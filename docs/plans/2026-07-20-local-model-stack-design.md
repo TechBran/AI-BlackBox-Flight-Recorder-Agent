@@ -1,7 +1,7 @@
 # On-Box Local Model Stack + CU Virtual Displays — Design Spec
 
 **Date:** 2026-07-20
-**Status:** SPEC v1 — iterating with Brandon before an implementation plan is written
+**Status:** SPEC v2 — hardened by 6-dimension Opus audit 2026-07-20 (see §14); iterating with Brandon before an implementation plan is written
 **Scope:** Bring STT, TTS, embeddings, and reranking wholesale onto the box (GPU-shared via queue/evict/TTL), integrate the full open-weights Qwen3-TTS capability surface, deliver it all through `Scripts/install.sh` + the onboarding wizard with honest CPU fallback — plus per-session virtual displays for computer use with live view in Portal and Android.
 
 ---
@@ -28,7 +28,7 @@
 | # | Decision | Choice |
 |---|----------|--------|
 | D1 | Qwen3-TTS role | **Additive provider** — new catalog group next to ElevenLabs/OpenAI/Gemini; cloud keeps working |
-| D2 | Routing precedence | **On-box wins when installed & healthy.** STT/TTS/embeddings/rerank wholesale local; custom API servers are for LLMs; cloud is the customer's explicit fallback choice |
+| D2 | Routing precedence | **On-box is the wizard-time default recommendation** — installing the stack seeds persisted per-capability enable/precedence flags so STT/TTS/embeddings/rerank resolve on-box wholesale by default; an **explicit credentialed user pick (e.g. Brandon's ElevenLabs) is never overridden at runtime**. Custom API servers are for LLMs; cloud is the customer's explicit fallback choice |
 | D3 | Qwen3-TTS variants | **All three 1.7B variants** (Base + CustomVoice + VoiceDesign), MS02 benchmark decides streaming size (G3) |
 | D4 | GPU orchestrator | **llama-swap front door** — supervises all model servers, native drain/swap/TTL semantics |
 | D5 | Embedding model | **Qwen3-Embedding-8B @ Q8_0** default on GPU boxes (4096-dim), eval-gated vs 4B-FP16 on MS02 (G1) |
@@ -37,7 +37,7 @@
 
 ### Premise corrections discovered during recon (2026-07-20)
 
-- **Qwen3-TTS open weights shipped 2026-01-22** (Apache-2.0), not today. Family max is **1.7B (~4GB BF16)** — there is no bigger open variant. Today's news was the API-only Qwen-Audio-3.0-TTS-Plus. Companion **Qwen3-ASR** (0.6B/1.7B, 52 languages, Apache-2.0, released 2026-01-29) exists as a future whisper alternative.
+- **Qwen3-TTS open weights shipped 2026-01-22** (Apache-2.0), not today. Family max is **1.7B (~4GB BF16 checkpoint at rest)** — there is no bigger open variant. Today's news was the API-only Qwen-Audio-3.0-TTS-Plus. Companion **Qwen3-ASR** (0.6B/1.7B, 52 languages, Apache-2.0, released 2026-01-29) exists as a future whisper alternative.
 - **Embeddings/reranker already run on THIS box's Ollama** (`127.0.0.1:11434`) — but the *active* embedding model is **gemini-embedding-2 (cloud)** and the *active* reranker is **Vertex (cloud)**. "Wholesale local" therefore means a **full re-embed migration** of the ~8,164-snapshot corpus, using the existing `POST /embeddings/reembed` machinery.
 - **The network box (gemma-box, 192.168.1.50)** hosts chat LLMs + Speaches audio (faster-whisper-large-v3-turbo + Kokoro) as a custom server. That's the "whisper across the network" being brought on-box.
 - **CU already never changes the desktop resolution** — native mode downscales screenshots in software (PIL → 1280×720) and scales coordinates back. The real gap is that CU *takes over* the physical desktop; D6 fixes that.
@@ -50,11 +50,11 @@
                       ┌────────────────────────────────────────────────┐
                       │  blackbox-models.service  (llama-swap, :9098)  │
  Orchestrator ──────► │                                                │
-  (per-capability     │  group "retrieval"  (co-resident, ~10.5GB)     │
+  (per-capability     │  group "retrieval" (co-resident, ~11.5–13GB)   │
    clients, on-box    │    • embed-qwen3-8b   llama-server GGUF Q8_0   │
    wins when healthy) │    • rerank-qwen3-0.6b llama-server --reranking│
                       │                                                │
-                      │  group "audio"      (co-resident, ~7–9.5GB)    │
+                      │  group "audio"     (co-resident, ~7–12GB peak) │
                       │    • speaches         faster-whisper STT       │
                       │    • qwen-tts         our FastAPI server       │
                       │                       (Base/CustomVoice/Design)│
@@ -67,15 +67,15 @@
 - **One systemd unit** (`blackbox-models.service`) runs the llama-swap binary with a generated `config.yaml`. llama-swap spawns/kills the member servers on demand — they are *not* independent systemd units.
 - **llama-swap gives us the required semantics natively** (all confirmed against docs, v240 2026-07-15): arbitrary `cmd` upstreams ("if you can run it on the CLI…"), proxying of `/v1/embeddings`, `/v1/rerank`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`, drain-before-swap, request queueing across swaps, `groups` with `swap`/`exclusive`/`persistent`, `ttl: 600`, `checkEndpoint` readiness, `/upstream/:model` passthrough, `/running` + `/health` for status.
 - **Port map:** `9098` llama-swap front door (new; infra range next to 9091/9093/9097). Member servers get llama-swap-assigned `${PORT}` on 127.0.0.1. Legacy contract port `8091` (vllm-reranker) is superseded but kept working via config (§5.3).
-- **VRAM budget (16GB):** retrieval group ≈ 8.5 (8B Q8_0) + 1.2 (reranker 0.6B) + ctx ≈ **10.5GB**. Audio group ≈ 1.6–4.5 (whisper turbo fp16 → large-v3 fp16) + ~4–5 (Qwen 1.7B BF16) ≈ **7–9.5GB**. All four at once ≈ 19GB — does not fit; hence two exclusive groups.
+- **VRAM budget (16GB) — itemized, budgeted at PEAK:** *Retrieval group* ≈ Q8_0 weights 8.05 + embed KV cache 1.13 (@ ctx 8192; Qwen3-8B = 36L × 8 KV heads × 128 hd) + non-causal embed compute buffer (large at ub=8192; bound with `-fa`, **measured in G1**) + a SECOND CUDA context (embed and rerank are two distinct `llama-server` processes) + reranker 0.6B ~1.3–1.9 ≈ **~11.5–13GB** — fits 16GB but real headroom is ~3GB, not ~5.5GB. (The ~0.8GB "ctx" term in v1 was wrong — it is smaller than the embed KV cache alone.) *Audio group* — at most ONE whisper resident (~2.5GB turbo fp16; **1.6GB is the int8 figure**) + ONE resident Qwen variant (~4–5GB BF16 steady-state = ~4GB weights + activation), free-before-load so a variant transition never holds two ≈ **~7–12GB at peak** (§5.4). All four at once ≈ **~20–25GB** — does not fit; hence two exclusive groups. NB: today's MS02 "≈10.5GB pinned" (6994 MiB Ollama **Q4** embed + 3284 MiB vLLM reservation = 10,278 MiB) is a *different* topology from the planned Q8_0 llama-server budget — the two ~10.5GB figures are coincidental; G1 measures the real Q8_0 steady-state and peak footprint before Q8_0 locks as default.
 - **CPU-only boxes run the identical topology** with CPU builds and smaller models (§7). Same front door, same routing, same wizard — just different tier defaults. This keeps one code path for the fresh-box gate.
 
 ### Orchestrator-side integration
 
 A new thin module `Orchestrator/local_stack.py` (name TBD) is the single source of truth for:
-- `is_installed()` / `is_healthy()` — llama-swap reachable + configured members present.
+- `is_installed()` / `is_healthy()` — llama-swap reachable + configured members present. **These key on install + config + process-liveness of llama-swap itself, NOT on live per-member VRAM residency** — so a normal group swap (the demanded group's members transiently down) never flips a capability to cloud; llama-swap's request-queueing transparently absorbs the swap and a mid-swap request waits rather than routing out. Routing decisions are config/install-state, never turn-to-turn health flapping.
 - `base_url()` — `http://127.0.0.1:9098/v1` (config: `[local_models] base_url`).
-- Per-capability resolution used by every consumer (D2 precedence): **on-box → (existing custom-server audio, unchanged, for the separate Kokoro system) → cloud per wizard choice.**
+- Per-capability resolution used by every consumer: an **explicit credentialed user pick always wins**; absent one, the wizard-seeded default resolves **on-box (new `localstack`/`onbox` token, ranked above the custom-server `local`) → existing custom-server audio (the separate Kokoro system, unchanged) → cloud per wizard choice** (D2, §5.5).
 - `GET /local-models/status` — aggregates llama-swap `/running`+`/health`, hardware tier, disk, per-model download state, and the routing decision per capability. Consumed by the wizard step and the Updates panel (status-only, per the panels convention).
 
 ---
@@ -84,54 +84,55 @@ A new thin module `Orchestrator/local_stack.py` (name TBD) is the single source 
 
 ### 5.1 Embeddings (Qwen3-Embedding-8B @ Q8_0)
 
-- **New provider key** in `Orchestrator/embeddings/providers.py`: `localstack` — OpenAI-compatible `POST {base_url}/embeddings` against llama-swap (bearer not needed on loopback). Sits beside `gemini`/`openai`/`ollama`.
-- **New registry entries** (`Orchestrator/embeddings/registry.py`): `qwen3-embedding-8b-local` (provider `localstack`, model id `embed-qwen3-8b`, 4096-dim, `max_input_tokens 8192`) and `qwen3-embedding-0.6b-local` (1024-dim, CPU-tier default). Thresholds (`semantic_threshold`, `junk_floor`) start from the existing Ollama Qwen entries and are **recalibrated during G1** — per-model thresholds are mandatory (memory: per-model calibration discipline).
-- **Upstream:** llama-server with official `Qwen/Qwen3-Embedding-8B` GGUF at Q8_0 (official 0.6B/4B GGUFs confirmed; 8B official GGUF to verify — else we convert with current `convert_hf_to_gguf.py`; G1 validates output quality either way).
-- **Migration:** wizard-driven `POST /embeddings/reembed {target: qwen3-embedding-8b-local}` — existing schema-2 chunked build + atomic swap. ~36K rows through a GPU-served 8B is fast; wizard shows the existing progress UI.
+- **New provider key** in `Orchestrator/embeddings/providers.py`: `localstack` — OpenAI-compatible `POST {base_url}/embeddings` against llama-swap (bearer not needed on loopback). Sits beside `gemini`/`openai`/`ollama`. **It is a net-new provider class** — it cannot subclass/reuse `OpenAIProvider` (which hardcodes `OPENAI_API_KEY` and has no `base_url`).
+- **New registry entries** (`Orchestrator/embeddings/registry.py`): `qwen3-embedding-8b-local` (provider `localstack`, model id `embed-qwen3-8b`, 4096-dim) and `qwen3-embedding-0.6b-local` (1024-dim, CPU-tier default). Each slug must declare **all four guard-tested fields** (registry.py:20-33): `tokenizer` (e.g. `hf:qwen3` — mandatory, omitted in v1), `max_input_tokens` (8192 for the 8B), `semantic_threshold`, and `junk_floor`. Thresholds start from the existing Ollama Qwen entries and are **recalibrated during G1** — per-model thresholds are mandatory (memory: per-model calibration discipline).
+- **Upstream:** llama-server with the **official `Qwen/Qwen3-Embedding-8B-GGUF` at Q8_0** (8.05GB file confirmed to exist — no self-conversion needed for embeddings; that contingency was dropped). Qwen3-Embedding needs **last-token pooling** — confirm the pinned llama.cpp auto-detects it from GGUF metadata, else set `--pooling last` explicitly. **Context/batch must be set explicitly:** llama.cpp non-causal (pooling) embeddings require `n_ubatch ≥ the full input sequence`, and `chunks_for_snapshot` prepends the WHOLE snapshot as the ordinal-0 vector (clamped ~7.4k tokens, p99 ~7k), so `-b`/`-ub` are effectively **forced to ~7400–8192** — a too-small ubatch hard-CRASHES the re-embed, it does not truncate. Set `-c 8192 -b 8192 -ub 8192 -fa` (flash-attention bounds the non-causal compute buffer) and **measure that compute-buffer VRAM in G1** (fold into the §4 budget). Do NOT naively drop `max_input_tokens` to 512–1024 — that collapses the ordinal-0 whole-doc vector into a single chunk and degrades the `max(whole, chunks)` scoring unless it is a deliberate, documented policy change.
+- **Migration:** wizard-driven `POST /embeddings/reembed {target: qwen3-embedding-8b-local}` — existing schema-2 chunked build + atomic swap. ~36K rows through a GPU-served 8B is fast; wizard shows the existing progress UI. **Cache-coherence step:** `ToolVault/embeddings.json` (tool-selection cache) and `code_embeddings.json` are keyed by the active embedding slug and self-invalidate only *lazily* on next sync/query — so **immediately after the corpus cutover the migration checklist must fire `POST /toolvault/reload` and rebuild code-embeddings**, otherwise the first hot-path query embeds at 4096-dim while the caches still hold 3072-dim vectors (on-demand re-embeds + a transient dim-mismatch window).
 - **Watcher/status compatibility:** `_model_preflight` blockers, `watcher.py` catalog checks, and `ollama_io` assumptions are Ollama-shaped; the `localstack` provider needs its own blocker strings ("local stack not installed / model not downloaded / llama-swap down") and health probe (embed-one-string through :9098).
 - **Ollama's future:** stays installed (step 1d) and registry-supported for existing boxes; new GPU boxes never activate it for embeddings. Formal deprecation is an open question (Q7).
 
 ### 5.2 Reranker (Qwen3-Reranker-0.6B via llama-server)
 
-- **Primary:** llama-server `--reranking --pooling rank` serving a **correctly-converted** Qwen3-Reranker-0.6B GGUF, exposed as `/v1/rerank` through llama-swap. New `RERANK_MODELS` entry `qwen3-reranker-0.6b-local` (provider `localstack`), scoring via the existing `_score_*` pattern; the mandatory `query_instruction` prefix carries over verbatim (ranker inverts without it — measured 2026-07-03).
-- **⚠ Known trap:** community reranker GGUFs are frequently broken (missing `cls.output.weight` → near-zero scores). We convert ourselves with current `convert_hf_to_gguf.py` and **G2 gates on score validity** against HF-reference scores on golden query/passage pairs before this provider can be selected.
-- **Why 0.6B not 4B:** rerank is the latency-critical inner loop of every search (candidate_n=40 passages per query); 0.6B GGUF loads in ~1–2s after an audio→retrieval group swap and scores well inside the 500ms-class ceiling. 4B is a config-only upgrade later if G2 shows quality headroom is needed.
-- **vLLM seam:** the existing dark `/score` seam (port 8091, `vllm-reranker.service` template) is kept as the FP16 quality alternative — installable but not default (vLLM cold-load 15–25s makes it a poor swap citizen). The M11 activation memory gets superseded by this design.
+- **Primary:** llama-server `--reranking --pooling rank` serving a **correctly-converted** Qwen3-Reranker-0.6B GGUF, exposed as `/v1/rerank` through llama-swap. New `RERANK_MODELS` entry `qwen3-reranker-0.6b-local` (provider `localstack`). **Wire shape is net-new:** llama.cpp `/v1/rerank` takes `{query, documents}` → `{results:[{index, relevance_score}]}`, which is NOT the vLLM `/score` `{text_1, text_2:[…]}` → `{data:[{index, score}]}` shape — so add a `_score_localstack` (or reuse `_scatter_relevance_scores`, rerank.py:697-724, which already parses `results:[{index, relevance_score}]`) plus `KNOWN_PROVIDERS` and `score()`-dispatch entries. The mandatory `query_instruction` prefix carries over verbatim, prepended to the `query` field (ranker inverts without it — measured 2026-07-03).
+- **⚠ Known trap:** community reranker GGUFs are frequently broken (missing `cls.output.weight` → near-zero ~1e-28 scores). We convert ourselves with a **llama.cpp build pinned post-dating the `convert_hf_to_gguf.py` Qwen3-Reranker fix** (detects Qwen3-Reranker, extracts `cls.output.weight`, sets `pooling_type=RANK` + classifier labels; llama.cpp #16407 resolved). **G2 gates on score validity** against HF-reference scores on golden query/passage pairs — optionally cross-checked against a known-good pre-converted GGUF — before this provider can be selected.
+- **Why 0.6B not 4B:** rerank is the latency-critical inner loop of every search (candidate_n=40 passages per query); the 0.6B GGUF loads in ~1–2s. **Its scoring latency is a G2 *target*, not an established fact** — 40 × ~1000-token passages through a 0.6B on llama.cpp is realistically ~1–2s (~0.5–1s at ~512-token chunks); the vLLM `/score` seam is the fallback if it misses. 4B is a config-only upgrade later if G2 shows quality headroom is needed.
+- **Cross-group swap cost (honest number):** the audio→retrieval swap does NOT just load the 0.6B reranker — it must ALSO cold-load the 8B embedder (~3–5s warm page-cache on MS02's 125GB RAM, ~6–8s cold, plus PCIe + CUDA init). **First search after a voice turn ≈ 6–10s; first voice turn after a search ≈ 5–8s.** keep-warm (`ttl: 0`) gives ZERO cross-group relief — it only defeats idle-unload *within* a resident group (§6). If this first-interaction stall is unacceptable the real levers are a hybrid (one capability stays cloud/CPU so both groups live), a client-side "loading models…" affordance, or a smaller resident embedder — decided with Brandon (Q12); G5 measures.
+- **vLLM seam:** the existing dark `/score` seam (port 8091, `vllm-reranker.service` template) is kept as the FP16 quality alternative — installable but not default (vLLM cold-load 15–25s makes it a poor swap citizen). **Hard rule:** the vLLM `/score` seam may **never co-run on the same GPU as the llama-swap retrieval group** — it is invisible to llama-swap's budgeting and pre-allocates ~90% of VRAM via `gpu_memory_utilization`, so the two together guarantee an OOM. Enabling one requires the other be down. The M11 activation memory gets superseded by this design.
 - **Selection stays sidecar-driven:** `POST /rerank/select` writes `Manifest/embeddings/rerank.json` exactly as today; the wizard flips it after G2 passes.
 
 ### 5.3 STT (Speaches on-box: faster-whisper)
 
-- **Upstream:** Speaches (active project, CPU compose exists) as a llama-swap member in the `audio` group. Models: `deepdml/faster-whisper-large-v3-turbo-ct2` (streaming default — same model the gemma-box serves today, so behavior parity) + `Systran/faster-whisper-large-v3` (batch-quality option). Speaches' internal `stt_model_ttl` set to harmonize with llama-swap's ttl (Speaches manages *model* residency inside the process; llama-swap manages the *process*).
-- **Batch path:** `file_transcribe._local_transcribe` gains the D2 precedence — resolve on-box stack first, then the existing custom-server audio, then cloud. Same OpenAI-compatible `POST /audio/transcriptions` shape, just a different base URL.
-- **Streaming path (`/ws/stt` `_local_bridge`):** connects to Speaches `/v1/realtime` (WebSocket). **Open engineering risk:** llama-swap's WS proxying is unverified (SSE is documented, WS is not). Two designs, gated by **G6 on MS02**:
-  - **(A) Proxy through llama-swap** — if WS passthrough works, activity accounting and group exclusivity are automatic. Preferred.
-  - **(B) Direct-to-Speaches port + keepalive** — the bridge connects to the member's port directly and the Orchestrator pings `/upstream/speaches` periodically during an active stream so the TTL never fires mid-utterance and the group stays claimed.
+- **Upstream:** Speaches (active project, CPU compose exists) as a llama-swap member in the `audio` group. **Pin a specific Speaches version** (latest is pre-1.0, v0.9.0-rc.3 2025-12-27 — note the rc-maturity supply-chain risk; the `/v1/realtime` event shape is thinly documented, so capture the actual event schema from the running server during G4/G6). Models: `deepdml/faster-whisper-large-v3-turbo-ct2` (streaming default — same model the gemma-box serves today, so behavior parity) + `Systran/faster-whisper-large-v3` (batch-quality option). **Constraint — at most ONE whisper model resident:** Speaches holds each model warm under its own `stt_model_ttl` with no concurrency cap, so a batch (large-v3, ~4.5GB) and a streaming (turbo, ~2.5GB) session inside the TTL window would BOTH be resident (invisible to llama-swap's process-level budget). Prefer serving both streaming+batch from `large-v3-turbo`, or force-unload the batch model around each batch request — a short `stt_model_ttl` alone does not guarantee single residency. Harmonize `stt_model_ttl` with llama-swap's ttl (Speaches manages *model* residency inside the process; llama-swap manages the *process*).
+- **Distinct on-box STT token (routing fix):** the existing `local` STT token already means *custom-server audio* (`has_audio` via `custom_models.json`), so it can never reach the on-box `:9098` Speaches member — and on a fresh on-box-only box (no custom server registered, exactly the §10 state) `local_stt_available()` is False, so on-box STT would be unreachable and the "all four local" acceptance would fail. Introduce a **distinct on-box token** (`localstack`/`onbox`) ranked ABOVE the custom-server `local` in `resolve_stt_provider`'s ordered avail dict, with an on-box availability signal independent of the custom-server registry (`local_stack.is_healthy()`), plumbed through `resolve_stt_provider`, `run_stt_bridge`, the streaming `_local_bridge` (resolve the on-box `base_url` first) and batch `_local_transcribe`. `local`/`resolve_audio` (custom-server) semantics stay unchanged.
+- **Batch path:** `file_transcribe._local_transcribe` resolves the **on-box stack first via the distinct on-box token** (above), then the existing custom-server audio, then cloud. Same OpenAI-compatible `POST /audio/transcriptions` shape, just a different base URL (`:9098`).
+- **Streaming path (`/ws/stt` `_local_bridge`):** connects to Speaches `/v1/realtime` (WebSocket). **Design A (proxy WS through llama-swap) is effectively DEAD on current llama-swap** — WebSocket proxying is a *known-missing* feature (open FR mostlygeek/llama-swap#754), not merely undocumented; don't burn G6 rediscovering it. **Design B (direct-to-member port) ships, but NOT via "keepalive claims":** pinging `/upstream/speaches` resets only the *idle* TTL — it does NOT block an exclusive cross-group swap, and a direct-to-port WS stream is invisible to llama-swap's in-flight drain counter. So the group must be protected at the **Orchestrator level by SERIALIZATION:** while a local voice stream is open, the Orchestrator does not dispatch retrieval-group requests to `:9098`, sequencing them into the STT-finalize → retrieve → TTS gap (the Orchestrator owns both sides). G6 is repurposed to fire a retrieval/embedding request *while* a voice stream is mid-utterance and assert no cut-off. Direction (accept Orchestrator serialization vs invest in patching #754) is **Q15**.
 - The existing bridge quirks carry over unchanged (24kHz resample, trailing-silence stop instead of explicit commit, per-utterance finals, hallucination filter, `stt_done` terminal frame).
-- **Tool schema fix (recon find):** `speech_to_text` ToolVault schema's provider enum omits `local` — add it while we're here.
+- **Tool schema fix (recon find):** `speech_to_text` ToolVault schema's provider enum omits `local` — add `local` **and the new on-box token** to the enum.
 
 ### 5.4 TTS (Qwen3-TTS server — ours, in-repo)
 
-- **We write a thin FastAPI server** (e.g. `LocalModels/qwen_tts_server/`, own lean venv) on the official `qwen-tts` package rather than adopting a community server — production-quality control over: all three variants, streaming, consent-gated cloning, profile persistence. The community FastAPI servers (groxaxo, cornball-ai) are references for the streaming implementation, not dependencies.
-- **One llama-swap member (`qwen-tts`), one process, three variants managed in-process:** the server lazy-loads the variant a request needs (CustomVoice for presets — the hot path; Base for cloned-voice synthesis; VoiceDesign for design) and drops the previous one. Loading all three at once (~12GB+) would blow the audio group's budget; in-process variant swap (~4GB each, seconds to load) keeps llama-swap's view simple: one member, one port.
+- **We write a thin FastAPI server** (e.g. `LocalModels/qwen_tts_server/`, own lean venv) — production-quality control over all three variants, consent-gated cloning, and profile persistence. **Streaming is NOT a reason to prefer the official `qwen-tts` package** — its high-level `generate_custom_voice`/`generate_voice_clone`/`generate_voice_design` each return a *complete* `(wavs, sr)` tuple (`non_streaming_mode=False` only simulates streaming over complete text and still returns a full tuple). True chunked yield must come from a lower-level KV-cache streamer — **source it from a dedicated fork** (`kunzite-app/Qwen3-TTS-streaming`'s `stream_generate_pcm()`, `rekuenkdr`, `andimarafioti/faster-qwen3-tts`) or vLLM-Omni, NOT the high-level package and NOT the groxaxo/cornball batch wrappers (those are preset/clone references only).
+- **One llama-swap member (`qwen-tts`), one process, three variants managed in-process:** the server lazy-loads the variant a request needs (CustomVoice for presets — the hot path; Base for cloned-voice synthesis; VoiceDesign for design) and drops the previous one. Loading all three at once (~12GB+) would blow the audio group's budget. **FREE-BEFORE-LOAD is mandatory:** a naive load-then-drop transiently holds old+new (~5–6GB each at the mid-swap activation peak) + whisper → up to ~16–18GB, a plausible OOM on the 16,380 MiB card — llama-swap budgets at the *process* level and cannot see this intra-process balloon. The server must drop refs → `gc.collect()` → `torch.cuda.empty_cache()` → **verify free VRAM** before allocating the next variant, keeping llama-swap's view simple (one member, one port). Define the process concurrency policy explicitly (serialize batch vs streaming synthesis, or co-resident) so two variants never load concurrently.
 - **Endpoints (OpenAI-compatible where a convention exists):**
-  - `GET /health` — llama-swap `checkEndpoint`.
-  - `POST /v1/audio/speech` — `{model, input, voice, response_format, stream}`; `stream:true` emits chunked audio as Qwen generates (12.5Hz token frames → 24kHz PCM/MP3). Routes through llama-swap's documented `/v1/audio/speech` proxying.
-  - `GET /v1/audio/voices` — presets + saved clone/design profiles (llama-swap proxies this path too).
-  - `POST /v1/voices/clone` — reference audio (~3s min) + name; **requires the literal consent flag**, mirroring the ElevenLabs gate exactly (422 without it; ToolVault wrapper requires `confirm_consent=true`).
-  - `POST /v1/voices/design` + `/v1/voices/design/save` — 2-step preview→save, mirroring ElevenLabs design UX.
+  - `GET /health` — llama-swap `checkEndpoint` (startup readiness only; see §6).
+  - `POST /v1/audio/speech` — `{model, input, voice, response_format, stream}`. **Body-`model` auto-routed** by llama-swap (a known OpenAI path). `stream:true` chunk-as-generated is a **G3-gated spike**, not a settled primitive (§5.4 rationale above); the accepted Q1/Q2 fallback is a **`StreamingResponse` over a full generation** (12Hz token frames — the tokenizer is officially `Qwen3-TTS-Tokenizer-12Hz`, not 12.5Hz). Read the output sample rate from the model's returned `sr` at runtime (do NOT hardcode 24kHz — confirm empirically in G3 and adjust browser-playback/resample). Base-clone streaming needs ~3s initial token buffering to avoid drift.
+  - `GET /v1/audio/voices` — presets + saved clone/design profiles (a known OpenAI path — body-model auto-routed).
+  - `POST /v1/voices/clone` — reference audio (~3s min) + name; **requires the literal consent flag**, mirroring the ElevenLabs gate exactly (422 without it; ToolVault wrapper requires `confirm_consent=true`). **Routing:** clone/design are NON-OpenAI paths that llama-swap does NOT auto-route (it extracts `model` only from known endpoints — open #245), so the Orchestrator calls them through **`/upstream/qwen-tts/v1/voices/…`** (auto-loads the member, honors group swap/exclusivity).
+  - `POST /v1/voices/design` + `/v1/voices/design/save` — 2-step preview→save, mirroring ElevenLabs design UX; routed through `/upstream/qwen-tts/…` like clone.
 - **Voice profiles** persist under `Manifest/voices/qwen/{slug}/` — `profile.json` (name, variant, operator, consent record, created) + reference audio / design params. Survives restarts; never in git.
 - **Catalog:** new dynamic group in `GET /tts/catalog`: `{id:'qwen', label:'Qwen3-TTS (On-Box)', dynamic:true}` — voice ids `qwen:<Voice>` (9 presets: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee) plus `qwen:<profile-slug>` for clones/designs, star-prefixed like ElevenLabs My-Voices. Present only when the local stack is healthy (fail-open like the other dynamic groups). **`local:` (Kokoro) remains untouched** (non-goal).
-- **Synthesis routing:** `POST /tts` and `/tts/batch` gain a `qwen:`-prefix branch (same pattern as the `elevenlabs:`/`local:` branches); `sanitize_for_speech` applies as today. Streaming browser playback mirrors the ElevenLabs `StreamingResponse` path.
+- **Synthesis routing:** `POST /tts` and `/tts/batch` each gain a `qwen:`-prefix branch (same pattern as the `elevenlabs:`/`local:` branches — **neither route has one today**; `tts_routes.py` handles only openai/gemini/elevenlabs/local); `sanitize_for_speech` applies as today. Streaming browser playback mirrors the ElevenLabs `StreamingResponse` path.
 - **Frontends (three-surfaces rule):** Portal voice picker picks the group up automatically from the catalog. **Android prerequisite fix (recon find):** `TtsRepository.generateWithVoice` hardcodes provider `openai` in its else-branch — a selected `local:`/`qwen:` voice would 400. Fix: pass the parsed provider through generically instead of enumerating branches.
 - **Voice Lab:** a Qwen tab beside ElevenLabs/xAI — clone (consent gate), design (preview→save), manage/delete profiles. Gated on local-stack health instead of an API key.
-- **Speed reality (G3):** RTX 3090 measures RTF 0.83–0.97 on the 1.7B; the 2000 Ada is slower, so 1.7B may be sub-realtime. Policy: **1.7B is the quality default for batch/file synthesis; the streaming default (1.7B vs 0.6B-CustomVoice) is decided by G3 measurements**, surfaced as an honest wizard note. First-packet latency claim (~97ms) also gets verified in G3.
+- **Speed reality (G3):** RTX 3090 measures RTF 0.83–0.97 on the 1.7B; the **2000 Ada is only ~0.24–0.34× a 3090** (FP32/bandwidth/cores), so its extrapolated 1.7B RTF ≈ 2.4–4.0× realtime — **1.7B streaming will near-certainly FAIL the G3 <0.9 gate**, not merely "may be sub-realtime". Planning-time expectation: **the 2000 Ada streaming default is 0.6B-CustomVoice; 1.7B is the batch/file quality tier.** Pre-wire the wizard copy/default for that likely outcome so it is not a surprise. G3 remains the measurement; the ~97ms first-packet figure is an A100+FlashAttention *paper* number — treat as to-be-measured, not a target.
 
 ### 5.5 Routing & precedence (D2, all capabilities)
 
-For each of STT / TTS / embeddings / rerank:
-1. **On-box stack installed & healthy → on-box wins.** No per-request user choice needed.
-2. The **separate** custom-server audio system (Kokoro `local:` group, gemma-box Speaches) keeps working exactly as today — it is not part of this precedence fight; it's a distinct provider the user can still pick explicitly.
-3. **No local stack (or user preference) → cloud provider** chosen in the wizard, exactly as today.
+For each of STT / TTS / embeddings / rerank the resolver is **seeded, not hard-wired**:
+1. **Installing the on-box stack seeds a persisted per-capability enable/precedence flag** so the capability *resolves on-box by default* — this is the **wizard-time default recommendation**, not a runtime override. An **explicit credentialed user pick is NEVER overridden at runtime** (e.g. Brandon's recorded "ElevenLabs for STT AND TTS" keeps winning); this preserves the wholesale-local *intent* (D2) via a persisted seed rather than an implicit runtime takeover, and stays consistent with §8's "nothing activates implicitly on install".
+2. On-box resolution uses a **distinct on-box token** (`localstack`/`onbox`) ranked ABOVE the existing custom-server `local`, with an availability signal independent of the custom-server registry (`local_stack.is_healthy()`). The existing `local`/`resolve_audio` custom-server semantics are unchanged.
+3. The **separate** custom-server audio system (Kokoro `local:` group, gemma-box Speaches) keeps working exactly as today — it is a distinct provider the user can still pick explicitly.
+4. **No local stack (or an explicit cloud preference) → cloud provider** chosen in the wizard, exactly as today.
 
 Provider naming follows the provider-explicit convention: the catalog group is `qwen` (model-explicit), the embeddings/rerank provider key is `localstack` (infrastructure-explicit) — bikeshed welcome (Q8).
 
@@ -139,13 +140,14 @@ Provider naming follows the provider-explicit convention: the catalog group is `
 
 ## 6. GPU Sharing Semantics & Edge Cases
 
-- **Queue/drain/evict/TTL:** llama-swap defaults. `ttl: 600` per member. Requests for a member of the *other* group trigger: drain in-flight → stop current group's members → start requested member → serve queue. Same-group members co-load.
+- **Queue/drain/evict/TTL:** llama-swap defaults. `ttl: 600` per member. Requests for a member of the *other* group trigger: drain in-flight → stop current group's members → start requested member → serve queue. Same-group members co-load. Two source-verified facts underpin this (see §14): llama-swap's `checkEndpoint`/`healthCheckTimeout` is a **one-time STARTUP readiness gate, never re-probed on a running process** (so an in-process TTS variant load can never trigger a health-based SIGTERM mid-synthesis), and a chunked streaming response **counts as in-flight for its full duration *through the proxy*** (a cross-group swap queues behind a mid-stream request, never SIGTERMs it — but a *direct-to-port* stream is invisible to that counter, which is why Design-B STT needs Orchestrator serialization).
 - **Live voice loop (the reason for D7):** a voice conversation is duplex — whisper listens while Qwen speaks. Both live in the `audio` group, co-resident; zero swaps inside a conversation.
 - **Search (the other pair):** every query runs embed→rerank back-to-back; both live in `retrieval`, co-resident; zero swaps inside a query.
-- **Streaming sessions are in-flight work:** an open STT stream (or TTS stream) must block eviction until it closes — via WS proxy activity (G6-A) or keepalive claims (G6-B). A retrieval request during a voice conversation queues until the conversation's current utterance drains; this is the accepted trade-off of one GPU.
-- **Initial re-embed migration thrash:** the first corpus re-embed (~36K rows in 32-chunk batches) is thousands of short requests; interleaved audio requests would swap groups between batches and crawl. Mitigation: the wizard runs migration as a foreground step with a "voice features will be slow until the index finishes building" notice; optionally set the retrieval group `persistent: true` for the duration via a config reload, restoring it after cutover. (Detail for the implementation plan.)
-- **Keep-warm interplay (wizard checkbox — work with it, don't fight it):** today's embeddings keep-warm setting (`Manifest/embeddings/keep_alive.json` → Ollama `keep_alive`, e.g. `-1` pin; MS02 currently holds its 8B embedder resident this way at ~7GB). Under llama-swap, keep-warm maps to **`ttl: 0` on that member** (never idle-unloaded). Adopted semantics: a kept-warm model is **immune to the 10-min idle TTL but still yields to a cross-group swap** when the other group is demanded, then reloads on next use — anything stronger (`persistent: true`) would deadlock VRAM (10.5 + 9.5 > 16GB). The wizard copy states exactly this. The legacy Ollama path keeps its current keep-warm meaning unchanged.
-- **Crash/health:** llama-swap `checkEndpoint` + `healthCheckTimeout` per member; `GET /local-models/status` surfaces member state; the embeddings watcher's daily probe covers the localstack provider like any other. If the stack dies, D2 precedence falls through to the wizard-chosen cloud provider (existing degradation paths: vector-less mints + gap-heal; un-reranked retrieval fall-through; cloud STT/TTS).
+- **Streaming sessions & in-flight accounting:** llama-swap's drain-before-swap waits for in-flight *proxied* requests to reach zero, and a chunked streaming RESPONSE stays in-flight for its FULL duration through the proxy (verified from source — see §14). BUT the STT stream ships as **Design B (direct-to-member WS)**, which is invisible to that counter, and WS proxying (Design A) is a known-missing llama-swap feature (#754). So an open local voice stream is protected by **Orchestrator-level serialization, not keepalive**: while a voice stream is open the Orchestrator holds retrieval-group dispatch. The real per-turn shape is **audio (listen) → [finalize] → retrieval (embed+rerank) → audio (speak)** — the Orchestrator sequences the retrieval work into the finalize→speak gap so the audio group is never force-swapped mid-utterance. A retrieval request that *does* arrive during an open utterance is held (not dropped) until that gap; auto-mint embeds during a long voice call degrade to vector-less rather than blocking (starvation policy below). This is the accepted trade-off of one GPU.
+- **Concurrency & 429 contract:** llama-swap's per-process concurrency semaphore returns **HTTP 429** when it can't be acquired (default limit ~10). Define `concurrencyLimit` per member and the per-capability client contract on 429 — retry-with-backoff vs immediate cloud fallback vs a user "busy" message — with special care on the real-time voice paths, where queue latency has a hard human ceiling (a 429 mid-voice-turn must not surface as a raw error to Portal/Android; Q13). Assume a **single active user** (this is a personal box); add a per-group concurrency cap so an open mic that pins the audio group for a whole conversation cannot silently starve every search/auto-mint embed queued behind it.
+- **Initial re-embed migration thrash:** the first corpus re-embed (~36K rows in 32-chunk batches) is thousands of short requests; interleaved audio requests would swap groups between batches and crawl. Mitigation: the wizard runs migration as a foreground step with a "voice features will be slow until the index finishes building" notice. Optionally pin the retrieval group for the duration — but **two caveats:** (a) llama-swap `--watch-config` **auto-restarts the whole proxy (unloads ALL members) on any config edit** — there is no in-place SIGHUP/endpoint reload (open #160/#547) — so the `persistent: true` flip does NOT keep the retrieval group warm across the toggle; batch config changes and design migration/wizard flows to tolerate a brief full-stack reload. (b) A pinned retrieval group means a concurrent voice call **cannot load the audio group** — so use a *time-boxed* pin WITH an explicit user-facing "voice temporarily uses cloud" message rather than a silent stall, and let auto-mint embeds during the window degrade to vector-less rather than blocking the mint. (Detail for the implementation plan.)
+- **Keep-warm interplay (wizard checkbox — work with it, don't fight it):** today's embeddings keep-warm setting (`Manifest/embeddings/keep_alive.json` → Ollama `keep_alive`, e.g. `-1` pin; MS02 currently holds its 8B embedder resident this way at ~7GB). Under llama-swap, keep-warm maps to **`ttl: 0` on that member** (never idle-unloaded). Adopted semantics: a kept-warm model is **immune to the 10-min idle TTL but still yields to a cross-group swap** when the other group is demanded, then reloads on next use — anything stronger (`persistent: true`) would deadlock VRAM (>16GB). **Keep-warm therefore gives ZERO cross-group relief** — the first interaction after a mode switch still pays the full cold-load (~6–10s, dominated by the 8B embedder; §5.2, Q12). **Write-path caveat:** `store.set_keep_alive`/`set_placement` (store.py) raise `ValueError` for any provider ≠ `ollama`, so a `localstack` slug is rejected today — new plumbing must translate the keep-warm/placement toggles into llama-swap `ttl: 0` / group config (they cannot be reused unchanged). The wizard copy states exactly this. The legacy Ollama path keeps its current keep-warm meaning unchanged.
+- **Crash/health & degradation invariant:** `GET /local-models/status` surfaces member state; the embeddings watcher's daily probe covers the localstack provider like any other. **Degradation is per-capability, and the embedding model is NEVER health-switched:** the active embedding model is set by a **wizard-time re-embed cutover ONLY** (the sole writer of `active.json`) — a health/crash-based active-slug switch would fragment the corpus across dim-incompatible stores (cloud gemini 3072-dim vs local 4096-dim), leaving half the corpus invisible to search. So if the stack dies: **STT/TTS** fall back per-request to the wizard-chosen cloud provider; **rerank** falls through to un-reranked retrieval (`score()` returns `None`, never raises — a dead reranker costs latency, never recall); **embeddings** degrade to vector-less mints + gap-heal on recovery, with **no model switch**. Routing/`is_healthy()` keys on install + config + process-liveness — NOT live per-member VRAM residency — so a normal group swap never routes to cloud (llama-swap queues the request through the swap).
 
 ---
 
@@ -157,9 +159,9 @@ Tier detection reuses `Orchestrator/hardware.py` (`probe()`/`derive_tier`); **ad
 |---|---|---|---|
 | Embeddings | Qwen3-Embedding-**8B Q8_0** (4096d) | Qwen3-Embedding-**0.6B** GGUF (1024d) — fast on CPU | cloud choice |
 | Rerank | Qwen3-Reranker-**0.6B** GGUF (4B = config upgrade) | 0.6B GGUF CPU (G2 latency-gates it; else existing CrossEncoder path / cloud) | cloud choice |
-| STT stream | whisper **large-v3-turbo** fp16 | large-v3-turbo **int8** (strong CPU); `distil`/`small` on weak CPUs — wizard shows measured RTF estimate | cloud choice |
+| STT stream | whisper **large-v3-turbo** fp16 | large-v3-turbo **int8** — *near-realtime for batch; low-latency streaming may lag*; `distil`/`small` on weak CPUs — wizard shows measured RTF (verify streaming, not just batch) | cloud choice |
 | STT batch | whisper **large-v3** fp16 | large-v3 int8 (slow, labeled) | cloud choice |
-| TTS | Qwen3-TTS **1.7B** (streaming size per G3) | **Off by default** — CPU Qwen is far sub-realtime; offered as "experimental (slow)" opt-in (`qwentts.cpp` GGUF is the escape hatch), cloud recommended | cloud choice |
+| TTS | Qwen3-TTS: **0.6B-CustomVoice streaming default on the 2000 Ada, 1.7B batch/file quality** (G3 confirms — 1.7B streaming near-certainly fails <0.9 RTF) | **Off by default** — CPU Qwen is far sub-realtime; offered as "experimental (slow)" opt-in (`qwentts.cpp` GGUF is the escape hatch), cloud recommended | cloud choice |
 
 Principles: local is the *default* only where the experience is honest (per Brandon: "extremely slow" is acceptable **as an informed choice**, never a silent default). The wizard shows per-capability estimates from the tier probe before the user commits. Same llama-swap topology on every tier — only members/builds differ.
 
@@ -173,9 +175,108 @@ New **Step 2f — `installer/templates/blackbox-install-localstack.sh`** (non-fa
 1. Download **llama-swap** release binary, sha256-pinned (same pattern as zellij, version pinned in `installer/templates/`).
 2. Download **llama.cpp `llama-server`** prebuilt (CUDA build behind the `nvidia-smi` gate, CPU build otherwise).
 3. Create lean venvs: **Speaches** and **our qwen-tts server** (own venvs — the MCP lean-venv lesson applies).
-4. Write `llama-swap config.yaml` from a template, tier-adjusted members (§7).
-5. Install `blackbox-models.service` via `blackbox-write-systemd` — **requires a new `target_kind` in its whitelist** (and a `systemctl restart blackbox-models.service` sudoers grant). `/etc` writes happen install-time as root; the wizard never writes `/etc` (ProtectSystem=strict).
+4. Write `llama-swap config.yaml` from **`installer/templates/llama-swap-config.yaml.template`** (the full design template is below), tier-adjusted members (§7). The service runs with `--watch-config`, which **auto-restarts the whole proxy on any config edit** (§6) — treat every config write as a brief full-stack reload.
+5. Install `blackbox-models.service` via `blackbox-write-systemd` — **requires a new `models-unit` `target_kind`** in `blackbox-write-systemd.sh`'s whitelist (hardcoded dest `/etc/systemd/system/blackbox-models.service`) and a **`systemctl restart blackbox-models.service`** line in `sudoers-blackbox-system` (only `daemon-reload` is covered today). The Phase-2 Step-0 reset additionally needs grants to **stop `vllm-reranker.service` and `ollama`** (§10) — add them to the sudoers policy or mark them explicit interactive-sudo manual steps. `/etc` writes happen install-time as root; the wizard never writes `/etc` (ProtectSystem=strict).
 6. **No weights at install time.** Weights download in the wizard (below) — keeps install fast and disk-gated.
+7. **CU virtual-display system packages:** add `xvfb`, `websockify`, and `novnc` (if not vendored) to `Scripts/onboarding/system-packages.txt` — the apt dispatcher (`installer/templates/blackbox-apt-install.sh`) refuses any package not in that allowlist, so without them a fresh box cannot install the CU framebuffer. `xvfb` is MUST_HAVE (CU virtual displays gate on it, §9); `websockify`/`novnc` are SHOULD_HAVE (live view). `xdotool`/`scrot`/`openbox`/`x11vnc` are already listed.
+
+**llama-swap `config.yaml` — DESIGN TEMPLATE** (the heart of D4; to be landed verbatim as `installer/templates/llama-swap-config.yaml.template` and shell-substituted at install time. Within a group `swap: false` = members CO-RESIDENT; across groups `exclusive: true` = loading one group unloads the other; keep-warm maps to `ttl: 0` per member):
+
+```yaml
+# installer/templates/llama-swap-config.yaml.template — DESIGN TEMPLATE
+# Landed by install.sh Step 2f, tier-adjusted (§7). ${...} are shell-substituted
+# at write time; ${PORT} is llama-swap's OWN per-member assigned loopback port
+# (left literal for llama-swap to fill). One binary (blackbox-models.service)
+# supervises all four members, each bound to 127.0.0.1.
+
+healthCheckTimeout: 120        # global default (seconds); per-member overrides below
+logLevel: info
+
+macros:
+  llama-server: "${LOCALSTACK_BIN}/llama-server"
+  models-dir:   "${LOCALSTACK_MODELS}"
+
+models:
+  # ── retrieval group ────────────────────────────────────────────────
+  "embed-qwen3-8b":
+    # Official Qwen/Qwen3-Embedding-8B-GGUF @ Q8_0 (8.05GB). Last-token pooling.
+    # -b/-ub forced to the full input seq (non-causal pooling); -fa bounds the
+    # compute buffer. --pooling last only if the build doesn't auto-detect it.
+    cmd: |
+      ${llama-server}
+      --model ${models-dir}/Qwen3-Embedding-8B-Q8_0.gguf
+      --host 127.0.0.1 --port ${PORT}
+      --embeddings --pooling last
+      -c 8192 -b 8192 -ub 8192 -fa
+      -ngl 99 --no-warmup
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 300      # 8GB weights load is slow — long startup gate
+    ttl: 600                     # keep-warm ⇒ set ttl: 0 (immune to idle unload,
+                                 #   still yields to a cross-group swap; §6)
+    concurrencyLimit: 4
+
+  "rerank-qwen3-0.6b":
+    # SELF-CONVERTED GGUF from a llama.cpp build post-dating the
+    # convert_hf_to_gguf.py fix (extracts cls.output.weight, pooling_type=RANK).
+    # G2 gates score validity before this member can be selected.
+    cmd: |
+      ${llama-server}
+      --model ${models-dir}/Qwen3-Reranker-0.6B-f16.gguf
+      --host 127.0.0.1 --port ${PORT}
+      --reranking --pooling rank
+      -c 8192 -ngl 99 --no-warmup
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 60
+    ttl: 600
+    concurrencyLimit: 2
+
+  # ── audio group ────────────────────────────────────────────────────
+  "speaches":
+    # Pinned Speaches version (pre-1.0; capture /v1/realtime schema in G4/G6).
+    # At most ONE whisper model resident (§5.3). Streaming via Design B
+    # (direct-to-${PORT}); llama-swap WS proxy (#754) is unavailable.
+    cmd: |
+      ${SPEACHES_VENV}/bin/uvicorn --factory speaches.main:create_app
+      --host 127.0.0.1 --port ${PORT}
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 120
+    ttl: 600
+    concurrencyLimit: 4
+
+  "qwen-tts":
+    # Our in-repo FastAPI server (LocalModels/qwen_tts_server). Three variants
+    # managed in-process with FREE-BEFORE-LOAD (§5.4). Clone/design routed via
+    # /upstream/qwen-tts/... (not body-model auto-routed); speech/voices are.
+    cmd: |
+      ${QWEN_TTS_VENV}/bin/uvicorn qwen_tts_server.app:app
+      --host 127.0.0.1 --port ${PORT}
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 180      # first variant load
+    ttl: 600
+    concurrencyLimit: 2
+
+groups:
+  # persistent:false on BOTH groups (persistent:true on both would deadlock
+  # VRAM: >16GB). ttl:600 idle-unload applies per member within a live group.
+  "retrieval":
+    swap: false                  # embed + rerank CO-RESIDENT
+    exclusive: true              # loading retrieval unloads the audio group
+    persistent: false
+    members:
+      - "embed-qwen3-8b"
+      - "rerank-qwen3-0.6b"
+  "audio":
+    swap: false                  # whisper + qwen-tts CO-RESIDENT
+    exclusive: true              # loading audio unloads the retrieval group
+    persistent: false
+    members:
+      - "speaches"
+      - "qwen-tts"
+```
 
 ### Onboarding wizard
 
@@ -193,11 +294,12 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 
 **Goal (D6):** every CU session gets a private virtual screen where the agent opens any application it needs, at the model's native resolution, never touching the user's desktop. The user watches from a live-view panel in the Portal and Android MVP. "Act on my real desktop" remains an explicit mode.
 
-- **Technology: per-session Xvfb (X11).** The recon nailed the constraint: on Wayland, ydotool injects into the *physical seat* and XDG-Portal screenshots capture the *real compositor* — neither is display-addressable. The X11 trio (Xvfb, xdotool, scrot) all honor `DISPLAY`, and the existing sandbox path (`browser/display.py`) already proves the pattern (Xvfb + openbox + x11vnc). We generalize it from a singleton to an allocator.
-- **DisplayAllocator** (evolves `display_arbiter.py`): allocates display numbers `:100+n`, spawns per-session `Xvfb :N -screen 0 WxH x24`, `openbox`, a session dbus, and per-session `x11vnc` on `127.0.0.1:<5901+n>`. Tears down on session end; reaps orphans by pid + TTL. The arbiter's existing mutual-exclusion role survives *only* for native-mode (real desktop) sessions.
+- **Technology: per-session Xvfb (X11).** The recon nailed the constraint: on Wayland, ydotool injects into the *physical seat* and XDG-Portal screenshots capture the *real compositor* — neither is display-addressable. The X11 trio (Xvfb, xdotool, scrot) all honor `DISPLAY`, and the existing sandbox path (`browser/display.py`) already proves the pattern (Xvfb + openbox + x11vnc). We generalize it from a singleton to an allocator. **Install gate:** `xvfb`, `websockify`, and `novnc` must be added to `Scripts/onboarding/system-packages.txt` (the apt dispatcher refuses any package off that allowlist; `xdotool`/`scrot`/`openbox`/`x11vnc` are already there but `xvfb`/`websockify`/`novnc` are NOT) — **CU virtual displays gate on `xvfb` being present** (MUST_HAVE); live view gates on `websockify`/`novnc` (SHOULD_HAVE).
+- **DisplayAllocator — a start/stop REWRITE, not a parameter tweak.** The Xvfb/openbox/x11vnc spawner is **`browser/display.py`'s `VirtualDisplay`** (not `display_arbiter.py`, which is pure in-memory mutex bookkeeping and spawns nothing — the v1 "evolves `display_arbiter.py`" attribution was wrong). Target `VirtualDisplay` for the per-session lifecycle; keep `display_arbiter.py` scoped to **native-mode mutual exclusion only**. `VirtualDisplay`'s current helpers use GLOBAL process patterns that break multi-session correctness (a §9 acceptance criterion): `pkill -f x11vnc` (kills ALL sessions), `pgrep -f x11vnc`/`pgrep -f openbox` (return True on *any* session), hardcoded `-rfbport 5900` (and `display.py:97`'s `pkill openbox` is already a dead no-op — `DISPLAY` is passed via env, not argv). The rewrite: allocate display `:100+n` + `Xvfb :N -screen 0 WxH x24` + `openbox`; **track per-session PIDs and do all liveness/teardown by pid** (no global pkill/pgrep); assign **per-session `x11vnc -rfbport 5901+n` bound to 127.0.0.1**; reap orphans by pid at **boot** and on **TTL**. Drop the per-session dbus (the working virtual path uses none) unless a bootstrapped app requires it.
 - **Per-backend native resolution — scaling deleted, not improved:** Anthropic/OpenAI sessions get 1280×720 Xvfb (scale 1.0, pixel-exact coordinates, no LANCZOS blur — the sandbox path already demonstrates unscaled coords); Gemini gets 1440×900 (its recommended resolution, currently an unused constant) with its 0–999 normalized mapping.
 - **Input/capture inside the session:** xdotool + scrot with `DISPLAY=:N` — no ydotool, no Portal screenshots, no Wayland involvement. Chrome launches inside with `--window-size` matched. Any X11 app works; GNOME/Wayland-only apps are a documented limitation of virtual sessions (use native mode for those).
-- **Live view:** noVNC/websockify per session, reverse-proxied by the Orchestrator (`/cu/view/{session_id}` WS). Auth = the Tailscale perimeter (by design, no app-layer auth). Portal gets a live-view panel (iframe pattern like the zellij terminal); Android renders the same page in a WebView (three-surfaces rule satisfied).
+- **Live view:** noVNC/websockify per session, reverse-proxied by the Orchestrator (`/cu/view/{session_id}` WS). Auth = the Tailscale perimeter (by design, no app-layer auth) — **but any tailnet peer/operator who holds or guesses a session id can watch any session's screen**, so per-session/per-operator gating vs session-id-UUID obscurity is an open decision (Q14, extends Q5). noVNC/websockify is the **only genuinely-new piece** (the Xvfb/openbox/x11vnc trio already runs under the real sandbox today) — smoke-check it under the unit (loopback bind is allowed by `RestrictAddressFamilies=AF_INET`; pin the dependency on `PrivateTmp=false`, or move the X11 socket under `/run/user`, so future hardening doesn't silently break CU). Portal gets a live-view panel (iframe pattern like the zellij terminal); Android renders the same page in a WebView (three-surfaces rule satisfied).
+- **Service restart orphans, does not kill:** under `blackbox.service`'s real sandbox (`KillMode=process`, `PrivateTmp=no`, `ProtectHome=no`) a restart reparents the Xvfb/openbox/x11vnc/websockify children to init — **the virtual session persists and live view reconnects**; only the uvicorn-served `/cu/view` WS blips. Because those orphans survive, the **pid+TTL reaper must ALSO run at boot** to sweep restart-survivors (this is why teardown is by pid, not global pkill).
 - **Default flip:** `use_computer`, `/browser/run`, and scheduler runs default to virtual sessions; the three interactive chat CU launch sites in `chat_routes.py` need the same audit (recon flag). `native_mode` becomes a per-session choice ("act on my desktop") instead of a global default.
 - **No GPU interaction:** Xvfb renders on CPU (llvmpipe) — CU sessions never contend with the model stack for VRAM.
 - **Concurrency:** the allocator naturally permits parallel CU sessions (separate displays); a sane cap (e.g. 3) guards CPU/RAM.
@@ -221,15 +323,23 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 | Ollama | 0.30.8 active — `qwen3-embedding:0.6b` + `:8b` already pulled |
 
 - **MS02 is already a full customer-shaped BlackBox install, tier HIGH:** `blackbox.service` active on :9091, repo at `/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main` — currently `main @ b8167dd` (~12 days behind origin; stray `config.ini.bak-pre-rerank` + modified `ToolVault/embeddings.json` to reconcile before Phase 2).
-- **Live today on MS02:** active embeddings = `qwen3-embedding-8b` served by Ollama (kept warm, llama-server resident ~6,994 MiB) **and** `vllm-reranker.service` running Qwen/Qwen3-Reranker-0.6B on :8091 (~3,284 MiB) → **≈10.5GB VRAM pinned at idle. M11 rerank is LIVE on MS02, not dark.**
+- **Live today on MS02:** active embeddings = `qwen3-embedding-8b` served by Ollama at **Q4_K_M** (kept warm, llama-server resident ~6,994 MiB — *below* Q8_0's ~7,676 MiB weights) **and** `vllm-reranker.service` running Qwen/Qwen3-Reranker-0.6B on :8091 (~3,284 MiB, a `gpu_memory_utilization` reservation) → **6,994 + 3,284 = 10,278 MiB ≈ 10GB pinned at idle. M11 rerank is LIVE on MS02, not dark.** NB this is a *different topology* from the planned Q8_0 llama-server retrieval group (§4) — the two "~10.5GB" figures are coincidental; neither this footprint nor the "giant re-embed worked great" throughput (which also ran on the Q4 Ollama + vLLM reservation) validates the Q8_0 config, which G1 must measure directly.
 - **MS02's snapshot Volume is a transplant and does not belong there.** The dev box's corpus was copied over purely to stress-test the embeddings layer — Brandon ran a giant-corpus re-embed through the GPU-served 8B and **it worked great** (a strong G1 throughput/feasibility signal). But the operators, settings, and ledger are the *dev box's* identity, not MS02's. **Phase 2 begins with a fresh-start reset (below).** This transplant pain is also the motivation for the parked export/import workstream (§12).
-- **Migration implication:** enabling the new stack on MS02 must first retire the always-resident pair — disable `vllm-reranker.service` and take embeddings duty off Ollama — because the audio group (~7–9.5GB) cannot fit beside the pinned 10.5GB. The grouped llama-swap stack *replaces* both (embeddings/rerank move into the `retrieval` group; keep-warm becomes `ttl: 0` per §6). Phase 2 runs as an **update-in-place through the production update path** (exercises the real customer journey: `install.sh` re-run picks up Step 2f), with a from-scratch fresh-box validation pass after.
+- **Migration implication:** enabling the new stack on MS02 must first retire the always-resident pair — disable `vllm-reranker.service` and **explicitly unload** the Ollama 8B (a pointer flip alone leaves it resident — see Step 0) — because neither the audio group (~7–12GB peak) nor the retrieval group (~11.5–13GB) can load beside the pinned ~10GB. The grouped llama-swap stack *replaces* both (embeddings/rerank move into the `retrieval` group; keep-warm becomes `ttl: 0` per §6). Phase 2 runs as an **update-in-place through the production update path** (exercises the real customer journey: `install.sh` re-run picks up Step 2f), with a from-scratch fresh-box validation pass after.
 
 **Phase 1 — build on this box (no GPU):** all code paths, CPU-tier behavior, install.sh idempotency, wizard flow, catalog/routing, CU virtual displays (CPU-only feature anyway), unit/integration tests. The fresh-box portable gate applies: no hardcoded hosts/operators; empty-store behavior verified.
 
 **Phase 2 — MS02 Ultra:**
 
-*Step 0 — fresh-start reset (destructive; run only when Phase 2 begins, checklist confirmed with Brandon first — Q11):* stop `blackbox.service`; remove the transplanted data layer — `Volume/`, `Manifest/` (snapshot index + all embedding stores/sidecars), `Fossils/`, operator registry/personas/preferences, `.onboarding_state.json` + `.onboarding_complete`, `Portal/uploads/*` — and retire the pinned pair (`systemctl disable --now vllm-reranker.service`, drop Ollama's embeddings duty). **Keep** the system layer: OS, Tailscale, SSH, Ollama binaries, repo, venvs. Proposed-keep-but-confirm: `.env` (API keys), `devices.json`, `credentials/custom_models.json`.
+*Step 0 — fresh-start reset (destructive; run only when Phase 2 begins, checklist confirmed with Brandon first — Q11):* stop `blackbox.service`; remove the transplanted data layer — `Volume/`, `Manifest/` (snapshot index + all embedding stores/sidecars), `Fossils/`, operator registry/personas/preferences, `.onboarding_state.json` + `.onboarding_complete`, `Portal/uploads/*`.
+
+**`config.ini` MUST be handled explicitly** — the operator roster lives in `config.ini [users]` (gitignored, wizard-populated), which is in *neither* the keep nor the wipe list in v1 and so would SURVIVE, preserving the dev-box operators and defeating the "fresh operators" purpose. Either delete `config.ini` and re-bootstrap from `config.ini.template` (true fresh path) or reset only `[users]` — decide in Q11.
+
+**Retire the pinned pair — with a real VRAM unload, not just a pointer flip:** `systemctl disable --now vllm-reranker.service` (correct as-is), then **explicitly UNLOAD the pinned Ollama 8B** — `ollama stop qwen3-embedding:8b` (or stop `ollama.service`). "Drop Ollama's embeddings duty" in v1 mapped only to `store.set_active_slug()` (writes `active.json`); that does NOT unload the `keep_alive=-1`-pinned ~7GB resident (keep_alive is only re-asserted on an embed request, and after the pointer flip no embed is sent). Without the explicit unload, a stale Ollama ~7GB + the retrieval group ~11.5–13GB = ~18–20GB > 16,380 MiB → **CUDA OOM the moment the retrieval group first lazy-loads (at the wizard re-embed, since llama-swap starts idle).**
+
+**VRAM-free precondition:** bake into the install/migration script an assertion that `nvidia-smi` shows the GPU near-idle **BEFORE the retrieval group is first activated (before the re-embed, not merely before service-start)**. Retiring the pair needs sudoers grants to stop `vllm-reranker.service`/`ollama` (§8) or explicit interactive-sudo steps.
+
+**Keep** the system layer: OS, Tailscale, SSH, Ollama binaries, repo, venvs. Proposed-keep-but-confirm: `.env` (API keys), `devices.json`, `credentials/custom_models.json`.
 
 *Then:* update the repo to main, re-run `Scripts/install.sh` (picks up Step 2f), and walk the **entire wizard from scratch** — because of the reset, MS02 now exercises the true fresh-customer path first-class (fresh operators, fresh config, new `local_models` step, one-click downloads, re-embed of an empty-then-growing corpus). Run the benchmark gates. Subsequent update cycles from that state exercise the production update-in-place journey.
 
@@ -237,12 +347,12 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 
 | Gate | Question | Pass criterion |
 |---|---|---|
-| **G1** | 8B-Q8_0 vs 4B-FP16 vs current gemini-embedding-2 on the chunk-gate harness | 8B-Q8 ≥ 4B and within agreed delta of gemini before cutover; thresholds recalibrated |
+| **G1** | 8B-Q8_0 vs 4B-FP16 vs current gemini-embedding-2 on the chunk-gate harness; **AND measure real Q8_0 VRAM** (steady-state + peak during a heavy re-embed batch, incl. the ub=8192 non-causal compute buffer) and the reranker separately on the RTX 2000 Ada | 8B-Q8 ≥ 4B and within agreed delta of gemini before cutover; thresholds recalibrated; measured Q8_0 footprint fits the §4 budget with headroom |
 | **G2** | Reranker GGUF validity + latency | Scores match HF reference on golden pairs (no cls.output.weight breakage); 40-passage rerank inside ceiling |
 | **G3** | Qwen3-TTS 1.7B RTF + first-packet latency, streaming, on the 2000 Ada | RTF < ~0.9 → 1.7B streams; else 0.6B streaming / 1.7B batch split |
 | **G4** | On-box whisper streaming parity vs today's gemma-box path | Latency/quality parity in the Portal + Android mic flows |
-| **G5** | Group swap cost | audio↔retrieval evict+load time measured; voice-turn and search latencies acceptable with cold group |
-| **G6** | llama-swap WebSocket proxy for `/v1/realtime` | Works → design A; fails → design B (direct + keepalive) |
+| **G5** | Cross-group swap cost (**expect ~6–10s first interaction** — dominated by the 8B embedder cold-load; keep-warm gives zero cross-group relief) | audio↔retrieval evict+load time measured both directions (warm + cold page-cache); Brandon signs off on the first-interaction stall (Q12) or the design shifts to a hybrid |
+| **G6** | Streaming-STT eviction safety (Design A / WS-proxy is **blocked on llama-swap #754** — ships as Design B: direct-to-member + **Orchestrator serialization**, not keepalive) | Fire a retrieval/embedding request WHILE a voice stream is mid-utterance → assert zero audio cut-off under the shipped design |
 
 ### Acceptance (end-to-end on MS02)
 
@@ -251,7 +361,7 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 - Search E2E on the migrated 8B-Q8 store, reranked locally.
 - CU session on a virtual display, agent opens apps privately, live view working in Portal + Android, desktop untouched throughout.
 - GPU behavior observed: queue → drain → evict → load; 10-min TTL eviction confirmed; voice loop never thrashes.
-- Kill the stack mid-use → graceful cloud fallback per D2.
+- Kill the stack mid-use → **per-capability** graceful degradation (D2): STT/TTS fall back to cloud, retrieval returns un-reranked, mints go vector-less + gap-heal on recovery — **the active embedding model is NOT switched** (no cloud/local dim fragmentation of the corpus; §6 invariant).
 
 ---
 
@@ -267,7 +377,11 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 8. **Q8 — Naming bikeshed:** `localstack` provider key, `qwen` catalog group id, `blackbox-models.service`, `[local_models]` — confirm or rename.
 9. **Q9 — Qwen3-ASR:** evaluate as a whisper alternative/addition later (52 languages, aligner)? Parked, not planned.
 10. **Q10 — MS02 dual role:** ~~after testing, does MS02 stay a customer-shaped reference box?~~ **Answered by recon 2026-07-20:** MS02 *is* already a full customer-shaped BlackBox install (tier HIGH, local embeddings + reranker live) — it is the permanent local-inference reference box; the dev box stays cloud (§10 topology).
-11. **Q11 — MS02 reset scope:** confirm the Step-0 keep/wipe split before running it — in particular whether `.env` (API keys), `devices.json`, and `credentials/custom_models.json` survive the reset or the wizard re-enters everything from zero.
+11. **Q11 — MS02 reset scope:** confirm the Step-0 keep/wipe split before running it — whether `.env` (API keys), `devices.json`, and `credentials/custom_models.json` survive the reset or the wizard re-enters everything from zero. **Includes `config.ini`/`[users]` (operator roster):** it is gitignored and wizard-populated, in neither the keep nor the wipe list, so unless it is handled explicitly the dev-box operators SURVIVE and silently defeat the "fresh operators" validation — decide: delete `config.ini` and re-bootstrap from `config.ini.template` (true fresh box) or reset only `[users]`.
+12. **Q12 — Cross-group swap-latency UX (load-bearing under D7):** the first interaction after a mode switch is ~6–10s cold (dominated by the 8B embedder load, which keep-warm CANNOT mitigate across groups). Is a multi-second stall on the first search-after-voice / first-voice-after-search acceptable, or do you want a **hybrid** where one capability stays cloud/CPU so both groups can live simultaneously? (If unacceptable this changes the architecture — must precede the plan, not surface at G5.)
+13. **Q13 — Voice give-up-to-cloud timeout during swaps:** during a group swap, does a real-time VOICE request ever give up to cloud, and if so what is the max queue wait before it does? The stated posture is "queue and accept the latency", but voice has a hard human ceiling and no timeout is specified — it defines the resolver/UX contract and the `concurrencyLimit`/429 handling for the live voice loop.
+14. **Q14 — CU live-view auth isolation (extends Q5):** the Tailscale perimeter holds (the view WS is tailnet-only), but any tailnet peer / any operator who holds or guesses a session id can watch ANY session's virtual screen. For the multi-operator "customer" framing, do you want per-session/per-operator gating on `/cu/view`, or is session-id (UUID) obscurity acceptable?
+15. **Q15 — STT streaming direction:** since llama-swap WebSocket proxying is a known-missing feature (Design A effectively dead on current llama-swap, #754), do you accept **Design B as Orchestrator-level serialization** (retrieval requests held while a voice stream is open), or invest in patching llama-swap / waiting on upstream #754? Sets the scope of G6 and the entire STT-streaming architecture.
 
 ---
 
@@ -293,3 +407,34 @@ What a first-class **export → bundle → import** would need to cover (sketch,
 - Speaches: github.com/speaches-ai/speaches (config: `stt_model_ttl`/`tts_model_ttl`, CPU compose)
 - faster-whisper VRAM/CPU benchmarks: github.com/SYSTRAN/faster-whisper
 - In-repo anchors: `Orchestrator/embeddings/{registry,providers}.py` · `Orchestrator/rerank.py` · `Orchestrator/hardware.py` · `Orchestrator/routes/{stt_ws_routes,tts_routes}.py` · `Orchestrator/onboarding/custom_servers.py` · `Scripts/install.sh` + `installer/templates/` · `Orchestrator/browser/{display,display_arbiter,config,actions,screenshot}.py`
+
+## 14. Hardening Audit Log (2026-07-20)
+
+**Verdict (condensed).** The spec is factually strong on external model facts and on its reading of the existing codebase — the great majority of load-bearing claims verified TRUE, and the core two-exclusive-group architecture (D7) survives verification and does **not** deadlock. But v1 was **not implementation-ready**: it carried four blockers — the llama-swap `config.yaml` (the heart of D4) was never written; `xvfb`/`websockify`/`novnc` were absent from the apt allowlist so a fresh box could not install the CU framebuffer; Step-0's "drop Ollama's embeddings duty" was a pointer flip that does NOT unload the pinned ~7GB Ollama 8B (guaranteed CUDA OOM at the first re-embed); and Step-0 omitted `config.ini`, so the dev-box operator roster would survive the "fresh operators" reset. On top of those sat a cluster of majors where the routing/degradation/streaming/VRAM narratives were wrong or under-specified: D2 "on-box wins, no user choice" inverted the real resolver and would override Brandon's explicit ElevenLabs picks; the existing STT `local` token could not reach the on-box `:9098` member; embeddings crash fall-through would fragment the corpus across dim-incompatible stores; llama-swap WebSocket proxying is a known-MISSING feature so Design A is effectively dead and Design B's keepalive does not block exclusive eviction; the official `qwen-tts` package is batch-only so "chunked-as-generated" streaming is unsupported; embedding ubatch is forced to ~8192 with an unbudgeted compute buffer; and cross-group swap latency was understated ~5× (~6–10s first interaction). All 32 corrections are applied above (§3–§11); the five follow-on decisions are Q11–Q15.
+
+**Confirmed solid — verified from primary sources (do not re-open):**
+- **keep-warm `ttl: 0` does NOT deadlock the two-group design** — llama-swap's `EvictionFor()` (`internal/router/group.go`) gates cross-group eviction solely on `Exclusive && !Persistent` and never consults per-model `ttl`/`unloadAfter`, so a kept-warm retrieval member IS evicted when the exclusive audio group is demanded and reloads on next use (exactly as §6 asserts).
+- **llama-swap group/ttl/exclusive/persistent semantics** are correct as described: `ttl:0` disables idle-unload only; `exclusive:true` unloads other non-persistent groups; `persistent` blocks cross-group eviction; `persistent:true` on BOTH groups would deadlock VRAM (>16GB) — so keep-warm = `ttl:0` (not `persistent`) is the sound choice.
+- **The official `Qwen/Qwen3-Embedding-8B-GGUF` Q8_0 file exists at 8.05GB** — the "8B official GGUF to verify" uncertainty is resolved; no self-conversion for embeddings.
+- **Qwen3-TTS family facts are accurate:** Apache-2.0, shipped 2026-01-22, family max 1.7B, three distinct 1.7B checkpoints (Base/CustomVoice/VoiceDesign), 3s cloning, natural-language VoiceDesign, and the 9 CustomVoice presets match the card (Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee).
+- **llama-swap's proxied endpoint surface** is correct: `/v1/embeddings`, `/v1/rerank`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`, plus `/upstream/:model`, `/running`, `/health`, `${PORT}`, `checkEndpoint`, `healthCheckTimeout`.
+- **Drain-before-swap + in-flight accounting** (recovered-verdict facts, source-verified): `checkEndpoint`/`healthCheckTimeout` is a **one-time STARTUP readiness gate, never re-probed on a running process** (no health-based SIGTERM during an in-process TTS variant load); the FIFO scheduler drains in-flight *proxied* requests before any swap and a **chunked streaming response stays in-flight for its FULL duration through the proxy** (a cross-group swap QUEUES behind a mid-stream request, never SIGTERMs it; `unloadTimeout` only bounds an already-idle process) — but a **direct-to-port** stream is invisible to that counter (hence Design-B STT needs Orchestrator serialization).
+- **Reranker facts** are correct: `RERANK_MODELS` holds the literals, `query_instruction` is mandatory (ranker inverts without it, measured 2026-07-03), the vLLM `/score` seam on :8091 is retained as the FP16 alternative, and `score()` returns `None` on ANY failure and never raises (a dead reranker costs latency, never recall).
+- **The community reranker-GGUF trap is real and G2 is the right gate:** broken conversions yield ~1e-28 scores from a missing `cls.output.weight`; current `convert_hf_to_gguf.py` detects Qwen3-Reranker and sets `pooling_type=RANK` + classifier labels; llama.cpp #16407 is resolved.
+- **STT bridge mechanics carry over correctly:** 24kHz resample, ~0.7s trailing-silence stop (not explicit commit), per-utterance finals, `is_whisper_hallucination` filter, and the `stt_done` terminal frame are all present in `stt_ws_routes.py`.
+- **CU already never changes desktop resolution:** native mode resizes screenshots in software (PIL → 1280×720) and scales coordinates back; the sandbox path returns unscaled pixel-exact captures — supporting §9's per-session native-resolution design.
+- **`ydotool` writes to `/dev/uinput`** at the kernel/physical-seat layer (not display-addressable) on both X11 and Wayland, while the X11 trio (Xvfb/xdotool/scrot) honors `DISPLAY` — so virtual sessions must force the xdotool/scrot path, as §9 states.
+- **Exactly three interactive chat CU launch sites** in `chat_routes.py` (`try_claim` at :4293, :4518, :4775), and Gemini's recommended 1440×900 is currently an unused constant — both as claimed.
+- **The CU virtual-display stack already runs under `blackbox.service`'s real sandbox** (`PrivateTmp=no`, `ProtectHome=no`, `KillMode=process`): `display.py` already spawns Xvfb+openbox+x11vnc today, `/tmp` and `/run/user` are reachable, and a service restart **orphans (not kills)** those children.
+- **The Tailscale perimeter holds for the live view:** Funnel exposes only :8443→:9093 (MCP); :9091 is tailnet-only via serve; `x11vnc` already binds 127.0.0.1 — so a `/cu/view` WS reverse-proxied through :9091 is not internet-reachable (conditional on websockify binding loopback and no dedicated Funnel being added).
+- **The disk gate is adequate:** the full GPU-tier weight set is ~27.5GB (dominated by three separate ~4.5GB Qwen3-TTS variant checkpoints = 13.5GB), so ≥40GB free is a sound download gate; `hardware.py` has `probe()`/`derive_tier` but no disk field, so a fail-soft disk probe genuinely needs adding.
+- **The install-mechanics gaps are correctly identified:** `blackbox-write-systemd.sh` has no `blackbox-models` target and `sudoers-blackbox-system` has no `blackbox-models` restart grant (only `daemon-reload` is covered).
+
+**Refuted alarms — do NOT re-litigate** (adversarially verified against primary sources; the spec's original posture stands, only genuine residue was folded in at minor severity):
+- **keep-warm `ttl:0` deadlock** — refuted (eviction ignores ttl; `ttl:0` members still yield to a cross-group swap).
+- **retrieval-pin "equivalence"** — refuted; the residue (a pinned retrieval group blocks a concurrent audio load, and `--watch-config` restarts the whole proxy) is captured in §6.
+- **`is_healthy()` cloud-flapping** — refuted; routing keys on install/config/process-liveness, not live per-member residency (§4/§6 clarified).
+- **systemd-sandbox breakage** — refuted; the trio already runs under the real unit and a restart orphans (not kills). Only noVNC/websockify is genuinely new (§9).
+- **TTS health-SIGTERM / streaming-not-in-flight** — refuted from llama-swap source: health is startup-only and a proxied stream is in-flight for its full duration; the proposed "raise `unloadTimeout` above worst-case synthesis" fix was actively wrong and rejected.
+
+**Audit provenance.** Six-dimension Opus audit (code-claims, external-facts, vram-math, failure-modes, impl-readiness, consistency) with adversarial per-finding verification; 44/45 agents completed (one verify agent's result was lost and recovered from its written verdict — the drain/health/streaming-in-flight confirmations above). Workflow `wf_9ccf920e-432`.
