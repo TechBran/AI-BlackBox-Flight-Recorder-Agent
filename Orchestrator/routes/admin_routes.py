@@ -103,7 +103,7 @@ def _validate_session_id(session_id: str) -> str:
     """Reject path-traversal session ids. The charset admits dots, so '.'
     and '..' must be excluded explicitly — '..' on the DELETE path would
     rmtree Portal/uploads/ itself."""
-    if session_id in {".", ".."} or not _SESSION_ID_RE.match(session_id):
+    if session_id in {".", ".."} or not _SESSION_ID_RE.fullmatch(session_id):
         raise HTTPException(status_code=400, detail=f"Invalid session_id: {session_id!r}")
     return session_id
 

@@ -31,6 +31,9 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+# Must import before the first TestClient request or the shared app's
+# middleware stack freezes early and later `import Orchestrator.app` crashes.
+import Orchestrator.app  # noqa: F401
 from Orchestrator.checkpoint import app
 from Orchestrator.routes import admin_routes
 
@@ -65,7 +68,14 @@ def _post(client, session_id):
 
 # ------------------------------------------------------- pure-function tier
 
-@pytest.mark.parametrize("bad", TRAVERSAL_IDS + ["", "a" * 129, "a\\b", "a b", "a\x00b", "..%2Fx"])
+@pytest.mark.parametrize(
+    "bad",
+    TRAVERSAL_IDS
+    + ["", "a" * 129, "a\\b", "a b", "a\x00b", "..%2Fx"]
+    # Trailing-newline ids: `$` + .match() accepts "x\n" (and "..\n" also
+    # slips the literal dot-set check) — fullmatch is the anchor that holds.
+    + ["abc\n", "..\n"],
+)
 def test_validate_rejects(bad):
     with pytest.raises(HTTPException) as exc:
         admin_routes._validate_session_id(bad)
