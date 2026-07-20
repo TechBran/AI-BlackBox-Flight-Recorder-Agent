@@ -178,6 +178,15 @@
     from { opacity: 0; transform: translateY(-4px); }
     to   { opacity: 1; transform: translateY(0); }
 }
+/* Shared entrance fade for module-local overlays (toolbar toasts + chip).
+   Same motion as the auth-banner keyframe above — that one keeps its own
+   name so the banner stays independent of toolbar styling churn. Uses the
+   individual `translate` property (NOT transform) so it composes with the
+   chip's `transform: translateX(-50%)` centering instead of clobbering it. */
+@keyframes cli-agents-fade-in {
+    from { opacity: 0; translate: 0 -4px; }
+    to   { opacity: 1; translate: 0 0; }
+}
 .cli-agents-auth-banner-label { color: var(--neutral-700, #ccc); flex: 1; }
 .cli-agents-auth-banner-btn {
     padding: 6px 14px;
@@ -638,6 +647,7 @@
     white-space: nowrap;
     pointer-events: none; /* never steal clicks from the terminal */
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    animation: cli-agents-fade-in 200ms ease;
 }
 
 /* ── Attach outcome toasts (module-local: the global #toast renders at
@@ -665,7 +675,7 @@
     color: var(--neutral-900, #ccc);
     font-size: 12px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    animation: cli-agents-auth-banner-fade-in 200ms ease;
+    animation: cli-agents-fade-in 200ms ease;
 }
 
 .zellij-terminal-toast-success { border-left-color: #4ade80; }

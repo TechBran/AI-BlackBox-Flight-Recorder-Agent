@@ -34,10 +34,8 @@
 // Module-level singletons. One toolbar per Portal page is the design.
 let currentContainerEl = null;
 let currentBarEl = null;
-let currentRailBtn = null;
 let currentLabelEl = null;
 let currentAttachBtn = null;
-let currentMaxBtn = null;
 let currentFileInput = null;
 let currentOperator = null;
 let currentOpts = {};
@@ -103,6 +101,10 @@ function ensureToastStack() {
     if (!host) return null;
     currentToastStackEl = document.createElement('div');
     currentToastStackEl.className = 'zellij-terminal-toast-stack';
+    // The toasts are the attach flow's ONLY feedback channel — announce
+    // them to screen readers (polite: outcomes, not interruptions).
+    currentToastStackEl.setAttribute('role', 'status');
+    currentToastStackEl.setAttribute('aria-live', 'polite');
     host.appendChild(currentToastStackEl);
     return currentToastStackEl;
 }
@@ -242,10 +244,16 @@ function uploadOne(file, serial) {
                         { copyText: body.path || '' });
                 }
             } else {
+                // A 2xx that landed here means the body didn't parse — the
+                // upload may well have succeeded, so don't toast the
+                // self-contradictory "failed — HTTP 200".
+                const is2xxUnparsable = xhr.status >= 200 && xhr.status < 300;
                 const rawDetail = body && (body.detail ?? body.message);
                 const detail = typeof rawDetail === 'string' && rawDetail
                     ? rawDetail
-                    : (rawDetail ? JSON.stringify(rawDetail) : `HTTP ${xhr.status}`);
+                    : (rawDetail ? JSON.stringify(rawDetail)
+                        : (is2xxUnparsable ? 'unexpected server response'
+                            : `HTTP ${xhr.status}`));
                 showToast('error', `📎 ${file.name} failed — ${detail}`);
                 fireCb(currentOpts.onError,
                     { stage: 'attach', status: xhr.status, message: detail }, 'onError');
@@ -279,6 +287,9 @@ function makeBarButton(extraClass, glyph, title) {
     btn.className = `zellij-terminal-bar-btn ${extraClass}`;
     btn.textContent = glyph;
     btn.title = title;
+    // Glyph-only buttons: the accessible name comes from aria-label (the
+    // emoji/box-drawing textContent is meaningless to screen readers).
+    btn.setAttribute('aria-label', title);
     // Focus-preservation rule (live-verified): preventDefault on pointerdown
     // stops the button from stealing keyboard focus from the terminal
     // iframe; click still fires normally. NEVER touchstart+preventDefault
@@ -292,6 +303,12 @@ export function mountTerminalBar(containerEl, options = {}) {
         console.error('[ZELLIJ-TERMINAL-BAR] mountTerminalBar called without container element');
         return null;
     }
+    // Validate BEFORE the auto-unmount below — a bad call (missing operator)
+    // must reject without destroying an already-working toolbar.
+    if (!options.operator || typeof options.operator !== 'string') {
+        console.error('[ZELLIJ-TERMINAL-BAR] mountTerminalBar requires options.operator (non-empty string)');
+        return null;
+    }
     if (currentBarEl && currentContainerEl === containerEl) {
         console.warn('[ZELLIJ-TERMINAL-BAR] mountTerminalBar is idempotent — second call on same container ignored');
         return currentBarEl;
@@ -299,10 +316,6 @@ export function mountTerminalBar(containerEl, options = {}) {
     if (currentBarEl && currentContainerEl !== containerEl) {
         console.warn('[ZELLIJ-TERMINAL-BAR] mountTerminalBar called with new container before unmount — auto-cleaning prior mount');
         unmountTerminalBar();
-    }
-    if (!options.operator || typeof options.operator !== 'string') {
-        console.error('[ZELLIJ-TERMINAL-BAR] mountTerminalBar requires options.operator (non-empty string)');
-        return null;
     }
 
     mountSerial += 1;
@@ -348,6 +361,7 @@ export function mountTerminalBar(containerEl, options = {}) {
         maximized = !maximized;
         maxBtn.textContent = maximized ? '🗗' : '⛶';
         maxBtn.title = maximized ? 'Restore window size' : 'Maximize terminal';
+        maxBtn.setAttribute('aria-label', maxBtn.title);
         maxBtn.setAttribute('aria-pressed', String(maximized));
         // The modal owns the card element and flips .cli-agents-maximized.
         fireCb(currentOpts.onToggleMaximize, { maximized }, 'onToggleMaximize');
@@ -371,10 +385,8 @@ export function mountTerminalBar(containerEl, options = {}) {
     containerEl.appendChild(bar);
 
     currentBarEl = bar;
-    currentRailBtn = railBtn;
     currentLabelEl = label;
     currentAttachBtn = attachBtn;
-    currentMaxBtn = maxBtn;
     currentFileInput = input;
     return bar;
 }
@@ -398,6 +410,7 @@ export function setActiveSession(sessionName) {
         currentAttachBtn.title = currentSessionName
             ? 'Attach a file — uploads and pastes its path into the terminal'
             : 'Launch a terminal first';
+        currentAttachBtn.setAttribute('aria-label', currentAttachBtn.title);
     }
 }
 
@@ -418,10 +431,8 @@ export function unmountTerminalBar() {
     if (currentBarEl?.parentNode) currentBarEl.parentNode.removeChild(currentBarEl);
     currentBarEl = null;
     currentContainerEl = null;
-    currentRailBtn = null;
     currentLabelEl = null;
     currentAttachBtn = null;
-    currentMaxBtn = null;
     currentFileInput = null;
     currentOperator = null;
     currentOpts = {};
