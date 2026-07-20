@@ -16,6 +16,10 @@ import java.io.IOException
  *    error, transport error) must surface as a Toast — the forbidden
  *    silent-drop rule pinned as a test.
  *  - [uploadingChipText] shows (i/n) progress only for multi-file batches.
+ *  - [sanitizeAttachBaseName] is the temp-file basename (→ multipart
+ *    filename → the backend's stored+pasted name): it must keep the
+ *    original basename verbatim (web-terminal parity) while stripping any
+ *    path separators a hostile ContentProvider smuggles into DISPLAY_NAME.
  */
 class CliAttachButtonTest {
 
@@ -103,6 +107,34 @@ class CliAttachButtonTest {
             error = IOException("connection reset"),
         )
         assertEquals(AttachOutcome.Notice("Upload failed: connection reset"), out)
+    }
+
+    // ── sanitizeAttachBaseName — temp-file (= multipart) basename ────────────
+
+    @Test
+    fun `plain display name passes through untouched`() {
+        assertEquals("report.pdf", sanitizeAttachBaseName("report.pdf"))
+    }
+
+    @Test
+    fun `forward-slash paths keep only the last segment`() {
+        assertEquals("report.pdf", sanitizeAttachBaseName("../../etc/report.pdf"))
+    }
+
+    @Test
+    fun `backslash paths keep only the last segment`() {
+        assertEquals("report.pdf", sanitizeAttachBaseName("C:\\Users\\evil\\report.pdf"))
+    }
+
+    @Test
+    fun `null display name falls back to attachment`() {
+        assertEquals("attachment", sanitizeAttachBaseName(null))
+    }
+
+    @Test
+    fun `separator-only display name falls back to attachment`() {
+        assertEquals("attachment", sanitizeAttachBaseName("dir/"))
+        assertEquals("attachment", sanitizeAttachBaseName("\\"))
     }
 
     // ── uploadingChipText — (i or n) progress ────────────────────────────────

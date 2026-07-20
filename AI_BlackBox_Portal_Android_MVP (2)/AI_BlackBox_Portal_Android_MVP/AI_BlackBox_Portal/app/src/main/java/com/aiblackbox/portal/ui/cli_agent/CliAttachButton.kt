@@ -95,6 +95,23 @@ internal fun uploadingChipText(fileName: String, index: Int, total: Int): String
     if (total > 1) "Uploading $fileName… (${index + 1}/$total)" else "Uploading $fileName…"
 
 /**
+ * Basename-sanitize a picker DISPLAY_NAME before it becomes the temp file's
+ * name — which [BlackBoxApi.uploadFile] sends as the multipart filename, so
+ * it IS the name the backend stores and pastes (web-terminal parity demands
+ * the untouched original basename). A hostile ContentProvider can return
+ * path separators in DISPLAY_NAME; keep only the last segment (`/` and
+ * `\`), falling back to "attachment" when nothing usable remains. The
+ * backend defends independently — this just prevents the client-side
+ * IOException from File(dir, "a/b"). Pure + [internal] for unit tests.
+ */
+internal fun sanitizeAttachBaseName(displayName: String?): String {
+    val base = displayName.orEmpty()
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+    return base.ifBlank { "attachment" }
+}
+
+/**
  * The user-visible surface an upload attempt resolves to:
  *   [Chip]  — transient success flash in the Popup chip (~[ATTACH_FLASH_MS]).
  *   [Notice] — a LONG Toast the user must not miss.
@@ -173,10 +190,18 @@ fun CliAttachButton(
                         return@forEachIndexed
                     }
                     chipText = uploadingChipText(name, index, uris.size)
-                    var temp: File? = null
+                    var tempDir: File? = null
                     val outcome = try {
-                        temp = withContext(Dispatchers.IO) {
-                            val f = File(context.cacheDir, "attach_${System.currentTimeMillis()}_$name")
+                        val temp = withContext(Dispatchers.IO) {
+                            // Unique SUBDIR + original basename: uploadFile
+                            // sends file.name as the multipart filename, and
+                            // the backend stores AND PASTES that name — a
+                            // timestamp-prefixed name would break web-terminal
+                            // paste parity.
+                            val dir = File(context.cacheDir, "attach_${System.currentTimeMillis()}")
+                                .apply { mkdirs() }
+                            tempDir = dir
+                            val f = File(dir, sanitizeAttachBaseName(name))
                             context.contentResolver.openInputStream(uri)?.use { input ->
                                 f.outputStream().use { output -> input.copyTo(output) }
                             } ?: throw IOException("Could not read $name")
@@ -205,13 +230,15 @@ fun CliAttachButton(
                         // Toast via attachOutcomeMessage — never a bare log.
                         attachOutcomeMessage(name, injected = false, serverPath = null, error = e)
                     } finally {
-                        // NonCancellable: the temp copy must be deleted even
-                        // when the batch is cancelled mid-flight.
-                        withContext(NonCancellable + Dispatchers.IO) { temp?.delete() }
+                        // NonCancellable: the temp dir (copy included) must be
+                        // deleted even when the batch is cancelled mid-flight.
+                        withContext(NonCancellable + Dispatchers.IO) { tempDir?.deleteRecursively() }
                     }
                     when (outcome) {
                         is AttachOutcome.Chip -> {
                             chipText = outcome.text
+                            // Intentionally serializes multi-file batches so
+                            // each file's success flash is visible.
                             delay(ATTACH_FLASH_MS)
                             chipText = null
                         }
@@ -249,6 +276,8 @@ fun CliAttachButton(
     }
 
     val shape = RoundedCornerShape(6.dp)
+    // getSessionName() is non-snapshot state: no recomposition when it changes
+    // (safe today — the zellij client's name is always non-blank from launch).
     val enabled = !getSessionName().isNullOrBlank()
 
     Box(
