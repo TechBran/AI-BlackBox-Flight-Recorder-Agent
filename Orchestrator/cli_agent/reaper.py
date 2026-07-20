@@ -77,12 +77,14 @@ def reap_idle_zellij_sessions(idle_seconds: int = _DEFAULT_IDLE_SECONDS) -> List
     Returns the list of deleted session names. Bails out cleanly (empty
     list) on any zellij CLI failure.
     """
-    from Orchestrator.cli_agent import zellij_client
+    from Orchestrator.cli_agent import terminal_uploads, zellij_client
 
     try:
         sessions = zellij_client.list_sessions()
     except Exception as exc:  # noqa: BLE001 — daemon may be down
         logger.warning("reap_idle_zellij_sessions: list_sessions failed (%s)", exc)
+        # No session list -> no reap AND no orphan sweep (we can't know
+        # which upload folders are live; never sweep blind).
         return []
 
     killed: List[str] = []
@@ -114,6 +116,41 @@ def reap_idle_zellij_sessions(idle_seconds: int = _DEFAULT_IDLE_SECONDS) -> List
             logger.warning(
                 "reap_idle_zellij_sessions: kill %s failed (%s)", name, exc
             )
+            continue
+        # Task 5: a reaped session's upload folder dies with it. Removed
+        # DIRECTLY (not left to the orphan sweep below) because a
+        # just-reaped folder's mtime may be younger than the sweep's age
+        # grace. Best-effort — a folder failure must not stop the loop.
+        try:
+            terminal_uploads.remove_for_session(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reap_idle_zellij_sessions: upload-folder removal for %s "
+                "failed (non-fatal): %s", name, exc,
+            )
+
+    # Task 5: sweep upload folders orphaned by out-of-band deaths
+    # (sessions killed from zellij's own session-manager never hit
+    # DELETE /zellij/sessions). Live set = sessions still alive AFTER
+    # this reap pass; the idle window doubles as the age grace so an
+    # EXITED-but-resurrectable session (or a mid-upload race) keeps its
+    # folder exactly as long as the session itself would be kept.
+    try:
+        live = {
+            s.get("name") for s in sessions
+            if s.get("name") and s.get("name") not in killed
+        }
+        swept = terminal_uploads.sweep_orphans(live, float(idle_seconds))
+        if swept:
+            logger.info(
+                "reap_idle_zellij_sessions: swept %d orphan upload "
+                "folder(s): %s", len(swept), swept,
+            )
+    except Exception as exc:  # noqa: BLE001 — cleanup must never fail the reap
+        logger.warning(
+            "reap_idle_zellij_sessions: orphan upload sweep failed "
+            "(non-fatal): %s", exc,
+        )
     return killed
 
 

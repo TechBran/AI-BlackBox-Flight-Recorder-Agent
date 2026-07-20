@@ -15,8 +15,7 @@ from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Response,
 from pydantic import BaseModel
 
 from Orchestrator.cli_agent import get_backend
-from Orchestrator.config import UPLOADS_DIR
-from Orchestrator.cli_agent import zellij_client, zellij_state
+from Orchestrator.cli_agent import terminal_uploads, zellij_client, zellij_state
 from Orchestrator.cli_agent.operator_config import OperatorConfig
 from Orchestrator.cli_agent.path_validator import PathValidator, WorkspaceViolation
 from Orchestrator.cli_agent.session_manager import (
@@ -1117,6 +1116,21 @@ async def zellij_delete_session(name: str, op: str = Query(...)):
         )
         raise HTTPException(500, f"Failed to remove Zellij state row: {exc}")
 
+    # Task 5: the session's attach-file upload folder dies with it (the
+    # deterministic resume name is reused across kill/relaunch — a
+    # relaunched session starts clean). Best-effort by design: removal
+    # is rmtree(ignore_errors=True) and any residual failure is logged,
+    # never allowed to change the 204 (the session IS gone).
+    try:
+        await asyncio.to_thread(
+            terminal_uploads.remove_for_session, name, _TERMINAL_UPLOADS_DIR
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "zellij_delete_session: upload-folder removal for %s failed "
+            "(non-fatal): %s", name, exc,
+        )
+
     logger.info("zellij_delete_session: operator=%s session=%s deleted", op, name)
     # 204 No Content
     return Response(status_code=204)
@@ -1205,7 +1219,10 @@ async def zellij_inject(req: ZellijInjectRequest, op: str = Query(...)):
 
 
 # ── POST /zellij/attach-file — upload + paste path into a terminal ──────
-_TERMINAL_UPLOADS_DIR = UPLOADS_DIR / "terminal"  # Portal/uploads/terminal/{session_name}/
+# Storage concept owned by cli_agent.terminal_uploads (Task 5: folders die
+# with their session). Kept as a routes-module global so tests can
+# monkeypatch ONE place for both the attach and delete endpoints.
+_TERMINAL_UPLOADS_DIR = terminal_uploads.TERMINAL_UPLOADS_DIR  # Portal/uploads/terminal/{session_name}/
 
 # Size limits mirror the global /upload endpoint — admin_routes.py holds
 # the canonical values (MAX_UPLOAD_SIZE / UPLOAD_CHUNK_SIZE). Defined

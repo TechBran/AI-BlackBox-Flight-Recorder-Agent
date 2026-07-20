@@ -61,13 +61,18 @@ def test_delete_cross_operator_returns_403(monkeypatch):
 # --- DELETE own session returns 204 -----------------------------------
 
 
-def test_delete_own_session_returns_204(monkeypatch):
+def test_delete_own_session_returns_204(monkeypatch, tmp_path):
     """Operator deleting their own session: backend=zellij + healthy +
     state lookup + kill + remove all mocked → 204 No Content."""
     monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
 
     import Orchestrator.cli_agent as cli_agent
     from Orchestrator.cli_agent import zellij_client, zellij_state
+    from Orchestrator.routes import cli_agent_routes
+
+    # DELETE now removes the session's terminal upload folder — redirect
+    # the base dir so the test can never touch real Portal/uploads data.
+    monkeypatch.setattr(cli_agent_routes, "_TERMINAL_UPLOADS_DIR", tmp_path)
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_state, "list_for_operator", return_value=[
@@ -1148,3 +1153,61 @@ def test_attach_file_413_unlinks_partial_write(monkeypatch, tmp_path):
     folder = tmp_path / "Brandon__claude__root"
     assert folder.is_dir()
     assert not any(folder.iterdir())
+
+
+# --- DELETE session removes the terminal upload folder (plan Task 5) -----
+
+
+def _delete_setup(monkeypatch, tmp_path):
+    """Common stubs for delete-removes-uploads tests: zellij backend
+    selected + healthy + kill/state mocked, uploads base dir redirected
+    to tmp_path (same one-place monkeypatch as _attach_setup)."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+    from Orchestrator.routes import cli_agent_routes
+    monkeypatch.setattr(cli_agent_routes, "_TERMINAL_UPLOADS_DIR", tmp_path)
+    return cli_agent_routes
+
+
+def test_delete_session_removes_upload_folder(monkeypatch, tmp_path):
+    """Deleting a session removes its attach-file upload folder — the
+    deterministic resume name is reused across kill/relaunch, so a
+    relaunched session must start clean. 204 unchanged."""
+    _delete_setup(monkeypatch, tmp_path)
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    folder = tmp_path / "Brandon__terminal"
+    folder.mkdir()
+    (folder / "shot.png").write_bytes(b"\x89PNG fake")
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_state, "list_for_operator", return_value=[]), \
+         patch.object(zellij_client, "kill_session"), \
+         patch.object(zellij_state, "remove_session"):
+        c = _client()
+        r = c.delete(
+            "/cli-agent/zellij/sessions/Brandon__terminal",
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 204, r.text
+    assert not folder.exists()
+
+
+def test_delete_session_without_upload_folder_still_204(monkeypatch, tmp_path):
+    """A session that never had files attached has no folder — the
+    removal is a silent no-op and the 204 contract is unchanged."""
+    _delete_setup(monkeypatch, tmp_path)
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_state, "list_for_operator", return_value=[]), \
+         patch.object(zellij_client, "kill_session"), \
+         patch.object(zellij_state, "remove_session"):
+        c = _client()
+        r = c.delete(
+            "/cli-agent/zellij/sessions/Brandon__terminal",
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 204, r.text
+    assert list(tmp_path.iterdir()) == []
