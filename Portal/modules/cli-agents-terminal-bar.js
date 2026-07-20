@@ -105,7 +105,11 @@ function ensureToastStack() {
     currentToastStackEl.className = 'zellij-terminal-toast-stack';
     // The toasts are the attach flow's ONLY feedback channel — announce
     // them to screen readers (polite: outcomes, not interruptions).
-    currentToastStackEl.setAttribute('role', 'status');
+    // Deliberately aria-live WITHOUT role="status": role="status" implies
+    // aria-atomic=true, which would re-announce the WHOLE stack (including
+    // still-visible sticky error toasts) every time a toast is appended.
+    // Bare aria-live defaults aria-atomic=false, so only the newly-added
+    // toast is announced.
     currentToastStackEl.setAttribute('aria-live', 'polite');
     host.appendChild(currentToastStackEl);
     return currentToastStackEl;

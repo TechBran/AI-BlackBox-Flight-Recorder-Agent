@@ -4,13 +4,14 @@
  *
  * Per docs/plans/2026-05-24-zellij-cli-agent-rewrite.md T11.5 (pivoted T15).
  *
- * Brandon's T15 redesign: drop the original 5-button per-provider row.
+ * T15 redesign (operator-locked): drop the original 5-button per-provider row.
  * Replace with ONE primary "+ Terminal" button + ONE small "▾" shortcuts
- * trigger that opens a dropdown of binary aliases (Claude / Gemini /
- * Codex / Antigravity). Each dropdown click injects "<binary>\n" into
- * the currently-active terminal session via POST /cli-agent/zellij/inject.
+ * trigger that opens a dropdown of provider entries (Claude / Gemini /
+ * Codex / Antigravity). Each dropdown click LAUNCHES A NEW SESSION with the
+ * provider as a KDL `pane command=` layout (T15 final — see injectShortcut).
  *
- * Why this is better than per-provider auto-launch:
+ * Mid-T15 rationale (HISTORICAL — write-chars injection was itself
+ * superseded at T15 final because it broke for claude; kept for context):
  *   - Zellij's `pane command=X` in a layout file only spawns the binary
  *     when a client renders the pane. Our launch_session detaches its
  *     transient client after ~2s — the binary never actually spawns.
@@ -56,10 +57,13 @@ const SHORTCUTS = [
     { id: 'antigravity', label: 'Antigravity', binary: 'agy' },
 ];
 
+// Auth note (Phase 5 master-token model, 2026-05-26): /cli-agent/zellij/launch
+// returns token:null and the orchestrator's app-proxy injects the master
+// session cookie on every upstream forward — the client NEVER holds or sends
+// zellij tokens. The old POST /app-proxy/9097/command/login cookie bridge is
+// gone (it 422'd against the tokenless response); launch goes straight to
+// loadSession.
 const LAUNCH_URL = '/cli-agent/zellij/launch';
-const LOGIN_URL = '/app-proxy/9097/command/login';
-const INJECT_URL = '/cli-agent/zellij/inject';
-const SPAWN_URL  = '/cli-agent/zellij/spawn';
 
 function fireCb(cb, payload, label) {
     if (typeof cb !== 'function') return;
@@ -148,36 +152,12 @@ async function launchTerminal() {
         return emitError('launch', 0, String(err));
     }
 
-    const { session_name, session_url, token } = launchData || {};
+    // token is deliberately NOT required or forwarded — the launch response
+    // carries token:null under the master-token model (see auth note above).
+    const { session_name, session_url } = launchData || {};
     if (typeof session_name !== 'string' || !session_name ||
-        typeof session_url !== 'string' || !session_url ||
-        typeof token !== 'string' || !token) {
-        return emitError('launch', launchStatus, 'launch response missing required fields (session_name, session_url, token)');
-    }
-
-    // Cookie bridge — Zellij auth on iframe load.
-    try {
-        const login = await fetch(LOGIN_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ auth_token: token, remember_me: false }),
-        });
-        if (!login.ok) {
-            const message = await login.text().catch(() => '');
-            return emitError('login', login.status, message);
-        }
-        let loginBody;
-        try {
-            loginBody = await login.json();
-        } catch (e) {
-            return emitError('login', login.status, `malformed login response: ${e.message}`);
-        }
-        if (loginBody?.success !== true) {
-            return emitError('login', login.status, loginBody?.message || 'login refused');
-        }
-    } catch (err) {
-        return emitError('login', 0, String(err));
+        typeof session_url !== 'string' || !session_url) {
+        return emitError('launch', launchStatus, 'launch response missing required fields (session_name, session_url)');
     }
 
     if (isStillMounted()) {
@@ -185,7 +165,6 @@ async function launchTerminal() {
             provider: 'terminal',
             sessionName: session_name,
             sessionUrl: session_url,
-            token,
             expiresAt: launchData.expires_at,
         }, 'onLaunched');
     }
@@ -221,32 +200,14 @@ async function injectShortcut(shortcut) {
         }
         const data = await launch.json();
 
-        // Cookie-bridge auth — Zellij sets the session_token cookie on our
-        // origin so the iframe load includes it automatically.
-        const login = await fetch(LOGIN_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ auth_token: data.token, remember_me: false }),
-        });
-        if (!login.ok) {
-            const message = await login.text().catch(() => '');
-            fireCb(currentCallbacks.onError, {
-                provider: shortcut.id,
-                stage: 'login',
-                status: login.status,
-                message,
-            }, 'onError');
-            return;
-        }
-
+        // No client-side auth step — the app-proxy injects the master
+        // session cookie on every forward (see auth note above).
         // Fire onLaunched so the caller (T12 modal) swaps the iframe to
         // the new session URL. Identical shape to terminal launch.
         fireCb(currentCallbacks.onLaunched, {
             provider: shortcut.id,
             sessionName: data.session_name,
             sessionUrl: data.session_url,
-            token: data.token,
             expiresAt: data.expires_at,
         }, 'onLaunched');
 

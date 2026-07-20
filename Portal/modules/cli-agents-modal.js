@@ -3,7 +3,7 @@
  * CLI Agents launcher modal — picks app folder + provider, opens terminal session.
  * Per docs/plans/2026-05-20-portal-tools-section-alignment.md Track 3 (xterm.js fix).
  *
- * Brandon-locked decisions (2026-05-20, post hardware test):
+ * Operator-locked decisions (2026-05-20, post hardware test):
  *  - xterm.js (standard VT100/xterm emulator) — simple <pre> couldn't render
  *    Claude Code's TUI (cursor escapes, box-drawing, alternate screen buffer).
  *  - Loaded via jsDelivr CDN as UMD scripts; globals window.Terminal +
@@ -351,7 +351,17 @@ function sendResize() {
 async function launchSession() {
     const appSlug = document.getElementById('cliAgentsAppSelect')?.value ?? '';
     const provider = document.querySelector('input[name="cliAgentsProvider"]:checked')?.value || 'claude';
-    const operator = getOperator() || 'Brandon';
+    // Canonical operator source ONLY (state-management getOperator →
+    // localStorage, populated by the header picker / initOperatorSelector).
+    // Never default to a hardcoded name: the session name and every backend
+    // call are operator-scoped, and a fabricated identity would silently
+    // create sessions under an operator that may not exist. Empty ⇒ fail
+    // loudly (fresh box before /health resolved, or cleared storage).
+    const operator = getOperator();
+    if (!operator) {
+        toastError('No operator selected — choose an operator in the Portal header, then retry');
+        return;
+    }
 
     let sessionId;
     try {
@@ -554,7 +564,13 @@ function setupZellijDropZone(card) {
             // Always claim file drags over the card — without preventDefault
             // the drop would never fire and the browser would navigate to
             // the dropped file. No-session drops still land in attachFiles,
-            // which toasts loudly.
+            // which toasts loudly. CAVEAT: that no-session-toast guarantee
+            // only holds for drops on the card CHROME. With no session there
+            // is no overlay, so a drop over the iframe rectangle retargets
+            // into the iframe document and never reaches these card
+            // listeners — harmless (the unloaded iframe is about:blank and
+            // browsers block file-drop navigation inside a subframe), but
+            // also toast-less.
             e.preventDefault();
             zellijDropDepth += 1;
             // Overlay only when a drop can actually succeed (active session).
@@ -631,6 +647,30 @@ function enterZellijMode() {
         return;
     }
 
+    // Canonical operator source ONLY (state-management getOperator →
+    // localStorage; the header picker / initOperatorSelector keeps it
+    // populated). Never default to a hardcoded name — every /cli-agent/*
+    // call is operator-scoped. getOperator() CAN legitimately be empty
+    // (fresh box before /health resolved, cleared storage): render an
+    // explicit in-modal error state instead of half-mounting. The error
+    // element lives inside zellijShellEl so the existing close/reopen
+    // teardown removes it; the global toast is invisible under the modal
+    // backdrop, so an in-modal surface is the only honest one.
+    const op = getOperator();
+    if (!op) {
+        console.error('[CLI-AGENTS-MODAL] no operator resolved — refusing to mount Zellij shell');
+        zellijShellEl = document.createElement('div');
+        zellijShellEl.className = 'cli-agents-zellij-shell';
+        zellijShellEl.id = 'cliAgentsZellijShell';
+        const errEl = document.createElement('div');
+        errEl.className = 'cli-agents-operator-error';
+        errEl.setAttribute('role', 'alert');
+        errEl.textContent = 'No operator selected — choose an operator in the Portal header, then reopen CLI Agents.';
+        zellijShellEl.appendChild(errEl);
+        body.appendChild(zellijShellEl);
+        return;
+    }
+
     zellijShellEl = document.createElement('div');
     zellijShellEl.className = 'cli-agents-zellij-shell';
     zellijShellEl.id = 'cliAgentsZellijShell';
@@ -662,11 +702,6 @@ function enterZellijMode() {
     // never flashes open on a remount when the user had collapsed it.
     const railCollapsed = readRailCollapsed();
     zellijShellEl.classList.toggle('rail-collapsed', railCollapsed);
-
-    // Defensive operator default — matches the tmux-path fallback elsewhere
-    // in this file. mountLauncher would throw with a missing operator
-    // otherwise, which would leave the modal in a half-mounted state.
-    const op = getOperator() || 'Brandon';
 
     mountIframe(iframeHost, {
         onSessionError: ({ sessionName, reason }) => {
@@ -719,7 +754,7 @@ function enterZellijMode() {
         },
         onInjected: ({ binary, sessionName }) => {
             // Silent success is fine; surface only when something interesting
-            // happens. Could add a debug toast here if Brandon wants feedback.
+            // happens. Could add a debug toast here if feedback is wanted.
         },
     });
 

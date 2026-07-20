@@ -252,6 +252,22 @@
     width: 100%;
 }
 
+/* Operator-missing error state: the modal refuses to mount the launcher/
+   switcher/iframe trio when getOperator() resolves empty (fresh box before
+   /health, cleared storage) and renders this single message instead. */
+.cli-agents-operator-error {
+    margin: auto;
+    padding: 18px 22px;
+    max-width: 480px;
+    text-align: center;
+    color: #ff9b9b; /* matches the #ff6b6b error family used by the toasts */
+    background: rgba(255, 107, 107, 0.08);
+    border: 1px solid rgba(255, 107, 107, 0.35);
+    border-radius: var(--radius-md, 8px);
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
 .cli-agents-zellij-main {
     flex: 1 1 auto;
     display: flex;
