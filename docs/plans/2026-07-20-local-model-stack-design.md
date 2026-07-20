@@ -144,6 +144,7 @@ Provider naming follows the provider-explicit convention: the catalog group is `
 - **Search (the other pair):** every query runs embed→rerank back-to-back; both live in `retrieval`, co-resident; zero swaps inside a query.
 - **Streaming sessions are in-flight work:** an open STT stream (or TTS stream) must block eviction until it closes — via WS proxy activity (G6-A) or keepalive claims (G6-B). A retrieval request during a voice conversation queues until the conversation's current utterance drains; this is the accepted trade-off of one GPU.
 - **Initial re-embed migration thrash:** the first corpus re-embed (~36K rows in 32-chunk batches) is thousands of short requests; interleaved audio requests would swap groups between batches and crawl. Mitigation: the wizard runs migration as a foreground step with a "voice features will be slow until the index finishes building" notice; optionally set the retrieval group `persistent: true` for the duration via a config reload, restoring it after cutover. (Detail for the implementation plan.)
+- **Keep-warm interplay (wizard checkbox — work with it, don't fight it):** today's embeddings keep-warm setting (`Manifest/embeddings/keep_alive.json` → Ollama `keep_alive`, e.g. `-1` pin; MS02 currently holds its 8B embedder resident this way at ~7GB). Under llama-swap, keep-warm maps to **`ttl: 0` on that member** (never idle-unloaded). Adopted semantics: a kept-warm model is **immune to the 10-min idle TTL but still yields to a cross-group swap** when the other group is demanded, then reloads on next use — anything stronger (`persistent: true`) would deadlock VRAM (10.5 + 9.5 > 16GB). The wizard copy states exactly this. The legacy Ollama path keeps its current keep-warm meaning unchanged.
 - **Crash/health:** llama-swap `checkEndpoint` + `healthCheckTimeout` per member; `GET /local-models/status` surfaces member state; the embeddings watcher's daily probe covers the localstack provider like any other. If the stack dies, D2 precedence falls through to the wizard-chosen cloud provider (existing degradation paths: vector-less mints + gap-heal; un-reranked retrieval fall-through; cloud STT/TTS).
 
 ---
@@ -205,9 +206,27 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 
 ## 10. Testing & Rollout
 
+### Deployment topology — Brandon's fleet (verified by SSH recon 2026-07-20)
+
+- **Dev box (A620AI, this machine):** no GPU, 31GB RAM → tier LOW. **Stays cloud for all four capabilities in day-to-day use** (Brandon's call). Its role in this plan is Phase-1 code development only.
+- **MS02 Ultra is THE local-inference + test host.** Access: **`ssh bbx@192.168.1.153`** (LAN, ed25519 key auth already provisioned from this box; user `bbx`). Tailscale shows it as `mini-rack-node-1-ms-02-ultra` / `100.72.92.12`, but **always connect via LAN**, not Tailscale (Brandon's instruction; the old Tailscale node entry `100.122.114.77` is stale).
+
+| MS02 verified inventory | |
+|---|---|
+| OS / kernel | Ubuntu 24.04.4 LTS / 6.17.0-35 |
+| CPU | Intel Core Ultra 9 285HX, 24 cores |
+| RAM | 125GB (≈112GB available) |
+| GPU | RTX 2000 Ada, **16,380 MiB**, driver 595.71.05 |
+| Disk | 915GB NVMe, **816GB free** (weights budget is a non-issue) |
+| Ollama | 0.30.8 active — `qwen3-embedding:0.6b` + `:8b` already pulled |
+
+- **MS02 is already a full customer-shaped BlackBox install, tier HIGH:** `blackbox.service` active on :9091, repo at `/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main` — currently `main @ b8167dd` (~12 days behind origin; stray `config.ini.bak-pre-rerank` + modified `ToolVault/embeddings.json` to reconcile before Phase 2).
+- **Live today on MS02:** active embeddings = `qwen3-embedding-8b` served by Ollama (kept warm, llama-server resident ~6,994 MiB) **and** `vllm-reranker.service` running Qwen/Qwen3-Reranker-0.6B on :8091 (~3,284 MiB) → **≈10.5GB VRAM pinned at idle. M11 rerank is LIVE on MS02, not dark.**
+- **Migration implication:** enabling the new stack on MS02 must first retire the always-resident pair — disable `vllm-reranker.service` and take embeddings duty off Ollama — because the audio group (~7–9.5GB) cannot fit beside the pinned 10.5GB. The grouped llama-swap stack *replaces* both (embeddings/rerank move into the `retrieval` group; keep-warm becomes `ttl: 0` per §6). Phase 2 runs as an **update-in-place through the production update path** (exercises the real customer journey: `install.sh` re-run picks up Step 2f), with a from-scratch fresh-box validation pass after.
+
 **Phase 1 — build on this box (no GPU):** all code paths, CPU-tier behavior, install.sh idempotency, wizard flow, catalog/routing, CU virtual displays (CPU-only feature anyway), unit/integration tests. The fresh-box portable gate applies: no hardcoded hosts/operators; empty-store behavior verified.
 
-**Phase 2 — MS02 Ultra (128GB RAM, Ultra 9, RTX 2000 Ada, on the network):** clone repo, run `Scripts/install.sh` as a *fresh customer box*, walk the wizard end-to-end, then run the benchmark gates.
+**Phase 2 — MS02 Ultra:** update the existing install in place through the production update path (see topology above), walk the wizard's new `local_models` step end-to-end, retire the pinned Ollama-embeddings + vllm-reranker pair, then run the benchmark gates. A from-scratch fresh-box validation pass (separate `BLACKBOX_ROOT` or reinstall) follows once gates pass.
 
 ### Benchmark gates (all measured on MS02, results into `eval/results/`)
 
@@ -242,7 +261,7 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 7. **Q7 — Ollama deprecation timeline** for embeddings once localstack is proven (install.sh still installs it today).
 8. **Q8 — Naming bikeshed:** `localstack` provider key, `qwen` catalog group id, `blackbox-models.service`, `[local_models]` — confirm or rename.
 9. **Q9 — Qwen3-ASR:** evaluate as a whisper alternative/addition later (52 languages, aligner)? Parked, not planned.
-10. **Q10 — MS02 dual role:** after testing, does MS02 stay a customer-shaped reference box, or return to being a LAN custom-server host (it can be both — the stacks don't overlap)?
+10. **Q10 — MS02 dual role:** ~~after testing, does MS02 stay a customer-shaped reference box?~~ **Answered by recon 2026-07-20:** MS02 *is* already a full customer-shaped BlackBox install (tier HIGH, local embeddings + reranker live) — it is the permanent local-inference reference box; the dev box stays cloud (§10 topology).
 
 ---
 
