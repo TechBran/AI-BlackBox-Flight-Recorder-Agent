@@ -1193,6 +1193,31 @@ def test_delete_session_removes_upload_folder(monkeypatch, tmp_path):
     assert not folder.exists()
 
 
+def test_delete_session_upload_removal_failure_still_204(monkeypatch, tmp_path):
+    """Upload-folder removal raising must never change the DELETE
+    contract — the session IS gone by that point; the failure is logged
+    and the orphan sweep is the backstop."""
+    _delete_setup(monkeypatch, tmp_path)
+    from Orchestrator.cli_agent import terminal_uploads, zellij_client, zellij_state
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_state, "list_for_operator", return_value=[]), \
+         patch.object(zellij_client, "kill_session"), \
+         patch.object(zellij_state, "remove_session"), \
+         patch.object(
+             terminal_uploads, "remove_for_session",
+             side_effect=OSError("disk on fire"),
+         ) as mock_remove_uploads:
+        c = _client()
+        r = c.delete(
+            "/cli-agent/zellij/sessions/Brandon__terminal",
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 204, r.text
+    mock_remove_uploads.assert_called_once()
+
+
 def test_delete_session_without_upload_folder_still_204(monkeypatch, tmp_path):
     """A session that never had files attached has no folder — the
     removal is a silent no-op and the 204 contract is unchanged."""

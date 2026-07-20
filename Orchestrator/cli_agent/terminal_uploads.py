@@ -16,7 +16,10 @@ leaking forever:
 
 The orphan sweep is age-gated: a folder whose session is gone is only
 removed once its mtime is older than the reaper's idle window — grace for
-EXITED-but-resurrectable sessions and mid-upload races.
+EXITED-but-resurrectable sessions and mid-upload races. NOTE: the age
+grace relies on directory-ENTRY creation bumping the folder mtime — true
+for the attach flow, which always creates a new entry per upload;
+appending to an existing file would NOT refresh the folder mtime.
 
 LAYERING: this lives in ``Orchestrator.cli_agent`` so both the routes
 layer and the reaper can import it (routes import cli_agent, never the
@@ -67,6 +70,14 @@ def remove_for_session(session_name: str, base_dir: Optional[Path] = None) -> No
     if not folder.is_dir():
         return
     shutil.rmtree(folder, ignore_errors=True)
+    if folder.exists():
+        # ignore_errors swallowed a failure mid-tree (permissions,
+        # immutable file, ...) — report honestly, don't claim success.
+        logger.warning(
+            "terminal_uploads: upload folder for session %s not fully "
+            "removed — residue left behind (%s)", session_name, folder,
+        )
+        return
     logger.info(
         "terminal_uploads: removed upload folder for session %s (%s)",
         session_name, folder,
@@ -103,6 +114,15 @@ def sweep_orphans(
             if age < max_age_seconds:
                 continue
             shutil.rmtree(child, ignore_errors=True)
+            if child.exists():
+                # Residue left behind — do NOT count it as removed, or a
+                # permanently-stuck folder would log a fresh "swept"
+                # success on every hourly pass forever (inverted signal).
+                logger.warning(
+                    "terminal_uploads: orphan upload folder %s not fully "
+                    "swept — residue left behind (%s)", child.name, child,
+                )
+                continue
             removed.append(child.name)
             logger.info(
                 "terminal_uploads: swept orphan upload folder %s "

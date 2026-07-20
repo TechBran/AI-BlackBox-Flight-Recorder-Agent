@@ -4,9 +4,12 @@ terminal upload folders die with their session).
 Everything runs against tmp_path with an explicit ``now`` / os.utime mtime
 control — no test may ever touch the real Portal/uploads/terminal.
 """
+import logging
 import os
 
 from Orchestrator.cli_agent import terminal_uploads
+
+_LOGGER_NAME = terminal_uploads.logger.name
 
 
 # --- remove_for_session ------------------------------------------------
@@ -47,6 +50,38 @@ def test_remove_for_session_rejects_traversal_and_invalid_names(tmp_path):
     assert tmp_path.exists()
 
 
+def test_remove_for_session_residue_logs_warning_not_success(
+    tmp_path, monkeypatch, caplog,
+):
+    """Honest reporting: rmtree(ignore_errors=True) can silently leave the
+    folder (or part of it) behind. Residue must emit a WARNING naming the
+    folder — never the INFO "removed" success line."""
+    folder = tmp_path / "Brandon__claude__root"
+    folder.mkdir()
+    monkeypatch.setattr(
+        terminal_uploads.shutil, "rmtree", lambda *a, **k: None,
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        terminal_uploads.remove_for_session(
+            "Brandon__claude__root", base_dir=tmp_path,
+        )
+
+    assert folder.exists()
+    warnings = [
+        r for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any(
+        "Brandon__claude__root" in r.getMessage()
+        and "residue" in r.getMessage()
+        for r in warnings
+    ), f"expected a residue WARNING, got: {[r.getMessage() for r in caplog.records]}"
+    assert not any(
+        r.levelno == logging.INFO and "removed" in r.getMessage()
+        for r in caplog.records
+    ), "residue must not log the INFO success line"
+
+
 # --- sweep_orphans -----------------------------------------------------
 
 
@@ -79,6 +114,45 @@ def test_sweep_orphans_keeps_live_removes_only_old_orphans(tmp_path):
     assert live.exists()
     assert young_orphan.exists()
     assert stray_file.exists()
+
+
+def test_sweep_orphans_residue_excluded_from_removed(
+    tmp_path, monkeypatch, caplog,
+):
+    """A permanently-stuck folder must NOT be reported as removed —
+    otherwise every hourly pass logs a fresh "swept" success for a folder
+    that never went away (inverted signal). Residue → WARNING, and the
+    returned list excludes the folder."""
+    now = 1_800_000_000.0
+    week = 7 * 86400
+
+    stuck = tmp_path / "Brandon__terminal__stuck"
+    stuck.mkdir()
+    os.utime(stuck, (now - 2 * week, now - 2 * week))
+
+    monkeypatch.setattr(
+        terminal_uploads.shutil, "rmtree", lambda *a, **k: None,
+    )
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        removed = terminal_uploads.sweep_orphans(
+            set(), week, base_dir=tmp_path, now=now,
+        )
+
+    assert removed == []
+    assert stuck.exists()
+    warnings = [
+        r for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any(
+        "Brandon__terminal__stuck" in r.getMessage()
+        and "residue" in r.getMessage()
+        for r in warnings
+    ), f"expected a residue WARNING, got: {[r.getMessage() for r in caplog.records]}"
+    assert not any(
+        r.levelno == logging.INFO and "swept" in r.getMessage()
+        for r in caplog.records
+    ), "residue must not log the INFO sweep-success line"
 
 
 def test_sweep_orphans_missing_base_dir_noop(tmp_path):

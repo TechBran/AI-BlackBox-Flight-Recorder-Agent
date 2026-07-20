@@ -1120,7 +1120,9 @@ async def zellij_delete_session(name: str, op: str = Query(...)):
     # deterministic resume name is reused across kill/relaunch — a
     # relaunched session starts clean). Best-effort by design: removal
     # is rmtree(ignore_errors=True) and any residual failure is logged,
-    # never allowed to change the 204 (the session IS gone).
+    # never allowed to change the 204 (the session IS gone). A concurrent
+    # attach can recreate the folder post-delete — the orphan sweep is
+    # the backstop.
     try:
         await asyncio.to_thread(
             terminal_uploads.remove_for_session, name, _TERMINAL_UPLOADS_DIR
