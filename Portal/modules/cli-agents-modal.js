@@ -49,6 +49,27 @@ import {
     markSessionActive, refresh as refreshSwitcher,
     setOperator as setSwitcherOperator,
 } from './cli-agents-zellij-switcher.js';
+import {
+    mountTerminalBar, unmountTerminalBar,
+    setActiveSession as setTerminalBarSession,
+} from './cli-agents-terminal-bar.js';
+
+// Rail-collapse persistence — survives the modal's unmount/remount cycle
+// (Task 9). The MODAL re-applies the stored state during enterZellijMode
+// and persists every toolbar toggle; the toolbar module only reports.
+const RAIL_COLLAPSED_KEY = 'cliAgentsRailCollapsed';
+
+function readRailCollapsed() {
+    try { return localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'; } catch { return false; }
+}
+
+function writeRailCollapsed(collapsed) {
+    try { localStorage.setItem(RAIL_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch { /* private mode */ }
+}
+
+function getCliAgentsCard() {
+    return document.querySelector('#cliAgentsModal .modal-card.cli-agents-card');
+}
 
 // Session-name field separator (mirrors Orchestrator/cli_agent/session_manager.py _FIELD_SEP).
 const FIELD_SEP = '__';
@@ -483,14 +504,17 @@ function enterZellijMode() {
     if (term) term.style.display = 'none';
 
     // Idempotent: if a prior open already built the shell and close didn't
-    // tear it down for some reason, blow away the trio's state FIRST (so
+    // tear it down for some reason, blow away the modules' state FIRST (so
     // their singletons release refs to the old DOM children) THEN remove
     // the stale shell. Calling unmount* on never-mounted state is safe.
     unmountLauncher();
     unmountSwitcher();
     unmountIframe();
+    unmountTerminalBar();
     if (zellijShellEl?.parentNode) zellijShellEl.parentNode.removeChild(zellijShellEl);
     zellijShellEl = null;
+    // Maximize never survives a close/reopen — fresh open is always windowed.
+    getCliAgentsCard()?.classList.remove('cli-agents-maximized');
 
     const body = document.querySelector('#cliAgentsModal .cli-agents-body');
     if (!body) {
@@ -507,13 +531,28 @@ function enterZellijMode() {
     mainRow.className = 'cli-agents-zellij-main';
     const switcherHost = document.createElement('div');
     switcherHost.className = 'cli-agents-zellij-switcher-host';
+    // Terminal column (Task 9): toolbar row above the iframe host so the
+    // toolbar never overlays terminal content. The column takes over the
+    // iframe host's old flex slot; the iframe host keeps flex-fill +
+    // position:relative (overlay anchor) inside it.
+    const terminalCol = document.createElement('div');
+    terminalCol.className = 'cli-agents-zellij-terminal-col';
+    const toolbarHost = document.createElement('div');
+    toolbarHost.className = 'cli-agents-zellij-toolbar-host';
     const iframeHost = document.createElement('div');
     iframeHost.className = 'cli-agents-zellij-iframe-host';
+    terminalCol.appendChild(toolbarHost);
+    terminalCol.appendChild(iframeHost);
     mainRow.appendChild(switcherHost);
-    mainRow.appendChild(iframeHost);
+    mainRow.appendChild(terminalCol);
     zellijShellEl.appendChild(launcherHost);
     zellijShellEl.appendChild(mainRow);
     body.appendChild(zellijShellEl);
+
+    // Re-apply persisted rail-collapse state before mounting so the rail
+    // never flashes open on a remount when the user had collapsed it.
+    const railCollapsed = readRailCollapsed();
+    zellijShellEl.classList.toggle('rail-collapsed', railCollapsed);
 
     // Defensive operator default — matches the tmux-path fallback elsewhere
     // in this file. mountLauncher would throw with a missing operator
@@ -532,6 +571,28 @@ function enterZellijMode() {
         onSessionChanged: (sessionName) => {
             markSessionActive(sessionName);
             setLauncherActiveSession(sessionName);
+            setTerminalBarSession(sessionName);
+        },
+    });
+
+    mountTerminalBar(toolbarHost, {
+        operator: op,
+        railCollapsed,
+        // Re-read at upload time (drift safety) — the iframe module tracks
+        // in-terminal session switches, so this is always the LIVE session.
+        getSessionName: getCurrentSessionName,
+        onToggleRail: ({ collapsed }) => {
+            zellijShellEl?.classList.toggle('rail-collapsed', collapsed);
+            writeRailCollapsed(collapsed);
+        },
+        onToggleMaximize: ({ maximized }) => {
+            getCliAgentsCard()?.classList.toggle('cli-agents-maximized', maximized);
+        },
+        onError: ({ stage, status, message }) => {
+            // The toolbar module already toasts every outcome itself (its
+            // toasts live INSIDE the modal; the global toast renders under
+            // the modal backdrop) — this hook is log-only.
+            console.error(`[CLI-AGENTS-MODAL] terminal bar ${stage} failed (${status}): ${message || ''}`);
         },
     });
 
@@ -541,6 +602,7 @@ function enterZellijMode() {
             loadSession({ sessionUrl, sessionName });
             markSessionActive(sessionName);
             setLauncherActiveSession(sessionName);
+            setTerminalBarSession(sessionName);
             refreshSwitcher();
         },
         onError: ({ provider, stage, status, message }) => {
@@ -558,12 +620,14 @@ function enterZellijMode() {
             loadSession({ sessionUrl, sessionName: name });
             markSessionActive(name);
             setLauncherActiveSession(name);
+            setTerminalBarSession(name);
         },
         onDelete: ({ name }) => {
             if (getCurrentSessionName() === name) {
                 unloadSession();
                 markSessionActive(null);
                 setLauncherActiveSession(null);
+                setTerminalBarSession(null);
             }
         },
         onError: ({ stage, status, message }) => {
@@ -622,11 +686,15 @@ function closeModal() {
         unmountLauncher();
         unmountSwitcher();
         unmountIframe();
+        unmountTerminalBar();
         if (zellijShellEl?.parentNode) {
             zellijShellEl.parentNode.removeChild(zellijShellEl);
         }
         zellijShellEl = null;
         zellijMode = false;
+        // Maximize is session-scoped UI state — never persists past close.
+        // (Rail collapse DOES persist, via localStorage re-applied on open.)
+        getCliAgentsCard()?.classList.remove('cli-agents-maximized');
     }
 
     // If a tmux session is open, leave the tmux session alone on the backend

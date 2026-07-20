@@ -256,6 +256,12 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
+    /* Rail collapse (Task 9): overflow stays hidden permanently so the
+       rail's content never spills mid-animation (the rail scrolls
+       internally anyway); flex-basis is a length on both ends of the
+       toggle, so the transition animates it (Chrome-verified). */
+    overflow: hidden;
+    transition: flex-basis var(--transition-base, 0.2s ease);
 }
 
 .cli-agents-zellij-iframe-host {
@@ -525,4 +531,219 @@
 .zellij-iframe-loading[hidden],
 .zellij-iframe-error[hidden] {
     display: none;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Terminal toolbar + maximize + rail collapse (Task 9)
+ * Toolbar row sits ABOVE the iframe host inside a new terminal column
+ * (.cli-agents-zellij-terminal-col replaces the iframe host's old flex
+ * slot in .cli-agents-zellij-main). Chip/toast overlays anchor to the
+ * iframe host's position:relative.
+ * ════════════════════════════════════════════════════════════════════ */
+
+.cli-agents-zellij-terminal-col {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.cli-agents-zellij-toolbar-host {
+    flex: 0 0 auto;
+}
+
+/* ── Toolbar row ────────────────────────────────────────── */
+
+.zellij-terminal-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--neutral-300, #333);
+}
+
+.zellij-terminal-bar-btn {
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--neutral-200, #222);
+    color: var(--neutral-1000, #e0e0e0);
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-md, 8px);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color var(--transition-fast, 0.15s ease),
+                background var(--transition-fast, 0.15s ease);
+}
+
+.zellij-terminal-bar-btn:hover:not(:disabled) {
+    background: var(--neutral-300, #2a2a2a);
+    border-color: #4a9eff;
+}
+
+.zellij-terminal-bar-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.zellij-terminal-bar-btn[aria-pressed="true"] {
+    background: rgba(74, 158, 255, 0.12);
+    border-color: #4a9eff;
+}
+
+/* Session label doubles as the spacer — flex-fills between the rail
+   toggle and the action buttons, ellipsizing long session names. */
+.zellij-terminal-bar-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 12px;
+    color: var(--neutral-900, #ccc);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.zellij-terminal-bar-label-empty {
+    color: var(--neutral-600, #666);
+    font-style: italic;
+}
+
+/* ── Upload progress chip (overlays the top of the iframe host) ── */
+
+.zellij-terminal-chip {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 5;
+    max-width: 80%;
+    padding: 6px 14px;
+    background: rgba(20, 20, 20, 0.92);
+    border: 1px solid #4a9eff;
+    border-radius: 999px;
+    color: var(--neutral-1000, #e0e0e0);
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none; /* never steal clicks from the terminal */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Attach outcome toasts (module-local: the global #toast renders at
+      z-index 100, UNDER the modal's 5000 backdrop) ── */
+
+.zellij-terminal-toast-stack {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    max-width: min(420px, 90%);
+}
+
+.zellij-terminal-toast {
+    max-width: 100%;
+    padding: 8px 12px;
+    background: rgba(20, 20, 20, 0.94);
+    border: 1px solid var(--neutral-300, #333);
+    border-left: 3px solid #4a9eff;
+    border-radius: var(--radius-md, 8px);
+    color: var(--neutral-900, #ccc);
+    font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    animation: cli-agents-auth-banner-fade-in 200ms ease;
+}
+
+.zellij-terminal-toast-success { border-left-color: #4ade80; }
+.zellij-terminal-toast-warn    { border-left-color: #fbbf24; }
+.zellij-terminal-toast-error   { border-left-color: #ff6b6b; }
+
+.zellij-terminal-toast-path {
+    margin-top: 6px;
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 11px;
+    color: var(--neutral-700, #aaa);
+    word-break: break-all;
+    user-select: all;
+}
+
+.zellij-terminal-toast-copy {
+    margin-top: 6px;
+    padding: 4px 10px;
+    background: var(--neutral-200, #222);
+    color: var(--neutral-1000, #e0e0e0);
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-sm, 4px);
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color var(--transition-fast, 0.15s ease);
+}
+
+.zellij-terminal-toast-copy:hover {
+    border-color: #4a9eff;
+}
+
+/* ── Rail collapse ──────────────────────────────────────── */
+
+.cli-agents-zellij-shell.rail-collapsed .cli-agents-zellij-switcher-host {
+    flex-basis: 0px;
+    width: 0;
+    min-width: 0;
+    overflow: hidden;
+}
+
+/* Collapse the row gap too, so no 10px dead seam remains at the left
+   edge. gap is animatable in Chrome — rides the same 0.2s curve. */
+.cli-agents-zellij-main {
+    transition: gap var(--transition-base, 0.2s ease);
+}
+
+.cli-agents-zellij-shell.rail-collapsed .cli-agents-zellij-main {
+    gap: 0;
+}
+
+/* ── Maximize ───────────────────────────────────────────── */
+/* Same specificity (0,2,0) as .cli-agents-card:has(.cli-agents-zellij-shell)
+   — these rules must stay AFTER it in this file so source order wins. */
+
+.cli-agents-card.cli-agents-maximized {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    margin: 0;
+}
+
+/* .modal-body caps max-height at calc(100vh - 200px) — lift it so the
+   body (already column-flex via .cli-agents-body) can flex-fill the
+   maximized card. */
+.cli-agents-card.cli-agents-maximized .cli-agents-body {
+    max-height: none;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* zellij-web self-refits on iframe resize — no extra plumbing needed. */
+.cli-agents-card.cli-agents-maximized .cli-agents-zellij-shell {
+    height: auto;
+    flex: 1 1 auto;
+    max-height: none;
+    min-height: 0;
 }
