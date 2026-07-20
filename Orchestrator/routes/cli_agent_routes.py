@@ -1231,7 +1231,7 @@ async def zellij_attach_file(
     Security boundary mirrors /zellij/inject (audit I10): operator
     allowlist + '{op}__' prefix gate + session-name charset; storage is
     keyed by the (validated) session name so there is no client-chosen
-    path component at all.
+    directory component — the client only chooses the basename.
     """
     _check_operator_allowed(op)
     if not _validate_operator_prefix(session_name, op):
@@ -1252,6 +1252,11 @@ async def zellij_attach_file(
     folder = _TERMINAL_UPLOADS_DIR / session_name
     folder.mkdir(parents=True, exist_ok=True)
     original_name = Path(file.filename or "attachment").name or "attachment"
+    if original_name in {".", ".."}:
+        # Path("..").name is ".." (not "") — without this guard,
+        # folder/".." points OUTSIDE the session folder. Never rely on
+        # the collision branch below to defuse it by accident.
+        original_name = "attachment"
     save_path = folder / original_name
     if save_path.exists():
         # Collision: keep both — suffix a ms timestamp (same uniqueness

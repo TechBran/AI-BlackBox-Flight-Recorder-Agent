@@ -1097,3 +1097,54 @@ def test_attach_file_collision_suffix(monkeypatch, tmp_path):
     folder = tmp_path / "Brandon__claude__root"
     assert (folder / "shot.png").read_bytes() == b"first"
     assert (folder / name2).read_bytes() == b"second"
+
+
+def test_attach_file_dotdot_filename_stays_in_session_folder(monkeypatch, tmp_path):
+    """A filename of ".." must be coerced to "attachment" and saved INSIDE
+    the session folder. Path("..").name is ".." (not ""), so without an
+    explicit guard folder/".." points at the uploads root — today that is
+    only defused by accident via the collision branch. Safety must not
+    depend on that accident."""
+    routes = _attach_setup(monkeypatch, tmp_path)
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "paste_into_pane", return_value=None):
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/attach-file?op=Brandon",
+            files={"file": ("..", b"sneaky", "application/octet-stream")},
+            data={"session_name": "Brandon__claude__root"},
+        )
+
+    assert r.status_code == 200, r.text
+    name = r.json()["filename"]
+    assert re.fullmatch(r"attachment(_\d+)?", name), name
+    folder = tmp_path / "Brandon__claude__root"
+    assert (folder / name).read_bytes() == b"sneaky"
+    # CRITICAL: nothing escaped the session folder — the uploads root
+    # contains exactly the one session directory and nothing else.
+    assert set(tmp_path.iterdir()) == {folder}
+
+
+def test_attach_file_413_unlinks_partial_write(monkeypatch, tmp_path):
+    """Oversize upload: 413 AND the partially-written file is unlinked —
+    the session folder holds no leftover bytes."""
+    routes = _attach_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "_MAX_UPLOAD_SIZE", 4)
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "paste_into_pane", return_value=None):
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/attach-file?op=Brandon",
+            files={"file": ("big.bin", b"0123456789", "application/octet-stream")},
+            data={"session_name": "Brandon__claude__root"},
+        )
+
+    assert r.status_code == 413, r.text
+    assert "too large" in r.json()["detail"].lower()
+    folder = tmp_path / "Brandon__claude__root"
+    assert folder.is_dir()
+    assert not any(folder.iterdir())
