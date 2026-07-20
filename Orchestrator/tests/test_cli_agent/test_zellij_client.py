@@ -377,6 +377,28 @@ def test_session_exists_false_on_cli_failure():
         assert zellij_client.session_exists("Brandon__terminal__root") is False
 
 
+# --- _run env scrub (ZELLIJ* leak — probe 2026-07-20) --------------------
+
+
+def test_run_scrubs_zellij_env(monkeypatch):
+    """_run must never let the orchestrator's own ZELLIJ_* env leak into
+    zellij CLI subprocesses — an inherited ZELLIJ_SESSION_NAME makes a bare
+    action target the USER'S live session (probe 2026-07-20)."""
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "someones-live-session")
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(zellij_client.subprocess, "run", fake_run)
+    zellij_client._run([zellij_client._ZELLIJ_BIN, "--session", "x", "action", "write", "13"])
+    assert captured["env"] is not None
+    assert not any(k.startswith("ZELLIJ") for k in captured["env"])
+    assert "PATH" in captured["env"]
+
+
 # --- master token LOADS (not re-mints) across a simulated restart -------
 
 

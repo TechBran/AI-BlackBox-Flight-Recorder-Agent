@@ -150,6 +150,10 @@ def _run(
       "install.sh" hint rather than a cryptic Python traceback.
     """
     logger.debug("zellij_client._run: %s", args)
+    # Scrub ZELLIJ* vars unconditionally: the orchestrator can itself run
+    # inside a zellij pane, and an inherited ZELLIJ_SESSION_NAME makes a
+    # bare action target the USER'S live session (probe 2026-07-20).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ZELLIJ")}
     try:
         result = subprocess.run(
             args,
@@ -157,6 +161,7 @@ def _run(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
     except FileNotFoundError as exc:
         # Most likely: /usr/local/bin/zellij absent (install.sh not run).
