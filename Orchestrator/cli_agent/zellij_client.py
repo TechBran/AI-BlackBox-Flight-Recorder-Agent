@@ -225,6 +225,32 @@ def send_key(session_name: str, byte_codes: list[int]) -> None:
     _run([_ZELLIJ_BIN, "--session", session_name, "action", "write", *codes])
 
 
+def paste_into_pane(session_name: str, text: str, pane_id: str = "terminal_0") -> None:
+    """Bracketed-paste ``text`` into a specific pane of a session.
+
+    ``zellij action paste`` wraps the payload in ESC[200~/ESC[201~ natively,
+    so TUI agents (claude/gemini/codex) receive ONE paste event and bash
+    leaves it unexecuted until the user presses Enter. ``--pane-id`` makes
+    delivery detached-safe — focused-pane resolution needs an attached
+    client and SILENTLY drops the action otherwise (probe 2026-07-20).
+    BlackBox KDL-launched sessions always contain exactly plugin_0 +
+    terminal_0, so terminal_0 deterministically addresses the CLI pane.
+
+    SECURITY: caller enforces operator gates; this adapter only injects.
+    """
+    if not session_name or not _SESSION_NAME_RE.match(session_name):
+        raise ValueError(f"invalid zellij session name: {session_name!r}")
+    if not text:
+        raise ValueError("paste text must be non-empty")
+    logger.info("paste_into_pane: session=%s pane=%s text_len=%d", session_name, pane_id, len(text))
+    _run([_ZELLIJ_BIN, "--session", session_name, "action", "paste", "--pane-id", pane_id, text])
+
+
+def is_valid_session_name(session_name: str) -> bool:
+    """Public charset check for routes — wraps the private regex."""
+    return bool(session_name) and _SESSION_NAME_RE.match(session_name) is not None
+
+
 def _read_port_from_config() -> int:
     """Parse ~/.config/zellij/config.kdl for web_server_port. Falls back
     to the default port on any read/parse failure — the daemon may not

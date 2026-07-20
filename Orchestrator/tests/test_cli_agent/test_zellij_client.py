@@ -399,6 +399,35 @@ def test_run_scrubs_zellij_env(monkeypatch):
     assert "PATH" in captured["env"]
 
 
+# --- paste_into_pane (detached-safe bracketed paste — probe 2026-07-20) --
+
+
+def test_paste_into_pane_argv(monkeypatch):
+    calls = []
+    monkeypatch.setattr(zellij_client, "_run", lambda argv, **kw: calls.append(argv))
+    zellij_client.paste_into_pane("Brandon__claude__root", 'Read this file: "/a/b c.png" ')
+    assert calls[0] == [
+        zellij_client._ZELLIJ_BIN, "--session", "Brandon__claude__root",
+        "action", "paste", "--pane-id", "terminal_0", 'Read this file: "/a/b c.png" ',
+    ]
+
+
+def test_paste_into_pane_rejects_bad_session():
+    with pytest.raises(ValueError):
+        zellij_client.paste_into_pane("bad;name", "x")
+
+
+def test_paste_into_pane_rejects_empty_text():
+    with pytest.raises(ValueError):
+        zellij_client.paste_into_pane("Brandon__claude__root", "")
+
+
+def test_is_valid_session_name():
+    assert zellij_client.is_valid_session_name("Brandon__claude__root") is True
+    assert zellij_client.is_valid_session_name("bad;name") is False
+    assert zellij_client.is_valid_session_name("") is False
+
+
 # --- master token LOADS (not re-mints) across a simulated restart -------
 
 
