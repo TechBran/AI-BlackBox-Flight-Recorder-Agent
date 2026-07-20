@@ -48,13 +48,14 @@ let launchInFlight = false;
 let dropdownOpen = false;
 let documentClickHandler = null;
 
-// Shortcut dropdown items: label → binary alias typed into the terminal.
-// Antigravity's binary is `agy` (per the CLI Agent install convention).
+// Shortcut dropdown items. `id` is the provider sent to /launch (the
+// backend maps provider → binary in its KDL layout; the client never
+// names binaries — see injectShortcut).
 const SHORTCUTS = [
-    { id: 'claude',      label: 'Claude',      binary: 'claude' },
-    { id: 'gemini',      label: 'Gemini',      binary: 'gemini' },
-    { id: 'codex',       label: 'Codex',       binary: 'codex' },
-    { id: 'antigravity', label: 'Antigravity', binary: 'agy' },
+    { id: 'claude',      label: 'Claude' },
+    { id: 'gemini',      label: 'Gemini' },
+    { id: 'codex',       label: 'Codex' },
+    { id: 'antigravity', label: 'Antigravity' },
 ];
 
 // Auth note (Phase 5 master-token model, 2026-05-26): /cli-agent/zellij/launch
@@ -74,16 +75,16 @@ function fireCb(cb, payload, label) {
 
 function refreshShortcutsState() {
     if (!currentShortcutsBtn) return;
-    // Dropdown is meaningful any time there's a live session to inject into.
+    // Dropdown is enabled any time there's a live session (each shortcut
+    // click launches a NEW provider session — see injectShortcut).
     // Deliberately NOT gated on launchInFlight: the caller's onLaunched fires
     // setActiveSession() BEFORE finishFlight() clears launchInFlight, which
     // would leave the button disabled-until-next-event if we also gated on
-    // the in-flight flag. The inject endpoint is independent of /launch
-    // anyway — they hit different code paths server-side.
+    // the in-flight flag.
     const canInject = !!currentActiveSession;
     currentShortcutsBtn.disabled = !canInject;
     currentShortcutsBtn.title = canInject
-        ? 'Inject a CLI agent alias into the current terminal'
+        ? 'Launch a new session running the chosen CLI agent'
         : 'Launch a terminal first';
     if (!canInject && dropdownOpen) closeDropdown();
 }
@@ -296,7 +297,6 @@ export function mountLauncher(containerEl, options = {}) {
         onLaunching: options.onLaunching,
         onLaunched: options.onLaunched,
         onError: options.onError,
-        onInjected: options.onInjected,
     };
 
     const row = document.createElement('div');

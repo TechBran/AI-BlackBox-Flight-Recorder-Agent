@@ -41,13 +41,11 @@ import {
 } from './cli-agents-zellij-iframe.js';
 import {
     mountLauncher, unmountLauncher,
-    setOperator as setLauncherOperator,
     setActiveSession as setLauncherActiveSession,
 } from './cli-agents-zellij-launcher.js';
 import {
     mountSwitcher, unmountSwitcher,
     markSessionActive, refresh as refreshSwitcher,
-    setOperator as setSwitcherOperator,
 } from './cli-agents-zellij-switcher.js';
 import {
     mountTerminalBar, unmountTerminalBar,
@@ -377,7 +375,30 @@ function sendResize() {
 // Launch — opens WS to /cli-agent/ws/<session_id>?op=X&provider=Y&app=Z
 // =============================================================================
 
+// In-pane error surface for the tmux setup pane. The global toast renders
+// UNDER the modal (toast z-index 100 vs the modal's 5000), so setup-time
+// failures must live inside #cliAgentsSetup — same reasoning as the zellij
+// branch's in-shell operator-error element in enterZellijMode.
+const SETUP_ERROR_ID = 'cliAgentsSetupError';
+
+function clearSetupError() {
+    document.getElementById(SETUP_ERROR_ID)?.remove();
+}
+
+function showSetupError(message) {
+    clearSetupError();
+    const setupEl = document.getElementById('cliAgentsSetup');
+    if (!setupEl) { toastError(message); return; } // no pane to anchor to — degrade
+    const errEl = document.createElement('div');
+    errEl.id = SETUP_ERROR_ID;
+    errEl.className = 'cli-agents-operator-error';
+    errEl.setAttribute('role', 'alert');
+    errEl.textContent = message;
+    setupEl.appendChild(errEl);
+}
+
 async function launchSession() {
+    clearSetupError(); // stale error from a prior attempt must not linger
     const appSlug = document.getElementById('cliAgentsAppSelect')?.value ?? '';
     const provider = document.querySelector('input[name="cliAgentsProvider"]:checked')?.value || 'claude';
     // Canonical operator source ONLY (state-management getOperator →
@@ -388,7 +409,7 @@ async function launchSession() {
     // loudly (fresh box before /health resolved, or cleared storage).
     const operator = getOperator();
     if (!operator) {
-        toastError('No operator selected — choose an operator in the Portal header, then retry');
+        showSetupError('No operator selected — choose an operator in the Portal header, then retry');
         return;
     }
 
@@ -396,7 +417,7 @@ async function launchSession() {
     try {
         sessionId = buildSessionName(operator, provider, appSlug);
     } catch (err) {
-        toastError(err.message);
+        showSetupError(err.message); // setup pane still visible here — same z-index trap as above
         return;
     }
     activeSessionId = sessionId;
@@ -666,6 +687,9 @@ function teardownZellijDropZone() {
 // makes this compose with .cli-agents-maximized: maximized's 100dvh comes
 // from CSS, and the inline style always wins.
 
+// Known false-positive: pinch-zoom also shrinks visualViewport.height in
+// CSS px, so a zoomed-in viewport can cross the threshold with no keyboard;
+// it self-heals on unzoom — do not "fix".
 const KB_OVERLAP_THRESHOLD_PX = 80; // below this = browser-chrome jitter, not a keyboard
 const KB_DEBOUNCE_MS = 100;         // collapse keyboard-animation frames — each apply
                                     // resizes the iframe and triggers a zellij refit,
@@ -893,10 +917,6 @@ function enterZellijMode() {
         },
         onError: ({ provider, stage, status, message }) => {
             toastError(`${provider} ${stage} failed (${status}): ${message || ''}`);
-        },
-        onInjected: ({ binary, sessionName }) => {
-            // Silent success is fine; surface only when something interesting
-            // happens. Could add a debug toast here if feedback is wanted.
         },
     });
 

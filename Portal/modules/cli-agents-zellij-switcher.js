@@ -8,12 +8,12 @@
  * URL back to the caller via onSwitch (caller wires it to the iframe
  * module), and DELETE /cli-agent/zellij/sessions/{name}?op={op} on × click.
  *
- * Auth model:
+ * Auth model (Phase 5 master-token, 2026-05-26):
  *   sessionUrl is /app-proxy/9097/{encoded-name} with NO ?token=… query
- *   string. We rely on the same-origin session_token cookie that the
- *   launcher (T11.5) set via /command/login at launch time, which the
- *   browser auto-includes on the iframe navigation. The switcher itself
- *   never mints or sees tokens.
+ *   string. The orchestrator's app-proxy injects the master session cookie
+ *   on every upstream forward — the client never holds, mints, or sees
+ *   zellij tokens (see the auth note in cli-agents-zellij-launcher.js; the
+ *   old /command/login cookie bridge is gone).
  *
  * Out of scope: launching (T11.5), iframe (T11b), modal wiring (T12),
  * CSS (T13).

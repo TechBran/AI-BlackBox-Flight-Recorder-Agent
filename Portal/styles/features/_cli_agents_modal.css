@@ -788,7 +788,13 @@
    so kb-open wins shared properties while both classes are set; the height
    itself is inline (style.height), which beats maximized's 100dvh
    regardless. Top-anchored so toolbar + iframe + extra-keys stack fits
-   above the keyboard. */
+   above the keyboard.
+   Ordering note (two-sided — see the ≤600px media block near the end of
+   this file): the phone-width .cli-agents-card:has(.cli-agents-zellij-shell)
+   rules are ALSO (0,2,0) and sit LATER in the file, so at ≤600px they
+   deliberately out-cascade these on shared properties — their values are
+   compatible (100vw/100dvh full-bleed; max-height:100dvh ≥ any kb-open
+   inline height, so it never caps the pinned card). */
 
 .cli-agents-card.kb-open {
     position: fixed;
