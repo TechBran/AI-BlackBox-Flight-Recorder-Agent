@@ -197,6 +197,33 @@ def test_launch_session_kdl_includes_args_block_when_args_supplied():
     assert 'args "--print" "hi"' in captured["layout_text"]
 
 
+def test_launch_session_child_env_scrubs_zellij_and_denylist(monkeypatch):
+    """The session-backend child env must drop ZELLIJ* vars (nested-pane
+    leak — same rationale as _run's scrub) AND the pane denylist keys
+    (ANTHROPIC_API_KEY), while keeping ordinary vars like PATH."""
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _FakeProc(wait_timeouts=True)
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "someones-live-session")
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-server-side-secret")
+
+    with patch.object(zellij_client.subprocess, "Popen", side_effect=fake_popen):
+        with patch.object(zellij_client.pty, "openpty", return_value=(40, 41)):
+            with patch.object(zellij_client.os, "close"):
+                zellij_client.launch_session("Brandon__terminal", binary=None)
+
+    env = captured["env"]
+    assert env is not None
+    assert not any(k.startswith("ZELLIJ") for k in env)
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "PATH" in env
+
+
 # --- kill_session idempotency -------------------------------------------
 
 
@@ -403,12 +430,16 @@ def test_run_scrubs_zellij_env(monkeypatch):
 
 
 def test_paste_into_pane_argv(monkeypatch):
+    """Argv carries `--` before the payload so leading-dash text can't be
+    parsed as a flag (probe 2026-07-20: without it zellij rejects e.g.
+    '--verbose ...' with rc=2)."""
     calls = []
     monkeypatch.setattr(zellij_client, "_run", lambda argv, **kw: calls.append(argv))
     zellij_client.paste_into_pane("Brandon__claude__root", 'Read this file: "/a/b c.png" ')
     assert calls[0] == [
         zellij_client._ZELLIJ_BIN, "--session", "Brandon__claude__root",
-        "action", "paste", "--pane-id", "terminal_0", 'Read this file: "/a/b c.png" ',
+        "action", "paste", "--pane-id", "terminal_0", "--",
+        'Read this file: "/a/b c.png" ',
     ]
 
 

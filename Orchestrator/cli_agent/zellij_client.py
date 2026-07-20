@@ -213,7 +213,7 @@ def send_key(session_name: str, byte_codes: list[int]) -> None:
     session silently drops actions) — always true for the app's use (the
     button is pressed FROM an attached terminal).
     """
-    if not session_name or not _SESSION_NAME_RE.match(session_name):
+    if not is_valid_session_name(session_name):
         raise ValueError(f"invalid zellij session name: {session_name!r}")
     if not byte_codes or len(byte_codes) > 32:
         raise ValueError("byte_codes must contain 1-32 bytes")
@@ -236,14 +236,20 @@ def paste_into_pane(session_name: str, text: str, pane_id: str = "terminal_0") -
     BlackBox KDL-launched sessions always contain exactly plugin_0 +
     terminal_0, so terminal_0 deterministically addresses the CLI pane.
 
+    The ``--`` separator before the payload makes leading-dash text safe —
+    without it Zellij's arg parser rejects e.g. ``--verbose`` payloads
+    (probe 2026-07-20, rc=2 with a "use `--`" hint).
+
     SECURITY: caller enforces operator gates; this adapter only injects.
+    Callers must NOT pass user-controlled ``pane_id`` — it gets no charset
+    validation here.
     """
-    if not session_name or not _SESSION_NAME_RE.match(session_name):
+    if not is_valid_session_name(session_name):
         raise ValueError(f"invalid zellij session name: {session_name!r}")
     if not text:
         raise ValueError("paste text must be non-empty")
     logger.info("paste_into_pane: session=%s pane=%s text_len=%d", session_name, pane_id, len(text))
-    _run([_ZELLIJ_BIN, "--session", session_name, "action", "paste", "--pane-id", pane_id, text])
+    _run([_ZELLIJ_BIN, "--session", session_name, "action", "paste", "--pane-id", pane_id, "--", text])
 
 
 def is_valid_session_name(session_name: str) -> bool:
@@ -834,9 +840,13 @@ def launch_session(
     #    The standard user-session bus lives at /run/user/<uid>/bus; pointing
     #    at it lets claude reach the keychain (other CLIs ignore this var).
     #    T15 surfaced empirically — symptom was "claude just sits there".
+    # 3. Strip ZELLIJ* vars (same rationale as _run's scrub): if the
+    #    orchestrator itself runs inside a zellij pane, an inherited
+    #    ZELLIJ_SESSION_NAME/ZELLIJ makes tools inside the NEW session
+    #    think they're nested in (and target) the parent session.
     child_env = {
         k: v for k, v in os.environ.items()
-        if k not in _ENV_DENYLIST_FOR_PANES
+        if k not in _ENV_DENYLIST_FOR_PANES and not k.startswith("ZELLIJ")
     }
     if "DBUS_SESSION_BUS_ADDRESS" not in child_env:
         bus_path = f"/run/user/{os.getuid()}/bus"
