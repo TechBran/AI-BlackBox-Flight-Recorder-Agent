@@ -926,3 +926,48 @@ def test_launch_cap_count_failure_fails_open(monkeypatch, tmp_path):
 
     assert r.status_code == 201, r.text
     mock_launch.assert_called_once()
+
+
+# --- attach-file: provider-aware attach text (pure-function unit tests) --
+
+
+def test_provider_parse():
+    from Orchestrator.routes.cli_agent_routes import _provider_from_session_name
+
+    assert _provider_from_session_name("Brandon__claude__root", "Brandon") == "claude"
+    assert _provider_from_session_name(
+        "Brandon__gemini__myapp__1784542317224_yolo", "Brandon"
+    ) == "gemini"
+    assert _provider_from_session_name("weird", "Brandon") == "unknown"
+
+
+def test_attach_text_terminal():
+    from Orchestrator.routes.cli_agent_routes import _build_attach_text
+
+    assert _build_attach_text("terminal", "/a/b c.png") == '"/a/b c.png" '
+
+
+def test_attach_text_gemini_escapes_spaces():
+    from Orchestrator.routes.cli_agent_routes import _build_attach_text
+
+    assert _build_attach_text("gemini", "/a/b c.pdf") == "@/a/b\\ c.pdf "
+
+
+def test_attach_text_codex_image_bare_path():
+    from Orchestrator.routes.cli_agent_routes import _build_attach_text
+
+    assert _build_attach_text("codex", "/a/shot.png") == "/a/shot.png "
+
+
+def test_attach_text_codex_textfile_sentence():
+    from Orchestrator.routes.cli_agent_routes import _build_attach_text
+
+    assert _build_attach_text("codex", "/a/notes.txt") == 'Read this file: "/a/notes.txt" '
+
+
+def test_attach_text_claude_sentence_no_newline():
+    from Orchestrator.routes.cli_agent_routes import _build_attach_text
+
+    out = _build_attach_text("claude", "/a/b.png")
+    assert out == 'Read this file: "/a/b.png" '
+    assert "\n" not in out

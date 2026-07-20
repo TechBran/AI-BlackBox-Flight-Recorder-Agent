@@ -531,6 +531,44 @@ def _validate_operator_prefix(session_name_: str, operator: str) -> bool:
     return session_name_.startswith(f"{operator}__")
 
 
+_ATTACH_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+
+
+def _provider_from_session_name(session_name_: str, operator: str) -> str:
+    """Parse the provider segment out of '{op}__{provider}__...'.
+
+    Pure function. Returns 'unknown' when the name doesn't carry the
+    BlackBox shape (out-of-band sessions) — callers fall back to the
+    universal sentence format.
+    """
+    prefix = f"{operator}__"
+    if not session_name_.startswith(prefix):
+        return "unknown"
+    rest = session_name_[len(prefix):]
+    return rest.split("__", 1)[0] if "__" in rest else rest or "unknown"
+
+
+def _build_attach_text(provider: str, abs_path: str) -> str:
+    """Compose the text pasted into the pane for an uploaded file.
+
+    NEVER a trailing newline — the user reviews and presses Enter, the same
+    semantics as dragging a file onto a real terminal. Trailing space so
+    they can keep typing. Per-CLI formats are the documented deterministic
+    ones (research 2026-07-20); anything unknown gets the universal
+    quoted-path sentence that all three agents honor.
+    """
+    if provider == "terminal":
+        return f'"{abs_path}" '
+    if provider == "gemini":
+        # @-token = deterministic multimodal injection; spaces must be
+        # backslash-escaped inside the token (quotes are NOT honored there).
+        return "@" + abs_path.replace(" ", "\\ ") + " "
+    if provider == "codex" and Path(abs_path).suffix.lower() in _ATTACH_IMAGE_EXTS:
+        # Codex auto-attaches a bracketed-pasted bare image path as [Image #N].
+        return f"{abs_path} "
+    return f'Read this file: "{abs_path}" '
+
+
 def _zellij_session_url(session_name_: str, token_value: Optional[str] = None) -> str:
     """Compose the session URL the Portal iframe will load.
 
