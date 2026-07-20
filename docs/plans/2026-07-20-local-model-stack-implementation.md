@@ -2,11 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Implement SPEC v2.1 (docs/plans/2026-07-20-local-model-stack-design.md, decisions D1–D12): STT/TTS/embeddings/rerank on-box behind a llama-swap front door (:9098, two exclusive GPU groups), full Qwen3-TTS integration, install-script + wizard delivery, and per-session CU virtual displays with live view.
+**Goal:** Implement SPEC v2.1 (docs/plans/2026-07-20-local-model-stack-design.md, decisions D1–D14): STT/TTS/embeddings/rerank on-box behind a llama-swap front door (:9098, two exclusive GPU groups; the retrieval group is sequential per D13), full Qwen3-TTS integration, install-script + wizard delivery, and per-session CU virtual displays with live view (concurrent, badge-not-lock per D14).
 
-**Architecture:** A single systemd unit (`blackbox-models.service`) runs a llama-swap binary on :9098 as the front door for every on-box model capability, spawning member servers on demand across two mutually-exclusive GPU groups — `retrieval` (Qwen3-Embedding-8B Q8_0 + Qwen3-Reranker-0.6B, both llama-server) and `audio` (Speaches/faster-whisper STT + our Qwen3-TTS FastAPI server) — with drain-then-swap, built-in request queueing, and 600s idle TTL. A new thin `Orchestrator/local_stack.py` module is the single source of truth for install/health state and per-capability routing precedence: an explicit user pick wins, else the wizard-seeded default resolves on-box (`localstack`/`onbox`) → existing custom-server audio → cloud. CU virtual displays are an independent workstream that generalizes `browser/display.py` from a singleton into a per-session Xvfb/openbox/x11vnc/websockify allocator with noVNC live view, so each computer-use session gets a private virtual screen at the model's native resolution while other users see an in-use indicator.
+**Architecture:** A single systemd unit (`blackbox-models.service`) runs a llama-swap binary on :9098 as the front door for every on-box model capability, spawning member servers on demand across two mutually-exclusive GPU groups — `retrieval` (Qwen3-Embedding-8B Q8_0 + Qwen3-Reranker-8B Q8_0, both llama-server, **swapped one-at-a-time within the group per D13** — `swap: true`, never co-resident) and `audio` (Speaches/faster-whisper STT + our Qwen3-TTS FastAPI server) — with drain-then-swap, built-in request queueing, and 600s idle TTL. A new thin `Orchestrator/local_stack.py` module is the single source of truth for install/health state and per-capability routing precedence: an explicit user pick wins, else the wizard-seeded default resolves on-box (`localstack`/`onbox`) → existing custom-server audio → cloud. CU virtual displays are an independent workstream that generalizes `browser/display.py` from a singleton into a per-session Xvfb/openbox/x11vnc/websockify allocator with noVNC live view, so each computer-use session gets a private virtual screen at the model's native resolution while other users see an **active-sessions badge/list** (D14 — concurrent sessions, cap 3; the exclusive "desktop in use" warning is native-mode only).
 
-**Tech Stack:** llama-swap, llama.cpp llama-server (Qwen3-Embedding-8B Q8_0, Qwen3-Reranker-0.6B GGUF), Speaches/faster-whisper, Qwen3-TTS via FastAPI, Xvfb/x11vnc/websockify+noVNC, FastAPI/pytest, Portal JS, Android Kotlin.
+**Tech Stack:** llama-swap, llama.cpp llama-server (Qwen3-Embedding-8B Q8_0, Qwen3-Reranker-8B Q8_0 GGUF), Speaches/faster-whisper, Qwen3-TTS via FastAPI, Xvfb/x11vnc/websockify+noVNC, FastAPI/pytest, Portal JS, Android Kotlin.
 
 **Read first:** the spec §4 config.yaml template, and §14 hardening log (refuted alarms — do not re-litigate them). **House rules:** never `git add -A` (stage explicit paths only); the tree must stay runnable at every commit (prod runs from the working tree); `config.ini`/`.env` are per-box — edit templates only, never the live per-box files; a restart of `blackbox.service` is pre-authorized.
 
@@ -23,7 +23,7 @@
 | M6 | The qwen-tts server (`LocalModels/qwen_tts_server/`) | — | 9 |
 | M7 | TTS integration across the three surfaces (Qwen3-TTS on-box) | M0, M5, M6 | 9 |
 | M8 | Onboarding wizard "local_models" step + Updates panel status | M1–M5 | 6 |
-| M9 | CU per-session virtual displays + live view + in-use flag | — (independent of model stack) | 11 |
+| M9 | CU per-session virtual displays + live view + active-sessions badge (D14) | — (independent of model stack) | 11 |
 | M10 | MS02 Phase-2 Runbook — Gate Harnesses, Deploy, G1–G6, Acceptance & Rollback | M1–M9 (runs on MS02) | 17 |
 
 **Total: 87 tasks across 11 milestones.**
@@ -372,7 +372,7 @@ Build the single Orchestrator-side source of truth for the on-box local model st
 - Resolver module: `Orchestrator/local_stack.py`
 - config.ini section: `[local_models]` — keys `enabled`, `base_url` (default `http://127.0.0.1:9098/v1`), per-capability flags `stt` / `tts` / `embeddings` / `rerank`
 - llama-swap front door: `http://127.0.0.1:9098/v1` (root `http://127.0.0.1:9098`)
-- llama-swap member ids (must match `installer/templates/llama-swap-config.yaml.template`): `embed-qwen3-8b`, `rerank-qwen3-0.6b`, `speaches`, `qwen-tts`
+- llama-swap member ids (must match `installer/templates/llama-swap-config.yaml.template`): `embed-qwen3-8b`, `rerank-qwen3-8b`, `speaches`, `qwen-tts`
 - Status endpoint: `GET /local-models/status`
 - Download-state contract file (written by the later download milestone, read fail-soft here): `Manifest/local_models/downloads.json`
 
@@ -839,13 +839,13 @@ def test_running_members_object_shape(monkeypatch, installed_cfg):
     monkeypatch.setattr(local_stack, "_transport", _transport({
         "/running": httpx.Response(200, json={"running": [
             {"model": "embed-qwen3-8b", "state": "ready"},
-            {"model": "rerank-qwen3-0.6b"},          # state omitted -> "ready"
+            {"model": "rerank-qwen3-8b"},            # state omitted -> "ready"
             {"missing_model_key": True},              # ignored
         ]}),
     }))
     assert local_stack.running_members() == [
         {"model": "embed-qwen3-8b", "state": "ready"},
-        {"model": "rerank-qwen3-0.6b", "state": "ready"},
+        {"model": "rerank-qwen3-8b", "state": "ready"},
     ]
 
 
@@ -891,7 +891,7 @@ def test_read_download_state_corrupt_is_empty(monkeypatch, tmp_path):
 
 def test_members_and_gate_constants():
     ids = [m["model"] for m in local_stack.MEMBERS]
-    assert ids == ["embed-qwen3-8b", "rerank-qwen3-0.6b", "speaches", "qwen-tts"]
+    assert ids == ["embed-qwen3-8b", "rerank-qwen3-8b", "speaches", "qwen-tts"]
     caps = {m["capability"] for m in local_stack.MEMBERS}
     assert caps == set(local_stack.CAPABILITIES)
     assert local_stack.DISK_GATE_MB == 40 * 1024
@@ -911,15 +911,16 @@ SECTION = "local_models"
 MEMBERS = (
     {"model": "embed-qwen3-8b",    "capability": "embeddings", "group": "retrieval",
      "label": "Qwen3-Embedding-8B (Q8_0)"},
-    {"model": "rerank-qwen3-0.6b", "capability": "rerank",     "group": "retrieval",
-     "label": "Qwen3-Reranker-0.6B"},
+    {"model": "rerank-qwen3-8b",   "capability": "rerank",     "group": "retrieval",
+     "label": "Qwen3-Reranker-8B (Q8_0)"},
     {"model": "speaches",          "capability": "stt",        "group": "audio",
      "label": "Speaches (faster-whisper)"},
     {"model": "qwen-tts",          "capability": "tts",        "group": "audio",
      "label": "Qwen3-TTS (On-Box)"},
 )
 
-# Full GPU-tier weight set is ~27.5GB (design §14); gate downloads at 40GB free.
+# Full GPU-tier weight set is ~34GB (D13's 8B Q8_0 rerank adds ~6.8GB over the old
+# 0.6B; design §14); still fits the 40GB gate (tighter headroom). Gate at 40GB free.
 DISK_GATE_MB = 40 * 1024
 
 # Download-state contract: the later download milestone's POST /local-models/
@@ -1130,7 +1131,7 @@ def test_models_rollup(client, monkeypatch):
           downloads={"embed-qwen3-8b": {"state": "downloaded"}})
     models = client.get("/local-models/status").json()["models"]
     assert [m["model"] for m in models] == \
-        ["embed-qwen3-8b", "rerank-qwen3-0.6b", "speaches", "qwen-tts"]
+        ["embed-qwen3-8b", "rerank-qwen3-8b", "speaches", "qwen-tts"]
     for m in models:
         assert set(m) == MODEL_KEYS
     by_id = {m["model"]: m for m in models}
@@ -1425,19 +1426,21 @@ Transcribe the spec §8 DESIGN TEMPLATE verbatim as `installer/templates/llama-s
                                     #   still yields to a cross-group swap; §6)
        concurrencyLimit: 4
 
-     "rerank-qwen3-0.6b":
-       # SELF-CONVERTED GGUF from a llama.cpp build post-dating the
-       # convert_hf_to_gguf.py fix (extracts cls.output.weight, pooling_type=RANK).
-       # G2 gates score validity before this member can be selected.
+     "rerank-qwen3-8b":
+       # SELF-CONVERTED GGUF (Qwen3-Reranker-8B @ Q8_0) from a llama.cpp build
+       # post-dating the convert_hf_to_gguf.py fix (extracts cls.output.weight,
+       # pooling_type=RANK). G2 gates score validity before this member can be
+       # selected. D13: retrieval is sequential (swap: true) — this member loads
+       # AFTER the embedder is evicted (a ~6–12s per-search swap, accepted cost).
        cmd: |
          ${llama-server}
-         --model ${models-dir}/Qwen3-Reranker-0.6B-f16.gguf
+         --model ${models-dir}/Qwen3-Reranker-8B-Q8_0.gguf
          --host 127.0.0.1 --port ${PORT}
          --reranking --pooling rank
          -c 8192 -ngl 99 --no-warmup
        proxy: "http://127.0.0.1:${PORT}"
        checkEndpoint: "/health"
-       healthCheckTimeout: 60
+       healthCheckTimeout: 300      # ~8GB Q8_0 weights load — long startup gate (D13)
        ttl: 600
        concurrencyLimit: 2
 
@@ -1473,12 +1476,12 @@ Transcribe the spec §8 DESIGN TEMPLATE verbatim as `installer/templates/llama-s
      # persistent:false on BOTH groups (persistent:true on both would deadlock
      # VRAM: >16GB). ttl:600 idle-unload applies per member within a live group.
      "retrieval":
-       swap: false                  # embed + rerank CO-RESIDENT
+       swap: true                   # D13: members swap within the group — embed and rerank are never co-resident
        exclusive: true              # loading retrieval unloads the audio group
        persistent: false
        members:
          - "embed-qwen3-8b"
-         - "rerank-qwen3-0.6b"
+         - "rerank-qwen3-8b"
      "audio":
        swap: false                  # whisper + qwen-tts CO-RESIDENT
        exclusive: true              # loading audio unloads the retrieval group
@@ -1489,7 +1492,7 @@ Transcribe the spec §8 DESIGN TEMPLATE verbatim as `installer/templates/llama-s
    ```
 
 2. Verify it parses as YAML and that the speaches deviation is present (the `${...}` shell/macros tokens are plain strings to a YAML parser):
-   - Run: `python3 -c "import yaml; d=yaml.safe_load(open('installer/templates/llama-swap-config.yaml.template')); assert set(d['models'])=={'embed-qwen3-8b','rerank-qwen3-0.6b','speaches','qwen-tts'}; assert '9099' in d['models']['speaches']['proxy']; assert set(d['groups'])=={'retrieval','audio'}; print('OK', d['groups']['retrieval']['exclusive'], d['groups']['audio']['exclusive'])"`
+   - Run: `python3 -c "import yaml; d=yaml.safe_load(open('installer/templates/llama-swap-config.yaml.template')); assert set(d['models'])=={'embed-qwen3-8b','rerank-qwen3-8b','speaches','qwen-tts'}; assert d['groups']['retrieval']['swap'] is True; assert '9099' in d['models']['speaches']['proxy']; assert set(d['groups'])=={'retrieval','audio'}; print('OK', d['groups']['retrieval']['exclusive'], d['groups']['audio']['exclusive'])"`
    - Expected: `OK True True`
    - Run: `grep -c '9099' installer/templates/llama-swap-config.yaml.template`
    - Expected: `3` (header note + cmd `--port 9099` + `proxy`), and `grep -c '${PORT}' installer/templates/llama-swap-config.yaml.template` → `6` (embed cmd+proxy, rerank cmd+proxy, qwen-tts cmd+proxy; speaches uses NONE).
@@ -1514,7 +1517,7 @@ Three coupled pieces (spec §8 item 5): the systemd unit template; the new `mode
    # Generated by BlackBox blackbox-install-localstack.sh — DO NOT EDIT BY HAND.
    #
    # llama-swap front door on 127.0.0.1:9098 supervising the on-box local-model
-   # stack: the "retrieval" group (embed-qwen3-8b + rerank-qwen3-0.6b) and the
+   # stack: the "retrieval" group (embed-qwen3-8b + rerank-qwen3-8b) and the
    # "audio" group (speaches STT + our qwen-tts server). One binary spawns/kills
    # the member servers on demand per the generated
    # LOCALSTACK_HOME_PLACEHOLDER/llama-swap-config.yaml. --watch-config
@@ -2014,7 +2017,7 @@ Add the provisioner call after Step 2e (CPU reranker deps end at `Scripts/instal
 
 ### Task 2.7: `POST /local-models/download` — HF-CDN weight download (NDJSON, ≥40GB disk gate)
 
-The wizard's one-click weight downloads (spec §8), cloned from the `/embeddings/ollama/pull` + `ollama_io.start_pull` singleton pattern: a process-wide single-flight guard (409 on concurrent), NDJSON progress streamed directly in the response, a fail-soft `_async_transport` test seam, atomic `.part`→final rename, re-run-safe skip when the file is already present. Gated on `hardware.disk_free_mb() >= 40 GB` — the ONE shared M1 probe (Task 1.2), same 40 GB threshold (`local_stack.DISK_GATE_MB` = `40 * 1024` MB) the status endpoint reports (the full GPU-tier weight set is ~27.5GB; ≥40GB is the sound floor — spec §7/§14).
+The wizard's one-click weight downloads (spec §8), cloned from the `/embeddings/ollama/pull` + `ollama_io.start_pull` singleton pattern: a process-wide single-flight guard (409 on concurrent), NDJSON progress streamed directly in the response, a fail-soft `_async_transport` test seam, atomic `.part`→final rename, re-run-safe skip when the file is already present. Gated on `hardware.disk_free_mb() >= 40 GB` — the ONE shared M1 probe (Task 1.2), same 40 GB threshold (`local_stack.DISK_GATE_MB` = `40 * 1024` MB) the status endpoint reports (the full GPU-tier weight set is ~34GB with D13's 8B Q8_0 reranker; ≥40GB is still the sound floor, tighter headroom — spec §7/§14).
 
 **Files:**
 - Create: `Orchestrator/localstack_downloads.py`
@@ -2158,7 +2161,7 @@ The wizard's one-click weight downloads (spec §8), cloned from the `/embeddings
    # blackbox.service runs as REAL_USER so ~ is $REAL_HOME.
    MODELS_DIR = Path(os.path.expanduser("~/.blackbox/localstack/models"))
 
-   MIN_FREE_GB = 40.0                 # full GPU-tier weight set ~27.5GB (§7/§14)
+   MIN_FREE_GB = 40.0                 # full GPU-tier weight set ~34GB (8B rerank per D13; §7/§14)
    CHUNK = 1 << 20                    # 1 MiB progress granularity
    DOWNLOAD_TIMEOUT = httpx.Timeout(None, connect=15.0)  # long file, no read cap
 
@@ -2186,8 +2189,9 @@ The wizard's one-click weight downloads (spec §8), cloned from the `/embeddings
    # QWEN_TTS_MODEL_DIR). NOT downloaded through this endpoint (documented, not gaps):
    #   • whisper (Speaches) — auto-pulled by the Speaches member on first
    #     transcription (its own HF cache); nothing to fetch here.
-   #   • rerank-qwen3-0.6b — SELF-CONVERTED from a pinned llama.cpp build (Task 4.4),
-   #     not a direct download.
+   #   • rerank-qwen3-8b — Qwen3-Reranker-8B @ Q8_0, SELF-CONVERTED from a pinned
+   #     llama.cpp build (Task 4.4), not a direct download (~8.1GB on disk once
+   #     converted; the sequential retrieval group per D13 makes the 8B affordable).
    #   • embed-qwen3-0.6b — CPU-tier fallback only (not fetched on a GPU box).
    DOWNLOAD_MANIFEST: dict[str, dict] = {
        "embed-qwen3-8b": {
@@ -2788,9 +2792,9 @@ Bring wholesale-local embeddings onto the box: a net-new `localstack` provider t
        "healthCheckTimeout": 120,
        "models": {
            "embed-qwen3-8b": {"proxy": "http://127.0.0.1:${PORT}", "ttl": 600},
-           "rerank-qwen3-0.6b": {"proxy": "http://127.0.0.1:${PORT}", "ttl": 600},
+           "rerank-qwen3-8b": {"proxy": "http://127.0.0.1:${PORT}", "ttl": 600},
        },
-       "groups": {"retrieval": {"members": ["embed-qwen3-8b", "rerank-qwen3-0.6b"]}},
+       "groups": {"retrieval": {"members": ["embed-qwen3-8b", "rerank-qwen3-8b"]}},
    }
 
 
@@ -2825,7 +2829,7 @@ Bring wholesale-local embeddings onto the box: a net-new `localstack` provider t
        assert local_stack.get_member_ttl("embed-qwen3-8b") == 0
        # sibling member untouched — surgical single-key edit
        on_disk = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-       assert on_disk["models"]["rerank-qwen3-0.6b"]["ttl"] == 600
+       assert on_disk["models"]["rerank-qwen3-8b"]["ttl"] == 600
        # ${PORT} literal preserved for llama-swap to fill
        assert on_disk["models"]["embed-qwen3-8b"]["proxy"] == "http://127.0.0.1:${PORT}"
        local_stack.set_member_ttl("embed-qwen3-8b", local_stack.TTL_COLD)
@@ -3427,15 +3431,15 @@ Bring wholesale-local embeddings onto the box: a net-new `localstack` provider t
 
 ## Milestone 4: Reranker on localstack + G2 validation harness
 
-**Depends on:** Milestone 1 (`Orchestrator/local_stack.py` — `base_url()` and `is_healthy()`). The llama-swap `rerank-qwen3-0.6b` member and its self-converted GGUF are provisioned by the installer milestone; this milestone's code is **inert-safe** until both land (the `localstack` provider resolves its base URL through a lazy import of `local_stack`, returning `None`/un-reranked when absent), so it never breaks the running tree.
+**Depends on:** Milestone 1 (`Orchestrator/local_stack.py` — `base_url()` and `is_healthy()`). The llama-swap `rerank-qwen3-8b` member and its self-converted GGUF are provisioned by the installer milestone; this milestone's code is **inert-safe** until both land (the `localstack` provider resolves its base URL through a lazy import of `local_stack`, returning `None`/un-reranked when absent), so it never breaks the running tree.
 
-Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `localstack`) to `Orchestrator/rerank.py` that posts the llama.cpp `/v1/rerank` shape to the llama-swap front door and parses `results[].relevance_score` through the existing `_scatter_relevance_scores`. Wire the provider into `KNOWN_PROVIDERS`, `score()` dispatch, `reachable()`, and the one-time preflight — including the §5.2 hard rule that the legacy vLLM reranker on `:8091` may never co-run with the on-box retrieval group. Ship the GGUF self-conversion runbook and the G2 validation harness (golden query/passage pairs + a served-vs-reference check that gates on rank-order agreement and no degenerate `~1e-28` scores) before the wizard is allowed to select this model.
+Bring the reranker on-box: add a `qwen3-reranker-8b-local` entry (provider `localstack`) to `Orchestrator/rerank.py` that posts the llama.cpp `/v1/rerank` shape to the llama-swap front door and parses `results[].relevance_score` through the existing `_scatter_relevance_scores`. Wire the provider into `KNOWN_PROVIDERS`, `score()` dispatch, `reachable()`, and the one-time preflight — including the §5.2 hard rule that the legacy vLLM reranker on `:8091` may never co-run with the on-box retrieval group. Ship the GGUF self-conversion runbook and the G2 validation harness (golden query/passage pairs + a served-vs-reference check that gates on rank-order agreement and no degenerate `~1e-28` scores) before the wizard is allowed to select this model.
 
 **Provider base URL — decided (spec §5.2 implied, not spelled out):** `_score_localstack` resolves its base URL from `local_stack.base_url()` (the `[local_models]` front door, `http://127.0.0.1:9098/v1`), **not** from `[rerank] base_url` (which defaults to the legacy vLLM `:8091` seam). This keeps the on-box reranker pointed at llama-swap regardless of the vLLM config and matches the canonical M1 resolver.
 
 ---
 
-### Task 4.1: RERANK_MODELS `qwen3-reranker-0.6b-local` entry + register the `localstack` provider
+### Task 4.1: RERANK_MODELS `qwen3-reranker-8b-local` entry + register the `localstack` provider
 
 **Files:**
 - Modify: `Orchestrator/rerank.py` (registry table ends line 297; `KNOWN_PROVIDERS` line 304; `CLOUD_PROVIDERS` line 310)
@@ -3455,7 +3459,7 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
    ```python
     assert set(rerank.RERANK_MODELS) == {
         "qwen3-reranker-0.6b", "qwen3-reranker-4b", "qwen3-reranker-0.6b-cpu",
-        "qwen3-reranker-0.6b-local",
+        "qwen3-reranker-8b-local",
         "llm-rerank-gemini-flash", "llm-rerank-gpt-mini",
         "llm-rerank-claude-haiku", "llm-rerank-grok",
         "voyage-rerank-2.5", "cohere-rerank-4", "vertex-semantic-ranker"}
@@ -3488,32 +3492,34 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
    ```
    with:
    ```python
-    # ── On-box localstack reranker (Milestone 4): Qwen3-Reranker-0.6B served by
-    # llama-server (--reranking --pooling rank) behind the llama-swap front door,
-    # exposed as /v1/rerank. Provider "localstack" — the on-box retrieval-group
-    # member, NOT the vLLM :8091 seam (retained as the FP16 fallback, which may
-    # NEVER co-run with this group; see preflight()). model_id is the llama-swap
-    # MEMBER name ("rerank-qwen3-0.6b" in the config template) — llama-swap routes
+    # ── On-box localstack reranker (Milestone 4): Qwen3-Reranker-8B @ Q8_0 (D13 —
+    # the retrieval group is sequential, so the reranker gets the whole card and we
+    # run the best-that-fits-in-one-shot 8B; the 0.6B stays CPU-tier fallback only)
+    # served by llama-server (--reranking --pooling rank) behind the llama-swap
+    # front door, exposed as /v1/rerank. Provider "localstack" — the on-box
+    # retrieval-group member, NOT the vLLM :8091 seam (retained as the FP16
+    # fallback, which may NEVER co-run with this group; see preflight()). model_id
+    # is the llama-swap MEMBER name ("rerank-qwen3-8b" in the config template) — llama-swap routes
     # /v1/rerank to that member by the body `model`. The GGUF is SELF-CONVERTED from
     # a pinned post-#16407 llama.cpp build (community GGUFs are broken → ~1e-28
     # scores); G2 (eval/rerank_g2.py) gates score validity + rank order before the
     # wizard flips the sidecar to this model. query_instruction is the SAME
     # mandatory Qwen instruct prefix as the vllm/cpu entries — the ranker inverts
     # without it (measured 2026-07-03). Keyless loopback (auth_kind none).
-    "qwen3-reranker-0.6b-local": {
+    "qwen3-reranker-8b-local": {
         "provider": "localstack",
-        "model_id": "rerank-qwen3-0.6b",
-        "label": "Qwen3 Reranker 0.6B (on-box, llama-swap)",
-        "vram_gb": 1.4,  # f16 0.6B resident in the retrieval group (§5.2 ~1.3–1.9)
+        "model_id": "rerank-qwen3-8b",
+        "label": "Qwen3 Reranker 8B Q8_0 (on-box, llama-swap)",
+        "vram_gb": 8.1,  # Q8_0 8B resident ALONE in the sequential retrieval group (D13, §5.2 ~10–11GB peak)
         "max_input_tokens": 8192,  # matches the member's -c 8192 (config template)
         "query_instruction": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
-        "quality_note": "On-box default reranker; pairs with the on-box qwen3 embedding store. Self-converted GGUF — G2-gated for score validity.",
+        "quality_note": "On-box default reranker (Qwen3-Reranker-8B @ Q8_0, top-of-family); sequential with the embedder per D13 (~6–12s model-swap per search). Pairs with the on-box qwen3 embedding store. Self-converted GGUF — G2-gated for score validity.",
         "auth_kind": "none",
         "key_env": None,
         "cost_note": "On-box GPU/CPU — free, private, unlimited (runs on your box via llama-swap; nothing leaves it)",
         "privacy": "local",
         "tiers": ["MID", "HIGH"],
-        "preflight_ceiling_ms": 500,  # G2 target (40-passage rerank inside ceiling)
+        "preflight_ceiling_ms": 500,  # D13: per-scoring-call target ONCE LOADED (40-passage rerank inside ceiling); G2 measures the ~6–12s per-search intra-group swap separately
         "preflight_passage_n": 1,     # llama.cpp /v1/rerank batches all docs in one call
     },
     # MID-tier opt-in (M5): the SAME Qwen 0.6B weights served IN-PROCESS on CPU
@@ -3558,7 +3564,7 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
 
 8. Commit.
 
-   Run: `git add Orchestrator/rerank.py Orchestrator/tests/test_rerank.py && git commit -m "feat(rerank): register qwen3-reranker-0.6b-local (localstack provider) in the registry"`
+   Run: `git add Orchestrator/rerank.py Orchestrator/tests/test_rerank.py && git commit -m "feat(rerank): register qwen3-reranker-8b-local (localstack provider) in the registry"`
    Expected: one commit created.
 
 ---
@@ -3584,9 +3590,9 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
 
    def test_localstack_in_known_providers_and_registry():
        assert "localstack" in rerank.KNOWN_PROVIDERS
-       e = rerank.RERANK_MODELS["qwen3-reranker-0.6b-local"]
+       e = rerank.RERANK_MODELS["qwen3-reranker-8b-local"]
        assert e["provider"] == "localstack"
-       assert e["model_id"] == "rerank-qwen3-0.6b"
+       assert e["model_id"] == "rerank-qwen3-8b"
        assert e["auth_kind"] == "none" and e["key_env"] is None
        assert e["preflight_ceiling_ms"] == 500 and e["preflight_passage_n"] == 1
        # the mandatory Qwen3-Reranker instruct prefix, verbatim from the vllm entry
@@ -3607,11 +3613,11 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
        monkeypatch.setattr(rerank.requests, "post", fake_post)
        _pin_localstack_base(monkeypatch)
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local", timeout_s="9"):
+                    model="qwen3-reranker-8b-local", timeout_s="9"):
            got = rerank.score("the query", ["pass A", "pass B"])
        assert got == [0.1, 0.9]                       # scattered back by index
        assert calls["url"] == "http://127.0.0.1:9098/v1/rerank"
-       assert calls["json"]["model"] == "rerank-qwen3-0.6b"
+       assert calls["json"]["model"] == "rerank-qwen3-8b"
        assert calls["json"]["documents"] == ["pass A", "pass B"]
        # the query carries the mandatory Qwen3-Reranker instruct prefix
        assert calls["json"]["query"].startswith("Instruct:")
@@ -3629,14 +3635,14 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
 
        monkeypatch.setattr(rerank.requests, "post", boom)
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local"):
+                    model="qwen3-reranker-8b-local"):
            assert rerank.score("q", ["p"]) is None
 
 
    def test_score_localstack_empty_base_url_returns_none(monkeypatch):
        monkeypatch.setattr(rerank, "_localstack_base_url", lambda: "")
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local"):
+                    model="qwen3-reranker-8b-local"):
            assert rerank.score("q", ["p"]) is None
 
 
@@ -3650,7 +3656,7 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
        monkeypatch.setattr(rerank.requests, "post", lambda *a, **k: resp)
        _pin_localstack_base(monkeypatch)
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local"):
+                    model="qwen3-reranker-8b-local"):
            assert rerank.score("q", ["a", "b"]) is None
 
 
@@ -3660,7 +3666,7 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
        monkeypatch.setattr(rerank.requests, "post", boom)
        _pin_localstack_base(monkeypatch)
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local"):
+                    model="qwen3-reranker-8b-local"):
            assert rerank.score("q", ["a"]) is None    # dispatcher never-raise (A9)
 
 
@@ -3672,11 +3678,11 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
        monkeypatch.setattr(rerank.requests, "get", no_net)
        monkeypatch.setattr(rerank, "_localstack_healthy", lambda: True)
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local"):
+                    model="qwen3-reranker-8b-local"):
            assert rerank.reachable() is True
        monkeypatch.setattr(rerank, "_localstack_healthy", lambda: False)
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local"):
+                    model="qwen3-reranker-8b-local"):
            assert rerank.reachable() is False
    ```
 
@@ -3759,8 +3765,8 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
 
    def _score_localstack(query: str, passages: list[str],
                          settings: dict) -> list[float] | None:
-       """On-box Qwen3-Reranker-0.6B via llama-swap /v1/rerank (the retrieval-group
-       member). Posts {model, query: instruction+query, documents} and scatters
+       """On-box Qwen3-Reranker-8B @ Q8_0 via llama-swap /v1/rerank (the retrieval-group
+       member, sequential per D13). Posts {model, query: instruction+query, documents} and scatters
        {index, relevance_score} back onto passage positions."""
        if not passages:
            return None
@@ -3854,7 +3860,7 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
        # a WORKING scorer — proves the refusal is the conflict, not a scoring fail
        monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local", preflight_ceiling_ms="5000"):
+                    model="qwen3-reranker-8b-local", preflight_ceiling_ms="5000"):
            pf = rerank.preflight()
            assert pf["state"] == "failed"
            assert ":8091" in pf["reason"] and "vllm" in pf["reason"].lower()
@@ -3875,7 +3881,7 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
        # autouse _no_network_reach refuses .get → no :8091 conflict
        monkeypatch.setattr(rerank, "score", lambda q, p: None)   # stack cold/down
        with pin_cfg("rerank", provider="localstack",
-                    model="qwen3-reranker-0.6b-local", preflight_ceiling_ms="5000"):
+                    model="qwen3-reranker-8b-local", preflight_ceiling_ms="5000"):
            assert rerank.preflight()["state"] == "failed"
            # within the TTL the failure is cached (not re-probed)
            def reprobed(q, p):
@@ -3957,12 +3963,17 @@ Bring the reranker on-box: add a `qwen3-reranker-0.6b-local` entry (provider `lo
 **Files:**
 - Create: `LocalModels/reranker/CONVERT-QWEN3-RERANKER-GGUF.md`
 
-No automated test (operator runbook, executed on MS02). The commands are exact and the output filename MUST match the config template's member path (`${LOCALSTACK_MODELS}/Qwen3-Reranker-0.6B-f16.gguf`).
+No automated test (operator runbook, executed on MS02). The commands are exact and the output filename MUST match the config template's member path (`${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-Q8_0.gguf`).
 
 1. Create `LocalModels/reranker/CONVERT-QWEN3-RERANKER-GGUF.md` with this content:
 
    ```markdown
-   # Qwen3-Reranker-0.6B → GGUF self-conversion runbook (Milestone 4)
+   # Qwen3-Reranker-8B → GGUF self-conversion runbook (Milestone 4, D13)
+
+   > **D13:** the retrieval group is sequential (`swap: true`), so the reranker gets
+   > the whole card alone and we run the top-of-family **Qwen3-Reranker-8B @ Q8_0**
+   > (the 0.6B stays the CPU-tier fallback only). Same convert/quantize procedure as
+   > any Qwen3-Reranker — only the source repo and the Q8_0 quantize step differ.
 
    Community reranker GGUFs are frequently broken: a conversion that drops
    `cls.output.weight` yields degenerate `~1e-28` relevance scores (the ranker is
@@ -3971,12 +3982,12 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
    resolved: detects Qwen3-Reranker, extracts `cls.output.weight`, sets
    `pooling_type=RANK` + the yes/no classifier labels). The output is validated by
    the G2 gate (`eval/rerank_g2.py`) before the wizard is allowed to select the
-   `qwen3-reranker-0.6b-local` model.
+   `qwen3-reranker-8b-local` model.
 
    Run this on the GPU box (MS02). `${LOCALSTACK_MODELS}` is the llama-swap
    models-dir the installer substitutes into
    `installer/templates/llama-swap-config.yaml.template` (the reranker member reads
-   `${models-dir}/Qwen3-Reranker-0.6B-f16.gguf`), e.g. `~/.blackbox/localstack/models`.
+   `${models-dir}/Qwen3-Reranker-8B-Q8_0.gguf`), e.g. `~/.blackbox/localstack/models`.
 
    ## 1. Clone + pin llama.cpp (post-#16407)
 
@@ -4010,34 +4021,38 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
    ## 3. Download the HF weights (CausalLM checkpoint)
 
    ```bash
-   huggingface-cli download Qwen/Qwen3-Reranker-0.6B \
-     --local-dir ./Qwen3-Reranker-0.6B
+   huggingface-cli download Qwen/Qwen3-Reranker-8B \
+     --local-dir ./Qwen3-Reranker-8B
    ```
 
-   ## 4. Convert to f16 GGUF (output name is load-bearing)
+   ## 4. Convert to f16 GGUF, then QUANTIZE to Q8_0 (output name is load-bearing)
+
+   First convert to an f16 intermediate:
 
    ```bash
-   python3 convert_hf_to_gguf.py ./Qwen3-Reranker-0.6B \
-     --outfile "${LOCALSTACK_MODELS}/Qwen3-Reranker-0.6B-f16.gguf" \
+   python3 convert_hf_to_gguf.py ./Qwen3-Reranker-8B \
+     --outfile "${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-f16.gguf" \
      --outtype f16
    ```
 
-   The filename MUST be exactly `Qwen3-Reranker-0.6B-f16.gguf` — the llama-swap
-   member `rerank-qwen3-0.6b` loads it by that path. f16 is fine for a 0.6B
-   (~1.3–1.5GB). If VRAM is tight, optionally quantize (and update the config
-   template's `--model` path to match):
+   Then quantize to **Q8_0** — this is MANDATORY for the 8B (D13): the f16 8B GGUF
+   is ~16GB and will not fit the sequential retrieval group's ~10–11GB budget,
+   whereas Q8_0 is ~8.1GB (same "highest quality that fits in one shot" rule as the
+   embedder). The final filename MUST be exactly `Qwen3-Reranker-8B-Q8_0.gguf` — the
+   llama-swap member `rerank-qwen3-8b` loads it by that path.
 
    ```bash
-   # optional: cmake --build build --target llama-quantize   (if not already built)
-   # ./build/bin/llama-quantize \
-   #   "${LOCALSTACK_MODELS}/Qwen3-Reranker-0.6B-f16.gguf" \
-   #   "${LOCALSTACK_MODELS}/Qwen3-Reranker-0.6B-Q8_0.gguf" Q8_0
+   cmake --build build --target llama-quantize   # if not already built
+   ./build/bin/llama-quantize \
+     "${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-f16.gguf" \
+     "${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-Q8_0.gguf" Q8_0
+   rm -f "${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-f16.gguf"   # drop the ~16GB intermediate
    ```
 
    ## 5. Quick metadata pre-check (NOT the authoritative gate)
 
    ```bash
-   ./build/bin/llama-gguf "${LOCALSTACK_MODELS}/Qwen3-Reranker-0.6B-f16.gguf" \
+   ./build/bin/llama-gguf "${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-Q8_0.gguf" \
      | grep -iE "pooling|cls\.output|classifier|rank"
    ```
    Expected: a `pooling_type` = RANK / `cls.output.weight` tensor is present. A
@@ -4052,11 +4067,11 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
    ```bash
    Orchestrator/venv/bin/python eval/rerank_g2.py            # served-vs-golden gate
    Orchestrator/venv/bin/python eval/rerank_g2.py --hf-reference \
-     --hf-model-dir ./llama.cpp/Qwen3-Reranker-0.6B         # + HF cross-check
+     --hf-model-dir ./llama.cpp/Qwen3-Reranker-8B          # + HF cross-check
    ```
    The GGUF is only trustworthy once G2 exits 0 (rank-order agreement + no
    degenerate `~1e-28` scores). Only then does the wizard flip the sidecar to
-   `qwen3-reranker-0.6b-local`.
+   `qwen3-reranker-8b-local`.
    ```
 
 2. Commit.
@@ -4082,7 +4097,7 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
    {"id": "rr-tailscale-remote", "query": "how does remote access to the box work", "relevant": ["External access is over Tailscale; the tailnet plus LAN is the trust boundary by design and there is no app-layer auth on the loopback services.", "The MCP tool server is exposed over a Tailscale Funnel with bearer and OAuth, isolated per operator."], "hard_negative": ["Reranker GGUFs that drop cls.output.weight produce degenerate scores near 1e-28.", "The onboarding wizard shows the hardware tier and disk headroom before downloading weights."]}
    {"id": "rr-reranker-instruct", "query": "why does the reranker need a query instruction prefix", "relevant": ["Qwen3-Reranker inverts its ranking without the instruct prefix: it scores well-formedness instead of relevance, so a relevant passage can lose to an off-topic one.", "The mandatory instruct prefix is prepended to the query before scoring on every Qwen reranker path (vLLM, CPU, and the on-box llama.cpp member)."], "hard_negative": ["Xvfb renders the computer-use virtual display on the CPU with llvmpipe and never touches the GPU.", "Speaches holds each whisper model warm under its own model TTL inside the process."]}
    {"id": "rr-tts-streaming", "query": "stream text to speech audio as it is generated", "relevant": ["Streaming TTS yields audio chunks as they are generated via a StreamingResponse; a base-clone stream buffers about three seconds first to avoid drift.", "The Qwen TTS server reads the output sample rate from the model at runtime rather than hardcoding it, then resamples for browser playback."], "hard_negative": ["Snapshots are minted through the chat save path which is far cheaper than a full LLM round-trip.", "The two GPU groups are mutually exclusive and swap with a ten minute idle TTL."]}
-   {"id": "rr-snapshot-search", "query": "search past sessions for how a bug was fixed", "relevant": ["Semantic search runs embed then rerank back-to-back over the snapshot corpus, both members co-resident in the retrieval group.", "Every development session is minted as a searchable snapshot with an embedding so past bug fixes can be recalled later."], "hard_negative": ["A voice conversation is duplex: whisper listens while the TTS model speaks, both in the audio group.", "The installer downloads the llama-swap binary sha256-pinned like the zellij release."]}
+   {"id": "rr-snapshot-search", "query": "search past sessions for how a bug was fixed", "relevant": ["Semantic search runs embed then rerank back-to-back over the snapshot corpus; the retrieval group swaps between the two members one at a time.", "Every development session is minted as a searchable snapshot with an embedding so past bug fixes can be recalled later."], "hard_negative": ["A voice conversation is duplex: whisper listens while the TTS model speaks, both in the audio group.", "The installer downloads the llama-swap binary sha256-pinned like the zellij release."]}
    {"id": "rr-app-register", "query": "register a new web app with the portal", "relevant": ["A new app is created under the Apps directory, started on a port in the 8060 to 8099 range, and registered with the portal using the system operator.", "Registering an app posts its name, port, and directory so it appears in the portal app list and can be reverse-proxied."], "hard_negative": ["Keep-warm maps to a ttl of zero which is immune to the idle timeout but still yields to a cross-group swap.", "The Vertex semantic ranker mints an OAuth token from the ambient service account credentials."]}
    ```
 
@@ -4140,7 +4155,7 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
 
    ```python
    #!/usr/bin/env python3
-   """G2 gate: Qwen3-Reranker-0.6B GGUF validity + rank-order agreement.
+   """G2 gate: Qwen3-Reranker-8B @ Q8_0 GGUF validity + rank-order agreement (D13).
 
    Broken reranker GGUFs (missing cls.output.weight) return degenerate ~1e-28
    scores. This harness scores each golden query's passages through the SERVED
@@ -4153,14 +4168,21 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
      * (optional --hf-reference) per-query Spearman rank agreement between the
        served scores and a HuggingFace transformers reference >= --rank-agreement-min.
 
+   D13 (sequential retrieval) adds a SECOND measurement, separate from the validity
+   gate: --measure-swap times the per-search intra-group swap overhead (force the
+   embedder resident → time a rerank call that must evict the embedder and cold-load
+   the 8B reranker → subtract a warm rerank). This is the ~6–12s "swap cost on every
+   search" the design accepts; it is REPORTED (not pass/failed) so G5 can sign off.
+
    The primary gate (degenerate + separation) needs only `requests`; --hf-reference
    additionally needs torch + transformers (present on the GPU box's reranker venv).
 
    Run (from the repo root, on the GPU box after serving the member):
        Orchestrator/venv/bin/python eval/rerank_g2.py
        Orchestrator/venv/bin/python eval/rerank_g2.py --base-url http://127.0.0.1:9098/v1
+       Orchestrator/venv/bin/python eval/rerank_g2.py --measure-swap   # D13 per-search swap overhead
        Orchestrator/venv/bin/python eval/rerank_g2.py --hf-reference \
-           --hf-model-dir ./llama.cpp/Qwen3-Reranker-0.6B
+           --hf-model-dir ./llama.cpp/Qwen3-Reranker-8B
 
    Writes eval/results/{date}-rerank-g2.{md,json} and exits non-zero on ANY failure
    (a failed gate = STOP: do not let the wizard select the on-box reranker).
@@ -4183,7 +4205,7 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
 
    GOLDEN = REPO / "eval" / "rerank_golden.jsonl"
    RESULTS_DIR = REPO / "eval" / "results"
-   SLUG = "qwen3-reranker-0.6b-local"
+   SLUG = "qwen3-reranker-8b-local"
 
    # A working reranker separates relevant from off-topic by far more than this; a
    # broken GGUF collapses everything to ~1e-28. Both the magnitude and the spread
@@ -4303,6 +4325,41 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
        return out
 
 
+   def measure_swap_overhead(base_url: str, model_id: str, instruction: str,
+                             documents: list[str],
+                             embed_model_id: str = "embed-qwen3-8b",
+                             timeout_s: float = 120.0) -> dict:
+       """D13 per-search swap overhead. The retrieval group is sequential
+       (swap: true), so a search does embed → EVICT embedder → cold-load the 8B
+       reranker → score. Force the embedder resident, then time the first rerank
+       (which pays the intra-group swap) minus a warm rerank (reranker already
+       loaded). REPORTED, not gated — this is the accepted ~6–12s/search cost that
+       G5 signs off on."""
+       import time
+       # 1. make the embedder the resident retrieval member (evicts the reranker)
+       try:
+           requests.post(base_url.rstrip("/") + "/embeddings",
+                         json={"model": embed_model_id, "input": "warm the embedder"},
+                         timeout=timeout_s)
+       except requests.RequestException:
+           return {"error": "embed warm-up failed (is embed-qwen3-8b served?)"}
+       body = {"model": model_id, "query": instruction + "swap timing probe",
+               "documents": list(documents)}
+       # 2. first rerank: pays evict-embedder + cold-load-8B-reranker
+       t0 = time.perf_counter()
+       cold = requests.post(base_url.rstrip("/") + "/rerank", json=body, timeout=timeout_s)
+       cold_s = time.perf_counter() - t0
+       # 3. second rerank: reranker already resident (steady-state scoring only)
+       t0 = time.perf_counter()
+       warm = requests.post(base_url.rstrip("/") + "/rerank", json=body, timeout=timeout_s)
+       warm_s = time.perf_counter() - t0
+       if cold.status_code != 200 or warm.status_code != 200:
+           return {"error": f"rerank probe non-200 (cold {cold.status_code}, warm {warm.status_code})"}
+       return {"cold_s": round(cold_s, 3), "warm_s": round(warm_s, 3),
+               "swap_overhead_s": round(cold_s - warm_s, 3),
+               "embed_model_id": embed_model_id}
+
+
    def main(argv=None) -> int:
        import os
        os.chdir(REPO)  # results path + any config reads are repo-relative
@@ -4312,7 +4369,9 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
        ap.add_argument("--hf-reference", action="store_true",
                        help="also compute the HuggingFace reference + Spearman agreement")
        ap.add_argument("--hf-model-dir", default=None,
-                       help="path to the Qwen3-Reranker-0.6B HF checkpoint (for --hf-reference)")
+                       help="path to the Qwen3-Reranker-8B HF checkpoint (for --hf-reference)")
+       ap.add_argument("--measure-swap", action="store_true",
+                       help="D13: also measure the per-search intra-group embed->rerank swap overhead (reported, not gated)")
        ap.add_argument("--rank-agreement-min", type=float, default=0.9,
                        help="min mean per-query Spearman vs HF reference (with --hf-reference)")
        ap.add_argument("--out-date", default=date.today().isoformat())
@@ -4359,11 +4418,22 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
            per_query.append(rec)
 
        mean_rho = (sum(spearmans) / len(spearmans)) if spearmans else None
+
+       # D13: optional per-search intra-group swap-overhead measurement (reported,
+       # NOT part of the pass/fail gate). Uses the first golden row's documents.
+       swap = None
+       if args.measure_swap and rows:
+           first = rows[0]
+           swap = measure_swap_overhead(
+               base_url, model_id, instruction,
+               list(first["relevant"]) + list(first["hard_negative"]))
+
        report = {
            "date": args.out_date, "slug": SLUG, "model_id": model_id,
            "base_url": base_url, "hf_reference": args.hf_reference,
            "rank_agreement_min": args.rank_agreement_min,
            "mean_spearman": mean_rho,
+           "swap_overhead": swap,
            "pass": all_pass, "queries": per_query,
        }
 
@@ -4376,6 +4446,11 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
                 f"- HF reference: {args.hf_reference}"
                 + (f" (mean Spearman {mean_rho:.3f}, min {args.rank_agreement_min})"
                    if mean_rho is not None else ""),
+                (f"- D13 per-search swap overhead: {swap['swap_overhead_s']}s "
+                 f"(cold {swap['cold_s']}s − warm {swap['warm_s']}s)"
+                 if swap and "swap_overhead_s" in swap
+                 else (f"- D13 swap overhead: {swap['error']}" if swap
+                       else "- D13 swap overhead: not measured (pass --measure-swap)")),
                 f"- **overall: {'PASS' if all_pass else 'FAIL'}**", "",
                 "| query | state | degenerate | separation | spearman |",
                 "|---|---|---|---|---|"]
@@ -4415,7 +4490,7 @@ No automated test (operator runbook, executed on MS02). The commands are exact a
 **Milestone 4 done-check:** run the full reranker suite once more —
 
 Run: `Orchestrator/venv/bin/python -m pytest Orchestrator/tests/test_rerank.py Orchestrator/tests/test_rerank_g2_harness.py -q`
-Expected: `... passed` (no failures, no errors). The `localstack` provider is now selectable through the existing `POST /rerank/select` (no route change: `localstack` ∈ `KNOWN_PROVIDERS`, the model's `provider` matches, and its `tiers` include HIGH/MID); the wizard flips the sidecar to `qwen3-reranker-0.6b-local` only after `eval/rerank_g2.py` exits 0 on MS02.
+Expected: `... passed` (no failures, no errors). The `localstack` provider is now selectable through the existing `POST /rerank/select` (no route change: `localstack` ∈ `KNOWN_PROVIDERS`, the model's `provider` matches, and its `tiers` include HIGH/MID); the wizard flips the sidecar to `qwen3-reranker-8b-local` only after `eval/rerank_g2.py` exits 0 on MS02.
 
 
 ---
@@ -8384,7 +8459,7 @@ Surface the D10 affordance on the two Android TTS entry points that already show
 
 ## Milestone 8: Onboarding wizard "local_models" step + Updates panel status
 
-**Depends on:** M1 (`Orchestrator/local_stack.py` resolver; `[local_models]` config.ini section written by the installer; `GET /local-models/status`; `POST /local-models/download`; the `localstack` embedding registry slugs `qwen3-embedding-8b-local` / `qwen3-embedding-0.6b-local`), M2 (`localstack` reranker registered in `rerank.KNOWN_PROVIDERS` + the `qwen3-reranker-0.6b-local` `RERANK_MODELS` slug), and the STT milestone (`resolve_stt_provider` accepts the `onbox` token; `/stt/catalog` exposes an `onbox` entry). The backend registration (Task 8.1–8.3) is self-contained and testable **without** those milestones landed; the wizard step (Task 8.4–8.5) consumes their endpoints **fail-open** (every read is defensive) so it renders meaningfully even before they are wired.
+**Depends on:** M1 (`Orchestrator/local_stack.py` resolver; `[local_models]` config.ini section written by the installer; `GET /local-models/status`; `POST /local-models/download`; the `localstack` embedding registry slugs `qwen3-embedding-8b-local` / `qwen3-embedding-0.6b-local`), M2 (`localstack` reranker registered in `rerank.KNOWN_PROVIDERS` + the `qwen3-reranker-8b-local` `RERANK_MODELS` slug), and the STT milestone (`resolve_stt_provider` accepts the `onbox` token; `/stt/catalog` exposes an `onbox` entry). The backend registration (Task 8.1–8.3) is self-contained and testable **without** those milestones landed; the wizard step (Task 8.4–8.5) consumes their endpoints **fail-open** (every read is defensive) so it renders meaningfully even before they are wired.
 
 Add a dedicated `local_models` onboarding step so a customer can see their hardware tier + disk headroom, download the on-box weights with progress, and deliberately activate STT / TTS / embeddings / reranking on-box per capability — never implicitly (D2, §8). The transcription step also gains an "On-box (local)" provider option (`STT_PROVIDER=onbox`), and the Updates panel gets a **status-only** card reading `/local-models/status` (panels are status-only; selection lives in the wizard). Every activation flip reuses an existing endpoint (`/embeddings/reembed`, `/rerank/select`, `/onboarding/save`) plus one thin M08 endpoint for the `[local_models]` stt/tts flags; the embeddings cutover is gated by an `nvidia-smi` near-idle blocking check (Phase-2 Step-0, §10) and followed by the `/toolvault/reload` sequencing (§5.1).
 
@@ -8934,7 +9009,7 @@ Replace the placeholder with the real step: fetch `GET /local-models/status`, re
    const REC_FALLBACK = {
        gpu: {
            embeddings: { label: "Qwen3-Embedding-8B (Q8_0, 4096-dim)", size: "~8 GB", note: "" },
-           rerank: { label: "Qwen3-Reranker-0.6B", size: "~1.3 GB", note: "Validated by benchmark before selection." },
+           rerank: { label: "Qwen3-Reranker-8B (Q8_0)", size: "~8.1 GB", note: "Sequential with the embedder (D13); validated by benchmark before selection." },
            stt: { label: "whisper large-v3-turbo (stream) + large-v3 (files)", size: "~5 GB", note: "" },
            tts: { label: "Qwen3-TTS 0.6B-CustomVoice (streaming) · 1.7B (files)", size: "~9 GB", note: "" },
        },
@@ -9194,7 +9269,7 @@ Replace the placeholder with the real step: fetch `GET /local-models/status`, re
            method: "POST", headers: { "Content-Type": "application/json" },
            body: JSON.stringify({
                provider: "localstack",
-               model: rec("rerank").slug || "qwen3-reranker-0.6b-local",
+               model: rec("rerank").slug || "qwen3-reranker-8b-local",
                enabled: on,
            }),
        });
@@ -9455,11 +9530,11 @@ Add a read-only card to the Updates panel that reflects `GET /local-models/statu
 
 ---
 
-## Milestone 9: CU per-session virtual displays + live view + in-use flag
+## Milestone 9: CU per-session virtual displays + live view + active-sessions badge (D14)
 
 **Depends on:** nothing (this milestone is self-contained — it touches the `Orchestrator/browser/*` CU stack + Portal/Android, none of which the model-stack milestones M1–M8 modify; it may land in parallel). Cross-milestone note: Task 9.8 edits `Scripts/onboarding/system-packages.txt`, which the **install milestone M2 Task 2.1 (spec §8 step 7)** already owns — NOT M8 (M8 is the wizard milestone and never touches system-packages.txt). M2 lands before M9 in the execution order, so **M2 Task 2.1 is the single owner of the `xvfb`/`websockify`/`novnc` allowlist lines and Task 9.8 is an explicit no-op** (it verifies the lines are present rather than adding duplicates).
 
-Goal: give every computer-use session its own private Xvfb screen at the model's native resolution so the agent opens its own windows without ever touching the user's desktop, watchable through a live-view panel in the Portal and Android. This rewrites `browser/display.py`'s singleton `VirtualDisplay` into a per-session `DisplayAllocator` (tracked by PID, no global `pkill`/`pgrep`, concurrency-capped, boot+TTL orphan reaping), makes virtual the default for `use_computer`/`/browser/run`/scheduler and the three chat CU launch sites (native becomes an explicit per-session opt-in still guarded by `display_arbiter`), and adds a noVNC/websockify live view plus a D11 "CU in use" indicator visible to all users.
+Goal: give every computer-use session its own private Xvfb screen at the model's native resolution so the agent opens its own windows without ever touching the user's desktop, watchable through a live-view panel in the Portal and Android. This rewrites `browser/display.py`'s singleton `VirtualDisplay` into a per-session `DisplayAllocator` (tracked by PID, no global `pkill`/`pgrep`, concurrency-capped, boot+TTL orphan reaping), makes virtual the default for `use_computer`/`/browser/run`/scheduler and the three chat CU launch sites (native becomes an explicit per-session opt-in still guarded by `display_arbiter`), and adds a noVNC/websockify live view plus a D14 **active-sessions badge/list** ("N agents running — watch") visible to all users (concurrent virtual sessions, cap 3 — a badge, not a lock; the exclusive "desktop in use" warning is native-mode only).
 
 **Spec anchors verified in code (2026-07-20):**
 - `browser/display.py` `VirtualDisplay`: global `pkill -f "Xvfb …"` (line 51), `pkill -f "openbox.*DISPLAY=…"` (line 96 — the spec-noted DEAD no-op: `DISPLAY` is passed via env at line 93/234, never argv), `pkill -f x11vnc` (line 128, kills ALL sessions), `pgrep -f x11vnc`/`pgrep -f openbox` (lines 160/170, True on ANY session), hardcoded `-rfbport 5900` (line 139). Singleton at lines 254-268.
@@ -10539,11 +10614,11 @@ if _os.path.isdir(_novnc_dir):
 
 ---
 
-### Task 9.6: `GET /cu/sessions` in-use endpoint + reaper startup/sweep hooks
+### Task 9.6: `GET /cu/sessions` active-sessions endpoint (D14 badge source) + reaper startup/sweep hooks
 
 **Depends on:** 9.1, 9.2, 9.4
 
-The D11 in-use flag source: a lightweight endpoint listing active virtual sessions (visible to all users). Also wires the boot orphan reaper into startup and the TTL reaper into the existing periodic CU sweep.
+The **D14 active-sessions badge/list source**: a lightweight endpoint listing the currently-active virtual sessions (visible to all users). D14 reframes the old "in use" lock as a **badge/list** — virtual sessions are concurrent (cap 3), so the UI shows a count ("N agents running — watch"), not an exclusive lock. The exclusive "desktop in use" warning is native-mode only (serialized by `display_arbiter`, surfaced separately). Also wires the boot orphan reaper into startup and the TTL reaper into the existing periodic CU sweep.
 
 **Files:**
 - Modify: `Orchestrator/routes/browser_routes.py` (add `GET /cu/sessions`)
@@ -10553,7 +10628,7 @@ The D11 in-use flag source: a lightweight endpoint listing active virtual sessio
 1. Write the failing test:
 
 ```python
-"""M9: /cu/sessions surfaces active virtual CU sessions for the in-use flag."""
+"""M9: /cu/sessions surfaces active virtual CU sessions for the D14 active-sessions badge/list."""
 from starlette.testclient import TestClient
 from Orchestrator.checkpoint import app
 from Orchestrator.browser import display as disp
@@ -10587,8 +10662,10 @@ def test_sessions_reports_active(monkeypatch):
 ```python
 @app.get("/cu/sessions")
 def cu_sessions():
-    """Active virtual CU sessions (D11 in-use flag). Visible to all users; no
-    per-operator gating (Tailscale perimeter is the boundary)."""
+    """Active virtual CU sessions (D14 active-sessions badge/list — concurrent, NOT
+    a lock). Visible to all users; no per-operator gating (Tailscale perimeter is
+    the boundary). The exclusive 'desktop in use' warning is native-mode only and
+    comes from display_arbiter, not this endpoint."""
     from Orchestrator.browser.display import get_allocator
     sessions = get_allocator().active_sessions()
     return {"active": bool(sessions), "count": len(sessions), "sessions": sessions}
@@ -10622,7 +10699,7 @@ async def _cu_display_reaper():
    Expected: `2 passed`.
 
 6. Commit.
-   Run: `git add Orchestrator/routes/browser_routes.py Orchestrator/startup.py Orchestrator/tests/test_cu_sessions_endpoint.py && git commit -m "feat(cu): GET /cu/sessions in-use endpoint + boot orphan sweep + periodic TTL display reaper"`
+   Run: `git add Orchestrator/routes/browser_routes.py Orchestrator/startup.py Orchestrator/tests/test_cu_sessions_endpoint.py && git commit -m "feat(cu): GET /cu/sessions active-sessions endpoint (D14 badge) + boot orphan sweep + periodic TTL display reaper"`
    Expected: one commit, three files.
 
 ---
@@ -10716,7 +10793,7 @@ def check_live_view() -> dict:
 
 ---
 
-### Task 9.9: Portal — live-view panel + "CU in use" indicator (manual browser step)
+### Task 9.9: Portal — live-view panel + active-sessions badge (D14) (manual browser step)
 
 **Depends on:** 9.5, 9.6. House rule: Portal frontend is validated by a manual browser step + a `?v=` cache bump; no automated frontend test.
 
@@ -10725,11 +10802,13 @@ def check_live_view() -> dict:
 - Modify: `Portal/index.html` (add a live-view panel container + bump `?v=genui318` → `?v=genui319` at lines 11 and 21)
 - Modify: `Portal/app-modular.js` (import the new module, mirroring the existing `import './modules/...'` block ~line 46-65)
 
-1. Create `Portal/modules/cu-live-view.js` — polls `/cu/sessions`, shows a global "CU in use" pill visible to all users, and mounts the first active session's live view in an iframe (the same iframe pattern as `Portal/modules/cli-agents-zellij-iframe.js`; the CU drawer already exists in `cu-drawer.js` — hang the panel next to it):
+1. Create `Portal/modules/cu-live-view.js` — polls `/cu/sessions`, shows a global **active-sessions badge** (a count like "2 agents running — watch") visible to all users, and mounts the first active session's live view in an iframe (the same iframe pattern as `Portal/modules/cli-agents-zellij-iframe.js`; the CU drawer already exists in `cu-drawer.js` — hang the panel next to it):
 ```javascript
-// CU live-view panel + in-use indicator (M9 / D11).
-// One shared live view; any BlackBox user may watch. When a CU session is
-// active an "in use" pill is shown to everyone (no per-operator gating).
+// CU live-view panel + active-sessions badge (M9 / D11, reframed by D14).
+// One shared live view; any BlackBox user may watch. Virtual CU sessions are
+// CONCURRENT (cap 3), so the badge shows a COUNT ("N agents running — watch"),
+// not an exclusive lock — no per-operator gating. (An exclusive "desktop in use"
+// warning is native-mode only, driven by display_arbiter, not this badge.)
 const POLL_MS = 4000;
 let _timer = null;
 
@@ -10751,8 +10830,11 @@ function renderPill(state) {
     pill.onclick = () => openLiveView(state.sessions[0]);
     (document.getElementById('statusLine') || document.body).appendChild(pill);
   }
-  const s = state.sessions[0];
-  pill.textContent = `● CU in use — ${s.operator} (${s.backend} ${s.width}×${s.height})`;
+  // D14: concurrent virtual sessions → a COUNT badge, not an exclusive lock.
+  const n = state.count || state.sessions.length;
+  pill.textContent = `● ${n} agent${n === 1 ? '' : 's'} running — watch`;
+  pill.title = state.sessions
+    .map(s => `${s.operator} (${s.backend} ${s.width}×${s.height})`).join(' · ');
 }
 
 function openLiveView(session) {
@@ -10797,17 +10879,17 @@ import { initCuLiveView } from './modules/cu-live-view.js';
 initCuLiveView();
 ```
 
-4. Manual validation (house rule): restart the service, hard-refresh the Portal, start a CU task in virtual mode (default), confirm (a) the "CU in use" pill appears for a DIFFERENT operator's browser too, and (b) clicking it opens the live-view iframe showing the agent's private screen while the physical desktop is untouched.
+4. Manual validation (house rule): restart the service, hard-refresh the Portal, start a CU task in virtual mode (default), confirm (a) the active-sessions badge ("1 agent running — watch") appears for a DIFFERENT operator's browser too, (b) launching a SECOND concurrent virtual session bumps the badge to "2 agents running" (D14 — no lock), and (c) clicking it opens the live-view iframe showing the agent's private screen while the physical desktop is untouched.
    Run: `sudo systemctl restart blackbox.service` (pre-authorized), then open the Portal, trigger a `use_computer`/browser task, watch the panel.
-   Expected: pill visible to all users; iframe streams the virtual display; desktop never changes.
+   Expected: badge visible to all users and counts concurrent sessions; iframe streams the virtual display; desktop never changes.
 
 5. Commit.
-   Run: `git add Portal/modules/cu-live-view.js Portal/index.html Portal/app-modular.js && git commit -m "feat(portal): CU live-view panel + shared 'CU in use' indicator (genui319)"`
+   Run: `git add Portal/modules/cu-live-view.js Portal/index.html Portal/app-modular.js && git commit -m "feat(portal): CU live-view panel + shared active-sessions badge (D14, genui319)"`
    Expected: one commit, three files.
 
 ---
 
-### Task 9.10: Android — live-view WebView + `/cu/sessions` client + in-use flag (unit gate + manual Fold)
+### Task 9.10: Android — live-view WebView + `/cu/sessions` client + active-sessions badge (D14) (unit gate + manual Fold)
 
 **Depends on:** 9.5, 9.6. House rule: Android unit gate is `./gradlew :app:testDebugUnitTest --offline`; UI is validated on the Fold device manually.
 
@@ -10881,7 +10963,7 @@ data class CuSession(
 )
 data class CuSessionsState(val active: Boolean, val sessions: List<CuSession>)
 
-/** Polls GET /cu/sessions for the D11 in-use flag + live-view targets. */
+/** Polls GET /cu/sessions for the D14 active-sessions badge (count) + live-view targets. */
 class CuSessionsClient(private val api: BlackBoxApi) {
     suspend fun sessions(): CuSessionsState {
         val body = api.get("/cu/sessions")
@@ -10932,17 +11014,17 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
     })
 }
 ```
-   Surface the in-use flag: wherever the Android home/status surface shows CLI-agent/device chips, poll `CuSessionsClient.sessions()` and render a "CU in use" chip when `active`, tapping it to navigate to `CuLiveViewScreen(baseUrl, sessions[0].sessionId)`. (Exact nav wiring is a manual Fold step per the house rule; mirror the existing chip/nav pattern used by the CLI-agent terminal surface.)
+   Surface the active-sessions badge (D14): wherever the Android home/status surface shows CLI-agent/device chips, poll `CuSessionsClient.sessions()` and render a **count** chip when `active` (e.g. "${sessions.size} agent(s) running — watch"), tapping it to navigate to `CuLiveViewScreen(baseUrl, sessions[0].sessionId)`. It is a badge, not a lock — concurrent sessions bump the count (cap 3); an exclusive "desktop in use" warning is native-mode only. (Exact nav wiring is a manual Fold step per the house rule; mirror the existing chip/nav pattern used by the CLI-agent terminal surface.)
 
 5. Run the unit gate, expect PASS.
    Run: `cd "AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal" && ./gradlew :app:testDebugUnitTest --offline --tests "*CuSessionsClientTest*"`
    Expected: `BUILD SUCCESSFUL`, tests pass.
 
-6. Manual Fold validation (house rule): sideload the debug APK, start a CU task from any surface, confirm the "CU in use" chip appears and tapping it opens the live view streaming the agent's virtual screen.
-   Expected: chip visible; WebView streams the virtual display; no takeover of the phone or the box desktop.
+6. Manual Fold validation (house rule): sideload the debug APK, start a CU task from any surface, confirm the active-sessions count chip appears (and bumps when a second concurrent session starts — D14, no lock) and tapping it opens the live view streaming the agent's virtual screen.
+   Expected: chip visible with the session count; WebView streams the virtual display; no takeover of the phone or the box desktop.
 
 7. Commit.
-   Run: `git add "AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/data/api/CuSessionsClient.kt" "AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/cu/CuLiveViewScreen.kt" "AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/test/java/com/aiblackbox/portal/data/api/CuSessionsClientTest.kt" && git commit -m "feat(android): CU live-view WebView + /cu/sessions client + in-use flag"`
+   Run: `git add "AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/data/api/CuSessionsClient.kt" "AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/cu/CuLiveViewScreen.kt" "AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/test/java/com/aiblackbox/portal/data/api/CuSessionsClientTest.kt" && git commit -m "feat(android): CU live-view WebView + /cu/sessions client + active-sessions badge (D14)"`
    Expected: one commit, three files.
 
 ---
@@ -10999,7 +11081,7 @@ if __name__ == "__main__":
 
 ---
 
-**Milestone 9 exit criteria:** the full CU suite is green (`python -m pytest Orchestrator/tests/test_cu_display_allocator.py Orchestrator/tests/test_cu_display_wiring.py Orchestrator/tests/test_cu_virtual_default.py Orchestrator/tests/test_cu_view_routes.py Orchestrator/tests/test_cu_sessions_endpoint.py Orchestrator/tests/test_cu_preflight.py Orchestrator/tests/test_cu_display_arbiter.py -q`); the Android unit gate passes; and on a box with Xvfb the two-session smoke + a manual Portal/Android live-view pass confirm: a CU session runs on a private virtual display at the model's native resolution, the physical desktop is never touched, all users see the "CU in use" flag and can watch the shared live view, `GET /local-models/status` is untouched by this work, and a service restart orphans-then-reaps the virtual children (boot reaper) rather than leaking them.
+**Milestone 9 exit criteria:** the full CU suite is green (`python -m pytest Orchestrator/tests/test_cu_display_allocator.py Orchestrator/tests/test_cu_display_wiring.py Orchestrator/tests/test_cu_virtual_default.py Orchestrator/tests/test_cu_view_routes.py Orchestrator/tests/test_cu_sessions_endpoint.py Orchestrator/tests/test_cu_preflight.py Orchestrator/tests/test_cu_display_arbiter.py -q`); the Android unit gate passes; and on a box with Xvfb the two-session smoke + a manual Portal/Android live-view pass confirm: a CU session runs on a private virtual display at the model's native resolution, the physical desktop is never touched, all users see the active-sessions badge (a count — "N agents running — watch", D14; concurrent sessions bump it, no lock) and can watch the shared live view, `GET /local-models/status` is untouched by this work, and a service restart orphans-then-reaps the virtual children (boot reaper) rather than leaking them.
 
 
 ---
@@ -11457,7 +11539,7 @@ Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readb
 
 ---
 
-### Task 10.4: G5 harness — cross-group swap-cost probe
+### Task 10.4: G5 harness — swap-cost probe (cross-group + intra-group embed↔rerank, D13)
 
 **Files:**
 - Create: `diagnostics/localstack/swap_cost.py`
@@ -11465,14 +11547,25 @@ Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readb
 1. Create `diagnostics/localstack/swap_cost.py`:
    ```python
    #!/usr/bin/env python3
-   """diagnostics/localstack/swap_cost.py — G5 live probe (MS02). Times the
-   cross-group first-interaction stall in BOTH directions by alternating a
-   retrieval-group request (embed) and an audio-group request (TTS) through the
-   llama-swap front door, forcing an exclusive evict+load each turn:
-     audio->retrieval : first embed after a TTS = evict(audio)+load(embed-8b+rerank)
-                        — expect ~6-10s (§5.2/D9)
+   """diagnostics/localstack/swap_cost.py — G5 live probe (MS02). Times TWO kinds
+   of swap through the llama-swap front door:
+
+   --scope cross (default): the cross-group first-interaction stall in BOTH
+   directions by alternating a retrieval-group request (embed) and an audio-group
+   request (TTS), forcing an exclusive evict+load each turn:
+     audio->retrieval : first embed after a TTS = evict(audio)+load(embed-8b)
+                        — expect ~6-10s (§5.2/D9). Sequential retrieval (D13) loads
+                        ONLY the demanded member (the embedder), not both.
      retrieval->audio : first TTS after an embed = evict(retrieval)+load(speaches+qwen-tts)
                         — expect ~5-8s
+
+   --scope intra (D13, NEW): the per-search intra-group swap the sequential
+   retrieval group pays on EVERY search — embed the query (embedder resident) ->
+   evict -> cold-load the 8B reranker -> score:
+     embed->rerank : first rerank after an embed = evict(embed-8b)+load(rerank-qwen3-8b)
+                     — expect ~6-12s (the accepted per-search cost). Corroborates
+                     the G2 --measure-swap number.
+
    Run with --cache warm, then again with --cache cold after the caller drops the
    page cache: sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'."""
    from __future__ import annotations
@@ -11503,20 +11596,44 @@ Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readb
        return time.time() - t0
 
 
+   def one_rerank():
+       # D13 intra-group: triggers evict(embed-8b)+load(rerank-qwen3-8b) when the
+       # embedder is the currently-resident retrieval member.
+       t0 = time.time()
+       requests.post(f"{BASE}/rerank", timeout=120, json={
+           "model": "rerank-qwen3-8b", "query": "intra-group swap probe",
+           "documents": ["a relevant passage about model swapping",
+                         "an unrelated decoy about bananas"]}).raise_for_status()
+       return time.time() - t0
+
+
    def main(argv=None):
        ap = argparse.ArgumentParser()
        ap.add_argument("--iters", type=int, default=5)
+       ap.add_argument("--scope", choices=["cross", "intra"], default="cross")
        ap.add_argument("--cache", choices=["warm", "cold"], default="warm")
        ap.add_argument("--out", default=None)
        args = ap.parse_args(argv)
-       one_tts()  # prime: land in the audio group so the first embed swaps
-       a2r, r2a = [], []
-       for _ in range(args.iters):
-           a2r.append(one_embed())
-           r2a.append(one_tts())
-       summary = {"gate": "G5", "cache": args.cache, "iters": args.iters,
-                  "audio_to_retrieval_s": summarize_latencies(a2r),
-                  "retrieval_to_audio_s": summarize_latencies(r2a)}
+       if args.scope == "intra":
+           # D13: retrieval group is sequential; prime with an embed each iter so
+           # the following rerank pays the intra-group evict+cold-load swap.
+           e2r = []
+           for _ in range(args.iters):
+               one_embed()               # embedder resident
+               e2r.append(one_rerank())  # evict embedder + cold-load the 8B reranker
+           summary = {"gate": "G5", "scope": "intra", "cache": args.cache,
+                      "iters": args.iters,
+                      "embed_to_rerank_s": summarize_latencies(e2r)}
+       else:
+           one_tts()  # prime: land in the audio group so the first embed swaps
+           a2r, r2a = [], []
+           for _ in range(args.iters):
+               a2r.append(one_embed())
+               r2a.append(one_tts())
+           summary = {"gate": "G5", "scope": "cross", "cache": args.cache,
+                      "iters": args.iters,
+                      "audio_to_retrieval_s": summarize_latencies(a2r),
+                      "retrieval_to_audio_s": summarize_latencies(r2a)}
        print(json.dumps(summary, indent=2))
        if args.out:
            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -11531,7 +11648,7 @@ Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readb
    - Run: `Orchestrator/venv/bin/python -c "import diagnostics.localstack.swap_cost; print('ok')"`
    - Expected: `ok`.
 3. Commit:
-   - Run: `git add diagnostics/localstack/swap_cost.py && git commit -m "feat(localstack): G5 cross-group swap-cost probe"`
+   - Run: `git add diagnostics/localstack/swap_cost.py && git commit -m "feat(localstack): G5 swap-cost probe (cross-group + intra-group embed<->rerank, D13)"`
    - Expected: one commit, 1 file.
 
 ---
@@ -11714,10 +11831,10 @@ Exercises the real customer update-in-place journey. **Nothing activates on inst
    - Expected: `blackbox.service` healthy after warm-up; `blackbox-models.service` enabled; `/local-models/status` returns tier `HIGH`, disk headroom, and every capability's download state `missing` (weights not yet pulled), routing still the pre-cutover providers (embeddings=gemini cloud, rerank was vLLM→now none, STT/TTS=cloud/gemma-box).
 4. Pull the GPU-tier weights through the wizard endpoint (streamed NDJSON progress), gated on ≥40GB free. **The endpoint takes ONE `{"artifact": ...}` per call** (Task 2.7) — loop over the two endpoint-downloadable artifacts. The other members are provisioned out-of-band and are NOT `/local-models/download` targets: **whisper** auto-pulls in the Speaches member on first transcription; the **reranker GGUF** is self-converted from a pinned llama.cpp build (Task 4.4 / §5.2); **embed-qwen3-0.6b** is the CPU-tier fallback (not needed on this GPU box):
    - Run: `ssh bbx@192.168.1.153 'for A in embed-qwen3-8b qwen-tts; do echo "== $A =="; curl -N -X POST http://127.0.0.1:9091/local-models/download -H "Content-Type: application/json" -d "{\"artifact\":\"$A\"}"; done'`
-   - Expected: for each artifact, NDJSON progress lines ending in a terminal `{"state":"done"}` line — `embed-qwen3-8b` (~8.1GB single GGUF) and `qwen-tts` (~13.5GB, the three variant checkpoints via HF snapshot). ~21.6GB pulled through the endpoint; whisper (~1.6–2.5GB Speaches auto-pull) + the self-converted reranker bring the on-disk total toward §14's ~27.5GB. No activation occurs.
+   - Expected: for each artifact, NDJSON progress lines ending in a terminal `{"state":"done"}` line — `embed-qwen3-8b` (~8.1GB single GGUF) and `qwen-tts` (~13.5GB, the three variant checkpoints via HF snapshot). ~21.6GB pulled through the endpoint; whisper (~1.6–2.5GB Speaches auto-pull) + the self-converted **Qwen3-Reranker-8B @ Q8_0 (~8.1GB, per D13)** bring the on-disk total toward §14's ~34GB (still under the 40GB gate). No activation occurs.
 5. Confirm the endpoint-downloaded members show `done` (per M1's real status shape: `models` is a LIST, each item carries a `download` dict — there is no `capabilities` key):
    - Run: `ssh bbx@192.168.1.153 'curl -fsS http://127.0.0.1:9091/local-models/status | python3 -c "import sys,json; d=json.load(sys.stdin); print({m[\"model\"]: (m[\"download\"] or {}).get(\"state\") for m in d[\"models\"]})"'`
-   - Expected: `embed-qwen3-8b` and `qwen-tts` show `done`; `speaches`/`rerank-qwen3-0.6b` may show `pending` (provisioned out-of-band, not via this endpoint). `/local-models/status` still reports the retrieval + audio groups **not resident** (llama-swap starts idle — correct).
+   - Expected: `embed-qwen3-8b` and `qwen-tts` show `done`; `speaches`/`rerank-qwen3-8b` may show `pending` (provisioned out-of-band, not via this endpoint). `/local-models/status` still reports the retrieval + audio groups **not resident** (llama-swap starts idle — correct).
 
 ---
 
@@ -11736,7 +11853,7 @@ Exercises the real customer update-in-place journey. **Nothing activates on inst
    - Expected: `{"status":"started",...}`; poll `GET /embeddings/status` until `migration_state` shows `state: "done"`. This is the "giant re-embed" path — fast on the GPU-served 8B.
 2. Measure the real Q8_0 VRAM (steady-state + heavy-batch peak incl. the ub=8192 non-causal compute buffer). Sample while firing a batch of ~8k-token strings straight at the front door:
    - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python diagnostics/localstack/vram.py --label g1-embed-peak --out eval/results/'"$DATE"'-g1-vram.json -- Orchestrator/venv/bin/python -c "import requests; big=(\"lorem ipsum \"*3000); [requests.post(\"http://127.0.0.1:9098/v1/embeddings\", json={\"model\":\"embed-qwen3-8b\",\"input\":[big]*8}, timeout=300) for _ in range(6)]"'`
-   - Expected: JSON with `peak_mib` (the retrieval group loaded: embed-8b + rerank-0.6b) and `fits_budget: true`, `headroom_mib` positive (§4 budgets ~11.5–13GB → ~3GB headroom). If `fits_budget: false`, STOP — Q8_0 does not fit; escalate (the design's fallback is a smaller resident embedder).
+   - Expected: JSON with `peak_mib` (D13 — the retrieval group is sequential, so this samples **embed-8b resident ALONE**; the reranker is swapped out and measured separately in G2) and `fits_budget: true`, `headroom_mib` positive (§4 budget ~9.5–11GB embed alone → ~5GB+ headroom, up from the old ~3GB co-resident). If `fits_budget: false`, STOP — Q8_0 does not fit; escalate (the design's fallback is a smaller resident embedder).
 3. Bench the 8B-Q8 candidate against the live gemini + qwen06 arms (comparison report):
    - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python eval/run_bench.py --candidate-dir Manifest/embeddings --candidate-slug qwen3-embedding-8b-local --out-date '"$DATE"'-g1-8b'`
    - Expected: a report table with arms `gemini2-hybrid`, `gemini2-semantic`, `qwen06-semantic`, and the candidate `qwen3-embedding-8b-local` (hybrid + semantic); written to `eval/results/$DATE-g1-8b.{md,json}`.
@@ -11760,22 +11877,22 @@ Exercises the real customer update-in-place journey. **Nothing activates on inst
 
 ---
 
-### Task 10.9: G2 — reranker GGUF validity + latency
+### Task 10.9: G2 — Qwen3-Reranker-8B GGUF validity + latency + per-search swap overhead (D13)
 
-Runs the reranker validity harness delivered by Milestone 4 as a gate. **The harness itself is M4's deliverable** (score-validity vs HF reference + 40-passage latency); this task only runs it, asserts the pass criteria, and records the result. If M4 named the harness differently, substitute M4's path here — the contract (below) is what gates.
+Runs the reranker validity harness delivered by Milestone 4 as a gate, on the **Qwen3-Reranker-8B @ Q8_0** GGUF (D13). **The harness itself is M4's deliverable** (`eval/rerank_g2.py`: score-validity vs HF reference + 40-passage once-loaded latency + the `--measure-swap` per-search intra-group embed→rerank swap-overhead measurement); this task only runs it, asserts the pass criteria, records the swap overhead (reported, not gated), and lands the result. If M4 named the harness differently, substitute M4's path here — the contract (below) is what gates.
 
 **Files:**
 - Results: `eval/results/$DATE-g2-rerank.json`
 
 1. Confirm the self-converted reranker GGUF is the one llama-swap serves (no community-broken `cls.output.weight`):
-   - Run: `ssh bbx@192.168.1.153 'curl -fsS -X POST http://127.0.0.1:9098/v1/rerank -H "Content-Type: application/json" -d "{\"model\":\"rerank-qwen3-0.6b\",\"query\":\"What is the capital of France?\",\"documents\":[\"Paris is the capital of France.\",\"Bananas are yellow.\"]}"'`
+   - Run: `ssh bbx@192.168.1.153 'curl -fsS -X POST http://127.0.0.1:9098/v1/rerank -H "Content-Type: application/json" -d "{\"model\":\"rerank-qwen3-8b\",\"query\":\"What is the capital of France?\",\"documents\":[\"Paris is the capital of France.\",\"Bananas are yellow.\"]}"'`
    - Expected: `{"results":[{"index":0,"relevance_score":<high>},{"index":1,"relevance_score":<low>}]}` — the relevant doc scores clearly above the decoy, and scores are NOT ~1e-28 (the broken-conversion signature). If scores collapse, STOP — the GGUF conversion is broken (§5.2 trap).
-2. Run the M4 G2 harness (score validity on golden pairs + 40-passage latency):
-   - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python diagnostics/localstack/rerank_validity.py --slug qwen3-reranker-0.6b-local --out eval/results/'"$DATE"'-g2-rerank.json ; echo EXIT=$?'`
-   - Expected: JSON with per-golden-pair score correlation vs the HF reference (Spearman ≥ the M4 threshold, no collapse), and `rerank_40_latency_s` inside the ceiling (~1–2s at ~1000-token passages; ~0.5–1s at ~512 tokens). `EXIT=0`.
+2. Run the M4 G2 harness (score validity on golden pairs + 40-passage once-loaded latency + the D13 per-search swap overhead):
+   - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python eval/rerank_g2.py --measure-swap --out-date '"$DATE"' ; echo EXIT=$?'`
+   - Expected: JSON with per-golden-pair score correlation vs the HF reference (Spearman ≥ the M4 threshold, no collapse), the **once-loaded** 40-passage scoring latency inside the ceiling (8B is slower than the old 0.6B — record the measured value), and a reported `swap_overhead` (`swap_overhead_s` ≈ the ~6–12s intra-group embed→rerank swap the design accepts — reported, NOT part of the pass/fail gate; G5 signs off on it). `EXIT=0` (validity gate passes; the swap number is informational).
 3. Flip the reranker selection to the on-box model (sidecar-driven, exactly as today) now that G2 passed:
-   - Run: `ssh bbx@192.168.1.153 'curl -fsS -X POST http://127.0.0.1:9091/rerank/select -H "Content-Type: application/json" -d "{\"provider\":\"localstack\",\"model\":\"qwen3-reranker-0.6b-local\",\"enabled\":true}" && cat /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main/Manifest/embeddings/rerank.json'`
-   - Expected: `rerank.json` now `{"enabled": true, "provider": "localstack", "model": "qwen3-reranker-0.6b-local"}`.
+   - Run: `ssh bbx@192.168.1.153 'curl -fsS -X POST http://127.0.0.1:9091/rerank/select -H "Content-Type: application/json" -d "{\"provider\":\"localstack\",\"model\":\"qwen3-reranker-8b-local\",\"enabled\":true}" && cat /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main/Manifest/embeddings/rerank.json'`
+   - Expected: `rerank.json` now `{"enabled": true, "provider": "localstack", "model": "qwen3-reranker-8b-local"}`.
 4. Land the G2 artifact (scp back → commit on dev box → push):
    - Run: `scp bbx@192.168.1.153:/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main/eval/results/$DATE-g2-rerank.json eval/results/ && git add eval/results/$DATE-g2-rerank.json && git commit -m "eval(localstack): G2 reranker validity + latency (MS02)"`
    - Expected: one commit, 1 file.
@@ -11864,7 +11981,7 @@ Walk the new `local_models` wizard step on the existing install: the deliberate 
    - Run: `ssh -t bbx@192.168.1.153 'sudo systemctl restart blackbox.service && sleep 90 && curl -fsS http://127.0.0.1:9091/local-models/status | python3 -c "import sys,json; d=json.load(sys.stdin); print({k:v[\"decision\"] for k,v in d[\"routing\"].items()})"'`
    - Expected: `stt` and `tts` show `on-box` (their seed flags just flipped). (embeddings/rerank show `off` in this seed-flag view — expected; their real on-box routing is confirmed next.)
    - Run: `ssh bbx@192.168.1.153 'cat /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main/Manifest/embeddings/active.json /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main/Manifest/embeddings/rerank.json'`
-   - Expected: `active.json` → `qwen3-embedding-8b-local`; `rerank.json` → `{"enabled": true, "provider": "localstack", "model": "qwen3-reranker-0.6b-local"}`. All four capabilities now resolve on-box.
+   - Expected: `active.json` → `qwen3-embedding-8b-local`; `rerank.json` → `{"enabled": true, "provider": "localstack", "model": "qwen3-reranker-8b-local"}`. All four capabilities now resolve on-box.
 
 ---
 
@@ -11892,23 +12009,26 @@ Compares first-partial + final-transcript latency and transcript quality for on-
 
 ---
 
-### Task 10.14: G5 — cross-group swap cost (both directions, warm + cold)
+### Task 10.14: G5 — swap cost: cross-group (both directions, warm + cold) + intra-group embed↔rerank (D13)
 
-Measures the audio↔retrieval evict+load first-interaction stall. Expected ~6–10s (dominated by the 8B embedder cold-load; keep-warm gives zero cross-group relief). Brandon signs off on the stall (Q12/D9) or the design shifts to a hybrid.
+Measures TWO swaps now: (a) the **cross-group** audio↔retrieval evict+load first-interaction stall (expected ~6–10s, dominated by the 8B embedder cold-load; keep-warm gives zero cross-group relief); and (b) the **intra-group** embed↔rerank swap that D13's sequential retrieval group adds to EVERY search (expected ~6–12s — the embedder is evicted and the 8B reranker cold-loads to score). Brandon signs off on both stalls (Q12/D9) or the design shifts to a hybrid.
 
 **Files:**
-- Results: `eval/results/$DATE-g5-swap-warm.json`, `eval/results/$DATE-g5-swap-cold.json`
+- Results: `eval/results/$DATE-g5-swap-warm.json`, `eval/results/$DATE-g5-swap-cold.json`, `eval/results/$DATE-g5-swap-intra.json`
 
-1. Warm page-cache run (both directions, 5 iters):
-   - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python diagnostics/localstack/swap_cost.py --cache warm --iters 5 --out eval/results/'"$DATE"'-g5-swap-warm.json'`
+1. Warm page-cache cross-group run (both directions, 5 iters):
+   - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python diagnostics/localstack/swap_cost.py --scope cross --cache warm --iters 5 --out eval/results/'"$DATE"'-g5-swap-warm.json'`
    - Expected: JSON with `audio_to_retrieval_s.median_s` ~6–10 and `retrieval_to_audio_s.median_s` ~5–8.
-2. Cold page-cache run (drop caches first, then measure the true cold-load):
-   - Run: `ssh -t bbx@192.168.1.153 'sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python diagnostics/localstack/swap_cost.py --cache cold --iters 5 --out eval/results/'"$DATE"'-g5-swap-cold.json'`
+2. Cold page-cache cross-group run (drop caches first, then measure the true cold-load):
+   - Run: `ssh -t bbx@192.168.1.153 'sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python diagnostics/localstack/swap_cost.py --scope cross --cache cold --iters 5 --out eval/results/'"$DATE"'-g5-swap-cold.json'`
    - Expected: cold medians somewhat higher than warm (PCIe + CUDA init on a cold page-cache); both directions recorded.
-3. Present the numbers to Brandon for the Q12/D9 sign-off (accept ~6–10s first interaction, or pivot to a hybrid). Record his decision in the commit message.
-4. Land the G5 artifacts:
-   - Run: `scp bbx@192.168.1.153:/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main/eval/results/$DATE-g5-swap-*.json eval/results/ && git add eval/results/$DATE-g5-swap-warm.json eval/results/$DATE-g5-swap-cold.json && git commit -m "eval(localstack): G5 cross-group swap cost warm+cold (MS02; Brandon signed off on ~6-10s)"`
-   - Expected: one commit, 2 files.
+3. **Intra-group embed↔rerank swap (D13, NEW):** measure the per-search swap the sequential retrieval group pays — embed the query (embedder resident) → evict → cold-load the 8B reranker → score. This corroborates the G2 `--measure-swap` number from a search-shaped harness:
+   - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && Orchestrator/venv/bin/python diagnostics/localstack/swap_cost.py --scope intra --iters 5 --out eval/results/'"$DATE"'-g5-swap-intra.json'`
+   - Expected: JSON with `embed_to_rerank_s.median_s` ~6–12 (the accepted per-search cost); it should be in the same ballpark as G2's reported `swap_overhead_s`.
+4. Present ALL the numbers to Brandon for the Q12/D9 sign-off (accept ~6–10s cross-group first interaction AND ~6–12s intra-group per-search swap, or pivot to a hybrid). Record his decision in the commit message.
+5. Land the G5 artifacts:
+   - Run: `scp bbx@192.168.1.153:/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main/eval/results/$DATE-g5-swap-*.json eval/results/ && git add eval/results/$DATE-g5-swap-warm.json eval/results/$DATE-g5-swap-cold.json eval/results/$DATE-g5-swap-intra.json && git commit -m "eval(localstack): G5 swap cost — cross-group warm+cold + intra-group embed<->rerank (MS02; Brandon signed off)"`
+   - Expected: one commit, 3 files.
 
 ---
 
@@ -11944,9 +12064,9 @@ Walk the design's acceptance checklist verbatim. Each item is a live check on th
    - Expected: the loop runs entirely on-box; no cloud audio provider is invoked.
 3. **Search E2E on the migrated 8B-Q8 store, reranked locally.**
    - Mint a couple of snapshots on the fresh box, then: `ssh bbx@192.168.1.153 'curl -fsS -X POST http://127.0.0.1:9091/search -H "Content-Type: application/json" -d "{\"query\":\"local model stack\"}" | python3 -m json.tool | head -30'`
-   - Expected: results ranked by the local 8B embed + local 0.6B rerank (confirm rerank ran in the logs: `[TOOLVAULT-EXEC]`/rerank scores present).
+   - Expected: results ranked by the local 8B embed + local 8B rerank (confirm rerank ran in the logs: `[TOOLVAULT-EXEC]`/rerank scores present).
 4. **CU session on a virtual display, agent opens apps privately, live view in Portal + Android, desktop untouched.**
-   - Manual: launch a `use_computer` session; confirm it opens on `:100+n` Xvfb (not the physical desktop), live view renders in the Portal panel and the Android WebView, and the in-use indicator shows to a second user. The physical desktop is untouched throughout.
+   - Manual: launch a `use_computer` session; confirm it opens on `:100+n` Xvfb (not the physical desktop), live view renders in the Portal panel and the Android WebView, and the active-sessions badge (count, D14) shows to a second user — launching a second concurrent session bumps it to "2 agents running" (no lock). The physical desktop is untouched throughout.
    - Expected: private virtual display, live view working on both surfaces, desktop unaffected.
 5. **GPU behavior observed: queue → drain → evict → load; 10-min TTL eviction confirmed; voice loop never thrashes.**
    - Run: `ssh bbx@192.168.1.153 'curl -fsS http://127.0.0.1:9098/running | python3 -m json.tool'` right after a voice turn (audio group resident), then after a search (retrieval group swapped in), then idle 11 minutes and re-check (both groups unloaded by the 600s TTL).
