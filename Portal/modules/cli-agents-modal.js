@@ -524,6 +524,15 @@ function enterZellijMode() {
         onSessionError: ({ sessionName, reason }) => {
             toastError(`Terminal failed for ${sessionName}: ${reason || 'unknown'}`);
         },
+        // Zellij's own session-manager can switch sessions from INSIDE the
+        // terminal (the web client navigates the iframe itself). Mirror the
+        // switcher's onSwitch wiring so the rail highlight + launcher gate
+        // follow the truly-loaded session. Torn down with unmountIframe in
+        // closeModal — no modal-side state to clean up.
+        onSessionChanged: (sessionName) => {
+            markSessionActive(sessionName);
+            setLauncherActiveSession(sessionName);
+        },
     });
 
     mountLauncher(launcherHost, {

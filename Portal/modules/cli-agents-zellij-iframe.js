@@ -14,6 +14,9 @@
  *     switcher's job is to swap src on this one iframe, not stack iframes.
  *   - We own the load-timeout because only the renderer knows when the swap
  *     started; the launcher hands off and forgets.
+ *   - We own in-iframe navigation tracking: Zellij's own session-manager
+ *     (Ctrl+o → w) switches sessions by navigating the iframe itself, so the
+ *     renderer is the only layer that can observe the truly-loaded session.
  */
 
 // Module-level singletons. One iframe per Portal page is the design.
@@ -24,6 +27,7 @@ let currentErrorEl = null;
 let currentContainerEl = null;
 let currentLoadTimeoutId = null;
 let currentHandleLoad = null;
+let currentHandleNavigation = null;
 let lastLoadAttempt = null;
 let mountOptions = {};
 
@@ -31,6 +35,27 @@ let mountOptions = {};
 // 2s on localhost; 15s is the upper bound before we declare the proxy or the
 // daemon dead. Switcher swaps cancel this timer mid-flight.
 const LOAD_TIMEOUT_MS = 15000;
+
+// Session URLs are /app-proxy/9097/{encoded-name} (mirrors PROXY_BASE in
+// cli-agents-zellij-switcher.js). The persistent navigation listener strips
+// this prefix to recover the session name the iframe actually loaded.
+const PROXY_BASE = '/app-proxy/9097/';
+
+// Name of the session the iframe ACTUALLY has loaded, read from its own
+// location. Same-origin through the app-proxy, but guarded: a cross-origin
+// or detached contentWindow must degrade to "unknown", never throw. Non-
+// session pages (about:blank, /command/login) return null.
+function readLoadedSessionName() {
+    try {
+        const path = currentIframe?.contentWindow?.location?.pathname || '';
+        if (!path.startsWith(PROXY_BASE)) return null;
+        const rest = path.slice(PROXY_BASE.length).replace(/\/+$/, '');
+        if (!rest || rest.includes('/')) return null;
+        return decodeURIComponent(rest) || null;
+    } catch {
+        return null;
+    }
+}
 
 function fireCb(cb, payload, label) {
     if (typeof cb !== 'function') return;
@@ -91,6 +116,21 @@ export function mountIframe(containerEl, options = {}) {
         loadSession(lastLoadAttempt);
     });
 
+    // Persistent load listener — lives for the whole mount, unlike the
+    // one-shot overlay listener in loadSession. Zellij's web client navigates
+    // the iframe ITSELF when the user switches sessions from inside the
+    // terminal (session-manager → SwitchedSession sets window.location.href),
+    // so without this currentSessionName goes stale and the switcher rail +
+    // any session-targeted injection aim at the wrong session. Portal-driven
+    // loads are a no-op here: loadSession sets the name before the load fires.
+    const handleNavigation = () => {
+        const loadedName = readLoadedSessionName();
+        if (!loadedName || loadedName === currentSessionName) return;
+        currentSessionName = loadedName;
+        fireCb(mountOptions.onSessionChanged, loadedName, 'onSessionChanged');
+    };
+    iframe.addEventListener('load', handleNavigation);
+
     containerEl.appendChild(iframe);
     containerEl.appendChild(loadingEl);
     containerEl.appendChild(errorEl);
@@ -99,6 +139,7 @@ export function mountIframe(containerEl, options = {}) {
     currentIframe = iframe;
     currentLoadingEl = loadingEl;
     currentErrorEl = errorEl;
+    currentHandleNavigation = handleNavigation;
     currentSessionName = null;
 
     return { iframe, loadingEl, errorEl };
@@ -115,7 +156,9 @@ export function loadSession({ sessionUrl, sessionName, onLoad, onError } = {}) {
     }
     // Same-name guard: skip only if the session is currently SUCCESSFULLY
     // loaded. If the error overlay is showing — e.g. previous attempt timed
-    // out — allow the retry to proceed.
+    // out — allow the retry to proceed. currentSessionName also tracks
+    // in-iframe switches (persistent listener in mountIframe), so this guard
+    // stays correct when the last navigation was Zellij-driven, not ours.
     if (sessionName === currentSessionName && currentLoadingEl.hidden && currentErrorEl.hidden) {
         console.warn(`[ZELLIJ-IFRAME] session "${sessionName}" already loaded — skipping reload`);
         return;
@@ -206,6 +249,7 @@ export function unmountIframe() {
         currentLoadTimeoutId = null;
     }
     if (currentIframe && currentHandleLoad) currentIframe.removeEventListener('load', currentHandleLoad);
+    if (currentIframe && currentHandleNavigation) currentIframe.removeEventListener('load', currentHandleNavigation);
     if (currentIframe && currentIframe.parentNode) currentIframe.parentNode.removeChild(currentIframe);
     if (currentLoadingEl && currentLoadingEl.parentNode) currentLoadingEl.parentNode.removeChild(currentLoadingEl);
     if (currentErrorEl && currentErrorEl.parentNode) currentErrorEl.parentNode.removeChild(currentErrorEl);
@@ -215,6 +259,7 @@ export function unmountIframe() {
     currentContainerEl = null;
     currentSessionName = null;
     currentHandleLoad = null;
+    currentHandleNavigation = null;
     lastLoadAttempt = null;
     mountOptions = {};
 }
