@@ -7,6 +7,7 @@ admin_routes.py - Health, upload, dashboard, admin endpoints
 
 # Standard library imports
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -92,6 +93,21 @@ async def upload_file(file: UploadFile = File(...)):
 # -----------------------------------------------------------------------------
 SESSION_UPLOADS_DIR = UPLOADS_DIR / "sessions"
 
+# Legitimate session ids are plain tokens: crypto.randomUUID() or
+# "session-{Date.now()}-{alnum}". Anything else is rejected before it can
+# touch the filesystem.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _validate_session_id(session_id: str) -> str:
+    """Reject path-traversal session ids. The charset admits dots, so '.'
+    and '..' must be excluded explicitly — '..' on the DELETE path would
+    rmtree Portal/uploads/ itself."""
+    if session_id in {".", ".."} or not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=400, detail=f"Invalid session_id: {session_id!r}")
+    return session_id
+
+
 @app.post("/upload/session")
 async def upload_session_file(
     file: UploadFile = File(...),
@@ -102,6 +118,7 @@ async def upload_session_file(
     Files are stored at: Portal/uploads/sessions/{session_id}/{original_filename}
     This allows Claude Code to access files directly using its file reading tools.
     """
+    _validate_session_id(session_id)
     try:
         # Create session folder if it doesn't exist
         session_folder = SESSION_UPLOADS_DIR / session_id
@@ -161,6 +178,8 @@ async def upload_session_file(
 @app.get("/upload/session/{session_id}")
 async def list_session_files(session_id: str):
     """List all files in a session's upload folder."""
+    # Before the try: the generic except below would 500 an HTTPException(400).
+    _validate_session_id(session_id)
     try:
         session_folder = SESSION_UPLOADS_DIR / session_id
         if not session_folder.exists():
@@ -189,6 +208,8 @@ async def list_session_files(session_id: str):
 @app.delete("/upload/session/{session_id}")
 async def cleanup_session_files(session_id: str):
     """Delete all files in a session's upload folder."""
+    # Before the try: the generic except below would 500 an HTTPException(400).
+    _validate_session_id(session_id)
     try:
         import shutil
         session_folder = SESSION_UPLOADS_DIR / session_id
