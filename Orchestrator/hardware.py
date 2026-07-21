@@ -27,6 +27,7 @@ exit, timeout, garbage output) degrades to the next rung; probe() never
 raises. Results are cached for PROBE_TTL_S — status is polled every 2s by the
 wizard, and hardware doesn't change under a running service.
 """
+import shutil
 import subprocess
 import threading
 import time
@@ -140,3 +141,18 @@ def probe(ttl_s: float = PROBE_TTL_S) -> dict:
     with _cache_lock:
         _cache = (now, result)
     return dict(result)
+
+
+def disk_free_mb(path: "str | None" = None) -> "int | None":
+    """Free space (MB) on the filesystem holding `path` (default: the BlackBox
+    root). None on ANY failure — fail-soft, never raises. Feeds the local-model
+    download gate (~40GB for the full GPU-tier weight set, design §7) and the
+    `disk` block of GET /local-models/status. Lazy `paths` import keeps this
+    module's import surface minimal (subprocess/shutil only)."""
+    try:
+        if path is None:
+            from Orchestrator.utils.paths import blackbox_root
+            path = str(blackbox_root())
+        return shutil.disk_usage(path).free // (1024 * 1024)
+    except Exception:
+        return None

@@ -183,3 +183,31 @@ def test_probe_still_returns_legacy_keys(monkeypatch):
     for k in ("gpu", "gpu_name", "vram_mb", "ram_mb", "source"):
         assert k in result
     assert result["tier"] == "HIGH"
+
+
+# ── disk_free_mb (M1: local-model download gate) ──────────────────────────────
+
+def test_disk_free_mb_happy(monkeypatch):
+    class _Usage:
+        free = 50 * 1024 * 1024 * 1024  # 50 GB in bytes
+    monkeypatch.setattr(hardware.shutil, "disk_usage", lambda p: _Usage)
+    assert hardware.disk_free_mb("/anywhere") == 50 * 1024  # 51200 MB
+
+
+def test_disk_free_mb_failsoft(monkeypatch):
+    def _boom(p):
+        raise OSError("no such path")
+    monkeypatch.setattr(hardware.shutil, "disk_usage", _boom)
+    assert hardware.disk_free_mb("/missing") is None
+
+
+def test_disk_free_mb_default_path_uses_root(monkeypatch):
+    seen = {}
+    class _Usage:
+        free = 10 * 1024 * 1024 * 1024
+    def _capture(p):
+        seen["path"] = p
+        return _Usage
+    monkeypatch.setattr(hardware.shutil, "disk_usage", _capture)
+    assert hardware.disk_free_mb() == 10 * 1024
+    assert seen["path"]  # a concrete root path was resolved, not None
