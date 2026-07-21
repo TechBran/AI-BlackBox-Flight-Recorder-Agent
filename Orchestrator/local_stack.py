@@ -321,3 +321,73 @@ def speaches_realtime_ws_url(model: str, *, intent: str = "transcription") -> st
     (Design B — bypasses the llama-swap proxy, which cannot proxy WebSockets)."""
     return (f"ws://127.0.0.1:{SPEACHES_STATIC_PORT}/v1/realtime"
             f"?model={_quote(model, safe='')}&intent={_quote(intent, safe='')}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M5 — D12 Orchestrator-level voice/retrieval serialization primitive.
+#
+# A direct-to-port on-box voice stream (Design-B STT WS to :9099, or streaming
+# Qwen TTS) is INVISIBLE to llama-swap's in-flight drain counter, so llama-swap
+# would evict the audio group mid-utterance to serve a retrieval-group request.
+# We serialize at the Orchestrator instead: while ANY on-box voice stream is
+# open, retrieval-group dispatch (localstack embeddings/rerank -> :9098) WAITS
+# behind it, sequencing retrieval into the STT-finalize -> retrieve -> TTS-speak
+# gap of a voice turn (§6).
+#
+# Deliberately poll-based on a plain int, NOT an asyncio.Event: voice_session()
+# runs on the FastAPI loop while auto-mint embeds run via search._run_async
+# (which may drive a coroutine on a DIFFERENT loop/thread). A module-level
+# asyncio.Event would raise "bound to a different event loop"; a GIL-atomic int
+# read is loop- and thread-agnostic. Single active user (personal box), so this
+# is cooperative sequencing, not a hard mutex.
+# ─────────────────────────────────────────────────────────────────────────────
+import asyncio as _asyncio
+import time as _time
+from contextlib import asynccontextmanager as _asynccontextmanager
+
+_voice_depth = 0
+
+# Bounded wait a retrieval caller tolerates before giving up on the gate. The
+# auto-mint embed path converts a timeout into a vector-less mint; a query embed
+# falls back to keyword search; rerank falls through to un-reranked retrieval.
+RETRIEVAL_GATE_TIMEOUT_S = 8.0
+_GATE_POLL_S = 0.05
+
+
+def is_voice_active() -> bool:
+    """True while >=1 on-box voice stream (STT bridge or streaming TTS) is open."""
+    return _voice_depth > 0
+
+
+@_asynccontextmanager
+async def voice_session():
+    """Hold for the FULL duration of an on-box voice stream. While held,
+    retrieval_gate() callers wait. Re-entrant via a depth counter (a duplex voice
+    turn may briefly overlap listen+speak)."""
+    global _voice_depth
+    _voice_depth += 1
+    try:
+        yield
+    finally:
+        _voice_depth -= 1
+        if _voice_depth < 0:
+            _voice_depth = 0
+
+
+@_asynccontextmanager
+async def retrieval_gate(*, timeout: float | None = RETRIEVAL_GATE_TIMEOUT_S):
+    """Await until no on-box voice stream is open, then yield. Wrap every
+    localstack retrieval-group dispatch (:9098 embeddings/rerank) in this.
+
+    timeout=None  -> wait indefinitely.
+    timeout=<s>   -> raise asyncio.TimeoutError once the ceiling passes, so the
+                     caller degrades (vector-less mint / keyword fallback /
+                     un-reranked) rather than deadlock behind a long voice call.
+    """
+    deadline = None if timeout is None else _time.monotonic() + timeout
+    while is_voice_active():
+        if deadline is not None and _time.monotonic() >= deadline:
+            raise _asyncio.TimeoutError(
+                "on-box voice session held the retrieval group past the gate timeout")
+        await _asyncio.sleep(_GATE_POLL_S)
+    yield
