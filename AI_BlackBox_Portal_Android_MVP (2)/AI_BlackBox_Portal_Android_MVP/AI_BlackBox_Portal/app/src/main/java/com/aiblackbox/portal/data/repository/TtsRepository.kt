@@ -96,6 +96,7 @@ class TtsRepository(private val api: BlackBoxApi) {
         voice: String = "onyx",
         model: String = "tts-1-hd",
         format: String = "mp3",
+        provider: String = "openai",
         operator: String = "Brandon"
     ): TtsResponse {
         val sanitized = text
@@ -109,7 +110,7 @@ class TtsRepository(private val api: BlackBoxApi) {
             append(",\"voice\":\"$voice\"")
             append(",\"model\":\"$model\"")
             append(",\"format\":\"$format\"")
-            append(",\"provider\":\"openai\"")
+            append(",\"provider\":\"$provider\"")
             append(",\"operator\":\"$operator\"")
             append("}")
         }
@@ -237,11 +238,15 @@ class TtsRepository(private val api: BlackBoxApi) {
                 )
             }
             else -> {
-                // OpenAI TTS — synchronous
+                // Generic synchronous /tts/batch path. Pass the PARSED provider
+                // through instead of hardcoding "openai", so on-box voices
+                // (local:/qwen:) reach their real backend branch instead of
+                // being mislabeled "openai" (which 400s on a non-openai id).
                 generateTts(
                     text = text,
                     voice = config.voice,
                     model = config.model,
+                    provider = config.provider,
                     operator = operator
                 )
             }
