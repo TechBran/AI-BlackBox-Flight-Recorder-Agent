@@ -151,6 +151,33 @@ def test_frame_iter_chunks_at_12hz():
     assert [len(c) for c in chunks] == [4000, 4000, 2000]
 
 
+def test_stream_true_flag_off_uses_full_generation_fallback(client):
+    # stream:true with the G3 flag OFF -> StreamingResponse OVER a full
+    # generation (correction [8]): synthesize_full runs, stream_true does NOT.
+    r = client.post("/v1/audio/speech", json={"input": "hello", "voice": "qwen:Vivian", "stream": True})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/octet-stream")
+    assert r.headers["x-sample-rate"] == str(SR)
+    assert r.headers["x-audio-format"] == "pcm_s16le"
+    assert any(c[0] == "synthesize_full" for c in client.fake.calls)
+    assert all(c[0] != "stream_true" for c in client.fake.calls)
+
+
+def test_stream_fallback_frames_reassemble_to_full_pcm(client):
+    # The framed body must equal the full PCM the manager produced (b"\x11\x22"*50).
+    r = client.post("/v1/audio/speech", json={"input": "hi", "voice": "qwen:Vivian", "stream": True})
+    assert r.content == b"\x11\x22" * 50
+
+
+def test_stream_true_flag_on_uses_stream_true(client, monkeypatch):
+    monkeypatch.setenv("QWEN_TTS_STREAMING", "1")   # G3 gate ON
+    r = client.post("/v1/audio/speech", json={"input": "hello", "voice": "qwen:Vivian", "stream": True})
+    assert r.status_code == 200
+    assert r.headers["x-sample-rate"] == str(SR)
+    assert any(c[0] == "stream_true" for c in client.fake.calls)
+    assert all(c[0] != "synthesize_full" for c in client.fake.calls)
+
+
 # ---- profile-variant voice resolution (Task 6.4) ----------------------------
 def test_speech_base_clone_uses_ref_audio(client):
     from qwen_tts_server import profile_store
