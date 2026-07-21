@@ -111,3 +111,21 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/bash BLACKBOX_ROOT_PLACEHOLD
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl restart zellij-web.service
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-install-zellij-binary *
+
+# ── Local model stack (local-model-stack M2) ────────────────────────────
+# blackbox-models.service is the llama-swap front door (:9098) supervising
+# the on-box STT/TTS/embeddings/rerank members. `restart` is normal lifecycle
+# (config regen on update, hung-member recovery, post-update bounce); `stop`
+# is used by the Phase-2 MS02 migration. daemon-reload is already granted
+# above (general-purpose) and unit INSTALL+enable is installer-time root.
+#
+# The Phase-2 Step-0 reset must RETIRE the pre-stack always-resident pair
+# before the retrieval group can first load (a pointer flip alone leaves the
+# keep_alive=-1-pinned ~7GB Ollama 8B resident → CUDA OOM at the re-embed):
+# stop vllm-reranker.service AND ollama to free VRAM. These are /etc-free
+# runtime PID-1 transitions; exact-command grants keep the perimeter tight.
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl restart blackbox-models.service
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl stop blackbox-models.service
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl disable --now vllm-reranker.service
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl stop vllm-reranker.service
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl stop ollama.service

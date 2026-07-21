@@ -25,6 +25,7 @@
 #   override              → /etc/systemd/system/blackbox.service.d/override.conf
 #   cli-agent-overrides   → /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf
 #   zellij-web-unit       → /etc/systemd/system/zellij-web.service
+#   models-unit           → /etc/systemd/system/blackbox-models.service
 #   sudoers-system        → /etc/sudoers.d/blackbox-system
 #
 # Exit codes:
@@ -68,13 +69,17 @@ case "$TARGET_KIND" in
         DEST="/etc/systemd/system/zellij-web.service"
         IS_SUDOERS=0
         ;;
+    models-unit)
+        DEST="/etc/systemd/system/blackbox-models.service"
+        IS_SUDOERS=0
+        ;;
     sudoers-system)
         DEST="/etc/sudoers.d/blackbox-system"
         IS_SUDOERS=1
         ;;
     *)
         echo "[blackbox-write-systemd] ERROR: unknown target_kind: $TARGET_KIND" >&2
-        echo "[blackbox-write-systemd] (Valid: unit | override | cli-agent-overrides | zellij-web-unit | sudoers-system)" >&2
+        echo "[blackbox-write-systemd] (Valid: unit | override | cli-agent-overrides | zellij-web-unit | models-unit | sudoers-system)" >&2
         exit 4
         ;;
 esac
