@@ -29,6 +29,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import quote as _quote
 
 import httpx
 import yaml
@@ -285,7 +286,6 @@ def set_member_ttl(member: str, ttl: int) -> None:
 # M5 — on-box STT model ids + Design-B direct-WS Speaches locator.
 # (base_url()/is_healthy()/enabled() come from the M1 module.)
 # ─────────────────────────────────────────────────────────────────────────────
-from urllib.parse import quote as _quote
 
 # llama-swap pins the Speaches member to this STATIC loopback port in the
 # generated config (installer/templates/llama-swap-config.yaml.template) so the
@@ -308,20 +308,16 @@ def stt_batch_model() -> str:
     return ONBOX_STT_BATCH_MODEL
 
 
-def front_door() -> str:
-    """llama-swap front-door root (base_url() without the trailing /v1)."""
-    return base_url().rsplit("/v1", 1)[0]
-
-
 def speaches_warm_url() -> str:
     """llama-swap /upstream passthrough that LOADS the audio group and proxies
     Speaches /health — GET it until 200 to warm the group before a direct-WS
-    stream (Design B). Going through :9098 is what triggers the load/evict."""
-    return f"{front_door()}/upstream/speaches/health"
+    stream (Design B). Going through :9098 is what triggers the load/evict.
+    Reuses base_url_root() (the M1 front-door-root helper) for /v1 stripping."""
+    return f"{base_url_root()}/upstream/speaches/health"
 
 
 def speaches_realtime_ws_url(model: str, *, intent: str = "transcription") -> str:
     """DIRECT ws:// URL to the pinned Speaches member's /v1/realtime endpoint
     (Design B — bypasses the llama-swap proxy, which cannot proxy WebSockets)."""
     return (f"ws://127.0.0.1:{SPEACHES_STATIC_PORT}/v1/realtime"
-            f"?model={_quote(model, safe='')}&intent={intent}")
+            f"?model={_quote(model, safe='')}&intent={_quote(intent, safe='')}")

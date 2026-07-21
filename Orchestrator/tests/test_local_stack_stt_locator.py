@@ -5,9 +5,9 @@ def test_speaches_static_port_is_9099():
     assert local_stack.SPEACHES_STATIC_PORT == 9099
 
 
-def test_front_door_strips_v1(monkeypatch):
+def test_base_url_root_strips_v1(monkeypatch):
     monkeypatch.setattr(local_stack, "base_url", lambda: "http://127.0.0.1:9098/v1")
-    assert local_stack.front_door() == "http://127.0.0.1:9098"
+    assert local_stack.base_url_root() == "http://127.0.0.1:9098"
 
 
 def test_warm_url_hits_upstream_speaches_health(monkeypatch):
