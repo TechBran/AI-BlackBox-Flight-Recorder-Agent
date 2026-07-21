@@ -14,12 +14,13 @@ Orchestrator (M7) path contract:
     /upstream/qwen-tts/v1/voices/... so the member auto-loads and group
     swap/exclusivity are honored (correction [18]). See README (Task 6.8).
 """
+import base64
 import io
 import wave
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -224,3 +225,53 @@ async def voices_clone(
         slug, name, operator, True, data, file.filename or "reference.wav"
     )
     return {"voice_id": slug, "name": name}
+
+
+@app.post("/v1/voices/design")
+async def voices_design(body: dict = Body(...), mgr: VariantManager = Depends(get_manager)):
+    """VoiceDesign step 1 — preview voices from a text description, mirroring the
+    ElevenLabs design UX. No profile is created yet; the chosen preview is saved
+    via .../design/save. Reached via /upstream/qwen-tts/v1/voices/design
+    (correction [18]). Design params are cached in-process keyed by
+    generated_voice_id so save can persist them."""
+    description = (body or {}).get("voice_description")
+    if not description:
+        raise HTTPException(status_code=400, detail="voice_description is required")
+    text = (body or {}).get("text") or "The quick brown fox jumps over the lazy dog."
+    try:
+        previews = await mgr.design_preview(str(description), str(text))
+    except VramError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    out = []
+    for p in previews:
+        gid = p["generated_voice_id"]
+        app.state.design_cache[gid] = {"description": description, "params": p.get("params")}
+        out.append({
+            "generated_voice_id": gid,
+            "audio_b64": base64.b64encode(_pcm_to_wav(p["pcm"], p["sr"])).decode("ascii"),
+            "sample_rate": p["sr"],
+        })
+    return {"previews": out}
+
+
+@app.post("/v1/voices/design/save")
+async def voices_design_save(body: dict = Body(...)):
+    """VoiceDesign step 2 — persist a chosen preview as a real profile. Missing
+    generated_voice_id or name -> 400 (mirrors elevenlabs_routes.py:186);
+    unknown/expired generated_voice_id -> 404. Reached via
+    /upstream/qwen-tts/v1/voices/design/save (correction [18])."""
+    gid = (body or {}).get("generated_voice_id")
+    name = (body or {}).get("name")
+    if not gid or not name:
+        raise HTTPException(status_code=400, detail="generated_voice_id and name are required")
+    cached = app.state.design_cache.get(gid)
+    if cached is None:
+        raise HTTPException(status_code=404, detail="unknown or expired generated_voice_id")
+    operator = (body or {}).get("operator") or "system"
+    try:
+        slug = profile_store.unique_slug(name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="name did not yield a usable slug")
+    profile_store.save_design_profile(slug, name, operator, cached.get("description"), cached.get("params"))
+    app.state.design_cache.pop(gid, None)
+    return {"voice_id": slug}

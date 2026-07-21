@@ -284,3 +284,33 @@ def test_speech_with_cloned_voice_resolves_base(client):
     assert r.status_code == 200
     call = client.fake.calls[-1]              # (kind, variant, preset, ref_audio, design)
     assert call[1] == "base" and call[3] is not None
+
+
+def test_design_missing_description_400(client):
+    assert client.post("/v1/voices/design", json={}).status_code == 400
+
+
+def test_design_preview_then_save_persists_design_profile(client):
+    pr = client.post("/v1/voices/design", json={"voice_description": "warm calm narrator"})
+    assert pr.status_code == 200
+    preview = pr.json()["previews"][0]
+    gid = preview["generated_voice_id"]
+    assert preview["audio_b64"] and preview["sample_rate"] == SR
+    assert client.fake.calls[-1][0] == "design_preview"
+
+    sv = client.post("/v1/voices/design/save", json={"generated_voice_id": gid, "name": "Narrator"})
+    assert sv.status_code == 200 and sv.json()["voice_id"] == "narrator"
+    prof = json.loads((client.voices_dir / "narrator" / "profile.json").read_text())
+    assert prof["variant"] == "voice_design" and prof["design"] == {"seed": 7}
+    # design voice surfaces in the list with type "design"
+    listed = {v["id"]: v for v in client.get("/v1/audio/voices").json()["voices"]}
+    assert listed["narrator"]["type"] == "design"
+
+
+def test_design_save_missing_name_400(client):
+    assert client.post("/v1/voices/design/save", json={"generated_voice_id": "x"}).status_code == 400
+
+
+def test_design_save_unknown_gid_404(client):
+    r = client.post("/v1/voices/design/save", json={"generated_voice_id": "nope", "name": "X"})
+    assert r.status_code == 404
