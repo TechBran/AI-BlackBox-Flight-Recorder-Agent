@@ -279,3 +279,49 @@ def set_member_ttl(member: str, ttl: int) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M5 — on-box STT model ids + Design-B direct-WS Speaches locator.
+# (base_url()/is_healthy()/enabled() come from the M1 module.)
+# ─────────────────────────────────────────────────────────────────────────────
+from urllib.parse import quote as _quote
+
+# llama-swap pins the Speaches member to this STATIC loopback port in the
+# generated config (installer/templates/llama-swap-config.yaml.template) so the
+# Design-B streaming STT bridge can open a DIRECT WebSocket to it — llama-swap
+# WebSocket proxying is a known-missing feature (mostlygeek/llama-swap#754).
+SPEACHES_STATIC_PORT = 9099
+
+# On-box whisper model ids served by the Speaches member (§5.3 / §8 template).
+# Streaming defaults to the turbo ct2 build (parity with today's gemma-box path);
+# batch uses full large-v3 for quality. Wizard-overridable later (Q3/Q6).
+ONBOX_STT_STREAM_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
+ONBOX_STT_BATCH_MODEL = "Systran/faster-whisper-large-v3"
+
+
+def stt_stream_model() -> str:
+    return ONBOX_STT_STREAM_MODEL
+
+
+def stt_batch_model() -> str:
+    return ONBOX_STT_BATCH_MODEL
+
+
+def front_door() -> str:
+    """llama-swap front-door root (base_url() without the trailing /v1)."""
+    return base_url().rsplit("/v1", 1)[0]
+
+
+def speaches_warm_url() -> str:
+    """llama-swap /upstream passthrough that LOADS the audio group and proxies
+    Speaches /health — GET it until 200 to warm the group before a direct-WS
+    stream (Design B). Going through :9098 is what triggers the load/evict."""
+    return f"{front_door()}/upstream/speaches/health"
+
+
+def speaches_realtime_ws_url(model: str, *, intent: str = "transcription") -> str:
+    """DIRECT ws:// URL to the pinned Speaches member's /v1/realtime endpoint
+    (Design B — bypasses the llama-swap proxy, which cannot proxy WebSockets)."""
+    return (f"ws://127.0.0.1:{SPEACHES_STATIC_PORT}/v1/realtime"
+            f"?model={_quote(model, safe='')}&intent={intent}")
