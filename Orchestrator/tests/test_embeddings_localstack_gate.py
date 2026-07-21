@@ -10,8 +10,7 @@ from Orchestrator.embeddings.providers import EmbeddingProviderError, get_provid
 
 
 def _localstack_provider():
-    # M3 registers the on-box embedding slug; adjust the slug if M3's registry
-    # entry differs. get_provider returns the localstack-backed provider.
+    # The on-box embedding slug; get_provider returns the localstack-backed provider.
     return get_provider("qwen3-embedding-8b-local")
 
 
@@ -33,14 +32,22 @@ def test_embed_raises_provider_error_when_gate_times_out(monkeypatch):
 
 
 def test_embed_proceeds_when_no_voice_session(monkeypatch):
-    # With no voice session the gate is open; stub the network so the test is
-    # hermetic and asserts the gate does not block the happy path.
+    # With no voice session the gate opens; stub the network so the test is
+    # hermetic and assert embed() runs the dispatch to completion (the gate is
+    # acquired AND released, not merely un-held) and returns the vectors.
     async def scenario():
         prov = _localstack_provider()
 
         async def _fake_post(texts, purpose):        # replaces the real HTTP call
-            return [[0.1, 0.2, 0.3] for _ in texts]
-        # Adjust to M3's actual inner dispatch name (e.g. _post_embeddings).
+            return [[0.0] * prov.dims for _ in texts]
         monkeypatch.setattr(prov, "_post_embeddings", _fake_post, raising=False)
+
+        assert local_stack.is_voice_active() is False
+        vectors = await prov.embed(["hello", "world"], "document")
+        assert len(vectors) == 2
+        assert all(len(vec) == prov.dims for vec in vectors)
+        # Gate released after the happy path — a subsequent embed still passes.
+        again = await prov.embed(["again"], "document")
+        assert len(again) == 1
         assert local_stack.is_voice_active() is False
     asyncio.run(scenario())
