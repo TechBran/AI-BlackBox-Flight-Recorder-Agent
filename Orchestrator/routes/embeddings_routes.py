@@ -222,26 +222,23 @@ def _model_preflight(
         return False, [remediation], None
 
     if provider == "localstack":
-        # On-box models are served by llama-swap (:9098), NOT Ollama — they must
-        # never fall through to the Ollama install/start/pull blockers,
-        # ollama_io.ram_preflight, or the GPU/CPU placement advisory below. The
-        # on-box device is install-fixed by hardware tier (CPU-tier boxes get the
-        # 0.6B member, GPU-tier the 8B), so there is NO runtime placement toggle:
-        # recommended_placement is None (mirrors the cloud path, and matches the
-        # `models[].placement`/keep_alive nulls the status route emits while
-        # `is_local` stays provider=="ollama").
-        #
-        # Registry-only interim (Task 3.1): the localstack provider (3.2),
-        # keep-warm ttl (3.3/3.4), and the full install/health/download preflight
-        # via Orchestrator.local_stack (3.5) do not exist yet, so an on-box slug
-        # is registered but not selectable. Report it as not-ready with a wizard
-        # pointer rather than falsely ready or with wrong Ollama remediation.
-        # Task 3.5 replaces this branch with granular
-        # is_installed/is_healthy/model_downloaded blockers.
-        return False, [
-            "On-box model stack setup is not complete — finish it in the "
-            "onboarding wizard"
-        ], None
+        from Orchestrator import local_stack  # lazy: avoid import cycle
+        if not local_stack.is_installed():
+            return False, [
+                "local stack not installed — install it from the setup wizard"
+            ], None
+        blockers = []
+        if not local_stack.is_healthy():
+            blockers.append(
+                "blackbox-models.service down — "
+                "sudo systemctl start blackbox-models.service"
+            )
+        elif not local_stack.model_downloaded(entry["model_id"]):
+            blockers.append(
+                f"model not downloaded — download it from the setup wizard "
+                f"(≈{entry['ram_gb']:g} GB)"
+            )
+        return (not blockers), blockers, _recommended_placement(entry, hw)
 
     blockers: list[str] = []
     if not ollama["running"]:
@@ -299,8 +296,10 @@ def embeddings_status(response: Response):
     for slug, entry in EMBEDDING_MODELS.items():
         store_exists = (base / slug / META_FILE).is_file()
         ready, blockers, recommended = _model_preflight(entry, ollama_state, hw)
-        # keep_alive + placement toggles are local-only (Ollama); null for cloud
-        is_local = entry["provider"] == "ollama"
+        # keep_alive + placement toggles are local-only; null for cloud. Keyed
+        # on privacy so on-box (localstack) models expose keep_alive/warm too;
+        # placement is null for localstack (device is install-fixed by tier).
+        is_local = entry["privacy"] == "local"
         keep_alive = get_keep_alive(slug, base_dir=base) if is_local else None
         # ADDITIVE (M6e): the model card mirrors its store's schema/rows
         # (same currency as the stores[] entries); null when no readable

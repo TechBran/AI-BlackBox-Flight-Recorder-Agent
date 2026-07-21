@@ -68,6 +68,11 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(ollama_io, "daemon_version", lambda: None)
     monkeypatch.setattr(ollama_io, "local_models", lambda: [])
     monkeypatch.setattr(ollama_io, "ram_preflight", lambda ram_gb: None)
+    from Orchestrator import local_stack
+    monkeypatch.setattr(local_stack, "is_installed", lambda: False)
+    monkeypatch.setattr(local_stack, "is_healthy", lambda: False)
+    monkeypatch.setattr(local_stack, "model_downloaded", lambda mid: False)
+    monkeypatch.setattr(local_stack, "get_member_ttl", lambda mid: None)
     # Hermetic hardware probe (WI-9): no subprocess from these tests; the real
     # command seams are exercised by test_hardware.py.
     monkeypatch.setattr(hardware, "probe", lambda ttl_s=60.0: dict(NO_GPU_HW))
