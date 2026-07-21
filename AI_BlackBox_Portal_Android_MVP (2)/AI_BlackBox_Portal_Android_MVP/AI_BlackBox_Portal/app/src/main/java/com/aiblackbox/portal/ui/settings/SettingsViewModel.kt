@@ -94,13 +94,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 val repo = com.aiblackbox.portal.data.repository.TtsRepository(api)
                 val text = "Hello! This is a preview of the selected voice."
                 val cfg = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceId)
-                val url = when (cfg.provider) {
-                    "openai" -> repo.generateTts(text, cfg.voice, cfg.model).audio_url
-                    "elevenlabs" -> repo.generateElevenLabsTts(text, cfg.voice).audio_url
-                    else -> {
+                val url = when {
+                    cfg.provider == "elevenlabs" ->
+                        repo.generateElevenLabsTts(text, cfg.voice).audio_url
+                    cfg.provider == "gemini-pro" || cfg.provider == "gemini-flash" -> {
                         val sub = repo.generateGeminiTts(text, cfg.voice, cfg.model)
                         repo.pollGeminiTaskForUrl(sub.task_id)
                     }
+                    // openai / local / qwen — synchronous /tts/batch, provider passed
+                    // through (M0 generic-provider fix). Without this a qwen/local
+                    // preview fell into the Gemini poll and failed.
+                    else ->
+                        repo.generateTts(text, cfg.voice, cfg.model, provider = cfg.provider).audio_url
                 }
                 if (url.isNotBlank()) playPreview(url)
                 else throw Exception("No audio url returned")
