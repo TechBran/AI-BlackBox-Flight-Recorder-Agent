@@ -1134,6 +1134,96 @@ async def tts_catalog():
         pass  # fail-open: qwen group simply absent if the helper errors
     return {"groups": groups}
 
+
+# =============================================================================
+# Qwen3-TTS voice management (backs the Voice Lab Qwen tab). Clone/design/save
+# proxy /upstream/qwen-tts/v1/voices/… (NON-OpenAI paths llama-swap won't
+# auto-route, §5.4); list/delete are filesystem ops over Manifest/voices/qwen/.
+# =============================================================================
+@app.get("/qwen/voices")
+async def qwen_voices_list():
+    """Saved clone/design profiles for the manage zone. No GPU wake (disk read)."""
+    from Orchestrator import qwen_tts
+    return {"voices": qwen_tts.list_profiles()}
+
+
+@app.post("/qwen/voices/clone")
+async def qwen_voices_clone(
+    name: str = Form(...),
+    consent: str = Form(None),
+    description: str = Form(None),
+    files: List[UploadFile] = File(...),
+):
+    """Clone a voice from reference audio (~3s min). Requires the literal
+    consent flag — 422 without it, mirroring the ElevenLabs gate. Forwards the
+    multipart to the qwen-tts server via /upstream/qwen-tts/v1/voices/clone."""
+    if (consent or "").strip().lower() != "true":
+        raise HTTPException(422, "consent required to clone a voice")
+    from Orchestrator import qwen_tts
+    # Forward under the SINGULAR field name 'file' — the M6 server declares
+    # `file: UploadFile = File(...)` (Task 6.6), so forwarding 'files' (plural)
+    # would 422 the member (missing required 'file'). The proxy still accepts a
+    # list from the browser (a single reference clip is the norm) and forwards
+    # each part as 'file'.
+    fwd_files = []
+    for f in files:
+        fwd_files.append(("file", (f.filename or "clip.wav", await f.read(),
+                                   f.content_type or "application/octet-stream")))
+    data = {"name": name, "consent": "true"}
+    if description:
+        data["description"] = description
+    try:
+        r = requests.post(qwen_tts.upstream_url("/v1/voices/clone"),
+                          data=data, files=fwd_files,
+                          timeout=qwen_tts.QWEN_TTS_TIMEOUT)
+    except Exception as e:
+        raise HTTPException(502, f"qwen-tts clone unreachable: {e}")
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, r.text[:400])
+    return r.json()
+
+
+@app.post("/qwen/voices/design")
+async def qwen_voices_design(body: dict = Body(...)):
+    """Design→preview: {voice_description, text?} -> {previews:[{generated_voice_id,
+    audio_b64, sample_rate}]} (passed through verbatim; the Voice Lab builds the
+    data: URL from audio_b64). Proxied through /upstream/qwen-tts/v1/voices/design."""
+    from Orchestrator import qwen_tts
+    try:
+        r = requests.post(qwen_tts.upstream_url("/v1/voices/design"),
+                          json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT)
+    except Exception as e:
+        raise HTTPException(502, f"qwen-tts design unreachable: {e}")
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, r.text[:400])
+    return r.json()
+
+
+@app.post("/qwen/voices/design/save")
+async def qwen_voices_design_save(body: dict = Body(...)):
+    """Save a chosen design preview: {generated_voice_id, name, description?}
+    -> {voice_id}. Persists Manifest/voices/qwen/{slug}/ server-side."""
+    from Orchestrator import qwen_tts
+    try:
+        r = requests.post(qwen_tts.upstream_url("/v1/voices/design/save"),
+                          json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT)
+    except Exception as e:
+        raise HTTPException(502, f"qwen-tts design/save unreachable: {e}")
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, r.text[:400])
+    return r.json()
+
+
+@app.delete("/qwen/voices/{slug}")
+async def qwen_voices_delete(slug: str):
+    """Delete a saved profile (filesystem op; voices are lazy-loaded from disk,
+    so no server round-trip is needed)."""
+    from Orchestrator import qwen_tts
+    if qwen_tts.delete_profile(slug):
+        return {"ok": True, "slug": slug}
+    raise HTTPException(404, f"no such qwen voice profile: {slug}")
+
+
 @app.get("/stt/catalog")
 async def stt_catalog():
     """STT provider/capability catalog -- single source of truth for the STT
