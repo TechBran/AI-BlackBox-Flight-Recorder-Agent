@@ -73,6 +73,7 @@ wire call) or, as an escape hatch, a verbatim served-model name.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -875,11 +876,13 @@ def _score_cohere(query: str, passages: list[str],
 # non-200 / malformed / count-or-index anomaly; transport blow-ups are backstopped
 # by the dispatcher's never-raise (audit A9).
 
-def _score_localstack(query: str, passages: list[str],
-                      settings: dict) -> list[float] | None:
+def _do_localstack_rerank(query: str, passages: list[str],
+                          settings: dict) -> list[float] | None:
     """On-box Qwen3-Reranker-8B @ Q8_0 via llama-swap /v1/rerank (the retrieval-group
     member, sequential per D13). Posts {model, query: instruction+query, documents} and scatters
-    {index, relevance_score} back onto passage positions."""
+    {index, relevance_score} back onto passage positions. Synchronous HTTP dispatch
+    (requests.post) — the sync score() path calls this directly; the async gated
+    entry _score_localstack wraps it behind the on-box voice-session gate (D12)."""
     if not passages:
         return None
     base = _localstack_base_url()
@@ -895,6 +898,27 @@ def _score_localstack(query: str, passages: list[str],
     if resp.status_code != 200:
         return None
     return _scatter_relevance_scores(resp.json(), len(passages))
+
+
+async def _score_localstack(query: str, passages: list[str],
+                            settings: "dict | None" = None) -> list[float] | None:
+    """Async gated entry for the on-box localstack reranker (:9098 /v1/rerank).
+
+    D12: serialize behind any open on-box voice stream; a gate timeout means
+    un-reranked retrieval (score None), never an error (a dead reranker costs
+    latency, never recall — §6). Wraps the M4 real dispatch (_do_localstack_rerank)
+    in local_stack.retrieval_gate(); on the bounded-wait timeout, returns None so
+    the retriever falls through to its un-reranked ranking rather than raising.
+    """
+    from Orchestrator import local_stack  # lazy: avoid import cycle
+    try:
+        async with local_stack.retrieval_gate(
+                timeout=local_stack.RETRIEVAL_GATE_TIMEOUT_S):
+            if settings is None:
+                settings = get_settings()
+            return _do_localstack_rerank(query, passages, settings)
+    except asyncio.TimeoutError:
+        return None
 
 
 # ── Google Vertex semantic-ranker (M7.2) ──────────────────────────────────────
@@ -1215,7 +1239,7 @@ def score(query: str, passages: list[str]) -> list[float] | None:
         return None
     fn = {"vllm": _score_vllm, "cpu": _score_cpu, "voyage": _score_voyage,
           "cohere": _score_cohere, "vertex": _score_vertex,
-          "llm": _score_llm, "localstack": _score_localstack}.get(p)
+          "llm": _score_llm, "localstack": _do_localstack_rerank}.get(p)
     if fn is None:
         return None
     try:
