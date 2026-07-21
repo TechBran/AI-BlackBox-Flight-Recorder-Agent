@@ -299,7 +299,26 @@ class LocalStackProvider(_BaseProvider):
             return budget
         return max(0, budget - tokenization.estimate_tokens(instruction, self.slug))
 
+    async def embed(self, texts, purpose):
+        # D12: serialize behind any open on-box voice stream. A bounded wait so a
+        # long voice call degrades auto-mint to a vector-less mint (the caller's
+        # except-EmbeddingProviderError -> {} path) instead of deadlocking. The
+        # gate wraps the WHOLE embed (retry loop included) so the ceiling is a
+        # single bounded wait, not the base retry loop's 4x multiplier.
+        from Orchestrator import local_stack  # lazy: avoid import cycle
+        try:
+            async with local_stack.retrieval_gate(
+                timeout=local_stack.RETRIEVAL_GATE_TIMEOUT_S
+            ):
+                return await super().embed(texts, purpose)
+        except asyncio.TimeoutError:
+            raise EmbeddingProviderError(
+                f"{self.slug}: retrieval gate held by an on-box voice session")
+
     async def _embed(self, texts, purpose):
+        return await self._post_embeddings(texts, purpose)
+
+    async def _post_embeddings(self, texts, purpose):
         from Orchestrator import local_stack  # lazy: avoid import cycle
         instruction = self.entry.get("query_instruction")
         if purpose == "query" and instruction is not None:
