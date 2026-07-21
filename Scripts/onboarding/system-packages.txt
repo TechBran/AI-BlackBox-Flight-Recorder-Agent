@@ -21,6 +21,10 @@ xdotool                  # SHOULD_HAVE # Computer Use input injection (X11 only)
 scrot                    # SHOULD_HAVE # X11 screenshot
 openbox                  # SHOULD_HAVE # CU window management
 x11vnc                   # SHOULD_HAVE # remote desktop CU
+# ── CU virtual displays (local-model-stack §9) ──
+xvfb                     # MUST_HAVE # CU per-session virtual X displays (CU gates on this)
+websockify               # SHOULD_HAVE # CU live-view WS bridge (noVNC transport)
+novnc                    # SHOULD_HAVE # CU live-view browser client
 mpg123                   # SHOULD_HAVE # audio playback
 alsa-utils               # SHOULD_HAVE # audio devices
 pulseaudio-utils         # SHOULD_HAVE # PulseAudio control
