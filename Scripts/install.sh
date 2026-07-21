@@ -512,6 +512,20 @@ if ! bash "$BLACKBOX_ROOT/installer/templates/blackbox-install-reranker-cpu.sh" 
     echo "[install]       Re-run later: sudo bash installer/templates/blackbox-install-reranker-cpu.sh"
 fi
 
+# ── Step 2f: on-box local model stack (llama-swap front door — GPU + CPU) ──
+# Provisions llama-swap (:9098), the llama.cpp llama-server (CUDA/CPU per the
+# nvidia-smi gate), the Speaches + qwen-tts venvs, the tier-adjusted
+# llama-swap config.yaml, and blackbox-models.service. Self-gating (build
+# selector, not a skip) + re-run-safe. NON-FATAL like the reranker step —
+# cloud STT/TTS/embeddings/rerank keep working and the wizard's local_models
+# step shows remediation. NO weights here (downloaded later in the wizard,
+# disk-gated). Nothing activates implicitly on install.
+if ! bash "$BLACKBOX_ROOT/installer/templates/blackbox-install-localstack.sh" \
+        "$REAL_USER" "$REAL_HOME" "$BLACKBOX_ROOT"; then
+    echo "[install] WARN: local model stack provisioning did not complete — on-box STT/TTS/embeddings/rerank unavailable; cloud fallbacks work."
+    echo "[install]       Re-run later: sudo bash installer/templates/blackbox-install-localstack.sh"
+fi
+
 # ── Step 3: .env from template (audit I2 — created as $REAL_USER, mode 0600 since it holds API keys) ──
 if [[ ! -f "$BLACKBOX_ROOT/.env" ]]; then
     sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/.env.template" "$BLACKBOX_ROOT/.env"
