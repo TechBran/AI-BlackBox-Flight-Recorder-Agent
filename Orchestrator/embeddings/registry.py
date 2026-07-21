@@ -128,6 +128,38 @@ EMBEDDING_MODELS = {
         # measured need.
         "max_input_tokens": 8192,
     },
+    "qwen3-embedding-8b-local": {
+        "provider": "localstack", "model_id": "embed-qwen3-8b", "dims": 4096,
+        "label": "Qwen3 8B (on-box, max quality)", "ram_gb": 8.1, "cost_per_1m_tokens": 0.0,
+        "privacy": "local",
+        "quality_note": "MTEB #1 open-source; GPU-served on-box via llama-swap (Q8_0)",
+        "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
+        # On-box keep-warm is the llama-swap member ttl (0 = warm), read by
+        # store.get_keep_alive — NOT keep_alive.json. Registry default = cold.
+        "keep_alive": None,
+        # Seeded from the Ollama qwen3-embedding-8b entry pending G1 recalibration
+        # on the RTX 2000 Ada Q8_0 store (per-model thresholds are mandatory).
+        "semantic_threshold": 0.50,
+        "junk_floor": 0.35,
+        # Same Qwen3 tokenizer as the Ollama qwen entries (vendored hf:qwen3);
+        # mandatory — llama-server pooling needs exact-length inputs.
+        "tokenizer": "hf:qwen3",
+        # llama-server launches with -c/-b/-ub 8192 (non-causal last-token
+        # pooling forces ub >= full input seq); covers p99 whole snapshots.
+        "max_input_tokens": 8192,
+    },
+    "qwen3-embedding-0.6b-local": {
+        "provider": "localstack", "model_id": "embed-qwen3-0.6b", "dims": 1024,
+        "label": "Qwen3 0.6B (on-box, light / CPU tier)", "ram_gb": 1.0, "cost_per_1m_tokens": 0.0,
+        "privacy": "local",
+        "quality_note": "Fast on CPU; on-box CPU-tier default via llama-swap",
+        "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
+        "keep_alive": None,
+        "semantic_threshold": 0.54,
+        "junk_floor": 0.35,
+        "tokenizer": "hf:qwen3",
+        "max_input_tokens": 8192,
+    },
 }
 
 # The store that historical inline 3072-dim index vectors transcode into

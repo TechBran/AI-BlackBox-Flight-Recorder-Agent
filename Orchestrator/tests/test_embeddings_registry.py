@@ -11,7 +11,7 @@ import pytest
 from Orchestrator import config, tokenization
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 
-VALID_PROVIDERS = {"gemini", "openai", "ollama"}
+VALID_PROVIDERS = {"gemini", "openai", "ollama", "localstack"}
 VALID_PRIVACY = {"cloud", "local"}
 
 
@@ -54,6 +54,8 @@ def test_cloud_zero_ram_local_zero_cost(slug):
     ("openai-text-embedding-3-large", 3072),
     ("qwen3-embedding-0.6b", 1024),
     ("qwen3-embedding-8b", 4096),
+    ("qwen3-embedding-8b-local", 4096),
+    ("qwen3-embedding-0.6b-local", 1024),
 ])
 def test_exact_slugs_present_with_dims(slug, dims):
     assert slug in EMBEDDING_MODELS
@@ -130,7 +132,7 @@ def test_ollama_query_instruction_fits_well_inside_clamp_budget():
     that are mostly (or, at the max(0, ...) floor, ONLY) instruction text —
     fail CI instead."""
     for slug, e in EMBEDDING_MODELS.items():
-        if e["provider"] != "ollama" or not e.get("query_instruction"):
+        if e["provider"] not in ("ollama", "localstack") or not e.get("query_instruction"):
             continue
         budget = int(e["max_input_tokens"] * 0.9)
         instr_tokens = tokenization.estimate_tokens(e["query_instruction"], slug)
@@ -138,3 +140,17 @@ def test_ollama_query_instruction_fits_well_inside_clamp_budget():
             f"{slug}: query_instruction ({instr_tokens} tokens) eats >=25% of "
             f"the {budget}-token clamp budget — query text would be crowded out"
         )
+
+
+@pytest.mark.parametrize(
+    "slug", [s for s, e in EMBEDDING_MODELS.items() if e["provider"] == "localstack"]
+)
+def test_localstack_entries_declare_a_real_tokenizer(slug):
+    """The on-box entries embed at 4096/1024 dims through llama.cpp — exact
+    token clamping is mandatory (a floor tokenizer would over/under-truncate a
+    whole-snapshot ordinal-0 vector). Every localstack slug MUST name a real
+    (hf:/tiktoken:) tokenizer, never None."""
+    tok = EMBEDDING_MODELS[slug]["tokenizer"]
+    assert tok and not tok.startswith("remote:"), (
+        f"{slug}: localstack entries need an exact local tokenizer, got {tok!r}"
+    )
