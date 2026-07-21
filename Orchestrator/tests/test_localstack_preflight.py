@@ -73,3 +73,7 @@ def test_localstack_status_shows_keep_alive_and_no_placement(client):
     m = _model(tc.get("/embeddings/status").json(), LOCALSTACK_SLUG)
     assert m["warm"] is True                 # is_local now privacy-based
     assert m["placement"] is None            # no runtime placement for on-box
+    # on-box devices are install-fixed by tier; no advisory placement hint
+    # either (set_placement raises for localstack, so a "cpu"/"gpu" recommendation
+    # would point at a toggle the backend rejects).
+    assert m["recommended_placement"] is None

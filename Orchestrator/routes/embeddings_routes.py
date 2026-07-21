@@ -238,7 +238,13 @@ def _model_preflight(
                 f"model not downloaded — download it from the setup wizard "
                 f"(≈{entry['ram_gb']:g} GB)"
             )
-        return (not blockers), blockers, _recommended_placement(entry, hw)
+        # recommended_placement is None for on-box models: the device is
+        # install-fixed by hardware tier with no runtime placement toggle, and
+        # store.set_placement() raises ValueError for any localstack slug.
+        # Emitting a "cpu"/"gpu" hint would advertise a toggle the backend
+        # rejects, so this branch mirrors placement=None (nothing writes
+        # placement.json for localstack).
+        return (not blockers), blockers, None
 
     blockers: list[str] = []
     if not ollama["running"]:
