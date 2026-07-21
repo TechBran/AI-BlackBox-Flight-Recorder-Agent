@@ -207,6 +207,12 @@ async def _catalog_check(entry: dict) -> tuple:
         elif provider_name == "openai":
             ids = await _openai_catalog()
             candidates = [i for i in ids if "embedding" in i]
+        elif provider_name == "localstack":
+            # On-box members have no vendor catalog and never deprecate; the
+            # probe (run_health_check step 1) governs broken-ness. Present =
+            # "listed", never a successor — so an ollama-tags mismatch can't
+            # flag a healthy on-box model as superseded.
+            return True, None, None
         else:  # ollama — local models don't deprecate; just confirm presence
             return (model_id in await _ollama_tags()), None, None
     except Exception as e:  # noqa: BLE001 — any listing failure = skip, not dead
@@ -263,6 +269,16 @@ def _recent_gap_reason(slug: str, store, index_ids, newest_tail) -> "str | None"
 
 async def _pick_migration_target(active: str, successor_slug: "str | None") -> tuple:
     """(target_slug, why) per the broken-path precedence; (None, reasons)."""
+    # §6 invariant (correction [6]): a broken ON-BOX active model is NEVER
+    # health-switched. active.json is written ONLY by the wizard re-embed
+    # cutover; a crash/health switch off a 4096-dim on-box store to a
+    # dim-incompatible cloud/local store would fragment the corpus. Stay broken
+    # (loud banner) → vector-less mints + gap-heal on recovery.
+    if EMBEDDING_MODELS.get(active, {}).get("provider") == "localstack":
+        return None, (
+            "on-box embedding model is never auto-migrated — the wizard re-embed "
+            "cutover is the sole writer of active.json (§6 invariant)"
+        )
     try:
         tags = await _ollama_tags()
     except Exception:  # noqa: BLE001 — daemon unreachable = local not ready
@@ -270,6 +286,8 @@ async def _pick_migration_target(active: str, successor_slug: "str | None") -> t
 
     def ready(slug: str) -> bool:
         entry = EMBEDDING_MODELS[slug]
+        if entry["provider"] == "localstack":
+            return False  # §6: on-box is activated ONLY by the wizard cutover
         attr = _CLOUD_KEY_ATTRS.get(entry["provider"])
         if attr is not None:
             return bool(getattr(config, attr, ""))

@@ -932,3 +932,54 @@ async def test_watcher_task_cancel_is_not_an_error(monkeypatch, capsys):
     await asyncio.sleep(0)
 
     assert "[WATCHER] ERROR" not in capsys.readouterr().out
+
+
+# ── M3 correction [6]: on-box active model is NEVER health-switched ──────────
+import Orchestrator.embeddings.watcher as _watcher
+from Orchestrator.embeddings.store import get_store, set_active_slug
+
+
+@pytest.mark.asyncio
+async def test_localstack_active_never_auto_migrates(tmp_path, monkeypatch):
+    """A broken on-box active model must NOT pick any migration target — the
+    wizard re-embed cutover is the sole writer of active.json (§6). Even with a
+    complete, ready cloud store on disk, target is None (stay broken →
+    vector-less mints + gap-heal on recovery)."""
+    stores = tmp_path / "embeddings"
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores))
+    # a complete, ready gemini (3072-dim) store — the tempting cross-dim target
+    monkeypatch.setattr(_watcher.config, "GOOGLE_API_KEY", "present", raising=False)
+    gem = get_store("gemini-embedding-001", base_dir=stores)
+    gem.append("SNAP-20260101-1", [0.1] * 3072)
+    target, why = await _watcher._pick_migration_target(
+        "qwen3-embedding-8b-local", successor_slug=None
+    )
+    assert target is None
+    assert "on-box" in why or "§6" in why
+
+
+@pytest.mark.asyncio
+async def test_localstack_is_never_a_migration_target(tmp_path, monkeypatch):
+    """A broken CLOUD active model must never auto-activate the on-box stack
+    (opting the operator into an unchosen, possibly mid-swap on-box store)."""
+    stores = tmp_path / "embeddings"
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores))
+    loc = get_store("qwen3-embedding-8b-local", base_dir=stores)
+    loc.append("SNAP-20260101-1", [0.1] * 4096)
+    async def _no_tags():
+        return []
+    monkeypatch.setattr(_watcher, "_ollama_tags", _no_tags)
+    target, _ = await _watcher._pick_migration_target(
+        "gemini-embedding-001", successor_slug=None
+    )
+    assert target != "qwen3-embedding-8b-local"
+
+
+@pytest.mark.asyncio
+async def test_localstack_catalog_check_never_superseded(monkeypatch):
+    """Local members have no vendor catalog and never deprecate — listed=True,
+    no successor, so a healthy on-box active model can't be flagged superseded
+    by an ollama-tags mismatch."""
+    entry = EMBEDDING_MODELS["qwen3-embedding-8b-local"]
+    listed, successor, note = await _watcher._catalog_check(entry)
+    assert listed is True and successor is None
