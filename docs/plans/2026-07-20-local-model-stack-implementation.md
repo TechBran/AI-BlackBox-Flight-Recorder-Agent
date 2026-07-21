@@ -10,6 +10,19 @@
 
 **Read first:** the spec §4 config.yaml template, and §14 hardening log (refuted alarms — do not re-litigate them). **House rules:** never `git add -A` (stage explicit paths only); the tree must stay runnable at every commit (prod runs from the working tree); `config.ini`/`.env` are per-box — edit templates only, never the live per-box files; a restart of `blackbox.service` is pre-authorized.
 
+## Deployment & Test Topology — read before executing any task
+
+**The build→ship→test loop (topology pinned by Brandon 2026-07-20).** This plan is authored and staged on a no-GPU dev box, but every GPU-dependent step is verified on a separate GPU host. Read this before executing any task — it governs *where* each `Run:` line executes.
+
+- **Dev box (this PC, no GPU) — authoring + staging ONLY.** Write code, run all unit tests (models mocked), run the CPU-path checks, and commit here. This box never loads a real model and never runs local inference.
+- **Ship via GitHub.** `git push origin main` (github.com/TechBran/blackbox-poc, private). **git is the ONLY transport between the two boxes — never `scp`/`rsync` tree state.** Both boxes track the same `main`, so everything stays the same on both sides.
+- **MS02 Ultra is THE GPU test host.** Permanent SSH key auth: **`ssh bbx@192.168.1.153`** (LAN, **never** Tailscale), repo clone at **`/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main`**. All local inference needs the GPU this dev box lacks, so **every GPU-dependent verification step runs on MS02.** The loop is: **build + unit-test here → commit → push → `ssh` to MS02 → `git pull` → run the GPU step → iterate** (fix back on the dev box, push again, re-pull on MS02).
+- **Model weights / GGUFs are NEVER in git** (gitignored, multi-GB). Weights download **on MS02** via the wizard / `POST /local-models/download` endpoint, and the reranker GGUF conversion+quantize **runbook (Task 4.4) runs on MS02** (128GB RAM, 816GB disk, the GPU — and that is where the artifact must live).
+- **MS02's clone is reconciled on first deploy.** It currently sits ~12 days behind origin at `b8167dd` with local modifications — a modified `ToolVault/embeddings.json` (**never re-commit it** — house rule) and an untracked `config.ini.bak-pre-rerank` — cleaned up in the M10 pre-flight (Task 10.6) before the deploy fast-forward.
+- **Remote-step convention.** Run MS02 steps inside an `ssh bbx@192.168.1.153` session or as `ssh bbx@192.168.1.153 '<command>'` one-liners; read logs with `journalctl -u blackbox.service -f` **on MS02**.
+
+**Step marker convention — `[MS02]`.** A step or task whose `Run:` requires the GPU or the real model weights is tagged **[MS02]** at the start of its title (for a task, immediately after the `Task N.M:` label — e.g. `### Task 10.1: [MS02] …`) or at the start of its text (for a step). **Untagged steps run on the dev box.** A tagged step's `Run:` executes on MS02 (via `ssh bbx@192.168.1.153`, shown per-command); where a tagged step must briefly return to the dev box (edit → commit → push, then re-pull on MS02 — the git-only-transport half of the loop) the step text says "on the dev box" explicitly, and the presence/absence of the `ssh` prefix on each `Run:` line is authoritative per-command. **All of Milestone 10 is the MS02 Phase-2 runbook and is [MS02] throughout** — its harness-authoring tasks (10.1–10.5) are written and committed on the dev box, then *run* on MS02, so they carry the milestone's [MS02] tag.
+
 ## Milestone map
 
 | # | Title | Depends on | Tasks |
@@ -39,6 +52,7 @@
 - **M8** comes after M1–M5 (the wizard step surfaces their capabilities, fail-open before they all land).
 - **M9** is independent of the model stack and may land in parallel.
 - **M10** is last — the MS02 Phase-2 runbook and gate harnesses run once M1–M9 are code-complete and merged.
+- **Build→ship→test loop (see "Deployment & Test Topology" above).** M0–M9 are built and unit-tested on the dev box (models mocked), with `git push origin main` as each milestone lands; MS02 `git pull`s come into play wherever an **[MS02]** step appears (a GPU / real-weight verification), and **M10 runs entirely on MS02** (the Phase-2 runbook). git is the only transport for tree/working-tree state between the two boxes — never `scp`/`rsync` the tree (the one carve-out: read-only eval artifacts return via `scp`-then-commit-on-the-dev-box, as the six M10 gate steps already do).
 
 ---
 
@@ -1954,9 +1968,9 @@ The provisioner, modeled closely on `blackbox-install-reranker.sh` (arg conventi
    - Run: `grep -c FILL_ installer/templates/llamacpp-version`
    - Expected: `3` (two placeholder shas on the pin lines + one in the header remediation) — a reminder these must be filled at execution time on MS02.
 
-5. Manual verification (root/systemd — runs on MS02 during Phase 2, not in CI):
-   - Fill the two llama.cpp shas in `installer/templates/llamacpp-version` per its header, confirm the two asset filenames on the pinned release page (adjust `ASSET_CPU`/`ASSET_CUDA` if naming drifted).
-   - `sudo bash installer/templates/blackbox-install-localstack.sh bbx /home/bbx /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main`
+5. **[MS02]** Manual verification (root/systemd — exercises the real CUDA `llama-server` build; runs on MS02 during Phase 2, not in CI). The `.sh`/version-pin files are authored + committed on the dev box (steps 1–4) and pushed; this verification pulls them on MS02 and runs the installer there:
+   - On the dev box: fill the two llama.cpp shas in `installer/templates/llamacpp-version` per its header, confirm the two asset filenames on the pinned release page (adjust `ASSET_CPU`/`ASSET_CUDA` if naming drifted), commit, and `git push origin main`.
+   - On MS02 (`ssh bbx@192.168.1.153`, after `git pull`): `sudo bash installer/templates/blackbox-install-localstack.sh bbx /home/bbx /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main`
    - Expected: exits 0; `systemctl is-active blackbox-models.service` → `active`; `curl -s http://127.0.0.1:9098/health` answers; `ls ~/.blackbox/localstack/bin` shows `llama-swap` + `llama-server`; re-running is a no-op on the binaries (skip messages).
 
 6. Commit.
@@ -3958,12 +3972,12 @@ Bring the reranker on-box: add a `qwen3-reranker-8b-local` entry (provider `loca
 
 ---
 
-### Task 4.4: GGUF self-conversion runbook (pinned llama.cpp build)
+### Task 4.4: [MS02] GGUF self-conversion runbook (pinned llama.cpp build)
 
 **Files:**
 - Create: `LocalModels/reranker/CONVERT-QWEN3-RERANKER-GGUF.md`
 
-No automated test (operator runbook, executed on MS02). The commands are exact and the output filename MUST match the config template's member path (`${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-Q8_0.gguf`).
+No automated test (operator runbook, executed on MS02). The **`.md` file itself is authored and committed on the dev box (steps 1–2), then pushed; its conversion+quantize commands run on MS02** (`ssh bbx@192.168.1.153`) — the whole substance of this runbook is a `[MS02]` GPU/RAM procedure, hence the task tag. The commands are exact and the output filename MUST match the config template's member path (`${LOCALSTACK_MODELS}/Qwen3-Reranker-8B-Q8_0.gguf`).
 
 1. Create `LocalModels/reranker/CONVERT-QWEN3-RERANKER-GGUF.md` with this content:
 
@@ -6926,7 +6940,7 @@ the manual `smoke_gpu.py` on MS02 (see that file).
 
 ---
 
-### Task 6.9: Manual GPU smoke for MS02 (gate G3)
+### Task 6.9: [MS02] Manual GPU smoke for MS02 (gate G3)
 
 This is the MS02-only real-model validation feeding gate G3 (Qwen3-TTS RTF + first-packet latency + FREE-BEFORE-LOAD verification). It is NOT a CI test — it loads real checkpoints and needs the RTX 2000 Ada. It runs after the installer milestone has created the qwen venv + downloaded the three variant checkpoints on MS02.
 
@@ -11104,7 +11118,7 @@ Throughout, `$REPO` on MS02 is `/home/bbx/Desktop/blackbox-poc-main./blackbox-po
 
 ---
 
-### Task 10.1: Gate-harness infra — pure metrics helpers, VRAM sampler, VRAM-idle preflight
+### Task 10.1: [MS02] Gate-harness infra — pure metrics helpers, VRAM sampler, VRAM-idle preflight
 
 Pure, unit-tested helpers shared by G1/G3/G5, a live `nvidia-smi` sampler, and the "GPU near-idle before first retrieval activation" assertion. Authored and committed on this dev box (no GPU needed); MS02 receives them via the Task 10.7 `git pull`.
 
@@ -11340,7 +11354,7 @@ Pure, unit-tested helpers shared by G1/G3/G5, a live `nvidia-smi` sampler, and t
 
 ---
 
-### Task 10.2: G3 harness — Qwen3-TTS RTF + first-packet latency probe
+### Task 10.2: [MS02] G3 harness — Qwen3-TTS RTF + first-packet latency probe
 
 Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readback). Dev-box authoring; runs on MS02 in Task 10.10.
 
@@ -11440,7 +11454,7 @@ Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readb
 
 ---
 
-### Task 10.3: G4 harness — on-box vs gemma-box streaming-STT parity probe
+### Task 10.3: [MS02] G4 harness — on-box vs gemma-box streaming-STT parity probe
 
 **Files:**
 - Create: `diagnostics/localstack/stt_parity.py`
@@ -11539,7 +11553,7 @@ Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readb
 
 ---
 
-### Task 10.4: G5 harness — swap-cost probe (cross-group + intra-group embed↔rerank, D13)
+### Task 10.4: [MS02] G5 harness — swap-cost probe (cross-group + intra-group embed↔rerank, D13)
 
 **Files:**
 - Create: `diagnostics/localstack/swap_cost.py`
@@ -11653,7 +11667,7 @@ Author the G3 live probe (RTF, streaming first-packet, runtime sample-rate readb
 
 ---
 
-### Task 10.5: G6 harness — streaming-STT eviction-safety probe
+### Task 10.5: [MS02] G6 harness — streaming-STT eviction-safety probe
 
 Fires a retrieval/embedding request *while* a local voice stream is mid-utterance and asserts zero audio cut-off — the direct test of the Orchestrator serialization (D12).
 
@@ -11787,7 +11801,7 @@ Fires a retrieval/embedding request *while* a local voice stream is mid-utteranc
 
 ---
 
-### Task 10.6: MS02 pre-flight — reconcile git, retire the pinned pair, assert VRAM idle
+### Task 10.6: [MS02] MS02 pre-flight — reconcile git, retire the pinned pair, assert VRAM idle
 
 Non-destructive prep. Frees the GPU so the retrieval group can later load, and cleans MS02's stray tree so the deploy is a clean fast-forward. **No snapshots are wiped here** (that is Task 10.11).
 
@@ -11814,15 +11828,16 @@ Non-destructive prep. Frees the GPU so the retrieval group can later load, and c
 
 ---
 
-### Task 10.7: Deploy the stack in-place — git pull main + install.sh re-run + wizard weight downloads
+### Task 10.7: [MS02] Deploy the stack in-place — push (dev box) → pull (MS02) + install.sh re-run + wizard weight downloads
 
-Exercises the real customer update-in-place journey. **Nothing activates on install** (§8) — this only lays down `blackbox-models.service`, the binaries, and the wizard step; the four capabilities stay on their current providers until the deliberate cutover (Task 10.12).
+Exercises the real customer update-in-place journey. **Nothing activates on install** (§8) — this only lays down `blackbox-models.service`, the binaries, and the wizard step; the four capabilities stay on their current providers until the deliberate cutover (Task 10.12). **The deploy is push-then-pull — git is the only transport** (never `scp`/`rsync`): the dev box pushes every merged milestone + harness commit to `origin/main` FIRST, then MS02 fast-forwards by pulling. Both boxes end on the same `main`.
 
-**Files:** none (runbook; runs `Scripts/install.sh` + wizard on MS02).
+**Files:** none (runbook; `git push` on the dev box, then `Scripts/install.sh` + wizard on MS02).
 
-1. Fast-forward MS02 to `origin/main` (config/secrets are gitignored → survive):
-   - Run: `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && git fetch origin main && git reset --hard origin/main && git rev-parse --short HEAD'`
-   - Expected: HEAD now matches origin/main's tip (the Milestone 1–10 merge, incl. the six harnesses from Tasks 10.1–10.5).
+1. **Push from the dev box first, then fast-forward MS02** (config/secrets are gitignored → they survive on MS02):
+   - On the dev box: `git push origin main` — ensure every merged milestone (M1–M9) plus the Task 10.1–10.5 harness commits and any threshold recalibration are on `origin/main` before MS02 pulls. (Verify with `git log origin/main --oneline -5`.)
+   - On MS02 (`ssh bbx@192.168.1.153`): `ssh bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && git fetch origin main && git reset --hard origin/main && git rev-parse --short HEAD'`
+   - Expected: MS02's HEAD now matches `origin/main`'s tip (the Milestone 1–10 merge, incl. the six harnesses from Tasks 10.1–10.5).
 2. Re-run the installer (idempotent; Step 2f is self-gating and picks up the localstack templates):
    - Run: `ssh -t bbx@192.168.1.153 'cd /home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main && sudo bash Scripts/install.sh'`
    - Expected: install completes; Step 2f logs `llama-swap` + `llama-server` binary install, `xvfb`/`websockify`/`novnc` apt install, and `blackbox-models.service` written to `/etc/systemd/system/`. No weights downloaded (deferred to the wizard).
@@ -11838,7 +11853,7 @@ Exercises the real customer update-in-place journey. **Nothing activates on inst
 
 ---
 
-### Task 10.8: G1 — embedding quality (8B-Q8 vs gemini) + real VRAM + threshold recalibration
+### Task 10.8: [MS02] G1 — embedding quality (8B-Q8 vs gemini) + real VRAM + threshold recalibration
 
 **Runs on the still-present transplant corpus, BEFORE Step-0.** Builds the 8B-Q8 candidate store on MS02's GPU, benches it against the incumbent gemini baseline through the existing chunk-gate harness, measures the real Q8_0 steady-state + non-causal-compute-buffer peak VRAM, recalibrates the on-box slug thresholds, and writes the authoritative `chunk-gate` artifact.
 
@@ -11877,7 +11892,7 @@ Exercises the real customer update-in-place journey. **Nothing activates on inst
 
 ---
 
-### Task 10.9: G2 — Qwen3-Reranker-8B GGUF validity + latency + per-search swap overhead (D13)
+### Task 10.9: [MS02] G2 — Qwen3-Reranker-8B GGUF validity + latency + per-search swap overhead (D13)
 
 Runs the reranker validity harness delivered by Milestone 4 as a gate, on the **Qwen3-Reranker-8B @ Q8_0** GGUF (D13). **The harness itself is M4's deliverable** (`eval/rerank_g2.py`: score-validity vs HF reference + 40-passage once-loaded latency + the `--measure-swap` per-search intra-group embed→rerank swap-overhead measurement); this task only runs it, asserts the pass criteria, records the swap overhead (reported, not gated), and lands the result. If M4 named the harness differently, substitute M4's path here — the contract (below) is what gates.
 
@@ -11899,7 +11914,7 @@ Runs the reranker validity harness delivered by Milestone 4 as a gate, on the **
 
 ---
 
-### Task 10.10: G3 — Qwen3-TTS RTF + first-packet + variant-transition peak VRAM
+### Task 10.10: [MS02] G3 — Qwen3-TTS RTF + first-packet + variant-transition peak VRAM
 
 Runs the Task 10.2 probe on MS02 and measures the FREE-BEFORE-LOAD variant-transition peak. Confirms the §7 planning expectation (1.7B streaming near-certainly fails <0.9 RTF on the 2000 Ada → 0.6B-CustomVoice streaming default, 1.7B batch tier).
 
@@ -11921,7 +11936,7 @@ Runs the Task 10.2 probe on MS02 and measures the FREE-BEFORE-LOAD variant-trans
 
 ---
 
-### Task 10.11: Step-0 — destructive snapshot-only reset (executable checklist)
+### Task 10.11: [MS02] Step-0 — destructive snapshot-only reset (executable checklist)
 
 **Runs only after G1/G2/G3 have their numbers** (they needed the transplant corpus). Wipes ONLY the transplanted snapshot ledger + embedding stores per D8; every other identity/config artifact stays. **DESTRUCTIVE — no undo for the snapshot ledger.** The authoritative wipe list below was enumerated from the live `Manifest/` on the dev box (the transplant source).
 
@@ -11959,7 +11974,7 @@ Runs the Task 10.2 probe on MS02 and measures the FREE-BEFORE-LOAD variant-trans
 
 ---
 
-### Task 10.12: Wizard cutover — activate the four capabilities on-box (fresh corpus)
+### Task 10.12: [MS02] Wizard cutover — activate the four capabilities on-box (fresh corpus)
 
 Walk the new `local_models` wizard step on the existing install: the deliberate per-capability activation onto the empty-but-growing corpus. Embeddings cut over via re-embed (the sole writer of `active.json`); STT/TTS via the `[local_models]` precedence flags; rerank already flipped in G2.
 
@@ -11985,7 +12000,7 @@ Walk the new `local_models` wizard step on the existing install: the deliberate 
 
 ---
 
-### Task 10.13: G4 — on-box whisper streaming parity vs the gemma-box path
+### Task 10.13: [MS02] G4 — on-box whisper streaming parity vs the gemma-box path
 
 Compares first-partial + final-transcript latency and transcript quality for on-box Speaches vs the gemma-box custom-server Speaches, over an identical clip, plus a manual Portal + Fold mic-flow parity check (house rule for UI).
 
@@ -12009,7 +12024,7 @@ Compares first-partial + final-transcript latency and transcript quality for on-
 
 ---
 
-### Task 10.14: G5 — swap cost: cross-group (both directions, warm + cold) + intra-group embed↔rerank (D13)
+### Task 10.14: [MS02] G5 — swap cost: cross-group (both directions, warm + cold) + intra-group embed↔rerank (D13)
 
 Measures TWO swaps now: (a) the **cross-group** audio↔retrieval evict+load first-interaction stall (expected ~6–10s, dominated by the 8B embedder cold-load; keep-warm gives zero cross-group relief); and (b) the **intra-group** embed↔rerank swap that D13's sequential retrieval group adds to EVERY search (expected ~6–12s — the embedder is evicted and the 8B reranker cold-loads to score). Brandon signs off on both stalls (Q12/D9) or the design shifts to a hybrid.
 
@@ -12032,7 +12047,7 @@ Measures TWO swaps now: (a) the **cross-group** audio↔retrieval evict+load fir
 
 ---
 
-### Task 10.15: G6 — streaming-STT eviction safety (Design B + Orchestrator serialization)
+### Task 10.15: [MS02] G6 — streaming-STT eviction safety (Design B + Orchestrator serialization)
 
 Fires a retrieval/embedding request while a voice stream is mid-utterance and asserts zero audio cut-off. This is the direct test that the Orchestrator holds retrieval-group dispatch while a local voice stream is open (D12).
 
@@ -12048,7 +12063,7 @@ Fires a retrieval/embedding request while a voice stream is mid-utterance and as
 
 ---
 
-### Task 10.16: Acceptance — end-to-end checklist on MS02 (§10 verbatim)
+### Task 10.16: [MS02] Acceptance — end-to-end checklist on MS02 (§10 verbatim)
 
 Walk the design's acceptance checklist verbatim. Each item is a live check on the cutover box.
 
@@ -12080,7 +12095,7 @@ Walk the design's acceptance checklist verbatim. Each item is a live check on th
 
 ---
 
-### Task 10.17: Rollback runbook — per-capability revert paths
+### Task 10.17: [MS02] Rollback runbook — per-capability revert paths
 
 Documented, tested rollback for each capability if a gate regresses in production. **The embeddings carve-out is different from the other three** (§6 invariant): reverting embeddings is a *re-embed*, never a flag flip. Keep this task's steps in the plan even though they run only on failure.
 
