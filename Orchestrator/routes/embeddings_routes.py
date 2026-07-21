@@ -221,6 +221,28 @@ def _model_preflight(
             return True, [], None
         return False, [remediation], None
 
+    if provider == "localstack":
+        # On-box models are served by llama-swap (:9098), NOT Ollama — they must
+        # never fall through to the Ollama install/start/pull blockers,
+        # ollama_io.ram_preflight, or the GPU/CPU placement advisory below. The
+        # on-box device is install-fixed by hardware tier (CPU-tier boxes get the
+        # 0.6B member, GPU-tier the 8B), so there is NO runtime placement toggle:
+        # recommended_placement is None (mirrors the cloud path, and matches the
+        # `models[].placement`/keep_alive nulls the status route emits while
+        # `is_local` stays provider=="ollama").
+        #
+        # Registry-only interim (Task 3.1): the localstack provider (3.2),
+        # keep-warm ttl (3.3/3.4), and the full install/health/download preflight
+        # via Orchestrator.local_stack (3.5) do not exist yet, so an on-box slug
+        # is registered but not selectable. Report it as not-ready with a wizard
+        # pointer rather than falsely ready or with wrong Ollama remediation.
+        # Task 3.5 replaces this branch with granular
+        # is_installed/is_healthy/model_downloaded blockers.
+        return False, [
+            "On-box model stack setup is not complete — finish it in the "
+            "onboarding wizard"
+        ], None
+
     blockers: list[str] = []
     if not ollama["running"]:
         if ollama["installed"]:
