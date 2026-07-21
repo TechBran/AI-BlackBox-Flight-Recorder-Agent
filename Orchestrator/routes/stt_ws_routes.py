@@ -13,6 +13,7 @@ clients. The client contract is provider-agnostic:
           {"type":"stt_final","text":...,"target":...}
           {"type":"stt_error","message":...}
           {"type":"stt_done"}                  (terminal — ALWAYS the last frame)
+          {"type":"stt_status","state":"loading_models"}   (onbox warm affordance, additive)
 
 stt_delta.text is the CUMULATIVE interim transcript so far (client replaces the
 interim region); stt_final.text is the full final (client commits).
@@ -65,7 +66,7 @@ from Orchestrator import config
 from Orchestrator.elevenlabs.client import (
     resolve_api_key, WS_BASE_URL, auth_headers, map_error, classify_realtime_frame,
 )
-from Orchestrator.stt.resolve import resolve_stt_provider, local_streaming_stt_available
+from Orchestrator.stt.resolve import resolve_stt_provider, local_streaming_stt_available, onbox_stt_available
 from Orchestrator.stt.streaming import (
     map_openai_event, map_google_result, InterimAccumulator, join_transcript_segments,
 )
@@ -125,7 +126,8 @@ async def ws_stt(websocket: WebSocket):
         # realtime (/v1/realtime) capability; otherwise local stays file-only and
         # must not win STREAMING resolution.
         provider = resolve_stt_provider(start.get("provider"),
-                                        local_ok=local_streaming_stt_available())
+                                        local_ok=local_streaming_stt_available(),
+                                        onbox_ok=onbox_stt_available())
         if not provider:
             await websocket.send_json({"type": "stt_error", "message": "no STT provider configured"})
             return
@@ -167,6 +169,8 @@ async def run_stt_bridge(websocket: WebSocket, provider: str, start: dict):
         await _elevenlabs_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     elif provider == "openai":
         await _openai_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
+    elif provider == "onbox":
+        await _onbox_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     elif provider == "local":
         await _local_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     else:
@@ -514,6 +518,182 @@ async def _local_bridge(websocket: WebSocket, *, target, lang, sample_rate):
             await local_ws.close()
         except Exception:
             pass
+
+
+# =============================================================================
+# On-box (Design B) streaming STT — direct-to-:9099 Speaches with a D10 warm
+# affordance and D12 voice-session serialization.
+# =============================================================================
+
+# D10: generous ceiling on warming the audio group before an honest error;
+# NEVER a silent provider switch (§5.3 / D10).
+_ONBOX_WARM_CEILING_S = 30.0
+_ONBOX_WARM_POLL_S = 1.0
+
+
+def _probe_speaches_health_sync(url: str) -> bool:
+    """Blocking one-shot health GET (run in an executor). 200 = ready; a 429
+    (concurrency), 5xx, or connection error = not ready yet. requests imported
+    lazily so this module stays websockets-only at import time."""
+    try:
+        import requests
+        r = requests.get(url, timeout=5)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _probe_speaches_health(url: str) -> bool:
+    """Async wrapper so tests can monkeypatch a single awaitable; runs the
+    blocking GET off the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _probe_speaches_health_sync, url)
+
+
+async def _warm_audio_group(websocket: WebSocket) -> bool:
+    """D10 affordance: emit stt_status {state:'loading_models'} then warm the
+    on-box audio group by GETting llama-swap's /upstream/speaches/health (:9098)
+    until healthy. Returns True once warm; False if the ~30s ceiling passes (the
+    caller then sends an honest stt_error — NEVER a silent provider switch). A
+    busy (429) or not-yet-ready probe just keeps the affordance up until the
+    ceiling (realtime 429 contract, correction [28])."""
+    from Orchestrator import local_stack
+    await websocket.send_json({"type": "stt_status", "state": "loading_models"})
+    url = local_stack.speaches_warm_url()
+    deadline = time.monotonic() + _ONBOX_WARM_CEILING_S
+    while time.monotonic() < deadline:
+        if await _probe_speaches_health(url):
+            return True
+        await asyncio.sleep(_ONBOX_WARM_POLL_S)
+    print(f"[STT/WS] onbox warm ceiling ({_ONBOX_WARM_CEILING_S}s) exceeded — honest stt_error")
+    return False
+
+
+async def _relay_realtime(websocket: WebSocket, upstream_ws, *, target, sample_rate, label):
+    """Shared Speaches /v1/realtime relay body (cloned from _local_bridge): client
+    PCM -> resample-to-24k -> upstream; per-utterance finals -> client; ~0.7s
+    trailing-silence stop; hallucination filter; drain-for-final with a 5s
+    backstop. `label` tags the log/error lines ('onbox')."""
+    stop_evt = asyncio.Event()
+    stop_ts = {"v": None}
+
+    async def client_to_upstream():
+        while True:
+            msg = await websocket.receive_json()
+            mtype = msg.get("type")
+            if mtype == "stt_audio":
+                pcm_b64 = msg.get("pcm", "")
+                if pcm_b64:
+                    raw = _resample_pcm16(base64.b64decode(pcm_b64), sample_rate, 24000)
+                    await upstream_ws.send(json.dumps({
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(raw).decode(),
+                    }))
+            elif mtype == "stt_stop":
+                # Server-VAD auto-commits on a pause; feed ~0.7s trailing silence
+                # to trigger the final-utterance cut (an explicit commit races the
+                # socket close, per _local_bridge).
+                silence = base64.b64encode(b"\x00\x00" * int(24000 * 0.7)).decode()
+                await upstream_ws.send(json.dumps({
+                    "type": "input_audio_buffer.append", "audio": silence}))
+                stop_ts["v"] = time.monotonic()
+                stop_evt.set()
+                return
+
+    async def upstream_to_client():
+        try:
+            async for raw in upstream_ws:
+                try:
+                    event = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                etype = event.get("type", "")
+                if "error" in etype:
+                    detail = (event.get("error") or {}).get("message") or json.dumps(event)[:300]
+                    print(f"[STT/WS] {label} ERROR event: {json.dumps(event)[:500]}")
+                    try:
+                        await websocket.send_json({"type": "stt_error", "message": f"{label}: {detail}"})
+                    except Exception:
+                        pass
+                    continue
+                if etype != "conversation.item.input_audio_transcription.completed":
+                    continue  # lifecycle events -- server emits finals only
+                text = (event.get("transcript") or "").strip()
+                if is_whisper_hallucination(text):
+                    if stop_evt.is_set():
+                        await _send_final(websocket, label,
+                                          {"type": "stt_final", "text": "", "target": target}, stop_ts)
+                        return
+                    continue
+                await _send_final(websocket, label,
+                                  {"type": "stt_final", "text": text, "target": target}, stop_ts)
+                if stop_evt.is_set():
+                    return
+        except websockets.ConnectionClosed:
+            return
+
+    pump = asyncio.ensure_future(client_to_upstream())
+    relay = asyncio.ensure_future(upstream_to_client())
+    try:
+        done, _pending = await asyncio.wait({pump, relay}, return_when=asyncio.FIRST_COMPLETED)
+        if pump in done and relay not in done:
+            try:
+                await asyncio.wait_for(relay, timeout=5.0)
+            except asyncio.TimeoutError:
+                relay.cancel()
+                try:
+                    await relay
+                except (asyncio.CancelledError, WebSocketDisconnect):
+                    pass
+                except Exception:
+                    pass
+        elif relay in done:
+            pump.cancel()
+            try:
+                await pump
+            except (asyncio.CancelledError, WebSocketDisconnect):
+                pass
+            except Exception:
+                pass
+        for t in (pump, relay):
+            if t.done() and not t.cancelled():
+                exc = t.exception()
+                if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                    raise exc
+    finally:
+        for t in (pump, relay):
+            if not t.done():
+                t.cancel()
+
+
+async def _onbox_bridge(websocket: WebSocket, *, target, lang, sample_rate):
+    """On-box Design-B streaming STT bridge. Warms the audio group through the
+    llama-swap :9098 /upstream passthrough (with the D10 loading affordance),
+    then connects DIRECT to the pinned Speaches :9099/v1/realtime for near-real-
+    time latency. The whole stream runs inside local_stack.voice_session() so
+    retrieval-group dispatch serializes behind it (D12). NEVER falls back to a
+    cloud provider — an unmet warm ceiling is an honest stt_error."""
+    from Orchestrator import local_stack
+    async with local_stack.voice_session():
+        if not await _warm_audio_group(websocket):
+            await websocket.send_json({"type": "stt_error",
+                                       "message": "on-box STT models still loading — please retry"})
+            return
+        model = local_stack.stt_stream_model()
+        ws_url = local_stack.speaches_realtime_ws_url(model)
+        upstream_ws = await websockets.connect(
+            ws_url, open_timeout=10, ping_interval=20, ping_timeout=30,
+            close_timeout=10, max_size=None,
+        )
+        try:
+            print(f"[STT/WS] onbox connected model={model} rate={sample_rate}->24000 url={ws_url}")
+            await _relay_realtime(websocket, upstream_ws,
+                                  target=target, sample_rate=sample_rate, label="onbox")
+        finally:
+            try:
+                await upstream_ws.close()
+            except Exception:
+                pass
 
 
 async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate):
