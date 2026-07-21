@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+soundfile
+numpy
+torch
+transformers
+# Qwen3-TTS streaming fork (kunzite-app/Qwen3-TTS-streaming) providing
+# stream_generate_pcm() (§5.4). Pinned to a specific commit at install time;
+# the exact call signatures are confirmed on MS02 during G3 (Task 6.9).
