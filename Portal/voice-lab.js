@@ -191,6 +191,45 @@ function ensureModal() {
               <div id="vlabXaiList" class="vlab-my-list"></div>
             </section>
 
+            <!-- ── Zone 5: Qwen3-TTS (On-Box) — hidden until /local-models/status healthy ── -->
+            <section class="vlab-zone" id="vlabQwenZone" hidden>
+              <h4 class="vlab-zone-title">Qwen3-TTS (On-Box)</h4>
+              <p class="vlab-zone-hint">Clone a voice from ~3s of clear speech, or design one from a
+                description — all on your box, no API key. On-box streaming uses the 0.6B voice tier for
+                low latency; the 1.7B voices are used for batch/file quality.</p>
+
+              <!-- Clone -->
+              <div class="vlab-method-label">Clone a voice</div>
+              <input id="vlabQwenFile" class="vlab-file-input" type="file"
+                     accept="audio/wav,audio/mpeg,audio/mp3,audio/x-m4a,audio/mp4,audio/webm,.wav,.mp3,.m4a,.webm" />
+              <input id="vlabQwenCloneName" class="vlab-input" type="text" placeholder="Name this voice" autocomplete="off" />
+              <label class="vlab-consent">
+                <input id="vlabQwenConsent" type="checkbox" />
+                <span>I confirm I own this voice or have permission to clone it.</span>
+              </label>
+              <div class="vlab-row vlab-row-end">
+                <button id="vlabQwenCloneBtn" class="vlab-btn vlab-btn-accent" type="button" disabled>Clone voice</button>
+              </div>
+
+              <!-- Design -->
+              <div class="vlab-method-label">Design a voice from text</div>
+              <textarea id="vlabQwenDesignDesc" class="vlab-input vlab-textarea"
+                        placeholder="e.g. a gravelly old sea captain, weathered and warm" rows="2"></textarea>
+              <div class="vlab-row vlab-row-end">
+                <button id="vlabQwenDesignGenBtn" class="vlab-btn vlab-btn-accent" type="button">Generate previews</button>
+              </div>
+              <div id="vlabQwenDesignPreviews" class="vlab-previews"></div>
+              <div id="vlabQwenDesignSaveRow" class="vlab-save-row" hidden>
+                <input id="vlabQwenDesignName" class="vlab-input" type="text" placeholder="Name this voice" autocomplete="off" />
+                <button id="vlabQwenDesignSaveBtn" class="vlab-btn vlab-btn-accent" type="button">Save voice</button>
+              </div>
+
+              <!-- Manage -->
+              <div class="vlab-method-label">My on-box voices</div>
+              <div id="vlabQwenStatus" class="vlab-status"></div>
+              <div id="vlabQwenList" class="vlab-my-list"></div>
+            </section>
+
             <p class="vlab-foot-hint">Previews play one at a time. Cloning/designing adds a voice to
               your account (your plan has a voice limit) and it appears in the TTS picker.</p>
           </div>
@@ -211,6 +250,14 @@ function ensureModal() {
     modal.querySelector('#vlabXaiName').addEventListener('input', refreshXaiCloneButton);
     modal.querySelector('#vlabXaiConsent').addEventListener('change', refreshXaiCloneButton);
     modal.querySelector('#vlabXaiCloneBtn').addEventListener('click', submitXaiClone);
+
+    // ── Qwen (on-box) zone wiring (static; gate/list refreshed per-open) ──
+    modal.querySelector('#vlabQwenFile').addEventListener('change', refreshQwenCloneButton);
+    modal.querySelector('#vlabQwenCloneName').addEventListener('input', refreshQwenCloneButton);
+    modal.querySelector('#vlabQwenConsent').addEventListener('change', refreshQwenCloneButton);
+    modal.querySelector('#vlabQwenCloneBtn').addEventListener('click', submitQwenClone);
+    modal.querySelector('#vlabQwenDesignGenBtn').addEventListener('click', runQwenDesign);
+    modal.querySelector('#vlabQwenDesignSaveBtn').addEventListener('click', saveQwenDesign);
 
     return modal;
 }
@@ -777,6 +824,228 @@ async function deleteXaiVoice(voiceId, name, btn) {
 }
 
 // =============================================================================
+// Zone 5 — Qwen3-TTS (On-Box): clone (consent) / design (preview→save) / manage.
+// Gated on GET /local-models/status healthy (no API key). Mirrors the ElevenLabs
+// zones; refreshes populateVoiceCatalog() after every mutation.
+// =============================================================================
+let qwenSelectedPreviewId = null;
+
+/** Is the on-box TTS capability available? (defensive across M1 shapes.) */
+async function qwenTabAvailable() {
+    try {
+        const res = await fetch('/local-models/status');
+        if (!res.ok) return false;
+        const s = await res.json();
+        return !!(s && (s.healthy === true || s.status === 'healthy'
+                 || (s.capabilities && s.capabilities.tts && s.capabilities.tts.enabled)));
+    } catch { return false; }
+}
+
+function refreshQwenCloneButton() {
+    const btn = document.getElementById('vlabQwenCloneBtn');
+    if (!btn) return;
+    const name = (document.getElementById('vlabQwenCloneName')?.value || '').trim();
+    const consent = !!document.getElementById('vlabQwenConsent')?.checked;
+    const hasFile = !!(document.getElementById('vlabQwenFile')?.files || []).length;
+    btn.disabled = !(name && consent && hasFile);
+}
+
+async function submitQwenClone() {
+    const btn = document.getElementById('vlabQwenCloneBtn');
+    if (!btn || btn.disabled) return;
+    const name = (document.getElementById('vlabQwenCloneName').value || '').trim();
+    const file = document.getElementById('vlabQwenFile').files[0];
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('consent', 'true');
+    fd.append('files', file, file.name);
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'Cloning…';
+    try {
+        const res = await fetch('/qwen/voices/clone', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            toastError(`Clone failed: ${(data && data.detail) ? data.detail : 'HTTP ' + res.status}`);
+            btn.disabled = false; btn.textContent = orig; return;
+        }
+        toastSuccess(`Cloned "${name}"`);
+        document.getElementById('vlabQwenCloneName').value = '';
+        document.getElementById('vlabQwenFile').value = '';
+        document.getElementById('vlabQwenConsent').checked = false;
+        btn.textContent = orig;
+        const newId = data.voice_id ? `qwen:${data.voice_id}` : null;
+        await Promise.all([loadQwenVoices(), populateVoiceCatalog(newId)]);
+    } catch (err) {
+        toastError(`Clone failed: ${err.message}`);
+        btn.disabled = false; btn.textContent = orig;
+    }
+}
+
+async function runQwenDesign() {
+    const desc = (document.getElementById('vlabQwenDesignDesc').value || '').trim();
+    if (!desc) { toastError('Describe the voice you want first'); return; }
+    const genBtn = document.getElementById('vlabQwenDesignGenBtn');
+    const previewsEl = document.getElementById('vlabQwenDesignPreviews');
+    const saveRow = document.getElementById('vlabQwenDesignSaveRow');
+    stopPreview();
+    qwenSelectedPreviewId = null;
+    saveRow.hidden = true;
+    previewsEl.innerHTML = '<div class="vlab-status">Generating previews…</div>';
+    genBtn.disabled = true;
+    const genOrig = genBtn.textContent;
+    genBtn.textContent = 'Generating…';
+    try {
+        const res = await fetch('/qwen/voices/design', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ voice_description: desc }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            previewsEl.innerHTML = `<div class="vlab-status">Design failed: ${escapeHtml((data && data.detail) || ('HTTP ' + res.status))}</div>`;
+            return;
+        }
+        renderQwenDesignPreviews(data.previews || [], previewsEl);
+    } catch (err) {
+        previewsEl.innerHTML = `<div class="vlab-status">Design failed: ${escapeHtml(err.message)}</div>`;
+    } finally {
+        genBtn.disabled = false;
+        genBtn.textContent = genOrig;
+    }
+}
+
+function renderQwenDesignPreviews(previews, container) {
+    if (!previews.length) {
+        container.innerHTML = '<div class="vlab-status">No previews returned. Try a different description.</div>';
+        return;
+    }
+    container.innerHTML = '';
+    previews.forEach((p, i) => {
+        // M6 /v1/voices/design returns previews as {generated_voice_id, audio_b64,
+        // sample_rate} — build the playable data: URL from the base64 WAV here (the
+        // member is loopback-only, so a data: URL is what the browser can play).
+        // `audio_url` kept as a defensive fallback if the contract ever emits one.
+        const audioUrl = p.audio_url
+            || (p.audio_b64 ? `data:audio/wav;base64,${p.audio_b64}` : null);
+        const card = document.createElement('div');
+        card.className = 'vlab-preview-card';
+        card.innerHTML = `
+            <button class="vlab-preview-btn" type="button" title="Play preview" ${audioUrl ? '' : 'disabled'}>▶</button>
+            <div class="vlab-preview-meta"><div class="vlab-preview-name">Option ${i + 1}</div></div>
+            <button class="vlab-btn vlab-use-btn" type="button">Use this one</button>`;
+        const playBtn = card.querySelector('.vlab-preview-btn');
+        const useBtn = card.querySelector('.vlab-use-btn');
+        if (audioUrl) playBtn.addEventListener('click', () => togglePreview(audioUrl, playBtn));
+        useBtn.addEventListener('click', () => {
+            qwenSelectedPreviewId = p.generated_voice_id;
+            container.querySelectorAll('.vlab-preview-card').forEach(c => c.classList.remove('selected'));
+            card.classList.add('selected');
+            container.querySelectorAll('.vlab-use-btn').forEach(b => { b.textContent = 'Use this one'; });
+            useBtn.textContent = '✓ Selected';
+            const saveRow = document.getElementById('vlabQwenDesignSaveRow');
+            saveRow.hidden = false;
+            const nameInput = document.getElementById('vlabQwenDesignName');
+            if (nameInput && !nameInput.value.trim()) {
+                nameInput.value = (document.getElementById('vlabQwenDesignDesc').value || '').trim().slice(0, 40);
+            }
+            nameInput?.focus();
+        });
+        container.appendChild(card);
+    });
+}
+
+async function saveQwenDesign() {
+    if (!qwenSelectedPreviewId) { toastError('Pick a preview with "Use this one" first'); return; }
+    const name = (document.getElementById('vlabQwenDesignName').value || '').trim();
+    if (!name) { toastError('Name the voice before saving'); return; }
+    const btn = document.getElementById('vlabQwenDesignSaveBtn');
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'Saving…';
+    try {
+        const res = await fetch('/qwen/voices/design/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ generated_voice_id: qwenSelectedPreviewId, name }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            toastError(`Save failed: ${(data && data.detail) ? data.detail : 'HTTP ' + res.status}`);
+            btn.disabled = false; btn.textContent = orig; return;
+        }
+        toastSuccess(`Saved "${name}"`);
+        stopPreview();
+        qwenSelectedPreviewId = null;
+        document.getElementById('vlabQwenDesignSaveRow').hidden = true;
+        document.getElementById('vlabQwenDesignPreviews').innerHTML = '';
+        document.getElementById('vlabQwenDesignDesc').value = '';
+        document.getElementById('vlabQwenDesignName').value = '';
+        btn.disabled = false; btn.textContent = orig;
+        const newId = data.voice_id ? `qwen:${data.voice_id}` : null;
+        await Promise.all([loadQwenVoices(), populateVoiceCatalog(newId)]);
+    } catch (err) {
+        toastError(`Save failed: ${err.message}`);
+        btn.disabled = false; btn.textContent = orig;
+    }
+}
+
+async function loadQwenVoices() {
+    const listEl = document.getElementById('vlabQwenList');
+    const statusEl = document.getElementById('vlabQwenStatus');
+    if (!listEl) return;
+    stopPreview();
+    if (statusEl) statusEl.textContent = 'Loading…';
+    listEl.innerHTML = '';
+    try {
+        const res = await fetch('/qwen/voices');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const mine = data.voices || [];
+        if (statusEl) statusEl.textContent = mine.length ? `${mine.length} on-box voice${mine.length === 1 ? '' : 's'}` : '';
+        if (!mine.length) {
+            listEl.innerHTML = '<div class="vlab-empty">No on-box voices yet. Clone or design one above.</div>';
+            return;
+        }
+        for (const v of mine) {
+            const row = document.createElement('div');
+            row.className = 'vlab-voice-row';
+            row.innerHTML = `
+                <div class="vlab-voice-main">
+                  <div class="vlab-voice-name">${escapeHtml(v.name || v.slug)}</div>
+                  <div class="vlab-voice-desc">${escapeHtml(v.variant || '')}</div>
+                </div>
+                <button class="vlab-btn vlab-delete-btn" type="button">Delete</button>`;
+            row.querySelector('.vlab-delete-btn').addEventListener('click',
+                (e) => deleteQwenVoice(v.slug, v.name, e.currentTarget));
+            listEl.appendChild(row);
+        }
+    } catch (err) {
+        if (statusEl) statusEl.textContent = '';
+        listEl.innerHTML = `<div class="vlab-empty">Failed to load voices: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+async function deleteQwenVoice(slug, name, btn) {
+    if (btn.disabled) return;
+    if (!window.confirm(`Delete on-box voice "${name || slug}"? This cannot be undone.`)) return;
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/qwen/voices/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+            toastError(`Delete failed: ${(data && data.detail) ? data.detail : 'HTTP ' + res.status}`);
+            btn.disabled = false; return;
+        }
+        toastSuccess(`Deleted "${name || slug}"`);
+        await Promise.all([loadQwenVoices(), populateVoiceCatalog()]);
+    } catch (err) {
+        toastError(`Delete failed: ${err.message}`);
+        btn.disabled = false;
+    }
+}
+
+// =============================================================================
 // Open / close
 // =============================================================================
 
@@ -796,13 +1065,31 @@ export async function openVoiceLab() {
             canClone = !!(s && s.features && s.features.instant_voice_cloning);
         }
     } catch { /* keep canClone=false -> upgrade explainer */ }
-    renderCloneZone(canClone);
 
-    // Load the account's voices for the manage zone.
-    loadMyVoices();
+    // ElevenLabs zones (clone/design/manage) only make sense with a key —
+    // hide all three on a Qwen-only box so the modal isn't full of 400s.
+    const elevenOk = canClone || false;   // canClone already implies a working key
+    const elevenConfigured = await (async () => {
+        try {
+            const r = await fetch('/elevenlabs/status');
+            return r.ok ? !!(await r.json()).configured : false;
+        } catch { return false; }
+    })();
+    document.getElementById('vlabCloneZone').hidden = !elevenConfigured;
+    document.getElementById('vlabDesignZone').hidden = !elevenConfigured;
+    document.getElementById('vlabManageZone').hidden = !elevenConfigured;
+    if (elevenConfigured) {
+        renderCloneZone(canClone);
+        loadMyVoices();
+    }
 
     // Gate + load the Grok (xAI) zone — hidden when no XAI key.
     loadXaiVoices();
+
+    // Gate + load the on-box Qwen zone — hidden unless the local stack is healthy.
+    const qwenOk = await qwenTabAvailable();
+    document.getElementById('vlabQwenZone').hidden = !qwenOk;
+    if (qwenOk) loadQwenVoices();
 }
 
 export function closeVoiceLab() {
