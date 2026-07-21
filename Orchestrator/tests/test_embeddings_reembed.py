@@ -350,3 +350,26 @@ def test_route_reembed_409_is_side_effect_free(env, fake_provider, app):
         assert client.post("/embeddings/reembed", json={"target": TARGET}).status_code == 409
     assert (cand / "in_progress.sentinel").exists()      # NOT wiped by the 409
     migrate._finish_job("cancelled")
+
+
+@pytest.mark.asyncio
+async def test_reembed_cutover_busts_toolvault_caches(env, fake_provider, monkeypatch):
+    """Correction [27]: after the re-embed cutover flips active.json, the
+    registry-derived ToolVault tool-list caches are invalidated so tool
+    selection reflects the just-activated model."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=2)
+    calls = {"invalidate": 0, "reset": 0}
+    from Orchestrator.toolvault import registry as tv_registry
+    from Orchestrator.tools import tool_registry
+    monkeypatch.setattr(
+        tv_registry, "invalidate_cache",
+        lambda *a, **k: calls.__setitem__("invalidate", calls["invalidate"] + 1),
+    )
+    monkeypatch.setattr(
+        tool_registry, "reset_cache",
+        lambda *a, **k: calls.__setitem__("reset", calls["reset"] + 1),
+    )
+    await migrate.run_migration(TARGET)                     # model-switch cutover
+    assert get_active_slug(base_dir=stores_dir) == TARGET   # cutover happened
+    assert calls["invalidate"] == 1 and calls["reset"] == 1  # caches busted once

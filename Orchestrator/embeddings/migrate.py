@@ -754,6 +754,14 @@ async def _run_engine(target_slug: str) -> dict:
             except Exception as e:  # noqa: BLE001 — cutover must not fail on toolvault
                 print(f"[MIGRATE] toolvault cutover hook raised (non-fatal): {e}")
 
+        # Correction [27]: bust the registry-derived ToolVault tool-list caches
+        # so tool selection reflects the just-activated model. Non-fatal — the
+        # cutover must NEVER fail on ToolVault.
+        try:
+            _toolvault_reload_after_cutover()
+        except Exception as e:  # noqa: BLE001 — cutover must not fail on toolvault
+            print(f"[MIGRATE] post-cutover toolvault reload failed (non-fatal): {e}")
+
         raced = sorted(target.ids() - preexisting_ids - job_appended)
         if raced:
             print(
@@ -1193,3 +1201,18 @@ def _toolvault_cutover_hook(target_slug: str) -> "threading.Thread | None":
     except Exception as e:  # noqa: BLE001
         print(f"[MIGRATE] could not launch toolvault re-embed (non-fatal): {e}")
         return None
+
+
+def _toolvault_reload_after_cutover() -> None:
+    """Correction [27]: after active.json flips, clear the registry +
+    tool_registry snapshot caches so registry-derived tool lists reflect the
+    new active model. ToolVault/embeddings.json dim coherence is already handled
+    inline by the precompute→set_active_slug→promote sequence above (and this
+    box has no separate code_embeddings.json cache), so the embeddings re-sync
+    that /toolvault/reload also runs is intentionally omitted here — after
+    promote it is a hash-keyed no-op and would race the fallback re-embed hook.
+    Imported lazily: toolvault imports migrate at load (import-cycle guard)."""
+    from Orchestrator.toolvault import registry as tv_registry  # lazy
+    from Orchestrator.tools import tool_registry                # lazy
+    tv_registry.invalidate_cache()
+    tool_registry.reset_cache()
