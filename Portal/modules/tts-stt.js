@@ -925,35 +925,45 @@ export async function generateTTSAudio(text) {
 export async function generateTTSAudioWithVoice(text, voiceConfig) {
     const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
-    // OpenAI, ElevenLabs, AND local (custom-server Kokoro) are single-call /tts
-    // providers (audio stream). Gemini falls through to the task-queue path below.
+    // OpenAI, ElevenLabs, local (custom-server Kokoro), AND on-box Qwen are
+    // single-call /tts providers (audio stream). Gemini falls through below.
     if (voiceConfig.provider === "openai" || voiceConfig.provider === "elevenlabs"
-        || voiceConfig.provider === "local") {
+        || voiceConfig.provider === "local" || voiceConfig.provider === "qwen") {
         const isEleven = voiceConfig.provider === "elevenlabs";
         const isLocal = voiceConfig.provider === "local";
-        const r = await fetch("/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                text: text,
-                // ElevenLabs/local: no OpenAI model; backend resolves the model.
-                ...(isEleven || isLocal ? {} : { model: TTS_MODEL }),
-                provider: voiceConfig.provider,
-                // Preserve the provider prefix so the backend detects the provider
-                // (elevenlabs: / local: both trigger their branch before OpenAI).
-                voice: isEleven ? `elevenlabs:${voiceConfig.voice}`
-                     : isLocal ? `local:${voiceConfig.voice}`
-                     : voiceConfig.voice,
-                format: TTS_FMT
-            })
-        });
-
-        if (r.ok) {
-            const blob = await r.blob();
-            return URL.createObjectURL(blob);
+        const isQwen = voiceConfig.provider === "qwen";
+        // D10 affordance: an on-box request may be queued behind a GPU group
+        // swap (~6-10s cold). If the first byte is slow, tell the user we're
+        // loading models rather than leaving a dead button. Cleared on return.
+        let slowTimer = null;
+        if (isQwen) slowTimer = setTimeout(() => toast("Loading on-box voice models…"), 1500);
+        try {
+            const r = await fetch("/tts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    text: text,
+                    // ElevenLabs/local/qwen: no OpenAI model; backend resolves it.
+                    ...(isEleven || isLocal || isQwen ? {} : { model: TTS_MODEL }),
+                    provider: voiceConfig.provider,
+                    // Preserve the provider prefix so the backend detects the
+                    // provider (elevenlabs:/local:/qwen: each trigger their branch).
+                    voice: isEleven ? `elevenlabs:${voiceConfig.voice}`
+                         : isLocal ? `local:${voiceConfig.voice}`
+                         : isQwen ? `qwen:${voiceConfig.voice}`
+                         : voiceConfig.voice,
+                    format: TTS_FMT
+                })
+            });
+            if (r.ok) {
+                const blob = await r.blob();
+                return URL.createObjectURL(blob);
+            }
+            console.error(`${voiceConfig.provider} TTS failed:`, r.status, await r.text());
+            return null;
+        } finally {
+            if (slowTimer) clearTimeout(slowTimer);
         }
-        console.error(`${voiceConfig.provider} TTS failed:`, r.status, await r.text());
-        return null;
     } else {
         // Gemini TTS
         const model = getGeminiModel(voiceConfig.provider);
@@ -1971,11 +1981,17 @@ function setupVoiceLabTrigger() {
         openVoiceLab();
     });
 
-    // Reveal only if an ElevenLabs key is configured.
-    fetch("/elevenlabs/status")
-        .then(r => r.ok ? r.json() : null)
-        .then(s => { if (s && s.configured) btn.style.display = ""; })
-        .catch(() => { /* no key / endpoint absent -> stay hidden */ });
+    // Reveal if EITHER an ElevenLabs key is configured OR the on-box stack is
+    // healthy (so Qwen-only boxes can reach the Voice Lab / Qwen tab).
+    Promise.allSettled([
+        fetch("/elevenlabs/status").then(r => r.ok ? r.json() : null).then(s => !!(s && s.configured)),
+        fetch("/local-models/status").then(r => r.ok ? r.json() : null)
+            .then(s => !!(s && (s.healthy === true || s.status === "healthy"
+                 || (s.capabilities && s.capabilities.tts && s.capabilities.tts.enabled)))),
+    ]).then(results => {
+        const show = results.some(x => x.status === "fulfilled" && x.value);
+        if (show) btn.style.display = "";
+    });
 }
 
 /**
