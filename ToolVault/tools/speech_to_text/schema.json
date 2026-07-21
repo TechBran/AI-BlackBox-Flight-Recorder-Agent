@@ -20,7 +20,9 @@
         "enum": [
           "openai",
           "google",
-          "elevenlabs"
+          "elevenlabs",
+          "local",
+          "onbox"
         ],
         "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default."
       },
