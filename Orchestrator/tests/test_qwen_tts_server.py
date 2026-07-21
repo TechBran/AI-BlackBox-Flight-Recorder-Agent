@@ -219,3 +219,68 @@ def test_speech_voice_path_traversal_blocked(client, tmp_path):
     # 'secretdir' under voices_dir -> not found -> 404, file never read.
     r = client.post("/v1/audio/speech", json={"input": "x", "voice": "qwen:../secretdir"})
     assert r.status_code == 404
+
+
+# ---- voices list + consent-gated cloning (Task 6.6) -------------------------
+def test_voices_lists_nine_presets(client):
+    voices = client.get("/v1/audio/voices").json()["voices"]
+    ids = [v["id"] for v in voices]
+    assert "Vivian" in ids and "Sohee" in ids
+    assert len([v for v in voices if v["type"] == "preset"]) == 9
+
+
+def test_clone_without_consent_422_no_profile(client):
+    r = client.post(
+        "/v1/voices/clone",
+        data={"name": "Brandon", "consent": "false"},
+        files={"file": ("ref.wav", _wav_bytes(4.0), "audio/wav")},
+    )
+    assert r.status_code == 422
+    assert not (client.voices_dir / "brandon").exists()
+
+
+def test_clone_too_short_422(client):
+    r = client.post(
+        "/v1/voices/clone",
+        data={"name": "Brandon", "consent": "true"},
+        files={"file": ("ref.wav", _wav_bytes(1.0), "audio/wav")},
+    )
+    assert r.status_code == 422
+
+
+def test_clone_ok_persists_base_profile(client):
+    r = client.post(
+        "/v1/voices/clone",
+        data={"name": "Brandon", "consent": "true", "operator": "Brandon"},
+        files={"file": ("ref.wav", _wav_bytes(4.0), "audio/wav")},
+    )
+    assert r.status_code == 200 and r.json()["voice_id"] == "brandon"
+    prof = json.loads((client.voices_dir / "brandon" / "profile.json").read_text())
+    assert prof["variant"] == "base" and prof["consent"] is True and prof["operator"] == "Brandon"
+    # the cloned voice now appears in the voices list as a clone
+    listed = {v["id"]: v for v in client.get("/v1/audio/voices").json()["voices"]}
+    assert listed["brandon"]["type"] == "clone"
+
+
+def test_clone_name_traversal_sanitized(client):
+    r = client.post(
+        "/v1/voices/clone",
+        data={"name": "../../etc/passwd", "consent": "true"},
+        files={"file": ("ref.wav", _wav_bytes(4.0), "audio/wav")},
+    )
+    assert r.status_code == 200
+    slug = r.json()["voice_id"]
+    assert "/" not in slug and ".." not in slug
+    assert (client.voices_dir / slug / "profile.json").exists()
+
+
+def test_speech_with_cloned_voice_resolves_base(client):
+    client.post(
+        "/v1/voices/clone",
+        data={"name": "Brandon", "consent": "true"},
+        files={"file": ("ref.wav", _wav_bytes(4.0), "audio/wav")},
+    )
+    r = client.post("/v1/audio/speech", json={"input": "hi", "voice": "brandon"})
+    assert r.status_code == 200
+    call = client.fake.calls[-1]              # (kind, variant, preset, ref_audio, design)
+    assert call[1] == "base" and call[3] is not None

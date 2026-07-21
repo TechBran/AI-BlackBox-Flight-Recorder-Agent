@@ -19,7 +19,7 @@ import wave
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -159,3 +159,68 @@ async def audio_speech(req: SpeechRequest, mgr: VariantManager = Depends(get_man
             headers={"X-Sample-Rate": str(sr), "X-Audio-Format": "pcm_s16le"},
         )
     return Response(content=_pcm_to_wav(pcm, sr), media_type="audio/wav")
+
+
+@app.get("/v1/audio/voices")
+def audio_voices():
+    """9 CustomVoice presets + saved clone/design profiles. Present only when the
+    stack is healthy; the Orchestrator catalog (M7) fail-opens when it is not."""
+    voices = [
+        {"id": p, "name": p, "type": "preset", "variant": settings.VARIANT_CUSTOM_VOICE}
+        for p in settings.PRESET_VOICES
+    ]
+    for prof in profile_store.list_profiles():
+        voices.append({
+            "id": prof.get("slug"), "name": prof.get("name"),
+            "type": "clone" if prof.get("variant") == settings.VARIANT_BASE else "design",
+            "variant": prof.get("variant"), "created": prof.get("created"),
+        })
+    return {"voices": voices}
+
+
+def _audio_duration_seconds(data: bytes, filename):
+    """Best-effort duration probe. WAV via stdlib wave; other containers via a
+    lazy soundfile import. None if undeterminable — fail-open (a legit upload
+    whose container we cannot parse is accepted, not rejected)."""
+    try:
+        with wave.open(io.BytesIO(data), "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except Exception:
+        pass
+    try:
+        import soundfile as sf   # lazy; present in the qwen venv
+        info = sf.info(io.BytesIO(data))
+        return float(info.frames) / float(info.samplerate or 1)
+    except Exception:
+        return None
+
+
+@app.post("/v1/voices/clone")
+async def voices_clone(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    consent: str = Form(...),
+    operator: str = Form("system"),
+):
+    """Base zero-shot clone: persist the ~3s reference + name as a profile (no
+    synthesis here — Base conditions on the stored reference at SPEAK time).
+    CONSENT GATE mirrors elevenlabs_routes.py:112 EXACTLY — 422 without the
+    literal "true", no work done (correction [11]). Reached by the Orchestrator
+    via /upstream/qwen-tts/v1/voices/clone (correction [18])."""
+    if consent != "true":
+        raise HTTPException(status_code=422, detail="Voice cloning requires consent confirmation")
+    data = await file.read()
+    dur = _audio_duration_seconds(data, file.filename)
+    if dur is not None and dur < settings.MIN_CLONE_SECONDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"reference audio must be at least {settings.MIN_CLONE_SECONDS:g}s (got {dur:.1f}s)",
+        )
+    try:
+        slug = profile_store.unique_slug(name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="name did not yield a usable slug")
+    profile_store.save_clone_profile(
+        slug, name, operator, True, data, file.filename or "reference.wav"
+    )
+    return {"voice_id": slug, "name": name}
