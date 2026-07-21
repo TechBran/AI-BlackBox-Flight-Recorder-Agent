@@ -11,9 +11,12 @@ cloud-fallback target); M1 reports the on-box view. Plain `def` — the httpx
 probes are sync and FastAPI runs sync routes in the threadpool (embeddings/status
 precedent), so the front-door probes never stall the event loop.
 """
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from Orchestrator import hardware, local_stack
+from Orchestrator import localstack_downloads as _dl
 
 router = APIRouter(prefix="/local-models", tags=["local-models"])
 
@@ -85,3 +88,32 @@ def local_models_status(response: Response):
         "models": models,
         "routing": routing,
     }
+
+
+class LocalModelDownloadRequest(BaseModel):
+    artifact: str  # key into localstack_downloads.DOWNLOAD_MANIFEST
+
+
+@router.post("/download")
+async def local_models_download(req: LocalModelDownloadRequest):
+    """Stream an on-box model weight download from the HF CDN as NDJSON
+    progress lines. 404 unknown artifact, 507 when <40GB free, 409 when a
+    download is already running, else a streaming NDJSON body (poll
+    GET /local-models/status for the same state out-of-band). Cloned from
+    POST /embeddings/ollama/pull's singleton pattern."""
+    if req.artifact not in _dl.DOWNLOAD_MANIFEST:
+        raise HTTPException(status_code=404, detail=f"Unknown artifact: {req.artifact!r}")
+    # The ONE shared M1 probe (Task 1.2), in MB; gate against the same 40 GB
+    # threshold the status endpoint reports (MIN_FREE_GB * 1024 MB).
+    free_mb = hardware.disk_free_mb()
+    if free_mb is not None and free_mb < _dl.MIN_FREE_GB * 1024:
+        raise HTTPException(
+            status_code=507,
+            detail=(f"Need >= {_dl.MIN_FREE_GB:g} GB free to download model weights; "
+                    f"only {free_mb / 1024:.0f} GB available. Free up disk and retry."),
+        )
+    try:
+        stream = _dl.start_download(req.artifact)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return StreamingResponse(stream, media_type="application/x-ndjson")
