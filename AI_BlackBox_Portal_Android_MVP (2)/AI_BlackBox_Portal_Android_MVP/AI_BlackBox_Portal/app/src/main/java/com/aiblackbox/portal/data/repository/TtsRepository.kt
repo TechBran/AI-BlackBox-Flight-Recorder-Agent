@@ -58,6 +58,27 @@ class TtsRepository(private val api: BlackBoxApi) {
         /** Maximum characters per TTS request (matches Portal TTS_MAX_CHARS) */
         const val TTS_MAX_CHARS = 4000
 
+        // D10 (Task 7.9): on-box (Qwen) synthesis can wait on a GPU group swap.
+        // Both the settings preview and the chat speak path show a "loading
+        // models…" affordance when the first byte is slower than
+        // SLOW_FIRST_BYTE_MS. Kept here so the two surfaces can never drift on
+        // the provider sentinel or the threshold.
+        const val ON_BOX_PROVIDER = "qwen"
+        const val SLOW_FIRST_BYTE_MS = 1500L
+
+        /**
+         * Slow-first-byte watchdog body. Waits [SLOW_FIRST_BYTE_MS]; if the
+         * request is still in flight when it fires, invokes [onSlow]. Callers
+         * cancel the enclosing coroutine the instant the first byte arrives, so
+         * a warm/fast synthesis never trips it. Extracted (vs inlined at each
+         * call site) so the timing transition is unit-testable without an
+         * Android ViewModel — see TtsSlowFirstByteTest.
+         */
+        suspend fun awaitSlowFirstByte(stillInFlight: () -> Boolean, onSlow: () -> Unit) {
+            kotlinx.coroutines.delay(SLOW_FIRST_BYTE_MS)
+            if (stillInFlight()) onSlow()
+        }
+
         /**
          * Parse "provider:voice" format into VoiceConfig.
          * Matches Portal parseVoiceValue().

@@ -453,6 +453,10 @@ fun SettingsSheet(
             // in the VM (previewing). Errors surface via Toast.
             val previewing by viewModel.previewing.collectAsState()
             val previewError by viewModel.previewError.collectAsState()
+            // D10 (Task 7.9): on-box (qwen) voices can wait on a GPU group swap.
+            // The VM raises previewSlow ~1.5s in so the spinner reads as "loading
+            // the model in", not a hang.
+            val previewSlow by viewModel.previewSlow.collectAsState()
             LaunchedEffect(previewError) {
                 previewError?.let {
                     android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
@@ -509,6 +513,11 @@ fun SettingsSheet(
                     onClick = { feedback(); viewModel.previewVoice(currentVoice) }
                 ) {
                     Text(if (previewing) "…" else "▶", color = SolidGreen)
+                }
+                // D10 affordance: distinguish "waiting on the on-box model to load"
+                // from an ordinary generate. Only shows once previewSlow flips.
+                if (previewSlow) {
+                    Text("Loading models…", color = BbxDim, fontSize = 11.sp)
                 }
                 // Voice Lab affordance — put it where web users (and Brandon) expect
                 // it: beside the voice picker. The screen itself gates on ElevenLabs

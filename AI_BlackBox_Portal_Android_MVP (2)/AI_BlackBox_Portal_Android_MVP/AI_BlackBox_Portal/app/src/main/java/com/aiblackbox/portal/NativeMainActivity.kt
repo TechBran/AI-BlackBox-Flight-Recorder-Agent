@@ -541,6 +541,14 @@ class NativeMainActivity : ComponentActivity() {
                                     }
                                     val voiceValue = store.getOperatorVoice(operator).first()
                                     val config = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceValue)
+                                    // D10 (Task 7.9): on-box (qwen) voices may wait on a GPU group
+                                    // swap; show "loading models…" only if the first byte is slow.
+                                    val slowToastJob = if (config.provider == com.aiblackbox.portal.data.repository.TtsRepository.ON_BOX_PROVIDER) scope.launch {
+                                        com.aiblackbox.portal.data.repository.TtsRepository.awaitSlowFirstByte(
+                                            stillInFlight = { true },
+                                            onSlow = { Toast.makeText(applicationContext, "Loading on-box voice models…", Toast.LENGTH_SHORT).show() },
+                                        )
+                                    } else null
                                     val body = buildTtsBatchBody(text, config.voice, config.model, "mp3", config.provider, operator)
                                     val request = okhttp3.Request.Builder()
                                         .url("${api.getBaseUrl()}/tts/batch")
@@ -549,6 +557,7 @@ class NativeMainActivity : ComponentActivity() {
                                     val response = withContext(Dispatchers.IO) {
                                         api.getClient().newCall(request).execute()
                                     }
+                                    slowToastJob?.cancel()
                                     if (response.isSuccessful) {
                                         val bytes = withContext(Dispatchers.IO) { response.body?.bytes() }
                                         if (bytes != null && bytes.isNotEmpty()) {

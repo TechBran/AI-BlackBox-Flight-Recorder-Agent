@@ -80,6 +80,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val previewing: StateFlow<Boolean> = _previewing.asStateFlow()
     private val _previewError = MutableStateFlow<String?>(null)
     val previewError: StateFlow<String?> = _previewError.asStateFlow()
+    // D10: flips true when a slow on-box preview is likely waiting on a GPU
+    // group swap ("Loading models…"), so the UI can distinguish "generating"
+    // from "loading the model in".
+    private val _previewSlow = MutableStateFlow(false)
+    val previewSlow: StateFlow<Boolean> = _previewSlow.asStateFlow()
     private var previewPlayer: android.media.MediaPlayer? = null
 
     fun clearPreviewError() { _previewError.value = null }
@@ -89,6 +94,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         if (_previewing.value) return
         _previewing.value = true
         _previewError.value = null
+        _previewSlow.value = false
+        val cfgForSlow = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceId)
+        val slowJob = if (cfgForSlow.provider == com.aiblackbox.portal.data.repository.TtsRepository.ON_BOX_PROVIDER) viewModelScope.launch {
+            com.aiblackbox.portal.data.repository.TtsRepository.awaitSlowFirstByte(
+                stillInFlight = { _previewing.value },
+                onSlow = { _previewSlow.value = true },
+            )
+        } else null
         viewModelScope.launch {
             try {
                 val repo = com.aiblackbox.portal.data.repository.TtsRepository(api)
@@ -112,6 +125,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             } catch (e: Exception) {
                 _previewError.value = "Preview failed: ${e.message}"
             } finally {
+                slowJob?.cancel()
+                _previewSlow.value = false
                 _previewing.value = false
             }
         }
