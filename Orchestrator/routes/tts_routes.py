@@ -1061,6 +1061,15 @@ async def tts_catalog():
                                            "description": "Local TTS"} for v in voices]})
     except Exception:
         pass  # fail-open
+    # On-box Qwen3-TTS group — present only when the local stack is healthy and
+    # TTS is enabled (fail-open, same as the ElevenLabs/local groups above).
+    try:
+        from Orchestrator import qwen_tts
+        _qg = qwen_tts.catalog_group()
+        if _qg:
+            groups.append(_qg)
+    except Exception:
+        pass  # fail-open: qwen group simply absent if the helper errors
     return {"groups": groups}
 
 @app.get("/stt/catalog")
