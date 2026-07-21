@@ -52,6 +52,19 @@ def local_streaming_stt_available() -> bool:
         return False
 
 
+def onbox_stt_available() -> bool:
+    """True iff the on-box local stack is installed+healthy AND STT is enabled in
+    [local_models]. Independent of the custom-server registry (local_stt_available)
+    so on a fresh on-box-only box the on-box Speaches member is reachable. Lazy
+    import + fail-soft: a missing/broken local_stack never breaks STT resolution."""
+    try:
+        import importlib
+        local_stack = importlib.import_module("Orchestrator.local_stack")
+        return bool(local_stack.is_healthy() and local_stack.enabled("stt"))
+    except Exception:
+        return False
+
+
 def _fresh_stt_provider():
     """Fresh-read the saved STT_PROVIDER (wizard selection) from .env so it takes
     effect WITHOUT a service restart. The web/Android client sends provider:""
@@ -66,7 +79,7 @@ def _fresh_stt_provider():
         return (config.STT_PROVIDER or "").strip().lower()
 
 
-def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, elevenlabs_ok=None, local_ok=None):
+def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, elevenlabs_ok=None, local_ok=None, onbox_ok=None):
     """Return 'openai' | 'google' | 'elevenlabs' | 'local' | None.
 
     Explicit choice wins if its credential is available; otherwise the single
@@ -89,9 +102,12 @@ def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, eleve
         google_ok = live_google if google_ok is None else google_ok
         elevenlabs_ok = live_elevenlabs if elevenlabs_ok is None else elevenlabs_ok
         local_ok = local_stt_available() if local_ok is None else local_ok
-    # local STT is file-only + a fallback, so it sits LAST in the tie-break order.
+        onbox_ok = onbox_stt_available() if onbox_ok is None else onbox_ok
+    # local STT is file-only + a fallback, so it sits LAST in the tie-break order;
+    # the on-box stack (onbox) is ranked ABOVE it but BELOW cloud tie-breaks — the
+    # wizard seeds an explicit "onbox" pick (D2) rather than relying on this order.
     avail = {"openai": openai_ok, "google": google_ok,
-             "elevenlabs": bool(elevenlabs_ok), "local": bool(local_ok)}
+             "elevenlabs": bool(elevenlabs_ok), "onbox": bool(onbox_ok), "local": bool(local_ok)}
     if provided in avail and avail[provided]:
         return provided
     live = [p for p, ok in avail.items() if ok]
