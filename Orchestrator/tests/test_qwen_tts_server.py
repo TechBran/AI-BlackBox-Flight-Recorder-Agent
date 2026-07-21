@@ -67,3 +67,41 @@ def _wav_bytes(seconds, sr=16000):
 def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200 and r.json() == {"status": "ok"}
+
+
+def test_speech_preset_wav_uses_model_sample_rate(client):
+    r = client.post("/v1/audio/speech", json={"input": "hello", "voice": "qwen:Vivian"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("audio/wav")
+    with wave.open(io.BytesIO(r.content), "rb") as w:
+        assert w.getframerate() == SR   # NOT 24000 — read from the model output
+    assert client.fake.calls[0][:3] == ("synthesize_full", "custom_voice", "Vivian")
+
+
+def test_speech_bare_preset_name_ok(client):
+    assert client.post("/v1/audio/speech", json={"input": "hi", "voice": "Serena"}).status_code == 200
+
+
+def test_speech_pcm_format_sets_headers(client):
+    r = client.post("/v1/audio/speech", json={"input": "hi", "voice": "qwen:Vivian", "response_format": "pcm"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/octet-stream")
+    assert r.headers["x-sample-rate"] == str(SR)
+    assert r.headers["x-audio-format"] == "pcm_s16le"
+
+
+def test_speech_missing_input_422(client):
+    assert client.post("/v1/audio/speech", json={"voice": "qwen:Vivian"}).status_code == 422
+
+
+def test_speech_missing_voice_422(client):
+    assert client.post("/v1/audio/speech", json={"input": "hi"}).status_code == 422
+
+
+def test_speech_unknown_voice_404(client):
+    assert client.post("/v1/audio/speech", json={"input": "x", "voice": "qwen:Nope"}).status_code == 404
+
+
+def test_speech_bad_format_400(client):
+    r = client.post("/v1/audio/speech", json={"input": "hi", "voice": "qwen:Vivian", "response_format": "mp3"})
+    assert r.status_code == 400

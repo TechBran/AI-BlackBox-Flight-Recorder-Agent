@@ -49,3 +49,91 @@ def health():
     """llama-swap checkEndpoint — STARTUP readiness ONLY (§6). Cheap; never
     loads a model (health is a one-time startup gate, never re-probed)."""
     return {"status": "ok"}
+
+
+# ---- helpers ---------------------------------------------------------------
+def _resolve_voice(voice: str):
+    """(variant, synth_kwargs, resolved_id). Accepts a bare preset name,
+    'qwen:<Preset>', or a saved profile slug. 422 if missing; 404 if unknown."""
+    if not voice:
+        raise HTTPException(status_code=422, detail="voice is required")
+    v = voice.split(":", 1)[1] if voice.startswith("qwen:") else voice
+    if v in settings.PRESET_VOICES:
+        return settings.VARIANT_CUSTOM_VOICE, {"preset": v}, v
+    prof = profile_store.get_profile(v)
+    if prof is None:
+        raise HTTPException(status_code=404, detail=f"unknown voice {voice!r}")
+    variant = prof.get("variant")
+    if variant == settings.VARIANT_BASE:
+        ref = profile_store.ref_audio_path(v)
+        if not ref:
+            raise HTTPException(status_code=422, detail=f"voice {v!r} has no reference audio")
+        return settings.VARIANT_BASE, {"ref_audio": ref}, v
+    if variant == settings.VARIANT_VOICE_DESIGN:
+        return settings.VARIANT_VOICE_DESIGN, {"design_params": prof.get("design")}, v
+    raise HTTPException(status_code=422, detail=f"voice {v!r} has an unknown variant")
+
+
+def _pcm_to_wav(pcm: bytes, sr: int) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)   # sr FROM MODEL OUTPUT — never hardcoded (correction [23])
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _frame_iter(pcm: bytes, sr: int):
+    """Chunk full PCM into 12Hz frames (tokenizer is Qwen3-TTS-Tokenizer-12Hz,
+    §5.4) for the StreamingResponse-over-full-generation fallback (correction [8])."""
+    samples_per_frame = max(1, sr // 12)
+    step = samples_per_frame * 2   # int16
+    for i in range(0, len(pcm), step):
+        yield pcm[i:i + step]
+
+
+# ---- endpoints -------------------------------------------------------------
+@app.post("/v1/audio/speech")
+async def audio_speech(body: dict = Body(...), mgr: VariantManager = Depends(get_manager)):
+    """OpenAI-shaped {model, input, voice, response_format, stream}. `model` is
+    consumed by llama-swap for routing; we synthesize `input` in `voice`.
+    (The Orchestrator applies sanitize_for_speech BEFORE calling — §5.4 — so
+    this server trusts `input`.) sr is read from the model output."""
+    text = (body or {}).get("input")
+    if not text or not str(text).strip():
+        raise HTTPException(status_code=422, detail="input is required")
+    response_format = (body or {}).get("response_format") or "wav"
+    if response_format not in ("wav", "pcm"):
+        raise HTTPException(status_code=400, detail="response_format must be 'wav' or 'pcm'")
+    stream = bool((body or {}).get("stream"))
+    variant, kwargs, _id = _resolve_voice((body or {}).get("voice"))
+
+    if stream and settings.streaming_enabled():
+        # G3-gated TRUE chunked streaming (OFF by default) — Task 6.5.
+        try:
+            sr, aiter = await mgr.stream_true(variant, str(text), **kwargs)
+        except VramError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        return StreamingResponse(
+            aiter, media_type="application/octet-stream",
+            headers={"X-Sample-Rate": str(sr), "X-Audio-Format": "pcm_s16le"},
+        )
+
+    try:
+        pcm, sr = await mgr.synthesize_full(variant, str(text), **kwargs)
+    except VramError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    if stream:
+        # Default shipping path: StreamingResponse OVER a full generation (correction [8]).
+        return StreamingResponse(
+            _frame_iter(pcm, sr), media_type="application/octet-stream",
+            headers={"X-Sample-Rate": str(sr), "X-Audio-Format": "pcm_s16le"},
+        )
+    if response_format == "pcm":
+        return Response(
+            content=pcm, media_type="application/octet-stream",
+            headers={"X-Sample-Rate": str(sr), "X-Audio-Format": "pcm_s16le"},
+        )
+    return Response(content=_pcm_to_wav(pcm, sr), media_type="audio/wav")
