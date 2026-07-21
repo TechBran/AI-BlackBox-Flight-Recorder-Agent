@@ -143,6 +143,36 @@ RERANK_MODELS = {
         "preflight_ceiling_ms": 500,
         "preflight_passage_n": 1,
     },
+    # ── On-box localstack reranker (Milestone 4): Qwen3-Reranker-8B @ Q8_0 (D13 —
+    # the retrieval group is sequential, so the reranker gets the whole card and we
+    # run the best-that-fits-in-one-shot 8B; the 0.6B stays CPU-tier fallback only)
+    # served by llama-server (--reranking --pooling rank) behind the llama-swap
+    # front door, exposed as /v1/rerank. Provider "localstack" — the on-box
+    # retrieval-group member, NOT the vLLM :8091 seam (retained as the FP16
+    # fallback, which may NEVER co-run with this group; see preflight()). model_id
+    # is the llama-swap MEMBER name ("rerank-qwen3-8b" in the config template) — llama-swap routes
+    # /v1/rerank to that member by the body `model`. The GGUF is SELF-CONVERTED from
+    # a pinned post-#16407 llama.cpp build (community GGUFs are broken → ~1e-28
+    # scores); G2 (eval/rerank_g2.py) gates score validity + rank order before the
+    # wizard flips the sidecar to this model. query_instruction is the SAME
+    # mandatory Qwen instruct prefix as the vllm/cpu entries — the ranker inverts
+    # without it (measured 2026-07-03). Keyless loopback (auth_kind none).
+    "qwen3-reranker-8b-local": {
+        "provider": "localstack",
+        "model_id": "rerank-qwen3-8b",
+        "label": "Qwen3 Reranker 8B Q8_0 (on-box, llama-swap)",
+        "vram_gb": 8.1,  # Q8_0 8B resident ALONE in the sequential retrieval group (D13, §5.2 ~10–11GB peak)
+        "max_input_tokens": 8192,  # matches the member's -c 8192 (config template)
+        "query_instruction": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
+        "quality_note": "On-box default reranker (Qwen3-Reranker-8B @ Q8_0, top-of-family); sequential with the embedder per D13 (~6–12s model-swap per search). Pairs with the on-box qwen3 embedding store. Self-converted GGUF — G2-gated for score validity.",
+        "auth_kind": "none",
+        "key_env": None,
+        "cost_note": "On-box GPU/CPU — free, private, unlimited (runs on your box via llama-swap; nothing leaves it)",
+        "privacy": "local",
+        "tiers": ["MID", "HIGH"],
+        "preflight_ceiling_ms": 500,  # D13: per-scoring-call target ONCE LOADED (40-passage rerank inside ceiling); G2 measures the ~6–12s per-search intra-group swap separately
+        "preflight_passage_n": 1,     # llama.cpp /v1/rerank batches all docs in one call
+    },
     # MID-tier opt-in (M5): the SAME Qwen 0.6B weights served IN-PROCESS on CPU
     # via a sentence-transformers CrossEncoder — no second service, no GPU. Slower
     # than the vLLM path (hence the 2000ms preflight ceiling + an 8-passage probe
@@ -301,13 +331,23 @@ _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
 # Providers score() knows how to dispatch (M2). "null" is the inert default;
 # the rest each map to a _score_<provider> helper. vllm/cpu/llm ship now;
 # voyage/cohere/vertex (M7) are stubbed to return None until then.
-KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
+KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm",
+                   "localstack"}
 
 # Cloud providers whose FAILED preflight is TTL-recoverable (M3.2): a transient
 # cloud blip must NOT disable rerank until the next restart. Deliberate,
 # documented deviation from audit A9's local-only once-per-process assumption —
 # the local vllm/cpu providers keep the process-lifetime failure cache.
 CLOUD_PROVIDERS = {"voyage", "cohere", "vertex", "llm"}
+
+# Providers whose FAILED preflight recovers after a TTL rather than sticking for
+# the process lifetime (M3.2). localstack (Milestone 4) joins here: under
+# llama-swap a cross-group swap can leave the retrieval group transiently cold
+# (a first probe queues behind a ~6–10s group load → over-ceiling), and that
+# transient must NOT disable rerank until a restart. NB this is ONLY the cache
+# policy — localstack reachability stays is_healthy()-based (loopback, keyless),
+# never the CLOUD_PROVIDERS key-present path.
+_PREFLIGHT_TTL_RECOVERABLE = CLOUD_PROVIDERS | {"localstack"}
 
 
 def _key_present_for(auth_kind: "str | None", key_env: "str | None") -> bool:

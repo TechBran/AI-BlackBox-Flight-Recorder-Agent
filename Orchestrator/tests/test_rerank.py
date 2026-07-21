@@ -150,6 +150,7 @@ RERANK_TIERS = {"LOW", "MID", "HIGH"}
 def test_rerank_models_table_shape():
     assert set(rerank.RERANK_MODELS) == {
         "qwen3-reranker-0.6b", "qwen3-reranker-4b", "qwen3-reranker-0.6b-cpu",
+        "qwen3-reranker-8b-local",
         "llm-rerank-gemini-flash", "llm-rerank-gpt-mini",
         "llm-rerank-claude-haiku", "llm-rerank-grok",
         "voyage-rerank-2.5", "cohere-rerank-4", "vertex-semantic-ranker"}
@@ -386,7 +387,8 @@ def test_dispatcher_never_raises(monkeypatch):
 
 def test_known_providers_set():
     assert rerank.KNOWN_PROVIDERS == {
-        "null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
+        "null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm",
+        "localstack"}
 
 
 # ── M5: in-process CPU CrossEncoder provider ──────────────────────────────────
