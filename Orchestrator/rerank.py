@@ -330,7 +330,11 @@ _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
 
 # Providers score() knows how to dispatch (M2). "null" is the inert default;
 # the rest each map to a _score_<provider> helper. vllm/cpu/llm ship now;
-# voyage/cohere/vertex (M7) are stubbed to return None until then.
+# voyage/cohere/vertex (M7) are stubbed to return None until then. localstack
+# (Milestone 4) is registered here so its model is selectable/preflightable, but
+# its _score_localstack dispatch entry lands in Task 4.2 — until then selecting
+# it scores None, which the retriever tolerates (falls through to the
+# un-reranked ranking). Deliberate staged stub, not a missing helper.
 KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm",
                    "localstack"}
 
@@ -1207,14 +1211,20 @@ def preflight() -> dict:
             result = {**base, "state": "failed", "reason": reason}
         else:
             result = {**base, "state": "ok", "reason": None}
-        # Cache policy (M3.2): a cloud FAILED preflight recovers after a TTL (a
-        # transient blip must not disable rerank until restart — the documented
-        # deviation from audit A9's local-only assumption). Local (vllm/cpu)
-        # failures and every OK stick for the process lifetime.
-        if result["state"] == "failed" and provider in CLOUD_PROVIDERS:
+        # Cache policy (M3.2): a TTL-recoverable FAILED preflight recovers after a
+        # TTL rather than sticking for the process lifetime (a transient blip must
+        # not disable rerank until restart — the documented deviation from audit
+        # A9's local-only assumption). This covers the cloud providers AND
+        # localstack (Milestone 4): a cross-group llama-swap cold-load makes the
+        # first probe queue behind a ~6-10s group load → over-ceiling, and that
+        # transient must NOT disable rerank for the process lifetime. Gate on
+        # _PREFLIGHT_TTL_RECOVERABLE (= CLOUD_PROVIDERS | {"localstack"}), NOT
+        # CLOUD_PROVIDERS. Genuinely-local (vllm/cpu) failures and every OK stick
+        # for the process lifetime.
+        if result["state"] == "failed" and provider in _PREFLIGHT_TTL_RECOVERABLE:
             _preflight_expiry = time.monotonic() + _PREFLIGHT_FAIL_TTL_S
             disabled = (f" — rerank disabled for {int(_PREFLIGHT_FAIL_TTL_S)}s"
-                        f" (cloud TTL, then re-probes)")
+                        f" (TTL, then re-probes)")
         else:
             _preflight_expiry = None
             disabled = (" — rerank disabled for process lifetime"

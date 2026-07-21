@@ -629,6 +629,36 @@ def test_local_failed_preflight_stays_process_lifetime(monkeypatch):
         assert rerank.preflight()["state"] == "failed"            # still sticky
 
 
+def test_localstack_failed_preflight_recovers_after_ttl(monkeypatch):
+    """Milestone 4 / Task 4.1 code-quality guard: localstack is NOT a cloud
+    provider, but its FAILED preflight must still recover after _PREFLIGHT_FAIL_
+    TTL_S — a cross-group llama-swap cold-load makes the first probe read
+    over-ceiling, and that transient must NOT disable rerank for the whole
+    process lifetime. This is gated by _PREFLIGHT_TTL_RECOVERABLE (=
+    CLOUD_PROVIDERS | {"localstack"}), NOT CLOUD_PROVIDERS; localstack is
+    deliberately absent from CLOUD_PROVIDERS (its reachability stays keyless/
+    is_healthy()-based). Regression guard for the mis-gate that would sink
+    localstack into the process-lifetime cache."""
+    assert "localstack" not in rerank.CLOUD_PROVIDERS          # keyless, not cloud
+    assert "localstack" in rerank._PREFLIGHT_TTL_RECOVERABLE   # but TTL-recoverable
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    monkeypatch.setattr(rerank, "score", lambda q, p: None)    # group cold → fails
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        assert rerank.preflight()["state"] == "failed"
+        # within the TTL window the failure is cached — NOT re-probed
+        def reprobed(q, p):
+            raise AssertionError("localstack preflight re-probed within its TTL")
+        monkeypatch.setattr(rerank, "score", reprobed)
+        assert rerank.preflight()["state"] == "failed"
+        # past the TTL, the group finished loading → re-probe → ok (NOT stuck for
+        # the process lifetime the way a genuinely-dead vllm/cpu reranker is)
+        clock.t += rerank._PREFLIGHT_FAIL_TTL_S + 1
+        monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
+        assert rerank.preflight()["state"] == "ok"
+
+
 def test_reachable_bearer_is_key_present_no_network(monkeypatch):
     """reachable() for a bearer cloud provider is a pure key-present check —
     ZERO http calls (actual cloud reachability is proven once by preflight)."""
