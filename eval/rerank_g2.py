@@ -127,13 +127,19 @@ def score_via_endpoint(base_url: str, model_id: str, instruction: str,
                        query: str, documents: list[str],
                        timeout_s: float = 30.0) -> "list[float] | None":
     """POST the llama.cpp /v1/rerank shape and parse via the SAME scatter the
-    production path uses (rerank._scatter_relevance_scores). None on any anomaly."""
-    resp = requests.post(
-        base_url.rstrip("/") + "/rerank",
-        json={"model": model_id, "query": instruction + query,
-              "documents": list(documents)},
-        timeout=timeout_s,
-    )
+    production path uses (rerank._scatter_relevance_scores). None on any anomaly
+    — including an unreachable/refused endpoint, so main()'s no-response FAIL
+    report is written instead of a raw traceback (the exact case this gate
+    exists to survive)."""
+    try:
+        resp = requests.post(
+            base_url.rstrip("/") + "/rerank",
+            json={"model": model_id, "query": instruction + query,
+                  "documents": list(documents)},
+            timeout=timeout_s,
+        )
+    except requests.RequestException:
+        return None
     if resp.status_code != 200:
         return None
     return rerank._scatter_relevance_scores(resp.json(), len(documents))
@@ -190,13 +196,16 @@ def measure_swap_overhead(base_url: str, model_id: str, instruction: str,
     body = {"model": model_id, "query": instruction + "swap timing probe",
             "documents": list(documents)}
     # 2. first rerank: pays evict-embedder + cold-load-8B-reranker
-    t0 = time.perf_counter()
-    cold = requests.post(base_url.rstrip("/") + "/rerank", json=body, timeout=timeout_s)
-    cold_s = time.perf_counter() - t0
-    # 3. second rerank: reranker already resident (steady-state scoring only)
-    t0 = time.perf_counter()
-    warm = requests.post(base_url.rstrip("/") + "/rerank", json=body, timeout=timeout_s)
-    warm_s = time.perf_counter() - t0
+    try:
+        t0 = time.perf_counter()
+        cold = requests.post(base_url.rstrip("/") + "/rerank", json=body, timeout=timeout_s)
+        cold_s = time.perf_counter() - t0
+        # 3. second rerank: reranker already resident (steady-state scoring only)
+        t0 = time.perf_counter()
+        warm = requests.post(base_url.rstrip("/") + "/rerank", json=body, timeout=timeout_s)
+        warm_s = time.perf_counter() - t0
+    except requests.RequestException as exc:
+        return {"error": f"rerank probe failed (endpoint unreachable: {exc})"}
     if cold.status_code != 200 or warm.status_code != 200:
         return {"error": f"rerank probe non-200 (cold {cold.status_code}, warm {warm.status_code})"}
     return {"cold_s": round(cold_s, 3), "warm_s": round(warm_s, 3),
@@ -221,6 +230,10 @@ def main(argv=None) -> int:
     ap.add_argument("--out-date", default=date.today().isoformat())
     args = ap.parse_args(argv)
 
+    # Deliberately reads the CANONICAL registry entry (model_id + query_instruction)
+    # rather than rerank.py's config-override resolution (the [rerank] query_instruction/
+    # model fallbacks): this is a validity gate on the canonical member, not on a box's
+    # locally-overridden live settings.
     entry = rerank.RERANK_MODELS[SLUG]
     instruction = entry["query_instruction"]
     model_id = entry["model_id"]
