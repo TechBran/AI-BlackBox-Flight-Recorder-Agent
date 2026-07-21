@@ -258,6 +258,20 @@ EMBEDDINGS_RECENT_GAP_TAIL = CFG.getint("embeddings", "recent_gap_tail", fallbac
 EMBEDDINGS_QUERY_FAIL_THRESHOLD = CFG.getint("embeddings", "query_fail_threshold", fallback=3)
 
 
+# ── [local_models] — on-box local model stack (M1, design 2026-07-20) ────────
+# Master enable + base_url snapshot at import for discoverability alongside
+# [computer_use]/[embeddings]. The LIVE source of truth for routing is
+# Orchestrator/local_stack.py, which RE-READS config.ini fresh per request so a
+# wizard flip applies with NO restart (custom_servers.py E8 lesson). The
+# per-capability enable flags (local_models.stt / .tts / .embeddings / .rerank)
+# are read fresh by local_stack.enabled(cap); they default false — nothing
+# routes on-box until the wizard flips each ("Nothing activates implicitly on
+# install", design §8).
+LOCAL_MODELS_ENABLED  = CFG.getboolean("local_models", "enabled", fallback=False)
+LOCAL_MODELS_BASE_URL = CFG.get("local_models", "base_url",
+                                fallback="http://127.0.0.1:9098/v1").strip()
+
+
 CURRENT_OPERATOR = USERS_DEFAULT   # updated on each /chat
 
 
