@@ -14,13 +14,14 @@ Orchestrator (M7) path contract:
     /upstream/qwen-tts/v1/voices/... so the member auto-loads and group
     swap/exclusivity are honored (correction [18]). See README (Task 6.8).
 """
-import base64
 import io
 import wave
 from contextlib import asynccontextmanager
+from typing import Optional
 
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 
 from . import profile_store, settings
 from .variant_manager import VariantManager, VramError
@@ -60,18 +61,25 @@ def _resolve_voice(voice: str):
     v = voice.split(":", 1)[1] if voice.startswith("qwen:") else voice
     if v in settings.PRESET_VOICES:
         return settings.VARIANT_CUSTOM_VOICE, {"preset": v}, v
-    prof = profile_store.get_profile(v)
+    # Not a preset -> treat as a saved-profile slug. Sanitize BEFORE any
+    # filesystem lookup so a crafted value ('../secretdir') can never escape
+    # voices_dir (the 'slug sanitization prevents path traversal' gate — §5.4).
+    try:
+        slug = profile_store.sanitize_slug(v)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"unknown voice {voice!r}")
+    prof = profile_store.get_profile(slug)
     if prof is None:
         raise HTTPException(status_code=404, detail=f"unknown voice {voice!r}")
     variant = prof.get("variant")
     if variant == settings.VARIANT_BASE:
-        ref = profile_store.ref_audio_path(v)
+        ref = profile_store.ref_audio_path(slug)
         if not ref:
-            raise HTTPException(status_code=422, detail=f"voice {v!r} has no reference audio")
-        return settings.VARIANT_BASE, {"ref_audio": ref}, v
+            raise HTTPException(status_code=422, detail=f"voice {slug!r} has no reference audio")
+        return settings.VARIANT_BASE, {"ref_audio": ref}, slug
     if variant == settings.VARIANT_VOICE_DESIGN:
-        return settings.VARIANT_VOICE_DESIGN, {"design_params": prof.get("design")}, v
-    raise HTTPException(status_code=422, detail=f"voice {v!r} has an unknown variant")
+        return settings.VARIANT_VOICE_DESIGN, {"design_params": prof.get("design")}, slug
+    raise HTTPException(status_code=422, detail=f"voice {slug!r} has an unknown variant")
 
 
 def _pcm_to_wav(pcm: bytes, sr: int) -> bytes:
@@ -93,21 +101,35 @@ def _frame_iter(pcm: bytes, sr: int):
         yield pcm[i:i + step]
 
 
+# ---- request model ---------------------------------------------------------
+class SpeechRequest(BaseModel):
+    """OpenAI-shaped speech request. `model` is consumed by llama-swap for
+    routing (present on the wire, unused here); we synthesize `input` in
+    `voice`. Optional fields carry server defaults so the route logic stays
+    declarative (no manual `.get(...)` plumbing)."""
+
+    model: Optional[str] = None
+    input: Optional[str] = None
+    voice: Optional[str] = None
+    response_format: Optional[str] = "wav"
+    stream: bool = False
+
+
 # ---- endpoints -------------------------------------------------------------
 @app.post("/v1/audio/speech")
-async def audio_speech(body: dict = Body(...), mgr: VariantManager = Depends(get_manager)):
+async def audio_speech(req: SpeechRequest, mgr: VariantManager = Depends(get_manager)):
     """OpenAI-shaped {model, input, voice, response_format, stream}. `model` is
     consumed by llama-swap for routing; we synthesize `input` in `voice`.
     (The Orchestrator applies sanitize_for_speech BEFORE calling — §5.4 — so
     this server trusts `input`.) sr is read from the model output."""
-    text = (body or {}).get("input")
+    text = req.input
     if not text or not str(text).strip():
         raise HTTPException(status_code=422, detail="input is required")
-    response_format = (body or {}).get("response_format") or "wav"
+    response_format = req.response_format or "wav"
     if response_format not in ("wav", "pcm"):
         raise HTTPException(status_code=400, detail="response_format must be 'wav' or 'pcm'")
-    stream = bool((body or {}).get("stream"))
-    variant, kwargs, _id = _resolve_voice((body or {}).get("voice"))
+    stream = bool(req.stream)
+    variant, kwargs, _id = _resolve_voice(req.voice)
 
     if stream and settings.streaming_enabled():
         # G3-gated TRUE chunked streaming (OFF by default) — Task 6.5.
