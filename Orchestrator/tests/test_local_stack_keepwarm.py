@@ -20,7 +20,7 @@ CONFIG = {
 def cfg(tmp_path, monkeypatch):
     path = tmp_path / "llama-swap-config.yaml"
     path.write_text(yaml.safe_dump(CONFIG), encoding="utf-8")
-    monkeypatch.setattr(local_stack, "config_path", lambda: path)
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: path)
     return path
 
 
@@ -34,7 +34,7 @@ def test_get_member_ttl_reads_the_live_config(cfg):
 
 
 def test_get_member_ttl_none_when_no_config(monkeypatch):
-    monkeypatch.setattr(local_stack, "config_path", lambda: None)
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: None)
     assert local_stack.get_member_ttl("embed-qwen3-8b") is None
 
 
@@ -60,6 +60,6 @@ def test_set_member_ttl_absent_member_raises(cfg):
 
 
 def test_set_member_ttl_no_config_raises(monkeypatch):
-    monkeypatch.setattr(local_stack, "config_path", lambda: None)
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: None)
     with pytest.raises(RuntimeError):
         local_stack.set_member_ttl("embed-qwen3-8b", 0)
