@@ -63,3 +63,64 @@ def test_set_member_ttl_no_config_raises(monkeypatch):
     monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: None)
     with pytest.raises(RuntimeError):
         local_stack.set_member_ttl("embed-qwen3-8b", 0)
+
+
+# ── store keep_alive / placement localstack path ─────────────────────────────
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from Orchestrator.embeddings import store as emb_store
+from Orchestrator.embeddings.store import (
+    KEEP_ALIVE_COLD, KEEP_ALIVE_WARM, get_keep_alive, set_keep_alive, set_placement,
+)
+from Orchestrator.routes.embeddings_routes import router
+
+LOCALSTACK_SLUG = "qwen3-embedding-8b-local"
+LOCALSTACK_MEMBER = "embed-qwen3-8b"
+
+
+def test_set_keep_alive_warm_sets_member_ttl_zero(cfg):
+    value = set_keep_alive(LOCALSTACK_SLUG, warm=True)
+    assert value == KEEP_ALIVE_WARM
+    assert local_stack.get_member_ttl(LOCALSTACK_MEMBER) == 0
+
+
+def test_set_keep_alive_cold_sets_member_ttl_600(cfg):
+    assert set_keep_alive(LOCALSTACK_SLUG, warm=False) == KEEP_ALIVE_COLD
+    assert local_stack.get_member_ttl(LOCALSTACK_MEMBER) == 600
+
+
+def test_get_keep_alive_reflects_member_ttl(cfg):
+    set_keep_alive(LOCALSTACK_SLUG, warm=True)
+    assert emb_store.is_warm(get_keep_alive(LOCALSTACK_SLUG)) is True
+    set_keep_alive(LOCALSTACK_SLUG, warm=False)
+    assert emb_store.is_warm(get_keep_alive(LOCALSTACK_SLUG)) is False
+
+
+def test_get_keep_alive_falls_back_to_registry_when_no_config(monkeypatch):
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: None)
+    assert get_keep_alive(LOCALSTACK_SLUG) is None  # registry keep_alive default
+
+
+def test_set_placement_localstack_raises_install_fixed(cfg):
+    with pytest.raises(ValueError, match="install"):
+        set_placement(LOCALSTACK_SLUG, "cpu")
+
+
+@pytest.fixture
+def client():
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+def test_keep_alive_route_accepts_localstack(cfg, client):
+    r = client.post("/embeddings/keep_alive", json={"slug": LOCALSTACK_SLUG, "warm": True})
+    assert r.status_code == 200
+    assert local_stack.get_member_ttl(LOCALSTACK_MEMBER) == 0
+
+
+def test_placement_route_rejects_localstack_with_install_fixed_message(client):
+    r = client.post("/embeddings/placement", json={"slug": LOCALSTACK_SLUG, "placement": "cpu"})
+    assert r.status_code == 400
+    assert "install" in r.json()["detail"]

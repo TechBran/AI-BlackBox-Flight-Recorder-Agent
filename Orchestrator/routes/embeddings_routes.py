@@ -531,10 +531,10 @@ async def embeddings_keep_alive(req: KeepAliveRequest):
         raise HTTPException(
             status_code=404, detail=f"Unknown embedding model slug: {req.slug!r}"
         )
-    if entry["provider"] != "ollama":
+    if entry["provider"] not in ("ollama", "localstack"):
         raise HTTPException(
             status_code=400,
-            detail=f"{req.slug!r} is a cloud model; keep_alive is Ollama-only",
+            detail=f"{req.slug!r} is a cloud model; keep_alive is on-box only",
         )
     value = set_keep_alive(req.slug, req.warm)
     if req.warm:
@@ -566,10 +566,13 @@ async def embeddings_placement(req: PlacementRequest):
             status_code=404, detail=f"Unknown embedding model slug: {req.slug!r}"
         )
     if entry["provider"] != "ollama":
-        raise HTTPException(
-            status_code=400,
-            detail=f"{req.slug!r} is a cloud model; placement is Ollama-only",
+        detail = (
+            f"{req.slug!r} runs on the on-box stack; device is fixed at install "
+            f"by hardware tier — no runtime placement toggle"
+            if entry["provider"] == "localstack"
+            else f"{req.slug!r} is a cloud model; placement is Ollama-only"
         )
+        raise HTTPException(status_code=400, detail=detail)
     if req.placement is not None and req.placement not in PLACEMENTS:
         raise HTTPException(
             status_code=400,

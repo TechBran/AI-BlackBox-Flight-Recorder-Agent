@@ -917,6 +917,15 @@ KEEP_ALIVE_COLD = "5m"    # unload 5 minutes after the last embed
 def get_keep_alive(slug: str, base_dir=None, fallback=None) -> "str | None":
     """Effective keep_alive for slug: per-box override, else the registry
     default, else `fallback` (for synthetic entries not in the registry)."""
+    entry = EMBEDDING_MODELS.get(slug)
+    if entry is not None and entry.get("provider") == "localstack":
+        # On-box keep-warm lives in the llama-swap member ttl (0 = warm),
+        # NOT keep_alive.json. Absent/unreadable config → registry default.
+        from Orchestrator import local_stack  # lazy: avoid import cycle
+        ttl = local_stack.get_member_ttl(entry["model_id"])
+        if ttl is None:
+            return entry.get("keep_alive")
+        return KEEP_ALIVE_WARM if ttl == 0 else KEEP_ALIVE_COLD
     base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
     try:
         overrides = json.loads((base / KEEP_ALIVE_FILE).read_text(encoding="utf-8"))
@@ -936,8 +945,15 @@ def set_keep_alive(slug: str, warm: bool, base_dir=None) -> str:
     entry = EMBEDDING_MODELS.get(slug)
     if entry is None:
         raise ValueError(f"unknown embedding model slug {slug!r}")
+    if entry["provider"] == "localstack":
+        # keep-warm ⇒ member ttl 0 (immune to idle unload); cold ⇒ 600 (§6).
+        from Orchestrator import local_stack  # lazy: avoid import cycle
+        local_stack.set_member_ttl(
+            entry["model_id"], local_stack.TTL_WARM if warm else local_stack.TTL_COLD
+        )
+        return KEEP_ALIVE_WARM if warm else KEEP_ALIVE_COLD
     if entry["provider"] != "ollama":
-        raise ValueError(f"{slug!r} is not a local model; keep_alive is Ollama-only")
+        raise ValueError(f"{slug!r} is not a local model; keep_alive is on-box/Ollama-only")
     base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
     base.mkdir(parents=True, exist_ok=True)
     path = base / KEEP_ALIVE_FILE
@@ -992,6 +1008,11 @@ def set_placement(slug: str, placement: "str | None", base_dir=None) -> "str | N
     entry = EMBEDDING_MODELS.get(slug)
     if entry is None:
         raise ValueError(f"unknown embedding model slug {slug!r}")
+    if entry["provider"] == "localstack":
+        raise ValueError(
+            f"{slug!r} runs on the on-box stack; its device is fixed at install "
+            f"by hardware tier — no runtime placement toggle"
+        )
     if entry["provider"] != "ollama":
         raise ValueError(f"{slug!r} is not a local model; placement is Ollama-only")
     if placement is not None and placement not in PLACEMENTS:
