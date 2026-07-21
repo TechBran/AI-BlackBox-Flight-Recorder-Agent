@@ -1939,3 +1939,111 @@ def test_tier_is_advisory_only_never_gates_retrieval():
     # tier surfaces in status() as advisory metadata only (a plain string).
     tier = rerank.hardware.probe().get("tier")
     assert tier in {"LOW", "MID", "HIGH"}
+
+
+# ── Milestone 4: on-box localstack reranker (llama.cpp /v1/rerank) ────────────
+# The localstack reranker posts to the llama-swap front door resolved by
+# Orchestrator/local_stack.py (M1). local_stack may not be landed in CI, so the
+# scorer resolves the base URL through rerank._localstack_base_url() — patched
+# here to a fixed URL so these tests are fully hermetic (HTTP mocked).
+
+def _pin_localstack_base(monkeypatch, base="http://127.0.0.1:9098/v1"):
+    monkeypatch.setattr(rerank, "_localstack_base_url", lambda: base)
+
+
+def test_localstack_in_known_providers_and_registry():
+    assert "localstack" in rerank.KNOWN_PROVIDERS
+    e = rerank.RERANK_MODELS["qwen3-reranker-8b-local"]
+    assert e["provider"] == "localstack"
+    assert e["model_id"] == "rerank-qwen3-8b"
+    assert e["auth_kind"] == "none" and e["key_env"] is None
+    assert e["preflight_ceiling_ms"] == 500 and e["preflight_passage_n"] == 1
+    # the mandatory Qwen3-Reranker instruct prefix, verbatim from the vllm entry
+    assert e["query_instruction"] == \
+        rerank.RERANK_MODELS["qwen3-reranker-0.6b"]["query_instruction"]
+
+
+def test_score_localstack_posts_rerank_shape_and_parses_results(monkeypatch):
+    calls = {}
+
+    def fake_post(url, json=None, timeout=None):
+        calls["url"], calls["json"], calls["timeout"] = url, json, timeout
+        # llama.cpp /v1/rerank shape: results[].relevance_score, out of order
+        return FakeResp(200, {"results": [
+            {"index": 1, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.1}]})
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    _pin_localstack_base(monkeypatch)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local", timeout_s="9"):
+        got = rerank.score("the query", ["pass A", "pass B"])
+    assert got == [0.1, 0.9]                       # scattered back by index
+    assert calls["url"] == "http://127.0.0.1:9098/v1/rerank"
+    assert calls["json"]["model"] == "rerank-qwen3-8b"
+    assert calls["json"]["documents"] == ["pass A", "pass B"]
+    # the query carries the mandatory Qwen3-Reranker instruct prefix
+    assert calls["json"]["query"].startswith("Instruct:")
+    assert calls["json"]["query"].endswith("\nQuery: the query")
+    assert calls["timeout"] == 9.0
+
+
+def test_score_localstack_stack_absent_returns_none(monkeypatch):
+    """base_url None (M1 resolver not landed / stack not installed) → inert,
+    and the scorer must NOT even attempt the POST."""
+    monkeypatch.setattr(rerank, "_localstack_base_url", lambda: None)
+
+    def boom(*a, **k):
+        raise AssertionError("must not POST when the stack base_url is absent")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        assert rerank.score("q", ["p"]) is None
+
+
+def test_score_localstack_empty_base_url_returns_none(monkeypatch):
+    monkeypatch.setattr(rerank, "_localstack_base_url", lambda: "")
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        assert rerank.score("q", ["p"]) is None
+
+
+@pytest.mark.parametrize("resp", [
+    FakeResp(500, {}),                                              # HTTP error
+    FakeResp(200, {"results": [{"index": 0, "relevance_score": 1.0}]}),  # wrong count
+    FakeResp(200, {"results": "garbage"}),                         # malformed
+    FakeResp(200, {}),                                             # no results key
+])
+def test_score_localstack_bad_response_returns_none(monkeypatch, resp):
+    monkeypatch.setattr(rerank.requests, "post", lambda *a, **k: resp)
+    _pin_localstack_base(monkeypatch)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        assert rerank.score("q", ["a", "b"]) is None
+
+
+def test_score_localstack_transport_exception_returns_none(monkeypatch):
+    def boom(*a, **k):
+        raise ConnectionError("refused")
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    _pin_localstack_base(monkeypatch)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        assert rerank.score("q", ["a"]) is None    # dispatcher never-raise (A9)
+
+
+def test_reachable_localstack_uses_is_healthy(monkeypatch):
+    """localstack reachability is the on-box stack health (loopback, keyless),
+    NOT a key-present check and NOT the [rerank] :8091 localhost probe."""
+    def no_net(*a, **k):
+        raise AssertionError("localstack reachability must not hit :8091")
+    monkeypatch.setattr(rerank.requests, "get", no_net)
+    monkeypatch.setattr(rerank, "_localstack_healthy", lambda: True)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        assert rerank.reachable() is True
+    monkeypatch.setattr(rerank, "_localstack_healthy", lambda: False)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        assert rerank.reachable() is False

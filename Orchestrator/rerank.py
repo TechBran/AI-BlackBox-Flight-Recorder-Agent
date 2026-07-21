@@ -456,6 +456,8 @@ def reachable(settings: dict | None = None, timeout_s: float = 1.0) -> bool:
     p = s["provider"]
     if p == "cpu":
         return _cpu_reachable()
+    if p == "localstack":
+        return _localstack_healthy()
     if p in CLOUD_PROVIDERS:
         # Vertex (gcp_service_account) has NO key_env, so key_present is always
         # False even with a valid GCP SA — its reachability is the ambient SA
@@ -471,6 +473,49 @@ def reachable(settings: dict | None = None, timeout_s: float = 1.0) -> bool:
         key_env = s.get("key_env")
         return bool(key_env and os.getenv(key_env))
     return _probe_localhost(s["base_url"], timeout_s)
+
+
+# ── On-box localstack reranker helpers (Milestone 4) ──────────────────────────
+# The localstack reranker posts to the llama-swap front door (/v1/rerank),
+# resolved from the [local_models] base_url via Orchestrator/local_stack.py — NOT
+# the [rerank] base_url (which defaults to the legacy vLLM :8091 seam). local_stack
+# is imported LAZILY (cycle-proof, mirroring _load_sidecar's rationale: local_stack
+# may import rerank for capability routing, so a top-level import risks a cycle).
+# Absent/uninstalled resolver → None/False so the provider stays inert, never raises.
+
+def _localstack_base_url() -> "str | None":
+    """The llama-swap front-door base_url ([local_models]) for the on-box
+    reranker, or None when the resolver is unavailable (M1 not landed / stack not
+    installed). Never raises."""
+    try:
+        from Orchestrator import local_stack
+        return local_stack.base_url()
+    except Exception:  # noqa: BLE001 - resolver absent → inert
+        return None
+
+
+def _localstack_healthy() -> bool:
+    """Whether the on-box stack is installed + configured + llama-swap is live
+    (local_stack.is_healthy(), which keys on install/config/process-liveness, NOT
+    live per-member VRAM residency — a group swap never flips this). Never raises."""
+    try:
+        from Orchestrator import local_stack
+        return bool(local_stack.is_healthy())
+    except Exception:  # noqa: BLE001 - resolver absent → not healthy
+        return False
+
+
+def _vllm_reranker_running(timeout_s: float = 1.0) -> bool:
+    """Is the legacy vllm-reranker.service answering on its :8091 port? A direct
+    ~1s-capped GET of DEFAULT_BASE_URL/v1/models (NOT the shared _probe_localhost
+    cache — this is a distinct, safety-critical probe for the §5.2 hard rule).
+    Never raises."""
+    try:
+        return requests.get(
+            DEFAULT_BASE_URL + "/v1/models", timeout=timeout_s
+        ).status_code == 200
+    except Exception:  # noqa: BLE001 - never-raise
+        return False
 
 
 # Malformed-config resilience (M3.1 fold-in from the M2 review). M2 moved
@@ -820,6 +865,38 @@ def _score_cohere(query: str, passages: list[str],
     return _scatter_relevance_scores(resp.json(), len(passages))
 
 
+# ── On-box localstack reranker (Milestone 4) ──────────────────────────────────
+# llama.cpp's /v1/rerank (--reranking --pooling rank) behind llama-swap. Wire shape
+# {model, query, documents} → {results:[{index, relevance_score}]} — the SAME row
+# shape the cloud rerankers return, so _scatter_relevance_scores parses it verbatim
+# (no bespoke parser). The mandatory Qwen3-Reranker instruct prefix is prepended to
+# the query (the ranker inverts without it). Base URL is the [local_models] front
+# door (loopback, keyless), NOT the [rerank] :8091 vLLM seam. None on absent stack /
+# non-200 / malformed / count-or-index anomaly; transport blow-ups are backstopped
+# by the dispatcher's never-raise (audit A9).
+
+def _score_localstack(query: str, passages: list[str],
+                      settings: dict) -> list[float] | None:
+    """On-box Qwen3-Reranker-8B @ Q8_0 via llama-swap /v1/rerank (the retrieval-group
+    member, sequential per D13). Posts {model, query: instruction+query, documents} and scatters
+    {index, relevance_score} back onto passage positions."""
+    if not passages:
+        return None
+    base = _localstack_base_url()
+    if not base:
+        return None
+    resp = requests.post(
+        base.rstrip("/") + "/rerank",
+        json={"model": settings["model_id"],
+              "query": settings.get("query_instruction", "") + query,
+              "documents": list(passages)},
+        timeout=settings["timeout_s"],
+    )
+    if resp.status_code != 200:
+        return None
+    return _scatter_relevance_scores(resp.json(), len(passages))
+
+
 # ── Google Vertex semantic-ranker (M7.2) ──────────────────────────────────────
 # The Discovery Engine Ranking API, reached over raw REST (no google-cloud SDK —
 # only google.auth, transitively present, for the OAuth token). Auth is a GCP
@@ -1138,7 +1215,7 @@ def score(query: str, passages: list[str]) -> list[float] | None:
         return None
     fn = {"vllm": _score_vllm, "cpu": _score_cpu, "voyage": _score_voyage,
           "cohere": _score_cohere, "vertex": _score_vertex,
-          "llm": _score_llm}.get(p)
+          "llm": _score_llm, "localstack": _score_localstack}.get(p)
     if fn is None:
         return None
     try:
