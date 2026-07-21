@@ -57,3 +57,50 @@ def test_catalog_survives_qwen_helper_raising(client):
         resp = client.get("/tts/catalog")
     assert resp.status_code == 200
     assert "qwen" not in [g["id"] for g in resp.json()["groups"]]
+
+
+# ── 7.3 POST /tts ────────────────────────────────────────────────────────
+def test_tts_qwen_voice_streams_audio(client):
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+        resp = client.post("/tts", json={"text": "Hello there.", "voice": "qwen:Vivian"})
+    assert resp.status_code == 200
+    # On-box Qwen emits WAV/PCM only — the branch always serves audio/wav.
+    assert resp.headers["content-type"].startswith("audio/wav")
+    assert resp.content == _FAKE_MP3
+    m_syn.assert_called_once()
+    args, kwargs = m_syn.call_args
+    assert args[0] == "Vivian"          # prefix stripped -> bare token
+    assert args[1] == "Hello there."
+    # The member is asked for 'wav', never 'mp3' (which the M6 server 400s).
+    assert kwargs.get("response_format", args[2] if len(args) > 2 else None) == "wav"
+
+
+def test_tts_qwen_return_json_shape(client):
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()):
+        resp = client.post("/tts", json={"text": "Hi.", "voice": "qwen:Serena",
+                                         "return_json": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "success"
+    assert body["audio_url"].startswith("/ui/uploads/")
+    assert body["voice"] == "Serena"
+    assert body["model"] == "qwen-tts"
+    assert body["size_bytes"] == len(_FAKE_MP3)
+
+
+def test_tts_qwen_provider_bare_voice(client):
+    """provider='qwen' with a BARE voice (the Android /tts shape) also routes."""
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+        resp = client.post("/tts", json={"text": "Yo.", "voice": "Ryan",
+                                         "provider": "qwen"})
+    assert resp.status_code == 200
+    m_syn.assert_called_once()
+    assert m_syn.call_args[0][0] == "Ryan"
+
+
+def test_tts_qwen_upstream_error_is_fallback(client):
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp(status=503)):
+        resp = client.post("/tts", json={"text": "Hi.", "voice": "qwen:Vivian",
+                                         "return_json": True})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "fallback"

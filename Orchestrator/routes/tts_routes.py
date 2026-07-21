@@ -235,6 +235,40 @@ def tts_openai(body: dict = Body(...)):
         return {"status": "success", "audio_url": f"/ui/uploads/{_filename}",
                 "voice": _bare, "model": _model, "format": _fmt, "size_bytes": len(_r.content)}
 
+    # --- On-box Qwen3-TTS branch: route to the llama-swap /v1/audio/speech
+    # proxy (body-model auto-routed to the qwen-tts member). Triggered by a
+    # 'qwen:' voice prefix or provider=='qwen'. Checked BEFORE the OpenAI path
+    # (which rejects Qwen voice tokens with an OpenAI-voice-enum 400). Mirrors
+    # the local branch but targets the on-box stack (:9098). sanitize_for_speech
+    # already applied up front (line 140).
+    if (body.get("voice") or "").startswith("qwen:") or body.get("provider") == "qwen":
+        from Orchestrator import qwen_tts
+        _text = (body.get("text") or "").strip()
+        if not _text:
+            raise HTTPException(400, "No text provided")
+        _voice = (body.get("voice") or "").strip()
+        _bare = _voice.split(":", 1)[1] if _voice.startswith("qwen:") else _voice
+        # The on-box Qwen member emits WAV/PCM only (M6 /v1/audio/speech 400s any
+        # other response_format — there is no mp3/opus encoder). Always request
+        # 'wav' (a proper RIFF container the browser plays directly); ignore any
+        # client `format` hint since Qwen cannot honor mp3/opus.
+        _fmt = "wav"
+        try:
+            _r = qwen_tts.synthesize(_bare, _text, response_format=_fmt)
+        except Exception as e:
+            return {"status": "fallback", "detail": str(e)}
+        if _r.status_code != 200:
+            return {"status": "fallback", "api_status": _r.status_code,
+                    "api_body": _r.text[:400]}
+        _mime = "audio/wav"
+        if not body.get("return_json"):
+            return StreamingResponse(iter([_r.content]), media_type=_mime)
+        _filename = f"{uuid.uuid4()}_tts.wav"
+        (UPLOADS_DIR / _filename).write_bytes(_r.content)
+        return {"status": "success", "audio_url": f"/ui/uploads/{_filename}",
+                "voice": _bare, "model": qwen_tts.QWEN_TTS_MODEL, "format": _fmt,
+                "size_bytes": len(_r.content)}
+
     if AUDIO_ENGINE == "browser": return {"status": "fallback"}
     api_key = OPENAI_API_KEY.strip()
     if not api_key: return {"status": "fallback", "message": "OPENAI_API_KEY not configured"}
