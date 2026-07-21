@@ -344,6 +344,7 @@ def speaches_realtime_ws_url(model: str, *, intent: str = "transcription") -> st
 import asyncio as _asyncio
 import time as _time
 from contextlib import asynccontextmanager as _asynccontextmanager
+from contextlib import contextmanager as _contextmanager
 
 _voice_depth = 0
 
@@ -390,4 +391,30 @@ async def retrieval_gate(*, timeout: float | None = RETRIEVAL_GATE_TIMEOUT_S):
             raise _asyncio.TimeoutError(
                 "on-box voice session held the retrieval group past the gate timeout")
         await _asyncio.sleep(_GATE_POLL_S)
+    yield
+
+
+@_contextmanager
+def retrieval_gate_sync(*, timeout: float | None = RETRIEVAL_GATE_TIMEOUT_S):
+    """Blocking sibling of retrieval_gate() for SYNC retrieval-group dispatch.
+
+    The production reranker entry — Orchestrator/rerank.py score() — is a plain
+    synchronous function that runs in the FastAPI threadpool over a blocking
+    requests.post, so it cannot `await` the async gate. This blocks that worker
+    thread instead, polling the SAME GIL-atomic _voice_depth with time.sleep
+    (loop- and thread-agnostic, exactly the reason the counter is a plain int and
+    not an asyncio.Event). Sleeping here parks only the retrieval worker thread,
+    never the FastAPI event loop where voice_session() runs.
+
+    timeout=None  -> wait indefinitely.
+    timeout=<s>   -> raise asyncio.TimeoutError once the ceiling passes, so the
+                     sync caller degrades (un-reranked) rather than block a worker
+                     thread behind a long voice call.
+    """
+    deadline = None if timeout is None else _time.monotonic() + timeout
+    while is_voice_active():
+        if deadline is not None and _time.monotonic() >= deadline:
+            raise _asyncio.TimeoutError(
+                "on-box voice session held the retrieval group past the gate timeout")
+        _time.sleep(_GATE_POLL_S)
     yield

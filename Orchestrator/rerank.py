@@ -881,8 +881,10 @@ def _do_localstack_rerank(query: str, passages: list[str],
     """On-box Qwen3-Reranker-8B @ Q8_0 via llama-swap /v1/rerank (the retrieval-group
     member, sequential per D13). Posts {model, query: instruction+query, documents} and scatters
     {index, relevance_score} back onto passage positions. Synchronous HTTP dispatch
-    (requests.post) — the sync score() path calls this directly; the async gated
-    entry _score_localstack wraps it behind the on-box voice-session gate (D12)."""
+    (requests.post) — the real POST, gate-free. Both gated entries wrap THIS behind
+    the on-box voice-session gate (D12): the production sync score() path via
+    _score_localstack_sync (blocking retrieval_gate_sync), and the async
+    _score_localstack (async retrieval_gate) for a future async dispatch."""
     if not passages:
         return None
     base = _localstack_base_url()
@@ -916,6 +918,31 @@ async def _score_localstack(query: str, passages: list[str],
                 timeout=local_stack.RETRIEVAL_GATE_TIMEOUT_S):
             if settings is None:
                 settings = get_settings()
+            return _do_localstack_rerank(query, passages, settings)
+    except asyncio.TimeoutError:
+        return None
+    except Exception:  # noqa: BLE001 - never-raise backstop (audit A9): a
+        # transport error from _do_localstack_rerank on an unreachable :9098
+        # (requests.ConnectionError) must degrade to un-reranked, mirroring the
+        # sync score() dispatcher's swallow-to-None — not propagate to the caller.
+        return None
+
+
+def _score_localstack_sync(query: str, passages: list[str],
+                           settings: dict) -> list[float] | None:
+    """Production SYNC entry for the on-box localstack reranker — what score()
+    dispatches to (rerank runs synchronously in the FastAPI threadpool).
+
+    D12: serialize behind any open on-box voice stream via the BLOCKING gate
+    (retrieval_gate_sync — score() cannot await the async gate). On the
+    bounded-wait timeout, return None (un-reranked): a voice-held reranker costs
+    latency, never recall (§6). Transport/HTTP failures inside the real dispatch
+    already return None via _do_localstack_rerank's own guards, and score()'s
+    A9 backstop is the final net."""
+    from Orchestrator import local_stack  # lazy: avoid import cycle
+    try:
+        with local_stack.retrieval_gate_sync(
+                timeout=local_stack.RETRIEVAL_GATE_TIMEOUT_S):
             return _do_localstack_rerank(query, passages, settings)
     except asyncio.TimeoutError:
         return None
@@ -1239,7 +1266,7 @@ def score(query: str, passages: list[str]) -> list[float] | None:
         return None
     fn = {"vllm": _score_vllm, "cpu": _score_cpu, "voyage": _score_voyage,
           "cohere": _score_cohere, "vertex": _score_vertex,
-          "llm": _score_llm, "localstack": _do_localstack_rerank}.get(p)
+          "llm": _score_llm, "localstack": _score_localstack_sync}.get(p)
     if fn is None:
         return None
     try:
