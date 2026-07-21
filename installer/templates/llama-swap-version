@@ -1,0 +1,7 @@
+# Pinned llama-swap release (github.com/mostlygeek/llama-swap).
+# The installer downloads llama-swap_<VER>_linux_amd64.tar.gz + the release's
+# published checksums.txt, verifies the tarball sha256, then installs the
+# binary to $LOCALSTACK_BIN/llama-swap. Bump on upgrade. Confirm the asset
+# name on the release page if goreleaser naming changes.
+# Format: bare version tag (no leading v) on the first non-comment line.
+240
