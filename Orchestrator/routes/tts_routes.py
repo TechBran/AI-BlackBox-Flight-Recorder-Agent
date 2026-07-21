@@ -347,6 +347,10 @@ async def tts_batch(body: dict = Body(...)):
     # caller that passes the voice but omits provider still routes to Kokoro, not OpenAI.
     if voice.startswith("local:"):
         provider = "local"
+    # A qwen:-prefixed voice forces the qwen provider (parity with local:), so a
+    # caller that passes the prefixed voice but omits provider still routes on-box.
+    if voice.startswith("qwen:"):
+        provider = "qwen"
     model = (body.get("model") or "").strip()
     audio_format = (body.get("format") or TTS_FORMAT).strip()
     operator = (body.get("operator") or "unknown").strip()
@@ -461,8 +465,32 @@ async def tts_batch(body: dict = Body(...)):
         futures = [loop.run_in_executor(_tts_executor, _local_tts_chunk, chunk) for chunk in chunks]
         results = await asyncio.gather(*futures, return_exceptions=True)
 
+    # --- On-box Qwen3-TTS provider: llama-swap /v1/audio/speech, sequential ---
+    elif provider == "qwen":
+        from Orchestrator import qwen_tts
+        _bare = voice.split(":", 1)[1] if voice.startswith("qwen:") else voice
+
+        def _qwen_all() -> List[bytes]:
+            # Sequential on purpose: one GPU serializes synthesis anyway, and
+            # the qwen-tts member's concurrencyLimit:2 would 429 a parallel
+            # fan-out. Any non-200 raises -> the endpoint returns 502.
+            # Request WAV: the M6 server emits WAV/PCM only (it 400s mp3/opus —
+            # there is no encoder), so audio_format cannot flow through here.
+            out: List[bytes] = []
+            for ch in chunks:
+                r = qwen_tts.synthesize(_bare, ch, response_format="wav")
+                if r.status_code != 200:
+                    raise HTTPException(502, f"Qwen TTS failed (HTTP {r.status_code}): {r.text[:200]}")
+                out.append(r.content)
+            return out
+
+        results = await loop.run_in_executor(_tts_executor, _qwen_all)
+        # Qwen returns WAV — drive the WAV stitcher + audio/wav mime below
+        # (mirrors the Gemini branch's `audio_format = "wav"`).
+        audio_format = "wav"
+
     else:
-        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', 'gemini-flash', 'elevenlabs', or 'local'.")
+        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', 'gemini-flash', 'elevenlabs', 'local', or 'qwen'.")
 
     # Check for errors in results
     errors = [(i, r) for i, r in enumerate(results) if isinstance(r, Exception)]

@@ -104,3 +104,38 @@ def test_tts_qwen_upstream_error_is_fallback(client):
                                          "return_json": True})
     assert resp.status_code == 200
     assert resp.json()["status"] == "fallback"
+
+
+# ── 7.4 POST /tts/batch ──────────────────────────────────────────────────
+def test_tts_batch_qwen_provider(client):
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+        resp = client.post("/tts/batch",
+                           json={"text": "Short batch.", "provider": "qwen",
+                                 "voice": "Vivian"})
+    assert resp.status_code == 200
+    # Qwen emits WAV — the batch stitches WAV and serves audio/wav (a single
+    # chunk passes through stitch_wav_chunks unchanged, so content is preserved).
+    assert resp.headers["content-type"].startswith("audio/wav")
+    assert resp.content == _FAKE_MP3
+    m_syn.assert_called_once()
+    assert m_syn.call_args[0][0] == "Vivian"
+    # The member is asked for 'wav', never mp3 (which the M6 server 400s).
+    assert m_syn.call_args.kwargs.get("response_format") == "wav"
+
+
+def test_tts_batch_qwen_prefix_forces_provider(client):
+    """A 'qwen:'-prefixed voice forces provider=qwen even if provider omitted
+    (parity with the local: override), and the bare token reaches synthesize."""
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+        resp = client.post("/tts/batch",
+                           json={"text": "Hi.", "voice": "qwen:Serena"})
+    assert resp.status_code == 200
+    m_syn.assert_called_once()
+    assert m_syn.call_args[0][0] == "Serena"
+
+
+def test_tts_batch_qwen_upstream_error_502(client):
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp(status=500)):
+        resp = client.post("/tts/batch",
+                           json={"text": "Hi.", "provider": "qwen", "voice": "Vivian"})
+    assert resp.status_code == 502
