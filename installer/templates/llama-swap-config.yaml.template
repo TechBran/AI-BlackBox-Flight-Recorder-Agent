@@ -1,0 +1,106 @@
+# installer/templates/llama-swap-config.yaml.template — DESIGN TEMPLATE
+# Landed by install.sh Step 2f (blackbox-install-localstack.sh), tier-adjusted
+# (§7). ${LOCALSTACK_BIN}/${LOCALSTACK_MODELS}/${SPEACHES_VENV}/${QWEN_TTS_VENV}
+# are shell-substituted at write time; ${PORT} is llama-swap's OWN per-member
+# assigned loopback port (left literal for llama-swap to fill); ${llama-server}
+# and ${models-dir} are llama-swap MACROS (left literal). One binary
+# (blackbox-models.service) supervises all four members, each bound to 127.0.0.1.
+#
+# DEVIATION FROM SPEC §8 TEMPLATE: the "speaches" member is pinned to the
+# STATIC port 9099 instead of ${PORT}. Design-B streaming STT (D12) opens a
+# direct WebSocket from the Orchestrator to Speaches /v1/realtime, which needs
+# a KNOWN port; llama-swap's ${PORT} is assigned dynamically per load and is
+# not discoverable by the Orchestrator. Pinning 9099 gives a stable direct-WS
+# target. All other members keep ${PORT} (they are reached only through the
+# :9098 proxy / /upstream). Canonical: front door 9098, speaches 9099.
+
+healthCheckTimeout: 120        # global default (seconds); per-member overrides below
+logLevel: info
+
+macros:
+  llama-server: "${LOCALSTACK_BIN}/llama-server"
+  models-dir:   "${LOCALSTACK_MODELS}"
+
+models:
+  # ── retrieval group ────────────────────────────────────────────────
+  "embed-qwen3-8b":
+    # Official Qwen/Qwen3-Embedding-8B-GGUF @ Q8_0 (8.05GB). Last-token pooling.
+    # -b/-ub forced to the full input seq (non-causal pooling); -fa bounds the
+    # compute buffer. --pooling last only if the build doesn't auto-detect it.
+    cmd: |
+      ${llama-server}
+      --model ${models-dir}/Qwen3-Embedding-8B-Q8_0.gguf
+      --host 127.0.0.1 --port ${PORT}
+      --embeddings --pooling last
+      -c 8192 -b 8192 -ub 8192 -fa
+      -ngl 99 --no-warmup
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 300      # 8GB weights load is slow — long startup gate
+    ttl: 600                     # keep-warm ⇒ set ttl: 0 (immune to idle unload,
+                                 #   still yields to a cross-group swap; §6)
+    concurrencyLimit: 4
+
+  "rerank-qwen3-8b":
+    # SELF-CONVERTED GGUF (Qwen3-Reranker-8B @ Q8_0) from a llama.cpp build
+    # post-dating the convert_hf_to_gguf.py fix (extracts cls.output.weight,
+    # pooling_type=RANK). G2 gates score validity before this member can be
+    # selected. D13: retrieval is sequential (swap: true) — this member loads
+    # AFTER the embedder is evicted (a ~6–12s per-search swap, accepted cost).
+    cmd: |
+      ${llama-server}
+      --model ${models-dir}/Qwen3-Reranker-8B-Q8_0.gguf
+      --host 127.0.0.1 --port ${PORT}
+      --reranking --pooling rank
+      -c 8192 -ngl 99 --no-warmup
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 300      # ~8GB Q8_0 weights load — long startup gate (D13)
+    ttl: 600
+    concurrencyLimit: 2
+
+  # ── audio group ────────────────────────────────────────────────────
+  "speaches":
+    # Pinned Speaches version (pre-1.0; capture /v1/realtime schema in G4/G6).
+    # At most ONE whisper model resident (§5.3). Streaming via Design B
+    # (direct-to-9099); llama-swap WS proxy (#754) is unavailable.
+    # DEVIATION: static port 9099 (not ${PORT}) — see header.
+    cmd: |
+      ${SPEACHES_VENV}/bin/uvicorn --factory speaches.main:create_app
+      --host 127.0.0.1 --port 9099
+    proxy: "http://127.0.0.1:9099"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 120
+    ttl: 600
+    concurrencyLimit: 4
+
+  "qwen-tts":
+    # Our in-repo FastAPI server (LocalModels/qwen_tts_server). Three variants
+    # managed in-process with FREE-BEFORE-LOAD (§5.4). Clone/design routed via
+    # /upstream/qwen-tts/... (not body-model auto-routed); speech/voices are.
+    cmd: |
+      ${QWEN_TTS_VENV}/bin/uvicorn qwen_tts_server.app:app
+      --host 127.0.0.1 --port ${PORT}
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: "/health"
+    healthCheckTimeout: 180      # first variant load
+    ttl: 600
+    concurrencyLimit: 2
+
+groups:
+  # persistent:false on BOTH groups (persistent:true on both would deadlock
+  # VRAM: >16GB). ttl:600 idle-unload applies per member within a live group.
+  "retrieval":
+    swap: true                   # D13: members swap within the group — embed and rerank are never co-resident
+    exclusive: true              # loading retrieval unloads the audio group
+    persistent: false
+    members:
+      - "embed-qwen3-8b"
+      - "rerank-qwen3-8b"
+  "audio":
+    swap: false                  # whisper + qwen-tts CO-RESIDENT
+    exclusive: true              # loading audio unloads the retrieval group
+    persistent: false
+    members:
+      - "speaches"
+      - "qwen-tts"
