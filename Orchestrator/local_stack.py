@@ -206,3 +206,74 @@ def model_downloaded(model_id: str) -> bool:
     GET /embeddings/status)."""
     entry = read_download_state().get(model_id)
     return isinstance(entry, dict) and entry.get("state") in ("downloaded", "done")
+
+
+import os
+from pathlib import Path
+
+import yaml
+
+# Keep-warm maps to a llama-swap member ttl (§6): 0 = immune to the 10-min idle
+# TTL (still yields to a cross-group swap); 600 = the template default (cold).
+TTL_WARM = 0
+TTL_COLD = 600
+
+
+def config_path() -> "Path | None":
+    """Path to the live llama-swap config.yaml the installer (M2, Step 2f) wrote
+    to ~/.blackbox/localstack/llama-swap-config.yaml (the installer's CONFIG_DEST,
+    Task 2.5) — or None when that file is absent (stack not installed). Derived
+    from the fixed install path rather than a config.ini key: the installer
+    writes the config there unconditionally, so nothing needs to declare/write a
+    [local_models] config_path key, and keep-warm resolves the REAL generated
+    config in production (a getattr(config, "LOCAL_MODELS_CONFIG_PATH", ...) would
+    always be None → get/set_member_ttl dead on-box). blackbox.service runs
+    ProtectHome=no, so ~ is the real user's home. (If M1 already defines this,
+    keep M1's and delete this copy.)"""
+    p = Path(os.path.expanduser("~/.blackbox/localstack/llama-swap-config.yaml"))
+    return p if p.exists() else None
+
+
+def get_member_ttl(member: str) -> "int | None":
+    """The ttl (seconds) configured for a llama-swap member, or None when the
+    config is absent/unreadable or the member is missing. 0 == kept warm."""
+    path = config_path()
+    if path is None:
+        return None
+    try:
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    model = (cfg.get("models") or {}).get(member)
+    if not isinstance(model, dict) or "ttl" not in model:
+        return None
+    try:
+        return int(model["ttl"])
+    except (TypeError, ValueError):
+        return None
+
+
+def set_member_ttl(member: str, ttl: int) -> None:
+    """Surgically set one member's ttl and atomically rewrite the config.
+
+    WARNING (§6): the service runs with --watch-config, which auto-restarts the
+    WHOLE proxy on any edit (unloads every member — there is no in-place reload,
+    llama-swap #160/#547). Batch config writes; one keep-warm toggle is one
+    write and one brief full-stack reload. Raises if the stack isn't installed
+    (RuntimeError) or the member isn't in the config (ValueError)."""
+    path = config_path()
+    if path is None:
+        raise RuntimeError("local stack not installed — no llama-swap config to edit")
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    models = (cfg or {}).get("models") or {}
+    if member not in models or not isinstance(models[member], dict):
+        raise ValueError(f"llama-swap config has no member {member!r}")
+    models[member]["ttl"] = int(ttl)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
