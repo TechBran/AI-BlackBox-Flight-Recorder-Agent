@@ -505,6 +505,19 @@ def _localstack_healthy() -> bool:
         return False
 
 
+def _vllm_reranker_running(timeout_s: float = 1.0) -> bool:
+    """Is the legacy vllm-reranker.service answering on its :8091 port? A direct
+    ~1s-capped GET of DEFAULT_BASE_URL/v1/models (NOT the shared _probe_localhost
+    cache — this is a distinct, safety-critical probe for the §5.2 hard rule).
+    Never raises."""
+    try:
+        return requests.get(
+            DEFAULT_BASE_URL + "/v1/models", timeout=timeout_s
+        ).status_code == 200
+    except Exception:  # noqa: BLE001 - never-raise
+        return False
+
+
 # Malformed-config resilience (M3.1 fold-in from the M2 review). M2 moved
 # get_settings() outside score()'s try, so a non-numeric [rerank] value would
 # now propagate out of score()/status() as a ValueError. Fix at the source:
@@ -1248,6 +1261,18 @@ def preflight() -> dict:
                     "measured_ms": None, "ceiling_ms": ceiling,
                     "passage_n": passage_n,
                     "reason": "no reranker provider configured"}
+        # §5.2 hard rule (Milestone 4): the legacy vLLM reranker (:8091) and the
+        # on-box localstack retrieval group CANNOT co-run — vLLM pre-allocates
+        # ~90% of VRAM via gpu_memory_utilization and is invisible to llama-swap's
+        # budgeting, so both resident → guaranteed OOM. Refuse to activate while
+        # it answers. NOT cached (stopping vllm-reranker.service resolves it live,
+        # no restart) — same non-cached posture as "skipped".
+        if provider == "localstack" and _vllm_reranker_running():
+            return {"state": "failed", "latency_ms": None, "measured_ms": None,
+                    "ceiling_ms": ceiling, "passage_n": passage_n,
+                    "reason": ("vLLM reranker still answering on :8091 — stop "
+                               "vllm-reranker.service before enabling the on-box "
+                               "retrieval group (both pre-allocate VRAM → OOM)")}
         passages = ["preflight probe passage"] * max(1, passage_n)
         t0 = time.monotonic()
         got = score("preflight probe", passages)

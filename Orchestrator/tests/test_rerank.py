@@ -2047,3 +2047,28 @@ def test_reachable_localstack_uses_is_healthy(monkeypatch):
     with pin_cfg("rerank", provider="localstack",
                  model="qwen3-reranker-8b-local"):
         assert rerank.reachable() is False
+
+
+# ── Milestone 4: §5.2 hard rule + TTL-recoverable localstack preflight ────────
+
+def test_localstack_preflight_refuses_when_vllm_reranker_up(monkeypatch):
+    """The vLLM reranker (:8091) and the on-box retrieval group cannot co-run
+    (both pre-allocate VRAM → OOM). preflight() REFUSES localstack while :8091
+    answers — and does NOT cache the refusal, so stopping the service resolves
+    it live on the next probe (no restart)."""
+    # something answering on :8091 = vllm-reranker.service still up
+    monkeypatch.setattr(rerank.requests, "get",
+                        lambda url, timeout=None: FakeResp(200, {"data": []}))
+    _pin_localstack_base(monkeypatch)
+    # a WORKING scorer — proves the refusal is the conflict, not a scoring fail
+    monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local", preflight_ceiling_ms="5000"):
+        pf = rerank.preflight()
+        assert pf["state"] == "failed"
+        assert ":8091" in pf["reason"] and "vllm" in pf["reason"].lower()
+        # NOT cached: stop the service (get now refuses) → next preflight re-checks
+        def refused(*a, **k):
+            raise ConnectionError("service stopped")
+        monkeypatch.setattr(rerank.requests, "get", refused)
+        assert rerank.preflight()["state"] == "ok"
