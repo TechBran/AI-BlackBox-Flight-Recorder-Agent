@@ -20,6 +20,7 @@ from Orchestrator.embeddings import providers
 from Orchestrator.embeddings.providers import (
     EmbeddingProviderError,
     GeminiProvider,
+    LocalStackProvider,
     OllamaProvider,
     OpenAIProvider,
     get_provider,
@@ -33,6 +34,10 @@ OLLAMA_SLUG = "qwen3-embedding-0.6b"
 GEMINI_DIMS = EMBEDDING_MODELS[GEMINI_SLUG]["dims"]
 OPENAI_DIMS = EMBEDDING_MODELS[OPENAI_SLUG]["dims"]
 OLLAMA_DIMS = EMBEDDING_MODELS[OLLAMA_SLUG]["dims"]
+
+LOCALSTACK_SLUG = "qwen3-embedding-8b-local"
+LOCALSTACK_DIMS = EMBEDDING_MODELS[LOCALSTACK_SLUG]["dims"]
+LOCALSTACK_BASE = "http://127.0.0.1:9098/v1"
 
 
 @pytest.fixture(autouse=True)
@@ -486,3 +491,115 @@ def test_get_provider_class_per_registry_provider():
     assert isinstance(get_provider(OPENAI_SLUG), OpenAIProvider)
     assert isinstance(get_provider(OLLAMA_SLUG), OllamaProvider)
     assert isinstance(get_provider("qwen3-embedding-8b"), OllamaProvider)
+    assert isinstance(get_provider("qwen3-embedding-8b-local"), LocalStackProvider)
+    assert isinstance(get_provider("qwen3-embedding-0.6b-local"), LocalStackProvider)
+
+
+# ── LocalStack (on-box llama-swap :9098) ─────────────────────────────────────
+
+def _localstack_with_mock_transport(provider, requests_seen, dims, status=200):
+    """Route the provider's httpx client through a MockTransport that records
+    the request (payload + headers) and answers with the OpenAI /embeddings
+    response shape ({data:[{index, embedding}]})."""
+
+    def handler(request):
+        body = json.loads(request.content.decode())
+        requests_seen.append({
+            "url": str(request.url),
+            "json": body,
+            "headers": {k.lower(): v for k, v in request.headers.items()},
+        })
+        if status != 200:
+            return httpx.Response(status, json={"error": "boom"})
+        return httpx.Response(200, json={"data": [
+            {"index": i, "embedding": [0.0] * dims}
+            for i, _ in enumerate(body["input"])
+        ]})
+
+    provider._transport = httpx.MockTransport(handler)
+    return provider
+
+
+@pytest.fixture
+def _localstack_base(monkeypatch):
+    from Orchestrator import local_stack
+    monkeypatch.setattr(local_stack, "base_url", lambda: LOCALSTACK_BASE)
+    return LOCALSTACK_BASE
+
+
+@pytest.mark.asyncio
+async def test_localstack_document_posts_openai_shape_to_front_door(_localstack_base):
+    provider = get_provider(LOCALSTACK_SLUG)
+    seen = []
+    _localstack_with_mock_transport(provider, seen, LOCALSTACK_DIMS)
+    result = await provider.embed(["first", "second"], purpose="document")
+    assert len(result) == 2 and all(len(v) == LOCALSTACK_DIMS for v in result)
+    assert seen[0]["url"] == f"{LOCALSTACK_BASE}/embeddings"
+    assert seen[0]["json"]["model"] == EMBEDDING_MODELS[LOCALSTACK_SLUG]["model_id"]
+    assert seen[0]["json"]["input"] == ["first", "second"]
+    # loopback → NEVER an Authorization header (keyless front door)
+    assert "authorization" not in seen[0]["headers"]
+
+
+@pytest.mark.asyncio
+async def test_localstack_query_prefixes_instruction(_localstack_base):
+    provider = get_provider(LOCALSTACK_SLUG)
+    seen = []
+    _localstack_with_mock_transport(provider, seen, LOCALSTACK_DIMS)
+    await provider.embed(["find the css fix"], purpose="query")
+    instruction = EMBEDDING_MODELS[LOCALSTACK_SLUG]["query_instruction"]
+    assert seen[0]["json"]["input"] == [instruction + "find the css fix"]
+
+
+@pytest.mark.asyncio
+async def test_localstack_output_follows_input_order(_localstack_base):
+    # response indices deliberately scrambled — output must follow input order
+    provider = get_provider(LOCALSTACK_SLUG)
+
+    def handler(request):
+        body = json.loads(request.content.decode())
+        n = len(body["input"])
+        data = [{"index": i, "embedding": [float(i)] + [0.0] * (LOCALSTACK_DIMS - 1)}
+                for i in range(n)]
+        return httpx.Response(200, json={"data": list(reversed(data))})
+
+    provider._transport = httpx.MockTransport(handler)
+    result = await provider.embed(["a", "b", "c"], purpose="document")
+    assert [v[0] for v in result] == [0.0, 1.0, 2.0]
+
+
+def test_localstack_read_timeout_is_generous_for_cold_group_swaps():
+    # A cross-group swap + 8B GGUF cold-load holds the request open through
+    # llama-swap's queue; the read cap must outlast it, connect stays short.
+    assert LocalStackProvider.TIMEOUT.read >= 300.0
+    assert LocalStackProvider.TIMEOUT.connect <= 10.0
+
+
+@pytest.mark.asyncio
+async def test_localstack_http_error_retries_then_raises(_localstack_base):
+    provider = get_provider(LOCALSTACK_SLUG)
+    sleeps = _record_sleeps(provider)
+    seen = []
+    _localstack_with_mock_transport(provider, seen, LOCALSTACK_DIMS, status=503)
+    with pytest.raises(EmbeddingProviderError):
+        await provider.embed(["text"], purpose="document")
+    assert sleeps == [1.0, 2.0, 4.0]      # full retry envelope, no real sleeps
+    assert len(seen) == 4                  # initial + 3 retries
+
+
+@pytest.mark.asyncio
+async def test_localstack_dims_mismatch_raises_without_retry(_localstack_base):
+    provider = get_provider(LOCALSTACK_SLUG)
+    sleeps = _record_sleeps(provider)
+
+    def handler(request):
+        body = json.loads(request.content.decode())
+        return httpx.Response(200, json={"data": [
+            {"index": i, "embedding": [0.0] * (LOCALSTACK_DIMS - 1)}
+            for i, _ in enumerate(body["input"])
+        ]})
+
+    provider._transport = httpx.MockTransport(handler)
+    with pytest.raises(EmbeddingProviderError):
+        await provider.embed(["hello"], purpose="document")
+    assert sleeps == []                    # guard fires after a "successful" call

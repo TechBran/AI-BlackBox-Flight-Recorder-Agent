@@ -62,6 +62,12 @@ GEMINI_EMBED_TIMEOUT_S = 60.0
 # short so a genuinely dead daemon still fails fast.
 OLLAMA_READ_TIMEOUT_S = 600.0
 
+# llama-swap holds a request through a cross-group swap + cold 8B GGUF load
+# (healthCheckTimeout 300 on the embed member); a slow read here is the stack
+# working, exactly like OLLAMA_READ_TIMEOUT_S. Connect stays short so a dead
+# :9098 front door fails fast.
+LOCALSTACK_READ_TIMEOUT_S = 600.0
+
 # WI-1 mode 1: clamp budget = 90% of the registry max_input_tokens. The hard
 # budget < limit guarantee holds on the exact-local tokenizer paths (OpenAI
 # tiktoken, Qwen hf — where the Ollama num_ctx invariant is load-bearing); the
@@ -266,10 +272,55 @@ class OllamaProvider(_BaseProvider):
             return resp.json()["embeddings"]
 
 
+class LocalStackProvider(_BaseProvider):
+    """On-box embeddings via the llama-swap front door (blackbox-models.service,
+    :9098). Net-new: OpenAIProvider hardcodes OPENAI_API_KEY and has no base_url,
+    and OllamaProvider speaks the /api/embed (num_ctx/keep_alive) dialect — neither
+    fits an OpenAI-compatible loopback llama-server. base_url is read FRESH per
+    call from the resolver so re-pointing the stack needs no restart; no bearer on
+    loopback. Qwen3-Embedding needs the instruct prefix on queries, so the
+    query-instruction prefixing + budget accounting mirror OllamaProvider."""
+
+    TIMEOUT = httpx.Timeout(LOCALSTACK_READ_TIMEOUT_S, connect=5.0)
+
+    def __init__(self, slug, entry):
+        super().__init__(slug, entry)
+        self._transport = None  # tests inject httpx.MockTransport
+
+    def _clamp_budget(self, purpose: str):
+        # Mirror of OllamaProvider._clamp_budget: the registry query_instruction
+        # is prefixed AFTER clamping (in _embed), so its tokens come out of the
+        # text budget or prefix+text would overshoot what the budget promises.
+        budget = super()._clamp_budget(purpose)
+        if budget is None or purpose != "query":
+            return budget
+        instruction = self.entry.get("query_instruction")
+        if not instruction:
+            return budget
+        return max(0, budget - tokenization.estimate_tokens(instruction, self.slug))
+
+    async def _embed(self, texts, purpose):
+        from Orchestrator import local_stack  # lazy: avoid import cycle
+        instruction = self.entry.get("query_instruction")
+        if purpose == "query" and instruction is not None:
+            texts = [instruction + t for t in texts]
+        base_url = local_stack.base_url().rstrip("/")  # fresh per call, no restart
+        payload = {"model": self.model_id, "input": texts}
+        async with httpx.AsyncClient(
+            timeout=self.TIMEOUT, transport=self._transport
+        ) as client:
+            resp = await client.post(f"{base_url}/embeddings", json=payload)
+            resp.raise_for_status()
+            data = resp.json()["data"]
+        items = sorted(data, key=lambda item: item["index"])
+        return [list(item["embedding"]) for item in items]
+
+
 _PROVIDER_CLASSES = {
     "gemini": GeminiProvider,
     "openai": OpenAIProvider,
     "ollama": OllamaProvider,
+    "localstack": LocalStackProvider,
 }
 
 _instances: dict = {}
