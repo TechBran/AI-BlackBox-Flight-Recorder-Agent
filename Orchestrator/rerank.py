@@ -505,19 +505,6 @@ def _localstack_healthy() -> bool:
         return False
 
 
-def _vllm_reranker_running(timeout_s: float = 1.0) -> bool:
-    """Is the legacy vllm-reranker.service answering on its :8091 port? A direct
-    ~1s-capped GET of DEFAULT_BASE_URL/v1/models (NOT the shared _probe_localhost
-    cache — this is a distinct, safety-critical probe for the §5.2 hard rule).
-    Never raises."""
-    try:
-        return requests.get(
-            DEFAULT_BASE_URL + "/v1/models", timeout=timeout_s
-        ).status_code == 200
-    except Exception:  # noqa: BLE001 - never-raise
-        return False
-
-
 # Malformed-config resilience (M3.1 fold-in from the M2 review). M2 moved
 # get_settings() outside score()'s try, so a non-numeric [rerank] value would
 # now propagate out of score()/status() as a ValueError. Fix at the source:
