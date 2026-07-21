@@ -13,11 +13,18 @@ only by the /stt route, not through this str-contract entry point.
 from __future__ import annotations
 
 import json
+import time
 
 import requests
 
 from Orchestrator import config
 from Orchestrator.stt.resolve import resolve_stt_provider
+
+# Batch 429 contract (correction [28]): a llama-swap concurrency 429 becomes
+# retry-with-backoff (capped) for the non-realtime path.
+_ONBOX_429_RETRIES = 3
+_ONBOX_429_BACKOFF_BASE = 0.5
+_ONBOX_429_BACKOFF_MAX = 4.0
 
 
 def transcribe_bytes(audio_bytes: bytes, content_type: str, *, provider: str | None = None,
@@ -30,6 +37,8 @@ def transcribe_bytes(audio_bytes: bytes, content_type: str, *, provider: str | N
     provider = provider or resolve_stt_provider()
     if not provider:
         raise RuntimeError("no STT provider configured")
+    if provider == "onbox":
+        return _onbox_transcribe(audio_bytes, content_type, filename)
     if provider == "local":
         return _local_transcribe(audio_bytes, content_type, filename)
     if provider == "elevenlabs":
@@ -99,6 +108,36 @@ def _local_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> s
         except Exception:
             detail = r.text
         raise RuntimeError(f"Local STT error: {detail}")
+    try:
+        return (r.json().get("text") or "").strip()
+    except Exception:
+        return r.text.strip()
+
+
+def _onbox_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
+    """Transcribe via the on-box Speaches member through the llama-swap front door
+    (:9098 /v1/audio/transcriptions). PROXIED (not direct-to-:9099) so llama-swap's
+    drain/TTL accounting sees the batch request. body model = the on-box batch STT
+    model id. A llama-swap 429 (concurrency limit) is retried with capped backoff."""
+    from Orchestrator import local_stack
+    base = local_stack.base_url()          # http://127.0.0.1:9098/v1
+    model = local_stack.stt_batch_model()
+    attempts = 0
+    while True:
+        files = {"file": (filename, audio_bytes, content_type)}
+        r = requests.post(f"{base}/audio/transcriptions",
+                          data={"model": model}, files=files, timeout=120)
+        if r.status_code == 429 and attempts < _ONBOX_429_RETRIES:
+            attempts += 1
+            time.sleep(min(_ONBOX_429_BACKOFF_BASE * (2 ** (attempts - 1)), _ONBOX_429_BACKOFF_MAX))
+            continue
+        break
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise RuntimeError(f"On-box STT error ({r.status_code}): {detail}")
     try:
         return (r.json().get("text") or "").strip()
     except Exception:
