@@ -172,8 +172,12 @@ if (( need_lc )); then
     fi
     # Copy the WHOLE bin dir (CUDA prebuilt bundles libllama/libggml *.so beside
     # the binary; LD_LIBRARY_PATH in the unit points at $LOCALSTACK_BIN).
+    # Copy AS ROOT (mirrors §1's `sudo install`): the root-owned mktemp dir is
+    # mode 0700, so a `sudo -u "$REAL_USER" cp` cannot traverse it -> EACCES.
+    # chown the result back to REAL_USER before the user-scoped chmod/marker.
     LC_SRCDIR="$(dirname "$LC_SRC")"
-    sudo -u "$REAL_USER" cp -a "$LC_SRCDIR/." "$LOCALSTACK_BIN/"
+    sudo cp -a "$LC_SRCDIR/." "$LOCALSTACK_BIN/"
+    sudo chown -R "$REAL_USER:$REAL_USER" "$LOCALSTACK_BIN"
     sudo -u "$REAL_USER" chmod +x "$LOCALSTACK_BIN/llama-server"
     echo "$LC_VER" | sudo -u "$REAL_USER" tee "$LC_MARKER" >/dev/null
     echo "[install-localstack] Installed $LOCALSTACK_BIN/llama-server ($LC_VER, sha256 $LC_ACTUAL)"
