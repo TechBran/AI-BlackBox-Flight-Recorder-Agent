@@ -1068,7 +1068,6 @@ export async function openVoiceLab() {
 
     // ElevenLabs zones (clone/design/manage) only make sense with a key —
     // hide all three on a Qwen-only box so the modal isn't full of 400s.
-    const elevenOk = canClone || false;   // canClone already implies a working key
     const elevenConfigured = await (async () => {
         try {
             const r = await fetch('/elevenlabs/status');
