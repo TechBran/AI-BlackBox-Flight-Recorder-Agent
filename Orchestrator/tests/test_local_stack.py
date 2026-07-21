@@ -89,3 +89,149 @@ def test_enabled_is_fresh_across_edits(cfg):
     assert local_stack.enabled("embeddings") is False
     cfg("[local_models]\nenabled = true\nembeddings = true\n")   # wizard flip
     assert local_stack.enabled("embeddings") is True             # no restart
+
+
+# ── Task 1.4: llama-swap probes + download-state ──────────────────────────────
+
+def _transport(routes: dict):
+    """Sync httpx.MockTransport: path -> httpx.Response (or a raising callable).
+    Mirrors test_embeddings_ollama.py's _get_transport."""
+    def handler(request):
+        target = routes.get(request.url.path)
+        if callable(target):
+            return target(request)
+        if target is None:
+            return httpx.Response(404)
+        return target
+    return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+def installed_cfg(cfg):
+    """A tmp config.ini with the stack installed (master enabled)."""
+    cfg("[local_models]\nenabled = true\n")
+    return cfg
+
+
+def test_llama_swap_health_reachable(monkeypatch, installed_cfg):
+    monkeypatch.setattr(local_stack, "_transport", _transport({
+        "/health": httpx.Response(200, text="OK"),
+    }))
+    h = local_stack.llama_swap_health()
+    assert h == {"reachable": True, "status_code": 200}
+
+
+def test_llama_swap_health_non_200(monkeypatch, installed_cfg):
+    monkeypatch.setattr(local_stack, "_transport", _transport({
+        "/health": httpx.Response(503, text="loading"),
+    }))
+    assert local_stack.llama_swap_health() == {"reachable": False, "status_code": 503}
+
+
+def test_llama_swap_health_unreachable(monkeypatch, installed_cfg):
+    def refuse(request):
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setattr(local_stack, "_transport", _transport({"/health": refuse}))
+    assert local_stack.llama_swap_health() == {"reachable": False, "status_code": None}
+
+
+def test_is_healthy_true_when_installed_and_reachable(monkeypatch, installed_cfg):
+    monkeypatch.setattr(local_stack, "_transport", _transport({
+        "/health": httpx.Response(200),
+    }))
+    assert local_stack.is_healthy() is True
+
+
+def test_is_healthy_false_when_not_installed(monkeypatch, cfg):
+    cfg("[local_models]\nenabled = false\n")
+    # No probe should even be attempted; a raising transport proves short-circuit.
+    def boom(request):
+        raise AssertionError("must not probe when not installed")
+    monkeypatch.setattr(local_stack, "_transport", _transport({"/health": boom}))
+    assert local_stack.is_healthy() is False
+
+
+def test_is_healthy_false_when_unreachable(monkeypatch, installed_cfg):
+    def refuse(request):
+        raise httpx.ConnectError("down")
+    monkeypatch.setattr(local_stack, "_transport", _transport({"/health": refuse}))
+    assert local_stack.is_healthy() is False
+
+
+def test_should_route_onbox(monkeypatch, cfg):
+    cfg("[local_models]\nenabled = true\nstt = true\ntts = false\n")
+    monkeypatch.setattr(local_stack, "_transport", _transport({
+        "/health": httpx.Response(200),
+    }))
+    assert local_stack.should_route_onbox("stt") is True    # seeded + healthy
+    assert local_stack.should_route_onbox("tts") is False    # not seeded
+
+
+def test_should_route_onbox_seeded_but_down(monkeypatch, cfg):
+    cfg("[local_models]\nenabled = true\nstt = true\n")
+    def refuse(request):
+        raise httpx.ConnectError("down")
+    monkeypatch.setattr(local_stack, "_transport", _transport({"/health": refuse}))
+    assert local_stack.should_route_onbox("stt") is False    # seeded but unhealthy
+
+
+def test_running_members_object_shape(monkeypatch, installed_cfg):
+    monkeypatch.setattr(local_stack, "_transport", _transport({
+        "/running": httpx.Response(200, json={"running": [
+            {"model": "embed-qwen3-8b", "state": "ready"},
+            {"model": "rerank-qwen3-8b"},            # state omitted -> "ready"
+            {"missing_model_key": True},              # ignored
+        ]}),
+    }))
+    assert local_stack.running_members() == [
+        {"model": "embed-qwen3-8b", "state": "ready"},
+        {"model": "rerank-qwen3-8b", "state": "ready"},
+    ]
+
+
+def test_running_members_bare_list(monkeypatch, installed_cfg):
+    monkeypatch.setattr(local_stack, "_transport", _transport({
+        "/running": httpx.Response(200, json=[{"model": "speaches", "state": "loading"}]),
+    }))
+    assert local_stack.running_members() == [{"model": "speaches", "state": "loading"}]
+
+
+def test_running_members_empty_when_idle(monkeypatch, installed_cfg):
+    monkeypatch.setattr(local_stack, "_transport", _transport({
+        "/running": httpx.Response(200, json={"running": []}),
+    }))
+    assert local_stack.running_members() == []   # up, nothing resident
+
+
+def test_running_members_none_when_unreachable(monkeypatch, installed_cfg):
+    def refuse(request):
+        raise httpx.ConnectError("down")
+    monkeypatch.setattr(local_stack, "_transport", _transport({"/running": refuse}))
+    assert local_stack.running_members() is None  # distinct from [] (idle)
+
+
+def test_read_download_state_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", tmp_path / "downloads.json")
+    assert local_stack.read_download_state() == {}
+
+
+def test_read_download_state_happy(monkeypatch, tmp_path):
+    p = tmp_path / "downloads.json"
+    p.write_text(json.dumps({"embed-qwen3-8b": {"state": "downloaded"}}), encoding="utf-8")
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", p)
+    assert local_stack.read_download_state() == {"embed-qwen3-8b": {"state": "downloaded"}}
+
+
+def test_read_download_state_corrupt_is_empty(monkeypatch, tmp_path):
+    p = tmp_path / "downloads.json"
+    p.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", p)
+    assert local_stack.read_download_state() == {}
+
+
+def test_members_and_gate_constants():
+    ids = [m["model"] for m in local_stack.MEMBERS]
+    assert ids == ["embed-qwen3-8b", "rerank-qwen3-8b", "speaches", "qwen-tts"]
+    caps = {m["capability"] for m in local_stack.MEMBERS}
+    assert caps == set(local_stack.CAPABILITIES)
+    assert local_stack.DISK_GATE_MB == 40 * 1024

@@ -39,6 +39,33 @@ DEFAULT_BASE_URL = "http://127.0.0.1:9098/v1"   # llama-swap front door + /v1
 CAPABILITIES = ("stt", "tts", "embeddings", "rerank")
 SECTION = "local_models"
 
+# The four llama-swap members (ids MUST match the config.yaml template, §8).
+# capability/group drive the status rollup + the per-capability routing block.
+MEMBERS = (
+    {"model": "embed-qwen3-8b",    "capability": "embeddings", "group": "retrieval",
+     "label": "Qwen3-Embedding-8B (Q8_0)"},
+    {"model": "rerank-qwen3-8b",   "capability": "rerank",     "group": "retrieval",
+     "label": "Qwen3-Reranker-8B (Q8_0)"},
+    {"model": "speaches",          "capability": "stt",        "group": "audio",
+     "label": "Speaches (faster-whisper)"},
+    {"model": "qwen-tts",          "capability": "tts",        "group": "audio",
+     "label": "Qwen3-TTS (On-Box)"},
+)
+
+# Full GPU-tier weight set is ~34GB (D13's 8B Q8_0 rerank adds ~6.8GB over the old
+# 0.6B; design §14); still fits the 40GB gate (tighter headroom). Gate at 40GB free.
+DISK_GATE_MB = 40 * 1024
+
+# Download-state contract: the later download milestone's POST /local-models/
+# download writes {"<member>": {"state": str, ...}} here; read fail-soft (absent
+# file => every member reports "pending"). Module attr so tests repoint it.
+DOWNLOAD_STATE_PATH = resolve("Manifest", "local_models", "downloads.json")
+
+# Fail-fast loopback probes (ollama_io GET_TIMEOUT precedent).
+GET_TIMEOUT = httpx.Timeout(2.0, connect=2.0)
+# httpx.MockTransport injected by tests; None => real network.
+_transport: "httpx.BaseTransport | None" = None
+
 # config.ini is a per-box, gitignored file (config.py reads it CWD-relative at
 # import; resolve() honors BLACKBOX_ROOT first). Module attr so tests repoint it.
 CONFIG_PATH = resolve("config.ini")
@@ -98,3 +125,84 @@ def is_installed() -> bool:
     """The on-box stack is installed + configured (master [local_models]
     enabled). Cheap, no HTTP — install/config state only."""
     return master_enabled()
+
+
+# ── llama-swap process-liveness (NOT per-member VRAM residency) ───────────────
+
+def llama_swap_health(timeout: "httpx.Timeout | None" = None) -> dict:
+    """Probe the llama-swap FRONT DOOR /health. Returns
+    {"reachable": bool, "status_code": int|None}. Fail-soft (never raises).
+    The front-door /health is up whenever the proxy PROCESS is up, independent
+    of which group is resident — so it does not flap on group swaps (this is the
+    proxy-level endpoint, distinct from each member's own checkEndpoint)."""
+    root = base_url_root()
+    try:
+        with httpx.Client(timeout=timeout or GET_TIMEOUT, transport=_transport) as client:
+            resp = client.get(f"{root}/health")
+            return {"reachable": resp.status_code == 200, "status_code": resp.status_code}
+    except Exception:
+        return {"reachable": False, "status_code": None}
+
+
+def is_healthy(timeout: "httpx.Timeout | None" = None) -> bool:
+    """Installed AND the llama-swap front door is reachable. Keys on install +
+    config + process-liveness of llama-swap ITSELF — never live per-member VRAM
+    residency (correction [30]). The on-box availability signal for routing.
+    Short-circuits with NO probe when not installed."""
+    if not is_installed():
+        return False
+    return llama_swap_health(timeout)["reachable"]
+
+
+def should_route_onbox(cap: str) -> bool:
+    """The shared on-box availability signal for each capability's resolver:
+    `cap` is seeded on-box (D2) AND the stack is reachable now. The resolver
+    MUST honor an explicit credentialed user pick BEFORE calling this."""
+    return enabled(cap) and is_healthy()
+
+
+def running_members(timeout: "httpx.Timeout | None" = None) -> "list[dict] | None":
+    """llama-swap /running -> [{"model": str, "state": str}]. None when the
+    proxy is UNREACHABLE (distinct from [] = up but nothing resident). Tolerant
+    of both {"running": [...]} and a bare list; drops items without a str
+    model; defaults a missing state to "ready"."""
+    root = base_url_root()
+    try:
+        with httpx.Client(timeout=timeout or GET_TIMEOUT, transport=_transport) as client:
+            resp = client.get(f"{root}/running")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return None
+    items = data.get("running") if isinstance(data, dict) else data
+    out = []
+    for it in (items or []):
+        if isinstance(it, dict) and isinstance(it.get("model"), str):
+            out.append({"model": it["model"], "state": str(it.get("state", "ready"))})
+    return out
+
+
+# ── download-state contract (writer = the later download milestone) ───────────
+
+def read_download_state() -> dict:
+    """{member_id: {"state": str, ...}} from DOWNLOAD_STATE_PATH; {} fail-soft
+    on absent/corrupt/wrong-shape."""
+    try:
+        data = json.loads(DOWNLOAD_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def model_downloaded(model_id: str) -> bool:
+    """True iff `model_id`'s weights are present, per the download-state contract
+    (read_download_state / DOWNLOAD_STATE_PATH, written by the download milestone).
+    A member counts as downloaded when its recorded state is a terminal success
+    ("downloaded" or "done"). Fail-soft: an absent/corrupt state file or an
+    unlisted member => False. This is the on-disk-presence signal the localstack
+    embeddings/rerank preflight (M3 Task 3.5 / M4) consumes; those tests
+    monkeypatch it, but a real installed+healthy box calls THIS implementation, so
+    it MUST exist here (missing it => AttributeError -> HTTP 500 on
+    GET /embeddings/status)."""
+    entry = read_download_state().get(model_id)
+    return isinstance(entry, dict) and entry.get("state") in ("downloaded", "done")
