@@ -533,6 +533,9 @@ class NativeMainActivity : ComponentActivity() {
                                 }
                             } catch (_: Exception) {}
                             scope.launch {
+                                // D10 (Task 7.9): declared outside the try so the finally block
+                                // can always cancel the slow-first-byte watchdog.
+                                var slowToastJob: kotlinx.coroutines.Job? = null
                                 try {
                                     val api = chatViewModel.getApi()
                                     if (api == null) {
@@ -543,7 +546,7 @@ class NativeMainActivity : ComponentActivity() {
                                     val config = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceValue)
                                     // D10 (Task 7.9): on-box (qwen) voices may wait on a GPU group
                                     // swap; show "loading models…" only if the first byte is slow.
-                                    val slowToastJob = if (config.provider == com.aiblackbox.portal.data.repository.TtsRepository.ON_BOX_PROVIDER) scope.launch {
+                                    slowToastJob = if (config.provider == com.aiblackbox.portal.data.repository.TtsRepository.ON_BOX_PROVIDER) scope.launch {
                                         com.aiblackbox.portal.data.repository.TtsRepository.awaitSlowFirstByte(
                                             stillInFlight = { true },
                                             onSlow = { Toast.makeText(applicationContext, "Loading on-box voice models…", Toast.LENGTH_SHORT).show() },
@@ -557,7 +560,6 @@ class NativeMainActivity : ComponentActivity() {
                                     val response = withContext(Dispatchers.IO) {
                                         api.getClient().newCall(request).execute()
                                     }
-                                    slowToastJob?.cancel()
                                     if (response.isSuccessful) {
                                         val bytes = withContext(Dispatchers.IO) { response.body?.bytes() }
                                         if (bytes != null && bytes.isNotEmpty()) {
@@ -586,6 +588,12 @@ class NativeMainActivity : ComponentActivity() {
                                         Toast.makeText(applicationContext, "TTS failed: ${e.message?.take(30)}", Toast.LENGTH_SHORT).show()
                                     }
                                 } finally {
+                                    // D10 (Task 7.9): cancel the slow-first-byte watchdog on
+                                    // EVERY exit path (success/failure/throw) — the job is
+                                    // launched with stillInFlight = { true }, so cancellation
+                                    // is the only thing that suppresses a stale "loading
+                                    // models…" toast after a failed/thrown request.
+                                    slowToastJob?.cancel()
                                     // Stop background service when TTS completes
                                     try {
                                         val stopIntent = android.content.Intent(applicationContext, BackgroundTaskService::class.java).apply {
