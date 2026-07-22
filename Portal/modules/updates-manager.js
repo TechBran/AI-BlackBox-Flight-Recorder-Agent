@@ -57,6 +57,10 @@ export async function initUpdatesPanel() {
     // Fire-and-forget (it catches everything internally): the embeddings
     // card must never delay or break the updates panel itself.
     _refreshEmbeddingsCard();
+    // On-box local model stack status (M8): fire-and-forget, fail-soft — it
+    // must never delay or break the updates panel itself (same contract as
+    // the embeddings card).
+    _refreshLocalModelsCard();
     await refreshPanel();
 }
 
@@ -453,6 +457,52 @@ function _rerankStatusLineHtml(rr) {
                 <button class="btn embeddings-manage-btn">Manage</button>
             </div>
         </div>`;
+}
+
+// ── On-box local model stack card (M8, read-only) ─────────────────────
+// Reflects GET /local-models/status. Status-only: no activation here — the
+// [Manage] button deep-links to the wizard step. Fail-soft: any error hides
+// the card (never breaks the panel), mirroring the embeddings card contract.
+let _lmWarnedOnce = false;
+
+async function _refreshLocalModelsCard() {
+    const container = document.getElementById("localModelsCard");
+    if (!container) return;  // panel not in DOM (menu modal not built yet)
+    const status = await _fetchJsonSoft("/local-models/status");
+    if (!status) {  // unreachable / older backend / not installed → hide
+        container.classList.add("hide");
+        container.innerHTML = "";
+        if (!_lmWarnedOnce) { _lmWarnedOnce = true; console.warn("[updates] local-models status unavailable"); }
+        return;
+    }
+    _renderLocalModelsCard(container, status);
+}
+
+function _renderLocalModelsCard(container, status) {
+    const routing = status.routing || {};
+    const onbox = [];
+    if ((routing.stt || "").toLowerCase() === "onbox") onbox.push("Speech");
+    if ((routing.tts || "").toLowerCase() === "onbox") onbox.push("Voice");
+    if (String(routing.embeddings || "").endsWith("-local")) onbox.push("Memory");
+    if (/localstack/i.test(String(routing.rerank || ""))) onbox.push("Reranking");
+
+    let line;
+    if (!status.installed) line = "On-box models: not installed";
+    else if (!status.healthy) line = "On-box models: installed — stack not running";
+    else if (onbox.length) line = `On-box models: ${onbox.join(", ")}`;
+    else line = "On-box models: ready — none active";
+
+    container.innerHTML = `
+        <div class="embeddings-card embeddings-rerank-status">
+            <div class="embeddings-card-title">${_esc(line)}</div>
+            <div class="embeddings-card-actions">
+                <button class="btn local-models-manage-btn">Manage</button>
+            </div>
+        </div>`;
+    container.classList.remove("hide");
+    container.querySelectorAll(".local-models-manage-btn").forEach((btn) => {
+        btn.addEventListener("click", () => { window.location.href = "/onboarding/?step=local_models"; });
+    });
 }
 
 // Fail-soft JSON GET: null on any non-2xx or network error (never throws).
