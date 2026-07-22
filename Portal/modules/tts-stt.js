@@ -39,6 +39,16 @@ let ttsState = { isFetching: false, isPlaying: false };
 /** Active AbortController for cancellable TTS requests */
 let activeTTSAbort = null;
 
+/**
+ * Last /tts/catalog groups fetched by populateVoiceCatalog. Cached so the
+ * provider-first two-step picker (D1) can re-derive a provider from a
+ * `provider:voice` value (e.g. syncVoiceDropdown restoring the operator's saved
+ * voice) without a second network round-trip. Stays null until the first
+ * successful fetch — every reader falls back to direct DOM assignment (the
+ * static grouped fallback) when it is null.
+ */
+let _ttsCatalogGroups = null;
+
 /** Cancel any in-flight TTS request */
 function cancelActiveTTS() {
     if (activeTTSAbort) {
@@ -692,15 +702,13 @@ export function ttsModelForProvider(provider) {
  */
 export async function syncVoiceDropdown() {
     const voiceSelect = document.getElementById("ttsVoiceSelect");
-    if (voiceSelect) {
-        const operator = (localStorage.getItem("bbx_operator") || "").trim();
-        if (operator) {
-            const serverVoice = await fetchOperatorVoiceFromServer(operator);
-            voiceSelect.value = serverVoice;
-        } else {
-            voiceSelect.value = getCurrentVoice();
-        }
-    }
+    if (!voiceSelect) return;
+    const operator = (localStorage.getItem("bbx_operator") || "").trim();
+    const value = operator ? await fetchOperatorVoiceFromServer(operator) : getCurrentVoice();
+    // Route through applyVoiceValue so the provider select switches + the voice
+    // select refills to expose the saved voice even when it belongs to a
+    // provider other than the one currently shown (two-step picker, D1).
+    applyVoiceValue(value);
 }
 
 // =============================================================================
@@ -1879,43 +1887,171 @@ export function attachThinkingAudioPlayer(panel, audioDataURL, btn, autoplay = f
 // Voice Selector Initialization
 // =============================================================================
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider-first two-step voice picker — pure helpers (D1, user-chosen UX
+// 2026-07-22). These are DOM-free and deterministic so they can be unit-tested
+// (Portal/modules/tts-stt.voicepicker.test.mjs) without a browser. The
+// `provider:voice` value contract, default resolution, cloud group order (with
+// on-box appended by the server), and the fail-open fallback all live here.
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Build the TTS voice dropdown from the backend catalog (single source of truth).
- * Falls back to whatever static <option>s are already in the DOM if the fetch fails
- * or returns an empty catalog.
+ * Provider <select> options from the catalog groups, in server order (cloud
+ * groups first, on-box appended). Each option value is the group id — the same
+ * token that prefixes every `provider:voice` id in that group.
+ */
+export function providerOptionsFromGroups(groups) {
+    return (groups || []).map(g => ({
+        value: g.id,
+        label: `${g.label} (${(g.voices || []).length} voices)`,
+    }));
+}
+
+/** Voice <select> options for ONE provider group (empty if the group is absent). */
+export function voiceOptionsForProvider(groups, providerId) {
+    const g = (groups || []).find(x => x.id === providerId);
+    if (!g) return [];
+    return (g.voices || []).map(v => ({ value: v.id, text: `${v.name} - ${v.description}` }));
+}
+
+/**
+ * The provider group id owning a `provider:voice` value. Prefers an exact voice
+ * match; falls back to the substring before the first colon so an id that is not
+ * (yet) in the catalog still resolves to a provider.
+ */
+export function providerOfVoiceId(groups, voiceId) {
+    for (const g of (groups || [])) {
+        if ((g.voices || []).some(v => v.id === voiceId)) return g.id;
+    }
+    const i = (voiceId || "").indexOf(":");
+    return i > 0 ? voiceId.slice(0, i) : null;
+}
+
+/**
+ * Resolve which {providerId, voiceId} the two selects should show, given the
+ * previously-wanted value. Order: the wanted value if it exists in the catalog →
+ * TTS_DEFAULT_VOICE if it exists → the first voice of the first group. Returns
+ * {providerId:null, voiceId:null} for an empty catalog (caller keeps static).
+ */
+export function resolveVoiceSelection(groups, wantValue, defaultVoice = TTS_DEFAULT_VOICE) {
+    const has = (val) => (groups || []).some(g => (g.voices || []).some(v => v.id === val));
+    let voiceId = has(wantValue) ? wantValue : (has(defaultVoice) ? defaultVoice : null);
+    if (!voiceId && groups && groups.length && (groups[0].voices || []).length) {
+        voiceId = groups[0].voices[0].id;
+    }
+    const providerId = voiceId
+        ? providerOfVoiceId(groups, voiceId)
+        : ((groups && groups[0] && groups[0].id) || null);
+    return { providerId, voiceId };
+}
+
+/** Rebuild a <select>'s <option>s from [{value,text}] and select `selectedValue`. */
+function fillSelect(sel, items, selectedValue = null) {
+    sel.innerHTML = "";
+    for (const it of items) {
+        const o = document.createElement("option");
+        o.value = it.value;
+        o.textContent = it.text != null ? it.text : it.label;
+        sel.appendChild(o);
+    }
+    if (selectedValue != null && items.length) {
+        sel.value = [...sel.options].some(o => o.value === selectedValue)
+            ? selectedValue : items[0].value;
+    }
+}
+
+/**
+ * Coordinate the provider + voice selects to show a `provider:voice` value.
+ * Uses the cached catalog groups to switch the provider select and refill the
+ * voice select. Falls back to a direct `#ttsVoiceSelect.value` assignment when
+ * the catalog has not loaded (static grouped fallback) or the provider select is
+ * absent (legacy single-select markup). Exported for syncVoiceDropdown + tests.
+ */
+export function applyVoiceValue(value) {
+    const providerSel = document.getElementById("ttsProviderSelect");
+    const voiceSel = document.getElementById("ttsVoiceSelect");
+    if (!voiceSel) return;
+    const groups = _ttsCatalogGroups;
+    if (providerSel && groups && groups.length) {
+        const pid = providerOfVoiceId(groups, value);
+        const items = voiceOptionsForProvider(groups, pid);
+        if (pid && items.length) {
+            providerSel.value = pid;
+            fillSelect(voiceSel, items, value);
+            return;
+        }
+    }
+    // No catalog / legacy markup: direct assignment (works when the value's
+    // <option> is already present, e.g. the static gemini-pro fallback list).
+    voiceSel.value = value;
+}
+
+/**
+ * Build the TTS voice picker from the backend catalog (single source of truth)
+ * as a provider-first TWO-STEP picker: a provider <select> (#ttsProviderSelect)
+ * fills the voice <select> (#ttsVoiceSelect) with only that provider's voices.
+ * #ttsVoiceSelect stays the canonical `provider:voice` value holder every
+ * downstream reader uses. Falls back to the static <option>s already in the DOM
+ * (both selects) if the fetch fails or returns an empty catalog.
  *
- * Exported so the voice-library browse modal can re-run it after adding a voice
- * (the new voice appears in /tts/catalog once the provider's voices-cache is
- * busted server-side). Pass `selectId` to select a specific catalog id (e.g.
- * the freshly-added `elevenlabs:<voice_id>`) if it exists in the rebuilt list.
+ * Exported so the voice-library / Voice Lab modals can re-run it after adding a
+ * voice. Pass `selectId` to select a specific catalog id (e.g. the freshly-added
+ * `elevenlabs:<voice_id>` / `qwen:<slug>`) if it exists in the rebuilt list.
+ *
+ * Degrades gracefully to the legacy grouped single-select (per-group <optgroup>)
+ * when #ttsProviderSelect is absent (e.g. an un-upgraded HTML surface).
  */
 export async function populateVoiceCatalog(selectId = null) {
-    const sel = document.getElementById("ttsVoiceSelect");
-    if (!sel) return;
+    const voiceSel = document.getElementById("ttsVoiceSelect");
+    if (!voiceSel) return;
+    const providerSel = document.getElementById("ttsProviderSelect");
     try {
         const res = await fetch("/tts/catalog");
         if (!res.ok) throw new Error("HTTP " + res.status);
         const { groups } = await res.json();
-        if (!groups || !groups.length) return;  // keep static fallback
-        const prev = sel.value || TTS_DEFAULT_VOICE;
-        sel.innerHTML = "";
-        for (const g of groups) {
-            const og = document.createElement("optgroup");
-            og.label = `${g.label} (${g.voices.length} voices)`;
-            for (const v of g.voices) {
-                const o = document.createElement("option");
-                o.value = v.id;
-                o.textContent = `${v.name} - ${v.description}`;
-                og.appendChild(o);
+        if (!groups || !groups.length) return;  // keep static fallback (both selects)
+        _ttsCatalogGroups = groups;
+
+        const prev = voiceSel.value || TTS_DEFAULT_VOICE;
+        const selectIdIsReal = selectId
+            && groups.some(g => (g.voices || []).some(v => v.id === selectId));
+        const wantValue = selectIdIsReal ? selectId : prev;
+        const { providerId, voiceId } = resolveVoiceSelection(groups, wantValue);
+
+        if (!providerSel) {
+            // Legacy single-select surface: keep the grouped <optgroup> behavior.
+            voiceSel.innerHTML = "";
+            for (const g of groups) {
+                const og = document.createElement("optgroup");
+                og.label = `${g.label} (${(g.voices || []).length} voices)`;
+                for (const v of (g.voices || [])) {
+                    const o = document.createElement("option");
+                    o.value = v.id;
+                    o.textContent = `${v.name} - ${v.description}`;
+                    og.appendChild(o);
+                }
+                voiceSel.appendChild(og);
             }
-            sel.appendChild(og);
+            voiceSel.value = [...voiceSel.options].some(o => o.value === voiceId)
+                ? voiceId : TTS_DEFAULT_VOICE;
+        } else {
+            // Two-step: provider select drives the voice select.
+            fillSelect(providerSel, providerOptionsFromGroups(groups), providerId);
+            fillSelect(voiceSel, voiceOptionsForProvider(groups, providerId), voiceId);
+            providerSel.onchange = () => {
+                const items = voiceOptionsForProvider(groups, providerSel.value);
+                fillSelect(voiceSel, items, items[0] && items[0].value);
+                // A provider switch changes the effective voice — notify every
+                // #ttsVoiceSelect listener (per-operator persistence) as if the
+                // user had picked the new provider's first voice manually.
+                voiceSel.dispatchEvent(new Event("change"));
+            };
         }
-        const want = selectId && [...sel.options].some(o => o.value === selectId) ? selectId : prev;
-        sel.value = [...sel.options].some(o => o.value === want) ? want : TTS_DEFAULT_VOICE;
-        if (selectId && sel.value === selectId) {
+
+        if (selectIdIsReal && voiceSel.value === selectId) {
             // Persist the freshly-added voice as the operator's preference and
             // notify listeners (mirrors the manual onchange handler).
-            sel.dispatchEvent(new Event("change"));
+            voiceSel.dispatchEvent(new Event("change"));
         }
     } catch (e) {
         console.error("voice catalog fetch failed, keeping static options", e);

@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui322"/> <!-- v322: CU live-view panel + shared active-sessions badge (D14) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui323"/> <!-- v323: provider-first two-step TTS voice picker (D1) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui322"></script> <!-- v322: CU live-view panel + shared active-sessions badge (D14) -->
+  <script type="module" src="/ui/app-modular.js?v=genui323"></script> <!-- v323: provider-first two-step TTS voice picker (D1) -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -530,86 +530,53 @@
         <!-- Voice Preferences Section -->
         <div class="menu-group voice-preferences-section">
           <h4>🔊 Voice Preferences</h4>
-          <div class="voice-selector-row">
-            <label for="ttsVoiceSelect">TTS Voice:</label>
+          <!-- Provider-first TWO-STEP voice picker (D1): choose a provider, then a
+               voice within that provider. #ttsVoiceSelect stays the canonical
+               `provider:voice` value holder every downstream reader uses.
+               populateVoiceCatalog() (tts-stt.js) rebuilds both selects from
+               /tts/catalog at runtime; the static markup below is the fail-open
+               fallback for BOTH selects (default provider Gemini Pro + Charon)
+               when the catalog is unreachable. -->
+          <div class="voice-selector-row" style="flex-wrap: wrap;">
+            <label for="ttsProviderSelect">Provider:</label>
+            <select id="ttsProviderSelect" style="background: var(--neutral-150); color: #fff; border: 1px solid var(--neutral-400); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; cursor: pointer;">
+              <option value="openai">OpenAI TTS HD</option>
+              <option value="gemini-flash">Gemini Flash TTS</option>
+              <option value="gemini-pro" selected>Gemini Pro TTS</option>
+            </select>
+            <label for="ttsVoiceSelect">Voice:</label>
             <select id="ttsVoiceSelect">
-              <optgroup label="OpenAI TTS (11 voices)">
-                <option value="openai:alloy">Alloy - Neutral, balanced</option>
-                <option value="openai:ash">Ash - Clear, direct</option>
-                <option value="openai:ballad">Ballad - Warm, melodic</option>
-                <option value="openai:coral">Coral - Smooth, friendly</option>
-                <option value="openai:echo">Echo - Warm, conversational</option>
-                <option value="openai:fable">Fable - Expressive, British</option>
-                <option value="openai:nova">Nova - Friendly, upbeat</option>
-                <option value="openai:onyx">Onyx - Deep, authoritative</option>
-                <option value="openai:sage">Sage - Calm, thoughtful</option>
-                <option value="openai:shimmer">Shimmer - Soft, gentle</option>
-                <option value="openai:verse">Verse - Rhythmic, engaging</option>
-              </optgroup>
-              <optgroup label="Gemini Flash TTS - Fast (30 voices)">
-                <option value="gemini-flash:Zephyr">Zephyr - Bright, cheerful</option>
-                <option value="gemini-flash:Puck">Puck - Playful, mischievous</option>
-                <option value="gemini-flash:Charon">Charon - Calm, informative</option>
-                <option value="gemini-flash:Kore">Kore - Clear, versatile</option>
-                <option value="gemini-flash:Fenrir">Fenrir - Bold, confident</option>
-                <option value="gemini-flash:Leda">Leda - Warm, youthful</option>
-                <option value="gemini-flash:Orus">Orus - Deep, firm</option>
-                <option value="gemini-flash:Aoede">Aoede - Breezy, conversational</option>
-                <option value="gemini-flash:Callirrhoe">Callirrhoe - Smooth, flowing</option>
-                <option value="gemini-flash:Autonoe">Autonoe - Gentle, measured</option>
-                <option value="gemini-flash:Enceladus">Enceladus - Rich, resonant</option>
-                <option value="gemini-flash:Iapetus">Iapetus - Deep, steady</option>
-                <option value="gemini-flash:Umbriel">Umbriel - Soft, mysterious</option>
-                <option value="gemini-flash:Algieba">Algieba - Warm, articulate</option>
-                <option value="gemini-flash:Despina">Despina - Light, energetic</option>
-                <option value="gemini-flash:Erinome">Erinome - Serene, melodic</option>
-                <option value="gemini-flash:Algenib">Algenib - Crisp, precise</option>
-                <option value="gemini-flash:Rasalgethi">Rasalgethi - Grand, theatrical</option>
-                <option value="gemini-flash:Laomedeia">Laomedeia - Graceful, elegant</option>
-                <option value="gemini-flash:Achernar">Achernar - Bright, radiant</option>
-                <option value="gemini-flash:Alnilam">Alnilam - Strong, commanding</option>
-                <option value="gemini-flash:Schedar">Schedar - Regal, distinguished</option>
-                <option value="gemini-flash:Gacrux">Gacrux - Earthy, grounded</option>
-                <option value="gemini-flash:Pulcherrima">Pulcherrima - Beautiful, refined</option>
-                <option value="gemini-flash:Achird">Achird - Friendly, approachable</option>
-                <option value="gemini-flash:Zubenelgenubi">Zubenelgenubi - Balanced, neutral</option>
-                <option value="gemini-flash:Vindemiatrix">Vindemiatrix - Mature, wise</option>
-                <option value="gemini-flash:Sadachbia">Sadachbia - Lucky, optimistic</option>
-                <option value="gemini-flash:Sadaltager">Sadaltager - Hopeful, bright</option>
-                <option value="gemini-flash:Sulafat">Sulafat - Lyrical, musical</option>
-              </optgroup>
-              <optgroup label="Gemini Pro TTS - Highest Quality (30 voices)">
-                <option value="gemini-pro:Zephyr">Zephyr - Bright, cheerful</option>
-                <option value="gemini-pro:Puck">Puck - Playful, mischievous</option>
-                <option value="gemini-pro:Charon" selected>Charon - Calm, informative</option>
-                <option value="gemini-pro:Kore">Kore - Clear, versatile</option>
-                <option value="gemini-pro:Fenrir">Fenrir - Bold, confident</option>
-                <option value="gemini-pro:Leda">Leda - Warm, youthful</option>
-                <option value="gemini-pro:Orus">Orus - Deep, firm</option>
-                <option value="gemini-pro:Aoede">Aoede - Breezy, conversational</option>
-                <option value="gemini-pro:Callirrhoe">Callirrhoe - Smooth, flowing</option>
-                <option value="gemini-pro:Autonoe">Autonoe - Gentle, measured</option>
-                <option value="gemini-pro:Enceladus">Enceladus - Rich, resonant</option>
-                <option value="gemini-pro:Iapetus">Iapetus - Deep, steady</option>
-                <option value="gemini-pro:Umbriel">Umbriel - Soft, mysterious</option>
-                <option value="gemini-pro:Algieba">Algieba - Warm, articulate</option>
-                <option value="gemini-pro:Despina">Despina - Light, energetic</option>
-                <option value="gemini-pro:Erinome">Erinome - Serene, melodic</option>
-                <option value="gemini-pro:Algenib">Algenib - Crisp, precise</option>
-                <option value="gemini-pro:Rasalgethi">Rasalgethi - Grand, theatrical</option>
-                <option value="gemini-pro:Laomedeia">Laomedeia - Graceful, elegant</option>
-                <option value="gemini-pro:Achernar">Achernar - Bright, radiant</option>
-                <option value="gemini-pro:Alnilam">Alnilam - Strong, commanding</option>
-                <option value="gemini-pro:Schedar">Schedar - Regal, distinguished</option>
-                <option value="gemini-pro:Gacrux">Gacrux - Earthy, grounded</option>
-                <option value="gemini-pro:Pulcherrima">Pulcherrima - Beautiful, refined</option>
-                <option value="gemini-pro:Achird">Achird - Friendly, approachable</option>
-                <option value="gemini-pro:Zubenelgenubi">Zubenelgenubi - Balanced, neutral</option>
-                <option value="gemini-pro:Vindemiatrix">Vindemiatrix - Mature, wise</option>
-                <option value="gemini-pro:Sadachbia">Sadachbia - Lucky, optimistic</option>
-                <option value="gemini-pro:Sadaltager">Sadaltager - Hopeful, bright</option>
-                <option value="gemini-pro:Sulafat">Sulafat - Lyrical, musical</option>
-              </optgroup>
+              <!-- Fallback = the default provider's (gemini-pro) voices, Charon selected. -->
+              <option value="gemini-pro:Zephyr">Zephyr - Bright, cheerful</option>
+              <option value="gemini-pro:Puck">Puck - Playful, mischievous</option>
+              <option value="gemini-pro:Charon" selected>Charon - Calm, informative</option>
+              <option value="gemini-pro:Kore">Kore - Clear, versatile</option>
+              <option value="gemini-pro:Fenrir">Fenrir - Bold, confident</option>
+              <option value="gemini-pro:Leda">Leda - Warm, youthful</option>
+              <option value="gemini-pro:Orus">Orus - Deep, firm</option>
+              <option value="gemini-pro:Aoede">Aoede - Breezy, conversational</option>
+              <option value="gemini-pro:Callirrhoe">Callirrhoe - Smooth, flowing</option>
+              <option value="gemini-pro:Autonoe">Autonoe - Gentle, measured</option>
+              <option value="gemini-pro:Enceladus">Enceladus - Rich, resonant</option>
+              <option value="gemini-pro:Iapetus">Iapetus - Deep, steady</option>
+              <option value="gemini-pro:Umbriel">Umbriel - Soft, mysterious</option>
+              <option value="gemini-pro:Algieba">Algieba - Warm, articulate</option>
+              <option value="gemini-pro:Despina">Despina - Light, energetic</option>
+              <option value="gemini-pro:Erinome">Erinome - Serene, melodic</option>
+              <option value="gemini-pro:Algenib">Algenib - Crisp, precise</option>
+              <option value="gemini-pro:Rasalgethi">Rasalgethi - Grand, theatrical</option>
+              <option value="gemini-pro:Laomedeia">Laomedeia - Graceful, elegant</option>
+              <option value="gemini-pro:Achernar">Achernar - Bright, radiant</option>
+              <option value="gemini-pro:Alnilam">Alnilam - Strong, commanding</option>
+              <option value="gemini-pro:Schedar">Schedar - Regal, distinguished</option>
+              <option value="gemini-pro:Gacrux">Gacrux - Earthy, grounded</option>
+              <option value="gemini-pro:Pulcherrima">Pulcherrima - Beautiful, refined</option>
+              <option value="gemini-pro:Achird">Achird - Friendly, approachable</option>
+              <option value="gemini-pro:Zubenelgenubi">Zubenelgenubi - Balanced, neutral</option>
+              <option value="gemini-pro:Vindemiatrix">Vindemiatrix - Mature, wise</option>
+              <option value="gemini-pro:Sadachbia">Sadachbia - Lucky, optimistic</option>
+              <option value="gemini-pro:Sadaltager">Sadaltager - Hopeful, bright</option>
+              <option value="gemini-pro:Sulafat">Sulafat - Lyrical, musical</option>
             </select>
             <button id="btnPreviewVoice" class="btn" title="Preview selected voice">▶️</button>
           </div>
