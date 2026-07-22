@@ -84,39 +84,81 @@ export async function render(container, { next, back, skip, sigil }) {
     renderBody(container);
 }
 
-function tierKey() {
-    // 'gpu' when a usable GPU is present (status.gpu / tier high), else 'cpu'.
-    const t = (status && (status.tier || "")).toLowerCase();
-    const hasGpu = !!(status && status.gpu && (status.gpu.vram_mb || status.gpu.name));
-    return (hasGpu || t === "high") ? "gpu" : "cpu";
+// NOTE: the pure decision/formatting helpers below take an optional `st`
+// (defaulting to the module-level `status`) so they can be unit-tested against
+// a realistic GET /local-models/status payload without a DOM
+// (local_models.render.test.mjs). They read the REAL payload shape:
+//   status.hardware = {gpu, gpu_name, vram_mb, ram_mb, source, tier}  (probe())
+//   status.disk     = {free_mb, required_mb, ok}
+//   status.routing[cap] = {enabled, healthy, decision}                (object!)
+//   status.models[] = {model, capability, group, label, running, state, download}
+export function tierKey(st = status) {
+    // 'gpu' when the hardware probe reports a usable GPU (or a HIGH tier),
+    // else 'cpu'. Reads status.hardware (verbatim probe() block) — NOT a
+    // top-level status.gpu/status.tier (those keys don't exist, which made
+    // this always return 'cpu' and mis-recommend CPU weights on GPU boxes).
+    const hw = (st && st.hardware) || {};
+    const tier = String(hw.tier || "").toUpperCase();
+    return (hw.gpu || tier === "HIGH") ? "gpu" : "cpu";
 }
 
-function rec(capId) {
-    const fromStatus = status && status.recommendations && status.recommendations[capId];
+export function rec(capId, st = status) {
+    const fromStatus = st && st.recommendations && st.recommendations[capId];
     if (fromStatus && (fromStatus.label || fromStatus.model)) {
         return { label: fromStatus.label || fromStatus.model,
                  size: fromStatus.size_gb ? `~${fromStatus.size_gb} GB` : (fromStatus.size || ""),
                  note: fromStatus.note || "", slug: fromStatus.slug || fromStatus.model || "" };
     }
-    return REC_FALLBACK[tierKey()][capId] || { label: "—", size: "", note: "" };
+    return REC_FALLBACK[tierKey(st)][capId] || { label: "—", size: "", note: "" };
 }
 
-function isActive(capId) {
-    const routing = (status && status.routing) || {};
-    const caps = (status && status.capabilities) || {};
-    if (capId === "stt") return (routing.stt || "").toLowerCase() === "onbox" || !!caps.stt;
-    if (capId === "tts") return (routing.tts || "").toLowerCase() === "onbox" || !!caps.tts;
-    if (capId === "embeddings") {
-        // active when the resolved embedding slug is a localstack slug.
-        return /-local$/.test(String(routing.embeddings || ""));
+export function isActive(capId, st = status) {
+    // routing[cap] is an OBJECT {enabled, healthy, decision}; "on-box" means the
+    // capability is seeded AND the stack is reachable (_routing_decision in
+    // Orchestrator/routes/local_models_routes.py). The old code called
+    // .toLowerCase() on this object (TypeError) and compared to 'onbox' rather
+    // than the hyphenated backend sentinel — the same bug HEAD fixed in the
+    // sibling updates-manager.js card.
+    const routing = (st && st.routing) || {};
+    return (routing[capId] || {}).decision === "on-box";
+}
+
+export function modelForCap(capId, st = status) {
+    // The downloadable weight member backing this capability, if status lists
+    // it (models[].capability). Keyed by `model` — the DOWNLOAD_MANIFEST
+    // artifact id POST /local-models/download expects.
+    return ((st && st.models) || []).find((m) => m.capability === capId) || null;
+}
+
+// True when this capability's weights are present on disk. The status endpoint
+// carries the download-state entry as models[].download = {state, ...} (or
+// {state:"pending"} when absent); read_download_state's terminal success states
+// are "downloaded"/"done" (Orchestrator/local_stack.py:model_downloaded). When
+// no member backs the capability there's nothing to download.
+export function isDownloaded(m) {
+    if (!m) return true;
+    const s = m.download && m.download.state;
+    return s === "downloaded" || s === "done";
+}
+
+// ── hardware / disk lines (pure, testable against the real payload) ───────
+export function hwLineHtml(st = status) {
+    // status.hardware is the verbatim probe() block: {gpu, gpu_name, vram_mb,…}.
+    const hw = (st && st.hardware) || {};
+    if (hw.gpu || hw.gpu_name || hw.vram_mb) {
+        const vram = hw.vram_mb ? ` · ${Math.round(hw.vram_mb / 1024)} GB VRAM` : "";
+        return `GPU: <strong>${escapeHtml(hw.gpu_name || "NVIDIA")}</strong>${vram}`;
     }
-    if (capId === "rerank") return /localstack/i.test(String(routing.rerank || ""));
-    return false;
+    return `No GPU detected — <strong>CPU tier</strong>`;
 }
 
-function modelForCap(capId) {
-    // The downloadable weight entry backing this capability, if status lists it.
-    return ((status && status.models) || []).find((m) => m.capability === capId) || null;
+export function diskLineHtml(st = status) {
+    // status.disk carries free_mb / required_mb (NOT free_gb/required_gb).
+    const disk = (st && st.disk) || {};
+    if (disk.free_mb == null) return "";
+    const freeGb = Math.round(disk.free_mb / 1024);
+    const needGb = disk.required_mb ? ` (needs ~${Math.round(disk.required_mb / 1024)} GB)` : "";
+    return `Disk free: <strong>${escapeHtml(String(freeGb))} GB</strong>${needGb}`;
 }
 
 function renderBody(container) {
@@ -124,16 +166,11 @@ function renderBody(container) {
     if (!body) return;
     const installed = !!(status && status.installed);
     const healthy = !!(status && status.healthy);
-    const gpu = status && status.gpu;
     const disk = (status && status.disk) || {};
     const tier = tierKey();
 
-    const hwLine = gpu && (gpu.name || gpu.vram_mb)
-        ? `GPU: <strong>${escapeHtml(gpu.name || "NVIDIA")}</strong>${gpu.vram_mb ? ` · ${Math.round(gpu.vram_mb / 1024)} GB VRAM` : ""}`
-        : `No GPU detected — <strong>CPU tier</strong>`;
-    const diskLine = (disk.free_gb != null)
-        ? `Disk free: <strong>${escapeHtml(String(disk.free_gb))} GB</strong>${disk.required_gb ? ` (needs ~${escapeHtml(String(disk.required_gb))} GB)` : ""}`
-        : "";
+    const hwLine = hwLineHtml();
+    const diskLine = diskLineHtml();
     const diskWarn = (disk.ok === false)
         ? `<p class="ob-lm-warn">Not enough free disk for the full on-box weight set. Free up space before downloading.</p>` : "";
     const cpuWarn = (tier === "cpu")
@@ -148,26 +185,26 @@ function renderBody(container) {
             ${installed ? `<div class="ob-lm-hw-badge ${healthy ? "ok" : "warn"}">${healthy ? "Stack healthy" : "Stack installed"}</div>` : ""}
         </div>
         ${notInstalled}${diskWarn}${cpuWarn}
-        <div class="ob-lm-caps">${CAPS.map(renderCapRow).join("")}</div>
+        <div class="ob-lm-caps">${CAPS.map((c) => renderCapRow(c, status)).join("")}</div>
         ${swapNote}
         <p id="ob-lm-hint" class="ob-lm-hint" hidden></p>`;
 
     CAPS.forEach((c) => wireCapRow(container, c.id));
 }
 
-function renderCapRow(cap) {
-    const r = rec(cap.id);
-    const active = isActive(cap.id);
-    const m = modelForCap(cap.id);
-    const dl = downloading[m && m.key];
-    const downloaded = !m || m.downloaded === true;
+export function renderCapRow(cap, st = status) {
+    const r = rec(cap.id, st);
+    const active = isActive(cap.id, st);
+    const m = modelForCap(cap.id, st);
+    const dl = downloading[m && m.model];
+    const downloaded = isDownloaded(m);
 
     let control;
     if (dl) {
         const pct = dl.total ? Math.min(100, Math.floor((dl.completed / dl.total) * 100)) : 0;
         control = `<div class="ob-lm-progress"><div class="ob-lm-progress-track"><div class="ob-lm-progress-fill" style="width:${pct}%"></div></div><span class="ob-lm-progress-text">${pct}% ${escapeHtml(dl.statusText || "downloading")}</span></div>`;
     } else if (!downloaded) {
-        control = `<button type="button" class="ob-lm-btn" data-dl="${escapeHtml(m.key)}">Download ${escapeHtml(r.size || "")}</button>`;
+        control = `<button type="button" class="ob-lm-btn" data-dl="${escapeHtml(m.model)}">Download ${escapeHtml(r.size || "")}</button>`;
     } else if (active) {
         control = `<button type="button" class="ob-lm-btn ob-lm-btn-on" data-off="${cap.id}">On-box active — turn off</button>`;
     } else {
@@ -204,7 +241,7 @@ async function startDownload(container, key) {
     try {
         const r = await fetch("/local-models/download", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: key }),
+            body: JSON.stringify({ artifact: key }),  // LocalModelDownloadRequest.artifact
         });
         if (!r.ok && r.status !== 409) throw new Error(`download returned ${r.status}`);
         // Stream NDJSON lines: {model,status,completed,total}. If the body
@@ -244,7 +281,7 @@ async function startDownload(container, key) {
 function updateDownloadBar(container, key) {
     const dl = downloading[key];
     const row = [...container.querySelectorAll(".ob-lm-cap")]
-        .find((el) => (modelForCap(el.getAttribute("data-cap")) || {}).key === key);
+        .find((el) => (modelForCap(el.getAttribute("data-cap")) || {}).model === key);
     const fill = row && row.querySelector(".ob-lm-progress-fill");
     const text = row && row.querySelector(".ob-lm-progress-text");
     if (!fill || !text || !dl) { renderBody(container); return; }
