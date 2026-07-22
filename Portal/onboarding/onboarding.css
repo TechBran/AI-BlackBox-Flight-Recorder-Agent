@@ -3445,3 +3445,24 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 .ob-lm-progress-text { font-size: 0.78rem; opacity: 0.8; white-space: nowrap; }
 .ob-lm-hint { font-size: 0.84rem; margin-top: 12px; color: var(--ob-muted, #9aa0ac); }
 .ob-lm-hint-error { color: #e6675b; }
+
+/* Audio two-card download section (M-C C1) — STT + TTS per-artifact buttons.
+   Absent entirely when the stack is off (no artifacts → no section). */
+.ob-lm-audio { margin: 16px 0 4px; }
+.ob-lm-audio-eyebrow { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .06em;
+    opacity: 0.65; margin-bottom: 10px; }
+.ob-lm-audio-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.ob-lm-audio-card { border: 1px solid var(--ob-border, #2a2a33); border-radius: 10px; padding: 14px 16px; }
+.ob-lm-audio-card-title { font-weight: 600; font-size: 0.98rem; }
+.ob-lm-audio-card-sub { font-size: 0.82rem; opacity: 0.75; margin: 6px 0 0; }
+.ob-lm-audio-fit { font-size: 0.82rem; opacity: 0.9; margin: 10px 0 0; }
+.ob-lm-audio-rows { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.ob-lm-audio-row { border-top: 1px solid var(--ob-border, #2a2a33); padding-top: 10px; }
+.ob-lm-audio-row:first-child { border-top: none; padding-top: 0; }
+.ob-lm-audio-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.ob-lm-audio-label { font-size: 0.86rem; font-weight: 500; }
+.ob-lm-audio-size { font-size: 0.78rem; opacity: 0.7; white-space: nowrap; }
+.ob-lm-audio-action { margin-top: 8px; }
+.ob-lm-audio-done { font-size: 0.82rem; color: #6fdca0; }
+.ob-lm-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+.ob-lm-btn[disabled]:hover { background: transparent; }
