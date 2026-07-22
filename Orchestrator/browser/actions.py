@@ -17,6 +17,7 @@ import subprocess
 import time
 import random
 import io
+from typing import Optional
 
 from Orchestrator.browser.config import (
     DISPLAY_NUMBER, DISPLAY_WIDTH, DISPLAY_HEIGHT,
@@ -211,7 +212,7 @@ class ActionExecutor:
     """
 
     def __init__(self, display_number: int = DISPLAY_NUMBER,
-                 coord_space: str = COORD_SPACE_ANTHROPIC, native_mode: bool = None):
+                 coord_space: str = COORD_SPACE_ANTHROPIC, native_mode: Optional[bool] = None):
         self.display_number = display_number
         if coord_space not in _COORD_SPACES:
             raise ValueError(

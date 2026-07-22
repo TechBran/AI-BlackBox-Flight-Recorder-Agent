@@ -17,7 +17,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
     import httpx
     from Orchestrator.browser.config import MAX_ITERATIONS
     from Orchestrator.browser.screenshot import (
-        capture_screenshot, capture_remote_screenshot,
+        capture_remote_screenshot,
         screenshot_to_base64, save_screenshot_to_uploads
     )
     from Orchestrator.browser.actions import execute_remote_action
@@ -529,7 +529,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
             # Capture fresh screenshot for the new prompt
             try:
                 from Orchestrator.browser.screenshot import (
-                    capture_screenshot, capture_remote_screenshot,
+                    capture_remote_screenshot,
                     screenshot_to_base64, save_screenshot_to_uploads
                 )
                 if session.device_id != "blackbox":

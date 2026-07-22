@@ -82,8 +82,10 @@ class FakeSession:
 
     def capture_screenshot_bytes(self) -> bytes:
         # Mirror ComputerUseSession.capture_screenshot_bytes (display=None):
-        # route through the module-level capture so tests that patch
-        # O.capture_screenshot continue to drive the loop's screenshot path.
+        # route through a test-injected O.capture_screenshot seam (set with
+        # monkeypatch(raising=False)) so tests drive the loop's screenshot
+        # path. Production agent_loop no longer imports capture_screenshot —
+        # it calls session.capture_screenshot_bytes() directly.
         return O.capture_screenshot()
 
 
@@ -157,7 +159,7 @@ def patched_loop(monkeypatch):
 
     monkeypatch.setattr(O, "ActionExecutor", FakeExecutor)
     monkeypatch.setattr(O, "OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(O, "capture_screenshot", lambda: b"\x89PNGfake")
+    monkeypatch.setattr(O, "capture_screenshot", lambda: b"\x89PNGfake", raising=False)
     monkeypatch.setattr(O, "resize_screenshot", lambda png, w, h: png)
     saved = []
 
@@ -473,7 +475,7 @@ async def test_post_action_screenshot_retry_once_then_continue(
             raise RuntimeError("scrot died")
         return b"PNG-%d" % calls["n"]
 
-    monkeypatch.setattr(O, "capture_screenshot", flaky_capture)
+    monkeypatch.setattr(O, "capture_screenshot", flaky_capture, raising=False)
     session = FakeSession()
     events = await _collect(O.run_openai_cu_loop(session, "click"))
     done = [e for e in events if e["type"] == "done"]
@@ -498,7 +500,7 @@ async def test_post_action_screenshot_persistent_failure_reuses_last_good(
             return good
         raise RuntimeError("scrot died")
 
-    monkeypatch.setattr(O, "capture_screenshot", capture)
+    monkeypatch.setattr(O, "capture_screenshot", capture, raising=False)
     session = FakeSession()
     events = await _collect(O.run_openai_cu_loop(session, "click"))
     out = [i for i in FakeAsyncOpenAI.last.responses.calls[1]["input"]
@@ -517,7 +519,7 @@ async def test_capture_never_succeeds_aborts_cleanly(patched_loop, monkeypatch):
     def always_fail():
         raise RuntimeError("no display")
 
-    monkeypatch.setattr(O, "capture_screenshot", always_fail)
+    monkeypatch.setattr(O, "capture_screenshot", always_fail, raising=False)
     session = FakeSession()
     session.openai_previous_response_id = "resp_prior"
     events = await _collect(O.run_openai_cu_loop(session, "click"))

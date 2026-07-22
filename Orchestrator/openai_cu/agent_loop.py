@@ -43,7 +43,7 @@ from openai import AsyncOpenAI
 
 from Orchestrator.browser.actions import ActionExecutor
 from Orchestrator.browser.screenshot import (
-    capture_screenshot, resize_screenshot, screenshot_to_base64,
+    resize_screenshot, screenshot_to_base64,
     save_screenshot_to_uploads,
 )
 from Orchestrator.config import OPENAI_API_KEY
