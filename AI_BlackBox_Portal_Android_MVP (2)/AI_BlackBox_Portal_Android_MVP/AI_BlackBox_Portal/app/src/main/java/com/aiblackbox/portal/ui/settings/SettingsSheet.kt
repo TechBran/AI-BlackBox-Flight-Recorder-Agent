@@ -432,7 +432,7 @@ fun SettingsSheet(
             Spacer(Modifier.height(20.dp))
 
             // ══════════════════════════════════════════════════════════════
-            // Voice Preferences — single dropdown (all voices grouped)
+            // Voice Preferences — provider-first TWO-STEP picker (D2): provider then voice
             // ══════════════════════════════════════════════════════════════
             SectionHeader("\uD83D\uDD0A Voice", SolidGreen)
 
@@ -464,6 +464,46 @@ fun SettingsSheet(
                 }
             }
 
+            // Provider-first two-step picker (D2): the provider dropdown picks a
+            // VoiceGroup; the voice dropdown then lists ONLY that provider's
+            // voices. `providerOverride` is UI-only state seeded from the
+            // persisted `provider:voice` id, so the canonical value every
+            // downstream reader uses (setOperatorVoice / generateWithVoice) and
+            // the D10 slow-first-byte affordance stay byte-for-byte unchanged.
+            var providerOverride by remember { mutableStateOf<String?>(null) }
+            val selectedVoiceGroup = allVoiceGroups.firstOrNull { it.label == providerOverride }
+                ?: com.aiblackbox.portal.data.repository.VoicePicker.selectedGroup(allVoiceGroups, currentVoice)
+            var showVoiceProviderMenu by remember { mutableStateOf(false) }
+
+            SettingsDropdown(
+                label = "Voice provider",
+                value = selectedVoiceGroup?.label ?: "—",
+                expanded = showVoiceProviderMenu,
+                onExpandedChange = { showVoiceProviderMenu = it },
+                accentColor = SolidGreen
+            ) {
+                allVoiceGroups.forEach { group ->
+                    val isSel = group.label == selectedVoiceGroup?.label
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                group.label,
+                                color = if (isSel) SolidGreen else BbxWhite,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 13.sp
+                            )
+                        },
+                        onClick = {
+                            feedback()
+                            providerOverride = group.label
+                            showVoiceProviderMenu = false
+                        }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {
             SettingsDropdown(
@@ -473,38 +513,32 @@ fun SettingsSheet(
                 onExpandedChange = { showVoiceMenu = it },
                 accentColor = SolidGreen
             ) {
-                allVoiceGroups.forEach { group ->
-                    // Group header
+                val groupVoices = selectedVoiceGroup?.voices ?: emptyList()
+                if (groupVoices.isEmpty()) {
                     DropdownMenuItem(
-                        text = {
-                            Text(
-                                group.label,
-                                color = if (group.label.contains("Gemini")) SolidGreen else BbxDim,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                        },
+                        text = { Text("No voices available", color = Neutral500, fontSize = 13.sp) },
                         onClick = {},
                         enabled = false
                     )
-                    group.voices.forEach { voice ->
-                        val isSelected = currentVoice == voice.id
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    "${voice.name} — ${voice.description}",
-                                    color = if (isSelected) SolidGreen else BbxWhite,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    fontSize = 13.sp
-                                )
-                            },
-                            onClick = {
-                                feedback()
-                                viewModel.setOperatorVoice(operator, voice.id)
-                                showVoiceMenu = false
-                            }
-                        )
-                    }
+                }
+                groupVoices.forEach { voice ->
+                    val isSelected = currentVoice == voice.id
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "${voice.name} — ${voice.description}",
+                                color = if (isSelected) SolidGreen else BbxWhite,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 13.sp
+                            )
+                        },
+                        onClick = {
+                            feedback()
+                            viewModel.setOperatorVoice(operator, voice.id)
+                            providerOverride = selectedVoiceGroup?.label
+                            showVoiceMenu = false
+                        }
+                    )
                 }
             }
                 } // end Box(weight=1f) wrapping the voice dropdown
@@ -519,15 +553,14 @@ fun SettingsSheet(
                 if (previewSlow) {
                     Text("Loading models…", color = BbxDim, fontSize = 11.sp)
                 }
-                // Voice Lab affordance — put it where web users (and Brandon) expect
-                // it: beside the voice picker. The screen itself gates on ElevenLabs
-                // status, so always-show is safe. (Menu item at "Generation" stays too.)
+                // Voice Lab affordance beside the voice picker (screen gates on
+                // ElevenLabs status, so always-show is safe).
                 IconButton(
                     onClick = { feedback(); onNavigate("voice_lab"); onDismiss() }
                 ) {
                     Text("🎙️", color = SolidGreen)
                 }
-            } // end Row (voice dropdown + ▶ preview + Voice Lab)
+            } // end Row (voice dropdown + preview + Voice Lab)
 
             Spacer(Modifier.height(16.dp))
 

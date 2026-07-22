@@ -358,6 +358,16 @@ val GEMINI_TTS_VOICE_PAIRS: List<Pair<String, String>> = listOf(
     "Sulafat" to "Lyrical, musical",
 )
 
+// On-box audio (D2) is DELIBERATELY absent from this compiled-in fallback:
+//   • qwen (on-box TTS) is dynamic-only — exactly like ElevenLabs/local, it comes
+//     ONLY from the live GET /tts/catalog when the on-box stack is healthy. Baking
+//     it in here would advertise non-functional voices on a stack-less box whose
+//     catalog is unreachable, breaking the fail-open invariant. Guarded by
+//     QwenVoiceRoutingTest.offlineFallback_hasNoQwenGroup and matching the web D1
+//     static fallback (Portal/index.html), which is likewise cloud-only.
+//   • whisper is STT-only (no TTS voices) and never belongs in a voice picker.
+// The provider-first two-step picker (VoicePicker) derives its providers from
+// whatever groups are present, so the live catalog surfaces qwen when available.
 val TTS_VOICE_GROUPS = listOf(
     VoiceGroup("OpenAI TTS HD", listOf(
         VoiceOption("openai:alloy", "Alloy", "Neutral, balanced"),
@@ -379,3 +389,33 @@ val TTS_VOICE_GROUPS = listOf(
         GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-pro:$n", n, d) }
     ),
 )
+
+/**
+ * Pure derivation for the provider-first TWO-STEP voice picker (D2). Given the
+ * live/offline [VoiceGroup] list and the persisted `provider:voice` id, decide
+ * which provider group the picker shows and which voices populate the second
+ * dropdown. Compose/Android-free so it is unit-testable on the JVM
+ * (VoicePickerDerivationTest). Mirrors the web helpers in
+ * Portal/modules/tts-stt.js (providerOfVoiceId / resolveVoiceSelection).
+ */
+object VoicePicker {
+    /** The group owning [voiceId]: exact voice match first, else the group whose
+     *  voices share the `provider:` prefix of [voiceId]. Null if neither. */
+    fun groupForVoice(groups: List<VoiceGroup>, voiceId: String): VoiceGroup? {
+        groups.firstOrNull { g -> g.voices.any { it.id == voiceId } }?.let { return it }
+        val prefix = voiceId.substringBefore(':', "")
+        if (prefix.isEmpty()) return null
+        return groups.firstOrNull { g ->
+            g.voices.any { it.id.substringBefore(':', "") == prefix }
+        }
+    }
+
+    /** Which provider group the two-step picker should display for the persisted
+     *  [currentVoice]: its owning group if resolvable, else the first group.
+     *  Null only for an empty catalog. */
+    fun selectedGroup(groups: List<VoiceGroup>, currentVoice: String): VoiceGroup? =
+        groupForVoice(groups, currentVoice) ?: groups.firstOrNull()
+
+    /** The voices that populate the second dropdown for the chosen [group]. */
+    fun voicesFor(group: VoiceGroup?): List<VoiceOption> = group?.voices ?: emptyList()
+}
