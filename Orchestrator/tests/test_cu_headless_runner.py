@@ -33,12 +33,32 @@ def runner_env(monkeypatch):
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(headless, "NATIVE_MODE", True)
 
-    async def _ensure_browser(self, url="about:blank"):
+    # M9: a virtual launch allocates a per-session display. The mock ensure_browser
+    # stands in a fake DisplayHandle so the runner's "virtual display allocated"
+    # check passes and session.capture_screenshot_bytes() routes to the (patched)
+    # per-display capture.
+    class _FakeHandle:
+        display_num = 100
+
+        def get_env(self):
+            return {"DISPLAY": ":100"}
+
+        def touch(self):
+            pass
+
+    async def _ensure_browser(self, url="about:blank", backend="anthropic"):
+        self.display = _FakeHandle()
         return True
 
     monkeypatch.setattr(ComputerUseSession, "ensure_browser", _ensure_browser)
     monkeypatch.setattr(ComputerUseSession, "destroy", lambda self: None)
 
+    monkeypatch.setattr(
+        "Orchestrator.browser.screenshot.capture_screenshot_display",
+        lambda n: b"\x89PNG-fake")
+    monkeypatch.setattr(
+        "Orchestrator.browser.screenshot.capture_screenshot",
+        lambda *a, **k: b"\x89PNG-fake")
     monkeypatch.setattr(headless, "capture_screenshot", lambda *a, **k: b"\x89PNG-fake")
     monkeypatch.setattr(
         headless, "save_screenshot_to_uploads",
@@ -581,8 +601,10 @@ async def test_gemini_desktop_blocked_by_running_browser_cu(runner_env, monkeypa
 
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
 
-    # A REAL running browser CU session holds the local display.
+    # A REAL running NATIVE browser CU session holds the shared physical display
+    # (M9: only native sessions contend).
     browser_sess = ComputerUseSession("system", device_id="blackbox")
+    browser_sess.native_mode = True
     browser_sess.status = "running"
     bsm._sessions[browser_sess.session_id] = browser_sess
     bsm._operator_sessions["system"] = browser_sess.session_id
@@ -599,7 +621,7 @@ async def test_gemini_desktop_blocked_by_running_browser_cu(runner_env, monkeypa
 
     try:
         result = await headless.run_cu_task(
-            "t-gem-conflict", "system", "hi",
+            "t-gem-conflict", "system", "hi", native_mode=True,
             model="gemini-2.5-computer-use-preview-10-2025")
 
         assert result["success"] is False

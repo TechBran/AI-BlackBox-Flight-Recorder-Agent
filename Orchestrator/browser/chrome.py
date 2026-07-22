@@ -6,11 +6,20 @@ import time
 import signal
 import json
 
+import os
+
 from Orchestrator.browser.config import (
     CHROME_PATH, PROFILE_BASE, DISPLAY_NUMBER, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-    CDP_PORT
+    CDP_PORT, ACTIVE_DISPLAY,
 )
-from Orchestrator.browser.display import get_display
+
+
+def _active_display_env() -> dict:
+    """Env for the box's default/native display — the fallback when a Chrome
+    method is called without a per-session DisplayHandle (M9)."""
+    env = os.environ.copy()
+    env["DISPLAY"] = f":{ACTIVE_DISPLAY}"
+    return env
 
 
 class ChromeInstance:
@@ -40,8 +49,8 @@ class ChromeInstance:
             env = handle.get_env()
             win_w, win_h = handle.width, handle.height
         else:
-            display = get_display()
-            env = display.get_env()
+            # No per-session handle: launch on the box's default/native display.
+            env = _active_display_env()
             win_w, win_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
 
         cmd = [
@@ -149,9 +158,8 @@ class ChromeInstance:
         return False
 
     def navigate(self, url: str):
-        """Navigate Chrome to a new URL using xdotool."""
-        display = get_display()
-        env = display.get_env()
+        """Navigate Chrome to a new URL using xdotool (default-display fallback)."""
+        env = _active_display_env()
         # Ctrl+L to focus address bar, type URL, press Enter
         subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+l"],
                        env=env, capture_output=True)

@@ -3,8 +3,8 @@
 Each CU session gets a private Xvfb screen (at the model's native resolution),
 an openbox WM, an x11vnc server bound to loopback, and — when live-view assets
 are present — a websockify WS bridge. Everything is tracked BY PID; teardown and
-liveness are per-pid. There is NO global process-name kill (the singleton
-VirtualDisplay this replaces matched processes by name, which broke multi-session
+liveness are per-pid. There is NO global process-name kill (the singleton display
+this replaces matched processes by name, which broke multi-session
 correctness). display_arbiter.py still owns native-mode mutual exclusion; this
 module owns virtual-session lifecycle only.
 """
@@ -307,66 +307,3 @@ def get_allocator() -> DisplayAllocator:
         if _allocator is None:
             _allocator = DisplayAllocator()
         return _allocator
-
-
-# ── Backward-compat shim (removed in Task 9.4 once all callers use handles) ──
-# A minimal singleton-style facade over a reserved "__default__" allocation so
-# chrome.py / session_manager.py / browser_routes.py keep importing get_display /
-# ensure_display_running until 9.4 rewires them. NO global process kills.
-class _DefaultDisplayShim:
-    _SID = "__default__"
-
-    def _handle(self) -> Optional[DisplayHandle]:
-        return get_allocator().get(self._SID)
-
-    def start(self) -> bool:
-        try:
-            get_allocator().allocate(self._SID, backend="anthropic", operator="system")
-            return True
-        except Exception as e:
-            print(f"[DISPLAY] default allocation failed: {e}")
-            return False
-
-    def is_running(self) -> bool:
-        return self._handle() is not None
-
-    def get_env(self) -> dict:
-        h = self._handle()
-        if h is None:
-            env = os.environ.copy(); env["DISPLAY"] = f":{ACTIVE_DISPLAY}"; return env
-        return h.get_env()
-
-    @property
-    def display_number(self) -> int:
-        h = self._handle()
-        return h.display_num if h else ACTIVE_DISPLAY
-
-    @property
-    def width(self) -> int:
-        h = self._handle(); return h.width if h else CU_DISPLAY_WIDTH
-
-    @property
-    def height(self) -> int:
-        h = self._handle(); return h.height if h else CU_DISPLAY_HEIGHT
-
-    def health_check(self) -> bool:
-        h = self._handle()
-        return bool(h) and _xvfb_ready(h.display_num)
-
-    def stop(self) -> None:
-        get_allocator().release(self._SID)
-
-
-# Backward-compat class alias: Orchestrator/browser/__init__.py re-exports the
-# name `VirtualDisplay` in its __all__. Nothing instantiates it directly; aliasing
-# the shim class keeps that import + re-export resolving until Task 9.4 removes it.
-VirtualDisplay = _DefaultDisplayShim
-
-_display_shim = _DefaultDisplayShim()
-
-def get_display() -> _DefaultDisplayShim:
-    return _display_shim
-
-def ensure_display_running() -> bool:
-    d = get_display()
-    return True if d.is_running() else d.start()

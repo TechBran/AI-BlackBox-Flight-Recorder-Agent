@@ -149,13 +149,31 @@ def golden_env(monkeypatch):
     monkeypatch.setattr(ComputerUseSession, "destroy", lambda self: None)
     destroy_session("system")
 
-    # -- no real display / Chrome --------------------------------------------
-    async def _ensure_browser(self, url="about:blank"):
+    # -- no real display / Chrome (M9: a virtual launch allocates a per-session
+    #    display; the mock stands in a fake handle so the runner's allocation
+    #    check passes and per-display capture routes through) -------------------
+    class _FakeHandle:
+        display_num = 100
+
+        def get_env(self):
+            return {"DISPLAY": ":100"}
+
+        def touch(self):
+            pass
+
+    async def _ensure_browser(self, url="about:blank", backend="anthropic"):
+        self.display = _FakeHandle()
         return True
 
     monkeypatch.setattr(ComputerUseSession, "ensure_browser", _ensure_browser)
     monkeypatch.setattr(headless, "NATIVE_MODE", True)  # skip Xvfb health check
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "Orchestrator.browser.screenshot.capture_screenshot_display",
+        lambda n: _tiny_png())
+    monkeypatch.setattr(
+        "Orchestrator.browser.screenshot.capture_screenshot",
+        lambda *a, **k: _tiny_png())
 
     # -- Anthropic seam: fake httpx, loop terminates with end_turn -------------
     api_calls = []

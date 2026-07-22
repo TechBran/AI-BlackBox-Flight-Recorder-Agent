@@ -4071,7 +4071,7 @@ async def persist_local_turn_and_mint(
         return {"snap_id": None, "minted": False, "checkpoint_triggered": False, "error": str(e)}
 
 
-async def stream_computer_use(messages: List[Dict], model: str, operator: str, session_id: str = None, device_id: str = "blackbox"):
+async def stream_computer_use(messages: List[Dict], model: str, operator: str, session_id: str = None, device_id: str = "blackbox", native_mode: bool = False):
     """Launch the CU agent loop as a background asyncio.Task and consume
     events from its queue.  The task keeps running even if the SSE client
     disconnects.  Reconnecting yields buffered / live events from the
@@ -4162,26 +4162,20 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
             print(f"[CU-STREAM] New message for {operator}, resetting completed session")
             session.reset_task_state()
 
-        # Ensure display/device is ready
+        # Ensure display/device is ready.
+        # VIRTUAL (default): allocate this session's own per-session display.
+        # NATIVE opt-in: use the shared physical display (arbiter-guarded below).
         if session.device_id == "blackbox":
+            session.native_mode = bool(native_mode)
             # Local device — start display + Chrome
-            if not await session.ensure_browser("about:blank"):
+            if not await session.ensure_browser("about:blank", backend="anthropic"):
                 yield {"type": "error", "data": "Failed to start browser session"}
                 return
 
-            # Health check: verify display is functional (skip in native mode)
-            from Orchestrator.browser.config import NATIVE_MODE
-            if not NATIVE_MODE:
-                from Orchestrator.browser.display import get_display
-                display = get_display()
-                if not display.health_check():
-                    print("[CU-STREAM] Display health check failed, attempting restart...")
-                    display.stop()
-                    display.start()
-                    if not display.health_check():
-                        yield {"type": "error", "data": "Display health check failed after restart. Cannot proceed."}
-                        return
-                    print("[CU-STREAM] Display restarted successfully")
+            if not session.native_mode and (session.display is None
+                                            or not session.display.get_env()):
+                yield {"type": "error", "data": "Virtual display allocation failed"}
+                return
 
             # Small wait for Chrome if freshly started
             if not session.conversation_history:
@@ -4221,7 +4215,7 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
             if session.device_id != "blackbox":
                 initial_png = await capture_remote_screenshot(session.device_id)
             else:
-                initial_png = capture_screenshot()
+                initial_png = session.capture_screenshot_bytes()
             initial_b64 = screenshot_to_base64(initial_png)
             session.screenshot_count += 1
             screenshot_url = save_screenshot_to_uploads(initial_png, f"cu_{operator}", session.screenshot_count)
@@ -4285,11 +4279,11 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
             "content-type": "application/json"
         }
 
-        # ── Claim the local display for THIS launch (M1-T6, per-launch key).
-        #    Only a "blackbox" target touches the local X server; a remote VNC
-        #    target does not, so it never claims/blocks. Released in the
-        #    consumer-loop finally. ──
-        if session.device_id == "blackbox":
+        # ── Claim the shared physical display ONLY for a NATIVE launch (M9). A
+        #    virtual launch drives its own per-session display and never contends,
+        #    so concurrent virtual agents are allowed (D14 — a badge, not a lock).
+        #    Released via the driver's done-callback below. ──
+        if session.device_id == "blackbox" and native_mode:
             owner = try_claim("browser", operator, _display_claim_id,
                               session_id=session.session_id)
             if owner is not None:
@@ -4368,7 +4362,8 @@ def _detect_device_switch(user_text: str, operator: str):
 async def stream_gemini_computer_use(messages: List[Dict], model: str,
                                       operator: str,
                                       session_id: str = None,
-                                      device_id: str = "blackbox"):
+                                      device_id: str = "blackbox",
+                                      native_mode: bool = False):
     """Launch the Gemini CU agent loop as a background asyncio.Task and consume
     events from its queue. Mirrors stream_computer_use() for identical UX.
 
@@ -4495,6 +4490,8 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             yield {"type": "cu_session", "data": {"session_id": session.session_id, "device_switch": detected_device}}
 
         session.reset_task_state()
+        # NATIVE opt-in contends for the shared display; virtual (default) does not.
+        session.native_mode = bool(native_mode and is_local_environment(session.environment))
         session.status = "starting"
         session.user_message = user_text
 
@@ -4510,11 +4507,11 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             system_prompt += "\n\n" + cu_fossil_context
             print(f"[GEMINI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
-        # ── Claim the local display for THIS launch (M1-T6, per-launch key).
-        #    Gate on the arbiter's PUBLIC local-environment predicate (single
-        #    source of truth; android is never local so it never claims/blocks).
-        #    Released via the driver's done-callback below. ──
-        if is_local_environment(session.environment):
+        # ── Claim the shared physical display ONLY for a NATIVE local launch (M9).
+        #    A virtual launch drives its own display and never contends; android is
+        #    never local so it never claims/blocks. Released via the driver's
+        #    done-callback below. ──
+        if native_mode and is_local_environment(session.environment):
             owner = try_claim("gemini-chat", operator, _display_claim_id,
                               session_id=session.session_id)
             if owner is not None:
@@ -4657,7 +4654,8 @@ async def _gemini_cu_agent_loop(session, operator: str, user_text: str,
 async def stream_openai_computer_use(messages: List[Dict], model: str,
                                       operator: str,
                                       session_id: str = None,
-                                      device_id: str = "blackbox"):
+                                      device_id: str = "blackbox",
+                                      native_mode: bool = False):
     """Launch the OpenAI CUA agent loop as a background asyncio.Task and
     consume events from its queue. Mirrors stream_gemini_computer_use for
     identical UX, but uses the browser/session_manager ComputerUseSession
@@ -4755,8 +4753,22 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
         # Rebind the event queue to the server loop (see fresh_event_queue —
         # a headless run may have left it bound to a dead loop).
         session.fresh_event_queue()
+        # NATIVE opt-in contends for the shared display; virtual (default) allocates
+        # this session's own display.
+        session.native_mode = bool(native_mode)
         session.status = "starting"
         session.user_message = user_text
+
+        # ── Ensure this session's display + Chrome are up (OpenAI CU captures via
+        #    session.capture_screenshot_bytes(), which needs the per-session
+        #    display). Virtual (default) allocates; native uses the shared display. ──
+        if not await session.ensure_browser("about:blank", backend="openai"):
+            yield {"type": "error", "data": "Failed to start browser session"}
+            return
+        if not session.native_mode and (session.display is None
+                                        or not session.display.get_env()):
+            yield {"type": "error", "data": "Virtual display allocation failed"}
+            return
 
         # ── Build system prompt with fossil context ──
         from Orchestrator.openai_cu.agent_loop import _default_system_prompt
@@ -4768,10 +4780,9 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
             system_prompt += "\n\n" + cu_fossil_context
             print(f"[OPENAI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
-        # ── Claim the local display for THIS launch (M1-T6, per-launch key).
-        #    Gated on the local target for symmetry with the Anthropic/headless
-        #    paths (OpenAI CU is local-desktop only, but be explicit). ──
-        if session.device_id == "blackbox":
+        # ── Claim the shared physical display ONLY for a NATIVE launch (M9). A
+        #    virtual launch drives its own per-session display and never contends. ──
+        if session.device_id == "blackbox" and native_mode:
             owner = try_claim("browser", operator, _display_claim_id,
                               session_id=session.session_id)
             if owner is not None:

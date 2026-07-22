@@ -402,7 +402,8 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
 
 async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
                               device_id: str, model: str,
-                              system_prompt: str, url: str) -> dict:
+                              system_prompt: str, url: str,
+                              native_mode: bool = False) -> dict:
     """Gemini CU headless dispatch.
 
     Uses the Gemini CU session type (NOT
@@ -454,7 +455,11 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
     # can never both take it. Consults BOTH registries AND the reservation table.
     # Android targets never touch the local X server, so they neither claim nor
     # are blocked. Failure SHAPE unchanged (_failure dict — fire-and-forget).
-    if environment == "desktop":
+    #    NATIVE opt-in only: a virtual Gemini task drives its own display and does
+    #    NOT contend for the physical desktop, so it never claims. (Per-session
+    #    virtual-display allocation for Gemini is deferred; a virtual Gemini task
+    #    currently renders on the box's default display — see M9 notes.)
+    if environment == "desktop" and native_mode:
         from Orchestrator.browser.display_arbiter import try_claim
         owner = try_claim("gemini-task", operator, task_id)
         if owner is not None:
@@ -466,6 +471,7 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
         # OWN, isolated session (see ISOLATION above) — never the operator-cached
         # chat session. Fresh: own queue, empty history, requested device/env.
         session = gemini_create_task_session(operator, device_id, environment)
+        session.native_mode = bool(native_mode and environment == "desktop")
         session.status = "starting"
         session.user_message = prompt
 
@@ -489,7 +495,8 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
 
 async def run_cu_task(task_id: str, operator: str, prompt: str,
                       device_id: str = "blackbox", model: str = "",
-                      system_prompt: str = None, url: str = None) -> dict:
+                      system_prompt: str = None, url: str = None,
+                      native_mode: bool = False) -> dict:
     """Run one Computer Use task headlessly and return the result contract dict.
 
     Three-backend dispatch (T5): the backend is resolved from `model`, only
@@ -530,7 +537,8 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
     # single-display lock, so it branches BEFORE any browser session is created.
     if backend == "google":
         return await _run_gemini_cu_task(
-            task_id, operator, prompt, device_id, model, system_prompt, url)
+            task_id, operator, prompt, device_id, model, system_prompt, url,
+            native_mode=native_mode)
 
     # anthropic + openai share the browser ComputerUseSession + its single-local-
     # display lock. Lazy chat_routes import (only the anthropic branch uses these
@@ -565,31 +573,27 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
             print(f"[CU-HEADLESS] Switching device {session.device_id} -> {device_id} for {operator}")
             session.device_id = device_id
 
-        # ── Claim the local display for THIS launch (M1-T6, per-launch key =
-        #    task_id). Atomic across BOTH registries + reservations; released in
-        #    the finally below. A remote (non-"blackbox") VNC target does not touch
-        #    the local X server, so it neither claims nor is blocked. ──
-        if session.device_id == "blackbox":
+        # ── VIRTUAL (default): per-session display, no shared-display claim.
+        #    NATIVE opt-in: claim the shared physical display via the arbiter
+        #    (per-launch key = task_id; released in the finally below). A remote
+        #    (non-"blackbox") VNC target does not touch the local X server. ──
+        if session.device_id == "blackbox" and native_mode:
+            session.native_mode = True
             owner = try_claim("browser", operator, task_id, session_id=session.session_id)
             if owner is not None:
                 return _failure(f"Cannot start Computer Use — {owner.describe()}. Stop it first.")
+        else:
+            session.native_mode = False
 
         # ── Ensure display/device is ready (mirrors stream_computer_use) ──
         if session.device_id == "blackbox":
             if url and not is_domain_allowed(url):
                 return _failure(f"Domain blocked by security policy: {url}")
-            if not await session.ensure_browser(url or "about:blank"):
+            if not await session.ensure_browser(url or "about:blank", backend=backend):
                 return _failure("Failed to start browser session")
-            if not NATIVE_MODE:
-                from Orchestrator.browser.display import get_display
-                display = get_display()
-                if not display.health_check():
-                    print("[CU-HEADLESS] Display health check failed, attempting restart...")
-                    display.stop()
-                    display.start()
-                    if not display.health_check():
-                        return _failure("Display health check failed after restart. Cannot proceed.")
-                    print("[CU-HEADLESS] Display restarted successfully")
+            if not session.native_mode and (session.display is None
+                                            or not session.display.get_env()):
+                return _failure("Virtual display allocation failed")
             if not session.conversation_history:
                 await asyncio.sleep(2)  # small wait for Chrome if freshly started
         else:
@@ -662,7 +666,7 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
             if session.device_id != "blackbox":
                 initial_png = await capture_remote_screenshot(session.device_id)
             else:
-                initial_png = capture_screenshot()
+                initial_png = session.capture_screenshot_bytes()
             initial_b64 = screenshot_to_base64(initial_png)
             session.screenshot_count += 1
             screenshots.append(

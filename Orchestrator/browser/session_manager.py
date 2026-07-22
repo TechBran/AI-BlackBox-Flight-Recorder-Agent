@@ -20,7 +20,6 @@ from typing import Dict, List, Optional
 from Orchestrator.browser.config import (
     DISPLAY_WIDTH, DISPLAY_HEIGHT, SESSION_TIMEOUT, NATIVE_MODE
 )
-from Orchestrator.browser.display import ensure_display_running, get_display
 from Orchestrator.browser.chrome import ChromeInstance
 from Orchestrator.browser.actions import ActionExecutor
 
@@ -200,27 +199,41 @@ class ComputerUseSession:
         """Check if session has been inactive too long."""
         return (time.time() - self.last_activity) > timeout
 
-    async def ensure_browser(self, url: str = "about:blank") -> bool:
-        """Start display + Chrome if not already running.
-        In native mode: real desktop is always running, no Chrome needed.
-        """
-        if NATIVE_MODE:
-            # Real desktop is always available — nothing to start
+    async def ensure_browser(self, url: str = "about:blank", backend: str = "anthropic") -> bool:
+        """Start this session's display + Chrome. Native: nothing to start."""
+        if self.native_mode:
             return True
-        if not ensure_display_running():
-            return False
+        from Orchestrator.browser.display import get_allocator
+        if self.display is None:
+            try:
+                self.display = get_allocator().allocate(
+                    self.session_id, backend=backend, operator=self.operator)
+            except Exception as e:
+                print(f"[CU-SESSION] display allocation failed for {self.operator}: {e}")
+                return False
+            # Re-bind the input executor to THIS session's display, unscaled.
+            from Orchestrator.browser.actions import (
+                ActionExecutor, COORD_SPACE_GEMINI, COORD_SPACE_ANTHROPIC)
+            coord = COORD_SPACE_GEMINI if backend in ("google", "gemini") else COORD_SPACE_ANTHROPIC
+            self.actions = ActionExecutor(display_number=self.display.display_num,
+                                          coord_space=coord, native_mode=False)
+        self.display.touch()
         if not self.chrome.is_running():
-            return self.chrome.start(url)
+            return self.chrome.start(url, handle=self.display)
         return True
 
     def destroy(self):
-        """Stop Chrome. Display persists for reuse. In native mode, nothing to stop."""
-        if NATIVE_MODE:
+        """Release this session's virtual display + Chrome. Native: nothing."""
+        if self.native_mode:
             return
         try:
             self.chrome.stop()
         except Exception as e:
             print(f"[CU-SESSION] Error stopping Chrome for {self.operator}: {e}")
+        if self.display is not None:
+            from Orchestrator.browser.display import get_allocator
+            get_allocator().release(self.session_id)
+            self.display = None
 
 
 # ── Global session store ──

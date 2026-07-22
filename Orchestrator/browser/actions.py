@@ -24,7 +24,6 @@ from Orchestrator.browser.config import (
     NATIVE_MODE, ACTIVE_DISPLAY,
     get_native_env
 )
-from Orchestrator.browser.display import get_display
 
 
 # ── Wayland detection + ydotool config ──

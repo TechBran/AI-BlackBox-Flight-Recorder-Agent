@@ -204,18 +204,17 @@ def startup_check_index():
     except Exception as e:
         logger.error("Error during cleanup: %s", e)
 
-    # Start Sovereign Browser display
-    logger.info("Starting Sovereign Browser display...")
+    # Sovereign Browser displays are per-session (M9): allocated on demand at each
+    # CU launch, not a single global display. At boot, reap any restart-survivor
+    # Xvfb/x11vnc/websockify children left on our slot displays/ports by a previous
+    # process (KillMode=process reparents them to init) so their slots are reusable.
+    logger.info("Reaping orphaned Sovereign Browser display children...")
     try:
-        from Orchestrator.browser.config import NATIVE_MODE, ACTIVE_DISPLAY, DISPLAY_WIDTH, DISPLAY_HEIGHT
-        from Orchestrator.browser.display import ensure_display_running
-        if ensure_display_running():
-            mode_str = "native desktop" if NATIVE_MODE else "Xvfb virtual"
-            logger.info("Sovereign Browser %s display :%s ready (%sx%s)", mode_str, ACTIVE_DISPLAY, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-        else:
-            logger.warning("Sovereign Browser display failed to start (browser tasks will start it on demand)")
+        from Orchestrator.browser.display import get_allocator
+        get_allocator().reap_orphans()
+        logger.info("Sovereign Browser per-session displays ready (allocated on demand)")
     except Exception as e:
-        logger.error("Sovereign Browser display error: %s (will start on demand)", e)
+        logger.error("Sovereign Browser display boot-reap error: %s", e)
 
     # Start background worker thread for task processing (lazy import to avoid circular import)
     logger.info("Starting background worker thread...")

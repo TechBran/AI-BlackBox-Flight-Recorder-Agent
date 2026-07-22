@@ -1731,6 +1731,7 @@ def process_browser_use(task: Task):
                     model=task_rd.get("model") or "",
                     system_prompt=task_rd.get("system_prompt"),
                     url=url,
+                    native_mode=task_rd.get("native_mode", False),
                 ),
                 timeout=SESSION_TIMEOUT + 30
             )

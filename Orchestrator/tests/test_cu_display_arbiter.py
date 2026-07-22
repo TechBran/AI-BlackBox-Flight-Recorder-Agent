@@ -44,22 +44,28 @@ def _clean(monkeypatch):
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-def _register_browser(operator, status="running", device_id="blackbox"):
+# M9: only NATIVE sessions contend for the one physical display, so the arbiter
+# scan sees them. These helpers register NATIVE holders (native_mode=True) — a
+# virtual session drives its own per-session display and never appears here.
+def _register_browser(operator, status="running", device_id="blackbox", native_mode=True):
     s = ComputerUseSession(operator, device_id=device_id)
+    s.native_mode = native_mode
     s.status = status
     bsm._sessions[s.session_id] = s
     bsm._operator_sessions[operator] = s.session_id
     return s
 
 
-def _register_gemini_chat(operator, status="running", environment="desktop", device_id="blackbox"):
+def _register_gemini_chat(operator, status="running", environment="desktop", device_id="blackbox", native_mode=True):
     s = gsm.get_or_create_session(operator, device_id, environment)   # BOTH dicts
+    s.native_mode = native_mode
     s.status = status
     return s
 
 
-def _register_gemini_task(operator, status="running", environment="desktop", device_id="blackbox"):
+def _register_gemini_task(operator, status="running", environment="desktop", device_id="blackbox", native_mode=True):
     s = gsm.create_task_session(operator, device_id, environment)     # _sessions only
+    s.native_mode = native_mode
     s.status = status
     return s
 
@@ -70,10 +76,26 @@ def _stub_browser_run(monkeypatch):
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(headless, "NATIVE_MODE", True)
 
-    async def _ensure(self, url="about:blank"):
+    class _FakeHandle:
+        display_num = 100
+
+        def get_env(self):
+            return {"DISPLAY": ":100"}
+
+        def touch(self):
+            pass
+
+    async def _ensure(self, url="about:blank", backend="anthropic"):
+        self.display = _FakeHandle()
         return True
 
     monkeypatch.setattr(ComputerUseSession, "ensure_browser", _ensure)
+    monkeypatch.setattr(
+        "Orchestrator.browser.screenshot.capture_screenshot_display",
+        lambda n: b"\x89PNG-fake")
+    monkeypatch.setattr(
+        "Orchestrator.browser.screenshot.capture_screenshot",
+        lambda *a, **k: b"\x89PNG-fake")
     monkeypatch.setattr(headless, "capture_screenshot", lambda *a, **k: b"\x89PNG-fake")
     monkeypatch.setattr(headless, "screenshot_to_base64", lambda p: "ZmFrZQ==")
     monkeypatch.setattr(headless, "save_screenshot_to_uploads",
@@ -248,11 +270,11 @@ def test_two_threads_contending_exactly_one_claims(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_C1_browser_reuse_launch_claims_the_display(monkeypatch):
-    """C1: a REUSED browser session's launch must claim the display. Pre-register
-    an idle browser session, run a browser CU task (which REUSES it), and prove
-    that WHILE its driver runs a concurrent cross-kind claim is REFUSED.
-    Mutation-verified in the report: drop run_cu_task's try_claim and it is
-    GRANTED."""
+    """C1: a REUSED NATIVE browser session's launch must claim the display.
+    Pre-register an idle browser session, run a NATIVE browser CU task (which
+    REUSES it), and prove that WHILE its driver runs a concurrent cross-kind claim
+    is REFUSED. Mutation-verified in the report: drop run_cu_task's try_claim and
+    it is GRANTED. (M9: virtual launches never claim — this pins the native path.)"""
     _stub_browser_run(monkeypatch)
     _register_browser("op", status="idle")           # reuse target
     observed = {}
@@ -266,7 +288,7 @@ async def test_C1_browser_reuse_launch_claims_the_display(monkeypatch):
 
     monkeypatch.setattr(headless, "run_anthropic_cu_loop", driver)
 
-    result = await headless.run_cu_task("t-reuse", "op", "hi")   # reuses the idle session
+    result = await headless.run_cu_task("t-reuse", "op", "hi", native_mode=True)   # reuses the idle session
     assert result["success"] is True
     assert observed["blocked"] is True                # the reuse launch had claimed
     assert not da._reservations                        # released in finally
@@ -280,7 +302,7 @@ async def test_C2_refused_task_launch_does_not_drop_another_launchs_claim(monkey
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
     da.try_claim("browser", "op", "live-chat-launch", session_id="sid-live")
 
-    result = await headless.run_cu_task("t-refused", "op", "hi",
+    result = await headless.run_cu_task("t-refused", "op", "hi", native_mode=True,
                                         model="claude-opus-4-6")
     assert result["success"] is False
     assert "Computer Use" in result["result_text"]
@@ -298,7 +320,7 @@ async def test_gemini_task_blocked_by_running_gemini_task_same_operator(monkeypa
     monkeypatch.setattr(headless, "gemini_create_task_session", _boom)
     monkeypatch.setattr(headless, "run_gemini_cu_loop", _boom)
     _register_gemini_task("brandon", status="running")
-    result = await headless.run_cu_task("t-b-same", "brandon", "hi",
+    result = await headless.run_cu_task("t-b-same", "brandon", "hi", native_mode=True,
                                         model="gemini-2.5-computer-use-preview-10-2025")
     assert result["success"] is False and "running" in result["result_text"].lower()
 
@@ -314,7 +336,7 @@ async def test_gemini_task_blocked_by_running_gemini_task_different_operator(mon
     monkeypatch.setattr(headless, "gemini_create_task_session", _boom)
     monkeypatch.setattr(headless, "run_gemini_cu_loop", _boom)
     _register_gemini_task("alice", status="running")
-    result = await headless.run_cu_task("t-b-diff", "brandon", "hi",
+    result = await headless.run_cu_task("t-b-diff", "brandon", "hi", native_mode=True,
                                         model="gemini-2.5-computer-use-preview-10-2025")
     assert result["success"] is False and "running" in result["result_text"].lower()
 
@@ -330,7 +352,7 @@ async def test_gemini_task_blocked_by_running_browser_cu(monkeypatch):
     monkeypatch.setattr(headless, "gemini_create_task_session", _boom)
     monkeypatch.setattr(headless, "run_gemini_cu_loop", _boom)
     _register_browser("brandon", status="running")
-    result = await headless.run_cu_task("t-brws", "brandon", "hi",
+    result = await headless.run_cu_task("t-brws", "brandon", "hi", native_mode=True,
                                         model="gemini-2.5-computer-use-preview-10-2025")
     assert result["success"] is False and "Computer Use" in result["result_text"]
 
@@ -410,7 +432,8 @@ async def test_gemini_chat_launch_refused_when_display_taken(monkeypatch):
     _register_gemini_task("other-op", status="running")
 
     events = await _drive(cr.stream_gemini_computer_use(
-        [{"role": "user", "content": "open settings"}], "", "brandon", device_id="blackbox"))
+        [{"role": "user", "content": "open settings"}], "", "brandon", device_id="blackbox",
+        native_mode=True))
     assert any(e["type"] == "error" and "Cannot start Gemini CU" in e["data"] for e in events)
     assert not da._reservations                        # nothing leaked (finally)
 
@@ -481,7 +504,7 @@ async def test_gemini_browser_session_blocks_browser_and_gemini_launches(monkeyp
     _register_gemini_chat("holder", status="running", environment="browser")
 
     # browser headless launch refused (returns before ensure_browser)
-    r1 = await headless.run_cu_task("t-b1", "op", "hi", model="claude-opus-4-6")
+    r1 = await headless.run_cu_task("t-b1", "op", "hi", native_mode=True, model="claude-opus-4-6")
     assert r1["success"] is False and "Computer Use" in r1["result_text"]
 
     # gemini-task launch refused
@@ -490,7 +513,7 @@ async def test_gemini_browser_session_blocks_browser_and_gemini_launches(monkeyp
 
     monkeypatch.setattr(headless, "gemini_create_task_session", _boom)
     monkeypatch.setattr(headless, "run_gemini_cu_loop", _boom)
-    r2 = await headless.run_cu_task("t-b2", "op", "hi",
+    r2 = await headless.run_cu_task("t-b2", "op", "hi", native_mode=True,
                                     model="gemini-2.5-computer-use-preview-10-2025")
     assert r2["success"] is False
 
@@ -728,7 +751,8 @@ async def test_disconnect_during_starting_keeps_claim(monkeypatch):
     monkeypatch.setattr(cr, "_gemini_cu_agent_loop", blocking_wrapper)
 
     agen = cr.stream_gemini_computer_use(
-        [{"role": "user", "content": "go"}], "", "brandon", device_id="blackbox")
+        [{"role": "user", "content": "go"}], "", "brandon", device_id="blackbox",
+        native_mode=True)
 
     async def consume():
         async for _ in agen:

@@ -19,6 +19,7 @@ class BrowserRunIn(BaseModel):
     operator: Optional[str] = "system"
     system_prompt: Optional[str] = None
     device_id: Optional[str] = "blackbox"
+    native_mode: Optional[bool] = False
 
 
 @app.post("/browser/run")
@@ -38,6 +39,7 @@ def browser_run(req: BrowserRunIn):
             "url": req.url,
             "system_prompt": req.system_prompt,
             "device_id": req.device_id or "blackbox",
+            "native_mode": bool(req.native_mode),
         }
     )
 
@@ -65,13 +67,16 @@ def browser_status():
                 "cu_resolution": f"{DISPLAY_WIDTH}x{DISPLAY_HEIGHT}",
                 "native_mode": True,
             }
-        from Orchestrator.browser.display import get_display
-        display = get_display()
+        # Virtual mode (M9): displays are per-session, allocated on demand. Report
+        # live virtual-CU sessions instead of a single global display.
+        from Orchestrator.browser.display import get_allocator, MAX_VIRTUAL_SESSIONS
+        sessions = get_allocator().active_sessions()
         return {
-            "display_running": display.is_running(),
-            "display": f":{display.display_number}",
-            "resolution": f"{display.width}x{display.height}",
+            "display_running": bool(sessions),
             "native_mode": False,
+            "virtual_sessions": len(sessions),
+            "cap": MAX_VIRTUAL_SESSIONS,
+            "sessions": sessions,
         }
     except Exception as e:
         return {"display_running": False, "error": str(e)}
@@ -81,14 +86,12 @@ def browser_status():
 def browser_screenshot():
     """Capture a screenshot from the display right now."""
     try:
-        from Orchestrator.browser.config import NATIVE_MODE
-        from Orchestrator.browser.display import ensure_display_running
         from Orchestrator.browser.screenshot import capture_screenshot, save_screenshot_to_uploads
         import time
 
-        if not NATIVE_MODE and not ensure_display_running():
-            return {"error": "Virtual display not running"}
-
+        # Live full-desktop capture (native display). Per-session virtual displays
+        # are captured via their own session handles; this endpoint is the native
+        # snapshot used by the interactive viewer.
         png_bytes = capture_screenshot()
         task_id = f"live_{int(time.time())}"
         url = save_screenshot_to_uploads(png_bytes, task_id, 0)

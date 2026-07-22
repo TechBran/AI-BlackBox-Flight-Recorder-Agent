@@ -169,12 +169,18 @@ def is_local_environment(env: Optional[str]) -> bool:
 
 
 def _browser_holds_local(session) -> bool:
+    # Only a NATIVE session contends for the one physical display (M9). A virtual
+    # session drives its OWN per-session Xvfb (display_arbiter is the native-only
+    # mutex), so it never registers as the local-display owner.
     return (getattr(session, "device_id", None) == "blackbox"
+            and getattr(session, "native_mode", False)
             and getattr(session, "status", None) in _BUSY_STATUSES)
 
 
 def _gemini_holds_local(session) -> bool:
+    # Native-only (M9): a virtual Gemini session does not touch the physical display.
     return (is_local_environment(getattr(session, "environment", None))
+            and getattr(session, "native_mode", False)
             and getattr(session, "status", None) in _BUSY_STATUSES)
 
 
