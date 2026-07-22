@@ -25,7 +25,7 @@ def test_embeddings_in_all_steps_after_api_keys():
     assert "embeddings" in st.ALL_STEPS
     i = st.ALL_STEPS.index("embeddings")
     assert st.ALL_STEPS[i - 1] == "api_keys"
-    assert st.ALL_STEPS[i + 1] == "optional_integrations"
+    assert st.ALL_STEPS[i + 1] == "local_models"
 
 
 def test_step_complete_and_skip_accept_embeddings(tmp_path, monkeypatch):
@@ -59,10 +59,10 @@ def test_advance_from_api_keys_lands_on_embeddings(tmp_path, monkeypatch):
     # complete advances past embeddings...
     s.mark_step_complete("embeddings")
     ob._advance_current_to_next("embeddings")
-    assert s.snapshot()["current_step"] == "optional_integrations"
+    assert s.snapshot()["current_step"] == "local_models"
 
     # ...and skip does too (skipping = keep current active model, never blocks)
     s.set_current("embeddings")
     s.mark_step_skipped("embeddings")
     ob._advance_current_to_next("embeddings")
-    assert s.snapshot()["current_step"] == "optional_integrations"
+    assert s.snapshot()["current_step"] == "local_models"
