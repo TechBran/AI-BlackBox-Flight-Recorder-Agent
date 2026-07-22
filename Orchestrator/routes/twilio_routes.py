@@ -1486,46 +1486,43 @@ async def cli_media_websocket(websocket: WebSocket, session_id: str, cli_session
 
 
 async def transcribe_and_queue(audio_bytes: bytes, cli_session: CLIPhoneSession):
-    """Transcribe audio and add to CLI session's transcription queue."""
+    """Transcribe audio and add to CLI session's transcription queue.
+
+    Routes through the shared STT choke point (file_transcribe.transcribe_bytes ->
+    resolve_stt_provider) so the Twilio telephony (µ-law) leg honors STT_PROVIDER
+    exactly like every other consumer: switch the STT endpoint in the wizard (e.g.
+    to on-box) and this path re-points with it, no restart. Previously this hard-
+    posted to OpenAI Whisper, bypassing the resolver.
+
+    Inert when the on-box stack is off: with STT_PROVIDER unset/cloud the resolver
+    returns the configured cloud provider and transcription proceeds unchanged.
+    transcribe_bytes is synchronous (requests), so it runs off the event loop via
+    asyncio.to_thread — this fire-and-forget background task never blocks audio I/O.
+    """
     try:
-        import aiohttp
+        import asyncio
         import io
         import wave
-        from Orchestrator.config import OPENAI_API_KEY, OPENAI_STT_URL, STT_MODEL
+        from Orchestrator.stt.file_transcribe import transcribe_bytes
 
-        if not OPENAI_API_KEY:
-            return
-
-        # Create WAV file
+        # PCM16 mono @ 24 kHz -> WAV container (the resolved provider decodes it).
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, 'wb') as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(24000)
             wav.writeframes(audio_bytes)
-        wav_buffer.seek(0)
+        wav_bytes = wav_buffer.getvalue()
 
-        # Send to Whisper
-        async with aiohttp.ClientSession() as session:
-            form = aiohttp.FormData()
-            form.add_field('file', wav_buffer, filename='audio.wav', content_type='audio/wav')
-            form.add_field('model', STT_MODEL)
-
-            async with session.post(
-                OPENAI_STT_URL,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                data=form,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    text = result.get("text", "").strip()
-                    if text:
-                        print(f"[TWILIO-CLI-STT] Transcribed: {text}")
-                        cli_session.transcription_queue.append({
-                            "text": text,
-                            "timestamp": now_utc_iso()
-                        })
+        text = (await asyncio.to_thread(
+            transcribe_bytes, wav_bytes, "audio/wav", filename="audio.wav"
+        ) or "").strip()
+        if text:
+            print(f"[TWILIO-CLI-STT] Transcribed: {text}")
+            cli_session.transcription_queue.append({
+                "text": text,
+                "timestamp": now_utc_iso()
+            })
     except Exception as e:
         print(f"[TWILIO-CLI-STT] Error: {e}")
 
