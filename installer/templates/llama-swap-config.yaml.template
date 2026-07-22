@@ -69,8 +69,11 @@ models:
     # dist") resolves the installer-created stub; ENABLE_UI=false skips the Gradio
     # demo (breaks on the installed gradio). sh -c … exec so both apply regardless
     # of how llama-swap spawns. The /v1/realtime WS route is separate from the mount.
+    # HF_HUB_CACHE = the same dir localstack_downloads._speaches_cache_dir()
+    # writes to (its default: ${LOCALSTACK_HOME}/hf-cache/hub) so the whisper the
+    # wizard downloaded is the whisper Speaches loads — else it 404s / re-pulls.
     cmd: |
-      /bin/sh -c 'cd ${LOCALSTACK_HOME} && ENABLE_UI=false exec ${SPEACHES_VENV}/bin/uvicorn --factory speaches.main:create_app --host 127.0.0.1 --port 9099'
+      /bin/sh -c 'cd ${LOCALSTACK_HOME} && HF_HUB_CACHE=${LOCALSTACK_HOME}/hf-cache/hub ENABLE_UI=false exec ${SPEACHES_VENV}/bin/uvicorn --factory speaches.main:create_app --host 127.0.0.1 --port 9099'
     proxy: "http://127.0.0.1:9099"
     checkEndpoint: "/health"
     healthCheckTimeout: 120

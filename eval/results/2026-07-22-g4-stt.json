@@ -1,0 +1,36 @@
+{
+  "gate": "G4",
+  "date": "2026-07-22",
+  "host": "bbx-MS-02-Ultra",
+  "gpu": "RTX 2000 Ada 16GB",
+  "capability": "on-box STT (Speaches + faster-whisper)",
+  "result": "PASS (batch)",
+  "pins": {
+    "speaches": "v0.9.0-rc.3",
+    "onnx_asr": "0.7.0 (>=0.12 moved NemoConformerTdt out of onnx_asr.models)",
+    "faster_whisper": "1.1.1 (1.2.x replaced silero v5 split assets with silero_vad_v6)",
+    "note": "speaches pins its deps loosely; newer resolutions drift the API. All three pinned."
+  },
+  "member_startup_fixes": [
+    "PYTHONPATH not needed (speaches is pip-installed) but cwd + relative resources are",
+    "realtime-console/dist StaticFiles mount -> stub dir created in LOCALSTACK_HOME",
+    "ENABLE_UI=false -> skip the Gradio demo (breaks on installed gradio)",
+    "model_aliases.json -> stub {} in cwd (FileNotFoundError at transcription)",
+    "HF_HUB_CACHE=<localstack>/hf-cache/hub -> speaches reads the wizard-downloaded whisper"
+  ],
+  "routing_fix": "batch STT -> /upstream/speaches/v1/audio/transcriptions (URL routing), not :9098/v1 body-model (404 'no router for requested model')",
+  "batch_transcription": {
+    "path": "POST /stt provider=onbox -> llama-swap /upstream/speaches -> faster-whisper large-v3",
+    "reference_clip": "Qwen3-TTS-synthesized (self-contained TTS->STT loop), 11.21s, 24000Hz",
+    "original_text": "Hello from the on-box Qwen text to speech engine. This is a second sentence to force chunking. And a third for good measure.",
+    "onbox_transcription": "Hello, from the Unbox Quen Text-to-Speech Engine. This is the second sentence to force chunking. And the third, for good measure.",
+    "quality": "near-exact; only 'on-box Qwen' -> 'Unbox Quen' (homophone of a coined word). VAD (silero_vad_v5) processed 11.21s in 0.037s.",
+    "http": 200
+  },
+  "exclusive_group_swap": "retrieval recovered (embeddings health=ok) after the audio group loaded whisper and swapped back",
+  "open": [
+    "STREAMING STT (/ws/stt Design-B direct-to-:9099) not yet exercised end-to-end — batch validated; streaming is a follow-up (G4 streaming + G6 eviction safety).",
+    "benign speaches log: 'Unexpected streaming transcription response type: Transcription' — non-fatal, JSON returned correctly.",
+    "G5 (audio<->retrieval swap latency) + G6 (streaming-STT eviction safety) harnesses committed, unrun."
+  ]
+}

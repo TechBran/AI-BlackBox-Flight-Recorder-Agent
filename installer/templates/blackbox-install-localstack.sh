@@ -331,6 +331,18 @@ if (( SPEACHES_OK )); then
     # last API-compatible onnx-asr so speaches.main imports.
     sudo -u "$REAL_USER" "$SPEACHES_VENV/bin/pip" install "onnx-asr==0.7.0" || \
         echo "[install-localstack] WARNING: onnx-asr pin failed — speaches STT may not import." >&2
+    # faster-whisper: speaches pins >=1.1.1 loosely; 1.2.x replaced the split
+    # silero VAD assets (silero_encoder_v5.onnx/decoder) with a combined
+    # silero_vad_v6.onnx, but speaches' VAD code loads the v5 split -> ONNXRuntime
+    # NoSuchFile at transcription time. 1.1.1 is the last with the v5 assets and
+    # still satisfies the pin.
+    sudo -u "$REAL_USER" "$SPEACHES_VENV/bin/pip" install "faster-whisper==1.1.1" || \
+        echo "[install-localstack] WARNING: faster-whisper pin failed — speaches VAD may 500." >&2
+    # speaches reads model_aliases.json relative to its cwd (${LOCALSTACK_HOME});
+    # absent -> FileNotFoundError at transcription. Stub an empty map (we pass real
+    # model ids, no aliases needed).
+    [ -f "$LOCALSTACK_HOME/model_aliases.json" ] || \
+        sudo -u "$REAL_USER" sh -c "printf '{}' > '$LOCALSTACK_HOME/model_aliases.json'"
     # create_app() unconditionally mounts StaticFiles(directory="realtime-console/dist")
     # (a frontend build absent from the pip package). Stub the dir so the mount
     # succeeds; the member runs with cwd=$LOCALSTACK_HOME (see the llama-swap tmpl)

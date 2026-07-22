@@ -151,7 +151,9 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
     # _MODEL): stream turbo + batch large-v3. Two HF repos → the Speaches HF hub
     # cache (dest_dir "speaches_cache", cache_dir layout) so the wizard's explicit
     # download button pre-fetches what Speaches would otherwise auto-pull
-    # invisibly on first transcription. repo_pending_g3 until confirmed at G4.
+    # invisibly on first transcription. G4 PASSED on MS02 2026-07-22 (onbox Whisper
+    # transcribes a real clip through /stt provider=onbox; eval/results/2026-07-22-
+    # g4-stt.json) → repo_pending_g3 CLEARED so the wizard download button goes live.
     "whisper": {
         "kind": "hf_snapshot",
         "label": "Whisper (faster-whisper large-v3 turbo + batch)",
@@ -160,7 +162,7 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
             "batch": "Systran/faster-whisper-large-v3",
         },
         "dest_dir": "speaches_cache",
-        "repo_pending_g3": True,
+        "repo_pending_g3": False,
         "approx_gb": 3.0,
     },
     # Legacy bundled all-variants convenience key (D-2) — RETAINED, marked
