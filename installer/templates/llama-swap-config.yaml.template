@@ -25,14 +25,14 @@ models:
   # ── retrieval group ────────────────────────────────────────────────
   "embed-qwen3-8b":
     # Official Qwen/Qwen3-Embedding-8B-GGUF @ Q8_0 (8.05GB). Last-token pooling.
-    # -b/-ub forced to the full input seq (non-causal pooling); -fa bounds the
+    # -b/-ub forced to the full input seq (non-causal pooling); -fa on bounds the
     # compute buffer. --pooling last only if the build doesn't auto-detect it.
     cmd: |
       ${llama-server}
       --model ${models-dir}/Qwen3-Embedding-8B-Q8_0.gguf
       --host 127.0.0.1 --port ${PORT}
       --embeddings --pooling last
-      -c 8192 -b 8192 -ub 8192 -fa
+      -c 8192 -b 8192 -ub 8192 -fa on on
       -ngl 99 --no-warmup
     proxy: "http://127.0.0.1:${PORT}"
     checkEndpoint: "/health"
