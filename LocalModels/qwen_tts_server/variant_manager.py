@@ -11,6 +11,14 @@ The heavy model ops live behind a `backend` object. The default TorchQwenBackend
 imports torch + the streaming fork LAZILY (only when a variant is loaded), so
 this module imports cleanly and the API/control tests run on a no-GPU box. Tests
 inject a fake backend; the real model NEVER loads in CI.
+
+Backend API (kunzite-app/Qwen3-TTS-streaming, pinned commit 80d21b6e — package
+`qwen_tts`, class `Qwen3TTSModel`). The wrapper's per-variant methods each return
+`(wavs: List[np.ndarray], sr: int)`; the streaming methods yield
+`(pcm_chunk: np.ndarray, sr: int)`. The backend is VARIANT-AWARE: the manager
+threads the resident variant name into every synth call so the backend dispatches
+to the right method (custom_voice/base/voice_design). Sample rate is READ FROM THE
+MODEL OUTPUT — never hardcoded (correction [23]).
 """
 import asyncio
 import gc
@@ -23,6 +31,15 @@ log = logging.getLogger("qwen_tts.variant_manager")
 
 class VramError(RuntimeError):
     """Free VRAM is below the safety floor after a free-before-load."""
+
+
+def _next_or_none(it):
+    """next(it) or None on StopIteration — pulled via asyncio.to_thread so a
+    blocking model .step() never stalls the event loop during streaming."""
+    try:
+        return next(it)
+    except StopIteration:
+        return None
 
 
 class VariantManager:
@@ -61,38 +78,64 @@ class VariantManager:
         return self._handle
 
     # -- public API -------------------------------------------------------
-    async def synthesize_full(self, variant, text, *, preset=None, ref_audio=None, design_params=None):
+    async def synthesize_full(self, variant, text, *, preset=None, ref_audio=None,
+                              ref_text=None, design_params=None, language=None):
         """Full (non-chunked) generation -> (pcm_s16le_bytes, sample_rate).
         sample_rate is READ FROM THE MODEL OUTPUT (correction [23])."""
         async with self._lock:
             handle = self._ensure_locked(variant)
             return await asyncio.to_thread(
-                self._backend.synth, handle, text,
-                preset=preset, ref_audio=ref_audio, design_params=design_params,
+                self._backend.synth, handle, variant, text,
+                preset=preset, ref_audio=ref_audio, ref_text=ref_text,
+                design_params=design_params, language=language,
             )
 
-    async def stream_true(self, variant, text, *, preset=None, ref_audio=None, design_params=None):
+    async def stream_true(self, variant, text, *, preset=None, ref_audio=None,
+                          ref_text=None, design_params=None, language=None):
         """G3-gated TRUE chunked yield. Returns (sample_rate, async_iter[bytes]).
-        The lock is held for the FULL stream duration (released in the async
-        generator's finally — also on Starlette client-disconnect aclose)."""
+        The sample rate is READ FROM THE FIRST YIELDED CHUNK (the wrapper exposes
+        no pre-stream sr attribute) — the first chunk is peeked here, then replayed
+        by the generator. The lock is held for the FULL stream duration (released
+        in the async generator's finally — also on Starlette client-disconnect
+        aclose). Chunks are pulled via asyncio.to_thread so the blocking model
+        never stalls the event loop."""
         await self._lock.acquire()
         try:
             handle = self._ensure_locked(variant)
-            sr = self._backend.sample_rate(handle)
+            gen = self._backend.synth_stream(
+                handle, variant, text,
+                preset=preset, ref_audio=ref_audio, ref_text=ref_text,
+                design_params=design_params, language=language,
+            )
+            first = await asyncio.to_thread(_next_or_none, gen)
         except BaseException:
             self._lock.release()
             raise
 
+        if first is None:
+            # Empty generation — nothing to stream; release immediately.
+            self._lock.release()
+
+            async def _empty():
+                return
+                yield  # pragma: no cover  (marks this an async generator)
+
+            return 0, _empty()
+
+        first_pcm, sr = first
+
         async def _gen():
             try:
-                for chunk in self._backend.synth_stream(
-                    handle, text, preset=preset, ref_audio=ref_audio, design_params=design_params
-                ):
-                    yield chunk
+                yield first_pcm
+                while True:
+                    nxt = await asyncio.to_thread(_next_or_none, gen)
+                    if nxt is None:
+                        break
+                    yield nxt[0]
             finally:
                 self._lock.release()
 
-        return sr, _gen()
+        return int(sr), _gen()
 
     async def design_preview(self, description, text):
         """VoiceDesign preview -> list[{generated_voice_id, pcm, sr, params}]."""
@@ -113,14 +156,22 @@ def _float_to_pcm16(wavs) -> bytes:
 
 
 class TorchQwenBackend:
-    """Real GPU backend. torch + the streaming fork are imported LAZILY inside
-    load()/synth()/design_preview() so the module (and CPU-box tests) never need
-    CUDA.
+    """Real GPU backend for the kunzite-app Qwen3-TTS-streaming fork (package
+    `qwen_tts`, pinned commit 80d21b6e). torch + the fork are imported LAZILY
+    inside load()/synth()/... so the module (and CPU-box tests) never need CUDA.
 
-    NB: the exact fork call signatures (kunzite-app Qwen3-TTS-streaming
-    stream_generate_pcm(), etc.) are CONFIRMED on MS02 in G3 (Task 6.9); the
-    shapes below follow the documented fork API. The real model NEVER loads in
-    CI — the API/control tests inject a fake backend."""
+    The wrapper class is `qwen_tts.Qwen3TTSModel`; `.from_pretrained(dir, ...)`
+    returns an instance whose `.model` is the underlying
+    Qwen3TTSForConditionalGeneration. Per-variant methods:
+      * custom_voice: generate_custom_voice(text, speaker, language, instruct)
+      * base:         generate_voice_clone(text, language, ref_audio, ref_text,
+                                           x_vector_only_mode, ...)
+      * voice_design: generate_voice_design(text, instruct, language)
+    each -> (wavs: List[np.ndarray], sr: int). Streaming (custom_voice/base):
+    stream_generate_custom_voice / stream_generate_voice_clone -> yield
+    (np.ndarray, sr). VoiceDesign has no streaming path -> full-gen fallback.
+    The real model NEVER loads in CI — the API/control tests inject a fake backend.
+    """
 
     def free_vram_mb(self):
         try:
@@ -141,38 +192,123 @@ class TorchQwenBackend:
             pass
 
     def load(self, variant, model_dir):
-        import torch  # noqa: F401  (ensures CUDA context is up)
-        from qwen3_tts_streaming import load_variant  # fork API — confirm in G3
-        return load_variant(str(model_dir), variant)
+        import torch
+        from pathlib import Path
+        from qwen_tts import Qwen3TTSModel
+
+        path = str(Path(model_dir) / variant)
+        attn = settings.attn_implementation()   # default "sdpa" (flash-attn is not a fork dep)
+        try:
+            return Qwen3TTSModel.from_pretrained(
+                path, device_map="cuda:0", dtype=torch.bfloat16, attn_implementation=attn,
+            )
+        except (ImportError, ValueError, RuntimeError) as exc:
+            if attn == "sdpa":
+                raise
+            log.warning("qwen-tts: attn_implementation=%s failed (%s) -> sdpa", attn, exc)
+            return Qwen3TTSModel.from_pretrained(
+                path, device_map="cuda:0", dtype=torch.bfloat16, attn_implementation="sdpa",
+            )
 
     def free(self, handle):
+        # Qwen3TTSModel wraps the HF module in .model; move it off the GPU so the
+        # caller's ref-drop + empty_cache reclaims VRAM (correction: real API has
+        # no bare .to on the wrapper).
         try:
-            handle.to("cpu")   # release VRAM; the caller drops the ref
+            handle.model.to("cpu")
         except Exception:
-            pass
+            try:
+                handle.to("cpu")
+            except Exception:
+                pass
 
     def sample_rate(self, handle):
-        return int(getattr(handle, "sample_rate", 0)) or None
+        # The wrapper exposes no reliable pre-stream sample-rate attribute; sr is
+        # authoritative only from the generate/stream OUTPUT. Return None so
+        # stream_true reads it from the first yielded chunk (correction [23]).
+        return None
 
-    def synth(self, handle, text, *, preset=None, ref_audio=None, design_params=None):
-        # READ sr FROM THE MODEL OUTPUT — never hardcode 24kHz (correction [23]).
-        wavs, sr = handle.generate(text, preset=preset, ref_audio=ref_audio, design=design_params)
-        return _float_to_pcm16(wavs), int(sr)
+    # -- variant-aware synthesis -----------------------------------------
+    def _lang(self, language):
+        return language or settings.default_language()
 
-    def synth_stream(self, handle, text, *, preset=None, ref_audio=None, design_params=None):
-        # kunzite-app stream_generate_pcm()-style KV-cache streamer (fork).
-        # Yields pcm_s16le byte chunks (~3s initial buffer for Base clones, §5.4).
-        for pcm_chunk in handle.stream_generate_pcm(
-            text, preset=preset, ref_audio=ref_audio, design=design_params
-        ):
-            yield pcm_chunk
+    def synth(self, handle, variant, text, *, preset=None, ref_audio=None,
+              ref_text=None, design_params=None, language=None):
+        """Dispatch full generation by variant. Returns (pcm_s16le_bytes, sr).
+        sr is READ FROM THE MODEL OUTPUT — never hardcoded (correction [23])."""
+        lang = self._lang(language)
+        if variant == settings.VARIANT_CUSTOM_VOICE:
+            wavs, sr = handle.generate_custom_voice(
+                text=text, speaker=preset, language=lang, instruct=None,
+            )
+        elif variant == settings.VARIANT_BASE:
+            # No stored transcript -> x-vector-only clone; ref_text present -> ICL.
+            x_vector_only = ref_text is None
+            wavs, sr = handle.generate_voice_clone(
+                text=text, language=lang, ref_audio=ref_audio, ref_text=ref_text,
+                x_vector_only_mode=x_vector_only,
+            )
+        elif variant == settings.VARIANT_VOICE_DESIGN:
+            wavs, sr = handle.generate_voice_design(
+                text=text, instruct=_design_instruct(design_params), language=lang,
+            )
+        else:
+            raise ValueError(f"unknown variant {variant!r}")
+        return _float_to_pcm16(wavs[0]), int(sr)
+
+    def synth_stream(self, handle, variant, text, *, preset=None, ref_audio=None,
+                     ref_text=None, design_params=None, language=None):
+        """Dispatch TRUE streaming by variant. Yields (pcm_s16le_bytes, sr).
+        Two-phase emit (aggressive first chunk) for low first-packet latency.
+        VoiceDesign has no streaming path -> single full-gen chunk fallback."""
+        lang = self._lang(language)
+        emit = settings.stream_emit_frames()
+        first_emit = settings.stream_first_chunk_emit()
+        if variant == settings.VARIANT_CUSTOM_VOICE:
+            gen = handle.stream_generate_custom_voice(
+                text=text, speaker=preset, language=lang, instruct=None,
+                emit_every_frames=emit, first_chunk_emit_every=first_emit,
+            )
+        elif variant == settings.VARIANT_BASE:
+            x_vector_only = ref_text is None
+            gen = handle.stream_generate_voice_clone(
+                text=text, language=lang, ref_audio=ref_audio, ref_text=ref_text,
+                x_vector_only_mode=x_vector_only,
+                emit_every_frames=emit, first_chunk_emit_every=first_emit,
+            )
+        elif variant == settings.VARIANT_VOICE_DESIGN:
+            # No streaming method for VoiceDesign — emit the full generation once.
+            pcm, sr = self.synth(
+                handle, variant, text, design_params=design_params, language=language,
+            )
+            yield pcm, sr
+            return
+        else:
+            raise ValueError(f"unknown variant {variant!r}")
+
+        for chunk, sr in gen:
+            yield _float_to_pcm16(chunk), int(sr)
 
     def design_preview(self, handle, description, text):
+        """One VoiceDesign preview per call (the real API returns ONE
+        (wavs, sr) per generate_voice_design). params carry the instruct so a
+        saved profile replays the same designed voice at speak time."""
         import uuid
-        previews = []
-        for wavs, sr, params in handle.design_previews(description, text):
-            previews.append({
-                "generated_voice_id": uuid.uuid4().hex,
-                "pcm": _float_to_pcm16(wavs), "sr": int(sr), "params": params,
-            })
-        return previews
+        wavs, sr = handle.generate_voice_design(
+            text=text, instruct=description, language=settings.default_language(),
+        )
+        return [{
+            "generated_voice_id": uuid.uuid4().hex,
+            "pcm": _float_to_pcm16(wavs[0]), "sr": int(sr),
+            "params": {"instruct": description},
+        }]
+
+
+def _design_instruct(design_params):
+    """Extract the natural-language instruct from a saved design profile's params
+    (a {'instruct': ...} dict) or accept a bare string; '' means 'no instruction'."""
+    if isinstance(design_params, dict):
+        return design_params.get("instruct") or ""
+    if isinstance(design_params, str):
+        return design_params
+    return ""

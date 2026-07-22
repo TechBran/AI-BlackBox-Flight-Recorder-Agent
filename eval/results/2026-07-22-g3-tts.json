@@ -1,0 +1,82 @@
+{
+  "gate": "G3",
+  "date": "2026-07-22",
+  "host": "bbx-MS-02-Ultra",
+  "gpu": "RTX 2000 Ada 16GB (16380 MiB)",
+  "fork": {
+    "repo": "kunzite-app/Qwen3-TTS-streaming",
+    "package": "qwen_tts",
+    "commit": "80d21b6e6c89e81e1804382c6140edd36cc61588",
+    "transformers": "4.57.3",
+    "torch": "2.13.0+cu130",
+    "attn_implementation": "sdpa",
+    "flash_attn_installed": false
+  },
+  "config": {
+    "QWEN_TTS_MIN_FREE_MB": 5000,
+    "default_language": "Auto",
+    "stream_emit_frames": 8,
+    "stream_first_chunk_emit": 4,
+    "output_sample_rate_hz": 24000,
+    "output_sample_rate_source": "read from model output tuple / first stream chunk (never hardcoded)"
+  },
+  "batch_rtf_1p7b": {
+    "custom_voice": {"rtf": 0.723, "audio_s": 10.937, "wall_s": 7.907, "sample_rate": 24000},
+    "base_clone":   {"rtf": 0.722, "audio_s": 9.897,  "wall_s": 7.147, "sample_rate": 24000},
+    "voice_design": {"rtf": 0.720, "audio_s": 8.617,  "wall_s": 6.204, "sample_rate": 24000}
+  },
+  "streaming_1p7b": {
+    "custom_voice": {"streaming_rtf": 1.012, "first_packet_ms": 2779.6, "chunks": 25, "sample_rate": 24000},
+    "base_clone":   {"streaming_rtf": 1.056, "first_packet_ms": 2752.3, "chunks": 21, "sample_rate": 24000}
+  },
+  "streaming_fallback_0p6b_customvoice": {
+    "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+    "weights_dir": "LocalModels/weights/qwen3-tts-cv-0.6b/custom_voice",
+    "size_gb": 2.4,
+    "instruct_supported": false,
+    "batch_rtf": 0.644,
+    "streaming_rtf": 0.687,
+    "first_packet_ms": 217,
+    "sample_rate": 24000,
+    "resident_free_after_mb": 13048
+  },
+  "free_before_load": {
+    "min_free_floor_mb": 5000,
+    "swap_cycle_order": ["base", "custom_voice", "voice_design", "base"],
+    "oom_free": true,
+    "free_mb_trace": [
+      {"variant": "base",         "free_before_mb": 11169, "free_after_mb": 11169, "ok": true},
+      {"variant": "custom_voice", "free_before_mb": 11169, "free_after_mb": 11303, "ok": true},
+      {"variant": "voice_design", "free_before_mb": 11303, "free_after_mb": 11301, "ok": true},
+      {"variant": "base",         "free_before_mb": 11301, "free_after_mb": 11247, "ok": true}
+    ],
+    "note": "Free VRAM stayed ~11.2-11.3 GB across every swap; peak is one resident model (~4.3 GB for 1.7B), never old+new. Floor never approached."
+  },
+  "clone_roundtrip": {
+    "ok": true, "variant": "base", "mode": "x_vector_only (3s ref, no transcript)",
+    "ref_dur_s": 3.0, "sample_rate": 24000, "audio_s": 3.577, "wav_bytes": 171734
+  },
+  "design_roundtrip": {
+    "ok": true, "n_previews": 1, "sample_rate": 24000, "audio_s": 3.817,
+    "contract": {"generated_voice_id": "hex32", "audio_b64": "present", "sample_rate": 24000}
+  },
+  "criteria": {
+    "1_fork_import_load_per_variant_sdpa": {"pass": true, "detail": "all 3 variants load via Qwen3TTSModel.from_pretrained (sdpa)"},
+    "2_generate_wav_roundtrip_rtf": {"pass": true, "detail": "batch RTF ~0.72 all variants; streaming <0.9 gate met by 0.6B (0.687), NOT by 1.7B (1.01/1.06)"},
+    "3_first_packet_latency": {"pass": true, "detail": "measured: 1.7B ~2.75s, 0.6B 217ms (two-phase emit)"},
+    "4_sample_rate_read_from_output": {"pass": true, "detail": "24000 Hz read from output, not hardcoded"},
+    "5_free_before_load_no_oom": {"pass": true, "detail": "base<->custom_voice<->voice_design cycle OOM-free; 5000MB floor respected"},
+    "6_clone_and_design_roundtrip": {"pass": true, "detail": "Base 3s zero-shot clone + VoiceDesign text-described both round-trip to the UI contract"}
+  },
+  "streaming_decision": {
+    "streaming_default_variant": "0.6B-CustomVoice",
+    "batch_tier_variant": "1.7B (custom_voice/base/voice_design)",
+    "rationale": "1.7B true-streaming RTF 1.01-1.06 (>=0.9) with ~2.75s first-packet; 0.6B-CustomVoice streaming RTF 0.687 (<0.9) with 217ms first-packet. Keep 1.7B for batch (higher quality, RTF 0.72), stream on 0.6B.",
+    "actions_for_controller": [
+      "add manifest key qwen-tts-cv-0.6b -> LocalModels/weights/qwen3-tts-cv-0.6b/custom_voice",
+      "set QWEN_TTS_STREAMING=1 with the 0.6B streaming member; keep 1.7B batch-only",
+      "note: 0.6B CustomVoice does NOT support instruct (fork forces instruct=None for 0b6)"
+    ]
+  },
+  "overall": "PASS (streaming default = 0.6B-CustomVoice, as §5.4 anticipated; 1.7B batch tier all green)"
+}

@@ -4,7 +4,13 @@ python-multipart
 soundfile
 numpy
 torch
-transformers
-# Qwen3-TTS streaming fork (kunzite-app/Qwen3-TTS-streaming) providing
-# stream_generate_pcm() (§5.4). Pinned to a specific commit at install time;
-# the exact call signatures are confirmed on MS02 during G3 (Task 6.9).
+transformers==4.57.3
+accelerate==1.12.0
+# Qwen3-TTS streaming fork (kunzite-app/Qwen3-TTS-streaming) — package name
+# `qwen_tts`, providing generate_custom_voice / generate_voice_clone /
+# generate_voice_design + stream_generate_custom_voice / stream_generate_voice_clone
+# (§5.4). Pinned to the G3-validated commit (2026-07-22). flash-attn is NOT a
+# fork dependency; the server loads with attn_implementation="sdpa" (override with
+# QWEN_TTS_ATTN=flash_attention_2). The install also pulls transformers 4.57.3,
+# accelerate 1.12.0, librosa, torchaudio, soundfile, onnxruntime, einops.
+git+https://github.com/kunzite-app/Qwen3-TTS-streaming.git@80d21b6e6c89e81e1804382c6140edd36cc61588

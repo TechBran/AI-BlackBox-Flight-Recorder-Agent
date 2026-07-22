@@ -26,6 +26,11 @@ MODELS_DIR = Path(os.path.expanduser("~/.blackbox/localstack/models"))
 MIN_FREE_GB = 40.0                 # full GPU-tier weight set ~34GB (8B rerank per D13; §7/§14)
 CHUNK = 1 << 20                    # 1 MiB progress granularity
 DOWNLOAD_TIMEOUT = httpx.Timeout(None, connect=15.0)  # long file, no read cap
+# hf_snapshot resilience (2026-07-22 bring-up lessons): abort a hung read so a
+# dropped CDN connection can't wedge forever, and retry per repo (re-run-safe).
+_HF_SNAPSHOT_READ_TIMEOUT = 30     # seconds; -> HF_HUB_DOWNLOAD_TIMEOUT
+_HF_SNAPSHOT_RETRIES = 4           # attempts per repo before surfacing the error
+_HF_SNAPSHOT_RETRY_DELAY = 4.0     # seconds between attempts
 
 # Test seam (providers.py / ollama_io _transport pattern): httpx.MockTransport.
 _async_transport: "httpx.AsyncBaseTransport | None" = None
@@ -115,14 +120,15 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
     # snapshot into _qwen_tts_model_dir()/<variant>, matching what the qwen-tts
     # variant manager loads (variant_manager.backend.load(variant, model_dir)).
     # Repo ids pinned to the real HF "12Hz" family (Qwen3-TTS-Tokenizer-12Hz, cf.
-    # qwen_tts_server/app.py:97). repo_pending_g3 STAYS set until snapshot_download
-    # is confirmed to resolve on MS02 (gating/size) + G3 synth passes (Task F1/F3).
+    # qwen_tts_server/app.py:97). G3 PASSED on MS02 2026-07-22 (all 3 variants
+    # download + synthesize, batch RTF 0.72, sr 24000; eval/results/2026-07-22-g3-
+    # tts.json) → repo_pending_g3 CLEARED so the wizard download buttons go live.
     "qwen-tts-base": {
         "kind": "hf_snapshot",
         "label": "Qwen3-TTS 1.7B — Base",
         "repos": {"base": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"},
         "dest_dir": "qwen_tts",
-        "repo_pending_g3": True,
+        "repo_pending_g3": False,
         "approx_gb": 4.5,
     },
     "qwen-tts-custom-voice": {
@@ -130,7 +136,7 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
         "label": "Qwen3-TTS 1.7B — Custom Voice (3s clone)",
         "repos": {"custom_voice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"},
         "dest_dir": "qwen_tts",
-        "repo_pending_g3": True,
+        "repo_pending_g3": False,
         "approx_gb": 4.5,
     },
     "qwen-tts-voice-design": {
@@ -138,7 +144,7 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
         "label": "Qwen3-TTS 1.7B — Voice Design (text-described)",
         "repos": {"voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"},
         "dest_dir": "qwen_tts",
-        "repo_pending_g3": True,
+        "repo_pending_g3": False,
         "approx_gb": 4.5,
     },
     # Whisper (Speaches) CT2 checkpoints (from local_stack.ONBOX_STT_{STREAM,BATCH}
@@ -164,12 +170,12 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
         "kind": "hf_snapshot",
         "label": "Qwen3-TTS 1.7B — all variants (bundled)",
         "repos": {
-            "custom_voice": "Qwen/Qwen3-TTS-1.7B-CustomVoice",
-            "base":         "Qwen/Qwen3-TTS-1.7B-Base",
-            "voice_design": "Qwen/Qwen3-TTS-1.7B-VoiceDesign",
+            "custom_voice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            "base":         "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            "voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
         },
         "dest_dir": "qwen_tts",
-        "repo_pending_g3": True,
+        "repo_pending_g3": False,
         "bundled": True,
         "approx_gb": 13.5,
     },
@@ -328,6 +334,18 @@ async def _stream_hf_snapshot(artifact: str, entry: dict):
         yield _line()
         _finish()
         return
+    # Download robustness (learned on the first on-box bring-up, 2026-07-22): the
+    # HF Xet CDN can stall a transfer mid-stream, and a dropped connection with no
+    # read timeout hangs forever. Disable Xet, cap the per-read timeout, and use
+    # hf_transfer (resilient parallel-chunk pulls) when it is installed. setdefault
+    # so an operator env override always wins; snapshot_download reads these per call.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(_HF_SNAPSHOT_READ_TIMEOUT))
+    try:
+        import hf_transfer  # noqa: F401
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    except Exception:
+        pass
     try:
         root.mkdir(parents=True, exist_ok=True)
         _set(status="downloading", completed=0, total=total)
@@ -343,7 +361,24 @@ async def _stream_hf_snapshot(artifact: str, entry: dict):
             else:
                 kwargs = dict(repo_id=repo, local_dir=str(root / variant),
                               local_dir_use_symlinks=False)
-            await asyncio.to_thread(snapshot_download, **kwargs)
+            # Retry per repo: snapshot_download is re-run-safe (skips complete
+            # files), so a retry resumes rather than restarts after a transient
+            # network drop. The final failure re-raises to the error line below.
+            last_err = None
+            for attempt in range(1, _HF_SNAPSHOT_RETRIES + 1):
+                try:
+                    await asyncio.to_thread(snapshot_download, **kwargs)
+                    last_err = None
+                    break
+                except Exception as ex:  # noqa: BLE001 — surface after retries
+                    last_err = ex
+                    if attempt < _HF_SNAPSHOT_RETRIES:
+                        _set(status=f"retry {variant} {attempt}/{_HF_SNAPSHOT_RETRIES - 1} "
+                                    f"({type(ex).__name__})", completed=done_n, total=total)
+                        yield _line()
+                        await asyncio.sleep(_HF_SNAPSHOT_RETRY_DELAY)
+            if last_err is not None:
+                raise last_err
             done_n += 1
             _set(status=f"{variant} ready", completed=done_n, total=total)
             yield _line()

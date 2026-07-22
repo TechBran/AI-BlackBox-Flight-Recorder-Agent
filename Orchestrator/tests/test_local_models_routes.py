@@ -67,11 +67,15 @@ def test_status_enumerates_audio_artifacts_when_installed(monkeypatch):
     for a in members["qwen-tts"]["artifacts"] + whisper:
         assert set(a) == {"key", "label", "downloadable", "downloaded",
                           "size_gb", "repo_pending_g3"}
-        # placeholder repo ids -> pending -> button disabled (downloadable False)
-        assert a["repo_pending_g3"] is True
-        assert a["downloadable"] is False
         assert a["downloaded"] is False
         assert isinstance(a["size_gb"], (int, float))
+    # Qwen variants are G3-validated -> gate cleared -> button live (downloadable).
+    for a in members["qwen-tts"]["artifacts"]:
+        assert a["repo_pending_g3"] is False
+        assert a["downloadable"] is True
+    # Whisper stays gated until G4 -> button disabled.
+    assert whisper[0]["repo_pending_g3"] is True
+    assert whisper[0]["downloadable"] is False
 
     # non-audio members (retrieval) never get an artifacts key
     assert "artifacts" not in members["embed-qwen3-8b"]

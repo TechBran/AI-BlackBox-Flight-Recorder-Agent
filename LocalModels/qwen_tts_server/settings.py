@@ -51,3 +51,34 @@ def min_free_vram_mb() -> int:
         return int(os.environ.get("QWEN_TTS_MIN_FREE_MB", "5000"))
     except ValueError:
         return 5000
+
+
+def default_language() -> str:
+    """Language passed to the fork's generate_* methods when the request carries
+    none. "Auto" is the fork's own default (used in its Base example) and lets the
+    model detect the language — multilingual-safe. Override via QWEN_TTS_LANGUAGE."""
+    return os.environ.get("QWEN_TTS_LANGUAGE", "Auto").strip() or "Auto"
+
+
+def attn_implementation() -> str:
+    """HF attn kernel for from_pretrained. Default "sdpa" (native, no build) —
+    flash-attn is NOT a fork dependency. Set QWEN_TTS_ATTN=flash_attention_2 to try
+    FA2 (falls back to sdpa on ImportError). See variant_manager.TorchQwenBackend.load."""
+    return os.environ.get("QWEN_TTS_ATTN", "sdpa").strip() or "sdpa"
+
+
+def stream_emit_frames() -> int:
+    """Codec frames per streamed PCM chunk (steady state). 8 frames @ 12Hz ≈ 0.67s."""
+    try:
+        return int(os.environ.get("QWEN_TTS_STREAM_EMIT_FRAMES", "8"))
+    except ValueError:
+        return 8
+
+
+def stream_first_chunk_emit() -> int:
+    """Two-phase streaming: emit interval for the FIRST chunk (lower = faster first
+    packet). 0 disables two-phase (use the steady interval throughout)."""
+    try:
+        return int(os.environ.get("QWEN_TTS_STREAM_FIRST_EMIT", "4"))
+    except ValueError:
+        return 4

@@ -145,7 +145,11 @@ def test_manifest_has_split_qwen_variants_and_whisper():
     for key in ("qwen-tts-base", "qwen-tts-custom-voice", "qwen-tts-voice-design", "whisper"):
         assert key in m, key
         assert m[key]["kind"] == "hf_snapshot"
-        assert m[key].get("repo_pending_g3") is True  # unpinned -> disabled button
+    # Qwen variants are G3-validated (2026-07-22) -> gate cleared, buttons live.
+    for key in ("qwen-tts-base", "qwen-tts-custom-voice", "qwen-tts-voice-design"):
+        assert m[key].get("repo_pending_g3") is False, key
+    # Whisper stays gated until G4 (STT streaming parity) confirms it.
+    assert m["whisper"].get("repo_pending_g3") is True
     # each qwen split is a single repo into the qwen dir; whisper = two CT2 repos
     assert len(m["qwen-tts-base"]["repos"]) == 1
     assert len(m["whisper"]["repos"]) == 2
