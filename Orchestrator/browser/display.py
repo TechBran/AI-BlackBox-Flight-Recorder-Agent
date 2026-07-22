@@ -9,22 +9,24 @@ correctness). display_arbiter.py still owns native-mode mutual exclusion; this
 module owns virtual-session lifecycle only.
 """
 import os
-import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from Orchestrator.browser.config import DISPLAY_DEPTH, ACTIVE_DISPLAY
+from Orchestrator.browser.config import (
+    DISPLAY_DEPTH, ACTIVE_DISPLAY, CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT,
+)
 
 # ── Slot ranges (loopback-only) ──
 DISPLAY_BASE = 100            # Xvfb :100, :101, :102
 VNC_BASE_PORT = 5901         # x11vnc RFB per session
 WEBSOCKIFY_BASE_PORT = 6101  # websockify WS bridge per session
 MAX_VIRTUAL_SESSIONS = 3     # concurrency cap (§9)
-VIRTUAL_DISPLAY_TTL = 1800.0 # idle seconds before the TTL reaper tears a session down
+VIRTUAL_DISPLAY_TTL = 1800.0 # idle seconds before the TTL reaper (reap_idle) tears a session down
 _STARTUP_WAIT = 1.0          # seconds to let Xvfb come up before openbox/x11vnc
+_WM_STARTUP_WAIT = 0.3       # seconds to let openbox settle before x11vnc attaches
 _NOVNC_DIR = "/usr/share/novnc"
 
 
@@ -67,34 +69,6 @@ def _terminate_proc(p) -> None:
             p.wait(timeout=2)
     except Exception:
         pass
-
-
-def _terminate_pid(pid: int) -> None:
-    """SIGTERM then SIGKILL a single pid we do NOT hold as a Popen (a restart-
-    survivor orphan). Never a process-name match. Used by reap_orphans()."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.kill(pid, sig)
-        except ProcessLookupError:
-            return
-        except PermissionError:
-            return
-        time.sleep(0.2)
-        try:
-            os.kill(pid, 0)  # still alive?
-        except OSError:
-            return
-
-
-def _pids_matching(pattern: str) -> List[int]:
-    """Targeted pgrep for a SPECIFIC slot identifier (e.g. 'Xvfb :100',
-    'rfbport 5901'). Used ONLY by the boot reaper to find restart-survivors on
-    OUR OWN slots — never a blanket process-name match like 'x11vnc'/'openbox'."""
-    try:
-        r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5)
-        return [int(x) for x in r.stdout.split()]
-    except Exception:
-        return []
 
 
 @dataclass
@@ -194,7 +168,7 @@ class DisplayAllocator:
         procs["openbox"] = subprocess.Popen(
             ["openbox", "--config-file", "/dev/null"], env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(0.3)
+        time.sleep(_WM_STARTUP_WAIT)
         # 3. x11vnc bound to loopback on THIS session's rfbport (no session dbus).
         procs["x11vnc"] = subprocess.Popen(
             ["x11vnc", "-display", h.display, "-forever", "-shared", "-nopw",
@@ -217,8 +191,12 @@ class DisplayAllocator:
         with self._lock:
             h = self._sessions.pop(session_id, None)
             procs = self._procs.pop(session_id, {})
-            if h is not None:
-                self._slots.pop(h.slot, None)
+            # Do NOT free the slot yet. A concurrent allocate() (contenders are
+            # tasks.py ThreadPoolExecutor threads) must not reclaim this slot —
+            # and thus its display_num/rfbport — while the old Xvfb/x11vnc are
+            # still terminating, or the new Xvfb dies with "Server is already
+            # active for display N". The slot stays reserved until teardown
+            # below completes.
         # Teardown the tracked children we own (Popen objects), outside the lock.
         # Dependents before Xvfb. This kills the SPECIFIC pids we spawned — never
         # a process-name kill.
@@ -226,6 +204,26 @@ class DisplayAllocator:
             p = procs.get(role)
             if p is not None:
                 _terminate_proc(p)
+        # Children are down; now the slot (and its ports/display) is safe to reuse.
+        if h is not None:
+            with self._lock:
+                if self._slots.get(h.slot) == session_id:
+                    self._slots.pop(h.slot, None)
+
+    def reap_idle(self, ttl: float = VIRTUAL_DISPLAY_TTL,
+                  now: Optional[float] = None) -> List[str]:
+        """TTL reaper: release every session idle longer than ``ttl`` seconds and
+        return the swept session_ids. Stale handles are snapshotted under the lock,
+        then released outside it. Teardown of already-dead children is a no-op
+        (release -> _terminate_proc swallows terminate/wait on exited Popens), so
+        this is safe to run repeatedly from a background sweep."""
+        cutoff = (now if now is not None else time.time()) - ttl
+        with self._lock:
+            stale = [sid for sid, h in self._sessions.items()
+                     if h.last_activity < cutoff]
+        for sid in stale:
+            self.release(sid)
+        return stale
 
     def active_sessions(self) -> List[dict]:
         with self._lock:
@@ -282,11 +280,11 @@ class _DefaultDisplayShim:
 
     @property
     def width(self) -> int:
-        h = self._handle(); return h.width if h else 1280
+        h = self._handle(); return h.width if h else CU_DISPLAY_WIDTH
 
     @property
     def height(self) -> int:
-        h = self._handle(); return h.height if h else 720
+        h = self._handle(); return h.height if h else CU_DISPLAY_HEIGHT
 
     def health_check(self) -> bool:
         h = self._handle()

@@ -206,3 +206,13 @@ def cu_preflight(skip_screenshot: bool = False):
     as banners with the remediation text."""
     from Orchestrator.browser import preflight
     return preflight.run_preflight(skip_screenshot=skip_screenshot)
+
+
+@app.get("/cu/sessions")
+def cu_sessions():
+    """Live virtual-CU sessions — powers the Portal/Android "N agents running —
+    watch" badge (D14: a badge, not a lock; concurrent sessions are allowed up to
+    the cap). Native-mode exclusivity is enforced separately by display_arbiter."""
+    from Orchestrator.browser.display import get_allocator, MAX_VIRTUAL_SESSIONS
+    sessions = get_allocator().active_sessions()
+    return {"sessions": sessions, "count": len(sessions), "cap": MAX_VIRTUAL_SESSIONS}
