@@ -82,3 +82,23 @@ def stream_first_chunk_emit() -> int:
         return int(os.environ.get("QWEN_TTS_STREAM_FIRST_EMIT", "4"))
     except ValueError:
         return 4
+
+
+def max_new_tokens_for(text: str) -> int:
+    """Bound the autoregressive audio-frame budget for ONE synth call, sized to the
+    chunk's text length. The model's default is 8192 frames (~11 min at 12Hz); if a
+    generation fails to emit an end-of-speech token it runs to that cap, exceeding
+    QWEN_TTS_TIMEOUT and 502-ing the whole batch (Brandon 2026-07-22: 'failed due to
+    timeout'). Natural 12Hz speech is ~0.8 frames/char (~15 chars/s); we allow ~2.5x
+    (QWEN_TTS_FRAMES_PER_CHAR) for pauses/slow voices, a floor for very short text,
+    and a hard ceiling backstop. This keeps every chunk well within the model's
+    generation budget AND its per-chunk synth well under the timeout."""
+    def _int(name, default):
+        try:
+            return int(os.environ.get(name, default))
+        except ValueError:
+            return int(default)
+    per_char = float(os.environ.get("QWEN_TTS_FRAMES_PER_CHAR", "2.0"))
+    floor = _int("QWEN_TTS_MIN_NEW_TOKENS", 256)
+    ceil = _int("QWEN_TTS_MAX_NEW_TOKENS", 3072)
+    return max(floor, min(ceil, int(len(text or "") * per_char) + floor))

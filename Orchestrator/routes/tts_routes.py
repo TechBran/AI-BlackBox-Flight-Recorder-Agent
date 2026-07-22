@@ -354,8 +354,12 @@ async def tts_batch(body: dict = Body(...)):
     model = (body.get("model") or "").strip()
     audio_format = (body.get("format") or TTS_FORMAT).strip()
     operator = (body.get("operator") or "unknown").strip()
-    # Provider-specific chunk defaults: OpenAI is fast per-request, Gemini benefits from smaller chunks
-    default_chunk = 1500 if provider == "openai" else 800
+    # Provider-specific chunk defaults: OpenAI is fast per-request, Gemini benefits
+    # from smaller chunks; qwen is on-box + SEQUENTIAL (one GPU) so smaller chunks
+    # keep each synth well under QWEN_TTS_TIMEOUT and bound the audio-frame budget
+    # (see qwen_tts_server.settings.max_new_tokens_for) — a long chat response is
+    # many bounded chunks, never one runaway generation.
+    default_chunk = 1500 if provider == "openai" else (600 if provider == "qwen" else 800)
     max_chunk_chars = int(body.get("max_chunk_chars", default_chunk))
 
     # Split text into chunks

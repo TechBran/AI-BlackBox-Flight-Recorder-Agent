@@ -237,20 +237,26 @@ class TorchQwenBackend:
         """Dispatch full generation by variant. Returns (pcm_s16le_bytes, sr).
         sr is READ FROM THE MODEL OUTPUT — never hardcoded (correction [23])."""
         lang = self._lang(language)
+        # Bound the audio-frame budget to the chunk length so a non-terminating
+        # generation can't run away to the model's 8192 default (~11 min) and blow
+        # the per-chunk timeout (correction 2026-07-22).
+        mnt = settings.max_new_tokens_for(text)
         if variant == settings.VARIANT_CUSTOM_VOICE:
             wavs, sr = handle.generate_custom_voice(
                 text=text, speaker=preset, language=lang, instruct=None,
+                max_new_tokens=mnt,
             )
         elif variant == settings.VARIANT_BASE:
             # No stored transcript -> x-vector-only clone; ref_text present -> ICL.
             x_vector_only = ref_text is None
             wavs, sr = handle.generate_voice_clone(
                 text=text, language=lang, ref_audio=ref_audio, ref_text=ref_text,
-                x_vector_only_mode=x_vector_only,
+                x_vector_only_mode=x_vector_only, max_new_tokens=mnt,
             )
         elif variant == settings.VARIANT_VOICE_DESIGN:
             wavs, sr = handle.generate_voice_design(
                 text=text, instruct=_design_instruct(design_params), language=lang,
+                max_new_tokens=mnt,
             )
         else:
             raise ValueError(f"unknown variant {variant!r}")
@@ -264,10 +270,12 @@ class TorchQwenBackend:
         lang = self._lang(language)
         emit = settings.stream_emit_frames()
         first_emit = settings.stream_first_chunk_emit()
+        mnt = settings.max_new_tokens_for(text)  # bound runaway (see synth)
         if variant == settings.VARIANT_CUSTOM_VOICE:
             gen = handle.stream_generate_custom_voice(
                 text=text, speaker=preset, language=lang, instruct=None,
                 emit_every_frames=emit, first_chunk_emit_every=first_emit,
+                max_new_tokens=mnt,
             )
         elif variant == settings.VARIANT_BASE:
             x_vector_only = ref_text is None
@@ -275,6 +283,7 @@ class TorchQwenBackend:
                 text=text, language=lang, ref_audio=ref_audio, ref_text=ref_text,
                 x_vector_only_mode=x_vector_only,
                 emit_every_frames=emit, first_chunk_emit_every=first_emit,
+                max_new_tokens=mnt,
             )
         elif variant == settings.VARIANT_VOICE_DESIGN:
             # No streaming method for VoiceDesign — emit the full generation once.
