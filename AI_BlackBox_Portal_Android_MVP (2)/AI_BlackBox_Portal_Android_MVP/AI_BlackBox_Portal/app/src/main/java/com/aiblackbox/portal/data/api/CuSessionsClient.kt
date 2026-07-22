@@ -27,8 +27,9 @@ data class CuSessionsState(
 )
 
 /**
- * Polls GET /cu/sessions for the D14 active-sessions badge (count) + live-view
- * targets. Parsing goes through the shared kotlinx.serialization [BlackBoxApi.json]
+ * Polls GET /cu/sessions for the D14 active-sessions badge (derived from
+ * [CuSessionsState.sessions].size) + live-view targets. Parsing goes through
+ * the shared kotlinx.serialization [BlackBoxApi.json]
  * (pure-JVM, unit-testable) — org.json is a non-mockable stub under this
  * module's `unitTests.returnDefaultValues = true`.
  */
