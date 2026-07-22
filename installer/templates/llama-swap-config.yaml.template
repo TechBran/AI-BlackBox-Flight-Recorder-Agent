@@ -78,9 +78,11 @@ models:
     # Our in-repo FastAPI server (LocalModels/qwen_tts_server). Three variants
     # managed in-process with FREE-BEFORE-LOAD (§5.4). Clone/design routed via
     # /upstream/qwen-tts/... (not body-model auto-routed); speech/voices are.
+    # PYTHONPATH=${LOCALMODELS} so `qwen_tts_server` (an in-repo package, NOT
+    # pip-installed into the venv) imports regardless of the service cwd. Run via
+    # `sh -c … exec` so the env var applies whether llama-swap spawns a shell or argv.
     cmd: |
-      ${QWEN_TTS_VENV}/bin/uvicorn qwen_tts_server.app:app
-      --host 127.0.0.1 --port ${PORT}
+      /bin/sh -c 'PYTHONPATH=${LOCALMODELS} exec ${QWEN_TTS_VENV}/bin/uvicorn qwen_tts_server.app:app --host 127.0.0.1 --port ${PORT}'
     proxy: "http://127.0.0.1:${PORT}"
     checkEndpoint: "/health"
     healthCheckTimeout: 180      # first variant load

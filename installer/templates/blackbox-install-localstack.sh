@@ -359,6 +359,7 @@ sed -e "s|\${LOCALSTACK_BIN}|$LOCALSTACK_BIN|g" \
     -e "s|\${LOCALSTACK_MODELS}|$LOCALSTACK_MODELS|g" \
     -e "s|\${SPEACHES_VENV}|$SPEACHES_VENV|g" \
     -e "s|\${QWEN_TTS_VENV}|$QWEN_TTS_VENV|g" \
+    -e "s|\${LOCALMODELS}|$BLACKBOX_ROOT/LocalModels|g" \
     "$TEMPLATE_DIR/llama-swap-config.yaml.template" > "$TMP_CFG"
 sudo install -m 0644 -o "$REAL_USER" -g "$REAL_USER" "$TMP_CFG" "$CONFIG_DEST"
 rm -f "$TMP_CFG"
