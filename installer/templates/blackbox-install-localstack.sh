@@ -109,13 +109,16 @@ if (( need_ls )); then
     trap 'rm -rf "${TMP_LS:-}"' EXIT
     LS_TARBALL="llama-swap_${LS_VER}_linux_amd64.tar.gz"
     LS_BASE="https://github.com/mostlygeek/llama-swap/releases/download/v${LS_VER}"
+    # goreleaser publishes the checksum file VERSIONED (llama-swap_<VER>_checksums.txt),
+    # not a bare checksums.txt — confirm the name on the release page if it drifts.
+    LS_CHECKSUMS="llama-swap_${LS_VER}_checksums.txt"
     echo "[install-localstack] Downloading llama-swap v${LS_VER}..."
     if ! curl --fail --location --silent --show-error -o "$TMP_LS/$LS_TARBALL" "$LS_BASE/$LS_TARBALL" \
-       || ! curl --fail --location --silent --show-error -o "$TMP_LS/checksums.txt" "$LS_BASE/checksums.txt"; then
+       || ! curl --fail --location --silent --show-error -o "$TMP_LS/$LS_CHECKSUMS" "$LS_BASE/$LS_CHECKSUMS"; then
         echo "[install-localstack] ERROR: llama-swap download failed ($LS_BASE)" >&2
         exit 4
     fi
-    LS_EXPECTED="$(awk -v f="$LS_TARBALL" '$2==f || $2=="*"f {print $1}' "$TMP_LS/checksums.txt" | head -n1)"
+    LS_EXPECTED="$(awk -v f="$LS_TARBALL" '$2==f || $2=="*"f {print $1}' "$TMP_LS/$LS_CHECKSUMS" | head -n1)"
     LS_ACTUAL="$(sha256sum "$TMP_LS/$LS_TARBALL" | awk '{print $1}')"
     if [[ -z "$LS_EXPECTED" || "$LS_EXPECTED" != "$LS_ACTUAL" ]]; then
         echo "[install-localstack] ERROR: llama-swap sha256 mismatch (expected='$LS_EXPECTED' actual='$LS_ACTUAL')" >&2

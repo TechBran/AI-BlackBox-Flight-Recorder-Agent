@@ -4,4 +4,4 @@
 # binary to $LOCALSTACK_BIN/llama-swap. Bump on upgrade. Confirm the asset
 # name on the release page if goreleaser naming changes.
 # Format: bare version tag (no leading v) on the first non-comment line.
-240
+241
