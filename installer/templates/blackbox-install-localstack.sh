@@ -65,9 +65,10 @@ QWEN_TTS_VENV="$LOCALSTACK_HOME/qwen-tts-venv"
 CONFIG_DEST="$LOCALSTACK_HOME/llama-swap-config.yaml"
 FRONT_PORT=9098
 VERIFY_TIMEOUT_S=180
-# Speaches pin (pre-1.0; §5.3). qwen-tts deps come from the repo requirements
+# Speaches pin (pre-1.0; §5.3). It is NOT published to PyPI — install from the
+# git tag (pip supports VCS URLs). qwen-tts deps come from the repo requirements
 # (TTS milestone); a fastapi/uvicorn floor keeps the member's uvicorn present.
-SPEACHES_PIN="speaches==0.9.0rc3"
+SPEACHES_PIN="git+https://github.com/speaches-ai/speaches.git@v0.9.0-rc.3"
 
 PYBIN="$(command -v python3.12 || command -v python3)"
 
@@ -301,35 +302,44 @@ if (( need_lc )); then
 fi
 
 # ── 3. Speaches venv (own lean venv — the MCP lean-venv lesson) ────────────
+# NON-FATAL: the Speaches STT member is the AUDIO group; a failure here leaves
+# the retrieval group (embeddings+reranker) fully functional — the audio member
+# just won't answer until fixed. Do not block the whole stack on heavy GPU deps.
+SPEACHES_OK=1
 if [[ ! -x "$SPEACHES_VENV/bin/pip" ]]; then
     echo "[install-localstack] Creating Speaches venv at $SPEACHES_VENV..."
     if ! sudo -u "$REAL_USER" "$PYBIN" -m venv "$SPEACHES_VENV"; then
-        echo "[install-localstack] ERROR: Speaches venv creation failed" >&2
-        exit 4
+        echo "[install-localstack] WARNING: Speaches venv creation failed — STT audio member unavailable (retrieval group unaffected)." >&2
+        SPEACHES_OK=0
     fi
 fi
-echo "[install-localstack] Installing/upgrading Speaches ($SPEACHES_PIN)..."
-if ! sudo -u "$REAL_USER" "$SPEACHES_VENV/bin/pip" install --upgrade "$SPEACHES_PIN"; then
-    echo "[install-localstack] ERROR: pip install $SPEACHES_PIN failed (check the pinned version/network)" >&2
-    exit 4
+if (( SPEACHES_OK )); then
+    echo "[install-localstack] Installing/upgrading Speaches ($SPEACHES_PIN)..."
+    if ! sudo -u "$REAL_USER" "$SPEACHES_VENV/bin/pip" install --upgrade "$SPEACHES_PIN"; then
+        echo "[install-localstack] WARNING: Speaches install failed — STT audio member unavailable (retrieval group unaffected). Re-run to retry." >&2
+        SPEACHES_OK=0
+    fi
 fi
 
 # ── 4. qwen-tts venv (server code + deps come from the TTS milestone) ──────
+# NON-FATAL too (audio group). Server start/health only needs fastapi/uvicorn;
+# the real Qwen3-TTS model backend + G3 come later.
+QWEN_OK=1
 if [[ ! -x "$QWEN_TTS_VENV/bin/pip" ]]; then
     echo "[install-localstack] Creating qwen-tts venv at $QWEN_TTS_VENV..."
     if ! sudo -u "$REAL_USER" "$PYBIN" -m venv "$QWEN_TTS_VENV"; then
-        echo "[install-localstack] ERROR: qwen-tts venv creation failed" >&2
-        exit 4
+        echo "[install-localstack] WARNING: qwen-tts venv creation failed — TTS audio member unavailable (retrieval group unaffected)." >&2
+        QWEN_OK=0
     fi
 fi
 QWEN_REQ="$BLACKBOX_ROOT/LocalModels/qwen_tts_server/requirements.txt"
-if [[ -f "$QWEN_REQ" ]]; then
+if (( QWEN_OK )) && [[ -f "$QWEN_REQ" ]]; then
     echo "[install-localstack] Installing qwen-tts requirements..."
     if ! sudo -u "$REAL_USER" "$QWEN_TTS_VENV/bin/pip" install --upgrade -r "$QWEN_REQ"; then
-        echo "[install-localstack] ERROR: qwen-tts requirements install failed" >&2
-        exit 4
+        echo "[install-localstack] WARNING: qwen-tts requirements install failed — TTS audio member unavailable (retrieval group unaffected). Re-run to retry." >&2
+        QWEN_OK=0
     fi
-else
+elif (( QWEN_OK )); then
     # Floor so the member's uvicorn entrypoint exists; the TTS milestone
     # lands qwen_tts_server + its full requirements later.
     echo "[install-localstack] (qwen-tts requirements.txt absent — installing fastapi/uvicorn floor; TTS milestone lands the server.)"
