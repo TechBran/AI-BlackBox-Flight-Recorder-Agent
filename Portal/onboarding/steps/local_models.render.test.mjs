@@ -185,12 +185,15 @@ test("renderCapRow never shows a Download button for a non-manifest member (fres
     const rk = step.renderCapRow({ id: "rerank", label: "Reranking" }, FRESH_STATUS);
     assert.doesNotMatch(rk, /data-dl=/);          // never a Download button
     assert.match(rk, /data-on="rerank"/);          // activation only
-    assert.match(rk, /provisioned automatically/); // the honest note replaces it
+    // The honest note replaces the Download button — and it must NOT repeat the
+    // old "converted at install" lie; the reranker is self-converted by setup.
+    assert.match(rk, /self-converted|benchmark-validated/);
+    assert.doesNotMatch(rk, /converted at install/);
 
     const stt = step.renderCapRow({ id: "stt", label: "Speech" }, FRESH_STATUS);
     assert.doesNotMatch(stt, /data-dl=/);
     assert.match(stt, /data-on="stt"/);
-    assert.match(stt, /provisioned automatically/);
+    assert.match(stt, /pulled automatically/);
 
     // ...while the genuinely fetchable members in the SAME payload still offer
     // their (correct, manifest-backed) Download button.

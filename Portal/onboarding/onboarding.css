@@ -2694,6 +2694,107 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 }
 .ob-emb-blockers li { margin: 0.15rem 0; }
 
+/* ── Two-card redesign: CARD 1 (embedding model) + CARD 2 (reranker) ──
+ * Each is a self-contained top-level card so the reranker no longer hides
+ * inside the compute block, and cloud vs on-box becomes a sub-header rather
+ * than a per-card badge. */
+.ob-emb-card {
+    margin: 1.25rem 0 0;
+    padding: 1rem 1.15rem 1.15rem;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--radius-md, 8px);
+}
+.ob-emb-card-title {
+    font-size: 0.95em;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.ob-emb-card-sub {
+    margin: 0.3rem 0 0;
+    font-size: 0.82em;
+    color: rgba(255, 255, 255, 0.55);
+}
+/* Sub-headers group the grid cards (Cloud / On the box). Inside CARD 1's grid
+ * they span the full width; in the reranker card they're plain block flow. */
+.ob-emb-subhead {
+    font-size: 0.72em;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.6);
+    margin: 1rem 0 0.15rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+.ob-emb-grid > .ob-emb-subhead { grid-column: 1 / -1; }
+.ob-emb-subhead:first-child { margin-top: 0.4rem; }
+.ob-emb-subhead-note {
+    font-size: 0.85em;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.4);
+}
+/* Quantization chip — value read live from the registry label. */
+.ob-emb-quant {
+    display: inline-block;
+    padding: 0.12rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.68em;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    background: rgba(150, 180, 255, 0.14);
+    color: rgba(200, 220, 255, 0.9);
+}
+/* Compact one-line meta (dims + RAM/cost) on a card's default face. */
+.ob-emb-metarow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.15rem 1rem;
+    margin: 0.5rem 0 0.35rem;
+    font-size: 0.82em;
+    color: rgba(255, 255, 255, 0.8);
+}
+.ob-emb-metalabel {
+    color: rgba(255, 255, 255, 0.45);
+    margin-right: 0.25rem;
+}
+.ob-emb-cardstatus { margin: 0.2rem 0 0.4rem; }
+
+/* Advanced disclosure — placement / warm / freshness / strategy / re-embed
+ * folded away so the default card face stays minimal. */
+.ob-emb-advanced {
+    margin-top: 0.6rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 0.5rem;
+}
+.ob-emb-advanced > summary {
+    cursor: pointer;
+    font-size: 0.78em;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.6);
+    list-style: revert;
+}
+.ob-emb-advanced > summary:hover { color: rgba(255, 255, 255, 0.85); }
+.ob-emb-advanced[open] > summary { margin-bottom: 0.5rem; }
+.ob-emb-advanced-body { display: flex; flex-direction: column; gap: 0.5rem; }
+.ob-emb-compute-label { color: rgba(255, 255, 255, 0.6); font-size: 0.85em; }
+/* On-box GGUF Download button + its inline progress bar (A2). */
+.ob-emb-dl { width: 100%; }
+.ob-emb-dl-bar { margin: 0; }
+.ob-emb-dl-text { margin: 0.3rem 0 0; }
+/* The green "Validated" line for a built + active on-box reranker. */
+.ob-emb-rerank-ok {
+    font-size: 0.82em;
+    font-weight: 600;
+    color: rgba(180, 240, 200, 0.9);
+}
+
 /* ── M13 compute card: hardware line + placement toggles + reranker ──
  * Mirrors the Portal updates card's compute block (updates-manager.js);
  * ob-* styling because the wizard has its own token system. */

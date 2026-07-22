@@ -229,10 +229,14 @@ export function renderCapRow(cap, st = status) {
     }
 
     // Non-downloadable member not yet on disk: there's no Download button, so
-    // tell the user it's provisioned automatically (converted at install /
-    // pulled on first use) instead of leaving a silent gap.
+    // explain how it IS provisioned — HONESTLY per capability. The reranker is
+    // NOT auto-converted at install (that was a lie): its 8B GGUF is self-
+    // converted + benchmark-validated by setup (or the Memory step), a ~40-60
+    // min job. STT (whisper) really is pulled automatically on first use.
     const autoNote = (m && !isDownloadable(m) && !downloaded && !active)
-        ? `<p class="ob-lm-cap-note">No manual download — provisioned automatically (converted at install, or pulled on first use).</p>`
+        ? (cap.id === "rerank"
+            ? `<p class="ob-lm-cap-note">No manual download here — the on-box reranker is self-converted &amp; benchmark-validated by setup (or the Memory step), not at install.</p>`
+            : `<p class="ob-lm-cap-note">No manual download — pulled automatically on first use.</p>`)
         : "";
 
     return `

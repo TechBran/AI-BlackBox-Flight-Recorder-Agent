@@ -55,6 +55,7 @@ let validation = null;    // /embeddings/validate result for selectedSlug
 let validating = false;   // probe in flight
 let migrating = false;    // migrate/reembed POST in flight (button debounce)
 let pulling = false;      // pull POST in flight (button debounce)
+let embDownloading = {};  // member_id -> {completed,total,statusText} for the on-box GGUF download (A2)
 let reembedConfirm = null; // slug awaiting the cloud re-embed cost confirm (inline)
 let keepAliveBusy = null; // slug whose keep_alive toggle POST is in flight
 let cancelClicked = false; // local echo until job.cancel_requested arrives
@@ -75,6 +76,7 @@ export async function render(container, { next, back, skip, sigil }) {
     validating = false;
     migrating = false;
     pulling = false;
+    embDownloading = {};
     reembedConfirm = null;
     keepAliveBusy = null;
     cancelClicked = false;
@@ -99,14 +101,10 @@ export async function render(container, { next, back, skip, sigil }) {
                     Choose how the BlackBox <em>remembers</em>.
                 </h1>
                 <p class="ob-step-lede">
-                    Every conversation snapshot is embedded into a vector index
-                    so semantic search can find it later. Cloud models
-                    (<strong>Gemini</strong>, <strong>OpenAI</strong>) bill per
-                    token on your own keys; local <strong>Qwen3</strong> models
-                    run fully offline through Ollama. Switching models
-                    re-embeds your snapshots in the background &mdash; search
-                    keeps working the whole time, and the switch survives
-                    restarts.
+                    Pick the model that embeds every snapshot into the search
+                    index &mdash; and, optionally, a reranker that sharpens the
+                    results; switching re-embeds in the background while search
+                    keeps working.
                 </p>
                 <div id="ob-emb-content">
                     <div class="ob-loading">Checking embedding status&hellip;</div>
@@ -270,11 +268,22 @@ function renderUnavailable() {
 
 function renderPicker() {
     const health = status.health || { state: "ok" };
+    // Two clean top-level cards: CARD 1 = the embedding model (grid grouped
+    // into Cloud / On-the-box sub-headers, placement+warm+freshness+strategy+
+    // re-embed folded into a per-card Advanced disclosure); CARD 2 = the
+    // reranker, lifted OUT to its own card. The Compute card shrinks to the
+    // bare hardware line.
     contentEl().innerHTML = `
         ${healthBannerHtml(health)}
         ${computeCardHtml()}
-        <div id="ob-emb-grid" class="ob-emb-grid" role="radiogroup"
-             aria-label="Embedding models"></div>
+        <div class="ob-emb-card" id="ob-emb-card-model">
+            <div class="ob-emb-card-title">Embedding model</div>
+            <p class="ob-emb-card-sub">The model that turns each snapshot into a
+               searchable vector. All searches use whichever one is active.</p>
+            <div id="ob-emb-grid" class="ob-emb-grid" role="radiogroup"
+                 aria-label="Embedding models"></div>
+        </div>
+        ${rerankCardHtml(rerankStatus)}
         <div id="ob-emb-hint-slot"></div>
     `;
     const switchBtn = contentEl().querySelector("#ob-emb-health-switch");
@@ -283,84 +292,75 @@ function renderPicker() {
             startMigrate(status.health.successor_slug, switchBtn);
         });
     }
-    // Placement segmented toggles live in the compute card (outside the
-    // grid, so grid re-renders during pull polling never clobber them).
-    contentEl().querySelectorAll(".ob-emb-segbtn").forEach((btn) => {
-        btn.addEventListener("click", () => onPlacementClick(btn));
-    });
-    // Reranker selector buttons (M10.1) live in the compute card too.
+    // Reranker selector buttons (M10.1) live in the reranker card (outside the
+    // grid, so grid re-renders during pull/download polling never clobber them).
     contentEl().querySelectorAll(".ob-emb-rerank-btn, .ob-emb-rerank-off").forEach((btn) => {
         btn.addEventListener("click", () => onRerankSelect(btn));
     });
     renderGrid();
 }
 
-// ── Compute card (M13: hardware line + placement toggles + reranker) ──
-// Mirrors the Portal updates card's compute block (Portal/modules/
-// updates-manager.js _computeCardHtml/_onPlacementClick — same
-// POST /embeddings/placement contract); markup is mirrored rather than
-// shared because the wizard has its own ob-* module/CSS system.
+// ── Compute card (hardware line only) ──
+// The placement toggles now live under each model's Advanced disclosure
+// (placementAdvancedHtml) and the reranker is its own top-level card
+// (rerankCardHtml), so this shrinks to the bare hardware readout.
 
 function computeCardHtml() {
     const hw = status && status.hardware;
-    const rerankHtml = rerankLineHtml();
-    // Older backend without the hardware block AND no reranker payload —
-    // additive contract, degrade silently.
-    if (!hw && !rerankHtml) return "";
+    // Older backend without the hardware block — additive contract, degrade
+    // silently.
+    if (!hw) return "";
 
     let hwLine = "";
-    if (hw) {
-        if (hw.gpu) {
-            const vram = hw.vram_mb
-                ? `${(hw.vram_mb / 1024).toFixed(1)} GB VRAM`
-                : "VRAM unknown";
-            hwLine = `GPU: ${escapeHtml(hw.gpu_name || "detected")} &middot; ${escapeHtml(vram)}`;
-        } else {
-            hwLine = "CPU only &mdash; local models run on CPU";
-        }
-        if (hw.ram_mb) {
-            hwLine += ` &middot; ${(hw.ram_mb / 1024).toFixed(1)} GB RAM`;
-        }
+    if (hw.gpu) {
+        const vram = hw.vram_mb
+            ? `${(hw.vram_mb / 1024).toFixed(1)} GB VRAM`
+            : "VRAM unknown";
+        hwLine = `GPU: ${escapeHtml(hw.gpu_name || "detected")} &middot; ${escapeHtml(vram)}`;
+    } else {
+        hwLine = "CPU only &mdash; local models run on CPU";
     }
-    // Placement toggles only make sense with a GPU to place onto — on a CPU
-    // box the hardware line above already says where local models run.
-    const rows = hw && hw.gpu ? placementRowsHtml() : "";
+    if (hw.ram_mb) {
+        hwLine += ` &middot; ${(hw.ram_mb / 1024).toFixed(1)} GB RAM`;
+    }
 
     return `
         <div class="ob-emb-compute" id="ob-emb-compute">
             <div class="ob-emb-compute-title">Compute</div>
-            ${hwLine ? `<p class="ob-emb-compute-hw">${hwLine}</p>` : ""}
-            ${rows}
-            ${rerankHtml}
+            <p class="ob-emb-compute-hw">${hwLine}</p>
         </div>
     `;
 }
 
-function placementRowsHtml() {
-    const locals = (status.models || []).filter((m) => m.privacy === "local");
-    return locals.map((m) => {
-        const current = m.placement || ""; // "" = auto (null persisted)
-        const rec = m.recommended_placement
-            ? `<span class="ob-emb-compute-rec">recommended: ${escapeHtml(m.recommended_placement.toUpperCase())}</span>`
-            : "";
-        const seg = ["", "gpu", "cpu"].map((value) => {
-            const label = value === "" ? "Auto" : value.toUpperCase();
-            const active = value === current ? " ob-emb-segbtn-active" : "";
-            const busy = placementBusy === m.slug ? " disabled" : "";
-            return `<button type="button"
-                        class="ob-emb-segbtn${active}"
-                        data-slug="${escapeHtml(m.slug)}" data-placement="${escapeHtml(value)}"
-                        aria-pressed="${value === current}"${busy}>${label}</button>`;
-        }).join("");
-        return `
-            <div class="ob-emb-compute-row">
-                <span class="ob-emb-compute-model">${escapeHtml(m.label)}</span>
-                ${rec}
-                <span class="ob-emb-seg" role="group"
-                      aria-label="Device placement for ${escapeHtml(m.label)}">${seg}</span>
-            </div>
-        `;
+// Per-model device-placement toggle (Auto/GPU/CPU), rendered INSIDE the
+// model's Advanced disclosure (moved out of the compute card). Local models
+// only, and only when there's a GPU to place onto — on a CPU box the hardware
+// line already says where local models run. Same POST /embeddings/placement
+// contract as before.
+function placementAdvancedHtml(m) {
+    const hw = status && status.hardware;
+    if (m.privacy !== "local" || !(hw && hw.gpu)) return "";
+    const current = m.placement || ""; // "" = auto (null persisted)
+    const rec = m.recommended_placement
+        ? `<span class="ob-emb-compute-rec">recommended: ${escapeHtml(m.recommended_placement.toUpperCase())}</span>`
+        : "";
+    const seg = ["", "gpu", "cpu"].map((value) => {
+        const label = value === "" ? "Auto" : value.toUpperCase();
+        const active = value === current ? " ob-emb-segbtn-active" : "";
+        const busy = placementBusy === m.slug ? " disabled" : "";
+        return `<button type="button"
+                    class="ob-emb-segbtn${active}"
+                    data-slug="${escapeHtml(m.slug)}" data-placement="${escapeHtml(value)}"
+                    aria-pressed="${value === current}"${busy}>${label}</button>`;
     }).join("");
+    return `
+        <div class="ob-emb-compute-row">
+            <span class="ob-emb-compute-label">Device placement</span>
+            ${rec}
+            <span class="ob-emb-seg" role="group"
+                  aria-label="Device placement for ${escapeHtml(m.label)}">${seg}</span>
+        </div>
+    `;
 }
 
 async function onPlacementClick(btn) {
@@ -389,99 +389,40 @@ async function onPlacementClick(btn) {
     renderPicker();
 }
 
-// Reranker SELECTOR (M10.1). A tier-driven picker over the models the backend
-// reports in rr.model_catalog (the additive per-model metadata added to
-// /rerank/status): tier-gate options to this box's hardware tier, gate cloud/
-// LLM selectability on each model's key_present, and — crucially — NEVER enter
-// a key here. Keys live in the API-Keys step (M10.0); un-keyed cloud options
-// deep-link back there, and Vertex (Advanced, needs a GCP service account)
-// deep-links the SA-upload in the optional-integrations step. Selecting POSTs
-// /rerank/select WITHOUT an api_key (the key is already in .env) — see
-// onRerankSelect. rerankStatus === null hides the whole block.
-function rerankLineHtml() {
-    const rr = rerankStatus;
+// CARD 2 — Reranker (its OWN top-level card). A tier-driven picker over the
+// models the backend reports in rr.model_catalog, split into two sub-headers:
+// "Cloud / your keys" (voyage/cohere/llm/vertex → select-only, key-gated,
+// deep-links to the API-Keys / optional-integrations steps for a missing key)
+// and "On the box" (localstack/cpu). Keys are NEVER entered here. Selecting
+// POSTs /rerank/select WITHOUT an api_key (the key is already in .env) — see
+// onRerankSelect. rerankStatus === null hides the whole card.
+//
+// Exported + rr-parameterised so the render test can assert on the returned
+// HTML without a DOM.
+export function rerankCardHtml(rr = rerankStatus) {
     if (!rr) return ""; // endpoint unreachable / older backend — hide
 
     const tier = rr.tier;
     const catalog = Array.isArray(rr.model_catalog) ? rr.model_catalog : [];
     // Tier-gate: only models whose tiers include this box's hardware tier.
     const forTier = catalog.filter((m) => (m.tiers || []).includes(tier));
+    const cloud = forTier.filter((m) => m.privacy === "cloud");
+    const onbox = forTier.filter((m) => m.privacy !== "cloud"); // localstack/cpu/vllm
 
     const activeSlug = rr.model;
     const rerankOn = !!rr.enabled; // status.enabled is the real retrieve() gate (post-M8)
 
-    // Friendly provider-key name for the "add your <X> key" deep-link.
-    const keyLabel = (m) => {
-        if (m.provider === "voyage") return "Voyage";
-        if (m.provider === "cohere") return "Cohere";
-        return ({
-            GOOGLE_API_KEY: "Google", OPENAI_API_KEY: "OpenAI",
-            ANTHROPIC_API_KEY: "Anthropic", XAI_API_KEY: "xAI",
-        })[m.key_env] || "provider";
-    };
+    const cloudRows = cloud.map((m) => rerankCloudOptionHtml(m, activeSlug, rerankOn, rr)).join("");
+    const onboxRows = onbox.map((m) => rerankOnboxOptionHtml(m, activeSlug, rerankOn, rr)).join("");
 
-    const selectBtn = (m) =>
-        `<button type="button" class="ob-cta ob-emb-rerank-btn"
-                 data-slug="${escapeHtml(m.slug)}" data-provider="${escapeHtml(m.provider)}"
-                 data-enabled="true">Use this reranker</button>`;
+    const cloudSection = cloudRows
+        ? `<div class="ob-emb-subhead">Cloud / your keys<span class="ob-emb-subhead-note">already verified · no download</span></div>${cloudRows}`
+        : "";
+    const onboxSection = onboxRows
+        ? `<div class="ob-emb-subhead">On the box<span class="ob-emb-subhead-note">build once · benchmark-gated</span></div>${onboxRows}`
+        : "";
 
-    const optionHtml = (m) => {
-        const isActive = m.slug === activeSlug && rerankOn;
-        const badge = isActive ? `<span class="ob-emb-rerank-badge">Active</span>` : "";
-        const notes = [];
-        if (m.cost_note) notes.push(m.cost_note);
-        if (m.quality_note) notes.push(m.quality_note);
-        if (isActive && rr.preflight && rr.preflight.latency_ms != null) {
-            notes.push(`preflight ${Math.round(rr.preflight.latency_ms)} ms`);
-        }
-        const noteHtml = notes.length
-            ? `<span class="ob-emb-rerank-note">${escapeHtml(notes.join(" · "))}</span>` : "";
-
-        let action;
-        if (m.provider === "vertex") {
-            // Advanced — a GCP service account, not a paste-a-key. Selectable
-            // once the SA is uploaded (key_present resolves from
-            // GOOGLE_APPLICATION_CREDENTIALS); else deep-link the SA-upload
-            // (optional_integrations owns it).
-            if (m.key_present) {
-                action = isActive
-                    ? `<span class="ob-emb-rerank-current">Selected</span>`
-                    : selectBtn(m);
-            } else {
-                action = `<a class="ob-emb-rerank-link" href="?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
-            }
-        } else if (m.provider === "voyage" || m.provider === "cohere" || m.provider === "llm") {
-            // Cloud / LLM: selectable iff the key is present; else deep-link the
-            // API-Keys step (key entry lives THERE, never here).
-            if (m.key_present) {
-                action = isActive
-                    ? `<span class="ob-emb-rerank-current">Selected</span>`
-                    : selectBtn(m);
-            } else {
-                action = `<a class="ob-emb-rerank-link" href="?step=api_keys">Add your ${escapeHtml(keyLabel(m))} key in the API Keys step ↗</a>`;
-            }
-        } else {
-            // Local: cpu (MID) is always in-process; vllm (HIGH) needs the
-            // installed+running reranker service (installer remediation).
-            const ready = m.provider === "cpu" ? true : (rr.gpu && rr.service_reachable);
-            action = ready
-                ? (isActive ? `<span class="ob-emb-rerank-current">Selected</span>` : selectBtn(m))
-                : `<span class="ob-emb-rerank-muted">Run the installer's reranker step to enable the local GPU reranker.</span>`;
-        }
-
-        return `
-            <div class="ob-emb-rerank-row${isActive ? " is-active" : ""}" data-slug="${escapeHtml(m.slug)}">
-                <div class="ob-emb-rerank-row-head">
-                    <span class="ob-emb-rerank-label">${escapeHtml(m.label)}</span>
-                    ${badge}
-                </div>
-                ${noteHtml}
-                <div class="ob-emb-rerank-action">${action}</div>
-            </div>`;
-    };
-
-    const rows = forTier.map(optionHtml).join("");
-    const empty = rows ? "" :
+    const empty = (cloudRows || onboxRows) ? "" :
         `<p class="ob-emb-rerank-muted">No reranker options for this hardware tier yet — add a Voyage or Cohere key in the API Keys step to unlock the cloud reranker.</p>`;
     // Turn-off affordance when reranking is currently ON.
     const offBtn = rerankOn
@@ -492,8 +433,8 @@ function rerankLineHtml() {
         : "";
 
     return `
-        <div class="ob-emb-rerank-selector" id="ob-emb-rerank">
-            <div class="ob-emb-rerank-title">Reranker
+        <div class="ob-emb-card ob-emb-rerank-selector" id="ob-emb-rerank">
+            <div class="ob-emb-card-title">Reranker
                 <span class="ob-emb-rerank-tier">${escapeHtml(tier || "?")} tier</span>
             </div>
             <p class="ob-emb-rerank-lede">Optional cross-encoder that re-orders
@@ -501,10 +442,96 @@ function rerankLineHtml() {
             ${rr.tier_guidance
                 ? `<p class="ob-emb-rerank-guidance">${escapeHtml(rr.tier_guidance)}</p>`
                 : ""}
-            ${rows}
+            ${cloudSection}
+            ${onboxSection}
             ${empty}
             ${offBtn}
         </div>`;
+}
+
+// Friendly provider-key name for the "add your <X> key" deep-link.
+function rerankKeyLabel(m) {
+    if (m.provider === "voyage") return "Voyage";
+    if (m.provider === "cohere") return "Cohere";
+    return ({
+        GOOGLE_API_KEY: "Google", OPENAI_API_KEY: "OpenAI",
+        ANTHROPIC_API_KEY: "Anthropic", XAI_API_KEY: "xAI",
+    })[m.key_env] || "provider";
+}
+
+function rerankSelectBtn(m) {
+    return `<button type="button" class="ob-cta ob-emb-rerank-btn"
+                 data-slug="${escapeHtml(m.slug)}" data-provider="${escapeHtml(m.provider)}"
+                 data-enabled="true">Use this reranker</button>`;
+}
+
+function rerankNotesHtml(m, isActive, rr) {
+    const notes = [];
+    if (m.cost_note) notes.push(m.cost_note);
+    if (m.quality_note) notes.push(m.quality_note);
+    if (isActive && rr.preflight && rr.preflight.latency_ms != null) {
+        notes.push(`preflight ${Math.round(rr.preflight.latency_ms)} ms`);
+    }
+    return notes.length
+        ? `<span class="ob-emb-rerank-note">${escapeHtml(notes.join(" · "))}</span>` : "";
+}
+
+function rerankRowHtml(m, isActive, action, rr) {
+    const badge = isActive ? `<span class="ob-emb-rerank-badge">Active</span>` : "";
+    return `
+        <div class="ob-emb-rerank-row${isActive ? " is-active" : ""}" data-slug="${escapeHtml(m.slug)}">
+            <div class="ob-emb-rerank-row-head">
+                <span class="ob-emb-rerank-label">${escapeHtml(m.label)}</span>
+                ${badge}
+            </div>
+            ${rerankNotesHtml(m, isActive, rr)}
+            <div class="ob-emb-rerank-action">${action}</div>
+        </div>`;
+}
+
+// Cloud / LLM / Vertex option: select-only, key-gated, deep-links for a
+// missing key (key entry lives in the API-Keys step, NEVER here).
+function rerankCloudOptionHtml(m, activeSlug, rerankOn, rr) {
+    const isActive = m.slug === activeSlug && rerankOn;
+    let action;
+    if (m.provider === "vertex") {
+        // Advanced — a GCP service account, not a paste-a-key. Selectable once
+        // the SA is uploaded; else deep-link the SA-upload (optional_integrations).
+        action = m.key_present
+            ? (isActive ? `<span class="ob-emb-rerank-current">Selected</span>` : rerankSelectBtn(m))
+            : `<a class="ob-emb-rerank-link" href="?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
+    } else {
+        action = m.key_present
+            ? (isActive ? `<span class="ob-emb-rerank-current">Selected</span>` : rerankSelectBtn(m))
+            : `<a class="ob-emb-rerank-link" href="?step=api_keys">Add your ${escapeHtml(rerankKeyLabel(m))} key in the API Keys step ↗</a>`;
+    }
+    return rerankRowHtml(m, isActive, action, rr);
+}
+
+// On-box option. cpu (in-process) is always ready; every other local provider
+// (localstack/vllm) keys on the backend `built` flag — the self-converted GGUF
+// physically on disk — NOT the old gpu-and-service_reachable proxy. States:
+//   built + active → green "Validated — scores healthy, ranks correct"
+//   built, not active → selectable
+//   not built → honest note (the build endpoint isn't wired into the wizard
+//               yet; it's provisioned by setup). We NEVER fake a build button.
+function rerankOnboxOptionHtml(m, activeSlug, rerankOn, rr) {
+    const isActive = m.slug === activeSlug && rerankOn;
+    let action;
+    if (m.provider === "cpu") {
+        action = isActive
+            ? `<span class="ob-emb-rerank-current">Selected</span>`
+            : rerankSelectBtn(m);
+    } else if (m.built) {
+        action = isActive
+            ? `<span class="ob-emb-rerank-ok">Validated &mdash; scores healthy, ranks correct.</span>`
+            : rerankSelectBtn(m);
+    } else {
+        action = `<p class="ob-emb-rerank-muted">On-box reranker setup is coming to the
+            wizard &mdash; for now it's provisioned by setup (~40&ndash;60 min: downloads
+            16 GB, converts, quantizes to Q8_0, benchmark-validated before it turns on).</p>`;
+    }
+    return rerankRowHtml(m, isActive, action, rr);
 }
 
 // Persist a reranker choice live (M10.1). POST /rerank/select with
@@ -577,8 +604,19 @@ function healthBannerHtml(health) {
 function renderGrid() {
     const grid = contentEl().querySelector("#ob-emb-grid");
     if (!grid) return;
-    grid.innerHTML = (status.models || []).map(renderCard).join("");
-    (status.models || []).forEach((m) => {
+    const models = status.models || [];
+    // Group into two sub-headers: Cloud (bill per token, no download) vs
+    // On the box (private, one-time download). privacy=="local" is the split;
+    // member_id being present is the on-box marker the backend adds.
+    const cloud = models.filter((m) => m.privacy !== "local");
+    const local = models.filter((m) => m.privacy === "local");
+    const section = (title, note, list) => list.length
+        ? `<div class="ob-emb-subhead">${escapeHtml(title)}<span class="ob-emb-subhead-note">${escapeHtml(note)}</span></div>${list.map(renderCard).join("")}`
+        : "";
+    grid.innerHTML =
+        section("Cloud", "bill per token · no download", cloud) +
+        section("On the box", "private · one-time download", local);
+    models.forEach((m) => {
         const card = grid.querySelector(`.ob-cli-agent-card[data-slug="${m.slug}"]`);
         if (card) card.addEventListener("click", () => choose(m.slug));
     });
@@ -590,41 +628,18 @@ function renderCard(m) {
     const isSelected = m.slug === selectedSlug;
     const local = m.privacy === "local";
 
-    const badges = [
-        isActive
-            ? `<span class="ob-cli-agent-badge ob-cli-agent-badge-ok">ACTIVE</span>`
-            : "",
-        `<span class="ob-cli-agent-badge ${local ? "ob-cli-agent-badge-info" : "ob-emb-badge-cloud"}">${local ? "LOCAL" : "CLOUD"}</span>`,
-    ].join("");
-
-    const costRow = local
-        ? `<div class="ob-cli-agent-meta-row">
-               <span class="ob-cli-agent-meta-label">RAM</span>
-               <span>${escapeHtml(fmtNum(m.ram_gb))} GB</span>
-           </div>`
-        : `<div class="ob-cli-agent-meta-row">
-               <span class="ob-cli-agent-meta-label">Cost</span>
-               <span>$${escapeHtml(fmtNum(m.cost_per_1m_tokens))} / 1M tokens</span>
-           </div>`;
-
-    // WI-9 device-placement hint (local models): the recommendation comes
-    // from the server's hardware probe; a persisted pin (m.placement) beats
-    // it. The Auto/GPU/CPU toggle lives in the compute card above the grid
-    // (M13; same POST /embeddings/placement contract as the Portal updates
-    // card) — this per-card line keeps the model choice hardware-aware at a
-    // glance.
-    const placementHint = local && m.recommended_placement
-        ? `<div class="ob-cli-agent-meta-row">
-               <span class="ob-cli-agent-meta-label">Compute</span>
-               <span>${escapeHtml(placementText(m))}</span>
-           </div>`
+    // Cloud/on-box is now the sub-header, not a per-card badge. The face keeps
+    // only the ACTIVE badge and a quantization chip read LIVE from the label.
+    const activeBadge = isActive
+        ? `<span class="ob-cli-agent-badge ob-cli-agent-badge-ok">ACTIVE</span>`
         : "";
+    const quant = quantBadge(m.label);
 
-    const blockersHtml = (m.blockers || []).length
-        ? `<ul class="ob-emb-blockers">${m.blockers
-              .map((b) => `<li>${escapeHtml(b)}</li>`)
-              .join("")}</ul>`
-        : "";
+    // Compact meta: dims + (RAM or cost). One line.
+    const costMeta = local
+        ? `<span class="ob-emb-metaitem"><span class="ob-emb-metalabel">RAM</span> ${escapeHtml(fmtNum(m.ram_gb))} GB</span>`
+        : `<span class="ob-emb-metaitem"><span class="ob-emb-metalabel">Cost</span> $${escapeHtml(fmtNum(m.cost_per_1m_tokens))}/1M tokens</span>`;
+    const dimsMeta = `<span class="ob-emb-metaitem"><span class="ob-emb-metalabel">Dims</span> ${escapeHtml(String(m.dims))}</span>`;
 
     const dataState = m.ready || isActive ? "ready" : "needs-auth";
     const selectedClass = isSelected ? " ob-card-selected" : "";
@@ -636,24 +651,98 @@ function renderCard(m) {
             <div class="ob-cli-agent-head">
                 <div class="ob-cli-agent-title">
                     <span class="ob-cli-agent-name">${escapeHtml(m.label)}${isSelected ? " &check;" : ""}</span>
-                    <span class="ob-cli-agent-vendor">${escapeHtml(m.slug)}</span>
                 </div>
-                <span class="ob-emb-badges">${badges}</span>
+                <span class="ob-emb-badges">${quant}${activeBadge}</span>
             </div>
             <p class="ob-cli-agent-auth-blurb">${escapeHtml(m.quality_note || "")}</p>
-            <div class="ob-cli-agent-meta-row">
-                <span class="ob-cli-agent-meta-label">Dims</span>
-                <span>${escapeHtml(String(m.dims))}</span>
-            </div>
-            ${costRow}
-            ${placementHint}
-            ${freshnessHtml(m)}
-            ${strategyHtml(m)}
-            ${blockersHtml}
-            ${warmToggleHtml(m)}
+            <div class="ob-emb-metarow">${dimsMeta}${costMeta}</div>
+            <div class="ob-emb-cardstatus">${cardStatusLine(m, isActive)}</div>
             <div class="ob-cli-agent-actions">${cardActionsHtml(m, isActive, isSelected)}</div>
+            ${advancedHtml(m, isActive, isSelected)}
         </div>
     `;
+}
+
+// The ONE status line on a card's default face. Everything more detailed
+// (freshness breakdown, strategy, placement, re-embed) lives under Advanced.
+function cardStatusLine(m, isActive) {
+    if (isActive) {
+        return `<p class="ob-emb-fresh ob-emb-fresh-ok">Active &mdash; all searches use this model.</p>`;
+    }
+    if (embNeedsDownload(m)) {
+        return `<p class="ob-emb-fresh ob-emb-fresh-subdued">Weights not on the box yet.</p>`;
+    }
+    if (m.store_exists) {
+        if (m.missing === 0) return `<p class="ob-emb-fresh ob-emb-fresh-ok">Index up to date.</p>`;
+        if (m.missing === null || m.missing === undefined) {
+            return `<p class="ob-emb-fresh ob-emb-fresh-subdued">Index unreadable &mdash; rebuilt on switch.</p>`;
+        }
+        return `<p class="ob-emb-fresh">${fmtInt(m.missing)} snapshot${m.missing === 1 ? "" : "s"} behind.</p>`;
+    }
+    return `<p class="ob-emb-fresh ob-emb-fresh-subdued">No index yet &mdash; built on switch.</p>`;
+}
+
+// A quantization chip read LIVE from the registry label (e.g. "…· Q4)" →
+// "Q4"; "…· Q8_0 · max quality)" → "Q8_0"). Never hardcode the quant — the
+// registry is the single source of truth. Empty when the label carries none.
+export function quantBadge(label) {
+    const mt = String(label || "").match(/\bQ\d+(?:_\d+)?(?:_[A-Z0-9]+)?\b/i);
+    if (!mt) return "";
+    return `<span class="ob-emb-quant" title="Quantization">${escapeHtml(mt[0].toUpperCase())}</span>`;
+}
+
+// True for an on-box embedder whose weights aren't on disk yet. The backend
+// emits the "not downloaded" blocker ONLY when the model is downloadable, NOT
+// active, and the GGUF is absent — so this is exactly downloadable && !downloaded
+// && !active, without the frontend duplicating the download manifest.
+export function embNeedsDownload(m) {
+    if (!m || !m.downloadable) return false;
+    return (m.blockers || []).some((b) => /not downloaded/i.test(b));
+}
+
+// The Download control (or its live progress bar) for an on-box embedder whose
+// GGUF is absent. "" for anything else — an ACTIVE model NEVER gets a download
+// prompt (embNeedsDownload is false for it). Wired to POST /local-models/download
+// {artifact: member_id}. Pure/exported (downloadingMap injectable) for tests.
+export function embDownloadBtnHtml(m, downloadingMap = embDownloading) {
+    if (!embNeedsDownload(m)) return "";
+    const dl = downloadingMap[m.member_id];
+    if (dl) {
+        const pct = dl.total ? Math.min(100, Math.floor((dl.completed / dl.total) * 100)) : 0;
+        return `
+            <div class="ob-emb-pullwrap ob-emb-dl-bar" data-member="${escapeHtml(m.member_id)}">
+                <div class="ob-emb-progress-track">
+                    <div class="ob-emb-progress-fill" style="width:${pct}%"></div>
+                </div>
+                <p class="ob-emb-fresh ob-emb-dl-text">${pct}% ${escapeHtml(dl.statusText || "downloading")}</p>
+            </div>`;
+    }
+    const size = m.ram_gb ? `&approx;${escapeHtml(fmtNum(m.ram_gb))} GB` : "";
+    return `
+        <button type="button" class="ob-cli-agent-action ob-cli-agent-action-auth ob-emb-dl"
+                data-member="${escapeHtml(m.member_id)}" data-slug="${escapeHtml(m.slug)}">
+            Download ${size}
+        </button>`;
+}
+
+// The collapsed Advanced disclosure — placement, warm/cold, freshness detail,
+// strategy, and re-embed — only rendered where it's meaningful (the active or
+// currently-selected card).
+function advancedHtml(m, isActive, isSelected) {
+    if (!(isActive || isSelected)) return "";
+    const inner = [
+        freshnessHtml(m),
+        strategyHtml(m),
+        placementAdvancedHtml(m),
+        warmToggleHtml(m),
+        reembedHtml(m),
+    ].filter((s) => s && s.trim()).join("");
+    if (!inner.trim()) return "";
+    return `
+        <details class="ob-emb-advanced">
+            <summary>Advanced &mdash; storage, device &amp; re-embed</summary>
+            <div class="ob-emb-advanced-body">${inner}</div>
+        </details>`;
 }
 
 // Warm/cold keep_alive toggle — local (Ollama) models only, once pulled.
@@ -720,15 +809,20 @@ function pullBlocker(m) {
 }
 
 function cardActionsHtml(m, isActive, isSelected) {
-    // Re-embed is offered on the active card AND any non-active card whose
-    // store already exists (upgrade-in-place, no model switch). reembedHtml
-    // self-gates on store_exists/active, so it renders "" where inapplicable.
-    const reembed = reembedHtml(m);
+    // Re-embed now lives under Advanced (advancedHtml), so the face's action
+    // region carries only the PRIMARY action: activate / download / select /
+    // validate→migrate.
     if (isActive) {
-        return `<p class="ob-cli-agent-ready-blurb">Currently active &mdash; all snapshot searches use this model.</p>${reembed}`;
+        return `<p class="ob-cli-agent-ready-blurb">Currently active &mdash; all snapshot searches use this model.</p>`;
+    }
+    // On-box embedder whose GGUF isn't on disk yet: the Download button IS the
+    // action (a real POST /local-models/download, not a select). Shown on any
+    // such card (no need to select first) so the multi-GB cost is obvious.
+    if (embNeedsDownload(m)) {
+        return embDownloadBtnHtml(m);
     }
     if (!isSelected) {
-        return `<p class="ob-cli-agent-auth-blurb">Click to select.</p>${reembed}`;
+        return `<p class="ob-cli-agent-auth-blurb">Click to select.</p>`;
     }
 
     const pull = status.ollama && status.ollama.pull;
@@ -743,12 +837,16 @@ function cardActionsHtml(m, isActive, isSelected) {
         `;
     }
     if (!m.ready) {
-        // Non-pull blockers (key missing, daemon down, RAM short) — the
-        // remediation lines above are the action.
-        return `<p class="ob-cli-agent-auth-blurb">Resolve the items above, then re-select this model.</p>${reembed}`;
+        // Non-pull blockers (key missing, daemon down, RAM short) — surface them
+        // as remediation lines right here (they no longer live on the face).
+        const blockersHtml = (m.blockers || []).length
+            ? `<ul class="ob-emb-blockers">${m.blockers
+                  .map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>`
+            : "";
+        return `${blockersHtml}<p class="ob-cli-agent-auth-blurb">Resolve the items above, then re-select this model.</p>`;
     }
 
-    // Ready, selected, not active → validate → migrate (+ re-embed-in-place).
+    // Ready, selected, not active → validate → migrate.
     const parts = [];
     if (validating) {
         parts.push(`<span class="ob-status-pill ob-status-pill-validating">Validating&hellip;</span>`);
@@ -779,7 +877,6 @@ function cardActionsHtml(m, isActive, isSelected) {
                     id="ob-emb-validate">Validate</button>
         `);
     }
-    parts.push(reembed);
     return parts.join("");
 }
 
@@ -911,6 +1008,82 @@ function wireCardActions(grid) {
             setKeepAlive(btn.dataset.slug, btn.getAttribute("aria-checked") !== "true");
         });
     });
+    // On-box GGUF download buttons (A2) → POST /local-models/download {artifact}.
+    grid.querySelectorAll(".ob-emb-dl").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            startEmbDownload(btn.dataset.member, btn.dataset.slug);
+        });
+    });
+    // Device-placement segmented toggles now live under each card's Advanced
+    // disclosure (moved out of the compute card).
+    grid.querySelectorAll(".ob-emb-segbtn").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            onPlacementClick(btn);
+        });
+    });
+}
+
+// ── On-box GGUF download (A2) ─────────────────────────────────────
+// Mirrors the M8 local_models.js NDJSON reader: POST /local-models/download
+// with {artifact: member_id}, stream {completed,total,status} lines into the
+// per-member progress bar, then refresh /embeddings/status so the "not
+// downloaded" blocker clears and the model becomes validate→migrate-able.
+async function startEmbDownload(memberId, slug) {
+    if (!memberId || embDownloading[memberId]) return;
+    embDownloading[memberId] = { completed: 0, total: 0, statusText: "starting" };
+    renderGrid();
+    try {
+        const r = await fetch("/local-models/download", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ artifact: memberId }),
+        });
+        if (!r.ok && r.status !== 409) throw new Error(`download returned ${r.status}`);
+        if (r.body && r.body.getReader) {
+            const reader = r.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += dec.decode(value, { stream: true });
+                let nl;
+                while ((nl = buf.indexOf("\n")) >= 0) {
+                    const line = buf.slice(0, nl).trim();
+                    buf = buf.slice(nl + 1);
+                    if (!line) continue;
+                    try {
+                        const p = JSON.parse(line);
+                        embDownloading[memberId] = {
+                            completed: Number(p.completed) || embDownloading[memberId].completed,
+                            total: Number(p.total) || embDownloading[memberId].total,
+                            statusText: p.status || "downloading",
+                        };
+                        updateEmbDownloadBar(memberId);
+                    } catch (_) { /* skip malformed line */ }
+                }
+            }
+        }
+    } catch (e) {
+        showHint(`Couldn't download the on-box weights: ${e.message}. Try again.`, true);
+    }
+    delete embDownloading[memberId];
+    await refreshStatus(); // reflect downloaded=true (blocker clears)
+    renderGrid();
+}
+
+function updateEmbDownloadBar(memberId) {
+    const grid = contentEl() && contentEl().querySelector("#ob-emb-grid");
+    const dl = embDownloading[memberId];
+    const bar = grid && grid.querySelector(`.ob-emb-dl-bar[data-member="${memberId}"]`);
+    const fill = bar && bar.querySelector(".ob-emb-progress-fill");
+    const text = bar && bar.querySelector(".ob-emb-dl-text");
+    if (!fill || !text || !dl) { renderGrid(); return; }
+    const pct = dl.total ? Math.min(100, Math.floor((dl.completed / dl.total) * 100)) : 0;
+    fill.style.width = pct + "%";
+    text.textContent = `${pct}% ${dl.statusText || "downloading"}`;
 }
 
 // ── keep_alive (warm/cold) toggle ────────────────────────────────
@@ -1403,17 +1576,6 @@ function renderJobStalled(job) {
 function modelLabel(slug) {
     const m = (status && status.models || []).find((x) => x.slug === slug);
     return (m && m.label) || slug || "";
-}
-
-function placementText(m) {
-    const rec = m.recommended_placement === "gpu" ? "GPU" : "CPU";
-    if (m.placement) {
-        const pin = m.placement.toUpperCase();
-        return pin === rec
-            ? `${pin} (pinned)`
-            : `${pin} (pinned; ${rec} recommended)`;
-    }
-    return `Auto (${rec} recommended)`;
 }
 
 function showHint(msg, isError) {
