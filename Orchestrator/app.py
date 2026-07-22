@@ -218,6 +218,16 @@ app.mount(
     name="onboarding",
 )
 
+# noVNC live-view assets (M9 Task 9.5). Served from the system apt path so the
+# per-session viewer page can `import RFB from '/cu/novnc/core/rfb.js'`. Mounted
+# AFTER the router includes so it never shadows the /cu/view API routes; the
+# whole mount is skipped when novnc isn't installed (SHOULD_HAVE, not MUST) and
+# cu_view() then returns the install-notice page instead.
+import os as _os
+_novnc_dir = "/usr/share/novnc"
+if _os.path.isdir(_novnc_dir):
+    app.mount("/cu/novnc", StaticFiles(directory=_novnc_dir), name="cu-novnc")
+
 # =============================================================================
 # Entry point verification
 # =============================================================================

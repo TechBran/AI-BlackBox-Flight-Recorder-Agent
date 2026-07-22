@@ -219,3 +219,100 @@ def cu_sessions():
     from Orchestrator.browser.display import get_allocator, MAX_VIRTUAL_SESSIONS
     sessions = get_allocator().active_sessions()
     return {"sessions": sessions, "count": len(sessions), "cap": MAX_VIRTUAL_SESSIONS}
+
+
+from fastapi import WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+
+_CU_VIEW_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>CU Live View — {session_id}</title>
+<style>html,body{{margin:0;height:100%;background:#0b0b0d;overflow:hidden}}
+#screen{{width:100vw;height:100vh}}</style></head>
+<body><div id="screen"></div>
+<script type="module">
+import RFB from '/cu/novnc/core/rfb.js';
+const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+const url = `${{proto}}://${{location.host}}/cu/view/{session_id}/ws`;
+const rfb = new RFB(document.getElementById('screen'), url, {{}});
+rfb.viewOnly = true;          // D11: watch only, no takeover
+rfb.scaleViewport = true;     // fit 1280x720 / 1440x900 into the panel
+rfb.resizeSession = false;    // never resize the agent's screen
+</script></body></html>"""
+
+_CU_VIEW_UNAVAILABLE = ("<!doctype html><meta charset=utf-8><body "
+    "style='font-family:system-ui;background:#0b0b0d;color:#ddd;padding:2rem'>"
+    "<h3>Live view unavailable</h3><p>noVNC / websockify are not installed on "
+    "this box (SHOULD_HAVE in system-packages.txt). The CU session is still "
+    "running — install <code>novnc</code> + <code>websockify</code> to watch.</p>")
+
+
+@app.get("/cu/view/{session_id}", response_class=HTMLResponse)
+def cu_view(session_id: str):
+    from Orchestrator.browser.display import get_allocator
+    h = get_allocator().get(session_id)
+    if h is None:
+        return HTMLResponse("<!doctype html><body>No active CU session for that id.",
+                            status_code=404)
+    if not h.live_view:
+        return HTMLResponse(_CU_VIEW_UNAVAILABLE)
+    return HTMLResponse(_CU_VIEW_HTML.format(session_id=session_id))
+
+
+@app.websocket("/cu/view/{session_id}/ws")
+async def cu_view_ws(websocket: WebSocket, session_id: str):
+    """Reverse-proxy the viewer's WebSocket to this session's loopback websockify.
+    Loopback-only target; the Tailscale perimeter is the auth boundary (§9)."""
+    import asyncio
+    import websockets
+    from websockets.exceptions import ConnectionClosed
+    from Orchestrator.browser.display import get_allocator
+
+    h = get_allocator().get(session_id)
+    # Plain accept() — mirror the proven app_proxy_websocket pattern. noVNC 1.x
+    # and websockify both default to binary frames without requiring the
+    # Sec-WebSocket-Protocol header, and a transparent proxy does not forward it
+    # (forcing subprotocol="binary" when the client offered none breaks the
+    # handshake).
+    await websocket.accept()
+    if h is None or not h.live_view:
+        await websocket.close(code=1008, reason="No live view for session")
+        return
+    target = f"ws://127.0.0.1:{h.ws_port}/"
+    try:
+        upstream = await websockets.connect(target, max_size=None, open_timeout=10)
+    except Exception as e:
+        print(f"[CU-VIEW] upstream connect failed ({target}): {e}")
+        await websocket.close(code=1011, reason="Upstream unavailable")
+        return
+
+    async def c2u():
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    return
+                if msg.get("bytes") is not None:
+                    await upstream.send(msg["bytes"])
+                elif msg.get("text") is not None:
+                    await upstream.send(msg["text"])
+        except (WebSocketDisconnect, ConnectionClosed):
+            pass
+
+    async def u2c():
+        try:
+            async for frame in upstream:
+                if isinstance(frame, bytes):
+                    await websocket.send_bytes(frame)
+                else:
+                    await websocket.send_text(frame)
+        except (ConnectionClosed, WebSocketDisconnect, RuntimeError):
+            pass
+
+    t1 = asyncio.create_task(c2u())
+    t2 = asyncio.create_task(u2c())
+    try:
+        _done, pending = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+    finally:
+        await upstream.close()
