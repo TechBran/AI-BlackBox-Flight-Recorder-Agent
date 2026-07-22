@@ -350,17 +350,118 @@ SPEACHES_STATIC_PORT = 9099
 
 # On-box whisper model ids served by the Speaches member (§5.3 / §8 template).
 # Streaming defaults to the turbo ct2 build (parity with today's gemma-box path);
-# batch uses full large-v3 for quality. Wizard-overridable later (Q3/Q6).
+# batch uses full large-v3 for quality. These now double as the FAIL-OPEN
+# fallback the getters return when the hardware probe can't determine a fit — a
+# probe error, or a GPU whose VRAM is unverifiable (an lspci-discovered card):
+# the flagship 16 GB pairing, matching hardware.derive_tier's "unverifiable VRAM
+# => HIGH" stance. Wizard-overridable via the fresh-read sidecar (below).
 ONBOX_STT_STREAM_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
 ONBOX_STT_BATCH_MODEL = "Systran/faster-whisper-large-v3"
 
+# ── GPU-fit "best Whisper" table (M-B Task B1) ────────────────────────────────
+# "Best whisper that fits the GPU," auto-selected from the hardware probe's VRAM
+# — the STT analogue of rerank.py's RERANK_MODELS + hardware.probe().vram_mb
+# tiering. Ordered high→low; the FIRST tier whose min_vram_mb <= probed VRAM
+# wins; the final entry (min_vram_mb == 0) is the CPU / small-GPU floor. Within a
+# tier's budget streaming favors low latency (the turbo / smaller build) and
+# batch favors quality (the larger build). All ids are faster-whisper CT2 repos
+# from the same family the Speaches member already serves. Literal discipline:
+# whisper repo ids live ONLY here (mirrors the RERANK_MODELS "one home" rule).
+WHISPER_FIT = (
+    {   # 16 GB+ GPU (RTX 2000 Ada gate) — the flagship pairing == today's constants
+        "min_vram_mb": 16000,
+        "stream": "deepdml/faster-whisper-large-v3-turbo-ct2",
+        "batch":  "Systran/faster-whisper-large-v3",
+        "compute_type": "float16",
+        "tier": "gpu-16gb",
+    },
+    {   # 8 GB GPU — turbo stream (int8) stays; batch drops to int8 medium
+        "min_vram_mb": 8000,
+        "stream": "deepdml/faster-whisper-large-v3-turbo-ct2",
+        "batch":  "Systran/faster-whisper-medium",
+        "compute_type": "int8",
+        "tier": "gpu-8gb",
+    },
+    {   # CPU / <8 GB — int8 small stream + base batch (the floor)
+        "min_vram_mb": 0,
+        "stream": "Systran/faster-whisper-small",
+        "batch":  "Systran/faster-whisper-base",
+        "compute_type": "int8",
+        "tier": "cpu",
+    },
+)
+
+# Fresh-read sidecar (mirrors rerank.json's discipline, custom_servers.py E8
+# lesson): a FUTURE wizard writes the resolved {"stream": id, "batch": id} here
+# and the getters pick it up with NO restart. Absent today — the selection is
+# derived purely from the probe. Module attr so tests repoint it.
+WHISPER_FIT_SIDECAR_PATH = resolve("Manifest", "local_models", "whisper_fit.json")
+
+
+def read_whisper_fit_sidecar() -> dict:
+    """{"stream": id, "batch": id} from WHISPER_FIT_SIDECAR_PATH; {} fail-soft on
+    absent/corrupt/wrong-shape (mirrors read_download_state). FRESH read every
+    call — a wizard-written override applies with no restart, no cache."""
+    try:
+        data = json.loads(WHISPER_FIT_SIDECAR_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_whisper_fit() -> "dict | None":
+    """Best-fit WHISPER_FIT tier for THIS box from the hardware probe's VRAM, or
+    None when the probe can't determine a fit (a probe error, or a GPU whose VRAM
+    is unverifiable — an lspci-discovered card) so the getters fall back to
+    today's flagship constants. A CPU-only box (no GPU) resolves the int8 floor
+    tier — never the GPU flagship. Never raises; the probe itself is fail-soft
+    and 60 s-cached (hardware.probe)."""
+    try:
+        from Orchestrator import hardware  # stdlib-only import; cycle-proof
+        hw = hardware.probe()
+    except Exception:
+        return None
+    if not hw.get("gpu"):
+        # CPU-only — the int8 floor tier (best that fits with no GPU).
+        return WHISPER_FIT[-1]
+    vram = hw.get("vram_mb")
+    if not isinstance(vram, int):
+        # GPU present but VRAM unverifiable (lspci) — defer to the flagship
+        # constants (matches derive_tier's "unverifiable VRAM => HIGH").
+        return None
+    for tier in WHISPER_FIT:
+        if vram >= tier["min_vram_mb"]:
+            return tier
+    return None
+
+
+def _resolve_stt_id(kind: str) -> str:
+    """Resolve the on-box whisper `kind` ("stream" | "batch") id, FRESH + LIVE:
+      1. the fresh-read sidecar (future wizard override, per-kind),
+      2. the hardware-probe best-fit WHISPER_FIT tier,
+      3. today's flagship constant (probe failed / VRAM unverifiable).
+    Never raises."""
+    const = ONBOX_STT_STREAM_MODEL if kind == "stream" else ONBOX_STT_BATCH_MODEL
+    side = read_whisper_fit_sidecar().get(kind)
+    if isinstance(side, str) and side.strip():
+        return side.strip()
+    fit = resolve_whisper_fit()
+    if isinstance(fit, dict) and isinstance(fit.get(kind), str):
+        return fit[kind]
+    return const
+
 
 def stt_stream_model() -> str:
-    return ONBOX_STT_STREAM_MODEL
+    """The on-box streaming (realtime) whisper repo id, GPU-fit + sidecar-aware.
+    Only ever called on the on-box STT path (gated by onbox_stt_available()); when
+    the stack is off no live consumer invokes it, so cloud STT is unaffected."""
+    return _resolve_stt_id("stream")
 
 
 def stt_batch_model() -> str:
-    return ONBOX_STT_BATCH_MODEL
+    """The on-box file/batch whisper repo id, GPU-fit + sidecar-aware. Only ever
+    called on the on-box STT path (gated by onbox_stt_available())."""
+    return _resolve_stt_id("batch")
 
 
 def speaches_warm_url() -> str:
