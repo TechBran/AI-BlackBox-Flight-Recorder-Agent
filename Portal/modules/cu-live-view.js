@@ -5,6 +5,9 @@
 // warning is native-mode only, driven by display_arbiter, not this badge.)
 const POLL_MS = 4000;
 let _timer = null;
+// Latest sessions snapshot, read at click time so the pill's handler never
+// captures a stale session list (sessions rotate while the pill persists).
+let latest = { active: false, sessions: [] };
 
 async function fetchSessions() {
   try {
@@ -15,13 +18,16 @@ async function fetchSessions() {
 }
 
 function renderPill(state) {
+  latest = state;
   let pill = document.getElementById('cuInUsePill');
   if (!state.active) { if (pill) pill.remove(); return; }
   if (!pill) {
     pill = document.createElement('button');
     pill.id = 'cuInUsePill';
     pill.className = 'cu-inuse-pill';
-    pill.onclick = () => openLiveView(state.sessions[0]);
+    // Read `latest` at click time — never close over this render's snapshot,
+    // which would go stale as sessions rotate while the pill persists.
+    pill.onclick = () => openLiveView(latest.sessions && latest.sessions[0]);
     (document.getElementById('statusLine') || document.body).appendChild(pill);
   }
   // D14: concurrent virtual sessions → a COUNT badge, not an exclusive lock.
@@ -41,6 +47,8 @@ function openLiveView(session) {
 }
 
 export function initCuLiveView() {
+  // Re-entrancy guard: never leak a second polling interval on a re-init.
+  if (_timer !== null) { clearInterval(_timer); _timer = null; }
   const closeBtn = document.getElementById('cuLiveViewClose');
   if (closeBtn) closeBtn.onclick = () => {
     const panel = document.getElementById('cuLiveViewPanel');
