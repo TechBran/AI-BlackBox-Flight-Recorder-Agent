@@ -50,6 +50,11 @@ const PROVIDERS = [
         vendor: "Custom server",
         needsHint: "Register a custom model server hosting a speech-to-text model (e.g. whisper) in the Keys step.",
     },
+    {
+        id: "onbox",
+        vendor: "On-box (local)",
+        needsHint: "Set up the on-box model stack in the On-Box Models step (whisper runs locally — no cloud STT).",
+    },
 ];
 
 // Inline highlight for the selected card. The shared stylesheet only ships
