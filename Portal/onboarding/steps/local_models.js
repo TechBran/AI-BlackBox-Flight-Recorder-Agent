@@ -1,12 +1,50 @@
-// On-box local model stack step (M8) — PLACEHOLDER. Full UI lands in Task 8.4.
-// Registered now so the parity guard (a steps/<step>.js module must exist for
-// every STEPS entry) is satisfied and the wizard can advance past this step.
+// On-box local model stack step (M8). Reads GET /local-models/status (M1) and
+// lets the user download weights + deliberately activate STT/TTS/embeddings/
+// reranking on-box, per capability (D2: nothing activates implicitly). Every
+// status read is fail-open — the step renders even if the stack isn't
+// installed yet. Activation flips reuse existing endpoints:
+//   embeddings → GPU-idle preflight (blocking) → /embeddings/reembed → on done
+//                /toolvault/reload (§5.1 cache coherence)
+//   rerank     → /rerank/select {provider:'localstack'}
+//   stt / tts  → /local-models/capability (config seed flag; stt also pins
+//                STT_PROVIDER=onbox)
+import { stepSigilContext } from "../onboarding.js";
+
+let status = null;         // last GET /local-models/status
+let busy = {};             // per-capability activation in-flight guard
+let downloading = {};      // model key -> {completed,total,statusText}
+let pollTimer = null;      // /embeddings/status poll during the reembed cutover
+
+// Static §7 fallback so the table is meaningful before M1's status carries
+// per-tier recommendations. Keyed by a coarse tier: 'gpu' | 'cpu'.
+const REC_FALLBACK = {
+    gpu: {
+        embeddings: { label: "Qwen3-Embedding-8B (Q8_0, 4096-dim)", size: "~8 GB", note: "" },
+        rerank: { label: "Qwen3-Reranker-8B (Q8_0)", size: "~8.1 GB", note: "Sequential with the embedder (D13); validated by benchmark before selection." },
+        stt: { label: "whisper large-v3-turbo (stream) + large-v3 (files)", size: "~5 GB", note: "" },
+        tts: { label: "Qwen3-TTS 0.6B-CustomVoice (streaming) · 1.7B (files)", size: "~9 GB", note: "" },
+    },
+    cpu: {
+        embeddings: { label: "Qwen3-Embedding-0.6B (1024-dim)", size: "~0.6 GB", note: "Fast on CPU." },
+        rerank: { label: "Qwen3-Reranker-0.6B (CPU)", size: "~1.3 GB", note: "Latency-gated; may fall back to cloud." },
+        stt: { label: "whisper large-v3-turbo (int8)", size: "~1.6 GB", note: "Near-realtime for files; streaming may lag." },
+        tts: { label: "Cloud recommended", size: "—", note: "On-box TTS is far slower than realtime on CPU — offered as experimental only." },
+    },
+};
+
+const CAPS = [
+    { id: "embeddings", label: "Memory (embeddings)" },
+    { id: "rerank", label: "Search reranking" },
+    { id: "stt", label: "Speech-to-text" },
+    { id: "tts", label: "Text-to-speech" },
+];
+
 export async function render(container, { next, back, skip, sigil }) {
-    const s = sigil || { num: "05", backLabel: "memory & search" };
+    const sig = sigil || stepSigilContext("local_models");
     container.innerHTML = `
         <section class="ob-step ob-local-models">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>${s.num}</em></div>
+                <div class="ob-step-sigil-num"><em>${sig.num}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">ON-BOX</div>
             </aside>
@@ -15,12 +53,19 @@ export async function render(container, { next, back, skip, sigil }) {
                     <span class="ob-step-eyebrow-dot" aria-hidden="true"></span>
                     On-box model stack
                 </div>
-                <h1 class="ob-step-title">Run models <em>on the box</em>.</h1>
-                <p class="ob-step-lede">Setup for on-box speech, memory, and
-                    reranking is being prepared. You can skip for now.</p>
+                <h1 class="ob-step-title">Run speech, memory &amp; search <em>on the box</em>.</h1>
+                <p class="ob-step-lede">
+                    When your hardware allows, the BlackBox runs transcription,
+                    voice, memory embeddings, and search reranking locally — the
+                    only thing that leaves the box is the chat model itself.
+                    Everything here is optional and turned on one capability at a
+                    time. An explicit provider you've already chosen (e.g. your
+                    ElevenLabs key) is never overridden.
+                </p>
+                <div id="ob-lm-body"><div class="ob-loading">Checking your hardware&hellip;</div></div>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-lm-back">
-                        <span aria-hidden="true">&larr;</span> Back to ${s.backLabel ? s.backLabel.toLowerCase() : "memory & search"}
+                        <span aria-hidden="true">&larr;</span> Back to ${sig.backLabel ? sig.backLabel.toLowerCase() : "memory & search"}
                     </button>
                     <button type="button" class="ob-cta" id="ob-lm-continue">
                         Continue <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>
@@ -31,7 +76,285 @@ export async function render(container, { next, back, skip, sigil }) {
                 </nav>
             </div>
         </section>`;
-    document.getElementById("ob-lm-back").addEventListener("click", back);
-    document.getElementById("ob-lm-continue").addEventListener("click", next);
-    document.getElementById("ob-lm-skip").addEventListener("click", skip);
+    document.getElementById("ob-lm-back").addEventListener("click", () => { stopPoll(); back(); });
+    document.getElementById("ob-lm-continue").addEventListener("click", () => { stopPoll(); next(); });
+    document.getElementById("ob-lm-skip").addEventListener("click", () => { stopPoll(); skip(); });
+
+    status = await fetchJson("/local-models/status");
+    renderBody(container);
+}
+
+function tierKey() {
+    // 'gpu' when a usable GPU is present (status.gpu / tier high), else 'cpu'.
+    const t = (status && (status.tier || "")).toLowerCase();
+    const hasGpu = !!(status && status.gpu && (status.gpu.vram_mb || status.gpu.name));
+    return (hasGpu || t === "high") ? "gpu" : "cpu";
+}
+
+function rec(capId) {
+    const fromStatus = status && status.recommendations && status.recommendations[capId];
+    if (fromStatus && (fromStatus.label || fromStatus.model)) {
+        return { label: fromStatus.label || fromStatus.model,
+                 size: fromStatus.size_gb ? `~${fromStatus.size_gb} GB` : (fromStatus.size || ""),
+                 note: fromStatus.note || "", slug: fromStatus.slug || fromStatus.model || "" };
+    }
+    return REC_FALLBACK[tierKey()][capId] || { label: "—", size: "", note: "" };
+}
+
+function isActive(capId) {
+    const routing = (status && status.routing) || {};
+    const caps = (status && status.capabilities) || {};
+    if (capId === "stt") return (routing.stt || "").toLowerCase() === "onbox" || !!caps.stt;
+    if (capId === "tts") return (routing.tts || "").toLowerCase() === "onbox" || !!caps.tts;
+    if (capId === "embeddings") {
+        // active when the resolved embedding slug is a localstack slug.
+        return /-local$/.test(String(routing.embeddings || ""));
+    }
+    if (capId === "rerank") return /localstack/i.test(String(routing.rerank || ""));
+    return false;
+}
+
+function modelForCap(capId) {
+    // The downloadable weight entry backing this capability, if status lists it.
+    return ((status && status.models) || []).find((m) => m.capability === capId) || null;
+}
+
+function renderBody(container) {
+    const body = container.querySelector("#ob-lm-body");
+    if (!body) return;
+    const installed = !!(status && status.installed);
+    const healthy = !!(status && status.healthy);
+    const gpu = status && status.gpu;
+    const disk = (status && status.disk) || {};
+    const tier = tierKey();
+
+    const hwLine = gpu && (gpu.name || gpu.vram_mb)
+        ? `GPU: <strong>${escapeHtml(gpu.name || "NVIDIA")}</strong>${gpu.vram_mb ? ` · ${Math.round(gpu.vram_mb / 1024)} GB VRAM` : ""}`
+        : `No GPU detected — <strong>CPU tier</strong>`;
+    const diskLine = (disk.free_gb != null)
+        ? `Disk free: <strong>${escapeHtml(String(disk.free_gb))} GB</strong>${disk.required_gb ? ` (needs ~${escapeHtml(String(disk.required_gb))} GB)` : ""}`
+        : "";
+    const diskWarn = (disk.ok === false)
+        ? `<p class="ob-lm-warn">Not enough free disk for the full on-box weight set. Free up space before downloading.</p>` : "";
+    const cpuWarn = (tier === "cpu")
+        ? `<p class="ob-lm-warn">On a CPU box the local models run <strong>much slower than realtime</strong>. Embeddings + files are fine; live voice is best left on a cloud provider. Nothing here is turned on by default.</p>` : "";
+    const notInstalled = !installed
+        ? `<p class="ob-lm-warn">The on-box stack isn't installed yet. Re-run <code>install.sh</code> (Step 2f) to add it, then return here to download models.</p>` : "";
+    const swapNote = `<p class="ob-lm-note">Voice and search share one GPU and take turns. The <strong>first</strong> interaction after you switch between talking and searching takes about <strong>6–10 seconds</strong> while models swap; after an idle spell the first use also takes a few seconds to warm up. Everything in between is fast.</p>`;
+
+    body.innerHTML = `
+        <div class="ob-lm-hw">
+            <div class="ob-lm-hw-line">${hwLine}${diskLine ? ` &nbsp;·&nbsp; ${diskLine}` : ""}</div>
+            ${installed ? `<div class="ob-lm-hw-badge ${healthy ? "ok" : "warn"}">${healthy ? "Stack healthy" : "Stack installed"}</div>` : ""}
+        </div>
+        ${notInstalled}${diskWarn}${cpuWarn}
+        <div class="ob-lm-caps">${CAPS.map(renderCapRow).join("")}</div>
+        ${swapNote}
+        <p id="ob-lm-hint" class="ob-lm-hint" hidden></p>`;
+
+    CAPS.forEach((c) => wireCapRow(container, c.id));
+}
+
+function renderCapRow(cap) {
+    const r = rec(cap.id);
+    const active = isActive(cap.id);
+    const m = modelForCap(cap.id);
+    const dl = downloading[m && m.key];
+    const downloaded = !m || m.downloaded === true;
+
+    let control;
+    if (dl) {
+        const pct = dl.total ? Math.min(100, Math.floor((dl.completed / dl.total) * 100)) : 0;
+        control = `<div class="ob-lm-progress"><div class="ob-lm-progress-track"><div class="ob-lm-progress-fill" style="width:${pct}%"></div></div><span class="ob-lm-progress-text">${pct}% ${escapeHtml(dl.statusText || "downloading")}</span></div>`;
+    } else if (!downloaded) {
+        control = `<button type="button" class="ob-lm-btn" data-dl="${escapeHtml(m.key)}">Download ${escapeHtml(r.size || "")}</button>`;
+    } else if (active) {
+        control = `<button type="button" class="ob-lm-btn ob-lm-btn-on" data-off="${cap.id}">On-box active — turn off</button>`;
+    } else {
+        control = `<button type="button" class="ob-lm-btn ob-lm-btn-activate" data-on="${cap.id}">Use on-box</button>`;
+    }
+
+    return `
+        <div class="ob-lm-cap" data-cap="${cap.id}">
+            <div class="ob-lm-cap-head">
+                <span class="ob-lm-cap-name">${escapeHtml(cap.label)}${active ? ' <span class="ob-lm-dot" title="On-box active">●</span>' : ""}</span>
+                <span class="ob-lm-cap-model">${escapeHtml(r.label)}${r.size ? ` · ${escapeHtml(r.size)}` : ""}</span>
+            </div>
+            ${r.note ? `<p class="ob-lm-cap-note">${escapeHtml(r.note)}</p>` : ""}
+            <div class="ob-lm-cap-action">${control}</div>
+        </div>`;
+}
+
+function wireCapRow(container, capId) {
+    const row = container.querySelector(`.ob-lm-cap[data-cap="${capId}"]`);
+    if (!row) return;
+    const dlBtn = row.querySelector("[data-dl]");
+    if (dlBtn) dlBtn.addEventListener("click", () => startDownload(container, dlBtn.getAttribute("data-dl")));
+    const onBtn = row.querySelector("[data-on]");
+    if (onBtn) onBtn.addEventListener("click", () => activate(container, capId, true));
+    const offBtn = row.querySelector("[data-off]");
+    if (offBtn) offBtn.addEventListener("click", () => activate(container, capId, false));
+}
+
+// ── Downloads (NDJSON progress, cloned from the embeddings-pull pattern) ──
+async function startDownload(container, key) {
+    if (downloading[key]) return;
+    downloading[key] = { completed: 0, total: 0, statusText: "starting" };
+    renderBody(container);
+    try {
+        const r = await fetch("/local-models/download", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: key }),
+        });
+        if (!r.ok && r.status !== 409) throw new Error(`download returned ${r.status}`);
+        // Stream NDJSON lines: {model,status,completed,total}. If the body
+        // isn't streamable (409 already-running / older backend), fall back
+        // to a status refresh.
+        if (r.body && r.body.getReader) {
+            const reader = r.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += dec.decode(value, { stream: true });
+                let nl;
+                while ((nl = buf.indexOf("\n")) >= 0) {
+                    const line = buf.slice(0, nl).trim();
+                    buf = buf.slice(nl + 1);
+                    if (!line) continue;
+                    try {
+                        const p = JSON.parse(line);
+                        downloading[key] = { completed: Number(p.completed) || downloading[key].completed,
+                                             total: Number(p.total) || downloading[key].total,
+                                             statusText: p.status || "downloading" };
+                        updateDownloadBar(container, key);
+                    } catch (_) { /* skip malformed line */ }
+                }
+            }
+        }
+    } catch (e) {
+        showHint(container, `Couldn't download: ${e.message}. Try again.`, true);
+    }
+    delete downloading[key];
+    status = await fetchJson("/local-models/status");  // reflect downloaded=true
+    renderBody(container);
+}
+
+function updateDownloadBar(container, key) {
+    const dl = downloading[key];
+    const row = [...container.querySelectorAll(".ob-lm-cap")]
+        .find((el) => (modelForCap(el.getAttribute("data-cap")) || {}).key === key);
+    const fill = row && row.querySelector(".ob-lm-progress-fill");
+    const text = row && row.querySelector(".ob-lm-progress-text");
+    if (!fill || !text || !dl) { renderBody(container); return; }
+    const pct = dl.total ? Math.min(100, Math.floor((dl.completed / dl.total) * 100)) : 0;
+    fill.style.width = pct + "%";
+    text.textContent = `${pct}% ${dl.statusText || "downloading"}`;
+}
+
+// ── Per-capability activation ────────────────────────────────────────────
+async function activate(container, capId, on) {
+    if (busy[capId]) return;
+    busy[capId] = true;
+    try {
+        if (capId === "embeddings") return await activateEmbeddings(container, on);
+        if (capId === "rerank") return await activateRerank(container, on);
+        // stt / tts → the seed-flag endpoint (stt also pins STT_PROVIDER).
+        const r = await fetch("/local-models/capability", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ capability: capId, enabled: on }),
+        });
+        if (!r.ok) throw new Error(await safeDetail(r));
+        status = await fetchJson("/local-models/status");
+        renderBody(container);
+    } catch (e) {
+        showHint(container, `Couldn't change ${capId}: ${e.message}`, true);
+    } finally {
+        busy[capId] = false;
+    }
+}
+
+async function activateRerank(container, on) {
+    const r = await fetch("/rerank/select", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            provider: "localstack",
+            model: rec("rerank").slug || "qwen3-reranker-8b-local",
+            enabled: on,
+        }),
+    });
+    if (!r.ok) throw new Error(await safeDetail(r));
+    status = await fetchJson("/local-models/status");
+    renderBody(container);
+}
+
+async function activateEmbeddings(container, on) {
+    if (!on) {
+        showHint(container, "To move memory back to cloud, pick a cloud model in the Memory step — the on-box corpus stays searchable meanwhile.", false);
+        return;
+    }
+    // BLOCKING GPU-idle precondition (Phase-2 Step-0): the retrieval group
+    // lazy-loads ~11.5-13GB on the first re-embed and OOMs if the old pinned
+    // embedder/reranker is still resident.
+    const pf = await fetchJson("/local-models/gpu-preflight");
+    if (pf && pf.ok === false) {
+        showHint(container, pf.detail || "Free the GPU before moving memory on-box, then retry.", true);
+        return;
+    }
+    const target = rec("embeddings").slug || (tierKey() === "gpu" ? "qwen3-embedding-8b-local" : "qwen3-embedding-0.6b-local");
+    const r = await fetch("/embeddings/reembed", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+    });
+    if (r.status === 409) { showHint(container, "A memory rebuild is already running — see the Memory step for progress.", false); startEmbedPoll(container, target); return; }
+    if (!r.ok) throw new Error(await safeDetail(r));
+    showHint(container, "Rebuilding your memory index on-box. Voice features may be slow until it finishes — track detailed progress in the Memory step.", false);
+    startEmbedPoll(container, target);
+}
+
+// Poll /embeddings/status; when the cutover job is done, fire /toolvault/reload
+// (§5.1 cache-coherence: ToolVault + code embeddings must re-embed at the new
+// dimension or the first hot query mixes dims).
+function startEmbedPoll(container, target) {
+    stopPoll();
+    pollTimer = setInterval(async () => {
+        const es = await fetchJson("/embeddings/status");
+        const job = es && es.job;
+        if (job && job.state === "running") {
+            const pct = job.total ? Math.floor((job.done / job.total) * 100) : 0;
+            showHint(container, `Rebuilding memory on-box: ${job.done || 0}/${job.total || "?"} (${pct}%)…`, false);
+            return;
+        }
+        stopPoll();
+        if (es && (es.active || "").endsWith("-local")) {
+            await fetch("/toolvault/reload", { method: "POST" }).catch(() => {});
+            showHint(container, "On-box memory active. Tool + code search caches refreshed.", false);
+        }
+        status = await fetchJson("/local-models/status");
+        renderBody(container);
+    }, 3000);
+}
+
+function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// ── helpers ──────────────────────────────────────────────────────────────
+function showHint(container, msg, isError) {
+    const hint = container.querySelector("#ob-lm-hint");
+    if (!hint) return;
+    hint.className = "ob-lm-hint" + (isError ? " ob-lm-hint-error" : "");
+    hint.textContent = msg;
+    hint.hidden = false;
+}
+async function fetchJson(url) {
+    try { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) return null; return await r.json(); }
+    catch (_) { return null; }
+}
+async function safeDetail(r) {
+    try { const j = await r.json(); return j.detail || `HTTP ${r.status}`; } catch (_) { return `HTTP ${r.status}`; }
+}
+function escapeHtml(s) {
+    if (s == null) return "";
+    return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }

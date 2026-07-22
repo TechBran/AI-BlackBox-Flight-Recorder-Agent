@@ -3313,3 +3313,34 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 @media (max-width: 720px) {
     .ob-hub-controls { width: 100%; }
 }
+
+/* ── On-box local model stack step (M8) ───────────────────────────── */
+.ob-lm-hw { display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 12px 14px; border: 1px solid var(--ob-border, #2a2a33);
+    border-radius: 8px; margin: 4px 0 14px; }
+.ob-lm-hw-line { font-size: 0.92rem; opacity: 0.9; }
+.ob-lm-hw-badge { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .04em;
+    padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+.ob-lm-hw-badge.ok { background: rgba(60,180,120,.18); color: #6fdca0; }
+.ob-lm-hw-badge.warn { background: rgba(220,170,60,.18); color: #e6c56b; }
+.ob-lm-warn { color: #e6b45b; font-size: 0.86rem; margin: 6px 0; }
+.ob-lm-note { color: var(--ob-muted, #9aa0ac); font-size: 0.82rem; margin: 12px 0 0; }
+.ob-lm-caps { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; }
+.ob-lm-cap { border: 1px solid var(--ob-border, #2a2a33); border-radius: 8px; padding: 12px 14px; }
+.ob-lm-cap-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.ob-lm-cap-name { font-weight: 600; }
+.ob-lm-cap-model { font-size: 0.82rem; opacity: 0.8; }
+.ob-lm-cap-note { font-size: 0.78rem; opacity: 0.7; margin: 4px 0 0; }
+.ob-lm-dot { color: #6fdca0; font-size: 0.7rem; }
+.ob-lm-cap-action { margin-top: 10px; }
+.ob-lm-btn { font: inherit; font-size: 0.86rem; padding: 7px 14px; border-radius: 6px;
+    border: 1px solid var(--ob-accent, #6f8cff); background: transparent;
+    color: var(--ob-accent, #6f8cff); cursor: pointer; }
+.ob-lm-btn:hover { background: rgba(111,140,255,.12); }
+.ob-lm-btn-on { border-color: #6fdca0; color: #6fdca0; }
+.ob-lm-progress { display: flex; align-items: center; gap: 10px; }
+.ob-lm-progress-track { flex: 1; height: 6px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; }
+.ob-lm-progress-fill { height: 100%; background: var(--ob-accent, #6f8cff); transition: width .2s; }
+.ob-lm-progress-text { font-size: 0.78rem; opacity: 0.8; white-space: nowrap; }
+.ob-lm-hint { font-size: 0.84rem; margin-top: 12px; color: var(--ob-muted, #9aa0ac); }
+.ob-lm-hint-error { color: #e6675b; }
