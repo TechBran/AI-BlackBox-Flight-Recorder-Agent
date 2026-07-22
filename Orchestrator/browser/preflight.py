@@ -112,6 +112,27 @@ def check_remote_tools() -> dict:
     return _check("remote", "ok", "vncdotool + adb present")
 
 
+def check_virtual_display() -> dict:
+    if not shutil.which("Xvfb"):
+        return _check("virtual_display", "fail",
+                      "Xvfb not installed — per-session CU virtual displays unavailable",
+                      "Install xvfb (MUST_HAVE in Scripts/onboarding/system-packages.txt); "
+                      "re-run Scripts/install.sh")
+    return _check("virtual_display", "ok", "Xvfb present (per-session CU displays)")
+
+
+def check_live_view() -> dict:
+    have_ws = bool(shutil.which("websockify"))
+    have_novnc = os.path.isdir("/usr/share/novnc")
+    if have_ws and have_novnc:
+        return _check("live_view", "ok", "websockify + noVNC present (live view enabled)")
+    missing = [n for n, ok in (("websockify", have_ws), ("novnc", have_novnc)) if not ok]
+    return _check("live_view", "warn",
+                  f"Live view degraded — missing {', '.join(missing)}",
+                  "Install websockify/novnc (SHOULD_HAVE in system-packages.txt) to watch "
+                  "CU sessions in the Portal/Android live-view panel")
+
+
 _RANK = {"ok": 0, "warn": 1, "fail": 2}
 
 
@@ -130,6 +151,8 @@ def run_preflight(skip_screenshot: bool = False) -> dict:
         ("resolution", lambda: check_resolution(force=not skip_screenshot)),
         ("api_keys", lambda: check_api_keys()),
         ("chrome", lambda: check_chrome()),
+        ("virtual_display", lambda: check_virtual_display()),
+        ("live_view", lambda: check_live_view()),
         ("remote", lambda: check_remote_tools()),
     ]
     checks = []

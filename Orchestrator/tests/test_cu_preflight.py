@@ -61,7 +61,8 @@ def _canned(id_, status):
 
 
 _CHECK_NAMES = ["check_display", "check_input_backend", "check_resolution",
-                "check_api_keys", "check_chrome", "check_remote_tools"]
+                "check_api_keys", "check_chrome", "check_virtual_display",
+                "check_live_view", "check_remote_tools"]
 
 
 def test_aggregation_precedence(monkeypatch):
@@ -72,13 +73,13 @@ def test_aggregation_precedence(monkeypatch):
                 preflight, name,
                 lambda *a, _n=name, _s=status, **kw: _canned(_n, _s))
 
-    set_all(["ok"] * 6)
+    set_all(["ok"] * 8)
     assert preflight.run_preflight(skip_screenshot=True)["status"] == "ok"
 
-    set_all(["ok", "warn", "ok", "ok", "ok", "ok"])
+    set_all(["ok", "warn", "ok", "ok", "ok", "ok", "ok", "ok"])
     assert preflight.run_preflight(skip_screenshot=True)["status"] == "warn"
 
-    set_all(["ok", "warn", "ok", "fail", "ok", "warn"])
+    set_all(["ok", "warn", "ok", "fail", "ok", "ok", "ok", "warn"])
     assert preflight.run_preflight(skip_screenshot=True)["status"] == "fail"
 
 
@@ -92,6 +93,30 @@ def test_raising_check_degrades(monkeypatch):
     assert display["status"] == "fail"
     assert "boom" in display["detail"]
     assert report["status"] == "fail"
+
+
+def test_virtual_display_missing_xvfb_fails(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda b: None)
+    c = preflight.check_virtual_display()
+    assert c["status"] == "fail"
+    assert "xvfb" in c["remediation"].lower()
+
+
+def test_virtual_display_present_ok(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda b: f"/usr/bin/{b}")
+    assert preflight.check_virtual_display()["status"] == "ok"
+
+
+def test_live_view_missing_deps_warns(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda b: None)
+    monkeypatch.setattr(preflight.os.path, "isdir", lambda p: False)
+    c = preflight.check_live_view()
+    assert c["status"] == "warn"  # SHOULD_HAVE — never fails the aggregate
+
+
+def test_preflight_includes_virtual_display_check():
+    ids = {c["id"] for c in preflight.run_preflight(skip_screenshot=True)["checks"]}
+    assert "virtual_display" in ids and "live_view" in ids
 
 
 def test_preflight_route():
