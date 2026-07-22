@@ -3,6 +3,7 @@ from Orchestrator.stt.catalog import build_stt_catalog
 
 def test_three_providers_in_order(monkeypatch):
     monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)  # hermetic vs registry
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: False)  # hermetic vs on-box stack
     assert [p["id"] for p in build_stt_catalog()] == ["openai", "google", "elevenlabs"]
 
 def test_provider_shape():
@@ -32,8 +33,25 @@ def test_available_flags_follow_stt_availability(monkeypatch):
     assert g["google"]["available"] is True
     assert g["elevenlabs"]["available"] is True
 
+def test_onbox_provider_emitted_when_available(monkeypatch):
+    # SoT: the on-box card's availability is catalog-driven (not hardcoded false).
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)  # hermetic vs registry
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: True)
+    g = {p["id"]: p for p in build_stt_catalog()}
+    assert "onbox" in g, "onbox provider must be emitted when the on-box stack is live"
+    assert g["onbox"]["available"] is True
+    assert g["onbox"]["models"]["streaming"] and g["onbox"]["models"]["file"]
+
+
+def test_onbox_provider_absent_when_unavailable(monkeypatch):
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: False)
+    assert "onbox" not in {p["id"] for p in build_stt_catalog()}
+
+
 def test_catalog_route_ok(monkeypatch):
     monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)  # hermetic vs registry
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: False)  # hermetic vs on-box stack
     import Orchestrator.app  # noqa: F401  -- side-effect: registers routes onto the shared app
     from fastapi.testclient import TestClient
     from Orchestrator.checkpoint import app

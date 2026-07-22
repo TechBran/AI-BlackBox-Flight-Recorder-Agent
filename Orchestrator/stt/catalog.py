@@ -1,5 +1,10 @@
 from Orchestrator import config
-from Orchestrator.stt.resolve import stt_availability, local_stt_available, local_streaming_stt_available
+from Orchestrator.stt.resolve import (
+    stt_availability,
+    local_stt_available,
+    local_streaming_stt_available,
+    onbox_stt_available,
+)
 
 
 def build_stt_catalog() -> list:
@@ -42,5 +47,24 @@ def build_stt_catalog() -> list:
                       + ("Realtime streaming + files; free + private."
                          if streams else "File transcription only; free + private.")),
             "models": {"streaming": "realtime" if streams else None, "file": "local"},
+        })
+    # On-box (local) STT — the on-box model stack's Speaches (faster-whisper) member.
+    # Independent of the custom-server registry (available iff the on-box stack is
+    # installed+healthy AND STT is enabled in [local_models]). Appended only when live,
+    # mirroring the conditional 'local' append above so the catalog stays the single
+    # source of truth for the transcription-step card's availability: present+Ready when
+    # the on-box stack is up, absent (card falls back to "Needs setup") otherwise.
+    if onbox_stt_available():
+        try:
+            from Orchestrator import local_stack
+            stream_model = local_stack.stt_stream_model()
+            batch_model = local_stack.stt_batch_model()
+        except Exception:
+            stream_model, batch_model = "whisper (realtime)", "whisper"
+        providers.append({
+            "id": "onbox", "label": "On-box (local)", "available": True,
+            "blurb": ("On-box faster-whisper via the local model stack — realtime streaming + "
+                      "files, free + fully private (no cloud STT, no API key)."),
+            "models": {"streaming": stream_model, "file": batch_model},
         })
     return providers

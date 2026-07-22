@@ -19,6 +19,11 @@ def test_transcription_offers_onbox_provider():
         "transcription.js PROVIDERS must include an 'onbox' (on-box local STT) "
         f"option; found {ids}"
     )
-    # The distinct on-box token must not be conflated with the custom-server
-    # 'local' token (spec §5.3 — they route to different backends).
-    assert "local" in ids and "onbox" in ids
+    # 'onbox' and 'local' are DISTINCT provider ids (spec §5.3 — the custom-server
+    # 'local' route and the on-box stack route to different backends). Guard that
+    # the new option was added alongside 'local', not by renaming/replacing it, so
+    # both cards remain present as separate entries.
+    assert "local" in ids, f"the custom-server 'local' option must remain; found {ids}"
+    assert ids.count("onbox") == 1 and ids.count("local") == 1, (
+        f"'onbox' and 'local' must each appear exactly once as distinct ids; found {ids}"
+    )

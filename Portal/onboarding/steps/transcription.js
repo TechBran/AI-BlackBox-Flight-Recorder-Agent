@@ -1,10 +1,13 @@
 // Transcription (speech-to-text) step — fifth screen of the onboarding wizard.
-// The BlackBox can transcribe voice with one of two providers:
+// The BlackBox can transcribe voice with one of several providers:
 //
 //   - OpenAI: gpt-realtime-whisper streaming + gpt-4o-transcribe for files.
 //     Uses the OpenAI API key entered in the Keys step.
 //   - Google: Cloud Speech-to-Text v2 (chirp_2) streaming + files. Uses a
 //     Google service-account JSON credential.
+//   - ElevenLabs: Scribe v2 realtime + files. Uses the ElevenLabs API key.
+//   - Custom server: a registered OpenAI-compatible LAN whisper server.
+//   - On-box (local): faster-whisper via the on-box model stack — no cloud, no key.
 //
 // STT_PROVIDER is a *preference*, not a secret. An empty value means "auto"
 // (the backend picks whichever provider is configured). This step lets the
@@ -13,10 +16,10 @@
 // This step:
 //   1. GET /stt/catalog            — per-provider {available, blurb, models}
 //      GET /onboarding/current-config — stt.provider ("" == auto)
-//   2. Render two radio-style provider cards (only one selected). Each shows
-//      label, blurb, streaming + file model names, and a Ready / Needs setup
-//      badge. The currently-selected provider is pre-checked; "" shows an
-//      "Auto" note and nothing explicitly checked.
+//   2. Render one radio-style provider card per PROVIDERS entry (only one
+//      selected). Each shows label, blurb, streaming + file model names, and a
+//      Ready / Needs setup badge. The currently-selected provider is pre-checked;
+//      "" shows an "Auto" note and nothing explicitly checked.
 //   3. Selecting a card POSTs /onboarding/save {secrets:{STT_PROVIDER:id}}
 //      (mirrors how api_keys persists), marks it selected, enables Continue.
 //   4. Unavailable providers stay informational — the card points the user at
@@ -83,14 +86,14 @@ export async function render(container, { next, back, skip, sigil }) {
                     Choose how the BlackBox <em>hears you</em>.
                 </h1>
                 <p class="ob-step-lede">
-                    Voice features transcribe what you say with one of two
-                    providers. <strong>OpenAI</strong> uses
-                    <code>gpt-realtime-whisper</code> for live streaming and
-                    <code>gpt-4o-transcribe</code> for files, billed to your
-                    OpenAI key. <strong>Google</strong> uses Cloud
-                    Speech-to-Text (<code>chirp&#95;2</code>) via a
-                    service-account JSON. Leave it on <strong>Auto</strong> and
-                    the BlackBox uses whichever you've configured.
+                    Voice features transcribe what you say with one of several
+                    providers &mdash; cloud (<strong>OpenAI</strong>,
+                    <strong>Google</strong>, <strong>ElevenLabs</strong>), a
+                    <strong>custom</strong> LAN whisper server, or fully
+                    <strong>on-box</strong> (faster-whisper via the on-box model
+                    stack, no cloud and no key). Leave it on
+                    <strong>Auto</strong> and the BlackBox uses whichever you've
+                    configured.
                 </p>
                 <div id="ob-stt-grid" class="ob-cli-agent-grid">
                     <div class="ob-loading">Loading transcription options&hellip;</div>
