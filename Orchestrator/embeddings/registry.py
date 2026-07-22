@@ -111,8 +111,8 @@ EMBEDDING_MODELS = {
     },
     "qwen3-embedding-8b": {
         "provider": "ollama", "model_id": "qwen3-embedding:8b", "dims": 4096,
-        "label": "Qwen3 8B (local, max quality)", "ram_gb": 6.0, "cost_per_1m_tokens": 0.0,
-        "privacy": "local", "quality_note": "MTEB #1 open-source; slow re-embeds on CPU",
+        "label": "Qwen3 8B (Ollama · Q4)", "ram_gb": 6.0, "cost_per_1m_tokens": 0.0,
+        "privacy": "local", "quality_note": "MTEB #1 open-source; Ollama-served Q4_K_M (~6GB) — the on-box Q8_0 build is higher fidelity",
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         "keep_alive": "5m",
         "semantic_threshold": 0.50,  # documented default; local Qwen scores run low (0.6b uses 0.54), 16-row store not live-measurable
@@ -130,9 +130,9 @@ EMBEDDING_MODELS = {
     },
     "qwen3-embedding-8b-local": {
         "provider": "localstack", "model_id": "embed-qwen3-8b", "dims": 4096,
-        "label": "Qwen3 8B (on-box, max quality)", "ram_gb": 8.1, "cost_per_1m_tokens": 0.0,
+        "label": "Qwen3 8B (on-box CUDA · Q8_0 · max quality)", "ram_gb": 8.1, "cost_per_1m_tokens": 0.0,
         "privacy": "local",
-        "quality_note": "MTEB #1 open-source; GPU-served on-box via llama-swap (Q8_0)",
+        "quality_note": "MTEB #1 open-source; GPU-served on-box via llama-swap (Q8_0 — highest-fidelity local build)",
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         # On-box keep-warm is the llama-swap member ttl (0 = warm), read by
         # store.get_keep_alive — NOT keep_alive.json. Registry default = cold.
