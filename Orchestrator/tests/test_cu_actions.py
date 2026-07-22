@@ -8,8 +8,11 @@ from Orchestrator.browser import actions as A
 def fake_resolution(monkeypatch):
     def _set(w, h):
         # NATIVE_MODE pinned True so the tests don't depend on this box's
-        # computer_use config — to_native reads both lazily from config.
+        # computer_use config. to_native reads the resolution lazily from config,
+        # but the native/virtual decision is now the ActionExecutor INSTANCE flag
+        # (captured from actions.NATIVE_MODE at construction, M9), so pin that too.
         monkeypatch.setattr("Orchestrator.browser.config.NATIVE_MODE", True)
+        monkeypatch.setattr("Orchestrator.browser.actions.NATIVE_MODE", True)
         monkeypatch.setattr("Orchestrator.browser.config.detect_native_resolution",
                             lambda force=False: (w, h))
     return _set
@@ -49,6 +52,9 @@ def test_scale_coord_none_passthrough(fake_resolution):
 
 
 def test_non_native_mode_identity(monkeypatch):
+    # native/virtual is the instance flag now (M9): pin the actions-module global
+    # so the default-constructed executor captures native_mode=False.
     monkeypatch.setattr("Orchestrator.browser.config.NATIVE_MODE", False)
+    monkeypatch.setattr("Orchestrator.browser.actions.NATIVE_MODE", False)
     ex = A.ActionExecutor(coord_space=A.COORD_SPACE_GEMINI)
     assert ex.to_native(640, 360) == (640, 360)

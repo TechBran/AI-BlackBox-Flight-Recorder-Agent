@@ -144,7 +144,7 @@ def _run_xdotool(*args, display_number: int = ACTIVE_DISPLAY) -> subprocess.Comp
     if NATIVE_MODE:
         env = {**os.environ, **get_native_env()}
     else:
-        env = get_display().get_env()
+        env = {"DISPLAY": f":{display_number}", "PATH": "/usr/bin:/usr/local/bin:/bin"}
     cmd = ["xdotool"] + list(args)
     try:
         return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=10)
@@ -210,13 +210,15 @@ class ActionExecutor:
     ydotool (Wayland-compatible) or xdotool (X11-only) accordingly.
     """
 
-    def __init__(self, display_number: int = DISPLAY_NUMBER, coord_space: str = COORD_SPACE_ANTHROPIC):
+    def __init__(self, display_number: int = DISPLAY_NUMBER,
+                 coord_space: str = COORD_SPACE_ANTHROPIC, native_mode: bool = None):
         self.display_number = display_number
         if coord_space not in _COORD_SPACES:
             raise ValueError(
                 f"unknown coord_space {coord_space!r}; expected one of {_COORD_SPACES}")
         self.coord_space = coord_space
         self.use_ydotool = _use_ydotool()
+        self.native_mode = NATIVE_MODE if native_mode is None else native_mode
 
     def to_native(self, x: int, y: int) -> tuple:
         """Convert model-space coordinates to native desktop pixels using the
@@ -227,9 +229,9 @@ class ActionExecutor:
         resolution changes are both honored at call time.
         """
         from Orchestrator.browser.config import (
-            detect_native_resolution, CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT, NATIVE_MODE,
+            detect_native_resolution, CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT,
         )
-        if not NATIVE_MODE:
+        if not self.native_mode:
             return int(x), int(y)
         w, h = detect_native_resolution()
         if self.coord_space == COORD_SPACE_GEMINI:
@@ -262,7 +264,7 @@ class ActionExecutor:
         if self.use_ydotool:
             _run_ydotool("mousemove", "--absolute", "--", str(x), str(y))
         else:
-            _run_xdotool("mousemove", "--sync", str(x), str(y))
+            _run_xdotool("mousemove", "--sync", str(x), str(y), display_number=self.display_number)
 
     def _click_button(self, button: int) -> None:
         """button: 1=left, 2=middle, 3=right (xdotool numbering)."""
@@ -271,7 +273,7 @@ class ActionExecutor:
             btn_map = {1: "0xC0", 2: "0xC2", 3: "0xC1"}
             _run_ydotool("click", btn_map.get(button, "0xC0"))
         else:
-            _run_xdotool("click", str(button))
+            _run_xdotool("click", str(button), display_number=self.display_number)
 
     def _click_button_repeat(self, button: int, repeat: int, delay_ms: int = 80) -> None:
         if self.use_ydotool:
@@ -279,7 +281,7 @@ class ActionExecutor:
             _run_ydotool("click", "--repeat", str(repeat),
                          "--next-delay", str(delay_ms), btn_map.get(button, "0xC0"))
         else:
-            _run_xdotool("click", "--repeat", str(repeat), "--delay", str(delay_ms), str(button))
+            _run_xdotool("click", "--repeat", str(repeat), "--delay", str(delay_ms), str(button), display_number=self.display_number)
 
     def _button_down(self, button: int) -> None:
         if self.use_ydotool:
@@ -287,20 +289,20 @@ class ActionExecutor:
             down_map = {1: "0x40", 2: "0x42", 3: "0x41"}
             _run_ydotool("click", down_map.get(button, "0x40"))
         else:
-            _run_xdotool("mousedown", str(button))
+            _run_xdotool("mousedown", str(button), display_number=self.display_number)
 
     def _button_up(self, button: int) -> None:
         if self.use_ydotool:
             up_map = {1: "0x80", 2: "0x82", 3: "0x81"}
             _run_ydotool("click", up_map.get(button, "0x80"))
         else:
-            _run_xdotool("mouseup", str(button))
+            _run_xdotool("mouseup", str(button), display_number=self.display_number)
 
     def _type_text(self, text: str) -> None:
         if self.use_ydotool:
             _run_ydotool("type", "--key-delay", "12", text)
         else:
-            _run_xdotool("type", "--clearmodifiers", "--delay", "12", text)
+            _run_xdotool("type", "--clearmodifiers", "--delay", "12", text, display_number=self.display_number)
 
     def _key_combo(self, text: str) -> None:
         """Press a key combo like 'Return' or 'ctrl+a'."""
@@ -310,7 +312,7 @@ class ActionExecutor:
             # Fall through: unknown key → try xdotool (silent no-op on Wayland,
             # but better than crashing — and useful if XWayland window is focused)
             print(f"[actions] ydotool can't translate key '{text}', falling through to xdotool")
-        _run_xdotool("key", "--clearmodifiers", text)
+        _run_xdotool("key", "--clearmodifiers", text, display_number=self.display_number)
 
     def _key_down(self, text: str) -> None:
         if self.use_ydotool:
@@ -318,7 +320,7 @@ class ActionExecutor:
             if codes:
                 _run_ydotool("key", *[f"{kc}:1" for kc in codes])
                 return
-        _run_xdotool("keydown", "--clearmodifiers", text)
+        _run_xdotool("keydown", "--clearmodifiers", text, display_number=self.display_number)
 
     def _key_up(self, text: str) -> None:
         if self.use_ydotool:
@@ -327,7 +329,7 @@ class ActionExecutor:
                 # Release in reverse order
                 _run_ydotool("key", *[f"{kc}:0" for kc in reversed(codes)])
                 return
-        _run_xdotool("keyup", "--clearmodifiers", text)
+        _run_xdotool("keyup", "--clearmodifiers", text, display_number=self.display_number)
 
     # --- Click actions ---
 
@@ -421,7 +423,7 @@ class ActionExecutor:
             button_map = {"up": "4", "down": "5", "left": "6", "right": "7"}
             button = button_map.get(direction, "5")
             for _ in range(clicks):
-                _run_xdotool("click", button)
+                _run_xdotool("click", button, display_number=self.display_number)
                 time.sleep(0.02)
         return {"success": True, "message": f"Scroll {direction} x{clicks} ticks at {coordinate}"}
 

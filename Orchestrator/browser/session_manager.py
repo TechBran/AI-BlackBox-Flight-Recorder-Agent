@@ -65,6 +65,8 @@ class ComputerUseSession:
         self.device_id: str = device_id
         self.created_at: float = time.time()
         self.chrome = ChromeInstance(operator=operator)
+        self.native_mode: bool = False       # virtual by default; native is opt-in (M9)
+        self.display = None                  # DisplayHandle when virtual, else None
         self.actions = ActionExecutor()
         self.conversation_history: list = []  # Anthropic-format messages
         self.screenshot_count: int = 0
@@ -89,6 +91,23 @@ class ComputerUseSession:
         self.stop_requested: bool = False
         self.prompt_queue: List[str] = []
         self._pending_dequeue: Optional[str] = None  # Stashed next prompt for auto-dequeue
+
+    @property
+    def display_number(self) -> int:
+        from Orchestrator.browser.config import ACTIVE_DISPLAY
+        return self.display.display_num if self.display is not None else ACTIVE_DISPLAY
+
+    def capture_screenshot_bytes(self) -> bytes:
+        """Screenshot THIS session's surface. Branches on whether a virtual
+        display is ALLOCATED (not on native_mode), so with display=None it is
+        byte-identical to the legacy capture_screenshot() path — additive and
+        behavior-preserving until 9.4 allocates a per-session display."""
+        from Orchestrator.browser.screenshot import (
+            capture_screenshot, capture_screenshot_display,
+        )
+        if self.display is not None:
+            return capture_screenshot_display(self.display.display_num)
+        return capture_screenshot()
 
     def request_stop(self):
         """Request emergency stop of the running agent task.

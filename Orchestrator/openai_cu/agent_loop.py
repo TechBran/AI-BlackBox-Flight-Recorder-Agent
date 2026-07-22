@@ -209,15 +209,18 @@ async def _execute_openai_action(action) -> dict:
     return {"success": False, "error": f"Unknown OpenAI CU action: {a_type}"}
 
 
-async def _capture_cu_screenshot() -> bytes:
+async def _capture_cu_screenshot(session) -> bytes:
     """Native-res capture resized to the declared 1280x720 display.
 
+    Routes through the session's capture seam so a per-session virtual display
+    (when allocated) is captured; with display=None it is the legacy path.
     capture_screenshot already resizes to the CU 1280x720 in native mode, so
-    the explicit resize is a no-op safeguard for other capture paths.
+    the explicit resize is a no-op safeguard for other capture paths (also a
+    no-op for a virtual 1280x720 display).
     to_thread: capture is a blocking subprocess + PIL resize — keep the event
     loop free during a CU step (Task-12 amendment pattern).
     """
-    png = await asyncio.to_thread(capture_screenshot)
+    png = await asyncio.to_thread(session.capture_screenshot_bytes)
     return await asyncio.to_thread(
         resize_screenshot, png, OPENAI_CU_WIDTH, OPENAI_CU_HEIGHT)
 
@@ -354,7 +357,7 @@ async def run_openai_cu_loop(
 
     # ── Initial screenshot ──
     try:
-        screenshot_bytes = await _capture_cu_screenshot()
+        screenshot_bytes = await _capture_cu_screenshot(session)
     except Exception as e:
         yield {"type": "error", "data": {"message": f"Failed to capture initial screenshot: {e}"}}
         session.status = "error"
@@ -531,11 +534,11 @@ async def run_openai_cu_loop(
             # ever succeeded, abort the turn cleanly.
             new_shot = None
             try:
-                new_shot = await _capture_cu_screenshot()
+                new_shot = await _capture_cu_screenshot(session)
             except Exception as e:
                 print(f"[OPENAI CU] Post-action screenshot failed ({e}); retrying once")
                 try:
-                    new_shot = await _capture_cu_screenshot()
+                    new_shot = await _capture_cu_screenshot(session)
                 except Exception as retry_err:
                     print(f"[OPENAI CU] Screenshot retry failed ({retry_err}); "
                           f"reusing last good screenshot")

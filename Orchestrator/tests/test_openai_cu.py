@@ -78,6 +78,13 @@ class FakeSession:
         self.status = "idle"
         self.final_response = ""
         self.total_tokens = {"input": 0, "output": 0}
+        self.display = None
+
+    def capture_screenshot_bytes(self) -> bytes:
+        # Mirror ComputerUseSession.capture_screenshot_bytes (display=None):
+        # route through the module-level capture so tests that patch
+        # O.capture_screenshot continue to drive the loop's screenshot path.
+        return O.capture_screenshot()
 
 
 class FakeResponses:

@@ -51,6 +51,10 @@ class GeminiCUSession:
         self.total_tokens: Dict[str, int] = {"input": 0, "output": 0}
         self.last_activity: float = time.time()
 
+        # Per-session virtual display (M9). Virtual by default; native is opt-in.
+        self.native_mode: bool = False
+        self.display = None
+
         # Background task state
         self.event_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self.agent_task: Optional[asyncio.Task] = None
@@ -69,6 +73,11 @@ class GeminiCUSession:
         self.cu_log: List[dict] = []
         self.provenance: Dict[str, list] = {}
         self.usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
+
+    @property
+    def display_number(self) -> int:
+        from Orchestrator.browser.config import ACTIVE_DISPLAY
+        return self.display.display_num if self.display is not None else ACTIVE_DISPLAY
 
     def trim_history(self, max_messages: int = 200):
         """Cap conversation history to prevent token explosion."""

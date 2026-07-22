@@ -186,10 +186,10 @@ async def _capture_screenshot(session: GeminiCUSession) -> bytes:
     """
     if session.environment in ("browser", "desktop"):
         from Orchestrator.browser.screenshot import capture_screenshot_display
-        from Orchestrator.browser.config import ACTIVE_DISPLAY
         # to_thread: capture is a blocking subprocess — keep the event loop
-        # free for other Orchestrator requests during a CU step.
-        return await asyncio.to_thread(capture_screenshot_display, ACTIVE_DISPLAY)
+        # free for other Orchestrator requests during a CU step. session.display_number
+        # is the per-session :N when a virtual display is allocated, else ACTIVE_DISPLAY.
+        return await asyncio.to_thread(capture_screenshot_display, session.display_number)
     elif session.environment == "android":
         from Orchestrator.adb.commands import ADBCommands
         cmds = ADBCommands(session.device_id)

@@ -22,8 +22,13 @@ class ChromeInstance:
         self.process = None
         self.cdp_ws_url = None  # WebSocket URL for CDP
 
-    def start(self, url: str = "about:blank") -> bool:
-        """Launch Chrome on the virtual display with CDP enabled. Returns True on success."""
+    def start(self, url: str = "about:blank", handle=None) -> bool:
+        """Launch Chrome on the session's virtual display with CDP.
+
+        With a DisplayHandle it launches inside that session's :N at the
+        backend resolution; handle=None preserves the legacy default-display
+        path so nothing regresses until Task 9.4 threads handles in.
+        """
         if self.is_running():
             print(f"[CHROME] Already running for operator {self.operator}")
             return True
@@ -31,13 +36,18 @@ class ChromeInstance:
         # Ensure profile directory exists
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
-        display = get_display()
-        env = display.get_env()
+        if handle is not None:
+            env = handle.get_env()
+            win_w, win_h = handle.width, handle.height
+        else:
+            display = get_display()
+            env = display.get_env()
+            win_w, win_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
 
         cmd = [
             CHROME_PATH,
             f"--user-data-dir={self.profile_dir}",
-            f"--window-size={DISPLAY_WIDTH},{DISPLAY_HEIGHT}",
+            f"--window-size={win_w},{win_h}",
             "--window-position=0,0",
             f"--remote-debugging-port={CDP_PORT}",
             "--remote-allow-origins=*",

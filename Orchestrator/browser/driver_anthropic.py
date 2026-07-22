@@ -42,7 +42,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
         """Capture screenshot from local or remote device based on session.device_id."""
         if session.device_id != "blackbox":
             return await capture_remote_screenshot(session.device_id)
-        return capture_screenshot()
+        return session.capture_screenshot_bytes()
 
     async def emit(evt):
         try:
@@ -535,7 +535,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                 if session.device_id != "blackbox":
                     fresh_png = await capture_remote_screenshot(session.device_id)
                 else:
-                    fresh_png = capture_screenshot()
+                    fresh_png = session.capture_screenshot_bytes()
                 fresh_b64 = screenshot_to_base64(fresh_png)
                 session.screenshot_count += 1
             except Exception:
