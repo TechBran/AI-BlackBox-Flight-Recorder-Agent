@@ -480,11 +480,17 @@ async function _refreshLocalModelsCard() {
 
 function _renderLocalModelsCard(container, status) {
     const routing = status.routing || {};
+    // GET /local-models/status emits routing[cap] as an OBJECT
+    // {enabled, healthy, decision}; decision "on-box" means the capability is
+    // seeded AND the stack is reachable (see _routing_decision in
+    // local_models_routes.py). A capability counts as active only when it is
+    // actually routing on-box.
+    const _isOnbox = (cap) => (routing[cap] || {}).decision === "on-box";
     const onbox = [];
-    if ((routing.stt || "").toLowerCase() === "onbox") onbox.push("Speech");
-    if ((routing.tts || "").toLowerCase() === "onbox") onbox.push("Voice");
-    if (String(routing.embeddings || "").endsWith("-local")) onbox.push("Memory");
-    if (/localstack/i.test(String(routing.rerank || ""))) onbox.push("Reranking");
+    if (_isOnbox("stt")) onbox.push("Speech");
+    if (_isOnbox("tts")) onbox.push("Voice");
+    if (_isOnbox("embeddings")) onbox.push("Memory");
+    if (_isOnbox("rerank")) onbox.push("Reranking");
 
     let line;
     if (!status.installed) line = "On-box models: not installed";
