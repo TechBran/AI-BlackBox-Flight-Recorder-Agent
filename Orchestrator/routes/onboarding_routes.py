@@ -779,6 +779,28 @@ def restart_status() -> RestartStatusResponse:
 from Orchestrator.onboarding import status_rollup
 
 
+def _read_local_models_snapshot(env: dict) -> dict:
+    """FAST persisted snapshot of the on-box stack for the hub rollup. Reads
+    config.ini [local_models] fresh via stdlib configparser (the section is
+    written by the installer/M1 + the M8 capability endpoint; the resolver
+    reads it fresh too). Fail-soft to all-off. No probe."""
+    import configparser
+    from Orchestrator.utils.paths import resolve
+    enabled = False
+    caps = {"stt": False, "tts": False, "embeddings": False, "rerank": False}
+    try:
+        cp = configparser.ConfigParser()
+        cp.read(resolve("config.ini"))
+        if cp.has_section("local_models"):
+            enabled = cp.getboolean("local_models", "enabled", fallback=False)
+            for c in caps:
+                caps[c] = cp.getboolean("local_models", c, fallback=False)
+    except Exception:
+        logger.exception("status rollup: local_models config read failed")
+    return {"enabled": enabled, "capabilities": caps,
+            "stt_provider": (env.get("STT_PROVIDER") or "").strip().lower()}
+
+
 def _collect_status_inputs() -> dict:
     """Cheap, probe-free snapshots for status_rollup.build_status.
 
@@ -884,10 +906,16 @@ def _collect_status_inputs() -> dict:
         logger.exception("status rollup: custom_servers read failed")
         custom = []
 
+    # local_models (M8) — probe-free: read the [local_models] flags FRESH from
+    # config.ini (the resolver's source of truth; a few-ms stdlib read, no
+    # subprocess/HTTP) + STT_PROVIDER from the already-read .env snapshot.
+    local_models = _read_local_models_snapshot(env)
+
     return dict(
         env=env, state=state, embeddings=embeddings, cli=cli,
         web_search=web_search, image=image, paired=paired, operators=operators,
         restart=restart, mcp=mcp, rerank=rerank_block, custom_servers=custom,
+        local_models=local_models,
         is_complete=_state.is_complete(),
     )
 

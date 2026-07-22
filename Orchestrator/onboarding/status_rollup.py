@@ -193,6 +193,27 @@ def _derive_embeddings(embeddings):
     return READY, f"Active: {active}", items, []
 
 
+def _derive_local_models(local_models):
+    """On-box stack hub summary — PERSISTED flags only, no probe. The live
+    llama-swap health check is the wizard step's own /local-models/status
+    fetch; this section stays fast + probe-free like the rest of the rollup.
+    required:False → absence is OPTIONAL, never ATTENTION."""
+    lm = local_models or {}
+    caps = lm.get("capabilities") or {}
+    on = {c for c in ("stt", "tts", "embeddings", "rerank") if caps.get(c)}
+    # STT can be pinned on-box purely via STT_PROVIDER=onbox (the router
+    # preference) even when the [local_models].stt seed flag is unset — count it.
+    if (lm.get("stt_provider") or "").strip().lower() == "onbox":
+        on.add("stt")
+    items = [{"key": c, "label": c, "configured": c in on, "validated_at": None}
+             for c in ("stt", "tts", "embeddings", "rerank")]
+    if not lm.get("enabled") and not on:
+        return OPTIONAL, "Not set up", items, []
+    n = len(on)
+    word = "capability" if n == 1 else "capabilities"
+    return READY, f"{n} {word} on-box", items, []
+
+
 def _derive_feature(feature, label):
     """Shared deriver for web_search + image (same enabled/key shape)."""
     enabled = feature.get("enabled") or []
@@ -268,7 +289,7 @@ def _derive_mcp(mcp):
 
 def build_status(*, env, state, embeddings, cli, web_search, image,
                  paired, operators, restart, mcp=None, rerank=None,
-                 custom_servers=None, is_complete=False):
+                 custom_servers=None, local_models=None, is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
     sections_out = []
     attention_out = []
@@ -283,6 +304,8 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
             st, summary, items, atts = _derive_operator(operators)
         elif key == "embeddings":
             st, summary, items, atts = _derive_embeddings(embeddings)
+        elif key == "local_models":
+            st, summary, items, atts = _derive_local_models(local_models)
         elif key == "web_search":
             st, summary, items, atts = _derive_feature(web_search, "Web Search")
         elif key == "image":
