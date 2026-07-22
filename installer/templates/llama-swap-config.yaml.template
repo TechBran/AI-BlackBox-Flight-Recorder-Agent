@@ -32,7 +32,7 @@ models:
       --model ${models-dir}/Qwen3-Embedding-8B-Q8_0.gguf
       --host 127.0.0.1 --port ${PORT}
       --embeddings --pooling last
-      -c 8192 -b 8192 -ub 8192 -fa on on
+      -c 8192 -b 8192 -ub 8192 -fa on
       -ngl 99 --no-warmup
     proxy: "http://127.0.0.1:${PORT}"
     checkEndpoint: "/health"
