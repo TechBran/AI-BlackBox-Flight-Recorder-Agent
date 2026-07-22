@@ -71,6 +71,52 @@ def _terminate_proc(p) -> None:
         pass
 
 
+def _pids_matching(pattern: str) -> List[int]:
+    """Find pids whose /proc/<pid>/cmdline contains ``pattern`` by scanning /proc
+    directly — NOT via a process-name matcher (which would name-match across every
+    session and false-positive). The caller passes a SPECIFIC slot identifier
+    (e.g. 'Xvfb :102', 'rfbport 5903', 'websockify 127.0.0.1:6103') so each hit is
+    scoped to one slot. Vanished/permission-denied pids are silently skipped."""
+    hits: List[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return hits
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue  # process vanished or not ours to read
+        if pattern in cmdline:
+            hits.append(int(entry))
+    return hits
+
+
+def _terminate_pid(pid: int) -> None:
+    """Kill a SPECIFIC orphan pid (SIGTERM, brief grace, SIGKILL). Used only by the
+    boot reaper for restart-survivors we no longer hold a Popen for — a service
+    restart reparents them to init (KillMode=process), so we cannot wait() a
+    non-child and must signal by pid. Swallows ESRCH (already gone)."""
+    import signal
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return  # already gone / not permitted
+    for _ in range(30):  # ~1.5s grace before the hard kill
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return  # exited on SIGTERM
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 @dataclass
 class DisplayHandle:
     session_id: str
@@ -228,6 +274,23 @@ class DisplayAllocator:
     def active_sessions(self) -> List[dict]:
         with self._lock:
             return [h.to_public() for h in self._sessions.values()]
+
+    def reap_orphans(self) -> None:
+        """Sweep restart-survivor children on OUR slot displays/ports that we no
+        longer track (a service restart reparents them to init — KillMode=process).
+        Targets SPECIFIC slot identifiers, one pid at a time; never a blanket
+        process-name kill. Call once at boot."""
+        with self._lock:
+            tracked = {p.pid for procs in self._procs.values() for p in procs.values()}
+        for slot in range(MAX_VIRTUAL_SESSIONS):
+            display = f":{DISPLAY_BASE + slot}"
+            vnc = VNC_BASE_PORT + slot
+            ws = WEBSOCKIFY_BASE_PORT + slot
+            for pattern in (f"Xvfb {display}", f"rfbport {vnc}", f"websockify 127.0.0.1:{ws}"):
+                for pid in _pids_matching(pattern):
+                    if pid not in tracked:
+                        print(f"[DISPLAY] boot-reaping orphan pid {pid} ({pattern})")
+                        _terminate_pid(pid)
 
     def shutdown_all(self) -> None:
         for sid in list(self._sessions):

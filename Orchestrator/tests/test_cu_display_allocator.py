@@ -200,6 +200,44 @@ def test_cu_sessions_endpoint_reflects_live_set(monkeypatch):
             a.release(sid)
 
 
+def test_fourth_concurrent_session_raises_cap(alloc):
+    for i in range(disp.MAX_VIRTUAL_SESSIONS):
+        alloc.allocate(f"s{i}", backend="anthropic", operator="op")
+    with pytest.raises(RuntimeError, match="cap reached"):
+        alloc.allocate("s-over", backend="anthropic", operator="op")
+
+
+def test_reap_idle_releases_only_stale_sessions(alloc, monkeypatch):
+    a = alloc.allocate("fresh", backend="anthropic", operator="op")
+    b = alloc.allocate("stale", backend="anthropic", operator="op")
+    b.last_activity = 0.0  # ancient
+    alloc.reap_idle()
+    assert "fresh" in alloc._sessions
+    assert "stale" not in alloc._sessions
+
+
+def test_reap_orphans_kills_untracked_slot_survivors(alloc, monkeypatch):
+    # Simulate a restart-survivor Xvfb on slot 2 with pid 4242 that we do NOT track.
+    killed = []
+    monkeypatch.setattr(disp, "_terminate_pid", lambda pid: killed.append(pid))
+    def fake_matching(pattern):
+        return [4242] if "Xvfb :102" in pattern else []
+    monkeypatch.setattr(disp, "_pids_matching", fake_matching)
+    alloc.reap_orphans()
+    assert 4242 in killed
+
+
+def test_reap_orphans_spares_tracked_pids(alloc, monkeypatch):
+    h = alloc.allocate("live", backend="anthropic", operator="op")  # slot 0 -> :100
+    tracked_xvfb = alloc._procs["live"]["xvfb"].pid
+    killed = []
+    monkeypatch.setattr(disp, "_terminate_pid", lambda pid: killed.append(pid))
+    monkeypatch.setattr(disp, "_pids_matching",
+                        lambda pattern: [tracked_xvfb] if "Xvfb :100" in pattern else [])
+    alloc.reap_orphans()
+    assert tracked_xvfb not in killed  # never kill a pid we own
+
+
 def test_no_global_process_kill_in_source():
     """Guard: the rewritten module must never shell out to a process-name matcher.
     pkill kills ALL sessions; pgrep -f <role> false-positives across sessions.
