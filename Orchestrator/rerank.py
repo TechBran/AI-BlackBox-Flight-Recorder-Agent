@@ -506,6 +506,21 @@ def _localstack_healthy() -> bool:
         return False
 
 
+def _member_gguf_present(model_id: str = "rerank-qwen3-8b") -> bool:
+    """Is the on-box reranker's GGUF physically on disk (the reranker BUILT flag,
+    A4)? Delegates to local_stack._member_gguf_present — the single on-disk-truth
+    presence check — lazily (cycle-proof: local_stack imports rerank for
+    capability routing) and never-raises (absent resolver / uninstalled stack →
+    False). This is the truth the reranker UI card keys on, replacing the
+    gpu-and-service_reachable proxy (which is False for the self-converted GGUF
+    that never binds the vLLM :8091 port)."""
+    try:
+        from Orchestrator import local_stack
+        return bool(local_stack._member_gguf_present(model_id))
+    except Exception:  # noqa: BLE001 - resolver absent / uninstalled → not built
+        return False
+
+
 def _vllm_reranker_running(timeout_s: float = 1.0) -> bool:
     """Is the legacy vllm-reranker.service answering on its :8091 port? A direct
     ~1s-capped GET of DEFAULT_BASE_URL/v1/models (NOT the shared _probe_localhost
@@ -1416,12 +1431,21 @@ def model_catalog() -> list[dict]:
     for slug in sorted(RERANK_MODELS):
         e = RERANK_MODELS[slug]
         key_env = e.get("key_env")
+        # A4: `built` — the reranker UI card's truth signal, replacing the
+        # gpu-and-service_reachable proxy. True ONLY for the localstack on-box
+        # reranker when its self-converted GGUF is on disk; False/N-A for cloud/
+        # cpu/vllm models (they have no on-box GGUF to build).
+        built = (
+            e.get("provider") == "localstack"
+            and _member_gguf_present(e.get("model_id", "rerank-qwen3-8b"))
+        )
         out.append({
             "slug": slug,
             "provider": e.get("provider"),
             "label": e.get("label", slug),
             "tiers": list(e.get("tiers", [])),
             "privacy": e.get("privacy"),
+            "built": built,
             "auth_kind": e.get("auth_kind", "none"),
             "key_env": key_env,
             # Cloud bearer models: present iff their key_env resolves. Vertex
@@ -1498,6 +1522,9 @@ def status() -> dict:
         "enabled": is_enabled(),
         "gpu": bool(hw.get("gpu")),
         "service_reachable": service_reachable(),
+        # A4 additive: the on-box reranker's GGUF is physically on disk (the BUILT
+        # truth the reranker card keys on, not the gpu-and-service_reachable proxy).
+        "member_gguf_present": _member_gguf_present("rerank-qwen3-8b"),
         "provider": s["provider"],
         "model": s["model"],
         "model_id": s["model_id"],

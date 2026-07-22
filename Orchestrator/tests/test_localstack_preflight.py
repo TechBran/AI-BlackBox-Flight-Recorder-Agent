@@ -64,7 +64,27 @@ def test_localstack_blocker_model_not_downloaded(client):
     tc, mp = client
     mp.setattr(local_stack, "model_downloaded", lambda mid: False)
     m = _model(tc.get("/embeddings/status").json(), LOCALSTACK_SLUG)
-    assert any("model not downloaded" in b for b in m["blockers"])
+    # A2: softened copy pointing at the real Download button.
+    assert any("not downloaded yet" in b for b in m["blockers"])
+    # A2: enrichment — a real Download button needs member_id + downloadable.
+    assert m["member_id"] == "embed-qwen3-8b"
+    assert m["downloadable"] is True
+
+
+def test_localstack_active_model_never_not_downloaded(client):
+    # A2: the ACTIVE model can NEVER be "not downloaded" — it's serving searches.
+    from pathlib import Path as _Path
+    tc, mp = client
+    # Make the localstack model the ACTIVE slug and report weights absent —
+    # the active-implies-downloaded guard must suppress the not-downloaded blocker.
+    set_active_slug(LOCALSTACK_SLUG, base_dir=_Path(config.EMBEDDINGS_STORES_DIR))
+    mp.setattr(local_stack, "model_downloaded", lambda mid: False)
+    body = tc.get("/embeddings/status").json()
+    assert body["active"] == LOCALSTACK_SLUG
+    m = _model(body, LOCALSTACK_SLUG)
+    assert not any("not downloaded" in b for b in m["blockers"])
+    assert m["ready"] is True
+
 
 
 def test_localstack_status_shows_keep_alive_and_no_placement(client):

@@ -193,7 +193,7 @@ def _cpu_warning(entry: dict, hw: dict, snapshot_count: int) -> "str | None":
 
 
 def _model_preflight(
-    entry: dict, ollama: dict, hw: dict
+    entry: dict, ollama: dict, hw: dict, is_active: bool = False
 ) -> tuple[bool, list[str], "str | None"]:
     """(ready, blockers, recommended_placement) for one registry entry,
     preflight-style.
@@ -233,10 +233,15 @@ def _model_preflight(
                 "blackbox-models.service down — "
                 "sudo systemctl start blackbox-models.service"
             )
-        elif not local_stack.model_downloaded(entry["model_id"]):
+        # The ACTIVE model can NEVER be "not downloaded": it is serving searches
+        # right now, so its weights are on disk by definition (the pre-existing
+        # bug flagged the active, serving qwen3-embedding-8b-local as a blocked
+        # download). not-downloaded fires only when NOT active AND the on-disk
+        # truth (model_downloaded, presence-first) says the weights are absent.
+        elif not is_active and not local_stack.model_downloaded(entry["model_id"]):
             blockers.append(
-                f"model not downloaded — download it from the setup wizard "
-                f"(≈{entry['ram_gb']:g} GB)"
+                f"On-box weights not downloaded yet — use the Download button "
+                f"below (≈{entry['ram_gb']:g} GB)."
             )
         # recommended_placement is None for on-box models: the device is
         # install-fixed by hardware tier with no runtime placement toggle, and
@@ -277,10 +282,14 @@ def embeddings_status(response: Response):
     from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle
 
     base = Path(config.EMBEDDINGS_STORES_DIR)
+    active = get_active_slug(base_dir=base)  # active-implies-downloaded (A2)
     index_ids = set(load_snapshot_index().keys())
     snapshot_count = len(index_ids)  # corpus size for the M9 cpu_warning estimate
     ollama_state = _ollama_state()
     hw = hardware.probe()  # 60s TTL cache — safe under the wizard's 2s poll
+    # DOWNLOAD_MANIFEST drives the additive `downloadable` flag (real Download
+    # button) — lazy import (localstack_downloads is stdlib+httpx only).
+    from Orchestrator.localstack_downloads import DOWNLOAD_MANIFEST
 
     stores = []
     for meta in list_stores(base):
@@ -301,7 +310,8 @@ def embeddings_status(response: Response):
     models = []
     for slug, entry in EMBEDDING_MODELS.items():
         store_exists = (base / slug / META_FILE).is_file()
-        ready, blockers, recommended = _model_preflight(entry, ollama_state, hw)
+        ready, blockers, recommended = _model_preflight(
+            entry, ollama_state, hw, is_active=(slug == active))
         # keep_alive + placement toggles are local-only; null for cloud. Keyed
         # on privacy so on-box (localstack) models expose keep_alive/warm too;
         # placement is null for localstack (device is install-fixed by tier).
@@ -336,6 +346,15 @@ def embeddings_status(response: Response):
             ),
             "ready": ready,
             "blockers": blockers,
+            # ADDITIVE (A2, real Download button): member_id = the llama-swap
+            # member / manifest key for on-box models (null for cloud/ollama);
+            # downloadable = a localstack model whose weights this box can fetch
+            # via POST /local-models/download (present in the download manifest).
+            "member_id": entry["model_id"] if entry["provider"] == "localstack" else None,
+            "downloadable": (
+                entry["provider"] == "localstack"
+                and entry["model_id"] in DOWNLOAD_MANIFEST
+            ),
             "keep_alive": keep_alive,
             "warm": store_is_warm(keep_alive) if is_local else None,
             # ADDITIVE (WI-9/M10): device placement. placement = the persisted
@@ -352,7 +371,7 @@ def embeddings_status(response: Response):
         })
 
     return {
-        "active": get_active_slug(base_dir=base),
+        "active": active,
         "health": _read_health(base),
         "job": get_job_status(),  # live migration job state; None when idle
         "stores": stores,

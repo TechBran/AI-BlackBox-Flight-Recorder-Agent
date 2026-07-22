@@ -229,6 +229,88 @@ def test_read_download_state_corrupt_is_empty(monkeypatch, tmp_path):
     assert local_stack.read_download_state() == {}
 
 
+# ── A1: model_downloaded checks ON-DISK PRESENCE first ────────────────────────
+
+def test_member_gguf_present_true_when_file_on_disk(monkeypatch, tmp_path):
+    from Orchestrator import localstack_downloads
+    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", tmp_path)
+    (tmp_path / "Qwen3-Embedding-8B-Q8_0.gguf").write_bytes(b"x")
+    assert local_stack._member_gguf_present("embed-qwen3-8b") is True
+    assert local_stack.model_downloaded("embed-qwen3-8b") is True
+
+
+def test_member_gguf_absent_falls_back_to_state_file(monkeypatch, tmp_path):
+    from Orchestrator import localstack_downloads
+    models = tmp_path / "models"
+    models.mkdir()
+    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", models)
+    # No GGUF on disk -> _member_gguf_present False, model_downloaded falls back
+    # to the (absent) state file -> False.
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", tmp_path / "downloads.json")
+    assert local_stack._member_gguf_present("embed-qwen3-8b") is False
+    assert local_stack.model_downloaded("embed-qwen3-8b") is False
+    # State file records a terminal success -> the fallback reports True.
+    (tmp_path / "downloads.json").write_text(
+        json.dumps({"embed-qwen3-8b": {"state": "downloaded"}}), encoding="utf-8")
+    assert local_stack.model_downloaded("embed-qwen3-8b") is True
+
+
+def test_member_gguf_present_zero_byte_is_not_downloaded(monkeypatch, tmp_path):
+    from Orchestrator import localstack_downloads
+    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", tmp_path)
+    (tmp_path / "Qwen3-Embedding-8B-Q8_0.gguf").write_bytes(b"")  # 0-byte
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", tmp_path / "nope.json")
+    assert local_stack._member_gguf_present("embed-qwen3-8b") is False
+    assert local_stack.model_downloaded("embed-qwen3-8b") is False
+
+
+def test_member_gguf_present_selfconvert_reranker(monkeypatch, tmp_path):
+    # rerank-qwen3-8b is NOT in the download manifest (self-converted) but still
+    # presence-checkable via _SELFCONVERT_GGUF.
+    from Orchestrator import localstack_downloads
+    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", tmp_path)
+    assert local_stack._member_gguf_present("rerank-qwen3-8b") is False
+    (tmp_path / "Qwen3-Reranker-8B-Q8_0.gguf").write_bytes(b"x")
+    assert local_stack._member_gguf_present("rerank-qwen3-8b") is True
+    assert local_stack.model_downloaded("rerank-qwen3-8b") is True
+
+
+def test_member_gguf_present_multifile_member_falls_back(monkeypatch, tmp_path):
+    # qwen-tts is an hf_snapshot (multi-file) with no single presence-checkable
+    # GGUF -> _member_gguf_present False, model_downloaded uses the state file.
+    from Orchestrator import localstack_downloads
+    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", tmp_path)
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", tmp_path / "downloads.json")
+    assert local_stack._member_gguf_present("qwen-tts") is False
+    assert local_stack.model_downloaded("qwen-tts") is False
+    (tmp_path / "downloads.json").write_text(
+        json.dumps({"qwen-tts": {"state": "done"}}), encoding="utf-8")
+    assert local_stack.model_downloaded("qwen-tts") is True
+
+
+# ── A3: record_download_state persists the contract ───────────────────────────
+
+def test_record_download_state_writes_and_merges(monkeypatch, tmp_path):
+    p = tmp_path / "sub" / "downloads.json"  # parent does not exist yet
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", p)
+    local_stack.record_download_state("embed-qwen3-8b")
+    assert local_stack.read_download_state() == {
+        "embed-qwen3-8b": {"state": "downloaded"}}
+    # A second member merges, doesn't clobber.
+    local_stack.record_download_state("qwen-tts", state="done", note="snap")
+    st = local_stack.read_download_state()
+    assert st["embed-qwen3-8b"]["state"] == "downloaded"
+    assert st["qwen-tts"] == {"state": "done", "note": "snap"}
+
+
+def test_record_download_state_failsoft_on_oserror(monkeypatch, tmp_path):
+    # Parent path is a FILE, so mkdir/replace raises OSError -> swallowed.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", blocker / "downloads.json")
+    local_stack.record_download_state("embed-qwen3-8b")  # must not raise
+
+
 def test_members_and_gate_constants():
     ids = [m["model"] for m in local_stack.MEMBERS]
     assert ids == ["embed-qwen3-8b", "rerank-qwen3-8b", "speaches", "qwen-tts"]

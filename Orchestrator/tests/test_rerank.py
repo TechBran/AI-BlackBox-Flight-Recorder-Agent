@@ -800,6 +800,8 @@ LEGACY_STATUS_KEYS = {
     "preflight", "available", "candidate_n", "passage_chars", "models",
     # M13 additive keys for the wizard's reranker block:
     "gpu", "service_reachable",
+    # A4 additive: the on-box reranker's GGUF is physically on disk (BUILT truth).
+    "member_gguf_present",
 }
 # M3.3 additive keys: hardware tier/ram + per-provider auth & reachability.
 # M10.1 additive: model_catalog (per-model selector metadata for the wizard).
@@ -1740,6 +1742,27 @@ def test_model_catalog_key_present_reads_env_fresh(monkeypatch):
     cat = {c["slug"]: c for c in rerank.model_catalog()}
     assert cat["voyage-rerank-2.5"]["key_present"] is True
     assert cat["cohere-rerank-4"]["key_present"] is False
+
+
+def test_model_catalog_built_flag_tracks_on_box_gguf(monkeypatch):
+    """A4: `built` is True ONLY for the localstack on-box reranker when its GGUF
+    is on disk; False for cloud/cpu/vllm models and for the on-box reranker when
+    the GGUF is absent (the reranker card's BUILT truth, not the gpu proxy)."""
+    monkeypatch.setattr(rerank, "_member_gguf_present", lambda mid="rerank-qwen3-8b": False)
+    cat = {c["slug"]: c for c in rerank.model_catalog()}
+    assert cat["qwen3-reranker-8b-local"]["built"] is False       # GGUF absent
+    assert cat["qwen3-reranker-0.6b"]["built"] is False           # vllm, N/A
+    assert cat["voyage-rerank-2.5"]["built"] is False             # cloud, N/A
+    monkeypatch.setattr(rerank, "_member_gguf_present", lambda mid="rerank-qwen3-8b": True)
+    cat = {c["slug"]: c for c in rerank.model_catalog()}
+    assert cat["qwen3-reranker-8b-local"]["built"] is True        # GGUF on disk
+    assert cat["qwen3-reranker-0.6b"]["built"] is False           # still N/A (vllm)
+
+
+def test_status_exposes_member_gguf_present(monkeypatch):
+    """A4: status() surfaces the on-box reranker BUILT flag additively."""
+    monkeypatch.setattr(rerank, "_member_gguf_present", lambda mid="rerank-qwen3-8b": True)
+    assert rerank.status()["member_gguf_present"] is True
 
 
 def test_model_catalog_local_models_need_no_key(monkeypatch):

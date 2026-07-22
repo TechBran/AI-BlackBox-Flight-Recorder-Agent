@@ -92,6 +92,18 @@ _DL: dict | None = None            # None = idle / never downloaded this process
 _DL_LOCK = threading.Lock()
 
 
+def _record_state(artifact: str) -> None:
+    """Persist a terminal-success download-state row (A3). Lazy import of
+    local_stack (it imports THIS module's MODELS_DIR/DOWNLOAD_MANIFEST, so a
+    top-level import would cycle); fail-soft is already inside
+    record_download_state — a bookkeeping-write failure never fails a download."""
+    try:
+        from Orchestrator import local_stack
+        local_stack.record_download_state(artifact)
+    except Exception:  # noqa: BLE001 - bookkeeping only; weights are on disk regardless
+        pass
+
+
 def download_status() -> dict | None:
     """Copy of the live download state (consumed by GET /local-models/status);
     None when idle / never downloaded this process."""
@@ -149,7 +161,7 @@ async def _stream(artifact: str):
     state 'done' (success or already-present) or 'error'."""
     entry = DOWNLOAD_MANIFEST[artifact]
     if entry.get("kind") == "hf_snapshot":
-        async for _l in _stream_hf_snapshot(entry):
+        async for _l in _stream_hf_snapshot(artifact, entry):
             yield _l
         return
     dest = MODELS_DIR / entry["dest"]
@@ -160,6 +172,7 @@ async def _stream(artifact: str):
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         if dest.exists() and dest.stat().st_size > 0:
             size = dest.stat().st_size
+            _record_state(artifact)  # persist the download-state contract (A3)
             _set(status="already present", completed=size, total=size, state="done")
             yield _line()
             return
@@ -180,6 +193,7 @@ async def _stream(artifact: str):
                         _set(status="downloading", completed=completed, total=total)
                         yield _line()
         os.replace(part, dest)
+        _record_state(artifact)  # persist the download-state contract (A3)
         _set(status="success", completed=completed, total=total or completed, state="done")
         yield _line()
     except Exception as e:  # network, HTTP, disk — all surface as one error line
@@ -193,7 +207,7 @@ async def _stream(artifact: str):
         _finish()
 
 
-async def _stream_hf_snapshot(entry: dict):
+async def _stream_hf_snapshot(artifact: str, entry: dict):
     """Pull the Qwen3-TTS variant checkpoints (multi-file HF repos) via
     huggingface_hub.snapshot_download into QWEN_TTS_MODEL_DIR/<variant>. Coarse
     progress (completed/total count REPOS, not bytes — snapshot_download exposes
@@ -226,6 +240,7 @@ async def _stream_hf_snapshot(entry: dict):
             done_n += 1
             _set(status=f"{variant} ready", completed=done_n, total=total)
             yield _line()
+        _record_state(artifact)  # persist the download-state contract (A3)
         _set(status="success", completed=total, total=total, state="done")
         yield _line()
     except Exception as e:

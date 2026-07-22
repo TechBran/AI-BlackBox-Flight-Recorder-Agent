@@ -37,7 +37,7 @@ MODEL_KEYS = {
     "slug", "label", "dims", "ram_gb", "cost_per_1m_tokens", "privacy",
     "quality_note", "store_exists", "schema", "rows", "missing", "ready",
     "blockers", "keep_alive", "warm", "placement", "recommended_placement",
-    "cpu_warning", "strategy",
+    "cpu_warning", "strategy", "member_id", "downloadable",
 }
 STORE_KEYS = {"slug", "dims", "count", "schema", "rows", "missing", "last_updated"}
 

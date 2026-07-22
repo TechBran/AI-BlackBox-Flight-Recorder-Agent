@@ -198,16 +198,71 @@ def read_download_state() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def record_download_state(model_id: str, state: str = "downloaded", **extra) -> None:
+    """Atomically merge {model_id: {"state": state, **extra}} into
+    DOWNLOAD_STATE_PATH (the download-state contract's WRITER). mkdir -p the
+    parent, tmp write + os.replace, fail-soft on OSError (logged, never raised):
+    a bookkeeping-file write failure must never fail the download itself — the
+    weights are on disk regardless, and _member_gguf_present already reports the
+    truth. Called at every terminal-success point of a download so future
+    downloads DO record state (the pre-existing bug: this file was never written
+    in production, so model_downloaded fell back to False for every member)."""
+    try:
+        current = read_download_state()
+        current[model_id] = {"state": state, **extra}
+        DOWNLOAD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DOWNLOAD_STATE_PATH.with_name(DOWNLOAD_STATE_PATH.name + ".tmp")
+        tmp.write_text(json.dumps(current), encoding="utf-8")
+        os.replace(tmp, DOWNLOAD_STATE_PATH)
+    except OSError as exc:
+        logger.warning("local_stack: could not record download state for %s (%s)",
+                       model_id, exc)
+
+
+# Members whose weights are NOT a direct HF-CDN download (absent from
+# localstack_downloads.DOWNLOAD_MANIFEST) but STILL land as a single named GGUF
+# on disk we can presence-check: the reranker is self-converted from a pinned
+# llama.cpp build (§7/§14), not fetched, so it has no manifest entry — map it to
+# its on-disk filename here so an installed reranker reads as downloaded.
+_SELFCONVERT_GGUF = {"rerank-qwen3-8b": "Qwen3-Reranker-8B-Q8_0.gguf"}
+
+
+def _member_gguf_present(model_id: str) -> bool:
+    """True iff `model_id`'s single on-disk GGUF exists and is non-empty — the
+    ON-DISK TRUTH the download-state bookkeeping file only approximates. Members
+    whose weights are a single GGUF resolve their filename from the download
+    manifest's "file" dest (embeddings) or _SELFCONVERT_GGUF (the self-converted
+    reranker); multi-file (qwen-tts hf_snapshot) / auto-pulled (speaches) members
+    return False here and fall back to the state file. Never raises."""
+    # lazy import to avoid a cycle (localstack_downloads imports only stdlib+httpx)
+    from Orchestrator.localstack_downloads import MODELS_DIR, DOWNLOAD_MANIFEST
+    entry = DOWNLOAD_MANIFEST.get(model_id)
+    name = entry["dest"] if entry and entry.get("kind") == "file" else _SELFCONVERT_GGUF.get(model_id)
+    if not name:
+        return False  # multi-file (qwen-tts) / auto-pulled (speaches) -> fall back to state file
+    try:
+        p = MODELS_DIR / name
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def model_downloaded(model_id: str) -> bool:
-    """True iff `model_id`'s weights are present, per the download-state contract
-    (read_download_state / DOWNLOAD_STATE_PATH, written by the download milestone).
-    A member counts as downloaded when its recorded state is a terminal success
-    ("downloaded" or "done"). Fail-soft: an absent/corrupt state file or an
-    unlisted member => False. This is the on-disk-presence signal the localstack
-    embeddings/rerank preflight (M3 Task 3.5 / M4) consumes; those tests
-    monkeypatch it, but a real installed+healthy box calls THIS implementation, so
-    it MUST exist here (missing it => AttributeError -> HTTP 500 on
-    GET /embeddings/status)."""
+    """True iff `model_id`'s weights are present — ON-DISK PRESENCE FIRST, the
+    download-state bookkeeping file only as a fallback.
+
+    A GGUF physically on disk (_member_gguf_present) counts as downloaded even
+    when Manifest/local_models/downloads.json was never written (the pre-existing
+    production bug: that file is never written, so a state-file-only check
+    reported the ACTIVE, serving qwen3-embedding-8b-local as "not downloaded").
+    Multi-file / auto-pulled members with no presence-checkable single GGUF fall
+    back to the state-file contract (a recorded terminal success "downloaded" or
+    "done"). Fail-soft: absent/corrupt state + no on-disk GGUF => False.
+
+    Consumed by the localstack embeddings/rerank preflight (M3 Task 3.5 / M4);
+    those tests monkeypatch it, but a real installed+healthy box calls THIS."""
+    if _member_gguf_present(model_id):
+        return True
     entry = read_download_state().get(model_id)
     return isinstance(entry, dict) and entry.get("state") in ("downloaded", "done")
 
