@@ -268,10 +268,14 @@ if (( need_lc )); then
             # Install the built binary PLUS every built shared lib beside it (the
             # unit's LD_LIBRARY_PATH points at $LOCALSTACK_BIN so the *.so must sit
             # there). Copy AS ROOT (mirrors §1), chown back to REAL_USER.
+            # Include BOTH regular files AND symlinks (-type l): the build produces
+            # SONAME symlinks (libllama-common.so.0 -> ...so.0.0.1) that the linker
+            # needs at runtime; a bare `-type f` drops them and llama-server then
+            # fails with "cannot open shared object file libllama-common.so.0".
             sudo cp -a "$LC_SRV" "$LOCALSTACK_BIN/"
             while IFS= read -r sofile; do
                 sudo cp -a "$sofile" "$LOCALSTACK_BIN/"
-            done < <(find "$TMP_LC/llama.cpp/build" -type f -name '*.so*')
+            done < <(find "$TMP_LC/llama.cpp/build" \( -type f -o -type l \) -name '*.so*')
             sudo chown -R "$REAL_USER:$REAL_USER" "$LOCALSTACK_BIN"
             sudo -u "$REAL_USER" chmod +x "$LOCALSTACK_BIN/llama-server"
             LC_INSTALLED_BACKEND="cuda"
