@@ -44,17 +44,56 @@ def _qwen_tts_model_dir() -> Path:
     return base / "LocalModels" / "weights" / "qwen3-tts"
 
 
+def _speaches_cache_dir() -> Path:
+    """Where the Speaches faster-whisper CT2 checkpoints land — the SAME HF hub
+    cache the Speaches member reads on first transcription (A1). Honors an
+    explicit SPEACHES_CACHE_DIR override, then HF_HOME (-> <HF_HOME>/hub, the
+    huggingface_hub on-disk layout), else a documented default under the
+    localstack root (~/.blackbox/localstack/hf-cache/hub) so the wizard download
+    button and the Speaches member agree on one location. Sibling of
+    _qwen_tts_model_dir(); NEVER _qwen_tts_model_dir() (whisper is not a Qwen
+    variant)."""
+    env = os.environ.get("SPEACHES_CACHE_DIR")
+    if env:
+        return Path(env)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home) / "hub"
+    return MODELS_DIR.parent / "hf-cache" / "hub"
+
+
+# Named dest buckets an hf_snapshot manifest entry may target via "dest_dir"
+# (A1). Absent/unknown -> the historical default (_qwen_tts_model_dir), keeping
+# the bundled qwen-tts key byte-identical. "speaches_cache" pulls whisper into
+# the HF hub cache Speaches reads (cache_dir layout, not a per-variant local_dir).
+_SPEACHES_CACHE_BUCKET = "speaches_cache"
+
+
+def _artifact_dest_root(dest_dir: "str | None") -> Path:
+    """Resolve an hf_snapshot entry's "dest_dir" bucket to a base Path. Default
+    (None / "qwen_tts") preserves today's _qwen_tts_model_dir()."""
+    if dest_dir == _SPEACHES_CACHE_BUCKET:
+        return _speaches_cache_dir()
+    return _qwen_tts_model_dir()
+
+
 # Two artifact kinds (correction — the GPU-tier weight set is not all single
 # GGUFs): "file" = a single HF-CDN GGUF into MODELS_DIR (embeddings); "hf_snapshot"
-# = a multi-file HF repo pulled via huggingface_hub.snapshot_download (the
-# Qwen3-TTS variant checkpoints — ~13.5GB, the bulk of the disk gate — go to
-# QWEN_TTS_MODEL_DIR). NOT downloaded through this endpoint (documented, not gaps):
-#   • whisper (Speaches) — auto-pulled by the Speaches member on first
-#     transcription (its own HF cache); nothing to fetch here.
+# = a multi-file HF repo (or set of repos) pulled via huggingface_hub.
+# snapshot_download into a per-artifact dest bucket (A1 "dest_dir"): Qwen3-TTS
+# variants -> _qwen_tts_model_dir()/<variant>; whisper -> the Speaches HF cache
+# (_speaches_cache_dir()). NOT downloaded through this endpoint (documented, not
+# gaps):
 #   • rerank-qwen3-8b — Qwen3-Reranker-8B @ Q8_0, SELF-CONVERTED from a pinned
 #     llama.cpp build (Task 4.4), not a direct download (~8.1GB on disk once
 #     converted; the sequential retrieval group per D13 makes the 8B affordable).
 #   • embed-qwen3-0.6b — CPU-tier fallback only (not fetched on a GPU box).
+#
+# "repo_pending_g3": True marks an hf_snapshot whose repo ids are placeholders
+# pinned/confirmed on MS02 at the G3/G4 bring-up (Task F1). The status endpoint
+# surfaces the flag so the wizard renders a DISABLED button ("pinned during first
+# GPU bring-up") instead of a live 404 button. "bundled": True marks the legacy
+# all-variants convenience key kept for status back-compat.
 DOWNLOAD_MANIFEST: dict[str, dict] = {
     "embed-qwen3-8b": {
         "kind": "file",
@@ -71,20 +110,76 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
         "approx_gb": 0.6,
     },
     # The three Qwen3-TTS 1.7B variant checkpoints (Base/CustomVoice/VoiceDesign,
-    # ~4.5GB each ≈ 13.5GB, §14). Multi-file HF repos → snapshot into
-    # QWEN_TTS_MODEL_DIR/<variant>, matching what the qwen-tts variant manager
-    # loads (variant_manager.backend.load(variant, model_dir)). Exact repo ids are
-    # confirmed at G3 (Task 6.9, the same seam that pins the streaming-fork
-    # signatures); update here if the open-weights repo names differ.
+    # ~4.5GB each ≈ 13.5GB, §14), split per-variant (A2) so the wizard renders
+    # one download button per variant. Each is a single multi-file HF repo →
+    # snapshot into _qwen_tts_model_dir()/<variant>, matching what the qwen-tts
+    # variant manager loads (variant_manager.backend.load(variant, model_dir)).
+    # Repo ids are placeholders confirmed/pinned at G3 (Task F1) — repo_pending_g3.
+    "qwen-tts-base": {
+        "kind": "hf_snapshot",
+        "label": "Qwen3-TTS 1.7B — Base",
+        "repos": {"base": "Qwen/Qwen3-TTS-1.7B-Base"},
+        "dest_dir": "qwen_tts",
+        "repo_pending_g3": True,
+        "approx_gb": 4.5,
+    },
+    "qwen-tts-custom-voice": {
+        "kind": "hf_snapshot",
+        "label": "Qwen3-TTS 1.7B — Custom Voice (3s clone)",
+        "repos": {"custom_voice": "Qwen/Qwen3-TTS-1.7B-CustomVoice"},
+        "dest_dir": "qwen_tts",
+        "repo_pending_g3": True,
+        "approx_gb": 4.5,
+    },
+    "qwen-tts-voice-design": {
+        "kind": "hf_snapshot",
+        "label": "Qwen3-TTS 1.7B — Voice Design (text-described)",
+        "repos": {"voice_design": "Qwen/Qwen3-TTS-1.7B-VoiceDesign"},
+        "dest_dir": "qwen_tts",
+        "repo_pending_g3": True,
+        "approx_gb": 4.5,
+    },
+    # Whisper (Speaches) CT2 checkpoints (from local_stack.ONBOX_STT_{STREAM,BATCH}
+    # _MODEL): stream turbo + batch large-v3. Two HF repos → the Speaches HF hub
+    # cache (dest_dir "speaches_cache", cache_dir layout) so the wizard's explicit
+    # download button pre-fetches what Speaches would otherwise auto-pull
+    # invisibly on first transcription. repo_pending_g3 until confirmed at G4.
+    "whisper": {
+        "kind": "hf_snapshot",
+        "label": "Whisper (faster-whisper large-v3 turbo + batch)",
+        "repos": {
+            "stream": "deepdml/faster-whisper-large-v3-turbo-ct2",
+            "batch": "Systran/faster-whisper-large-v3",
+        },
+        "dest_dir": "speaches_cache",
+        "repo_pending_g3": True,
+        "approx_gb": 3.0,
+    },
+    # Legacy bundled all-variants convenience key (D-2) — RETAINED, marked
+    # bundled, so existing per-member status rows / callers don't vanish. Not an
+    # artifact child (MEMBER_ARTIFACTS lists the per-variant splits instead).
     "qwen-tts": {
         "kind": "hf_snapshot",
+        "label": "Qwen3-TTS 1.7B — all variants (bundled)",
         "repos": {
             "custom_voice": "Qwen/Qwen3-TTS-1.7B-CustomVoice",
             "base":         "Qwen/Qwen3-TTS-1.7B-Base",
             "voice_design": "Qwen/Qwen3-TTS-1.7B-VoiceDesign",
         },
+        "dest_dir": "qwen_tts",
+        "repo_pending_g3": True,
+        "bundled": True,
         "approx_gb": 13.5,
     },
+}
+
+# Per-member artifact children (A4): the manifest keys that render as individual
+# download buttons UNDER an audio MEMBER in GET /local-models/status. The bundled
+# "qwen-tts" key is intentionally NOT a child — it IS the member id; its children
+# are the per-variant splits. Whisper hangs off the speaches (STT) member.
+MEMBER_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "qwen-tts": ("qwen-tts-base", "qwen-tts-custom-voice", "qwen-tts-voice-design"),
+    "speaches": ("whisper",),
 }
 
 # ── download singleton ────────────────────────────────────────────────────
@@ -208,14 +303,20 @@ async def _stream(artifact: str):
 
 
 async def _stream_hf_snapshot(artifact: str, entry: dict):
-    """Pull the Qwen3-TTS variant checkpoints (multi-file HF repos) via
-    huggingface_hub.snapshot_download into QWEN_TTS_MODEL_DIR/<variant>. Coarse
-    progress (completed/total count REPOS, not bytes — snapshot_download exposes
-    no byte granularity); re-run-safe (snapshot_download skips already-present
-    files). Terminal line state 'done' or 'error'."""
+    """Pull a multi-file HF repo set via huggingface_hub.snapshot_download into
+    this entry's per-artifact dest bucket (A1 "dest_dir"): Qwen3-TTS variants →
+    _qwen_tts_model_dir()/<variant> (per-variant local_dir); whisper → the
+    Speaches HF hub cache (_speaches_cache_dir(), cache_dir layout so Speaches
+    finds it on first use). Coarse progress (completed/total count REPOS, not
+    bytes — snapshot_download exposes no byte granularity); re-run-safe
+    (snapshot_download skips already-present files). Terminal line state 'done'
+    or 'error'. record_download_state fires at terminal success (A3) — multi-file
+    artifacts fail _member_gguf_present so the state file is their only truth."""
     import asyncio
     repos = entry["repos"]
-    root = _qwen_tts_model_dir()
+    dest_dir = entry.get("dest_dir")
+    root = _artifact_dest_root(dest_dir)
+    use_cache_layout = dest_dir == _SPEACHES_CACHE_BUCKET
     total = len(repos)
     try:
         from huggingface_hub import snapshot_download
@@ -233,10 +334,14 @@ async def _stream_hf_snapshot(artifact: str, entry: dict):
         for variant, repo in repos.items():
             _set(status=f"downloading {variant} ({repo})", completed=done_n, total=total)
             yield _line()
-            await asyncio.to_thread(
-                snapshot_download, repo_id=repo,
-                local_dir=str(root / variant), local_dir_use_symlinks=False,
-            )
+            if use_cache_layout:
+                # HF hub cache layout (models--org--name) — Speaches reads from
+                # here; NOT a flattened per-variant local_dir.
+                kwargs = dict(repo_id=repo, cache_dir=str(root))
+            else:
+                kwargs = dict(repo_id=repo, local_dir=str(root / variant),
+                              local_dir_use_symlinks=False)
+            await asyncio.to_thread(snapshot_download, **kwargs)
             done_n += 1
             _set(status=f"{variant} ready", completed=done_n, total=total)
             yield _line()

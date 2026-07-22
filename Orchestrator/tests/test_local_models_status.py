@@ -89,7 +89,11 @@ def test_models_rollup(client, monkeypatch):
     assert [m["model"] for m in models] == \
         ["embed-qwen3-8b", "rerank-qwen3-8b", "speaches", "qwen-tts"]
     for m in models:
-        assert set(m) == MODEL_KEYS
+        # audio members (qwen-tts, speaches) carry an ADDITIVE per-artifact
+        # `artifacts` list (M-A/A4: the 3 Qwen variants + whisper); every other
+        # member keeps exactly MODEL_KEYS.
+        expected = MODEL_KEYS | ({"artifacts"} if m["model"] in {"speaches", "qwen-tts"} else set())
+        assert set(m) == expected
     by_id = {m["model"]: m for m in models}
     assert by_id["speaches"]["running"] is True
     assert by_id["speaches"]["state"] == "loading"

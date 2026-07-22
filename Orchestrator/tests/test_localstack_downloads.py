@@ -6,6 +6,7 @@ is module state reset per test; MODELS_DIR + hardware.disk_free_mb monkeypatched
 so nothing touches the real filesystem or the real disk gate.
 """
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -102,3 +103,118 @@ def test_download_already_present_is_done(monkeypatch):
     assert resp.status_code == 200
     assert _lines(resp)[-1]["state"] == "done"
     assert dest.read_bytes() == FAKE
+
+
+# ── M-A: per-artifact hf_snapshot dest routing (A1) + split keys (A2) ─────────
+
+class _RecordingSnapshot:
+    """Stand-in for huggingface_hub.snapshot_download that records the kwargs it
+    was called with (local_dir vs cache_dir) and touches a marker so a test can
+    assert WHERE the artifact would land — no network, no real weights."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        target = kwargs.get("local_dir") or kwargs.get("cache_dir")
+        from pathlib import Path as _P
+        _P(target).mkdir(parents=True, exist_ok=True)
+        (_P(target) / ".marker").write_text("ok")
+        return target
+
+
+@pytest.fixture
+def hf_snapshot(monkeypatch):
+    """Inject a recording snapshot_download into huggingface_hub so
+    _stream_hf_snapshot resolves it at import time inside the coroutine."""
+    import huggingface_hub
+    rec = _RecordingSnapshot()
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", rec, raising=False)
+    return rec
+
+
+def _run_download(artifact):
+    return _lines(_client().post("/local-models/download", json={"artifact": artifact}))
+
+
+def test_manifest_has_split_qwen_variants_and_whisper():
+    """A2: the bundled key is split into 3 per-variant keys + a whisper key; the
+    bundled convenience key is RETAINED for back-compat, marked bundled."""
+    m = dl.DOWNLOAD_MANIFEST
+    for key in ("qwen-tts-base", "qwen-tts-custom-voice", "qwen-tts-voice-design", "whisper"):
+        assert key in m, key
+        assert m[key]["kind"] == "hf_snapshot"
+        assert m[key].get("repo_pending_g3") is True  # unpinned -> disabled button
+    # each qwen split is a single repo into the qwen dir; whisper = two CT2 repos
+    assert len(m["qwen-tts-base"]["repos"]) == 1
+    assert len(m["whisper"]["repos"]) == 2
+    assert m["whisper"]["dest_dir"] == "speaches_cache"
+    # bundled key retained (D-2), flagged, so per-member status rows don't vanish
+    assert m["qwen-tts"].get("bundled") is True
+
+
+def test_qwen_variant_streams_into_qwen_weights_dir(monkeypatch, tmp_path, hf_snapshot):
+    """A1: a Qwen variant lands in weights/qwen3-tts/<variant> (local_dir)."""
+    qdir = tmp_path / "qwen3-tts"
+    monkeypatch.setattr(dl, "_qwen_tts_model_dir", lambda: qdir)
+    lines = _run_download("qwen-tts-base")
+    assert lines[-1]["state"] == "done"
+    assert hf_snapshot.calls, "snapshot_download never called"
+    call = hf_snapshot.calls[-1]
+    assert call.get("local_dir") == str(qdir / "base")
+    assert "cache_dir" not in call
+    assert (qdir / "base" / ".marker").exists()
+
+
+def test_whisper_streams_into_speaches_cache(monkeypatch, tmp_path, hf_snapshot):
+    """A1: whisper (dest_dir=speaches_cache) lands in the Speaches HF cache
+    (cache_dir layout), NEVER the Qwen weights dir."""
+    cache = tmp_path / "hf-cache" / "hub"
+    qdir = tmp_path / "qwen3-tts"
+    monkeypatch.setattr(dl, "_speaches_cache_dir", lambda: cache)
+    monkeypatch.setattr(dl, "_qwen_tts_model_dir", lambda: qdir)
+    lines = _run_download("whisper")
+    assert lines[-1]["state"] == "done"
+    # both CT2 repos routed into the speaches cache via cache_dir, not local_dir
+    assert len(hf_snapshot.calls) == 2
+    for call in hf_snapshot.calls:
+        assert call.get("cache_dir") == str(cache)
+        assert "local_dir" not in call
+    assert not qdir.exists()  # nothing leaked into the qwen weights dir
+
+
+def test_bundled_qwen_tts_dest_unchanged(monkeypatch, tmp_path, hf_snapshot):
+    """A1 regression: the legacy bundled qwen-tts key keeps landing all three
+    variants under _qwen_tts_model_dir()/<variant> (byte-identical routing)."""
+    qdir = tmp_path / "qwen3-tts"
+    monkeypatch.setattr(dl, "_qwen_tts_model_dir", lambda: qdir)
+    lines = _run_download("qwen-tts")
+    assert lines[-1]["state"] == "done"
+    landed = {c["local_dir"] for c in hf_snapshot.calls}
+    assert landed == {str(qdir / "base"), str(qdir / "custom_voice"), str(qdir / "voice_design")}
+
+
+def test_speaches_cache_dir_honors_env(monkeypatch):
+    """_speaches_cache_dir: explicit override > HF_HOME/hub > localstack default."""
+    monkeypatch.setenv("SPEACHES_CACHE_DIR", "/x/cache")
+    assert dl._speaches_cache_dir() == Path("/x/cache")
+    monkeypatch.delenv("SPEACHES_CACHE_DIR")
+    monkeypatch.setenv("HF_HOME", "/y/hf")
+    assert dl._speaches_cache_dir() == Path("/y/hf") / "hub"
+    monkeypatch.delenv("HF_HOME")
+    # default sits under the localstack root, a sibling of MODELS_DIR
+    assert dl._speaches_cache_dir() == dl.MODELS_DIR.parent / "hf-cache" / "hub"
+
+
+def test_hf_snapshot_records_download_state(monkeypatch, tmp_path, hf_snapshot):
+    """A3: a multi-file artifact persists state='downloaded' at terminal success
+    (its only truth — it fails _member_gguf_present)."""
+    from Orchestrator import local_stack
+    state_path = tmp_path / "downloads.json"
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", state_path)
+    monkeypatch.setattr(dl, "_qwen_tts_model_dir", lambda: tmp_path / "qwen3-tts")
+    lines = _run_download("qwen-tts-voice-design")
+    assert lines[-1]["state"] == "done"
+    recorded = local_stack.read_download_state()
+    assert recorded.get("qwen-tts-voice-design", {}).get("state") == "downloaded"

@@ -21,6 +21,24 @@ from Orchestrator import localstack_downloads as _dl
 router = APIRouter(prefix="/local-models", tags=["local-models"])
 
 
+def _artifact_row(key: str) -> dict:
+    """One per-artifact download child (A4) for the audio members. `downloadable`
+    is False while `repo_pending_g3` (placeholder repo ids pinned on MS02 at
+    G3/G4) so the wizard renders a disabled button with a reason instead of a
+    live 404 button; the raw flag is surfaced too. `downloaded` is the canonical
+    model_downloaded() truth (state-file for these multi-file artifacts)."""
+    entry = _dl.DOWNLOAD_MANIFEST[key]
+    pending = bool(entry.get("repo_pending_g3"))
+    return {
+        "key": key,
+        "label": entry.get("label", key),
+        "downloadable": (key in _dl.DOWNLOAD_MANIFEST) and not pending,
+        "downloaded": local_stack.model_downloaded(key),
+        "size_gb": entry.get("approx_gb"),
+        "repo_pending_g3": pending,
+    }
+
+
 def _routing_decision(cap: str, healthy: bool) -> dict:
     """On-box routing view for one capability. `seeded` = the wizard-time D2
     default (local_stack.enabled). decision: "on-box" (seeded + reachable),
@@ -61,7 +79,7 @@ def local_models_status(response: Response):
     for m in local_stack.MEMBERS:
         run = running_by_id.get(m["model"])
         dl = downloads.get(m["model"])
-        models.append({
+        row = {
             "model": m["model"],
             "capability": m["capability"],
             "group": m["group"],
@@ -71,11 +89,22 @@ def local_models_status(response: Response):
             "download": dl if isinstance(dl, dict) else {"state": "pending"},
             # True only when POST /local-models/download can fetch this member —
             # i.e. its id is a DOWNLOAD_MANIFEST key. rerank-qwen3-8b (self-
-            # converted at install) and speaches/whisper (auto-pulled on first
-            # transcription) are deliberately NOT in the manifest, so the wizard
-            # must not offer a Download button (it would 404 "Unknown artifact").
+            # converted at install) is deliberately NOT in the manifest, so the
+            # wizard must not offer a member-level Download button. (Per-artifact
+            # audio children are enumerated in `artifacts` below.)
             "downloadable": m["model"] in _dl.DOWNLOAD_MANIFEST,
-        })
+        }
+        # Per-artifact children (A4): the 3 Qwen variants under qwen-tts + whisper
+        # under speaches, each its own download button in the wizard audio
+        # section. INERT WHEN OFF: only populated when the stack is installed
+        # (no [local_models] section -> is_installed() False -> empty list), so a
+        # dev box with the stack off emits no artifact rows.
+        child_keys = _dl.MEMBER_ARTIFACTS.get(m["model"])
+        if child_keys is not None:
+            row["artifacts"] = (
+                [_artifact_row(k) for k in child_keys] if installed else []
+            )
+        models.append(row)
 
     routing = {cap: _routing_decision(cap, healthy) for cap in local_stack.CAPABILITIES}
 
