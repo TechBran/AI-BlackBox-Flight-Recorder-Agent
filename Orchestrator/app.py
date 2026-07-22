@@ -135,6 +135,9 @@ app.include_router(rerank_router)
 from Orchestrator.routes.local_models_routes import router as local_models_status_router
 app.include_router(local_models_status_router)
 
+from Orchestrator.routes.local_stack_routes import router as local_stack_router
+app.include_router(local_stack_router)
+
 from Orchestrator.routes.credentials_routes import router as credentials_router
 app.include_router(credentials_router)
 
