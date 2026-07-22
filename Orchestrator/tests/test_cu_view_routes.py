@@ -1,6 +1,10 @@
-"""M9: /cu/view — viewer HTML resolves the session's ws port; unknown session
-degrades gracefully; the WS proxy rejects an unknown session."""
+"""M9: /cu/view — the viewer HTML carries the session's /cu/view/{id}/ws proxy
+path (the ws port itself is resolved server-side at connect time, never embedded
+in the page); an unknown session degrades gracefully; and the WS proxy accepts
+then closes 1008 for an unknown/dead session."""
+import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 import Orchestrator.app  # noqa: F401 — registers the /cu/view routes onto the shared app
 from Orchestrator.checkpoint import app
 from Orchestrator.browser import display as disp
@@ -18,7 +22,7 @@ def test_view_page_renders_for_known_session(monkeypatch):
     _fake_handle(monkeypatch)
     r = TestClient(app).get("/cu/view/sess-1")
     assert r.status_code == 200
-    assert "/cu/view/sess-1/ws" in r.text          # socket path injected
+    assert "/cu/view/sess-1/ws" in r.text          # ws proxy PATH injected (not the port)
     assert "/cu/novnc/core/rfb.js" in r.text        # noVNC module referenced
 
 
@@ -34,3 +38,15 @@ def test_view_page_live_view_unavailable_notice(monkeypatch):
     r = TestClient(app).get("/cu/view/sess-1")
     assert r.status_code == 200
     assert "novnc" in r.text.lower()  # install-novnc notice
+
+
+def test_ws_proxy_rejects_unknown_session(monkeypatch):
+    """The load-bearing reverse-proxy: for an unknown/dead session the proxy
+    accepts the handshake (so the client sees a real WS) then closes 1008 — it
+    never dials a loopback ws port for a session the allocator doesn't know."""
+    _fake_handle(monkeypatch)  # only "sess-1" resolves; "nope" -> None
+    client = TestClient(app)
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect("/cu/view/nope/ws") as ws:
+            ws.receive_text()  # server accepted, then closes with 1008
+    assert excinfo.value.code == 1008

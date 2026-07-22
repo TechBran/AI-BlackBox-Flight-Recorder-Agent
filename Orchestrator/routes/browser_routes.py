@@ -4,8 +4,10 @@ Sovereign Browser REST API endpoints
 import time
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
-from fastapi import Body
+from fastapi import Body, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from starlette.requests import Request
+from starlette.websockets import WebSocketState
 
 from Orchestrator.checkpoint import app
 from Orchestrator.models import TaskType, TaskStatus
@@ -221,9 +223,6 @@ def cu_sessions():
     return {"sessions": sessions, "count": len(sessions), "cap": MAX_VIRTUAL_SESSIONS}
 
 
-from fastapi import WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
-
 _CU_VIEW_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <title>CU Live View — {session_id}</title>
 <style>html,body{{margin:0;height:100%;background:#0b0b0d;overflow:hidden}}
@@ -314,5 +313,17 @@ async def cu_view_ws(websocket: WebSocket, session_id: str):
         _done, pending = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
+        # Await the cancelled tasks so they don't emit "Task was destroyed but it
+        # is pending" warnings — mirror the app_proxy_websocket reference.
+        await asyncio.gather(*pending, return_exceptions=True)
     finally:
         await upstream.close()
+        # Prefer upstream's close code so e.g. a websockify-side close flows to the
+        # viewer, matching the reference proxy's close-code propagation.
+        code = upstream.close_code if upstream.close_code is not None else 1000
+        reason = upstream.close_reason or ""
+        try:
+            if websocket.application_state == WebSocketState.CONNECTED:
+                await websocket.close(code=code, reason=reason)
+        except Exception:
+            pass
