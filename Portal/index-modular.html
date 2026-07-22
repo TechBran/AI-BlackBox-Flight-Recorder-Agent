@@ -328,10 +328,25 @@
         <!-- Voice Preferences Section -->
         <div class="menu-group voice-preferences-section">
           <h4>🔊 Voice Preferences</h4>
-          <div class="voice-selector-row">
-            <label for="ttsVoiceSelect">TTS Voice:</label>
+          <!-- Provider-first TWO-STEP voice picker (D1/D3 parity): choose a
+               provider, then a voice within that provider. #ttsVoiceSelect stays
+               the canonical `provider:voice` value holder every downstream reader
+               uses. populateVoiceCatalog() (tts-stt.js) rebuilds both selects
+               from /tts/catalog at runtime; the static markup below is the
+               fail-open fallback for BOTH selects when the catalog is
+               unreachable. Mirrors Portal/index.html so every WebView surface
+               inherits the same two-step shape (no residual flat list). -->
+          <div class="voice-selector-row" style="flex-wrap: wrap;">
+            <label for="ttsProviderSelect">Provider:</label>
+            <select id="ttsProviderSelect">
+              <option value="openai">OpenAI TTS HD</option>
+              <option value="gemini-flash">Gemini Flash TTS</option>
+              <option value="gemini-pro" selected>Gemini Pro TTS</option>
+            </select>
+            <label for="ttsVoiceSelect">Voice:</label>
             <select id="ttsVoiceSelect">
-              <option value="gemini-pro:Charon">Charon - Calm, informative</option>
+              <!-- Fallback = the default provider's (gemini-pro) voices, Charon selected. -->
+              <option value="gemini-pro:Charon" selected>Charon - Calm, informative</option>
             </select>
             <button id="btnPreviewVoice" class="btn" title="Preview selected voice">▶️</button>
           </div>
