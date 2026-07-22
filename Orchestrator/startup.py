@@ -226,6 +226,33 @@ def startup_check_index():
 
 
 @app.on_event("startup")
+async def _cu_display_reaper():
+    """CU virtual-display reaper (M9 §9). Sweeps restart-survivor children on our
+    slot displays/ports once at boot (teardown-by-pid also runs at boot — the boot
+    orphan sweep in startup_check_index is idempotent, so a second targeted pass
+    here is a safe no-op), then loops the TTL reaper. cleanup_inactive_sessions /
+    reap_idle is scheduled NOWHERE else in the tree, so this owns the periodic
+    sweep. Never raises — maintenance, not boot criteria."""
+    import asyncio
+    from Orchestrator.browser.display import get_allocator, VIRTUAL_DISPLAY_TTL
+    try:
+        get_allocator().reap_orphans()  # sweep restart-survivor children once
+    except Exception as e:
+        print(f"[STARTUP] CU display orphan reap skipped: {e}")
+
+    async def _loop():
+        interval = max(60.0, VIRTUAL_DISPLAY_TTL / 3.0)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                get_allocator().reap_idle()
+            except Exception as e:
+                print(f"[CU-DISPLAY] TTL reap skipped: {e}")
+
+    asyncio.create_task(_loop())
+
+
+@app.on_event("startup")
 def startup_embeddings_transcode():
     """One-time migration: inline index embeddings → binary vector store.
 

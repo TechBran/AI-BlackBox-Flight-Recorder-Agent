@@ -220,7 +220,8 @@ def cu_sessions():
     the cap). Native-mode exclusivity is enforced separately by display_arbiter."""
     from Orchestrator.browser.display import get_allocator, MAX_VIRTUAL_SESSIONS
     sessions = get_allocator().active_sessions()
-    return {"sessions": sessions, "count": len(sessions), "cap": MAX_VIRTUAL_SESSIONS}
+    return {"active": bool(sessions), "count": len(sessions),
+            "cap": MAX_VIRTUAL_SESSIONS, "sessions": sessions}
 
 
 _CU_VIEW_HTML = """<!doctype html><html><head><meta charset="utf-8">
