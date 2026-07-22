@@ -1,268 +1,311 @@
+"""Per-session virtual-display allocation for computer use (M9).
+
+Each CU session gets a private Xvfb screen (at the model's native resolution),
+an openbox WM, an x11vnc server bound to loopback, and — when live-view assets
+are present — a websockify WS bridge. Everything is tracked BY PID; teardown and
+liveness are per-pid. There is NO global process-name kill (the singleton
+VirtualDisplay this replaces matched processes by name, which broke multi-session
+correctness). display_arbiter.py still owns native-mode mutual exclusion; this
+module owns virtual-session lifecycle only.
 """
-Virtual display management using Xvfb
-"""
-import subprocess
 import os
+import signal
+import subprocess
+import threading
 import time
-import shutil
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
-from Orchestrator.browser.config import (
-    DISPLAY_NUMBER, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_DEPTH,
-    NATIVE_MODE, ACTIVE_DISPLAY
-)
+from Orchestrator.browser.config import DISPLAY_DEPTH, ACTIVE_DISPLAY
+
+# ── Slot ranges (loopback-only) ──
+DISPLAY_BASE = 100            # Xvfb :100, :101, :102
+VNC_BASE_PORT = 5901         # x11vnc RFB per session
+WEBSOCKIFY_BASE_PORT = 6101  # websockify WS bridge per session
+MAX_VIRTUAL_SESSIONS = 3     # concurrency cap (§9)
+VIRTUAL_DISPLAY_TTL = 1800.0 # idle seconds before the TTL reaper tears a session down
+_STARTUP_WAIT = 1.0          # seconds to let Xvfb come up before openbox/x11vnc
+_NOVNC_DIR = "/usr/share/novnc"
 
 
-class VirtualDisplay:
-    """Manages an Xvfb virtual display with openbox window manager for headless automation."""
+def resolution_for_backend(backend: str) -> tuple:
+    """Native CU resolution per backend (§9 / D6). ONE source per backend."""
+    b = (backend or "anthropic").lower()
+    if b in ("google", "gemini"):
+        from Orchestrator.gemini_cu.config import GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT
+        return GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT       # 1440x900
+    from Orchestrator.browser.config import CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT
+    return CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT           # 1280x720 (anthropic + openai)
 
-    def __init__(self, display_number=DISPLAY_NUMBER,
-                 width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT, depth=DISPLAY_DEPTH):
-        self.display_number = display_number
-        self.width = width
-        self.height = height
-        self.depth = depth
-        self.process = None
-        self.wm_process = None  # openbox window manager
-        self.vnc_process = None  # x11vnc for VNC access
-        self.display_str = f":{display_number}"
 
-    def start(self) -> bool:
-        """Start the Xvfb virtual display. Returns True if started (or already running).
-        In native mode, just ensure VNC is running on the real display.
-        """
-        if NATIVE_MODE:
-            self.display_str = f":{ACTIVE_DISPLAY}"
-            if not self._is_vnc_running():
-                self._start_vnc_server()
-            return True
+def _live_view_available() -> bool:
+    """websockify binary + noVNC assets both present -> live view can run."""
+    import shutil
+    return bool(shutil.which("websockify")) and os.path.isdir(_NOVNC_DIR)
 
-        if self.is_running():
-            print(f"[DISPLAY] Xvfb {self.display_str} already running")
-            # Ensure window manager is also running
-            if not self._is_wm_running():
-                self._start_window_manager()
-            # Ensure VNC server is running
-            if not self._is_vnc_running():
-                self._start_vnc_server()
-            return True
 
-        # Kill any stale Xvfb on this display
-        subprocess.run(
-            ["pkill", "-f", f"Xvfb {self.display_str}"],
-            capture_output=True
-        )
-        time.sleep(0.5)
+def _xvfb_ready(display_num: int) -> bool:
+    """One-shot readiness probe: xdpyinfo / scrot against :N succeeds."""
+    env = {"DISPLAY": f":{display_num}", "PATH": "/usr/bin:/usr/local/bin:/bin"}
+    try:
+        r = subprocess.run(["scrot", "--overwrite", f"/tmp/xvfb_ready_{display_num}.png"],
+                           env=env, capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
 
-        cmd = [
-            "Xvfb", self.display_str,
-            "-screen", "0", f"{self.width}x{self.height}x{self.depth}",
-            "-nolisten", "tcp",
-            "-ac"  # Disable access control for local use
-        ]
 
+def _terminate_proc(p) -> None:
+    """Tear down a TRACKED child we own (a Popen): terminate -> wait -> kill.
+    Reaps the zombie via wait(). Used by release() (we hold the Popen)."""
+    try:
+        p.terminate()
         try:
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            time.sleep(1)  # Give Xvfb time to start
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait(timeout=2)
+    except Exception:
+        pass
 
-            if self.process.poll() is not None:
-                print(f"[DISPLAY] Xvfb failed to start (exit code {self.process.returncode})")
-                return False
 
-            print(f"[DISPLAY] Xvfb {self.display_str} started ({self.width}x{self.height})")
-
-            # Start openbox window manager for proper window management
-            self._start_window_manager()
-
-            # Start x11vnc for VNC fallback access
-            self._start_vnc_server()
-
-            return True
-        except FileNotFoundError:
-            print("[DISPLAY] Xvfb not found. Install with: sudo apt-get install xvfb")
-            return False
-        except Exception as e:
-            print(f"[DISPLAY] Failed to start Xvfb: {e}")
-            return False
-
-    def _start_window_manager(self):
-        """Start openbox on the virtual display for window management."""
-        env = self.get_env()
+def _terminate_pid(pid: int) -> None:
+    """SIGTERM then SIGKILL a single pid we do NOT hold as a Popen (a restart-
+    survivor orphan). Never a process-name match. Used by reap_orphans()."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            # Kill any existing openbox on this display
-            subprocess.run(
-                ["pkill", "-f", f"openbox.*DISPLAY={self.display_str}"],
-                capture_output=True, env=env
-            )
-            time.sleep(0.3)
-
-            self.wm_process = subprocess.Popen(
-                ["openbox", "--config-file", "/dev/null"],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            time.sleep(0.5)
-
-            if self.wm_process.poll() is not None:
-                print(f"[DISPLAY] openbox failed to start (exit {self.wm_process.returncode})")
-                self.wm_process = None
-            else:
-                print(f"[DISPLAY] openbox window manager started on {self.display_str}")
-        except FileNotFoundError:
-            print("[DISPLAY] openbox not found — no window manager (install: sudo apt-get install openbox)")
-        except Exception as e:
-            print(f"[DISPLAY] Failed to start openbox: {e}")
-
-    def _start_vnc_server(self):
-        """Start x11vnc on the virtual display for remote viewing."""
-        if not shutil.which("x11vnc"):
-            print("[DISPLAY] x11vnc not installed — VNC access unavailable. Install with: sudo apt-get install x11vnc")
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        time.sleep(0.2)
+        try:
+            os.kill(pid, 0)  # still alive?
+        except OSError:
             return
 
-        try:
-            # Kill any existing x11vnc
-            subprocess.run(["pkill", "-f", "x11vnc"], capture_output=True)
-            time.sleep(0.3)
 
-            self.vnc_process = subprocess.Popen(
-                [
-                    "x11vnc",
-                    "-display", self.display_str,
-                    "-forever",
-                    "-shared",
-                    "-nopw",
-                    "-listen", "127.0.0.1",
-                    "-rfbport", "5900",
-                    "-noxdamage",
-                    "-quiet",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            time.sleep(0.5)
-            if self.vnc_process.poll() is not None:
-                print(f"[DISPLAY] x11vnc failed to start (exit {self.vnc_process.returncode})")
-                self.vnc_process = None
-            else:
-                print(f"[DISPLAY] x11vnc started on localhost:5900 (PID {self.vnc_process.pid})")
-        except Exception as e:
-            print(f"[DISPLAY] Failed to start x11vnc: {e}")
+def _pids_matching(pattern: str) -> List[int]:
+    """Targeted pgrep for a SPECIFIC slot identifier (e.g. 'Xvfb :100',
+    'rfbport 5901'). Used ONLY by the boot reaper to find restart-survivors on
+    OUR OWN slots — never a blanket process-name match like 'x11vnc'/'openbox'."""
+    try:
+        r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5)
+        return [int(x) for x in r.stdout.split()]
+    except Exception:
+        return []
 
-    def _is_vnc_running(self) -> bool:
-        """Check if x11vnc is running."""
-        if self.vnc_process and self.vnc_process.poll() is None:
-            return True
-        result = subprocess.run(
-            ["pgrep", "-f", "x11vnc"],
-            capture_output=True, text=True
-        )
-        return result.returncode == 0
 
-    def _is_wm_running(self) -> bool:
-        """Check if openbox window manager is running on this display."""
-        if self.wm_process and self.wm_process.poll() is None:
-            return True
-        result = subprocess.run(
-            ["pgrep", "-f", "openbox"],
-            capture_output=True, text=True
-        )
-        return result.returncode == 0
+@dataclass
+class DisplayHandle:
+    session_id: str
+    slot: int
+    backend: str
+    operator: str
+    width: int
+    height: int
+    display_num: int
+    vnc_port: int
+    ws_port: int
+    live_view: bool = False
+    pids: Dict[str, int] = field(default_factory=dict)  # role -> pid (introspection)
+    created_at: float = field(default_factory=time.time)
+    last_activity: float = field(default_factory=time.time)
 
-    def stop(self):
-        """Stop VNC, window manager, and Xvfb virtual display.
-        In native mode, only stops VNC (don't touch the real desktop).
-        """
-        if NATIVE_MODE:
-            if self.vnc_process:
-                self.vnc_process.terminate()
-                try:
-                    self.vnc_process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    self.vnc_process.kill()
-                self.vnc_process = None
-                print("[DISPLAY] x11vnc stopped (native mode)")
-            return
-
-        if self.vnc_process:
-            self.vnc_process.terminate()
-            try:
-                self.vnc_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.vnc_process.kill()
-            self.vnc_process = None
-            print("[DISPLAY] x11vnc stopped")
-
-        if self.wm_process:
-            self.wm_process.terminate()
-            try:
-                self.wm_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.wm_process.kill()
-            self.wm_process = None
-            print(f"[DISPLAY] openbox stopped")
-
-        if self.process:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            self.process = None
-            print(f"[DISPLAY] Xvfb {self.display_str} stopped")
-
-    def is_running(self) -> bool:
-        """Check if the virtual display is active. Native mode is always 'running'."""
-        if NATIVE_MODE:
-            return True
-        # Check our process
-        if self.process and self.process.poll() is None:
-            return True
-        # Check if any Xvfb is on our display
-        result = subprocess.run(
-            ["pgrep", "-f", f"Xvfb {self.display_str}"],
-            capture_output=True, text=True
-        )
-        return result.returncode == 0
+    @property
+    def display(self) -> str:
+        return f":{self.display_num}"
 
     def get_env(self) -> dict:
-        """Return environment dict with DISPLAY set."""
         env = os.environ.copy()
-        env["DISPLAY"] = f":{ACTIVE_DISPLAY}" if NATIVE_MODE else self.display_str
+        env["DISPLAY"] = self.display
         return env
 
-    def health_check(self) -> bool:
-        """Verify display is functional by attempting a dummy screenshot."""
-        if NATIVE_MODE:
-            return True  # Real desktop is always functional
-        if not self.is_running():
-            return False
-        try:
-            result = subprocess.run(
-                ["scrot", "--overwrite", "/tmp/xvfb_health_check.png"],
-                env=self.get_env(), capture_output=True, text=True, timeout=5
+    def touch(self) -> None:
+        self.last_activity = time.time()
+
+    def to_public(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "operator": self.operator,
+            "backend": self.backend,
+            "width": self.width,
+            "height": self.height,
+            "display": self.display,
+            "live_view": self.live_view,
+            "view_url": f"/cu/view/{self.session_id}",
+            "started_at": self.created_at,
+        }
+
+
+class DisplayAllocator:
+    """Thread-safe per-session virtual-display lifecycle. Contenders are OS
+    threads (tasks.py ThreadPoolExecutor), so a process-wide RLock guards the
+    slot table."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._sessions: Dict[str, DisplayHandle] = {}       # session_id -> handle
+        self._slots: Dict[int, str] = {}                    # slot -> session_id
+        self._procs: Dict[str, Dict[str, subprocess.Popen]] = {}  # session_id -> role -> Popen
+
+    def _free_slot(self) -> int:
+        for slot in range(MAX_VIRTUAL_SESSIONS):
+            if slot not in self._slots:
+                return slot
+        raise RuntimeError(
+            f"CU virtual-display cap reached ({MAX_VIRTUAL_SESSIONS} concurrent sessions)")
+
+    def allocate(self, session_id: str, backend: str = "anthropic",
+                 operator: str = "system") -> DisplayHandle:
+        with self._lock:
+            existing = self._sessions.get(session_id)
+            if existing is not None:
+                existing.touch()
+                return existing
+            slot = self._free_slot()  # raises when capped
+            width, height = resolution_for_backend(backend)
+            h = DisplayHandle(
+                session_id=session_id, slot=slot, backend=backend, operator=operator,
+                width=width, height=height, display_num=DISPLAY_BASE + slot,
+                vnc_port=VNC_BASE_PORT + slot, ws_port=WEBSOCKIFY_BASE_PORT + slot,
             )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, Exception):
+            self._start_quartet(h)
+            self._sessions[session_id] = h
+            self._slots[slot] = session_id
+            return h
+
+    def _start_quartet(self, h: DisplayHandle) -> None:
+        procs: Dict[str, subprocess.Popen] = {}
+        # 1. Xvfb at the backend's native resolution — scale 1.0, no LANCZOS.
+        procs["xvfb"] = subprocess.Popen(
+            ["Xvfb", h.display, "-screen", "0", f"{h.width}x{h.height}x{DISPLAY_DEPTH}",
+             "-nolisten", "tcp", "-ac"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(_STARTUP_WAIT)
+        if not _xvfb_ready(h.display_num):
+            for p in procs.values():
+                _terminate_proc(p)
+            raise RuntimeError(f"Xvfb {h.display} failed to become ready")
+        env = h.get_env()
+        # 2. openbox WM (DISPLAY via env — the singleton's name-match kill of
+        #    'openbox' by argv was a dead no-op: DISPLAY lives in env, not argv).
+        procs["openbox"] = subprocess.Popen(
+            ["openbox", "--config-file", "/dev/null"], env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.3)
+        # 3. x11vnc bound to loopback on THIS session's rfbport (no session dbus).
+        procs["x11vnc"] = subprocess.Popen(
+            ["x11vnc", "-display", h.display, "-forever", "-shared", "-nopw",
+             "-listen", "127.0.0.1", "-rfbport", str(h.vnc_port), "-noxdamage", "-quiet"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 4. websockify WS bridge (only when assets present — SHOULD_HAVE).
+        if _live_view_available():
+            procs["websockify"] = subprocess.Popen(
+                ["websockify", f"127.0.0.1:{h.ws_port}", f"127.0.0.1:{h.vnc_port}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            h.live_view = True
+        self._procs[h.session_id] = procs
+        h.pids = {role: p.pid for role, p in procs.items()}  # introspection mirror
+
+    def get(self, session_id: str) -> Optional[DisplayHandle]:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def release(self, session_id: str) -> None:
+        with self._lock:
+            h = self._sessions.pop(session_id, None)
+            procs = self._procs.pop(session_id, {})
+            if h is not None:
+                self._slots.pop(h.slot, None)
+        # Teardown the tracked children we own (Popen objects), outside the lock.
+        # Dependents before Xvfb. This kills the SPECIFIC pids we spawned — never
+        # a process-name kill.
+        for role in ("websockify", "x11vnc", "openbox", "xvfb"):
+            p = procs.get(role)
+            if p is not None:
+                _terminate_proc(p)
+
+    def active_sessions(self) -> List[dict]:
+        with self._lock:
+            return [h.to_public() for h in self._sessions.values()]
+
+    def shutdown_all(self) -> None:
+        for sid in list(self._sessions):
+            self.release(sid)
+
+
+# ── Module singleton ──
+_allocator: Optional[DisplayAllocator] = None
+_allocator_lock = threading.Lock()
+
+def get_allocator() -> DisplayAllocator:
+    global _allocator
+    with _allocator_lock:
+        if _allocator is None:
+            _allocator = DisplayAllocator()
+        return _allocator
+
+
+# ── Backward-compat shim (removed in Task 9.4 once all callers use handles) ──
+# A minimal singleton-style facade over a reserved "__default__" allocation so
+# chrome.py / session_manager.py / browser_routes.py keep importing get_display /
+# ensure_display_running until 9.4 rewires them. NO global process kills.
+class _DefaultDisplayShim:
+    _SID = "__default__"
+
+    def _handle(self) -> Optional[DisplayHandle]:
+        return get_allocator().get(self._SID)
+
+    def start(self) -> bool:
+        try:
+            get_allocator().allocate(self._SID, backend="anthropic", operator="system")
+            return True
+        except Exception as e:
+            print(f"[DISPLAY] default allocation failed: {e}")
             return False
 
+    def is_running(self) -> bool:
+        return self._handle() is not None
 
-# Singleton display instance for the application
-_display = None
+    def get_env(self) -> dict:
+        h = self._handle()
+        if h is None:
+            env = os.environ.copy(); env["DISPLAY"] = f":{ACTIVE_DISPLAY}"; return env
+        return h.get_env()
 
-def get_display() -> VirtualDisplay:
-    """Get or create the singleton VirtualDisplay."""
-    global _display
-    if _display is None:
-        _display = VirtualDisplay()
-    return _display
+    @property
+    def display_number(self) -> int:
+        h = self._handle()
+        return h.display_num if h else ACTIVE_DISPLAY
+
+    @property
+    def width(self) -> int:
+        h = self._handle(); return h.width if h else 1280
+
+    @property
+    def height(self) -> int:
+        h = self._handle(); return h.height if h else 720
+
+    def health_check(self) -> bool:
+        h = self._handle()
+        return bool(h) and _xvfb_ready(h.display_num)
+
+    def stop(self) -> None:
+        get_allocator().release(self._SID)
+
+
+# Backward-compat class alias: Orchestrator/browser/__init__.py re-exports the
+# name `VirtualDisplay` in its __all__. Nothing instantiates it directly; aliasing
+# the shim class keeps that import + re-export resolving until Task 9.4 removes it.
+VirtualDisplay = _DefaultDisplayShim
+
+_display_shim = _DefaultDisplayShim()
+
+def get_display() -> _DefaultDisplayShim:
+    return _display_shim
 
 def ensure_display_running() -> bool:
-    """Ensure the virtual display is running. Returns True on success."""
-    display = get_display()
-    if not display.is_running():
-        return display.start()
-    return True
+    d = get_display()
+    return True if d.is_running() else d.start()
