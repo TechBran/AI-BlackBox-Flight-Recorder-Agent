@@ -69,6 +69,12 @@ def local_models_status(response: Response):
             "running": run is not None,
             "state": run["state"] if run else None,
             "download": dl if isinstance(dl, dict) else {"state": "pending"},
+            # True only when POST /local-models/download can fetch this member —
+            # i.e. its id is a DOWNLOAD_MANIFEST key. rerank-qwen3-8b (self-
+            # converted at install) and speaches/whisper (auto-pulled on first
+            # transcription) are deliberately NOT in the manifest, so the wizard
+            # must not offer a Download button (it would 404 "Unknown artifact").
+            "downloadable": m["model"] in _dl.DOWNLOAD_MANIFEST,
         })
 
     routing = {cap: _routing_decision(cap, healthy) for cap in local_stack.CAPABILITIES}

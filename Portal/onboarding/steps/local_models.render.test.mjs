@@ -49,16 +49,16 @@ const GPU_STATUS = {
     models: [
         { model: "embed-qwen3-8b", capability: "embeddings", group: "retrieval",
           label: "Qwen3-Embedding-8B (Q8_0)", running: false, state: null,
-          download: { state: "pending" } },
+          download: { state: "pending" }, downloadable: true },
         { model: "rerank-qwen3-8b", capability: "rerank", group: "retrieval",
           label: "Qwen3-Reranker-8B (Q8_0)", running: false, state: null,
-          download: { state: "done" } },
+          download: { state: "done" }, downloadable: false },
         { model: "speaches", capability: "stt", group: "audio",
           label: "Speaches", running: true, state: "ready",
-          download: { state: "downloaded" } },
+          download: { state: "downloaded" }, downloadable: false },
         { model: "qwen-tts", capability: "tts", group: "audio",
           label: "Qwen3-TTS", running: false, state: null,
-          download: { state: "pending" } },
+          download: { state: "pending" }, downloadable: true },
     ],
     routing: {
         embeddings: { enabled: true, healthy: true, decision: "on-box" },
@@ -79,6 +79,39 @@ const CPU_EMPTY_STATUS = {
         rerank: { enabled: false, healthy: false, decision: "off" },
         stt: { enabled: false, healthy: false, decision: "off" },
         tts: { enabled: false, healthy: false, decision: "off" },
+    },
+};
+
+// Fresh-box GPU payload: NOTHING downloaded yet. Every member's download
+// defaults to {state:"pending"} (local_models_routes.py). embeddings + tts are
+// fetchable (downloadable:true); rerank (self-converted) + stt (whisper auto-
+// pulled) are NOT — this is the exact state that used to render a Download
+// button whose POST 404s "Unknown artifact".
+const FRESH_STATUS = {
+    installed: true, enabled: true, healthy: true,
+    base_url: "http://127.0.0.1:9098/v1",
+    hardware: { gpu: true, gpu_name: "NVIDIA RTX 2000 Ada Generation",
+                vram_mb: 16380, ram_mb: 64000, source: "nvidia-smi", tier: "HIGH" },
+    disk: { free_mb: 512000, required_mb: 40960, ok: true },
+    models: [
+        { model: "embed-qwen3-8b", capability: "embeddings", group: "retrieval",
+          label: "Qwen3-Embedding-8B (Q8_0)", running: false, state: null,
+          download: { state: "pending" }, downloadable: true },
+        { model: "rerank-qwen3-8b", capability: "rerank", group: "retrieval",
+          label: "Qwen3-Reranker-8B (Q8_0)", running: false, state: null,
+          download: { state: "pending" }, downloadable: false },
+        { model: "speaches", capability: "stt", group: "audio",
+          label: "Speaches", running: false, state: null,
+          download: { state: "pending" }, downloadable: false },
+        { model: "qwen-tts", capability: "tts", group: "audio",
+          label: "Qwen3-TTS", running: false, state: null,
+          download: { state: "pending" }, downloadable: true },
+    ],
+    routing: {
+        embeddings: { enabled: false, healthy: true, decision: "off" },
+        rerank: { enabled: false, healthy: true, decision: "off" },
+        stt: { enabled: false, healthy: true, decision: "off" },
+        tts: { enabled: false, healthy: true, decision: "off" },
     },
 };
 
@@ -141,6 +174,37 @@ test("renderCapRow shows activate/deactivate for downloaded weights", () => {
     // rerank: downloaded but not active → 'Use on-box' (data-on)
     const rk = step.renderCapRow({ id: "rerank", label: "Reranking" }, GPU_STATUS);
     assert.match(rk, /data-on="rerank"/);
+});
+
+test("renderCapRow never shows a Download button for a non-manifest member (fresh-box pending)", () => {
+    // The regression: on a fresh box rerank/stt default to download.state
+    // 'pending', so isDownloaded() is false — but their ids aren't in
+    // DOWNLOAD_MANIFEST (downloadable:false), so a Download button would POST an
+    // unknown artifact and 404. They must fall through to 'Use on-box' + an
+    // auto-provision note instead.
+    const rk = step.renderCapRow({ id: "rerank", label: "Reranking" }, FRESH_STATUS);
+    assert.doesNotMatch(rk, /data-dl=/);          // never a Download button
+    assert.match(rk, /data-on="rerank"/);          // activation only
+    assert.match(rk, /provisioned automatically/); // the honest note replaces it
+
+    const stt = step.renderCapRow({ id: "stt", label: "Speech" }, FRESH_STATUS);
+    assert.doesNotMatch(stt, /data-dl=/);
+    assert.match(stt, /data-on="stt"/);
+    assert.match(stt, /provisioned automatically/);
+
+    // ...while the genuinely fetchable members in the SAME payload still offer
+    // their (correct, manifest-backed) Download button.
+    const emb = step.renderCapRow({ id: "embeddings", label: "Memory" }, FRESH_STATUS);
+    assert.match(emb, /data-dl="embed-qwen3-8b"/);
+    const tts = step.renderCapRow({ id: "tts", label: "Voice" }, FRESH_STATUS);
+    assert.match(tts, /data-dl="qwen-tts"/);
+});
+
+test("isDownloadable gates on the backend downloadable flag", () => {
+    assert.equal(step.isDownloadable(step.modelForCap("embeddings", FRESH_STATUS)), true);
+    assert.equal(step.isDownloadable(step.modelForCap("rerank", FRESH_STATUS)), false);
+    assert.equal(step.isDownloadable(step.modelForCap("stt", FRESH_STATUS)), false);
+    assert.equal(step.isDownloadable(null), false);
 });
 
 test("renderCapRow tolerates the empty/CPU payload (no member, no throw)", () => {

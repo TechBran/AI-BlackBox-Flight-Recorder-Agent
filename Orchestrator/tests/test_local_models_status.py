@@ -16,7 +16,8 @@ STATUS_KEYS = {
     "installed", "enabled", "healthy", "base_url",
     "hardware", "disk", "llama_swap", "models", "routing",
 }
-MODEL_KEYS = {"model", "capability", "group", "label", "running", "state", "download"}
+MODEL_KEYS = {"model", "capability", "group", "label", "running", "state", "download",
+              "downloadable"}
 DISK_KEYS = {"free_mb", "required_mb", "ok"}
 ROUTING_KEYS = {"enabled", "healthy", "decision"}
 
@@ -96,6 +97,13 @@ def test_models_rollup(client, monkeypatch):
     assert by_id["embed-qwen3-8b"]["state"] is None
     assert by_id["embed-qwen3-8b"]["download"] == {"state": "downloaded"}
     assert by_id["qwen-tts"]["download"] == {"state": "pending"}  # absent -> pending
+    # downloadable == "id is a DOWNLOAD_MANIFEST key": embeddings + tts are
+    # fetchable; rerank (self-converted) + stt (auto-pulled) are NOT, so the
+    # wizard must never render a Download button for them.
+    assert by_id["embed-qwen3-8b"]["downloadable"] is True
+    assert by_id["qwen-tts"]["downloadable"] is True
+    assert by_id["rerank-qwen3-8b"]["downloadable"] is False
+    assert by_id["speaches"]["downloadable"] is False
 
 
 def test_llama_swap_running_passthrough_and_null(client, monkeypatch):

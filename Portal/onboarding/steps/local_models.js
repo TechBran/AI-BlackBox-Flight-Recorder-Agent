@@ -124,10 +124,22 @@ export function isActive(capId, st = status) {
 }
 
 export function modelForCap(capId, st = status) {
-    // The downloadable weight member backing this capability, if status lists
-    // it (models[].capability). Keyed by `model` — the DOWNLOAD_MANIFEST
-    // artifact id POST /local-models/download expects.
+    // The weight member backing this capability, if status lists it
+    // (models[].capability). Its `model` id is a valid POST /local-models/
+    // download artifact ONLY when m.downloadable is true (i.e. the id is a
+    // DOWNLOAD_MANIFEST key) — that holds for embeddings + tts, but NOT for
+    // rerank (self-converted at install) or stt (whisper auto-pulled on first
+    // use). Gate the Download control on isDownloadable(), never on `model`
+    // alone, or the button POSTs an unknown artifact and 404s.
     return ((st && st.models) || []).find((m) => m.capability === capId) || null;
+}
+
+// True when this member has a fetchable weight artifact — POST /local-models/
+// download will accept its id. Driven off the backend `downloadable` flag
+// (m.model ∈ DOWNLOAD_MANIFEST), the single source of truth, so the frontend
+// never duplicates the manifest and can't drift from it.
+export function isDownloadable(m) {
+    return !!(m && m.downloadable);
 }
 
 // True when this capability's weights are present on disk. The status endpoint
@@ -198,18 +210,30 @@ export function renderCapRow(cap, st = status) {
     const m = modelForCap(cap.id, st);
     const dl = downloading[m && m.model];
     const downloaded = isDownloaded(m);
+    // A member "needs a download" only when it has a fetchable artifact AND its
+    // weights aren't present yet. Non-manifest members (rerank/stt) skip the
+    // Download button entirely and fall through to activation — a note below
+    // explains they're provisioned automatically.
+    const needsDownload = isDownloadable(m) && !downloaded;
 
     let control;
     if (dl) {
         const pct = dl.total ? Math.min(100, Math.floor((dl.completed / dl.total) * 100)) : 0;
         control = `<div class="ob-lm-progress"><div class="ob-lm-progress-track"><div class="ob-lm-progress-fill" style="width:${pct}%"></div></div><span class="ob-lm-progress-text">${pct}% ${escapeHtml(dl.statusText || "downloading")}</span></div>`;
-    } else if (!downloaded) {
+    } else if (needsDownload) {
         control = `<button type="button" class="ob-lm-btn" data-dl="${escapeHtml(m.model)}">Download ${escapeHtml(r.size || "")}</button>`;
     } else if (active) {
         control = `<button type="button" class="ob-lm-btn ob-lm-btn-on" data-off="${cap.id}">On-box active — turn off</button>`;
     } else {
         control = `<button type="button" class="ob-lm-btn ob-lm-btn-activate" data-on="${cap.id}">Use on-box</button>`;
     }
+
+    // Non-downloadable member not yet on disk: there's no Download button, so
+    // tell the user it's provisioned automatically (converted at install /
+    // pulled on first use) instead of leaving a silent gap.
+    const autoNote = (m && !isDownloadable(m) && !downloaded && !active)
+        ? `<p class="ob-lm-cap-note">No manual download — provisioned automatically (converted at install, or pulled on first use).</p>`
+        : "";
 
     return `
         <div class="ob-lm-cap" data-cap="${cap.id}">
@@ -218,6 +242,7 @@ export function renderCapRow(cap, st = status) {
                 <span class="ob-lm-cap-model">${escapeHtml(r.label)}${r.size ? ` · ${escapeHtml(r.size)}` : ""}</span>
             </div>
             ${r.note ? `<p class="ob-lm-cap-note">${escapeHtml(r.note)}</p>` : ""}
+            ${autoNote}
             <div class="ob-lm-cap-action">${control}</div>
         </div>`;
 }
