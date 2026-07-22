@@ -9,13 +9,14 @@ Variant-transition PEAK VRAM is a separate step (vram.py wrapping a
 CustomVoice->Base->VoiceDesign sweep). The <0.9 RTF result INFORMS the
 streaming-default decision (§7); it is not a hard pass/fail — exit 0 always."""
 from __future__ import annotations
-import argparse, json, struct, sys, time
+import argparse, json, sys, time
 from pathlib import Path
 import requests
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-from diagnostics.localstack.metrics import wav_duration_seconds, rtf  # noqa: E402
+from diagnostics.localstack.metrics import (  # noqa: E402
+    parse_wav_header, rtf, summarize_latencies)
 
 BASE = "http://127.0.0.1:9098/v1"
 # model="qwen-tts" routes to the member; the VARIANT is inferred from the
@@ -31,11 +32,11 @@ def measure_batch(model, voice, text):
         "response_format": "wav", "stream": False})
     r.raise_for_status()
     wall, wav = time.time() - t0, r.content
-    audio_s = wav_duration_seconds(wav)
-    sr = struct.unpack_from("<I", wav, 24)[0]  # RIFF fmt sample_rate
+    hdr = parse_wav_header(wav)  # duration AND sample_rate from the real header
+    audio_s = hdr["duration_seconds"]
     return {"wall_s": round(wall, 3), "audio_s": round(audio_s, 3),
-            "rtf": round(rtf(wall, audio_s), 3), "sample_rate": sr,
-            "bytes": len(wav)}
+            "rtf": round(rtf(wall, audio_s), 3),
+            "sample_rate": hdr["sample_rate"], "bytes": len(wav)}
 
 
 def measure_first_packet(model, voice, text):
@@ -65,10 +66,12 @@ def main(argv=None):
         print(json.dumps(row))
         results.append(row)
     worst = max(r["rtf"] for r in results)
+    fp = [r["first_packet_s"] for r in results if r["first_packet_s"] is not None]
     summary = {"gate": "G3", "gate_rtf": args.gate_rtf, "worst_rtf": worst,
                "streams_faster_than_realtime": worst < args.gate_rtf,
                "recommend_streaming_variant":
                    "1.7B" if worst < args.gate_rtf else "0.6B-CustomVoice",
+               "first_packet_latency": summarize_latencies(fp) if fp else None,
                "cases": results}
     print(json.dumps(summary, indent=2))
     if args.out:

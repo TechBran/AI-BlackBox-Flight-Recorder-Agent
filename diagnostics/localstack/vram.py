@@ -20,6 +20,26 @@ def sample_used_mib(gpu: int) -> int:
     return parse_nvidia_smi_used_mib(out)
 
 
+def summarize(label, gpu, baseline, samples, elapsed_s, rc) -> dict:
+    """Build the report dict from a (possibly None) baseline and the collected
+    samples. If the baseline read failed (nvidia-smi absent/errored) we fall
+    back to the first successful sample; with neither, every derived field is
+    None and ``fits_budget`` is None so callers can flag an unmeasurable run
+    instead of reporting a false pass."""
+    if baseline is None:
+        baseline = samples[0] if samples else None
+    peak = max(samples) if samples else baseline
+    delta = None if (peak is None or baseline is None) else peak - baseline
+    headroom = None if peak is None else BUDGET_MIB - peak
+    fits = None if peak is None else peak < BUDGET_MIB
+    return {"label": label, "gpu": gpu,
+            "baseline_mib": baseline, "peak_mib": peak,
+            "delta_mib": delta, "n_samples": len(samples),
+            "elapsed_s": elapsed_s,
+            "budget_mib": BUDGET_MIB, "headroom_mib": headroom,
+            "fits_budget": fits, "command_rc": rc}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpu", type=int, default=0)
@@ -42,7 +62,16 @@ def main(argv=None):
                 print(f"[vram] sample error: {e}", file=sys.stderr)
             stop.wait(args.interval)
 
-    baseline = sample_used_mib(args.gpu)
+    # Guard the baseline read: a missing/broken nvidia-smi must degrade to a
+    # clean report, never an uncaught traceback (the loop already tolerates it).
+    try:
+        baseline = sample_used_mib(args.gpu)
+    except Exception as e:  # noqa: BLE001
+        print(f"[vram] baseline read failed ({e}); is nvidia-smi installed and "
+              f"--gpu {args.gpu} valid? Falling back to the first live sample.",
+              file=sys.stderr)
+        baseline = None
+
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
     t0 = time.time()
@@ -51,17 +80,17 @@ def main(argv=None):
     stop.set()
     t.join(timeout=2)
 
-    peak = max(samples) if samples else baseline
-    summary = {"label": args.label, "gpu": args.gpu,
-               "baseline_mib": baseline, "peak_mib": peak,
-               "delta_mib": peak - baseline, "n_samples": len(samples),
-               "elapsed_s": round(time.time() - t0, 2),
-               "budget_mib": BUDGET_MIB, "headroom_mib": BUDGET_MIB - peak,
-               "fits_budget": peak < BUDGET_MIB, "command_rc": rc}
+    summary = summarize(args.label, args.gpu, baseline, samples,
+                        round(time.time() - t0, 2), rc)
     print(json.dumps(summary, indent=2))
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps(summary, indent=2))
+
+    if summary["fits_budget"] is None:
+        print("[vram] no GPU samples collected — nvidia-smi unavailable; VRAM "
+              "budget could not be assessed.", file=sys.stderr)
+        return 3
     return 0 if summary["fits_budget"] else 2
 
 

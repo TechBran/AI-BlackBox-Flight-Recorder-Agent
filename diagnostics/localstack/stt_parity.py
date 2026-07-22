@@ -59,8 +59,8 @@ async def run(provider, wav_path):
         await ws.send(json.dumps({"type": "stop"}))
         await asyncio.wait_for(rtask, timeout=30)
     return {"provider": provider,
-            "first_partial_s": round(first_partial, 3) if first_partial else None,
-            "final_s": round(final_at, 3) if final_at else None,
+            "first_partial_s": round(first_partial, 3) if first_partial is not None else None,
+            "final_s": round(final_at, 3) if final_at is not None else None,
             "transcript": " ".join(finals).strip(), "stt_done": got_done}
 
 
