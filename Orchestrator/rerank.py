@@ -354,6 +354,26 @@ CLOUD_PROVIDERS = {"voyage", "cohere", "vertex", "llm"}
 # never the CLOUD_PROVIDERS key-present path.
 _PREFLIGHT_TTL_RECOVERABLE = CLOUD_PROVIDERS | {"localstack"}
 
+# Swappable / cold-loading LOCAL providers whose FIRST scoring call pays a
+# one-time MODEL-LOAD cost that is NOT per-scoring-call latency and must be
+# EXCLUDED from preflight()'s timed probe (bug: a fully-working reranker showed
+# available=False right after a restart / on a cold box because that cold load
+# was timed against the per-scoring-call ceiling — MS02, 2026-07-22):
+#   localstack — llama-swap loads the reranker member on the first /v1/rerank,
+#                evicting the embedder (the D13 sequential intra-group swap,
+#                ~2-6s). The registry comment on qwen3-reranker-8b-local is
+#                explicit that its 500ms ceiling is "per-scoring-call ONCE
+#                LOADED"; G5 measures that swap separately.
+#   vllm       — the engine's first inference after a cold start (graph
+#                warm/compile) can dwarf steady-state scoring.
+# For these, preflight() fires ONE UNTIMED throwaway score to trigger the load,
+# THEN times the now-warm probe (measured_ms reflects warm scoring, ~106ms live,
+# not the multi-second load). Cloud (batched, already-resident) and cpu
+# (in-process; its own _load_cpu_model owns first-call load, and the CPU probe's
+# extrapolation model deliberately measures the first call) are NOT warmed —
+# their timing is unchanged.
+_PREFLIGHT_WARM_PROVIDERS = {"localstack", "vllm"}
+
 
 def _key_present_for(auth_kind: "str | None", key_env: "str | None") -> bool:
     """Whether the credential a model needs is configured, read FRESH (M4).
@@ -1340,6 +1360,16 @@ def preflight() -> dict:
                                "vllm-reranker.service before enabling the on-box "
                                "retrieval group (both pre-allocate VRAM → OOM)")}
         passages = ["preflight probe passage"] * max(1, passage_n)
+        # Warm swappable local members BEFORE timing (MS02 cold-load bug): the
+        # first score() call on localstack/vllm pays a one-time model load (the
+        # D13 llama-swap cross-group swap / a vLLM cold start), which is NOT the
+        # per-scoring-call latency the ceiling gates. Fire one UNTIMED throwaway
+        # score to trigger the load; its result is discarded (score() is
+        # never-raise, so this can only cost latency). The timed probe below then
+        # measures the now-warm scoring path. Cloud/cpu are not warmed (see
+        # _PREFLIGHT_WARM_PROVIDERS) so their timing is unchanged.
+        if provider in _PREFLIGHT_WARM_PROVIDERS:
+            score("preflight warmup", passages)
         t0 = time.monotonic()
         got = score("preflight probe", passages)
         measured_ms = (time.monotonic() - t0) * 1000.0

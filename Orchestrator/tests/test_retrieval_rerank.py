@@ -369,8 +369,8 @@ def test_preflight_failure_disables_rerank_and_probes_exactly_once(
         world, monkeypatch):
     """End-to-end gating through the REAL available()/preflight(): a
     configured provider whose probe misses the ceiling disables rerank for
-    the process — ranking is flag-off-identical and the probe runs exactly
-    once across retrieves."""
+    the process — ranking is flag-off-identical and preflight runs (and caches)
+    exactly once across retrieves, so the SECOND retrieve adds no score calls."""
     probes = {"n": 0}
 
     def counting_score(q, ps):
@@ -385,7 +385,10 @@ def test_preflight_failure_disables_rerank_and_probes_exactly_once(
             second = retrieval.retrieve("q", "system", k=10, store=make_store())
     assert first == expected_flag_off()
     assert second == expected_flag_off()
-    assert probes["n"] == 1                        # one probe, then cached
+    # vllm is a swappable/cold-loading provider: preflight fires one UNTIMED
+    # warm-up score then one TIMED probe (2 score calls) on its single cached
+    # run — the 2nd retrieve re-probes zero times (the caching invariant).
+    assert probes["n"] == 2
 
 
 # ── provenance mode coexists with rerank ──────────────────────────────────────

@@ -139,6 +139,22 @@ def make_scorer(clock, elapse_s, result):
     return _score
 
 
+def make_cold_then_warm_scorer(clock, cold_s, warm_s, result):
+    """A fake rerank.score whose FIRST call 'takes' cold_s of clock time (the
+    swappable member's one-time load — the llama-swap cross-group swap / vLLM
+    cold start) and EVERY subsequent call warm_s (steady-state scoring once the
+    member is resident). Records the call count so a test can prove preflight
+    warmed first (2 calls) and timed only the warm one."""
+    def _score(query, passages):
+        _score.calls += 1
+        _score.passages = list(passages)
+        clock.t += cold_s if _score.calls == 1 else warm_s
+        return result
+    _score.calls = 0
+    _score.passages = None
+    return _score
+
+
 # ── RERANK_MODELS registry conventions ────────────────────────────────────────
 
 # M2 Task 2.1 schema enums (mirror the embeddings registry guard style).
@@ -657,6 +673,89 @@ def test_localstack_failed_preflight_recovers_after_ttl(monkeypatch):
         clock.t += rerank._PREFLIGHT_FAIL_TTL_S + 1
         monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
         assert rerank.preflight()["state"] == "ok"
+
+
+# ── swappable-member warm-up before the timed probe (MS02 cold-load bug) ───────
+
+def test_localstack_preflight_warms_member_before_timing(monkeypatch):
+    """Live MS02 bug: the on-box localstack reranker (Qwen3-Reranker-8B via
+    llama-swap) loads the member on the FIRST /v1/rerank call — the D13
+    cross-group swap (evict the embedder, load the 8B), ~2-6s. Timing THAT cold
+    load against the 500ms per-scoring-call ceiling reported state=failed /
+    available=False for a reranker that actually scores at ~106ms once resident.
+
+    preflight() must fire ONE untimed throwaway score to trigger the load, THEN
+    time the now-warm probe: measured_ms must reflect the WARM latency (106ms),
+    NOT the cold load (2349ms), and the ceiling stays the registry's 500ms
+    (per-scoring-call ONCE LOADED) — we do NOT weaken it."""
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    # First call = cold member load (2349ms, the live MS02 measurement);
+    # subsequent calls = warm scoring (106ms, the live once-loaded number).
+    scorer = make_cold_then_warm_scorer(clock, cold_s=2.349, warm_s=0.106,
+                                        result=[1.0])
+    monkeypatch.setattr(rerank, "score", scorer)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local", preflight_ceiling_ms=None):
+        pf = rerank.preflight()
+        assert scorer.calls == 2             # warm-up THEN timed probe
+        assert pf["ceiling_ms"] == 500.0     # registry per-call ceiling, NOT weakened
+        assert pf["measured_ms"] == 106.0    # the WARM latency, not 2349 (cold load)
+        assert pf["state"] == "ok"           # 106 < 500 → available (was failing live)
+        assert rerank.available() is True    # cached ok → gate opens
+
+
+def test_vllm_preflight_warms_before_timing(monkeypatch):
+    """vLLM shares the cold-load issue (first inference after a cold start pays
+    graph warm/compile). preflight() warms it too, so the timed probe measures
+    steady-state scoring, not the cold first call."""
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    scorer = make_cold_then_warm_scorer(clock, cold_s=3.0, warm_s=0.05,
+                                        result=[1.0])
+    monkeypatch.setattr(rerank, "score", scorer)
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+                 model="qwen3-reranker-0.6b", preflight_ceiling_ms=None):
+        pf = rerank.preflight()
+    assert scorer.calls == 2                 # warm-up THEN timed probe
+    assert pf["measured_ms"] == 50.0         # warm, not 3000ms cold
+    assert pf["state"] == "ok"               # 50 < 500
+
+
+def test_cpu_and_cloud_preflight_are_not_warmed(monkeypatch):
+    """The warm-up is ONLY for swappable local members (localstack/vllm). cpu
+    (in-process, its own load path) and cloud (batched, already-resident) keep
+    their existing single-probe timing — the FIRST call IS the measured one."""
+    # cpu: a single probe call, its measured cold-load time is what gets
+    # extrapolated (unchanged behavior — no warm-up swallows the first call).
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-cpu",
+                        _fake_cpu_entry(ceiling=2000, passage_n=1))
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    cpu_scorer = make_cold_then_warm_scorer(clock, cold_s=0.3, warm_s=0.01,
+                                            result=[1.0])
+    monkeypatch.setattr(rerank, "score", cpu_scorer)
+    with pin_cfg("rerank", provider="cpu", model="fake-cpu",
+                 base_url="http://x:1", preflight_ceiling_ms=None), \
+         pin_cfg("retrieval", rerank_candidate_n="1"):
+        pf = rerank.preflight()
+    assert cpu_scorer.calls == 1             # NOT warmed — one probe only
+    assert pf["measured_ms"] == 300.0        # the first (only) call is measured
+
+    rerank.reset_preflight()
+    # cloud: same — a single probe, no warm-up.
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(ceiling=1200, passage_n=1))
+    clock2 = Clock(2000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock2)
+    cloud_scorer = make_cold_then_warm_scorer(clock2, cold_s=0.4, warm_s=0.01,
+                                              result=[1.0])
+    monkeypatch.setattr(rerank, "score", cloud_scorer)
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage",
+                 preflight_ceiling_ms=None):
+        pf = rerank.preflight()
+    assert cloud_scorer.calls == 1           # NOT warmed
+    assert pf["measured_ms"] == 400.0
 
 
 def test_reachable_bearer_is_key_present_no_network(monkeypatch):
