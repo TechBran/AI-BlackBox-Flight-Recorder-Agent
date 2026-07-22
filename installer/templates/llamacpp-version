@@ -1,18 +1,30 @@
-# Pinned llama.cpp release (github.com/ggml-org/llama.cpp) for the llama-server
-# prebuilt. Three non-comment lines below: <build-tag>, <cpu-zip-sha256>,
-# <cuda-zip-sha256>. The installer picks the CUDA asset when nvidia-smi shows
-# >=8000 MB VRAM, else the CPU asset, and verifies its zip against the pinned
-# sha before extracting llama-server.
+# Pinned llama.cpp release (github.com/ggml-org/llama.cpp) for llama-server.
+# Three non-comment lines below: <build-tag>, <cpu-tar-sha256>,
+# <vulkan-tar-sha256>.
 #
-# EXECUTION-TIME STEP (fill the two shas before the FIRST run on a new pin —
-# they cannot be known at authoring time; the installer hard-fails on the
-# FILL_* placeholders):
-#   V=b6620
-#   curl -fsSL -o /tmp/cpu.zip  https://github.com/ggml-org/llama.cpp/releases/download/$V/llama-$V-bin-ubuntu-x64.zip      && sha256sum /tmp/cpu.zip
-#   curl -fsSL -o /tmp/cuda.zip https://github.com/ggml-org/llama.cpp/releases/download/$V/llama-$V-bin-ubuntu-cuda-x64.zip && sha256sum /tmp/cuda.zip
+# ACQUISITION STRATEGY (owner decision):
+#   * NVIDIA GPU box (nvidia-smi >=8000 MB VRAM): BUILD llama.cpp from SOURCE
+#     with CUDA at the pinned tag (primary path). No prebuilt sha is needed for
+#     the CUDA path — the source is fetched via `git clone --branch <tag>`, and
+#     the compute capability is pinned in the installer (RTX 2000 Ada = sm_89).
+#     If the source build fails (no CUDA toolkit installable, clone/compile
+#     error) the installer FALLS BACK to the Vulkan prebuilt below.
+#   * No GPU / VRAM <8000 MB: download the CPU prebuilt (the floor).
+# llama.cpp stopped shipping prebuilt Linux CUDA binaries — the release only
+# has Windows CUDA — which is why CUDA is a source build here. The two shas
+# below are the CPU and Vulkan prebuilt fallbacks, and both are .tar.gz (gzip
+# tarballs, extracted with tar — the prebuilt archive format changed from the
+# earlier release); the installer verifies each against its sha before extract.
+#
+# EXECUTION-TIME STEP (refresh the two shas whenever the pin changes — they
+# cannot be known at authoring time; the installer hard-fails if a sha is left
+# unpinned / is not a 64-hex-char digest):
+#   V=b10084
+#   curl -fsSL -o /tmp/cpu.tar.gz    https://github.com/ggml-org/llama.cpp/releases/download/$V/llama-$V-bin-ubuntu-x64.tar.gz        && sha256sum /tmp/cpu.tar.gz
+#   curl -fsSL -o /tmp/vulkan.tar.gz https://github.com/ggml-org/llama.cpp/releases/download/$V/llama-$V-bin-ubuntu-vulkan-x64.tar.gz && sha256sum /tmp/vulkan.tar.gz
 # Also confirm the two asset filenames on the release page (naming has drifted
-# historically) and update ASSET_CPU/ASSET_CUDA in blackbox-install-localstack.sh
-# if they differ.
-b6620
-FILL_CPU_SHA256_BEFORE_RUN
-FILL_CUDA_SHA256_BEFORE_RUN
+# historically) and update ASSET_CPU/ASSET_VULKAN in
+# blackbox-install-localstack.sh if they differ.
+b10084
+ca89e0a7674442768be33d0a1ebd1fe764c7eed7c953365595dedb017ce7faa6
+c0c51b990a45dadee55a43e8574fb61253394f237ec0b30735452dd693a018b5

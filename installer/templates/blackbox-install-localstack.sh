@@ -75,18 +75,22 @@ PYBIN="$(command -v python3.12 || command -v python3)"
 sudo -u "$REAL_USER" mkdir -p "$LOCALSTACK_BIN" "$LOCALSTACK_MODELS"
 
 # ── GPU build selector (NOT a skip) ────────────────────────────────────────
+# USE_CUDA=1 means "attempt the CUDA SOURCE build (primary) with a Vulkan
+# prebuilt fallback"; USE_CUDA=0 means "CPU prebuilt floor". See §2 for the
+# three-tier acquisition — llama.cpp no longer ships prebuilt Linux CUDA
+# binaries, so CUDA is compiled from source at the pinned tag.
 USE_CUDA=0
 if command -v nvidia-smi >/dev/null 2>&1; then
     VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
         | sort -nr | head -n1 | tr -d '[:space:]' || true)"
     if [[ "$VRAM_MB" =~ ^[0-9]+$ ]] && (( VRAM_MB >= 8000 )); then
         USE_CUDA=1
-        echo "[install-localstack] GPU detected (${VRAM_MB} MB VRAM) — CUDA llama-server build."
+        echo "[install-localstack] GPU detected (${VRAM_MB} MB VRAM) — CUDA source build (Vulkan prebuilt fallback)."
     else
-        echo "[install-localstack] GPU present but VRAM <8000 MB (or unreadable) — CPU llama-server build."
+        echo "[install-localstack] GPU present but VRAM <8000 MB (or unreadable) — CPU llama-server prebuilt."
     fi
 else
-    echo "[install-localstack] No NVIDIA GPU — CPU llama-server build (honest CPU tier, §7)."
+    echo "[install-localstack] No NVIDIA GPU — CPU llama-server prebuilt (honest CPU tier, §7)."
 fi
 
 # ── 1. llama-swap release binary (sha256-verified; zellij pattern) ─────────
@@ -128,59 +132,161 @@ if (( need_ls )); then
     rm -rf "$TMP_LS"; trap - EXIT
 fi
 
-# ── 2. llama.cpp llama-server prebuilt (CUDA behind the gate; sha-pinned) ──
+# ── 2. llama.cpp llama-server (CUDA source build primary; Vulkan/CPU tar.gz
+#      prebuilt fallbacks) ──────────────────────────────────────────────────
+# llama.cpp stopped shipping prebuilt Linux CUDA binaries, so on a capable
+# NVIDIA box we BUILD llama-server from source with CUDA at the pinned tag
+# (sm_89 = RTX 2000 Ada). If that build cannot be produced we fall back to the
+# Vulkan prebuilt; boxes with no capable GPU get the CPU prebuilt floor. The
+# two shas pin the .tar.gz prebuilt fallbacks (there is no CUDA prebuilt sha —
+# CUDA is compiled, not downloaded).
 mapfile -t LC_PINS < <(grep -vE '^[[:space:]]*(#|$)' "$TEMPLATE_DIR/llamacpp-version")
-LC_VER="${LC_PINS[0]:-}"; LC_CPU_SHA="${LC_PINS[1]:-}"; LC_CUDA_SHA="${LC_PINS[2]:-}"
+LC_VER="${LC_PINS[0]:-}"; LC_CPU_SHA="${LC_PINS[1]:-}"; LC_VULKAN_SHA="${LC_PINS[2]:-}"
 if [[ -z "$LC_VER" ]]; then
     echo "[install-localstack] ERROR: could not parse pinned llama.cpp version" >&2
     exit 4
 fi
 # Confirm asset names on the release page if goreleaser/CI naming drifts.
-ASSET_CPU="llama-${LC_VER}-bin-ubuntu-x64.zip"
-ASSET_CUDA="llama-${LC_VER}-bin-ubuntu-cuda-x64.zip"
-if (( USE_CUDA )); then LC_ASSET="$ASSET_CUDA"; LC_SHA="$LC_CUDA_SHA"; else LC_ASSET="$ASSET_CPU"; LC_SHA="$LC_CPU_SHA"; fi
-if [[ "$LC_SHA" == FILL_* || -z "$LC_SHA" ]]; then
-    echo "[install-localstack] ERROR: llama.cpp sha256 not pinned for $LC_ASSET." >&2
-    echo "[install-localstack] Fill it in $TEMPLATE_DIR/llamacpp-version (see the header remediation), then re-run." >&2
-    exit 4
-fi
-need_lc=1
+ASSET_CPU="llama-${LC_VER}-bin-ubuntu-x64.tar.gz"
+ASSET_VULKAN="llama-${LC_VER}-bin-ubuntu-vulkan-x64.tar.gz"
+
+# The backend we WANT: cuda on a capable NVIDIA box (Vulkan is only ever a
+# fallback), else the cpu prebuilt floor. The marker records what we actually
+# installed (e.g. b10084-cuda / b10084-vulkan / b10084-cpu).
+if (( USE_CUDA )); then LC_WANT_BACKEND="cuda"; else LC_WANT_BACKEND="cpu"; fi
 LC_MARKER="$LOCALSTACK_BIN/.llamacpp-version"
+need_lc=1
 if [[ -x "$LOCALSTACK_BIN/llama-server" && -f "$LC_MARKER" ]]; then
-    [[ "$(cat "$LC_MARKER" 2>/dev/null)" == "$LC_VER" ]] && { need_lc=0; echo "[install-localstack] llama-server $LC_VER already installed, skipping."; }
+    if [[ "$(cat "$LC_MARKER" 2>/dev/null)" == "${LC_VER}-${LC_WANT_BACKEND}" ]]; then
+        need_lc=0
+        echo "[install-localstack] llama-server ${LC_VER} (${LC_WANT_BACKEND}) already installed, skipping."
+    fi
 fi
 if (( need_lc )); then
     TMP_LC="$(mktemp -d /tmp/llamacpp-XXXXXX)"
     trap 'rm -rf "${TMP_LC:-}"' EXIT
-    LC_URL="https://github.com/ggml-org/llama.cpp/releases/download/${LC_VER}/${LC_ASSET}"
-    echo "[install-localstack] Downloading llama.cpp $LC_VER ($LC_ASSET)..."
-    if ! curl --fail --location --silent --show-error -o "$TMP_LC/$LC_ASSET" "$LC_URL"; then
-        echo "[install-localstack] ERROR: llama.cpp download failed ($LC_URL)" >&2
-        exit 4
-    fi
-    LC_ACTUAL="$(sha256sum "$TMP_LC/$LC_ASSET" | awk '{print $1}')"
-    if [[ "$LC_SHA" != "$LC_ACTUAL" ]]; then
-        echo "[install-localstack] ERROR: llama.cpp sha256 mismatch (expected='$LC_SHA' actual='$LC_ACTUAL')" >&2
-        exit 4
-    fi
-    # python3 zipfile — no unzip dependency (python3 is MUST_HAVE).
-    "$PYBIN" -m zipfile -e "$TMP_LC/$LC_ASSET" "$TMP_LC/x"
-    LC_SRC="$(find "$TMP_LC/x" -type f -name llama-server | head -n1)"
-    if [[ -z "$LC_SRC" ]]; then
-        echo "[install-localstack] ERROR: llama-server not found in $LC_ASSET after extract" >&2
-        exit 4
-    fi
-    # Copy the WHOLE bin dir (CUDA prebuilt bundles libllama/libggml *.so beside
-    # the binary; LD_LIBRARY_PATH in the unit points at $LOCALSTACK_BIN).
+    LC_INSTALLED_BACKEND=""
+
+    # Install a prebuilt tar.gz fallback ($1 asset, $2 expected sha256): download,
+    # verify the sha, extract with tar (.tar.gz — NOT zip), then install the WHOLE
+    # extracted bin dir (the prebuilt bundles the *.so beside llama-server; the
+    # unit's LD_LIBRARY_PATH points at $LOCALSTACK_BIN so they must sit there).
     # Copy AS ROOT (mirrors §1's `sudo install`): the root-owned mktemp dir is
-    # mode 0700, so a `sudo -u "$REAL_USER" cp` cannot traverse it -> EACCES.
-    # chown the result back to REAL_USER before the user-scoped chmod/marker.
-    LC_SRCDIR="$(dirname "$LC_SRC")"
-    sudo cp -a "$LC_SRCDIR/." "$LOCALSTACK_BIN/"
-    sudo chown -R "$REAL_USER:$REAL_USER" "$LOCALSTACK_BIN"
-    sudo -u "$REAL_USER" chmod +x "$LOCALSTACK_BIN/llama-server"
-    echo "$LC_VER" | sudo -u "$REAL_USER" tee "$LC_MARKER" >/dev/null
-    echo "[install-localstack] Installed $LOCALSTACK_BIN/llama-server ($LC_VER, sha256 $LC_ACTUAL)"
+    # mode 0700 so a `sudo -u "$REAL_USER" cp` cannot traverse it -> EACCES; chown
+    # back to REAL_USER before the user-scoped chmod. Returns non-zero on failure
+    # (caller falls through), never `exit`s.
+    lc_fetch_prebuilt() {
+        local asset="$1" expected="$2"
+        local url="https://github.com/ggml-org/llama.cpp/releases/download/${LC_VER}/${asset}"
+        if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "[install-localstack] ERROR: llama.cpp sha256 not pinned for $asset (see llamacpp-version header)." >&2
+            return 1
+        fi
+        echo "[install-localstack] Downloading llama.cpp $LC_VER ($asset)..."
+        if ! curl --fail --location --silent --show-error -o "$TMP_LC/$asset" "$url"; then
+            echo "[install-localstack] ERROR: llama.cpp download failed ($url)" >&2
+            return 1
+        fi
+        local actual
+        actual="$(sha256sum "$TMP_LC/$asset" | awk '{print $1}')"
+        if [[ "$expected" != "$actual" ]]; then
+            echo "[install-localstack] ERROR: llama.cpp sha256 mismatch for $asset (expected='$expected' actual='$actual')" >&2
+            return 1
+        fi
+        # .tar.gz prebuilt — extract with tar (python3 -m tarfile is an alt).
+        mkdir -p "$TMP_LC/x"
+        if ! tar -xzf "$TMP_LC/$asset" -C "$TMP_LC/x"; then
+            echo "[install-localstack] ERROR: failed to extract $asset" >&2
+            return 1
+        fi
+        local srv srcdir
+        srv="$(find "$TMP_LC/x" -type f -name llama-server | head -n1)"
+        if [[ -z "$srv" ]]; then
+            echo "[install-localstack] ERROR: llama-server not found in $asset after extract" >&2
+            return 1
+        fi
+        srcdir="$(dirname "$srv")"
+        sudo cp -a "$srcdir/." "$LOCALSTACK_BIN/"
+        sudo chown -R "$REAL_USER:$REAL_USER" "$LOCALSTACK_BIN"
+        sudo -u "$REAL_USER" chmod +x "$LOCALSTACK_BIN/llama-server"
+        echo "[install-localstack] Installed $LOCALSTACK_BIN/llama-server ($LC_VER, prebuilt, sha256 $actual)"
+        return 0
+    }
+
+    # ── CUDA source build (primary path on a capable NVIDIA box) ────────────────
+    if (( USE_CUDA )); then
+        echo "[install-localstack] Building llama.cpp $LC_VER from source with CUDA (primary path)..."
+        CUDA_OK=1
+        # Ensure a CUDA compiler. The installer runs as root; nvidia-cuda-toolkit
+        # is a multi-GB install. On failure, fall through to the Vulkan prebuilt.
+        if ! command -v nvcc >/dev/null 2>&1; then
+            echo "[install-localstack] nvcc not found — installing nvidia-cuda-toolkit (multi-GB; this can take a while)..."
+            if ! sudo apt-get install -y nvidia-cuda-toolkit; then
+                echo "[install-localstack] WARNING: nvidia-cuda-toolkit install failed — falling back to the Vulkan prebuilt." >&2
+                CUDA_OK=0
+            fi
+        fi
+        if (( CUDA_OK )) && ! command -v nvcc >/dev/null 2>&1; then
+            echo "[install-localstack] WARNING: nvcc still unavailable after install — falling back to the Vulkan prebuilt." >&2
+            CUDA_OK=0
+        fi
+        # Shallow, pinned-tag clone.
+        if (( CUDA_OK )) && ! git clone --depth 1 --branch "$LC_VER" \
+                https://github.com/ggml-org/llama.cpp "$TMP_LC/llama.cpp"; then
+            echo "[install-localstack] WARNING: llama.cpp clone at $LC_VER failed — falling back to the Vulkan prebuilt." >&2
+            CUDA_OK=0
+        fi
+        # Configure + build only the llama-server target. sm_89 = RTX 2000 Ada;
+        # LLAMA_CURL=OFF drops the libcurl build dependency.
+        if (( CUDA_OK )) && { ! cmake -S "$TMP_LC/llama.cpp" -B "$TMP_LC/llama.cpp/build" \
+                    -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 \
+                    -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release \
+                || ! cmake --build "$TMP_LC/llama.cpp/build" --target llama-server -j"$(nproc)"; }; then
+            echo "[install-localstack] WARNING: CUDA build failed — falling back to the Vulkan prebuilt." >&2
+            CUDA_OK=0
+        fi
+        LC_SRV=""
+        if (( CUDA_OK )); then
+            LC_SRV="$(find "$TMP_LC/llama.cpp/build" -type f -name llama-server | head -n1)"
+            if [[ -z "$LC_SRV" ]]; then
+                echo "[install-localstack] WARNING: llama-server missing after CUDA build — falling back to the Vulkan prebuilt." >&2
+                CUDA_OK=0
+            fi
+        fi
+        if (( CUDA_OK )); then
+            # Install the built binary PLUS every built shared lib beside it (the
+            # unit's LD_LIBRARY_PATH points at $LOCALSTACK_BIN so the *.so must sit
+            # there). Copy AS ROOT (mirrors §1), chown back to REAL_USER.
+            sudo cp -a "$LC_SRV" "$LOCALSTACK_BIN/"
+            while IFS= read -r sofile; do
+                sudo cp -a "$sofile" "$LOCALSTACK_BIN/"
+            done < <(find "$TMP_LC/llama.cpp/build" -type f -name '*.so*')
+            sudo chown -R "$REAL_USER:$REAL_USER" "$LOCALSTACK_BIN"
+            sudo -u "$REAL_USER" chmod +x "$LOCALSTACK_BIN/llama-server"
+            LC_INSTALLED_BACKEND="cuda"
+            echo "[install-localstack] Installed $LOCALSTACK_BIN/llama-server ($LC_VER, CUDA source build, sm_89)"
+        fi
+    fi
+
+    # ── Vulkan prebuilt fallback (GPU box where the CUDA build did not land) ────
+    if (( USE_CUDA )) && [[ -z "$LC_INSTALLED_BACKEND" ]]; then
+        if lc_fetch_prebuilt "$ASSET_VULKAN" "$LC_VULKAN_SHA"; then
+            LC_INSTALLED_BACKEND="vulkan"
+        fi
+    fi
+
+    # ── CPU prebuilt floor (no NVIDIA GPU, or VRAM <8000 MB) ────────────────────
+    if (( ! USE_CUDA )) && [[ -z "$LC_INSTALLED_BACKEND" ]]; then
+        if lc_fetch_prebuilt "$ASSET_CPU" "$LC_CPU_SHA"; then
+            LC_INSTALLED_BACKEND="cpu"
+        fi
+    fi
+
+    if [[ -z "$LC_INSTALLED_BACKEND" || ! -x "$LOCALSTACK_BIN/llama-server" ]]; then
+        echo "[install-localstack] ERROR: llama-server could not be provisioned (CUDA build + prebuilt fallbacks all failed)." >&2
+        exit 4
+    fi
+    echo "${LC_VER}-${LC_INSTALLED_BACKEND}" | sudo -u "$REAL_USER" tee "$LC_MARKER" >/dev/null
     rm -rf "$TMP_LC"; trap - EXIT
 fi
 
