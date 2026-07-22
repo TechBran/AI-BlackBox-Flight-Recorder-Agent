@@ -49,6 +49,21 @@ def _silence_notify(monkeypatch):
 
     monkeypatch.setattr(watcher, "notify", _noop)
 
+
+@pytest.fixture(autouse=True)
+def _no_job(monkeypatch):
+    """Default: NO migration running (migrate.get_job_status → None).
+
+    run_health_check() is now migration-aware — a probe miss WHILE a re-embed
+    job runs reports "migrating", not "broken". Pin the job-status seam to None
+    so the probe/catalog/broken/superseded/ok logic is exercised hermetically
+    regardless of any module-level _JOB a migrate test left "running" in this
+    process. The migration-aware tests below override this with a running-job
+    stub. raising=False so it applies whether or not the import exists yet.
+    """
+    monkeypatch.setattr(watcher, "get_job_status", lambda: None, raising=False)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Isolated index + stores + volume; cloud keys cleared (preflight = not ready)."""
@@ -666,6 +681,117 @@ async def test_broken_while_migration_already_running(
     assert "already running" in health["detail"]
     # the rewrite landed on disk too
     assert "already running" in _read_health_file(stores_dir)["detail"]
+
+
+# ── migration-aware health (a running re-embed must NOT read "broken") ───────
+#
+# The live bug: an operator re-embeds onto a new target and, to free VRAM,
+# STOPS the provider serving the currently-active model. The daily watcher then
+# probes the (deliberately down) active model, can't reach it, and used to write
+# state="broken" → the Android/Portal "⚠ Search memory needs attention" alarm —
+# even though a healthy migration is progressing. run_health_check() now checks
+# for an ACTIVE migration job and reports "migrating" instead.
+
+
+@pytest.fixture
+def running_job(monkeypatch):
+    """Fake an ACTIVE re-embed job (migrate.get_job_status → state 'running')."""
+    job = {
+        "target": "qwen3-embedding-8b-local", "state": "running",
+        "done": 787, "total": 6166, "kind": "reembed", "phase": "building",
+    }
+    monkeypatch.setattr(watcher, "get_job_status", lambda: job)
+    return job
+
+
+@pytest.mark.asyncio
+async def test_migration_active_probe_fail_reports_migrating_not_broken(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, running_job
+):
+    """Probe fails (provider intentionally stopped) but a job is RUNNING →
+    state 'migrating', a clear N/M-onto-target detail, and NO auto-migration is
+    kicked — even with a prior 'broken' health on disk that would otherwise
+    satisfy the consecutive-run gate."""
+    _, stores_dir, _ = env
+    calls, _ = migration_spy
+    catalogs["ollama"] = [QWEN_ID]  # a viable fallback exists — must NOT be used
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "migrating"
+    assert "re-embed in progress" in health["detail"]
+    assert "787/6166" in health["detail"]
+    assert "qwen3-embedding-8b-local" in health["detail"]
+    assert calls == []  # a migration window must never trip auto-migrate
+    assert _read_health_file(stores_dir)["state"] == "migrating"
+
+
+@pytest.mark.asyncio
+async def test_migration_active_skips_the_in_run_reprobe(
+    env, catalogs, broken_provider, migration_spy, running_job
+):
+    """A deliberately-down provider is not re-probed while a job runs — only the
+    single probe fires (no pointless in-run re-probe wait)."""
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "migrating"
+    assert broken_provider.attempts == 1  # single probe, no second attempt
+
+
+@pytest.mark.asyncio
+async def test_no_migration_probe_fail_still_broken(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health
+):
+    """Requirement 2: with NO job running (autouse get_job_status → None) a
+    genuine probe failure is STILL 'broken' and still auto-migrates on a
+    consecutive broken run — the migration-awareness must not soften a real
+    outage."""
+    _, stores_dir, _ = env
+    calls, _ = migration_spy
+    catalogs["ollama"] = [QWEN_ID]
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == [QWEN]  # prior broken + still broken → kick, unchanged
+    assert _read_health_file(stores_dir)["state"] == "broken"
+
+
+@pytest.mark.asyncio
+async def test_migration_window_is_not_a_consecutive_broken_run(
+    env, catalogs, broken_provider, migration_spy
+):
+    """Requirement 3: a 'migrating' run on disk is NOT a 'broken' run. When the
+    migration ends but the provider is genuinely still down, the FIRST broken
+    run must DEFER (needs a consecutive broken), never auto-migrate off a single
+    post-migration failure."""
+    _, stores_dir, _ = env
+    calls, _ = migration_spy
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    (stores_dir / watcher.HEALTH_FILE).write_text(
+        json.dumps({
+            "state": "migrating",
+            "detail": "re-embed in progress: 6000/6166 onto qwen3-embedding-8b-local",
+            "successor": None, "successor_slug": None,
+            "checked_at": "2026-06-11T00:00:00+00:00",
+        }),
+        encoding="utf-8",
+    )
+    catalogs["ollama"] = [QWEN_ID]  # a viable target stands by
+
+    health = await watcher.run_health_check()  # job is idle now (autouse → None)
+
+    assert health["state"] == "broken"
+    assert calls == []  # deferred: prev state was 'migrating', not 'broken'
+    assert "deferred" in health["detail"]
+
+
+@pytest.mark.asyncio
+async def test_migrating_rechecks_hourly_like_broken():
+    """A 'migrating' state rechecks on the fast (hourly) cadence so health
+    returns to 'ok' within ~1h of the migration finishing, not a day later."""
+    assert watcher._next_interval("migrating") == watcher.WATCH_INTERVAL_BROKEN_S
+    assert watcher._next_interval("ok") == watcher.WATCH_INTERVAL_OK_S
 
 
 # ── broken: false-broken debounce ────────────────────────────────────────────

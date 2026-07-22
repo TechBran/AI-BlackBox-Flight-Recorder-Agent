@@ -537,6 +537,18 @@ async function onRerankSelect(btn) {
 
 function healthBannerHtml(health) {
     if (!health || health.state === "ok") return "";
+    if (health.state === "migrating") {
+        // A re-embed/migration is (or was just) running — the watcher's
+        // migration-aware health state. NEVER the urgent "broken" alert: an
+        // active job renders the job panel instead of this banner, and a
+        // lingering "migrating" (job finished, watcher not yet re-run) is a
+        // benign, self-healing state. Info styling, detail only.
+        return `
+            <div class="ob-emb-banner ob-emb-banner-info" role="status">
+                <p>${escapeHtml(health.detail || "Re-embedding your search memory…")}</p>
+            </div>
+        `;
+    }
     if (health.state === "superseded") {
         const successor = health.successor
             ? ` Successor: <strong>${escapeHtml(health.successor)}</strong>.`

@@ -288,6 +288,38 @@ def test_embeddings_attention_when_health_broken_is_error_severity():
                for a in rollup["attention"])
 
 
+def test_embeddings_migrating_is_ready_not_attention():
+    """A re-embed migration in progress (health.state == 'migrating') is NOT an
+    alarm: the hub section is READY (non-alarming), with no embeddings attention
+    entry. Mirrors the watcher's migration-aware 'migrating' health state."""
+    inp = _empty_inputs()
+    inp["embeddings"] = {
+        "active": "qwen3-embedding-8b",
+        "health": {"state": "migrating",
+                   "detail": "re-embed in progress: 787/6166 onto qwen3-embedding-8b-local"},
+        "stores": [{"slug": "qwen3-embedding-8b", "missing": 0}], "models": [],
+    }
+    rollup = sr.build_status(**inp)
+    assert _section(rollup, "embeddings")["state"] == sr.READY
+    assert not any(a["section"] == "embeddings" for a in rollup["attention"])
+
+
+def test_embeddings_migrating_not_attention_even_when_behind():
+    """During a migration the active provider may be intentionally stopped, so
+    mints land vector-less and the store looks 'behind'. That backlog is EXPECTED
+    and heals on completion — it must not become an ATTENTION 'N behind' alarm
+    while migrating (the migrating short-circuit precedes the behind check)."""
+    inp = _empty_inputs()
+    inp["embeddings"] = {
+        "active": "qwen3-embedding-8b",
+        "health": {"state": "migrating", "detail": "re-embed in progress: 1/6166 onto x"},
+        "stores": [{"slug": "qwen3-embedding-8b", "missing": 4200}], "models": [],
+    }
+    rollup = sr.build_status(**inp)
+    assert _section(rollup, "embeddings")["state"] == sr.READY
+    assert not any(a["section"] == "embeddings" for a in rollup["attention"])
+
+
 def test_web_search_optional_when_nothing_enabled():
     inp = _empty_inputs()
     inp["web_search"] = {"enabled": [], "providers": {}, "default": ""}

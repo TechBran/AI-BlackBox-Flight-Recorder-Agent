@@ -78,6 +78,7 @@ import openai
 from Orchestrator import config
 from Orchestrator.embeddings.migrate import (
     chunk_group_batches,
+    get_job_status,
     slice_snapshot_text,
     start_migration,
 )
@@ -508,6 +509,12 @@ async def _notify_state_transition(prev_state, state: str, detail: str) -> None:
     """
     if prev_state == state:
         return
+    # "migrating" is a transient, expected, non-alarming state (a re-embed is
+    # running with the old provider intentionally down): ENTERING it fires no
+    # notification. LEAVING it (migrating -> ok / migrating -> broken) still
+    # notifies normally via the titles below.
+    if state == "migrating":
+        return
     # A fresh box (no prior health.json → prev_state is None) landing on "ok" is
     # NOT a meaningful transition — staying silent avoids a "healthy" boot-noise
     # notification. A first-ever broken/superseded IS actionable, so those still
@@ -539,7 +546,20 @@ async def run_health_check() -> dict:
     #    RETRY_PROBE_DELAY_S; a transient blip (429 burst, hiccup) must not be
     #    declared "broken". Only a second miss in the same run is.
     probe_ok, probe_err = await _probe_active(active)
-    if not probe_ok:
+
+    # Migration awareness (the intentional-outage guard): a DELIBERATE re-embed
+    # /migration can stop the active model's provider to free VRAM for the
+    # target it is embedding into, so a probe miss WHILE a job is RUNNING is
+    # expected, not a fault. Read the live job once here: it lets us skip the
+    # pointless 60s in-run re-probe against a provider that is down on purpose,
+    # and (state decision below) report "migrating" instead of "broken" — which
+    # ALSO keeps an intentional migration from tripping the consecutive-run
+    # auto-migrate gate. A STALLED/finished job is state != "running", so a
+    # genuine migration FAILURE still falls through to the normal broken path.
+    job = get_job_status()
+    migration_active = bool(job) and job.get("state") == "running"
+
+    if not probe_ok and not migration_active:
         print(
             f"[WATCHER] probe failed ({probe_err}); "
             f"re-probing once in {RETRY_PROBE_DELAY_S:.0f}s"
@@ -564,7 +584,20 @@ async def run_health_check() -> dict:
     successor = successor_slug or successor_raw
 
     # 3. state decision (the design table)
-    if not probe_ok:
+    if not probe_ok and migration_active:
+        # A running re-embed/migration is the reason the probe missed (its
+        # target is being embedded while the OLD provider is intentionally
+        # down): report the migration, NOT a fault. Distinct non-alarming state
+        # so every surface (updates panels, wizard, hub rollup) shows progress
+        # instead of "Search memory needs attention". Genuine migration
+        # failures are NOT suppressed — a stalled job is state != "running" and
+        # falls through to the broken branch, and the `job` field surfaces it.
+        state = "migrating"
+        detail = (
+            f"re-embed in progress: {job.get('done', 0)}/{job.get('total', 0)} "
+            f"onto {job.get('target')}"
+        )
+    elif not probe_ok:
         state = "broken"
         detail = f"active model {active} failed its health probe: {probe_err}"
     elif not listed:
@@ -678,9 +711,18 @@ def start_watcher() -> "asyncio.Task":
 
 
 def _next_interval(state: str) -> float:
-    """Sleep before the next run: hourly while broken (the consecutive-run
-    migration gate confirms — or recovery is noticed — fast), else daily."""
-    return WATCH_INTERVAL_BROKEN_S if state == "broken" else WATCH_INTERVAL_OK_S
+    """Sleep before the next run: hourly while broken OR migrating, else daily.
+
+    Broken → the consecutive-run migration gate confirms (or recovery is
+    noticed) fast. Migrating → once the re-embed finishes and the provider is
+    reachable again (or the new model is activated), health returns to "ok"
+    within ~1h instead of waiting out the full daily interval on a stale
+    "migrating"."""
+    return (
+        WATCH_INTERVAL_BROKEN_S
+        if state in ("broken", "migrating")
+        else WATCH_INTERVAL_OK_S
+    )
 
 
 async def _watch_forever() -> None:

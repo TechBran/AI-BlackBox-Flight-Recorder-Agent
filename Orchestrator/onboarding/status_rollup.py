@@ -173,6 +173,15 @@ def _derive_embeddings(embeddings):
     if not active:
         return ATTENTION, "No memory model active", items, [
             {"severity": "warn", "message": "Memory index not initialized"}]
+    if hstate == "migrating":
+        # A re-embed/migration is actively running (watcher's migration-aware
+        # health state). The model being migrated away from may have its
+        # provider intentionally stopped, so mints can land vector-less and the
+        # store transiently looks "behind" — EXPECTED, and it heals on
+        # completion. Surface it as non-alarming progress (READY, never
+        # ATTENTION), short-circuiting BEFORE the behind check below. The wizard
+        # + updates panels render live job progress from the `job` field.
+        return READY, (health.get("detail") or "Re-embedding memory in progress"), items, []
     if hstate == "broken":
         return ATTENTION, "Memory index broken", items, [
             {"severity": "error",
