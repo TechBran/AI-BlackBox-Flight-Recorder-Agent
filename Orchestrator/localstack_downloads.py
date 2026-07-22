@@ -114,11 +114,13 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
     # one download button per variant. Each is a single multi-file HF repo →
     # snapshot into _qwen_tts_model_dir()/<variant>, matching what the qwen-tts
     # variant manager loads (variant_manager.backend.load(variant, model_dir)).
-    # Repo ids are placeholders confirmed/pinned at G3 (Task F1) — repo_pending_g3.
+    # Repo ids pinned to the real HF "12Hz" family (Qwen3-TTS-Tokenizer-12Hz, cf.
+    # qwen_tts_server/app.py:97). repo_pending_g3 STAYS set until snapshot_download
+    # is confirmed to resolve on MS02 (gating/size) + G3 synth passes (Task F1/F3).
     "qwen-tts-base": {
         "kind": "hf_snapshot",
         "label": "Qwen3-TTS 1.7B — Base",
-        "repos": {"base": "Qwen/Qwen3-TTS-1.7B-Base"},
+        "repos": {"base": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"},
         "dest_dir": "qwen_tts",
         "repo_pending_g3": True,
         "approx_gb": 4.5,
@@ -126,7 +128,7 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
     "qwen-tts-custom-voice": {
         "kind": "hf_snapshot",
         "label": "Qwen3-TTS 1.7B — Custom Voice (3s clone)",
-        "repos": {"custom_voice": "Qwen/Qwen3-TTS-1.7B-CustomVoice"},
+        "repos": {"custom_voice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"},
         "dest_dir": "qwen_tts",
         "repo_pending_g3": True,
         "approx_gb": 4.5,
@@ -134,7 +136,7 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
     "qwen-tts-voice-design": {
         "kind": "hf_snapshot",
         "label": "Qwen3-TTS 1.7B — Voice Design (text-described)",
-        "repos": {"voice_design": "Qwen/Qwen3-TTS-1.7B-VoiceDesign"},
+        "repos": {"voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"},
         "dest_dir": "qwen_tts",
         "repo_pending_g3": True,
         "approx_gb": 4.5,

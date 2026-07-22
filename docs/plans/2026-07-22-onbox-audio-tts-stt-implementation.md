@@ -130,7 +130,7 @@
 - Modify (if needed): the ViewModel exposing `voiceGroups` (`~446`) to also expose a selected-provider state
 - Test: an Android unit test for the provider→voice derivation (`./gradlew :app:testDebugUnitTest --offline`)
 
-**Steps:** Replace the single `DropdownMenu` that flattens `allVoiceGroups` with two: provider (`allVoiceGroups.map { it.label/id }`) then voice (`selectedGroup.voices`). Preserve `generateWithVoice` provider contract, D10 slow-first-byte affordance, and the `provider:voice` persisted preference. Add `qwen`/whisper to the offline `TTS_VOICE_GROUPS` fallback. Unit-test the derivation; commit. (Device validation is a manual follow-up — list in manual_steps.)
+**Steps:** Replace the single `DropdownMenu` that flattens `allVoiceGroups` with two: provider (`allVoiceGroups.map { it.label/id }`) then voice (`selectedGroup.voices`). Preserve `generateWithVoice` provider contract, D10 slow-first-byte affordance, and the `provider:voice` persisted preference. **Keep the offline `TTS_VOICE_GROUPS` fallback cloud-only** (qwen is dynamic-catalog-only — design §1/§7 require it ABSENT from the compiled-in fallback so a stack-less/offline box never advertises non-functional on-box voices; the committed `QwenVoiceRoutingTest.offlineFallback_hasNoQwenGroup` guards this; whisper is STT-only and produces no voices). The two-step picker surfaces `qwen` automatically whenever the live `/tts/catalog` provides it. Unit-test the derivation; commit. (Device validation is a manual follow-up — list in manual_steps.)
 
 ### Task D3: WebView + fallback parity
 
