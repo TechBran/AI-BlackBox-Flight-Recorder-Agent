@@ -34,6 +34,7 @@ SECTIONS: list[dict] = [
     {"key": "tailscale",              "group": "network",      "label": "Tailnet",     "required": False},
     {"key": "api_keys",               "group": "keys",         "label": "API Keys",    "required": True},
     {"key": "embeddings",             "group": "keys",         "label": "Memory",      "required": True},
+    {"key": "local_models",           "group": "keys",         "label": "On-Box Models", "required": False},
     {"key": "optional_integrations",  "group": "capabilities", "label": "Extras",      "required": False},
     {"key": "transcription",          "group": "capabilities", "label": "Speech",      "required": False},
     {"key": "web_search",             "group": "capabilities", "label": "Web Search",  "required": False},

@@ -3,7 +3,7 @@
 // a step-grid landing page (Phase 2.10 — not yet implemented).
 
 const STEPS = [
-    "welcome", "tailscale", "api_keys", "embeddings",
+    "welcome", "tailscale", "api_keys", "embeddings", "local_models",
     "optional_integrations", "transcription", "web_search", "image", "pair_phone", "cli_agents", "mcp", "operator", "done",
 ];
 
@@ -17,6 +17,7 @@ const STEP_LABELS = {
     tailscale: "TAILNET",
     api_keys: "KEYS",
     embeddings: "MEMORY & SEARCH",
+    local_models: "ON-BOX MODELS",
     optional_integrations: "EXTRAS",
     transcription: "SPEECH",
     web_search: "WEB SEARCH",

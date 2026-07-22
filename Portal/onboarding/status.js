@@ -21,6 +21,7 @@ export const SECTIONS = [
     { key: "tailscale",              group: "network",      label: "Tailnet",     required: false },
     { key: "api_keys",               group: "keys",         label: "API Keys",    required: true  },
     { key: "embeddings",             group: "keys",         label: "Memory",      required: true  },
+    { key: "local_models",           group: "keys",         label: "On-Box Models", required: false },
     { key: "optional_integrations",  group: "capabilities", label: "Extras",      required: false },
     { key: "transcription",          group: "capabilities", label: "Speech",      required: false },
     { key: "web_search",             group: "capabilities", label: "Web Search",  required: false },
