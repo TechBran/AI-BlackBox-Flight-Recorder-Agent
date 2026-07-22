@@ -45,6 +45,11 @@
 // Import the orchestrator which handles all initialization
 import './modules/app-init.js';
 
+// CU live-view panel + shared active-sessions badge (D14). Type=module scripts
+// are deferred, so the DOM is parsed by the time this top-level code runs.
+import { initCuLiveView } from './modules/cu-live-view.js';
+initCuLiveView();
+
 // Re-export commonly used functions for potential external use
 export {
     toast,
