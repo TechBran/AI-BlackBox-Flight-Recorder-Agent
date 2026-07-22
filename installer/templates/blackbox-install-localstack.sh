@@ -324,6 +324,22 @@ if (( SPEACHES_OK )); then
         SPEACHES_OK=0
     fi
 fi
+if (( SPEACHES_OK )); then
+    # Speaches v0.9.0-rc.3 pins onnx-asr loosely (>=0.7.0); onnx-asr >=0.12 moved
+    # NemoConformerTdt out of onnx_asr.models, so parakeet.py (imported at startup)
+    # ImportErrors and the member exits prematurely. We only use whisper — pin the
+    # last API-compatible onnx-asr so speaches.main imports.
+    sudo -u "$REAL_USER" "$SPEACHES_VENV/bin/pip" install "onnx-asr==0.7.0" || \
+        echo "[install-localstack] WARNING: onnx-asr pin failed — speaches STT may not import." >&2
+    # create_app() unconditionally mounts StaticFiles(directory="realtime-console/dist")
+    # (a frontend build absent from the pip package). Stub the dir so the mount
+    # succeeds; the member runs with cwd=$LOCALSTACK_HOME (see the llama-swap tmpl)
+    # and ENABLE_UI=false (its Gradio demo breaks on the installed gradio). The
+    # /v1/realtime WEBSOCKET route is separate from this static mount — STT streaming
+    # is unaffected.
+    sudo -u "$REAL_USER" mkdir -p "$LOCALSTACK_HOME/realtime-console/dist"
+    sudo -u "$REAL_USER" sh -c "printf '<!doctype html><title>speaches</title>' > '$LOCALSTACK_HOME/realtime-console/dist/index.html'"
+fi
 
 # ── 4. qwen-tts venv (server code + deps come from the TTS milestone) ──────
 # NON-FATAL too (audio group). Server start/health only needs fastapi/uvicorn;
@@ -360,6 +376,7 @@ sed -e "s|\${LOCALSTACK_BIN}|$LOCALSTACK_BIN|g" \
     -e "s|\${SPEACHES_VENV}|$SPEACHES_VENV|g" \
     -e "s|\${QWEN_TTS_VENV}|$QWEN_TTS_VENV|g" \
     -e "s|\${LOCALMODELS}|$BLACKBOX_ROOT/LocalModels|g" \
+    -e "s|\${LOCALSTACK_HOME}|$LOCALSTACK_HOME|g" \
     "$TEMPLATE_DIR/llama-swap-config.yaml.template" > "$TMP_CFG"
 sudo install -m 0644 -o "$REAL_USER" -g "$REAL_USER" "$TMP_CFG" "$CONFIG_DEST"
 rm -f "$TMP_CFG"

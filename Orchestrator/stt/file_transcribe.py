@@ -115,18 +115,21 @@ def _local_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> s
 
 
 def _onbox_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
-    """Transcribe via the on-box Speaches member through the llama-swap front door
-    (:9098 /v1/audio/transcriptions). PROXIED (not direct-to-:9099) so llama-swap's
-    drain/TTL accounting sees the batch request. body model = the on-box batch STT
-    model id. A llama-swap 429 (concurrency limit) is retried with capped backoff."""
+    """Transcribe via the on-box Speaches member through the llama-swap front door.
+    Uses the UPSTREAM PROXY path (/upstream/speaches/v1/audio/transcriptions), NOT
+    body-model auto-routing: llama-swap routes to the speaches member by URL (so its
+    drain/TTL accounting still sees the request), which leaves the request body
+    `model` free to carry the WHISPER model id that Speaches uses to pick the model.
+    Body-model routing would 404 ('no router for requested model') because the
+    whisper id is not a llama-swap member name (the member is 'speaches'). A
+    llama-swap 429 (concurrency limit) is retried with capped backoff."""
     from Orchestrator import local_stack
-    base = local_stack.base_url()          # http://127.0.0.1:9098/v1
+    url = f"{local_stack.base_url_root()}/upstream/speaches/v1/audio/transcriptions"
     model = local_stack.stt_batch_model()
     attempts = 0
     while True:
         files = {"file": (filename, audio_bytes, content_type)}
-        r = requests.post(f"{base}/audio/transcriptions",
-                          data={"model": model}, files=files, timeout=120)
+        r = requests.post(url, data={"model": model}, files=files, timeout=120)
         if r.status_code == 429 and attempts < _ONBOX_429_RETRIES:
             attempts += 1
             time.sleep(min(_ONBOX_429_BACKOFF_BASE * (2 ** (attempts - 1)), _ONBOX_429_BACKOFF_MAX))
