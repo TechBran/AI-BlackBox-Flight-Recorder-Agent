@@ -239,11 +239,18 @@ if (( need_lc )); then
             echo "[install-localstack] WARNING: llama.cpp clone at $LC_VER failed — falling back to the Vulkan prebuilt." >&2
             CUDA_OK=0
         fi
+        # Ubuntu's nvidia-cuda-toolkit is CUDA 12.x whose nvcc rejects the system
+        # default gcc-13 ("unsupported GNU version"); the toolkit pulls gcc-12 as a
+        # dep, so pin it as the CUDA host compiler when present (fall back to a
+        # lower gcc, else nvcc's default). Prevents a spurious Vulkan fallback on
+        # Ubuntu 24.04.
+        CUDA_HOST_CC="$(command -v gcc-12 || command -v gcc-11 || command -v gcc-10 || true)"
+        CUDA_HOST_FLAG=(); [[ -n "$CUDA_HOST_CC" ]] && CUDA_HOST_FLAG=(-DCMAKE_CUDA_HOST_COMPILER="$CUDA_HOST_CC")
         # Configure + build only the llama-server target. sm_89 = RTX 2000 Ada;
         # LLAMA_CURL=OFF drops the libcurl build dependency.
         if (( CUDA_OK )) && { ! cmake -S "$TMP_LC/llama.cpp" -B "$TMP_LC/llama.cpp/build" \
                     -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 \
-                    -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release \
+                    -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release "${CUDA_HOST_FLAG[@]}" \
                 || ! cmake --build "$TMP_LC/llama.cpp/build" --target llama-server -j"$(nproc)"; }; then
             echo "[install-localstack] WARNING: CUDA build failed — falling back to the Vulkan prebuilt." >&2
             CUDA_OK=0
