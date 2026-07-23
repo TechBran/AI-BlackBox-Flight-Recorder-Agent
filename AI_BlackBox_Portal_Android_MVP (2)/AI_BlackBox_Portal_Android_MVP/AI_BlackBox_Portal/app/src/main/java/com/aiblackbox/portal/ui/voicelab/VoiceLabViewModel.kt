@@ -9,7 +9,9 @@ import com.aiblackbox.portal.data.repository.CloneResult
 import com.aiblackbox.portal.data.repository.DesignPreview
 import com.aiblackbox.portal.data.repository.ElevenLabsStatus
 import com.aiblackbox.portal.data.repository.ElevenVoice
+import com.aiblackbox.portal.data.repository.QwenVoice
 import com.aiblackbox.portal.data.repository.SharedVoice
+import com.aiblackbox.portal.data.repository.TtsRepository
 import com.aiblackbox.portal.data.repository.VoiceLabException
 import com.aiblackbox.portal.data.repository.VoiceLabRepository
 import com.aiblackbox.portal.data.repository.XaiVoice
@@ -49,6 +51,30 @@ enum class RecordState { IDLE, RECORDING }
 
 /** A captured/picked clip queued for cloning. file lives in cacheDir. */
 data class ClonePart(val file: File, val displayName: String, val fromRecording: Boolean)
+
+/** One on-box design preview, with its base64 audio decoded to a cacheDir WAV. */
+data class QwenPreview(val generatedVoiceId: String, val audioPath: String?)
+
+/** What the Voice Lab screen renders at its top-level gate. */
+enum class VoiceLabGate { LOADING, NOT_CONFIGURED, CONTENT }
+
+/**
+ * Screen gate: render content as soon as EITHER provider probe lands positive
+ * (ElevenLabs configured OR the on-box stack healthy+tts); declare
+ * NOT_CONFIGURED only after BOTH probes have answered negative; otherwise keep
+ * loading. Top-level pure function so the offline unit test drives it directly.
+ */
+internal fun resolveVoiceLabGate(
+    elevenLoaded: Boolean,
+    qwenLoaded: Boolean,
+    elevenConfigured: Boolean,
+    qwenAvailable: Boolean,
+): VoiceLabGate = when {
+    elevenLoaded && elevenConfigured -> VoiceLabGate.CONTENT
+    qwenLoaded && qwenAvailable -> VoiceLabGate.CONTENT
+    elevenLoaded && qwenLoaded -> VoiceLabGate.NOT_CONFIGURED
+    else -> VoiceLabGate.LOADING
+}
 
 class VoiceLabViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -126,6 +152,28 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
     private val _xaiClonePart = MutableStateFlow<ClonePart?>(null)
     val xaiClonePart: StateFlow<ClonePart?> = _xaiClonePart.asStateFlow()
 
+    // ── On-Box (Qwen3-TTS) zone ──────────────────────────────────────────────
+    private val _qwenLoaded = MutableStateFlow(false)
+    val qwenLoaded: StateFlow<Boolean> = _qwenLoaded.asStateFlow()
+    private val _qwenAvailable = MutableStateFlow(false)
+    val qwenAvailable: StateFlow<Boolean> = _qwenAvailable.asStateFlow()
+    private val _qwenVoices = MutableStateFlow<List<QwenVoice>>(emptyList())
+    val qwenVoices: StateFlow<List<QwenVoice>> = _qwenVoices.asStateFlow()
+    private val _qwenVoicesLoading = MutableStateFlow(false)
+    val qwenVoicesLoading: StateFlow<Boolean> = _qwenVoicesLoading.asStateFlow()
+    private val _qwenCloneState = MutableStateFlow(CloneState.IDLE)
+    val qwenCloneState: StateFlow<CloneState> = _qwenCloneState.asStateFlow()
+    private val _qwenCloneError = MutableStateFlow<String?>(null)
+    val qwenCloneError: StateFlow<String?> = _qwenCloneError.asStateFlow()
+    private val _qwenClonePart = MutableStateFlow<ClonePart?>(null)
+    val qwenClonePart: StateFlow<ClonePart?> = _qwenClonePart.asStateFlow()
+    private val _qwenDesignState = MutableStateFlow(DesignState.IDLE)
+    val qwenDesignState: StateFlow<DesignState> = _qwenDesignState.asStateFlow()
+    private val _qwenDesignPreviews = MutableStateFlow<List<QwenPreview>>(emptyList())
+    val qwenDesignPreviews: StateFlow<List<QwenPreview>> = _qwenDesignPreviews.asStateFlow()
+    private val _qwenDesignError = MutableStateFlow<String?>(null)
+    val qwenDesignError: StateFlow<String?> = _qwenDesignError.asStateFlow()
+
     companion object {
         private const val MAX_RECORD_MS = 5 * 60_000L // 5 min cap
     }
@@ -136,6 +184,7 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         api = BlackBoxApi(origin)
         repo = VoiceLabRepository(api!!)
         refreshStatus()
+        refreshQwenStatus() // on-box zone gates on /local-models/status, no key needed
         loadXaiVoices()   // xAI zone gates on its own key, independent of ElevenLabs
     }
 
@@ -491,6 +540,189 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    // ── On-Box (Qwen3-TTS) ────────────────────────────────────────────────────
+    fun refreshQwenStatus() {
+        val repo = repo ?: return
+        viewModelScope.launch {
+            try {
+                val st = repo.fetchQwenStatus()
+                _qwenAvailable.value = st.available
+                if (st.available) loadQwenVoices()
+            } catch (_: Exception) {
+                _qwenAvailable.value = false // unreachable == stack off (zone hides)
+            } finally {
+                _qwenLoaded.value = true
+            }
+        }
+    }
+
+    /** Queue ONE picked reference clip (a single ~3s+ clip is the qwen norm). */
+    fun addQwenPickedFile(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val part = withContext(Dispatchers.IO) { copyUriToCache(uri) }
+                _qwenClonePart.value?.let { runCatching { it.file.delete() } }
+                _qwenClonePart.value = part
+                _qwenCloneError.value = null
+            } catch (e: Exception) {
+                _message.value = "Couldn't read file: ${e.message}"
+            }
+        }
+    }
+
+    fun clearQwenPart() {
+        _qwenClonePart.value?.let { runCatching { it.file.delete() } }
+        _qwenClonePart.value = null
+    }
+
+    fun submitQwenClone(name: String, description: String, consent: Boolean) {
+        val repo = repo ?: return
+        val part = _qwenClonePart.value
+        if (name.isBlank() || part == null || !consent) {
+            _qwenCloneError.value = "Name, one clip, and consent are required."
+            return
+        }
+        _qwenCloneState.value = CloneState.SUBMITTING
+        _qwenCloneError.value = null
+        viewModelScope.launch {
+            try {
+                repo.cloneQwenVoice(name.trim(), listOf(part.file), consent, description.trim())
+                _qwenCloneState.value = CloneState.IDLE
+                _message.value = "On-box voice \"${name.trim()}\" cloned."
+                clearQwenPart()
+                loadQwenVoices()
+                refreshTtsCatalog() // the new qwen:<slug> id must reach the voice picker
+            } catch (e: VoiceLabException) {
+                _qwenCloneState.value = CloneState.IDLE
+                _qwenCloneError.value = when (e.status) {
+                    422 -> "Consent is required to clone a voice."
+                    400 -> "Clone rejected: ${e.message}"
+                    else -> e.message
+                }
+            } catch (e: Exception) {
+                _qwenCloneState.value = CloneState.IDLE
+                _qwenCloneError.value = e.message ?: "Clone failed"
+            }
+        }
+    }
+
+    fun qwenDesign(description: String, text: String) {
+        val repo = repo ?: return
+        if (description.isBlank()) {
+            _qwenDesignError.value = "Describe the voice first."
+            return
+        }
+        _qwenDesignState.value = DesignState.GENERATING
+        _qwenDesignError.value = null
+        clearQwenPreviews()
+        viewModelScope.launch {
+            try {
+                val previews = repo.designQwenVoice(description.trim(), text.trim())
+                // The member returns base64 WAV (loopback-only server); decode each
+                // to a cacheDir file so the shared AudioPlayerBar/MediaPlayer path
+                // can play it exactly like the ElevenLabs preview URLs.
+                _qwenDesignPreviews.value = withContext(Dispatchers.IO) {
+                    previews.map { p ->
+                        val path = try {
+                            if (p.audioB64.isBlank()) null else {
+                                val f = File(
+                                    getApplication<Application>().cacheDir,
+                                    "qwen_preview_${System.currentTimeMillis()}_${p.generatedVoiceId.hashCode()}.wav",
+                                )
+                                f.writeBytes(java.util.Base64.getDecoder().decode(p.audioB64))
+                                f.absolutePath
+                            }
+                        } catch (_: Exception) {
+                            null // bad base64 → card renders without a player
+                        }
+                        QwenPreview(p.generatedVoiceId, path)
+                    }
+                }
+                _qwenDesignState.value = DesignState.READY
+                if (_qwenDesignPreviews.value.isEmpty()) _qwenDesignError.value = "No previews returned."
+            } catch (e: VoiceLabException) {
+                _qwenDesignState.value = DesignState.IDLE
+                _qwenDesignError.value = e.message
+            } catch (e: Exception) {
+                _qwenDesignState.value = DesignState.IDLE
+                _qwenDesignError.value = e.message ?: "Design failed"
+            }
+        }
+    }
+
+    fun saveQwenDesigned(generatedVoiceId: String, name: String) {
+        val repo = repo ?: return
+        if (name.isBlank()) { _qwenDesignError.value = "Name the voice before saving."; return }
+        _qwenDesignState.value = DesignState.SAVING
+        _qwenDesignError.value = null
+        viewModelScope.launch {
+            try {
+                repo.saveQwenDesignedVoice(generatedVoiceId, name.trim())
+                _message.value = "On-box voice \"${name.trim()}\" saved."
+                clearQwenPreviews()
+                _qwenDesignState.value = DesignState.IDLE
+                loadQwenVoices()
+                refreshTtsCatalog() // the new qwen:<slug> id must reach the voice picker
+            } catch (e: VoiceLabException) {
+                _qwenDesignState.value = DesignState.READY
+                _qwenDesignError.value = e.message
+            } catch (e: Exception) {
+                _qwenDesignState.value = DesignState.READY
+                _qwenDesignError.value = e.message ?: "Save failed"
+            }
+        }
+    }
+
+    fun clearQwenDesignError() { _qwenDesignError.value = null }
+
+    fun loadQwenVoices() {
+        val repo = repo ?: return
+        _qwenVoicesLoading.value = true
+        viewModelScope.launch {
+            try {
+                _qwenVoices.value = repo.fetchQwenVoices()
+            } catch (_: Exception) {
+                // keep whatever we had (gate covers the stack-off case)
+            } finally {
+                _qwenVoicesLoading.value = false
+            }
+        }
+    }
+
+    fun deleteQwenVoice(slug: String) {
+        val repo = repo ?: return
+        viewModelScope.launch {
+            try {
+                repo.deleteQwenVoice(slug)
+                _message.value = "On-box voice deleted."
+                loadQwenVoices()
+                refreshTtsCatalog() // drop the deleted qwen:<slug> from the picker too
+            } catch (e: Exception) {
+                _message.value = "Delete failed: ${e.message}"
+            }
+        }
+    }
+
+    private fun clearQwenPreviews() {
+        _qwenDesignPreviews.value.forEach { p ->
+            p.audioPath?.let { runCatching { File(it).delete() } }
+        }
+        _qwenDesignPreviews.value = emptyList()
+    }
+
+    /**
+     * Re-fetch GET /tts/catalog after an on-box voice mutation so the two-step
+     * voice picker (SettingsViewModel.loadVoiceCatalog on sheet open) sees the
+     * fresh qwen:<slug> entry immediately — this warms the path and surfaces
+     * catalog errors here rather than at pick time. Fire-and-forget.
+     */
+    private fun refreshTtsCatalog() {
+        val api = api ?: return
+        viewModelScope.launch {
+            runCatching { TtsRepository(api).fetchCatalog() }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         recordTicker?.cancel()
@@ -498,5 +730,7 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         // Drop any un-submitted clips.
         _cloneParts.value.forEach { runCatching { it.file.delete() } }
         _xaiClonePart.value?.let { runCatching { it.file.delete() } }
+        _qwenClonePart.value?.let { runCatching { it.file.delete() } }
+        clearQwenPreviews()
     }
 }

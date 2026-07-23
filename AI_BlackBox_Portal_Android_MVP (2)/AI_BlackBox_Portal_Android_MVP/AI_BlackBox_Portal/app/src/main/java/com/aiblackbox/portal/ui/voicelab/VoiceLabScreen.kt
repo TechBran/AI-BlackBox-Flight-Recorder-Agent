@@ -99,10 +99,14 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
 //                name → save.
 //   3) Manage  — my_voices list with delete (confirm; in_use warning via snackbar).
 //   4) Grok (xAI) — clone one ≤120s clip + consent → cloned voice_ids usable in Grok voice sessions (own /xai/voices gate).
+//   5) On-Box (Qwen3-TTS) — clone (one clip + consent) / design (b64 previews →
+//      save) / manage, gated on GET /local-models/status healthy+tts (no key).
 //
-// Gating (GET /elevenlabs/status):
-//   - not configured  → "Configure ElevenLabs in the Portal" empty state.
-//   - cloning disabled → Clone zone shows an upgrade hint (Design/Manage still work).
+// Gating (resolveVoiceLabGate — ElevenLabs /elevenlabs/status OR on-box
+// /local-models/status):
+//   - neither available → "not configured" empty state (keyless + stack-off box).
+//   - either available  → its section renders; the other simply stays absent.
+//   - cloning disabled  → ElevenLabs Clone zone shows an upgrade hint.
 // =============================================================================
 
 @Composable
@@ -116,6 +120,8 @@ fun VoiceLabScreen(
 
     val statusLoaded by viewModel.statusLoaded.collectAsState()
     val status by viewModel.status.collectAsState()
+    val qwenLoaded by viewModel.qwenLoaded.collectAsState()
+    val qwenAvailable by viewModel.qwenAvailable.collectAsState()
     val message by viewModel.message.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -149,28 +155,46 @@ fun VoiceLabScreen(
                 color = BbxWhite,
             )
             Spacer(Modifier.height(4.dp))
+            // Sub-line lists whichever providers are live (both, one, or a probe hint).
+            val subtitle = listOfNotNull(
+                if (status?.configured == true)
+                    "ElevenLabs" + (status?.tier?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: "")
+                else null,
+                if (qwenAvailable) "On-Box Qwen3-TTS" else null,
+            ).joinToString("  +  ").ifBlank { "Voice cloning & design" }
             Text(
-                "ElevenLabs" + (status?.tier?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
+                subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = Neutral500,
             )
             Spacer(Modifier.height(16.dp))
 
-            when {
-                !statusLoaded -> {
-                    LoadingBlock("Checking ElevenLabs…")
+            when (resolveVoiceLabGate(
+                elevenLoaded = statusLoaded,
+                qwenLoaded = qwenLoaded,
+                elevenConfigured = status?.configured == true,
+                qwenAvailable = qwenAvailable,
+            )) {
+                VoiceLabGate.LOADING -> {
+                    LoadingBlock("Checking voice providers…")
                 }
-                status?.configured != true -> {
+                VoiceLabGate.NOT_CONFIGURED -> {
                     NotConfiguredCard()
                 }
-                else -> {
-                    CloneZone(viewModel, context, view)
-                    Spacer(Modifier.height(16.dp))
-                    DesignZone(viewModel, view)
-                    Spacer(Modifier.height(16.dp))
-                    BrowseLibraryZone(viewModel, view)
-                    Spacer(Modifier.height(16.dp))
-                    ManageZone(viewModel, view)
+                VoiceLabGate.CONTENT -> {
+                    if (status?.configured == true) {
+                        CloneZone(viewModel, context, view)
+                        Spacer(Modifier.height(16.dp))
+                        DesignZone(viewModel, view)
+                        Spacer(Modifier.height(16.dp))
+                        BrowseLibraryZone(viewModel, view)
+                        Spacer(Modifier.height(16.dp))
+                        ManageZone(viewModel, view)
+                    }
+                    if (qwenAvailable) {
+                        if (status?.configured == true) Spacer(Modifier.height(16.dp))
+                        QwenZone(viewModel, view)
+                    }
                 }
             }
 
@@ -198,10 +222,11 @@ private fun LoadingBlock(label: String) {
 private fun NotConfiguredCard() {
     GlassCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(RadiusMd)) {
         Column(modifier = Modifier.padding(18.dp)) {
-            Text("ElevenLabs not configured", color = BbxWhite, fontWeight = FontWeight.Bold)
+            Text("No voice provider configured", color = BbxWhite, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Add your ElevenLabs API key in the Portal to enable voice cloning, " +
+                "Add your ElevenLabs API key in the Portal, or enable the on-box " +
+                    "local model stack (Qwen3-TTS), to unlock voice cloning, " +
                     "design, and management.",
                 color = BbxDim,
                 style = MaterialTheme.typography.bodyMedium,
@@ -443,7 +468,13 @@ private fun RecordButton(
 }
 
 @Composable
-private fun ConsentRow(checked: Boolean, enabled: Boolean, onToggle: () -> Unit) {
+private fun ConsentRow(
+    checked: Boolean,
+    enabled: Boolean,
+    onToggle: () -> Unit,
+    text: String = "I confirm I have the rights and consent to clone this voice, and accept " +
+        "ElevenLabs' voice cloning terms.",
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -468,8 +499,7 @@ private fun ConsentRow(checked: Boolean, enabled: Boolean, onToggle: () -> Unit)
         }
         Spacer(Modifier.size(10.dp))
         Text(
-            "I confirm I have the rights and consent to clone this voice, and accept " +
-                "ElevenLabs' voice cloning terms.",
+            text,
             color = if (enabled) BbxDim else Neutral500,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.weight(1f),
@@ -987,6 +1017,301 @@ private fun XaiZone(viewModel: VoiceLabViewModel, view: android.view.View) {
                     }
                 }
             }
+        }
+    }
+}
+
+// =============================================================================
+// Zone: On-Box (Qwen3-TTS) — clone (one clip + consent) / design (b64 previews
+// decoded to cacheDir WAVs by the VM, played via the shared AudioPlayerBar) /
+// manage (list + delete). Gated by resolveVoiceLabGate on /local-models/status.
+// =============================================================================
+
+private const val QWEN_CONSENT_TEXT =
+    "I confirm I have the rights and consent to clone this voice. On-box voices " +
+        "run entirely on this machine."
+
+@Composable
+private fun QwenZone(viewModel: VoiceLabViewModel, view: android.view.View) {
+    val voices by viewModel.qwenVoices.collectAsState()
+    val voicesLoading by viewModel.qwenVoicesLoading.collectAsState()
+    val cloneState by viewModel.qwenCloneState.collectAsState()
+    val cloneError by viewModel.qwenCloneError.collectAsState()
+    val part by viewModel.qwenClonePart.collectAsState()
+    val designState by viewModel.qwenDesignState.collectAsState()
+    val previews by viewModel.qwenDesignPreviews.collectAsState()
+    val designError by viewModel.qwenDesignError.collectAsState()
+
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var consent by remember { mutableStateOf(false) }
+    var designDesc by remember { mutableStateOf("") }
+    var designText by remember { mutableStateOf("") }
+    var confirmDelete by remember { mutableStateOf<com.aiblackbox.portal.data.repository.QwenVoice?>(null) }
+
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri -> uri?.let { viewModel.addQwenPickedFile(it) } }
+
+    SectionCard(title = "📦  On-Box (Qwen3-TTS)") {
+        Text(
+            "Clone and design voices that run entirely on this box — free, " +
+                "private, no API key.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Neutral500,
+        )
+        Spacer(Modifier.height(14.dp))
+
+        // ── Clone: one reference clip (~3s minimum) ──
+        FieldLabel("Clone a voice")
+        PillAction(
+            label = if (part == null) "Pick audio" else "Replace audio",
+            enabled = cloneState != CloneState.SUBMITTING,
+            onClick = { filePicker.launch("audio/*") },
+        )
+        part?.let { p ->
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(RadiusSm))
+                    .background(Neutral150OrSurface())
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    p.displayName,
+                    color = BbxWhite,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .clickFeedback(enabled = cloneState != CloneState.SUBMITTING) {
+                            viewModel.clearQwenPart()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Remove", tint = Neutral700, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        FieldLabel("Voice name")
+        InputBox(
+            value = name,
+            onValueChange = { name = it },
+            placeholder = "e.g. My On-Box Narrator",
+            singleLine = true,
+        )
+
+        Spacer(Modifier.height(12.dp))
+        FieldLabel("Description (optional)")
+        InputBox(
+            value = description,
+            onValueChange = { description = it },
+            placeholder = "Tone, accent, intended use…",
+            minHeight = 56.dp,
+        )
+
+        Spacer(Modifier.height(12.dp))
+        ConsentRow(
+            checked = consent,
+            enabled = true,
+            onToggle = { consent = !consent },
+            text = QWEN_CONSENT_TEXT,
+        )
+
+        Spacer(Modifier.height(16.dp))
+        val canSubmit = name.isNotBlank() && part != null && consent &&
+            cloneState != CloneState.SUBMITTING
+        PrimaryButton(
+            label = if (cloneState == CloneState.SUBMITTING) "Cloning…" else "Clone on-box voice",
+            enabled = canSubmit,
+            loading = cloneState == CloneState.SUBMITTING,
+            onClick = { viewModel.submitQwenClone(name, description, consent) },
+        )
+        AnimatedVisibility(visible = cloneError != null) {
+            cloneError?.let { ErrorText(it) }
+        }
+
+        // ── Design: description → previews → save ──
+        Spacer(Modifier.height(18.dp))
+        FieldLabel("Design a voice")
+        InputBox(
+            value = designDesc,
+            onValueChange = { designDesc = it },
+            placeholder = "A warm, middle-aged narrator with a calm cadence…",
+            minHeight = 72.dp,
+        )
+        Spacer(Modifier.height(8.dp))
+        FieldLabel("Preview text (optional)")
+        InputBox(
+            value = designText,
+            onValueChange = { designText = it },
+            placeholder = "Text the previews will speak…",
+            minHeight = 48.dp,
+        )
+        Spacer(Modifier.height(12.dp))
+        PrimaryButton(
+            label = if (designState == DesignState.GENERATING) "Generating…" else "Generate previews",
+            enabled = designDesc.isNotBlank() && designState != DesignState.GENERATING && designState != DesignState.SAVING,
+            loading = designState == DesignState.GENERATING,
+            onClick = { viewModel.qwenDesign(designDesc, designText) },
+        )
+        AnimatedVisibility(visible = designError != null) {
+            designError?.let { ErrorText(it) }
+        }
+
+        if (previews.isNotEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            Text("Pick a preview", style = MaterialTheme.typography.labelMedium, color = BbxDim)
+            Spacer(Modifier.height(10.dp))
+            previews.forEachIndexed { idx, preview ->
+                QwenPreviewCard(
+                    index = idx,
+                    preview = preview,
+                    saving = designState == DesignState.SAVING,
+                    onSave = { saveName -> viewModel.saveQwenDesigned(preview.generatedVoiceId, saveName) },
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+        }
+
+        // ── Manage: saved on-box voices ──
+        Spacer(Modifier.height(18.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (voices.isEmpty() && !voicesLoading) "No on-box voices yet"
+                else "${voices.size} on-box voice(s)",
+                color = BbxDim,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .clickFeedback { viewModel.loadQwenVoices() },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (voicesLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), color = BbxAccent, strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = BbxDim, modifier = Modifier.size(20.dp))
+                }
+            }
+        }
+        if (voices.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            voices.forEach { v ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp)
+                        .clip(RoundedCornerShape(RadiusSm))
+                        .background(Neutral150OrSurface())
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(v.name, color = BbxWhite, style = MaterialTheme.typography.bodyMedium)
+                        if (v.variant.isNotBlank()) {
+                            Text(v.variant, color = Neutral500, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .clickFeedback { confirmDelete = v },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = BbxRed, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+    }
+
+    confirmDelete?.let { v ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Delete on-box voice", color = BbxWhite) },
+            text = { Text("Delete \"${v.name}\"? This cannot be undone.", color = BbxDim) },
+            confirmButton = {
+                TextButton(onClick = {
+                    view.performPressFeedback()
+                    viewModel.deleteQwenVoice(v.slug)
+                    confirmDelete = null
+                }) { Text("Delete", color = BbxRed) }
+            },
+            dismissButton = {
+                TextButton(onClick = { view.performPressFeedback(); confirmDelete = null }) { Text("Cancel", color = BbxDim) }
+            },
+            containerColor = Neutral100,
+            tonalElevation = 0.dp,
+        )
+    }
+}
+
+@Composable
+private fun QwenPreviewCard(
+    index: Int,
+    preview: QwenPreview,
+    saving: Boolean,
+    onSave: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var saveName by remember { mutableStateOf("") }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(RadiusMd))
+            .background(Neutral100)
+            .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
+            .padding(12.dp)
+    ) {
+        Text(
+            "Preview ${index + 1}",
+            color = BbxWhite,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Medium,
+        )
+        Spacer(Modifier.height(8.dp))
+        if (preview.audioPath != null) {
+            // Shared waveform player — MediaPlayer.setDataSource takes the local
+            // cacheDir WAV path the VM decoded from audio_b64.
+            AudioPlayerBar(audioUrl = preview.audioPath, modifier = Modifier.fillMaxWidth())
+        } else {
+            Text("No audio preview", color = Neutral500, style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(10.dp))
+        if (!expanded) {
+            PillAction(
+                label = "Use this",
+                enabled = !saving,
+                onClick = { expanded = true },
+            )
+        } else {
+            FieldLabel("Voice name")
+            InputBox(
+                value = saveName,
+                onValueChange = { saveName = it },
+                placeholder = "Name this voice",
+                singleLine = true,
+            )
+            Spacer(Modifier.height(12.dp))
+            PrimaryButton(
+                label = if (saving) "Saving…" else "Save voice",
+                enabled = saveName.isNotBlank() && !saving,
+                loading = saving,
+                onClick = { onSave(saveName) },
+            )
         }
     }
 }

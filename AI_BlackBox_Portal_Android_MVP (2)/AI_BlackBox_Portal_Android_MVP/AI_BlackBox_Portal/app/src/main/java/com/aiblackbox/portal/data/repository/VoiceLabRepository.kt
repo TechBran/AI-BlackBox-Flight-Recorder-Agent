@@ -107,6 +107,94 @@ data class SharedVoice(
 /** One xAI custom (cloned) Grok voice. Tolerates voice_id|id key naming. */
 data class XaiVoice(val voiceId: String, val name: String)
 
+// =============================================================================
+// On-Box (Qwen3-TTS) — wire contracts for the /qwen/voices/* + /local-models/
+// status routes. Parse functions are top-level internal (like
+// parseXaiVoicesResponse) so the offline unit tests exercise them directly.
+// =============================================================================
+
+/**
+ * GET /local-models/status → gate for the On-Box zone. `available` requires the
+ * stack to be healthy AND the tts capability enabled; `ttsEnabled` fails OPEN
+ * (true) when the routing block is absent so older/leaner status shapes that
+ * only report `healthy` still light the zone (Portal parity).
+ */
+data class QwenTtsStatus(
+    val healthy: Boolean = false,
+    val ttsEnabled: Boolean = true,
+) {
+    val available: Boolean get() = healthy && ttsEnabled
+}
+
+/** One saved on-box clone/design profile (GET /qwen/voices). */
+data class QwenVoice(
+    val slug: String,
+    val name: String,
+    val variant: String = "",
+)
+
+/**
+ * One design preview candidate (POST /qwen/voices/design). The member returns
+ * base64 WAV (`audio_b64`) because it is loopback-only; `audioUrl` is kept as a
+ * defensive fallback should the contract ever emit a URL (Portal parity).
+ */
+data class QwenDesignPreview(
+    val generatedVoiceId: String,
+    val audioB64: String = "",
+    val sampleRate: Int = 0,
+    val audioUrl: String = "",
+)
+
+/** Parse GET /local-models/status — minimal fields only (healthy + routing.tts). */
+internal fun parseQwenStatusResponse(raw: String): QwenTtsStatus {
+    val j = Json { ignoreUnknownKeys = true; isLenient = true }
+    val o = j.parseToJsonElement(raw).jsonObject
+    val healthy = o["healthy"]?.jsonPrimitive?.contentOrNull?.toBoolean() ?: false
+    val tts = o["routing"]?.jsonObject?.get("tts")?.jsonObject
+    val ttsEnabled = tts?.get("enabled")?.jsonPrimitive?.contentOrNull?.toBoolean()
+        ?: true // routing absent → fail-open on `healthy` alone
+    return QwenTtsStatus(healthy = healthy, ttsEnabled = ttsEnabled)
+}
+
+/** Parse GET /qwen/voices → {voices:[{slug, name, variant}]}. Slugless rows skipped. */
+internal fun parseQwenVoicesResponse(raw: String): List<QwenVoice> {
+    val j = Json { ignoreUnknownKeys = true; isLenient = true }
+    val o = j.parseToJsonElement(raw).jsonObject
+    return (o["voices"]?.jsonArray ?: JsonArray(emptyList())).mapNotNull { el ->
+        val vo = el.jsonObject
+        val slug = vo["slug"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+        QwenVoice(
+            slug = slug,
+            name = vo["name"]?.jsonPrimitive?.contentOrNull ?: slug,
+            variant = vo["variant"]?.jsonPrimitive?.contentOrNull ?: "",
+        )
+    }
+}
+
+/** Parse POST /qwen/voices/design → previews[{generated_voice_id, audio_b64, sample_rate}]. */
+internal fun parseQwenDesignResponse(raw: String): List<QwenDesignPreview> {
+    val j = Json { ignoreUnknownKeys = true; isLenient = true }
+    val o = j.parseToJsonElement(raw).jsonObject
+    return (o["previews"]?.jsonArray ?: JsonArray(emptyList())).mapNotNull { el ->
+        val po = el.jsonObject
+        val gid = po["generated_voice_id"]?.jsonPrimitive?.contentOrNull
+            ?: return@mapNotNull null
+        QwenDesignPreview(
+            generatedVoiceId = gid,
+            audioB64 = po["audio_b64"]?.jsonPrimitive?.contentOrNull ?: "",
+            sampleRate = po["sample_rate"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            audioUrl = po["audio_url"]?.jsonPrimitive?.contentOrNull ?: "",
+        )
+    }
+}
+
+/** Parse a clone / design-save response → voice_id ("" when absent). */
+internal fun parseQwenVoiceIdResponse(raw: String): String {
+    val j = Json { ignoreUnknownKeys = true; isLenient = true }
+    return j.parseToJsonElement(raw).jsonObject["voice_id"]
+        ?.jsonPrimitive?.contentOrNull ?: ""
+}
+
 /** GET /xai/voices → gating (configured=false hides the zone) + cloned voices. */
 data class XaiVoicesResult(val configured: Boolean, val voices: List<XaiVoice>)
 
@@ -365,6 +453,88 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
     suspend fun deleteXaiVoice(voiceId: String): Boolean {
         val request = Request.Builder()
             .url("${api.getBaseUrl()}/xai/voices/$voiceId")
+            .header("X-BlackBox-Client", "native-android/1.0")
+            .delete()
+            .build()
+        api.getClient().newCall(request).execute().use { response ->
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                throw VoiceLabException(response.code, extractError(body, response.code))
+            }
+            val o = json.parseToJsonElement(body).jsonObject
+            return o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // On-Box (Qwen3-TTS) — status gate + clone/design/manage. Mirrors the
+    // ElevenLabs helpers above; the backend routes proxy the on-box qwen-tts
+    // member (see Orchestrator/routes/tts_routes.py "Qwen3-TTS voice management").
+    // -------------------------------------------------------------------------
+
+    /** GET /local-models/status → healthy + tts capability gate for the zone. */
+    suspend fun fetchQwenStatus(): QwenTtsStatus =
+        parseQwenStatusResponse(api.get("/local-models/status"))
+
+    /** GET /qwen/voices → saved on-box clone/design profiles. */
+    suspend fun fetchQwenVoices(): List<QwenVoice> =
+        parseQwenVoicesResponse(api.get("/qwen/voices"))
+
+    /**
+     * POST /qwen/voices/clone (multipart: name, consent, description?, files).
+     * The proxy 422s without the literal consent flag (ElevenLabs-gate parity).
+     * Returns the new voice_id/slug.
+     */
+    suspend fun cloneQwenVoice(
+        name: String,
+        files: List<File>,
+        consent: Boolean,
+        description: String = "",
+    ): String {
+        val builder = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("name", name)
+            .addFormDataPart("consent", if (consent) "true" else "false")
+        if (description.isNotBlank()) builder.addFormDataPart("description", description)
+        files.forEach { f ->
+            builder.addFormDataPart("files", f.name, f.asRequestBody(mediaTypeFor(f.name)))
+        }
+        val request = Request.Builder()
+            .url("${api.getBaseUrl()}/qwen/voices/clone")
+            .header("X-BlackBox-Client", "native-android/1.0")
+            .post(builder.build())
+            .build()
+        api.getClient().newCall(request).execute().use { response ->
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                throw VoiceLabException(response.code, extractError(body, response.code))
+            }
+            return parseQwenVoiceIdResponse(body)
+        }
+    }
+
+    /** POST /qwen/voices/design {voice_description, text?} → preview candidates. */
+    suspend fun designQwenVoice(voiceDescription: String, text: String = ""): List<QwenDesignPreview> {
+        val payload = buildJsonObject {
+            put("voice_description", voiceDescription)
+            if (text.isNotBlank()) put("text", text)
+        }.toString()
+        return parseQwenDesignResponse(postOrThrow("/qwen/voices/design", payload))
+    }
+
+    /** POST /qwen/voices/design/save {generated_voice_id, name} → voice_id. */
+    suspend fun saveQwenDesignedVoice(generatedVoiceId: String, name: String): String {
+        val payload = buildJsonObject {
+            put("generated_voice_id", generatedVoiceId)
+            put("name", name)
+        }.toString()
+        return parseQwenVoiceIdResponse(postOrThrow("/qwen/voices/design/save", payload))
+    }
+
+    /** DELETE /qwen/voices/{slug} → ok. 404s (no such profile) surface as VoiceLabException. */
+    suspend fun deleteQwenVoice(slug: String): Boolean {
+        val request = Request.Builder()
+            .url("${api.getBaseUrl()}/qwen/voices/$slug")
             .header("X-BlackBox-Client", "native-android/1.0")
             .delete()
             .build()
