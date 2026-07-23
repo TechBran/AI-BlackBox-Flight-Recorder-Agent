@@ -184,7 +184,27 @@ CU_FRONTIER_ANTHROPIC_MODEL = CFG.get("computer_use", "frontier_anthropic_model"
 CU_FRONTIER_OPENAI_MODEL    = CFG.get("computer_use", "frontier_openai_model",
                                       fallback="gpt-5.5").strip()
 CU_NATIVE_MODE          = CFG.getboolean("computer_use", "native_mode", fallback=True)
-CU_CHROME_PATH          = CFG.get("computer_use", "chrome_path", fallback="/opt/google/chrome/chrome").strip()
+def _resolve_chrome_path() -> str:
+    """Resolve the CU browser binary portably (M6 finding, 2026-07-23: MS02 has
+    chromium but no Google Chrome — the hardcoded /opt path failed every virtual
+    CU session there with 'Chrome not found'). Order: an explicitly-configured
+    EXISTING path wins; else the first present of the well-known binaries; else
+    the old default (so the error message still names a concrete path)."""
+    import shutil as _sh
+    configured = CFG.get("computer_use", "chrome_path", fallback="").strip()
+    if configured and os.path.exists(configured):
+        return configured
+    for cand in ("/opt/google/chrome/chrome",):
+        if os.path.exists(cand):
+            return cand
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        p = _sh.which(name)
+        if p:
+            return p
+    return configured or "/opt/google/chrome/chrome"
+
+
+CU_CHROME_PATH          = _resolve_chrome_path()
 CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=150)
 # Session budget for one CU run. MUST cover the drivers' 30-min wall-clock cap
 # (MAX_WALL_CLOCK=1800 fires first with a clean error event; the outer
