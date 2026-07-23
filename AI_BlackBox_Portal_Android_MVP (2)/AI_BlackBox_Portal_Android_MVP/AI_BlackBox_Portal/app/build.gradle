@@ -17,8 +17,8 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 8
-        versionName "1.4.0-tts-queue-voice-lab-qwen"
+        versionCode 9
+        versionName "1.4.2-clone-mainsafe-fix"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }

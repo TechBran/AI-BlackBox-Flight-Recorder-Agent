@@ -2,6 +2,8 @@ package com.aiblackbox.portal.data.repository
 
 import android.util.Log
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -504,12 +506,17 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
             .header("X-BlackBox-Client", "native-android/1.0")
             .post(builder.build())
             .build()
-        api.getClient().newCall(request).execute().use { response ->
-            val body = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                throw VoiceLabException(response.code, extractError(body, response.code))
+        // Main-safe: the VM launches on Main; a bare execute() there throws
+        // NetworkOnMainThreadException (null message -> the bare "Clone failed"
+        // toast Brandon hit 2026-07-23) BEFORE any request leaves the phone.
+        return withContext(Dispatchers.IO) {
+            api.getClient().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    throw VoiceLabException(response.code, extractError(body, response.code))
+                }
+                parseQwenVoiceIdResponse(body)
             }
-            return parseQwenVoiceIdResponse(body)
         }
     }
 
@@ -538,13 +545,16 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
             .header("X-BlackBox-Client", "native-android/1.0")
             .delete()
             .build()
-        api.getClient().newCall(request).execute().use { response ->
-            val body = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                throw VoiceLabException(response.code, extractError(body, response.code))
+        // Main-safe (same NetworkOnMainThreadException hazard as cloneQwenVoice).
+        return withContext(Dispatchers.IO) {
+            api.getClient().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    throw VoiceLabException(response.code, extractError(body, response.code))
+                }
+                val o = json.parseToJsonElement(body).jsonObject
+                o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false
             }
-            val o = json.parseToJsonElement(body).jsonObject
-            return o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false
         }
     }
 
