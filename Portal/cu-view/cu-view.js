@@ -34,6 +34,15 @@ import {
     targetStillListed,
 } from "./switcher.js";
 
+// ── Diagnostics ──────────────────────────────────────────────────────────
+
+// Lifecycle beacon installed by index.html's inline script (Android-WebView
+// black-screen hunt, 2026-07-23). Firing "module-boot" here proves the WHOLE
+// ES-module import chain above (noVNC RFB + local modules) resolved in this
+// browser — the inline script fires "page-load" even when it doesn't.
+const diag = window.__cuvDiag || (() => {});
+diag("module-boot");
+
 // ── Session identity ─────────────────────────────────────────────────────
 
 // Page URL is /cu/view/{sid} (no templating — the path IS the contract).
@@ -609,6 +618,7 @@ function connect() {
         if (rfb !== inst) return;
         reconnectAttempts = 0;
         setStatus("connected");
+        diag("rfb-connect", sessionId);
     });
     inst.addEventListener("desktopname", (ev) => {
         if (rfb === inst && ev.detail?.name) statusDot.title = ev.detail.name;
@@ -617,6 +627,7 @@ function connect() {
         // Stale-instance guard: a superseded RFB's disconnect must never
         // clobber the live one or trigger a reconnect storm.
         if (rfb !== inst) return;
+        diag("rfb-disconnect", `${sessionId} ended=${ended}`);
         rfb = null;
         if (ended) return;
         scheduleReconnect();

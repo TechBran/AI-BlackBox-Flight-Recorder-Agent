@@ -89,6 +89,24 @@ def test_view_page_live_view_unavailable_notice(monkeypatch):
     assert "novnc" in r.text.lower()  # install-novnc notice
 
 
+def test_view_diag_beacon_wiring():
+    """Android-WebView black-screen hunt (2026-07-23): the served page carries
+    an INLINE classic-script beacon (runs even when the ES-module chain fails)
+    and POST /cu/view/diag accepts its payload log-only — it must never error
+    back at the page, even on garbage bodies."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[2]
+            / "Portal" / "cu-view" / "index.html").read_text()
+    assert "/cu/view/diag" in html                     # inline beacon wired
+    assert 'diag("page-load"' in html                  # fires before modules
+    client = TestClient(app)
+    r = client.post("/cu/view/diag",
+                    json={"event": "page-load", "sid": "s1", "detail": "ua"})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    r = client.post("/cu/view/diag", content=b"not-json")   # beacon blobs vary
+    assert r.status_code == 200
+
+
 def test_ws_proxy_rejects_unknown_session(monkeypatch):
     """The load-bearing reverse-proxy: for an unknown/dead session the proxy
     accepts the handshake (so the client sees a real WS) then closes 1008 — it

@@ -411,8 +411,25 @@ def _cu_view_auto():
     return RedirectResponse(target["url"], status_code=302)
 
 
+@app.post("/cu/view/diag")
+async def cu_view_diag(request: Request):
+    """Client-side diagnostic beacon for the served live-view page (Android
+    WebView black-screen hunt, 2026-07-23). The page POSTs lifecycle events
+    (page-load / module-boot / rfb-connect / js-error / js-rejection) so a
+    WebView with no devtools can testify server-side about what it actually
+    did. Log-only; never errors back at the page."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ua = request.headers.get("user-agent", "?")
+    print(f"[CU-VIEW-DIAG] {body.get('event', '?')} sid={body.get('sid', '?')} "
+          f"detail={str(body.get('detail', ''))[:300]} ua={ua[:120]}")
+    return {"ok": True}
+
+
 @app.get("/cu/view/{session_id}", response_class=HTMLResponse)
-def cu_view(session_id: str):
+def cu_view(session_id: str, request: Request):
     """Serve the interactive CU live-view client (Portal/cu-view/, design
     2026-07-23 §4/M2). Route contract unchanged for real session ids: 404 for
     unknown sessions, install-hint page when live_view is off, HTML otherwise.
@@ -420,6 +437,11 @@ def cu_view(session_id: str):
     /cu/sessions — no server-side templating. Two RESERVED ids are dispatched
     specially (never treated as session lookups): "main" streams the REAL
     desktop; "auto" 302s to the best available surface."""
+    # Request-level breadcrumb (pairs with the page's /cu/view/diag beacons):
+    # WHICH client asked for WHICH id — the first question when a frontend
+    # renders black is whether its navigation ever reached us at all.
+    _ua = request.headers.get("user-agent", "?")
+    print(f"[CU-VIEW] GET /cu/view/{session_id} ua={_ua[:120]}")
     if session_id == "main":
         return _cu_view_main()
     if session_id == "auto":
@@ -427,6 +449,7 @@ def cu_view(session_id: str):
     from Orchestrator.browser.display import get_allocator
     h = get_allocator().get(session_id)
     if h is None:
+        print(f"[CU-VIEW] GET /cu/view/{session_id} -> 404 unknown session")
         return HTMLResponse("<!doctype html><body>No active CU session for that id.",
                             status_code=404)
     if not h.live_view:

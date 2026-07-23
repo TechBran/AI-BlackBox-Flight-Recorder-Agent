@@ -61,6 +61,40 @@
     <input id="cuvKbSink" type="text" autocomplete="off" autocorrect="off"
            autocapitalize="off" spellcheck="false" aria-label="Remote keyboard input">
 
-    <script type="module" src="/ui/cu-view/cu-view.js"></script>
+    <script>
+        // Diag beacon (2026-07-23 Android-WebView black-screen hunt): report
+        // page lifecycle server-side so a WebView with no devtools can testify.
+        // Classic (non-module) script ON PURPOSE: it runs even when the ES
+        // module chain below fails to load — which is one of the suspects.
+        (function () {
+            function diag(event, detail) {
+                try {
+                    var body = JSON.stringify({
+                        event: event,
+                        sid: location.pathname.split("/").pop(),
+                        detail: String(detail || "").slice(0, 500)
+                    });
+                    if (!(navigator.sendBeacon &&
+                          navigator.sendBeacon("/cu/view/diag",
+                              new Blob([body], { type: "application/json" })))) {
+                        fetch("/cu/view/diag", { method: "POST", body: body,
+                            headers: { "Content-Type": "application/json" },
+                            keepalive: true });
+                    }
+                } catch (e) { /* diagnostics must never break the page */ }
+            }
+            window.__cuvDiag = diag;
+            diag("page-load", navigator.userAgent);
+            window.addEventListener("error", function (ev) {
+                diag("js-error", (ev.message || "err") + " @ " +
+                    (ev.filename || "?") + ":" + (ev.lineno || 0));
+            });
+            window.addEventListener("unhandledrejection", function (ev) {
+                diag("js-rejection",
+                    ev.reason && (ev.reason.message || String(ev.reason)));
+            });
+        })();
+    </script>
+    <script type="module" src="/ui/cu-view/cu-view.js?v=diag1"></script>
 </body>
 </html>
