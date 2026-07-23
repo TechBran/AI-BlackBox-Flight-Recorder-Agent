@@ -43,6 +43,41 @@ import {
 const diag = window.__cuvDiag || (() => {});
 diag("module-boot");
 
+/** Sample the RFB canvas + report full render geometry. Distinguishes the
+ *  black-screen failure modes with numbers instead of screenshots: mean
+ *  luminance > ~5 while the user sees black = the canvas HAS the desktop and
+ *  compositing is eating it (app-side); lum ≈ 0 = the canvas itself is black
+ *  (stream/decode side); degenerate cnv/stage/scale = sizing bug (page-side). */
+function paintProbe(tag) {
+    try {
+        const canvas = screenEl.querySelector("canvas");
+        if (!canvas) { diag(`probe-${tag}`, "no-canvas"); return; }
+        const r = stageEl.getBoundingClientRect();
+        const cr = canvas.getBoundingClientRect();
+        let lum = "n/a";
+        try {
+            const ctx = canvas.getContext("2d");
+            const w = canvas.width, h = canvas.height;
+            if (ctx && w > 8 && h > 8) {
+                let total = 0, n = 0;   // corners + center, 8x8 each
+                for (const [sx, sy] of [[0, 0], [w - 8, 0], [0, h - 8],
+                                        [w - 8, h - 8], [(w >> 1) - 4, (h >> 1) - 4]]) {
+                    const d = ctx.getImageData(sx, sy, 8, 8).data;
+                    for (let i = 0; i < d.length; i += 4) {
+                        total += (d[i] + d[i + 1] + d[i + 2]) / 3; n += 1;
+                    }
+                }
+                lum = (total / n).toFixed(1);
+            }
+        } catch (e) { lum = `err:${e.message || e}`; }
+        diag(`probe-${tag}`,
+            `lum=${lum} cnv=${canvas.width}x${canvas.height}@${cr.width.toFixed(0)}x${cr.height.toFixed(0)} ` +
+            `stage=${r.width.toFixed(0)}x${r.height.toFixed(0)} ` +
+            `scale=${vp ? vp.scale.toFixed(4) : "?"} tx=${vp ? vp.tx.toFixed(0) : "?"} ` +
+            `ty=${vp ? vp.ty.toFixed(0) : "?"} dpr=${devicePixelRatio} vis=${document.visibilityState}`);
+    } catch (e) { diag(`probe-${tag}`, `fail:${e.message || e}`); }
+}
+
 // ── Session identity ─────────────────────────────────────────────────────
 
 // Page URL is /cu/view/{sid} (no templating — the path IS the contract).
@@ -619,6 +654,8 @@ function connect() {
         reconnectAttempts = 0;
         setStatus("connected");
         diag("rfb-connect", sessionId);
+        setTimeout(() => { if (rfb === inst) paintProbe("2s"); }, 2000);
+        setTimeout(() => { if (rfb === inst) paintProbe("6s"); }, 6000);
     });
     inst.addEventListener("desktopname", (ev) => {
         if (rfb === inst && ev.detail?.name) statusDot.title = ev.detail.name;

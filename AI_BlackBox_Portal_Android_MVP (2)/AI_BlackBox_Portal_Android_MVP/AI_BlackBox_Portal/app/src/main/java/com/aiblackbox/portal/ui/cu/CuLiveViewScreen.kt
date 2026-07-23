@@ -37,12 +37,23 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
                 // upload, so deny local file:// and content:// access outright.
                 settings.allowFileAccess = false
                 settings.allowContentAccess = false
-                // BLACK-CANVAS FIX (Brandon field find 2026-07-23): the served
+                // BLACK-SCREEN HUNT (Brandon field find 2026-07-23): the served
                 // page rendered PURE BLACK in this WebView while identical in
-                // Chrome. Prime suspect: WebView "algorithmic darkening" — on
-                // dark-themed apps Android auto-darkens web content and is
-                // notorious for blacking out <canvas>. The page is already
-                // dark-themed; never let the WebView re-shade it.
+                // Chrome. The /cu/view/diag beacons PROVED the page loads, the
+                // whole ES-module chain boots, and the RFB stream CONNECTS in
+                // this WebView — so the loss is in view-surface rendering, not
+                // networking or JS. v1.5.4 therefore aligns this settings block
+                // with the field-proven WizardWebViewScreen config:
+                //  - NO setLayerType(LAYER_TYPE_HARDWARE): forcing an explicit
+                //    hardware layer on a WebView is a documented trigger for
+                //    exactly this black-surface symptom (the WebView manages
+                //    its own compositor surface; an outer HW layer can swallow
+                //    it). The wizard WebView works without it.
+                //  - MIXED_CONTENT_COMPATIBILITY_MODE: wizard parity.
+                settings.mixedContentMode =
+                    android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                // Darkening opt-outs stay (harmless, defensive): never let the
+                // WebView re-shade the already-dark page or its canvas.
                 if (android.os.Build.VERSION.SDK_INT >= 33) {
                     settings.isAlgorithmicDarkeningAllowed = false
                 }
@@ -50,8 +61,6 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
                 if (android.os.Build.VERSION.SDK_INT in 29..32) {
                     settings.forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
                 }
-                // Belt-and-suspenders for canvas compositing in WebView.
-                setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                 setBackgroundColor(android.graphics.Color.BLACK)
                 webViewClient = WebViewClient()
                 loadUrl("${baseUrl.trimEnd('/')}/cu/view/$sessionId")
