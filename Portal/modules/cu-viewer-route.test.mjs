@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { chooseCuViewer } from "./cu-viewer-route.js";
+import { chooseCuViewer, chooseDrawerSurface } from "./cu-viewer-route.js";
 
 /** Build a fake /cu/sessions session entry (to_public shape). */
 function session(id, overrides = {}) {
@@ -116,5 +116,45 @@ test("local device ids ('blackbox', 'local', empty) stream normally", () => {
     for (const deviceId of ["blackbox", "local", "", null, undefined]) {
         const choice = chooseCuViewer(payload([session("abc")]), { deviceId });
         assert.equal(choice.mode, "stream", `deviceId=${String(deviceId)}`);
+    }
+});
+
+// ── drawer default surface (desktop-first CU, 2026-07-23) ─────────────────
+
+test("drawer: no live session → prominent open-desktop CTA", () => {
+    assert.deepEqual(chooseDrawerSurface(payload([])),
+        { mode: "open-desktop", reason: "no-sessions" });
+    assert.deepEqual(chooseDrawerSurface(null),
+        { mode: "open-desktop", reason: "no-sessions" });
+    assert.deepEqual(chooseDrawerSurface({ sessions: "wat" }),
+        { mode: "open-desktop", reason: "no-sessions" });
+});
+
+test("drawer: live session → stream IS the default surface", () => {
+    const s = session("live-1");
+    const choice = chooseDrawerSurface(payload([s]));
+    assert.equal(choice.mode, "stream");
+    assert.equal(choice.session.session_id, "live-1");
+    assert.equal(choice.session.view_url, "/cu/view/live-1");
+});
+
+test("drawer: sessions exist but live_view unavailable → fallback, not CTA", () => {
+    const choice = chooseDrawerSurface(payload([session("a", { live_view: false })]));
+    assert.deepEqual(choice, { mode: "fallback", reason: "stream-unavailable" });
+});
+
+test("drawer: remote device target never shows the local-desktop CTA", () => {
+    assert.deepEqual(chooseDrawerSurface(payload([]), { deviceId: "fold-vnc" }),
+        { mode: "fallback", reason: "remote-device" });
+    assert.deepEqual(chooseDrawerSurface(payload([session("abc")]), { deviceId: "fold-vnc" }),
+        { mode: "fallback", reason: "remote-device" });
+});
+
+test("drawer: local device ids keep desktop-first behavior", () => {
+    for (const deviceId of ["blackbox", "local", "", null, undefined]) {
+        assert.equal(chooseDrawerSurface(payload([]), { deviceId }).mode,
+            "open-desktop", `deviceId=${String(deviceId)}`);
+        assert.equal(chooseDrawerSurface(payload([session("abc")]), { deviceId }).mode,
+            "stream", `deviceId=${String(deviceId)}`);
     }
 });

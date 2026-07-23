@@ -248,6 +248,18 @@ async def _cu_display_reaper():
                 get_allocator().reap_idle()
             except Exception as e:
                 print(f"[CU-DISPLAY] TTL reap skipped: {e}")
+            # Session-level sweep (desktop-first CU 2026-07-23): manual
+            # /cu/session/open sessions have no agent turn to lazily observe
+            # their expiry, so sweep ComputerUseSession objects here too —
+            # same SESSION_TIMEOUT the reuse path already enforces, running
+            # tasks skipped. Reaps Chrome + the session dict entry; the
+            # display quartet falls to reap_idle above / release() here.
+            try:
+                from Orchestrator.browser.session_manager import cleanup_inactive_sessions
+                from Orchestrator.browser.config import SESSION_TIMEOUT
+                cleanup_inactive_sessions(timeout=SESSION_TIMEOUT)
+            except Exception as e:
+                print(f"[CU-SESSION] idle sweep skipped: {e}")
 
     asyncio.create_task(_loop())
 

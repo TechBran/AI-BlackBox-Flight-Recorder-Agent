@@ -65,6 +65,34 @@ export function chooseCuViewer(status, opts = {}) {
 }
 
 /**
+ * Decide the CU drawer's DEFAULT desktop surface (desktop-first CU,
+ * 2026-07-23): with NO live session the drawer shows the prominent
+ * "Open live desktop" CTA (→ POST /cu/session/open); with a live session the
+ * live view IS the default surface (fallback only when live_view is
+ * unavailable — delegated to chooseCuViewer, so the semantics can never
+ * drift from the Live-button routing).
+ *
+ * PURE like chooseCuViewer — node-tested in cu-viewer-route.test.mjs.
+ *
+ * @param {object|null} status - /cu/sessions response or null on fetch failure.
+ * @param {object} [opts] - same options as chooseCuViewer ({sessionId, deviceId}).
+ * @returns {{mode:'open-desktop', reason:string}
+ *          |{mode:'stream', session:object}
+ *          |{mode:'fallback', reason:string}}
+ */
+export function chooseDrawerSurface(status, opts = {}) {
+    const deviceId = opts.deviceId;
+    if (deviceId && deviceId !== "blackbox" && deviceId !== "local") {
+        // Remote targets have no local virtual desktop to open — never show
+        // the local-desktop CTA; route like the Live button (→ fallback).
+        return chooseCuViewer(status, opts);
+    }
+    const sessions = (status && Array.isArray(status.sessions)) ? status.sessions : [];
+    if (!sessions.length) return { mode: "open-desktop", reason: "no-sessions" };
+    return chooseCuViewer(status, opts);
+}
+
+/**
  * Open the right CU viewer: streaming client when available, screenshot-poll
  * modal otherwise. Resolution is LIVE per open — sessions rotate, so nothing
  * is cached here.

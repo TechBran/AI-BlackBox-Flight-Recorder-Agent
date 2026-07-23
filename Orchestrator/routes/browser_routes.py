@@ -5,7 +5,7 @@ import time
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
 from fastapi import Body, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.requests import Request
 from starlette.websockets import WebSocketState
 
@@ -222,6 +222,78 @@ def cu_preflight(skip_screenshot: bool = False):
     as banners with the remediation text."""
     from Orchestrator.browser import preflight
     return preflight.run_preflight(skip_screenshot=skip_screenshot)
+
+
+class CuSessionOpenIn(BaseModel):
+    operator: Optional[str] = "system"
+
+
+@app.post("/cu/session/open")
+async def cu_session_open(req: Optional[CuSessionOpenIn] = Body(default=None)):
+    """Desktop-first CU (2026-07-23): ensure-or-create a live VIRTUAL session
+    for the operator WITHOUT any agent loop — the Splashtop-style desktop is up
+    before the first prompt, so the user can drive it and a later agent task
+    takes over the SAME session.
+
+    Reuse semantics are exactly the task-attach path's
+    (session_manager.get_or_create_session): an alive, unexpired session for
+    the operator is returned as-is; a subsequent /browser/run or use_computer
+    task for this operator picks THIS session up. The session stays subject to
+    the normal idle expiry (SESSION_TIMEOUT + the display TTL reaper) — a
+    manually opened desktop is never immortal.
+    """
+    from Orchestrator.browser.session_manager import (
+        destroy_session_by_id, get_operator_session, get_or_create_session,
+    )
+    operator = (req.operator if req and req.operator else "system")
+
+    # Compute `reused` with the SAME predicate get_or_create_session applies,
+    # BEFORE calling it (it reports nothing back about which branch it took).
+    existing = get_operator_session(operator)
+    reused = bool(existing is not None and existing.is_alive()
+                  and not existing.is_expired())
+
+    try:
+        session = get_or_create_session(operator)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+    session.native_mode = False  # manual desktop sessions are always virtual
+    try:
+        ok = await session.ensure_browser("about:blank")
+    except Exception as e:
+        ok = False
+        print(f"[CU-SESSION] manual open: ensure_browser raised: {e}")
+    if not ok:
+        # Don't pin a half-created session on the operator; a reused session
+        # that failed to (re)start its browser is equally unusable.
+        destroy_session_by_id(session.session_id)
+        return JSONResponse(
+            {"error": "Failed to start the desktop session (virtual display cap "
+                      "reached, or Xvfb/Chrome could not start)"},
+            status_code=502)
+
+    session.touch()
+    live = bool(session.display is not None and session.display.live_view)
+    return {
+        "session_id": session.session_id,
+        "view_url": f"/cu/view/{session.session_id}",
+        "reused": reused,
+        "live_view": live,
+        "operator": operator,
+    }
+
+
+@app.post("/cu/session/{session_id}/close")
+def cu_session_close(session_id: str):
+    """Explicitly end a CU session (manual desktop or otherwise). Calls the
+    existing session cleanup (Chrome + display quartet teardown); 404 for an
+    unknown id."""
+    from Orchestrator.browser.session_manager import destroy_session_by_id
+    if not destroy_session_by_id(session_id):
+        return JSONResponse({"error": f"Unknown CU session: {session_id}"},
+                            status_code=404)
+    return {"success": True, "session_id": session_id}
 
 
 @app.get("/cu/sessions")

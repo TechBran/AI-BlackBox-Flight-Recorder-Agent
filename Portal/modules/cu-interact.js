@@ -7,6 +7,9 @@
 
 import { $ } from './core-utils.js';
 import { getCUDeviceId, getCUSessionId } from './cu-drawer.js';
+import {
+    createFallbackViewport, fallbackTransformCss, mapViewToScreenshot,
+} from './cu-fallback-zoom.js';
 
 let modal = null;
 let pollingInterval = null;
@@ -27,6 +30,109 @@ let _activeDeviceId = null;
 
 /** Get device_id for interactive action requests. */
 function _getDeviceId() { return _activeDeviceId || getCUDeviceId() || 'blackbox'; }
+
+// ── Pinch-zoom/pan state (desktop-first CU 2026-07-23, part C) ──
+// View-only CSS transform on the screenshot <img>; the math is the streaming
+// client's ViewportTransform (via cu-fallback-zoom.js). Clicks map through the
+// CURRENT transform, so the fallback is never precise-tap-only.
+let _vt = null;          // ViewportTransform over the img's layout box, or null
+let _pinch = null;       // active two-finger gesture {dist, cx, cy}
+let _panTouch = null;    // active one-finger pan while zoomed {x, y, moved}
+let _suppressClick = false; // swallow the synthetic click after a pan/pinch
+
+/** (Re)build the viewport when the img's LAYOUT size changes (offsetWidth is
+ *  transform-independent, so an active zoom never rebuilds it). Keeps the
+ *  current transform across screenshot polls of the same size. */
+function _syncViewport() {
+    const screen = modal && modal.querySelector('.cu-interact-screen');
+    if (!screen) return;
+    const w = screen.offsetWidth;
+    const h = screen.offsetHeight;
+    if (!(w > 0 && h > 0)) { return; }
+    if (_vt && _vt.viewW === w && _vt.viewH === h) return;
+    _vt = createFallbackViewport(w, h);
+    _applyTransform();
+}
+
+function _applyTransform() {
+    const screen = modal && modal.querySelector('.cu-interact-screen');
+    if (!screen) return;
+    screen.style.transformOrigin = '0 0';
+    screen.style.transform = (_vt && _vt.scale !== 1) || (_vt && (_vt.tx || _vt.ty))
+        ? fallbackTransformCss(_vt) : '';
+}
+
+function _resetViewport() {
+    _vt = null;
+    _pinch = null;
+    _panTouch = null;
+    _suppressClick = false;
+    const screen = modal && modal.querySelector('.cu-interact-screen');
+    if (screen) screen.style.transform = '';
+}
+
+function _wrapPoint(t) {
+    const wrap = modal.querySelector('.cu-interact-screen-wrap');
+    const r = wrap.getBoundingClientRect();
+    return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+
+function handleTouchStart(e) {
+    _syncViewport();
+    if (!_vt) return;
+    if (e.touches.length === 2) {
+        e.preventDefault();
+        const a = _wrapPoint(e.touches[0]);
+        const b = _wrapPoint(e.touches[1]);
+        _pinch = {
+            dist: Math.hypot(a.x - b.x, a.y - b.y),
+            cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2,
+        };
+        _panTouch = null;
+        _suppressClick = true;  // a two-finger gesture is never a click
+    } else if (e.touches.length === 1 && _vt.zoomedIn) {
+        const p = _wrapPoint(e.touches[0]);
+        _panTouch = { x: p.x, y: p.y, moved: false };
+    } else {
+        _panTouch = null;
+    }
+}
+
+function handleTouchMove(e) {
+    if (!_vt) return;
+    if (_pinch && e.touches.length === 2) {
+        e.preventDefault();
+        const a = _wrapPoint(e.touches[0]);
+        const b = _wrapPoint(e.touches[1]);
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        const cx = (a.x + b.x) / 2;
+        const cy = (a.y + b.y) / 2;
+        if (_pinch.dist > 0 && d > 0) _vt.zoomAt(cx, cy, d / _pinch.dist);
+        _vt.panBy(cx - _pinch.cx, cy - _pinch.cy);
+        _pinch = { dist: d, cx, cy };
+        _applyTransform();
+    } else if (_panTouch && e.touches.length === 1) {
+        const p = _wrapPoint(e.touches[0]);
+        const dx = p.x - _panTouch.x;
+        const dy = p.y - _panTouch.y;
+        if (_panTouch.moved || Math.hypot(dx, dy) > 8) {
+            e.preventDefault();
+            _panTouch.moved = true;
+            _suppressClick = true;  // this drag pans the view; it must not click
+            _vt.panBy(dx, dy);
+            _panTouch.x = p.x;
+            _panTouch.y = p.y;
+            _applyTransform();
+        }
+    }
+}
+
+function handleTouchEnd(e) {
+    if (e.touches.length < 2) _pinch = null;
+    if (e.touches.length === 0) _panTouch = null;
+    // _suppressClick is consumed by handleScreenClick (the browser fires the
+    // synthetic click AFTER touchend).
+}
 
 /**
  * Fetch the live CU display resolution from /browser/status (fire-and-forget).
@@ -103,6 +209,14 @@ function createModal() {
     refreshBtn.addEventListener('click', refreshScreenshot);
     screen.addEventListener('click', handleScreenClick);
     screen.addEventListener('wheel', handleScreenScroll, { passive: false });
+    screen.addEventListener('load', _syncViewport);
+
+    // Pinch-zoom/pan on the screenshot surface (view-only CSS transform).
+    const screenWrap = modal.querySelector('.cu-interact-screen-wrap');
+    screenWrap.addEventListener('touchstart', handleTouchStart, { passive: false });
+    screenWrap.addEventListener('touchmove', handleTouchMove, { passive: false });
+    screenWrap.addEventListener('touchend', handleTouchEnd, { passive: false });
+    screenWrap.addEventListener('touchcancel', handleTouchEnd, { passive: false });
     modal.addEventListener('keydown', handleKeyDown);
     modal.addEventListener('click', (e) => {
         if (e.target === modal) close();
@@ -160,9 +274,11 @@ export function open(initialScreenshotUrl, deviceId) {
     modal.focus();
 
     _fetchDisplayResolution();
+    _syncViewport();
     refreshScreenshot();
     pollingInterval = setInterval(refreshScreenshot, POLL_MS);
     document.addEventListener('keydown', globalEscHandler);
+    window.addEventListener('resize', _syncViewport);
 }
 
 export function close() {
@@ -178,6 +294,8 @@ export function close() {
 
     _detachKeyboardOffset();
     document.removeEventListener('keydown', globalEscHandler);
+    window.removeEventListener('resize', _syncViewport);
+    _resetViewport();  // a later open() starts un-zoomed
 }
 
 // =============================================================================
@@ -245,13 +363,36 @@ async function refreshScreenshot() {
     }
 }
 
+/**
+ * Map a client-space pointer event to screenshot coords. Goes through the
+ * pinch viewport when active (mapViewToScreenshot — the transform-aware pure
+ * math tested in cu-fallback-zoom.test.mjs); falls back to the legacy
+ * rect-ratio math when the viewport is not initialized. Both are equivalent
+ * at identity — the helper is what keeps zoomed clicks correct.
+ */
+function _eventToScreenshotCoords(e) {
+    if (_vt) {
+        const wrap = modal.querySelector('.cu-interact-screen-wrap');
+        const wr = wrap.getBoundingClientRect();
+        return mapViewToScreenshot(_vt, e.clientX - wr.left, e.clientY - wr.top,
+                                   displayW, displayH);
+    }
+    const screen = modal.querySelector('.cu-interact-screen');
+    const rect = screen.getBoundingClientRect();
+    return {
+        x: Math.round(((e.clientX - rect.left) / rect.width) * displayW),
+        y: Math.round(((e.clientY - rect.top) / rect.height) * displayH),
+    };
+}
+
 function handleScreenClick(e) {
     e.preventDefault();
+    // The synthetic click that trails a pan/pinch gesture is not a click.
+    if (_suppressClick) { _suppressClick = false; return; }
     const screen = modal.querySelector('.cu-interact-screen');
     const rect = screen.getBoundingClientRect();
 
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * displayW);
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * displayH);
+    const { x, y } = _eventToScreenshotCoords(e);
 
     showClickIndicator(e.clientX - rect.left, e.clientY - rect.top, rect);
 
@@ -267,11 +408,22 @@ function handleScreenClick(e) {
 
 function handleScreenScroll(e) {
     e.preventDefault();
-    const screen = modal.querySelector('.cu-interact-screen');
-    const rect = screen.getBoundingClientRect();
 
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * displayW);
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * displayH);
+    // Ctrl+wheel (incl. trackpad pinch, which browsers report as ctrl+wheel):
+    // zoom the VIEW about the pointer — desktop parity with touch pinch.
+    if (e.ctrlKey) {
+        _syncViewport();
+        if (_vt) {
+            const wrap = modal.querySelector('.cu-interact-screen-wrap');
+            const wr = wrap.getBoundingClientRect();
+            _vt.zoomAt(e.clientX - wr.left, e.clientY - wr.top,
+                       e.deltaY < 0 ? 1.1 : 1 / 1.1);
+            _applyTransform();
+        }
+        return;
+    }
+
+    const { x, y } = _eventToScreenshotCoords(e);
     const direction = e.deltaY > 0 ? 'down' : 'up';
     const clicks = Math.min(Math.ceil(Math.abs(e.deltaY) / 50), 5);
 

@@ -347,6 +347,17 @@ def destroy_session(operator: str):
         print(f"[CU-SESSION] Destroyed session for {operator}")
 
 
+def destroy_session_by_id(session_id: str) -> bool:
+    """Explicitly destroy a session by id (the manual /cu/session/{sid}/close
+    path). Returns False when the id is unknown — the caller 404s."""
+    if session_id not in _sessions:
+        return False
+    op = _sessions[session_id].operator
+    _cleanup_session(session_id)
+    print(f"[CU-SESSION] Closed session {session_id[:8]} for {op} (explicit)")
+    return True
+
+
 def cleanup_inactive_sessions(timeout: int = 600):
     """Remove sessions that have been inactive for too long.
     Skips sessions whose background agent task is still running.

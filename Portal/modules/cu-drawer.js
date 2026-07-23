@@ -127,6 +127,9 @@ function _createDrawer() {
     drawer.className = 'cu-drawer';
     drawer.id = 'cuDrawer';
     drawer.innerHTML = `
+        <div class="cu-drawer-row cu-drawer-desktop-row">
+            <button class="cu-drawer-open-desktop hide" title="Start the live desktop before any prompt">Open live desktop</button>
+        </div>
         <div class="cu-drawer-row cu-drawer-tool-row">
             <span class="cu-drawer-dot"></span>
             <span class="cu-drawer-tool-label">Idle</span>
@@ -292,6 +295,96 @@ function _renderPreflightBanner(drawer, data) {
 }
 
 // =============================================================================
+// Desktop-First Surface (2026-07-23)
+// =============================================================================
+
+/**
+ * Decide + render the drawer's default desktop surface:
+ *   - NO live session  → show the prominent "Open live desktop" CTA
+ *     (→ POST /cu/session/open, then embed /cu/view/{sid} immediately).
+ *   - live session     → the live view IS the default surface: embed the
+ *     streaming panel right away (Splashtop there before any prompt).
+ *   - sessions but live_view unavailable → keep the CTA hidden; the Live
+ *     button routes to the screenshot fallback as before (never auto-pop the
+ *     fullscreen modal on attach).
+ * Decision logic is the PURE chooseDrawerSurface (cu-viewer-route.js,
+ * node-tested); this function is the thin impure renderer.
+ */
+async function _refreshDesktopSurface(drawer) {
+    if (!drawer || !drawer.isConnected) return;
+    const btn = drawer.querySelector('.cu-drawer-open-desktop');
+    if (!btn) return;
+
+    let status = null;
+    try {
+        const r = await fetch('/cu/sessions', { cache: 'no-store' });
+        if (r.ok) status = await r.json();
+    } catch { /* offline → CTA still shows; the POST surfaces the real error */ }
+
+    let choice;
+    try {
+        const route = await import('./cu-viewer-route.js');
+        choice = route.chooseDrawerSurface(status, { deviceId: getCUDeviceId() });
+    } catch (err) {
+        console.warn('[CU-Drawer] surface decision failed:', err);
+        choice = { mode: 'open-desktop', reason: 'decision-failed' };
+    }
+
+    if (choice.mode === 'open-desktop') {
+        btn.classList.remove('hide');
+        return;
+    }
+    btn.classList.add('hide');
+    if (choice.mode === 'stream') {
+        try {
+            // Don't reload the iframe if this session's stream is already up.
+            const frame = document.getElementById('cuLiveViewFrame');
+            const panel = document.getElementById('cuLiveViewPanel');
+            const already = frame && panel && panel.style.display === 'block'
+                && frame.src && frame.src.indexOf(choice.session.view_url) !== -1;
+            if (!already) {
+                const { openStreamPanel } = await import('./cu-live-view.js');
+                openStreamPanel(choice.session);
+            }
+        } catch (err) {
+            console.warn('[CU-Drawer] stream embed failed:', err);
+        }
+    }
+}
+
+/** CTA handler: ensure-or-create the operator's live desktop session, then
+ *  embed its live view immediately. */
+async function _openLiveDesktop(btn) {
+    btn.disabled = true;
+    const prevLabel = btn.textContent;
+    btn.textContent = 'Opening desktop…';
+    try {
+        const res = await fetch('/cu/session/open', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ operator: getOperator() || undefined })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error || !data.session_id) {
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        _setSession(data.session_id);
+        const route = await import('./cu-viewer-route.js');
+        await route.openCuViewer({
+            sessionId: data.session_id,
+            deviceId: getCUDeviceId()
+        });
+        toast(data.reused ? 'Reattached to the live desktop' : 'Live desktop ready');
+    } catch (err) {
+        console.error('[CU-Drawer] open desktop failed:', err);
+        toast('Open desktop failed: ' + err.message);
+    }
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+    if (_drawer) _refreshDesktopSurface(_drawer);
+}
+
+// =============================================================================
 // Attach / Detach
 // =============================================================================
 
@@ -342,7 +435,18 @@ function _attachDrawer() {
             toast('New session failed: ' + err.message);
         }
         newBtn.disabled = false;
+        // The old session may be gone now — re-decide CTA vs live surface.
+        if (_drawer) _refreshDesktopSurface(_drawer);
     });
+
+    // Desktop-first CTA (2026-07-23): live desktop before any prompt.
+    const openDesktopBtn = _drawer.querySelector('.cu-drawer-open-desktop');
+    if (openDesktopBtn) {
+        openDesktopBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            _openLiveDesktop(openDesktopBtn);
+        });
+    }
 
     // Live view — route stream-vs-fallback (M4, design 2026-07-23 §7.1):
     // streaming client when this session is a live virtual session,
@@ -384,6 +488,11 @@ function _attachDrawer() {
 
     // Preflight environment check (async, non-blocking, once per attach)
     _fetchPreflight(_drawer);
+
+    // Desktop-first surface (async, non-blocking): no session → "Open live
+    // desktop" CTA; live session → the streaming view embeds as the default
+    // surface right away.
+    _refreshDesktopSurface(_drawer);
 
     // Re-populate when model changes (google backend shows Android, others don't)
     const modelEl = document.getElementById('modelSelect');
