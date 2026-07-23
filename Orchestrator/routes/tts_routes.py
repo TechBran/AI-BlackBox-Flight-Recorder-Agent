@@ -360,11 +360,20 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
     audio_format = (body.get("format") or TTS_FORMAT).strip()
     operator = (body.get("operator") or "unknown").strip()
     # Provider-specific chunk defaults: OpenAI is fast per-request, Gemini benefits
-    # from smaller chunks; qwen is on-box + SEQUENTIAL (one GPU) so smaller chunks
-    # keep each synth well under QWEN_TTS_TIMEOUT and bound the audio-frame budget
-    # (see qwen_tts_server.settings.max_new_tokens_for) — a long chat response is
-    # many bounded chunks, never one runaway generation.
-    default_chunk = 1500 if provider == "openai" else (600 if provider == "qwen" else 800)
+    # from smaller chunks; qwen chunks bound each sample's audio-frame budget
+    # (see qwen_tts_server.settings.max_new_tokens_for) so a long chat response
+    # is many bounded chunks, never one runaway generation. With NATIVE BATCH
+    # (A3, default) the chunks of a reply run as ONE padded GPU generate, and
+    # batch wall-time = the LONGEST sample x per-step cost, which batching
+    # amortizes — so SMALLER chunks mean a WIDER batch and a shorter longest
+    # sample: measured on the 1835-char gate reply, 600-char chunks (b=4) gave
+    # RTF 0.227 vs 300-char chunks (b=7) RTF ~0.14. Sequential fallback keeps
+    # the old 600 (per-chunk HTTP overhead matters again there).
+    if provider == "qwen":
+        from Orchestrator import qwen_tts as _qwen_tts_mod
+        default_chunk = 300 if _qwen_tts_mod.native_batch_enabled() else 600
+    else:
+        default_chunk = 1500 if provider == "openai" else 800
     max_chunk_chars = int(body.get("max_chunk_chars", default_chunk))
 
     # Split text into chunks
@@ -474,7 +483,7 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
         futures = [loop.run_in_executor(_tts_executor, _local_tts_chunk, chunk) for chunk in chunks]
         results = await asyncio.gather(*futures, return_exceptions=True)
 
-    # --- On-box Qwen3-TTS provider: llama-swap /v1/audio/speech, sequential ---
+    # --- On-box Qwen3-TTS provider: native batch (A3), sequential fallback ---
     elif provider == "qwen":
         from Orchestrator import qwen_tts
         _bare = voice.split(":", 1)[1] if voice.startswith("qwen:") else voice
@@ -487,20 +496,40 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
                 raise HTTPException(502, f"Qwen TTS failed (HTTP {r.status_code}): {r.text[:200]}")
             return r.content
 
-        # Single-flight + per-chunk so (a) two batches serialize on the one GPU
-        # instead of contending, and (b) an abandoned request (client navigated
-        # away / retried) STOPS after the current chunk instead of running the
-        # whole batch orphaned — the root of the pile-up that 429-storms the member.
+        # Single-flight so two batches serialize on the one GPU instead of
+        # contending (429 pile-up). Preferred path (A3, QWEN_TTS_NATIVE_BATCH
+        # default on): ALL chunks in ONE member request — the member runs them
+        # as padded GPU batches (measured 3.3-6.3x vs the sequential loop).
+        # Fallback: the per-chunk sequential loop (old member without the
+        # batch endpoint, or gate off), which keeps its between-chunk
+        # disconnect-abort. The native path checks disconnect once up front —
+        # one batch call is indivisible on the GPU anyway.
         results: List = []
         async with _qwen_batch_lock:
-            for i, ch in enumerate(chunks):
+            _native = qwen_tts.native_batch_enabled()
+            if _native:
                 if request is not None and await request.is_disconnected():
-                    print(f"[TTS Batch] qwen: client disconnected at chunk {i}/{num_chunks} — stopping")
+                    print(f"[TTS Batch] qwen: client disconnected before dispatch — stopping")
                     raise HTTPException(499, "client disconnected")
                 try:
-                    results.append(await loop.run_in_executor(_tts_executor, _qwen_one, ch))
+                    results = list(await loop.run_in_executor(
+                        _tts_executor, lambda: qwen_tts.synthesize_batch(
+                            _bare, chunks, response_format="wav")))
+                except qwen_tts.QwenBatchUnsupported as e:
+                    print(f"[TTS Batch] qwen: {e} — falling back to per-chunk path")
+                    _native = False
                 except Exception as e:  # noqa: BLE001 — collected below like the other providers
-                    results.append(e)
+                    results = [e]
+            if not _native:
+                results = []
+                for i, ch in enumerate(chunks):
+                    if request is not None and await request.is_disconnected():
+                        print(f"[TTS Batch] qwen: client disconnected at chunk {i}/{num_chunks} — stopping")
+                        raise HTTPException(499, "client disconnected")
+                    try:
+                        results.append(await loop.run_in_executor(_tts_executor, _qwen_one, ch))
+                    except Exception as e:  # noqa: BLE001 — collected below like the other providers
+                        results.append(e)
         # Qwen returns WAV — drive the WAV stitcher + audio/wav mime below
         # (mirrors the Gemini branch's `audio_format = "wav"`).
         audio_format = "wav"
@@ -1188,10 +1217,14 @@ async def qwen_voices_clone(
     data = {"name": name, "consent": "true"}
     if description:
         data["description"] = description
+    # Blocking HTTP in an ASYNC route freezes the whole event loop for up to
+    # QWEN_TTS_TIMEOUT (300s of GPU synth) — every chat/WS/STT surface stalls
+    # (audit CRITICAL 2026-07-22). Offload to the TTS executor.
+    loop = asyncio.get_running_loop()
     try:
-        r = requests.post(qwen_tts.upstream_url("/v1/voices/clone"),
-                          data=data, files=fwd_files,
-                          timeout=qwen_tts.QWEN_TTS_TIMEOUT)
+        r = await loop.run_in_executor(_tts_executor, lambda: requests.post(
+            qwen_tts.upstream_url("/v1/voices/clone"),
+            data=data, files=fwd_files, timeout=qwen_tts.QWEN_TTS_TIMEOUT))
     except Exception as e:
         raise HTTPException(502, f"qwen-tts clone unreachable: {e}")
     if r.status_code != 200:
@@ -1205,9 +1238,13 @@ async def qwen_voices_design(body: dict = Body(...)):
     audio_b64, sample_rate}]} (passed through verbatim; the Voice Lab builds the
     data: URL from audio_b64). Proxied through /upstream/qwen-tts/v1/voices/design."""
     from Orchestrator import qwen_tts
+    # Executor-offloaded: a design preview is a real GPU synth (audit CRITICAL —
+    # blocking here froze the entire event loop for its duration).
+    loop = asyncio.get_running_loop()
     try:
-        r = requests.post(qwen_tts.upstream_url("/v1/voices/design"),
-                          json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT)
+        r = await loop.run_in_executor(_tts_executor, lambda: requests.post(
+            qwen_tts.upstream_url("/v1/voices/design"),
+            json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT))
     except Exception as e:
         raise HTTPException(502, f"qwen-tts design unreachable: {e}")
     if r.status_code != 200:
@@ -1220,9 +1257,12 @@ async def qwen_voices_design_save(body: dict = Body(...)):
     """Save a chosen design preview: {generated_voice_id, name, description?}
     -> {voice_id}. Persists Manifest/voices/qwen/{slug}/ server-side."""
     from Orchestrator import qwen_tts
+    # Executor-offloaded (audit CRITICAL — see the clone/design routes above).
+    loop = asyncio.get_running_loop()
     try:
-        r = requests.post(qwen_tts.upstream_url("/v1/voices/design/save"),
-                          json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT)
+        r = await loop.run_in_executor(_tts_executor, lambda: requests.post(
+            qwen_tts.upstream_url("/v1/voices/design/save"),
+            json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT))
     except Exception as e:
         raise HTTPException(502, f"qwen-tts design/save unreachable: {e}")
     if r.status_code != 200:

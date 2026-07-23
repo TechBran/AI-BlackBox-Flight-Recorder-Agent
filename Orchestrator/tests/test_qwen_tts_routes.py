@@ -106,9 +106,13 @@ def test_tts_qwen_upstream_error_is_fallback(client):
     assert resp.json()["status"] == "fallback"
 
 
-# ── 7.4 POST /tts/batch ──────────────────────────────────────────────────
+# ── 7.4 POST /tts/batch (A3: native GPU batch is the primary path) ────────
 def test_tts_batch_qwen_provider(client):
-    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+    """Native batch on (default): ALL chunks go to synthesize_batch in ONE call;
+    per-chunk synthesize is never touched."""
+    with patch("Orchestrator.qwen_tts.synthesize_batch",
+               return_value=[_FAKE_MP3]) as m_batch, \
+         patch("Orchestrator.qwen_tts.synthesize") as m_syn:
         resp = client.post("/tts/batch",
                            json={"text": "Short batch.", "provider": "qwen",
                                  "voice": "Vivian"})
@@ -117,25 +121,44 @@ def test_tts_batch_qwen_provider(client):
     # chunk passes through stitch_wav_chunks unchanged, so content is preserved).
     assert resp.headers["content-type"].startswith("audio/wav")
     assert resp.content == _FAKE_MP3
-    m_syn.assert_called_once()
-    assert m_syn.call_args[0][0] == "Vivian"
+    m_batch.assert_called_once()
+    assert m_batch.call_args[0][0] == "Vivian"
+    assert m_batch.call_args[0][1] == ["Short batch."]  # the chunk list
     # The member is asked for 'wav', never mp3 (which the M6 server 400s).
-    assert m_syn.call_args.kwargs.get("response_format") == "wav"
+    assert m_batch.call_args.kwargs.get("response_format") == "wav"
+    m_syn.assert_not_called()
 
 
 def test_tts_batch_qwen_prefix_forces_provider(client):
     """A 'qwen:'-prefixed voice forces provider=qwen even if provider omitted
-    (parity with the local: override), and the bare token reaches synthesize."""
-    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+    (parity with the local: override), and the bare token reaches the batch."""
+    with patch("Orchestrator.qwen_tts.synthesize_batch",
+               return_value=[_FAKE_MP3]) as m_batch:
         resp = client.post("/tts/batch",
                            json={"text": "Hi.", "voice": "qwen:Serena"})
     assert resp.status_code == 200
+    m_batch.assert_called_once()
+    assert m_batch.call_args[0][0] == "Serena"
+
+
+def test_tts_batch_qwen_falls_back_when_member_lacks_batch(client):
+    """An old member without /v1/audio/speech/batch (QwenBatchUnsupported) falls
+    back to the per-chunk sequential loop transparently."""
+    from Orchestrator import qwen_tts as qt
+    with patch("Orchestrator.qwen_tts.synthesize_batch",
+               side_effect=qt.QwenBatchUnsupported("member has no batch endpoint")), \
+         patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+        resp = client.post("/tts/batch",
+                           json={"text": "Hi.", "provider": "qwen", "voice": "Vivian"})
+    assert resp.status_code == 200
     m_syn.assert_called_once()
-    assert m_syn.call_args[0][0] == "Serena"
+    assert m_syn.call_args[0][0] == "Vivian"
 
 
 def test_tts_batch_qwen_upstream_error_502(client):
-    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp(status=500)):
+    """A non-404/405 batch failure surfaces as 502 (no silent fallback)."""
+    with patch("Orchestrator.qwen_tts.synthesize_batch",
+               side_effect=RuntimeError("Qwen TTS batch failed (HTTP 500)")):
         resp = client.post("/tts/batch",
                            json={"text": "Hi.", "provider": "qwen", "voice": "Vivian"})
     assert resp.status_code == 502

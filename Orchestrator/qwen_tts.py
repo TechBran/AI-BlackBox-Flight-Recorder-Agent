@@ -218,3 +218,67 @@ def synthesize(voice: str, text: str, response_format: str = "wav",
                            _QWEN_429_BACKOFF_MAX))
             continue
         return r
+
+
+# --------------------------------------------------------------------------
+# A3 (2026-07-22): native batch synthesis — ALL of a reply's chunks in ONE
+# member request so the GPU runs ONE padded generate per sub-batch instead of
+# a sequential per-chunk loop (measured 3.3x at b=4 / 6.3x at b=8; transport
+# consolidation itself is ~free — the win is GPU batching).
+# --------------------------------------------------------------------------
+class QwenBatchUnsupported(RuntimeError):
+    """The member predates /v1/audio/speech/batch (404/405) — caller should
+    fall back to the per-chunk sequential path."""
+
+
+def native_batch_enabled() -> bool:
+    """QWEN_TTS_NATIVE_BATCH gate (default ON). Off restores the per-chunk
+    sequential loop exactly as before A3."""
+    return os.environ.get("QWEN_TTS_NATIVE_BATCH", "1").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def synthesize_batch(voice: str, texts: List[str],
+                     response_format: str = "wav") -> List[bytes]:
+    """POST /upstream/qwen-tts/v1/audio/speech/batch (NON-OpenAI path —
+    llama-swap does not body-model auto-route it; /upstream auto-loads the
+    member and honors group swap/exclusivity, like clone/design). Returns the
+    decoded per-chunk WAV bytes in input order.
+
+    Raises QwenBatchUnsupported on 404/405 (old member) and RuntimeError on any
+    other non-200 — the /tts/batch route falls back to the sequential path on
+    the former and surfaces the latter. 429s back off exactly like
+    synthesize(). Timeout scales with the batch size: the member holds ONE
+    request for the whole reply (sub-batched internally), so the flat 300s
+    single-chunk budget gets a per-chunk allowance on top."""
+    import base64
+    import time
+    req = {
+        "model": QWEN_TTS_MODEL,
+        "inputs": list(texts),
+        "voice": voice,
+        "response_format": response_format,
+    }
+    timeout = QWEN_TTS_TIMEOUT + 20 * len(texts)
+    retries = _qwen_429_retries()
+    attempts = 0
+    while True:
+        r = requests.post(upstream_url("/v1/audio/speech/batch"), json=req,
+                          timeout=timeout)
+        if r.status_code == 429 and attempts < retries:
+            attempts += 1
+            time.sleep(min(_QWEN_429_BACKOFF_BASE * (2 ** (attempts - 1)),
+                           _QWEN_429_BACKOFF_MAX))
+            continue
+        break
+    if r.status_code in (404, 405):
+        raise QwenBatchUnsupported(f"member has no batch endpoint (HTTP {r.status_code})")
+    if r.status_code != 200:
+        raise RuntimeError(f"Qwen TTS batch failed (HTTP {r.status_code}): {r.text[:200]}")
+    data = r.json()
+    wavs = data.get("wavs_b64")
+    if not isinstance(wavs, list) or len(wavs) != len(texts):
+        raise RuntimeError(
+            f"Qwen TTS batch returned {len(wavs) if isinstance(wavs, list) else 'no'} "
+            f"wavs for {len(texts)} inputs")
+    return [base64.b64decode(w) for w in wavs]

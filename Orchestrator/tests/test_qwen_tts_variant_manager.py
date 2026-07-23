@@ -46,6 +46,12 @@ class FakeBackend:
         self.events.append(("synth_stream", handle["variant"]))
         yield (b"\x00\x01" * 100, handle["sr"])
 
+    def synth_batch(self, handle, variant, texts, *, preset=None, ref_audio=None,
+                    ref_text=None, design_params=None, language=None):
+        # Signature mirrors TorchQwenBackend.synth_batch (A3).
+        self.events.append(("synth_batch", handle["variant"], len(texts)))
+        return ([bytes([i]) * 10 for i in range(len(texts))], handle["sr"])
+
 
 def _mgr(be, tmp_path, monkeypatch):
     monkeypatch.setenv("QWEN_TTS_MODEL_DIR", str(tmp_path))
@@ -102,6 +108,75 @@ def test_unknown_variant_raises(tmp_path, monkeypatch):
     mgr = _mgr(be, tmp_path, monkeypatch)
     with pytest.raises(ValueError):
         asyncio.run(mgr.synthesize_full("nope", "hi"))
+
+
+def test_batch_single_load_single_call(tmp_path, monkeypatch):
+    """A3: N texts -> ONE load + ONE synth_batch (within the cap), order kept."""
+    be = FakeBackend()
+    mgr = _mgr(be, tmp_path, monkeypatch)
+    pcms, sr = asyncio.run(mgr.synthesize_batch(
+        "custom_voice", ["a", "b", "c"], preset="Vivian"))
+    assert sr == 22050 and len(pcms) == 3
+    assert pcms[0] == bytes([0]) * 10 and pcms[2] == bytes([2]) * 10  # input order
+    assert be.events == [
+        ("empty_cache", None), ("load", "custom_voice"),
+        ("synth_batch", "custom_voice", 3),
+    ]
+
+
+def test_batch_splits_at_max_batch(tmp_path, monkeypatch):
+    """QWEN_TTS_MAX_BATCH caps each generate call; the manager sub-batches."""
+    be = FakeBackend()
+    monkeypatch.setenv("QWEN_TTS_MAX_BATCH", "4")
+    mgr = _mgr(be, tmp_path, monkeypatch)
+    pcms, _sr = asyncio.run(mgr.synthesize_batch(
+        "custom_voice", [f"t{i}" for i in range(10)], preset="Vivian"))
+    assert len(pcms) == 10
+    sizes = [e[2] for e in be.events if e[0] == "synth_batch"]
+    assert sizes == [4, 4, 2]
+    assert sum(1 for e in be.events if e[0] == "load") == 1  # one residency
+
+
+def test_batch_vram_guard_degrades_cap(tmp_path, monkeypatch):
+    """Low free VRAM shrinks the sub-batch size instead of OOMing (audit fix)."""
+    be = FakeBackend(free_mb=5500)  # above the load floor, tight for batching
+    monkeypatch.setenv("QWEN_TTS_MAX_BATCH", "8")
+    monkeypatch.setenv("QWEN_TTS_BATCH_VRAM_MB", "700")
+    monkeypatch.setenv("QWEN_TTS_BATCH_HEADROOM_MB", "2048")
+    mgr = _mgr(be, tmp_path, monkeypatch)
+    pcms, _sr = asyncio.run(mgr.synthesize_batch(
+        "custom_voice", [f"t{i}" for i in range(8)], preset="Vivian"))
+    assert len(pcms) == 8
+    sizes = [e[2] for e in be.events if e[0] == "synth_batch"]
+    # (5500 - 2048) // 700 = 4 per sub-batch
+    assert sizes == [4, 4]
+
+
+def test_batch_guard_prefers_reusable_pool_probe(tmp_path, monkeypatch):
+    """When the backend exposes batch_free_vram_mb (device-free + torch's
+    reusable reserved pool), the cap uses IT — a bare device-free reading
+    collapses to 1 once the caching allocator has ballooned (live regression
+    2026-07-22)."""
+    be = FakeBackend(free_mb=2500)   # device-free alone would give cap 1
+    be.batch_free_vram_mb = lambda: 12000
+    monkeypatch.setenv("QWEN_TTS_MAX_BATCH", "8")
+    monkeypatch.setenv("QWEN_TTS_BATCH_VRAM_MB", "700")
+    monkeypatch.setenv("QWEN_TTS_BATCH_HEADROOM_MB", "2048")
+    mgr = VariantManager(backend=be, min_free_mb=2000)  # load floor still passes
+    monkeypatch.setenv("QWEN_TTS_MODEL_DIR", str(tmp_path))
+    pcms, _sr = asyncio.run(mgr.synthesize_batch(
+        "custom_voice", [f"t{i}" for i in range(8)], preset="Vivian"))
+    assert len(pcms) == 8
+    sizes = [e[2] for e in be.events if e[0] == "synth_batch"]
+    assert sizes == [8]              # NOT degraded
+
+
+def test_batch_empty_returns_empty(tmp_path, monkeypatch):
+    be = FakeBackend()
+    mgr = _mgr(be, tmp_path, monkeypatch)
+    pcms, sr = asyncio.run(mgr.synthesize_batch("custom_voice", [], preset="Vivian"))
+    assert pcms == [] and sr == 0
+    assert be.events == []  # no load for an empty batch
 
 
 def test_lock_serializes_concurrent_synths(tmp_path, monkeypatch):

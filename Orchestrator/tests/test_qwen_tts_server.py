@@ -40,6 +40,10 @@ class FakeManager:
         self.calls.append(("design_preview", description, text))
         return [{"generated_voice_id": "gvid-1", "pcm": b"\x33\x44" * 10, "sr": SR, "params": {"seed": 7}}]
 
+    async def synthesize_batch(self, variant, texts, *, preset=None, ref_audio=None, design_params=None):
+        self.calls.append(("synthesize_batch", variant, preset, list(texts)))
+        return ([bytes([0x10 + i]) * 20 for i in range(len(texts))], SR)
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -111,6 +115,57 @@ def test_speech_whitespace_input_422(client):
     # Body(...)/Pydantic satisfies "present" — the whitespace-only guard is ours.
     r = client.post("/v1/audio/speech", json={"input": "   ", "voice": "qwen:Vivian"})
     assert r.status_code == 422
+
+
+# ---- native batch (A3, 2026-07-22) -------------------------------------------
+def test_speech_batch_returns_ordered_wavs(client):
+    r = client.post("/v1/audio/speech/batch",
+                    json={"inputs": ["one", "two", "three"], "voice": "qwen:Vivian"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sample_rate"] == SR and len(body["wavs_b64"]) == 3
+    import base64
+    for i, w64 in enumerate(body["wavs_b64"]):
+        with wave.open(io.BytesIO(base64.b64decode(w64)), "rb") as w:
+            assert w.getframerate() == SR          # sr from the model output
+            assert w.readframes(w.getnframes()) == bytes([0x10 + i]) * 20  # order kept
+    kind, variant, preset, texts = client.fake.calls[0]
+    assert (kind, variant, preset) == ("synthesize_batch", "custom_voice", "Vivian")
+    assert texts == ["one", "two", "three"]
+
+
+def test_speech_batch_pcm_format(client):
+    r = client.post("/v1/audio/speech/batch",
+                    json={"inputs": ["a"], "voice": "qwen:Vivian", "response_format": "pcm"})
+    assert r.status_code == 200
+    import base64
+    assert base64.b64decode(r.json()["wavs_b64"][0]) == bytes([0x10]) * 20
+
+
+def test_speech_batch_empty_inputs_422(client):
+    assert client.post("/v1/audio/speech/batch",
+                       json={"inputs": [], "voice": "qwen:Vivian"}).status_code == 422
+    assert client.post("/v1/audio/speech/batch",
+                       json={"voice": "qwen:Vivian"}).status_code == 422
+    assert client.post("/v1/audio/speech/batch",
+                       json={"inputs": ["ok", "  "], "voice": "qwen:Vivian"}).status_code == 422
+
+
+def test_speech_batch_too_many_inputs_422(client):
+    r = client.post("/v1/audio/speech/batch",
+                    json={"inputs": ["x"] * 65, "voice": "qwen:Vivian"})
+    assert r.status_code == 422
+
+
+def test_speech_batch_unknown_voice_404(client):
+    assert client.post("/v1/audio/speech/batch",
+                       json={"inputs": ["x"], "voice": "qwen:Nope"}).status_code == 404
+
+
+def test_speech_batch_bad_format_400(client):
+    r = client.post("/v1/audio/speech/batch",
+                    json={"inputs": ["x"], "voice": "qwen:Vivian", "response_format": "mp3"})
+    assert r.status_code == 400
 
 
 # ---- streaming (Task 6.4/6.5) ------------------------------------------------

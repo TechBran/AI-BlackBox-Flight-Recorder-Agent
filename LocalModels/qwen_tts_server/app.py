@@ -116,6 +116,24 @@ class SpeechRequest(BaseModel):
     stream: bool = False
 
 
+class BatchSpeechRequest(BaseModel):
+    """A3 native batch request: all of a reply's chunks in ONE call so the GPU
+    runs ONE padded generate per sub-batch (3.3-6.3x measured vs sequential).
+    Reached via /upstream/qwen-tts/v1/audio/speech/batch — a NON-OpenAI path
+    llama-swap does not body-model auto-route (same contract as clone/design,
+    correction [18])."""
+
+    model: Optional[str] = None
+    inputs: Optional[list] = None
+    voice: Optional[str] = None
+    response_format: Optional[str] = "wav"
+
+
+# Sanity ceiling on inputs per batch request (the manager sub-batches to
+# QWEN_TTS_MAX_BATCH internally; this only rejects absurd payloads).
+MAX_BATCH_INPUTS = 64
+
+
 # ---- endpoints -------------------------------------------------------------
 @app.post("/v1/audio/speech")
 async def audio_speech(req: SpeechRequest, mgr: VariantManager = Depends(get_manager)):
@@ -160,6 +178,39 @@ async def audio_speech(req: SpeechRequest, mgr: VariantManager = Depends(get_man
             headers={"X-Sample-Rate": str(sr), "X-Audio-Format": "pcm_s16le"},
         )
     return Response(content=_pcm_to_wav(pcm, sr), media_type="audio/wav")
+
+
+@app.post("/v1/audio/speech/batch")
+async def audio_speech_batch(req: BatchSpeechRequest,
+                             mgr: VariantManager = Depends(get_manager)):
+    """A3: {inputs: [...], voice, response_format} -> {wavs_b64: [...],
+    sample_rate}. One VariantManager lock hold; the fork's list-input
+    generate_* runs the texts as padded GPU batches (per-sample EOS trim), in
+    VRAM-guarded sub-batches of QWEN_TTS_MAX_BATCH. Output order matches
+    `inputs`. wav b64 by default; 'pcm' returns raw s16le b64 (both mono at
+    the model's own sample rate — read from the model output, never assumed)."""
+    inputs = req.inputs
+    if not isinstance(inputs, list) or not inputs:
+        raise HTTPException(status_code=422, detail="inputs must be a non-empty list")
+    if len(inputs) > MAX_BATCH_INPUTS:
+        raise HTTPException(status_code=422,
+                            detail=f"inputs exceeds the {MAX_BATCH_INPUTS}-item batch ceiling")
+    texts = [str(t) for t in inputs]
+    if any(not t.strip() for t in texts):
+        raise HTTPException(status_code=422, detail="inputs must not contain empty items")
+    response_format = req.response_format or "wav"
+    if response_format not in ("wav", "pcm"):
+        raise HTTPException(status_code=400, detail="response_format must be 'wav' or 'pcm'")
+    variant, kwargs, _id = _resolve_voice(req.voice)
+    try:
+        pcms, sr = await mgr.synthesize_batch(variant, texts, **kwargs)
+    except VramError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    if response_format == "pcm":
+        wavs = [base64.b64encode(p).decode("ascii") for p in pcms]
+    else:
+        wavs = [base64.b64encode(_pcm_to_wav(p, sr)).decode("ascii") for p in pcms]
+    return {"wavs_b64": wavs, "sample_rate": sr, "format": response_format}
 
 
 @app.get("/v1/audio/voices")

@@ -84,6 +84,56 @@ def stream_first_chunk_emit() -> int:
         return 4
 
 
+def _bool_env(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def optimize_enabled() -> bool:
+    """A2 (2026-07-22): fork torch.compile optimizations (talker + codebook
+    predictor) applied at variant load. DEFAULT OFF — measured on the RTX 2000
+    Ada (torch 2.13.0+cu130, G3b eval): compile gives 1.54x on batch-1
+    non-streaming synth (RTF 0.47 vs 0.72) but makes the BATCHED hot path
+    (A3, the shipped default) WORSE — compiled dynamic-shape kernels ran b=4
+    at RTF 0.25-0.27 vs 0.222 eager. Cost: ~33s compile warmup per residency
+    (b=1) + one ~21s recompile at the first new batch shape (torch then goes
+    dynamic — b=3/b=4 showed no further recompiles). With ttl:600 idle-unload
+    and the exclusive retrieval group swapping audio out on every embed,
+    default-on would re-pay that warmup constantly to SLOW the batch path.
+    Flip QWEN_TTS_OPTIMIZE=1 only for batch-1-heavy deployments (short
+    interactive utterances, no long replies)."""
+    return _bool_env("QWEN_TTS_OPTIMIZE", "0")
+
+
+def max_batch() -> int:
+    """A3: hard cap on samples per native-batch generate call. Measured VRAM on
+    the 16GB card: b=1 4.32GB -> b=4 5.58GB -> b=8 7.37GB (~0.4GB/sample at
+    ~250-char texts; 600-char chunks run larger). 8 keeps the co-resident
+    whisper member safe; the manager splits larger requests into sub-batches."""
+    try:
+        return max(1, int(os.environ.get("QWEN_TTS_MAX_BATCH", "8")))
+    except ValueError:
+        return 8
+
+
+def batch_vram_mb_per_item() -> int:
+    """Per-sample VRAM estimate (MB) for the pre-dispatch batch guard. Measured
+    ~400MB/sample at ~250-char texts; default 700 is deliberately conservative
+    for 600-char chunks. The guard degrades to smaller sub-batches instead of
+    OOMing the co-resident whisper (audit 2026-07-22, VRAM finding)."""
+    try:
+        return max(100, int(os.environ.get("QWEN_TTS_BATCH_VRAM_MB", "700")))
+    except ValueError:
+        return 700
+
+
+def batch_vram_headroom_mb() -> int:
+    """Free-VRAM headroom (MB) kept untouched by the batch-size guard."""
+    try:
+        return max(0, int(os.environ.get("QWEN_TTS_BATCH_HEADROOM_MB", "2048")))
+    except ValueError:
+        return 2048
+
+
 def max_new_tokens_for(text: str) -> int:
     """Bound the autoregressive audio-frame budget for ONE synth call, sized to the
     chunk's text length. The model's default is 8192 frames (~11 min at 12Hz); if a
