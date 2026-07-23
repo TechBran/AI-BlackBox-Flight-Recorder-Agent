@@ -414,6 +414,24 @@ function setupDragAndDrop() {
 }
 
 /**
+ * Setup the composer's Computer Use shortcut (Brandon 2026-07-23): one click
+ * from the chat input into the agent-desktop live view. openCuViewer picks
+ * the best surface (a running session's desktop first, else main).
+ */
+function setupComputerUseShortcut() {
+    const btn = $("btnComputerUse");
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+        try {
+            const { openCuViewer } = await import('./cu-viewer-route.js');
+            await openCuViewer({});
+        } catch (e) {
+            console.error('[ComputerUse] shortcut failed:', e);
+        }
+    });
+}
+
+/**
  * Setup file attachment button and hidden file input
  */
 function setupFileAttachment() {
@@ -693,6 +711,7 @@ async function initApp() {
     initNewSessionModal();
     setupDragAndDrop();
     setupFileAttachment();
+    setupComputerUseShortcut();
     setupAndroidOverlay();  // Setup Android floating overlay feature
 
     // Phase 5: Chat Send

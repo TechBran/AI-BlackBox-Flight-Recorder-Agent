@@ -136,6 +136,37 @@ fun AttachIcon(
 }
 
 /**
+ * Computer / monitor icon for the composer's Computer Use shortcut
+ * (Brandon 2026-07-23: one tap from the chat input straight into the CU
+ * live view). Monitor outline + stand + base, drawn like its siblings.
+ */
+@Composable
+fun ComputerIcon(
+    modifier: Modifier = Modifier.size(18.dp),
+    color: Color = Neutral500,
+    strokeWidth: Float = 2f
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        // Screen
+        drawRoundRect(
+            color = color,
+            topLeft = Offset(w * 0.08f, h * 0.14f),
+            size = Size(w * 0.84f, h * 0.54f),
+            cornerRadius = CornerRadius(w * 0.08f, w * 0.08f),
+            style = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
+        // Stand
+        drawLine(color, Offset(w * 0.5f, h * 0.68f), Offset(w * 0.5f, h * 0.84f),
+                 strokeWidth = strokeWidth, cap = StrokeCap.Round)
+        // Base
+        drawLine(color, Offset(w * 0.32f, h * 0.86f), Offset(w * 0.68f, h * 0.86f),
+                 strokeWidth = strokeWidth, cap = StrokeCap.Round)
+    }
+}
+
+/**
  * Send arrow icon (upward arrow).
  */
 @Composable

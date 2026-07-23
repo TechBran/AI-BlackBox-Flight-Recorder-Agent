@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.ui.components.AttachIcon
+import com.aiblackbox.portal.ui.components.ComputerIcon
 import com.aiblackbox.portal.ui.components.MicIcon
 import com.aiblackbox.portal.ui.components.RecordAudioIcon
 import com.aiblackbox.portal.ui.components.SendIcon
@@ -92,6 +93,11 @@ fun Composer(
     onValueChange: (TextFieldValue) -> Unit,
     onSend: () -> Unit,
     onAttach: () -> Unit = {},
+    // Computer Use shortcut (Brandon 2026-07-23): one tap from the composer
+    // into the CU live view. Composer stays nav-agnostic — the host navigates
+    // (CU_LIVE_VIEW/auto -> the server 302s to the best surface: a running
+    // agent's desktop first, else the main desktop).
+    onComputerUse: () -> Unit = {},
     onWhisper: () -> Unit = {},
     onRecordAudio: () -> Unit = {},
     // Opens the LIVE voice-agent screen (full spoken conversation). Distinct from
@@ -219,6 +225,18 @@ fun Composer(
                     modifier = Modifier.size(40.dp)
                 ) {
                     AttachIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
+                }
+
+                // Computer Use shortcut (right of attach — Brandon's circled
+                // spot, 2026-07-23): jump straight to the agent desktop.
+                IconButton(
+                    onClick = {
+                        view.performPressFeedback()
+                        onComputerUse()
+                    },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    ComputerIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
                 }
 
                 // Text field — ALWAYS visible (never swapped for the waveform).

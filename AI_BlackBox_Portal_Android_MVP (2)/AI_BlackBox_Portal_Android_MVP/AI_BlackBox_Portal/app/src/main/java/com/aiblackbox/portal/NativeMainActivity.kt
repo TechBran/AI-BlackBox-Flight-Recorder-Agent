@@ -995,6 +995,13 @@ class NativeMainActivity : ComponentActivity() {
                             onAttach = {
                                 launchFilePicker()
                             },
+                            onComputerUse = {
+                                // Composer shortcut (Brandon 2026-07-23): straight
+                                // into the CU live view. "auto" 302s server-side to
+                                // the best surface — a running agent's desktop
+                                // first, else the main desktop.
+                                navController.navigate("${Routes.CU_LIVE_VIEW}/auto")
+                            },
                             onWhisper = {
                                 // Tap-toggle dictation via /ws/stt (Brandon 2026-07-05).
                                 // Tap 1 = start + live-append; tap 2 = just STOP. The
