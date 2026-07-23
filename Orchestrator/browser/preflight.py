@@ -123,7 +123,12 @@ def check_virtual_display() -> dict:
 
 def check_live_view() -> dict:
     have_ws = bool(shutil.which("websockify"))
-    have_novnc = os.path.isdir("/usr/share/novnc")
+    # noVNC assets: pinned vendored copy first (Portal/vendor/novnc — D3,
+    # 2026-07-23 live-view design), apt path as fallback — must agree with
+    # display._live_view_available or preflight contradicts the live panel.
+    from Orchestrator.utils.paths import resolve as _resolve_path
+    have_novnc = (os.path.isdir(str(_resolve_path("Portal", "vendor", "novnc")))
+                  or os.path.isdir("/usr/share/novnc"))
     if have_ws and have_novnc:
         return _check("live_view", "ok", "websockify + noVNC present (live view enabled)")
     missing = [n for n, ok in (("websockify", have_ws), ("novnc", have_novnc)) if not ok]

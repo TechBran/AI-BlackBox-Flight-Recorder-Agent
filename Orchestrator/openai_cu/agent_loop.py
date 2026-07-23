@@ -13,9 +13,11 @@ Loop shape (mirrors run_gemini_cu_loop's event contract):
     )
     -> each computer_call carries an `actions` ARRAY (gpt-5.5 batches; the
        legacy preview model sent a single `action`) — execute the batch in
-       order via ActionExecutor (DEFAULT anthropic-1280 coordinate space:
-       coordinates follow the pixel space of the 1280x720 screenshots we
-       send, the same space Anthropic uses)
+       order via session.actions (the SESSION-BOUND ActionExecutor that
+       ensure_browser re-binds to this session's own virtual display,
+       session_manager.py — anthropic-1280 coordinate space: coordinates
+       follow the pixel space of the 1280x720 screenshots we send, the same
+       space Anthropic uses)
     -> reply with ONE computer_call_output per call_id carrying a fresh
        {"type": "computer_screenshot", "image_url": "data:image/png;base64,...",
         "detail": "original"}
@@ -41,7 +43,6 @@ from typing import AsyncGenerator, Optional
 
 from openai import AsyncOpenAI
 
-from Orchestrator.browser.actions import ActionExecutor
 from Orchestrator.browser.screenshot import (
     resize_screenshot, screenshot_to_base64,
     save_screenshot_to_uploads,
@@ -143,11 +144,16 @@ _BUTTON_MAP = {
 }
 
 
-async def _execute_openai_action(action) -> dict:
-    """Execute one OpenAI computer_call action via ActionExecutor.
+async def _execute_openai_action(action, executor) -> dict:
+    """Execute one OpenAI computer_call action via the CALLER-SUPPLIED executor.
 
-    Coordinates are pixels in the declared 1280x720 display — exactly the
-    anthropic-1280 coordinate space, so the DEFAULT executor is correct.
+    The caller passes session.actions — the session-bound ActionExecutor that
+    ensure_browser re-binds to this session's own virtual display
+    (session_manager.py:214-219), exactly like the Anthropic path. D4 bug fix
+    (2026-07-23 design): constructing a fresh default ActionExecutor() here
+    targeted the GLOBAL display, which no virtual CU session is on.
+    Coordinates are pixels in the declared 1280x720 display — the
+    anthropic-1280 coordinate space the session executor is bound with.
     Executor calls run in a thread (blocking xdotool/ydotool subprocesses).
     """
     a_type = getattr(action, "type", None)
@@ -159,8 +165,6 @@ async def _execute_openai_action(action) -> dict:
     if a_type == "wait":
         await asyncio.sleep(1)
         return {"success": True, "message": "waited 1s"}
-
-    executor = ActionExecutor()  # default anthropic-1280 coord space
 
     if a_type == "click":
         x, y = int(getattr(action, "x", 0)), int(getattr(action, "y", 0))
@@ -508,7 +512,7 @@ async def run_openai_cu_loop(
                        "data": {"action": a_type, "params": _action_params(action),
                                 "step": step}}
 
-                result = await _execute_openai_action(action)
+                result = await _execute_openai_action(action, session.actions)
                 if not result.get("success", True):
                     print(f"[OPENAI CU] Action {a_type} failed: {result}")
                 await asyncio.sleep(0.5)

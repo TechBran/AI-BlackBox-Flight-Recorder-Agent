@@ -73,12 +73,23 @@ def browser_status():
         # live virtual-CU sessions instead of a single global display.
         from Orchestrator.browser.display import get_allocator, MAX_VIRTUAL_SESSIONS
         sessions = get_allocator().active_sessions()
+        # D8 (2026-07-23 live-view design): interactive viewers read
+        # cu_resolution for click scaling/aspect and silently kept a stale
+        # 1280x720 default when the field was absent — wrong for a 1440x900
+        # Gemini session. Report the FIRST session's native WxH (matching the
+        # viewer's open-sessions[0] behavior), falling back to the global CU
+        # default when idle. Additive-only shape change.
+        if sessions:
+            cu_resolution = f"{sessions[0]['width']}x{sessions[0]['height']}"
+        else:
+            cu_resolution = f"{DISPLAY_WIDTH}x{DISPLAY_HEIGHT}"
         return {
             "display_running": bool(sessions),
             "native_mode": False,
             "virtual_sessions": len(sessions),
             "cap": MAX_VIRTUAL_SESSIONS,
             "sessions": sessions,
+            "cu_resolution": cu_resolution,
         }
     except Exception as e:
         return {"display_running": False, "error": str(e)}
@@ -234,9 +245,14 @@ import RFB from '/cu/novnc/core/rfb.js';
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const url = `${{proto}}://${{location.host}}/cu/view/{session_id}/ws`;
 const rfb = new RFB(document.getElementById('screen'), url, {{}});
-rfb.viewOnly = true;          // D11: watch only, no takeover
+// D1 (2026-07-23 design, closes local-model-stack Q5): interactive by
+// default — pointer/keys flow over RFB into this session's OWN Xvfb (D2),
+// sidestepping the global-display /browser/* input path entirely.
+// ?viewonly=1 opts back into watch-only. Perimeter unchanged (§6): the
+// tailnet could already drive via the open /browser/click|type|key routes.
+rfb.viewOnly = new URLSearchParams(location.search).get('viewonly') === '1';
 rfb.scaleViewport = true;     // fit 1280x720 / 1440x900 into the panel
-rfb.resizeSession = false;    // never resize the agent's screen
+rfb.resizeSession = false;    // never resize the agent's screen (D6)
 </script></body></html>"""
 
 _CU_VIEW_UNAVAILABLE = ("<!doctype html><meta charset=utf-8><body "

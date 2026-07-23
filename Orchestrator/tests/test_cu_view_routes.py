@@ -26,6 +26,32 @@ def test_view_page_renders_for_known_session(monkeypatch):
     assert "/cu/novnc/core/rfb.js" in r.text        # noVNC module referenced
 
 
+def test_view_page_is_interactive_by_default(monkeypatch):
+    """D1 (2026-07-23 design): the viewer constructs RFB WITHOUT viewOnly —
+    input flows over RFB into this session's own Xvfb. A ?viewonly=1 query
+    param opts back into watch-only, evaluated client-side."""
+    _fake_handle(monkeypatch)
+    r = TestClient(app).get("/cu/view/sess-1")
+    assert r.status_code == 200
+    assert "viewOnly = true" not in r.text          # the old D11 hard gate is gone
+    assert "viewonly" in r.text                      # the query opt-out is wired
+    assert "resizeSession = false" in r.text         # invariant: never resize the agent's screen
+
+
+def test_novnc_vendored_mount_serves_rfb_core():
+    """D3: /cu/novnc serves the PINNED vendored noVNC (Portal/vendor/novnc,
+    v1.5.0) — the RFB entry module and its pako dependency closure must both
+    resolve, or the viewer's ES-module import chain 404s at runtime."""
+    client = TestClient(app)
+    rfb = client.get("/cu/novnc/core/rfb.js")
+    assert rfb.status_code == 200
+    assert "RFB" in rfb.text
+    # core/inflator.js imports ../vendor/pako/lib/zlib/inflate.js — the only
+    # dependency outside core/; a missing pako tree breaks the import chain.
+    pako = client.get("/cu/novnc/vendor/pako/lib/zlib/inflate.js")
+    assert pako.status_code == 200
+
+
 def test_view_page_unknown_session_is_friendly(monkeypatch):
     _fake_handle(monkeypatch)
     r = TestClient(app).get("/cu/view/nope")

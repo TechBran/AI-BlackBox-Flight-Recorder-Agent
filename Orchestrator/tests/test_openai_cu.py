@@ -68,6 +68,22 @@ def test_scroll_heuristic(sx, sy, expected):
 # Loop integration — fully mocked client
 # ---------------------------------------------------------------------------
 
+class FakeExecutor:
+    """Session-bound ActionExecutor spy. Module-level (not fixture-local) so
+    FakeSession can own an instance — mirroring ComputerUseSession.actions,
+    the executor session_manager.ensure_browser re-binds to the session's own
+    virtual display (D4). Calls record on the CLASS; the patched_loop fixture
+    resets the list per test."""
+    calls = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    def execute(self, action, **params):
+        FakeExecutor.calls.append((action, params))
+        return {"success": True, "message": "ok"}
+
+
 class FakeSession:
     """Minimal ComputerUseSession stand-in (browser/session_manager shape)."""
     def __init__(self):
@@ -79,6 +95,9 @@ class FakeSession:
         self.final_response = ""
         self.total_tokens = {"input": 0, "output": 0}
         self.display = None
+        # Mirrors ComputerUseSession.__init__ (session_manager.py): the loop
+        # must drive THIS executor (D4), never construct a fresh default.
+        self.actions = FakeExecutor()
 
     def capture_screenshot_bytes(self) -> bytes:
         # Mirror ComputerUseSession.capture_screenshot_bytes (display=None):
@@ -146,18 +165,10 @@ def _scripted_two_step():
 
 @pytest.fixture
 def patched_loop(monkeypatch):
-    """Patch SDK client, screenshots, and ActionExecutor; return spies."""
-    executor_calls = []
+    """Patch SDK client + screenshots; reset the session-executor spy."""
+    FakeExecutor.calls = []
+    executor_calls = FakeExecutor.calls
 
-    class FakeExecutor:
-        def __init__(self, *a, **k):
-            pass
-
-        def execute(self, action, **params):
-            executor_calls.append((action, params))
-            return {"success": True, "message": "ok"}
-
-    monkeypatch.setattr(O, "ActionExecutor", FakeExecutor)
     monkeypatch.setattr(O, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(O, "capture_screenshot", lambda: b"\x89PNGfake", raising=False)
     monkeypatch.setattr(O, "resize_screenshot", lambda png, w, h: png)
@@ -287,30 +298,28 @@ async def test_multi_turn_continuity_uses_session_response_id(patched_loop):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_action_map_dispatch(monkeypatch):
+async def test_action_map_dispatch():
+    """Actions dispatch onto the CALLER-SUPPLIED executor (the session-bound
+    one in production, D4) — _execute_openai_action never constructs its own."""
     calls = []
 
-    class FakeExecutor:
-        def __init__(self, *a, **k):
-            pass
-
+    class Spy:
         def execute(self, action, **params):
             calls.append((action, params))
             return {"success": True}
 
-    monkeypatch.setattr(O, "ActionExecutor", FakeExecutor)
-
+    ex = Spy()
     A = SimpleNamespace
-    await O._execute_openai_action(A(type="click", x=1, y=2, button="right"))
-    await O._execute_openai_action(A(type="click", x=1, y=2, button="wheel"))
-    await O._execute_openai_action(A(type="double_click", x=3, y=4))
-    await O._execute_openai_action(A(type="scroll", x=5, y=6, scroll_x=0, scroll_y=120))
-    await O._execute_openai_action(A(type="type", text="hi"))
-    await O._execute_openai_action(A(type="keypress", keys=["CTRL", "A"]))
+    await O._execute_openai_action(A(type="click", x=1, y=2, button="right"), ex)
+    await O._execute_openai_action(A(type="click", x=1, y=2, button="wheel"), ex)
+    await O._execute_openai_action(A(type="double_click", x=3, y=4), ex)
+    await O._execute_openai_action(A(type="scroll", x=5, y=6, scroll_x=0, scroll_y=120), ex)
+    await O._execute_openai_action(A(type="type", text="hi"), ex)
+    await O._execute_openai_action(A(type="keypress", keys=["CTRL", "A"]), ex)
     await O._execute_openai_action(
-        A(type="drag", path=[{"x": 1, "y": 1}, {"x": 9, "y": 9}]))
-    await O._execute_openai_action(A(type="move", x=7, y=8))
-    res = await O._execute_openai_action(A(type="bogus"))
+        A(type="drag", path=[{"x": 1, "y": 1}, {"x": 9, "y": 9}]), ex)
+    await O._execute_openai_action(A(type="move", x=7, y=8), ex)
+    res = await O._execute_openai_action(A(type="bogus"), ex)
 
     assert calls == [
         ("right_click", {"coordinate": [1, 2]}),
@@ -327,17 +336,38 @@ async def test_action_map_dispatch(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_screenshot_and_wait_actions_no_executor(monkeypatch):
-    class Boom:
-        def __init__(self, *a, **k):
-            raise AssertionError("executor must not be constructed")
-
-    monkeypatch.setattr(O, "ActionExecutor", Boom)
+    """screenshot/wait never touch the executor — None would AttributeError."""
     async def _no_sleep(_secs):
         return None
     monkeypatch.setattr(O.asyncio, "sleep", _no_sleep)
-    r1 = await O._execute_openai_action(SimpleNamespace(type="screenshot"))
-    r2 = await O._execute_openai_action(SimpleNamespace(type="wait"))
+    r1 = await O._execute_openai_action(SimpleNamespace(type="screenshot"), None)
+    r2 = await O._execute_openai_action(SimpleNamespace(type="wait"), None)
     assert r1["success"] and r2["success"]
+
+
+@pytest.mark.asyncio
+async def test_loop_drives_session_bound_executor(patched_loop, monkeypatch):
+    """D4 display-binding fix: the loop executes actions via session.actions
+    (the executor ensure_browser re-binds to the session's OWN virtual display,
+    session_manager.py:214-219) — exactly like the Anthropic path. A fresh
+    default ActionExecutor() would act on the GLOBAL display no virtual
+    session is on."""
+    private_calls = []
+
+    class SessionBound:
+        def execute(self, action, **params):
+            private_calls.append((action, params))
+            return {"success": True}
+
+    session = FakeSession()
+    session.actions = SessionBound()  # simulate the ensure_browser re-bind
+    events = await _collect(O.run_openai_cu_loop(session, "click the button"))
+
+    # The click went through the SESSION'S executor…
+    assert private_calls == [("left_click", {"coordinate": [100, 200]})]
+    # …and never through a default/module-level one.
+    assert patched_loop["executor_calls"] == []
+    assert not any(e["type"] == "error" for e in events)
 
 
 # ---------------------------------------------------------------------------

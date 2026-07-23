@@ -41,9 +41,18 @@ def resolution_for_backend(backend: str) -> tuple:
 
 
 def _live_view_available() -> bool:
-    """websockify binary + noVNC assets both present -> live view can run."""
+    """websockify binary + noVNC assets both present -> live view can run.
+
+    noVNC assets: the pinned vendored copy (Portal/vendor/novnc — D3,
+    2026-07-23 live-view design; what /cu/novnc actually serves) counts first,
+    with the apt path as fallback, mirroring the app.py mount preference. With
+    the client vendored in-repo, websockify is the only real runtime gate."""
     import shutil
-    return bool(shutil.which("websockify")) and os.path.isdir(_NOVNC_DIR)
+    if not shutil.which("websockify"):
+        return False
+    from Orchestrator.utils.paths import resolve as _resolve_path
+    vendored = str(_resolve_path("Portal", "vendor", "novnc"))
+    return os.path.isdir(vendored) or os.path.isdir(_NOVNC_DIR)
 
 
 def _xvfb_ready(display_num: int) -> bool:
