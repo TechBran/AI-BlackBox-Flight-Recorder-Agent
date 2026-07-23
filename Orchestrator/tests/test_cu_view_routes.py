@@ -46,6 +46,21 @@ def test_view_client_is_interactive_by_default():
     assert "resizeSession = true" not in js           # never resize the agent's screen
 
 
+def test_view_client_carries_the_switcher_rail():
+    """N2 (main-desktop switcher): the served client builds the
+    [Main desktop]+sessions rail from /cu/sessions via the PURE switcher.js
+    module (node-tested in switcher.test.mjs) and swaps streams in place with
+    a history.replaceState URL rewrite so deep links keep working."""
+    js = _cu_view_js()
+    assert "./switcher.js" in js                      # pure state module wired
+    assert "history.replaceState" in js               # in-place URL rewrite
+    assert "/cu/sessions" in js                       # ONE payload feeds the rail
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[2]
+            / "Portal" / "cu-view" / "index.html").read_text()
+    assert "cuvSwitcher" in html                      # the rail container exists
+
+
 def test_novnc_vendored_mount_serves_rfb_core():
     """D3: /cu/novnc serves the PINNED vendored noVNC (Portal/vendor/novnc,
     v1.5.0) — the RFB entry module and its pako dependency closure must both

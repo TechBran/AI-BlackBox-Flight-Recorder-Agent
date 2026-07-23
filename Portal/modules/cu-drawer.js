@@ -337,14 +337,20 @@ async function _refreshDesktopSurface(drawer) {
     btn.classList.add('hide');
     if (choice.mode === 'stream') {
         try {
-            // Don't reload the iframe if this session's stream is already up.
+            // N2 (main-desktop switcher): the drawer's default surface embeds
+            // /cu/view/auto — the server 302s to the best target and the served
+            // page's switcher rail owns session-vs-main swapping from there.
+            // chooseDrawerSurface stays the gate, so boxes without live-view
+            // infra keep the CTA/fallback behavior unchanged.
+            // Don't reload the iframe if a live view is already embedded (the
+            // page swaps streams in place; a reload would yank the user back).
             const frame = document.getElementById('cuLiveViewFrame');
             const panel = document.getElementById('cuLiveViewPanel');
             const already = frame && panel && panel.style.display === 'block'
-                && frame.src && frame.src.indexOf(choice.session.view_url) !== -1;
+                && frame.src && frame.src.indexOf('/cu/view/') !== -1;
             if (!already) {
                 const { openStreamPanel } = await import('./cu-live-view.js');
-                openStreamPanel(choice.session);
+                openStreamPanel({ view_url: '/cu/view/auto' });
             }
         } catch (err) {
             console.warn('[CU-Drawer] stream embed failed:', err);

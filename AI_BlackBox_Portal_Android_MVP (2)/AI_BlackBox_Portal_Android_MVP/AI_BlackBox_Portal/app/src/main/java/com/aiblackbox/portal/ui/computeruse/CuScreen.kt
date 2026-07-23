@@ -703,8 +703,14 @@ fun CuScreen(
         if (desktopFirstRouted || !sessionsLoaded) return@LaunchedEffect
         desktopFirstRouted = true
         if (initialLiveDeviceId != null) return@LaunchedEffect
+        // N2 (main-desktop switcher): the entry navigates to the served
+        // /cu/view/auto — the server 302s to the best surface (live session,
+        // else main desktop) and the page's switcher rail owns any further
+        // session-vs-main swapping. chooseCuEntrySurface stays the GATE:
+        // when live-view infra is absent (no streamable session) this screen
+        // remains the screenshot fallback and we never navigate.
         val choice = chooseCuEntrySurface(liveSessions, selectedDeviceId)
-        if (choice is CuEntrySurface.Stream) onOpenLiveView(choice.session.sessionId)
+        if (choice is CuEntrySurface.Stream) onOpenLiveView("auto")
     }
 
     // Bottom clearance for the Composer overlay: measured Composer stack

@@ -239,6 +239,10 @@ fun BlackBoxNavGraph(
                 backStackEntry.arguments?.getString("sessionId").orEmpty()
             // D9 (WebView reuse): the served /cu/view page IS the client —
             // gestures/cursor/extra-keys all ship server-side; zero Kotlin UI.
+            // N2: besides real session ids, the reserved ids "auto" (server
+            // 302s to the best surface — CuScreen's entry routing uses this)
+            // and "main" (real-desktop stream) flow through unchanged; the
+            // page's switcher rail handles session-vs-main swaps in place.
             CuLiveViewScreen(baseUrl = origin, sessionId = sessionId)
         }
         composable(

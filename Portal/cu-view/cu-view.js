@@ -29,15 +29,25 @@ import {
     KEYSYMS, MODIFIER_KEYSYMS, EXTRA_KEY_ROWS,
     keysymForChar, buildKeySequence,
 } from "./keysyms.js";
+import {
+    MAIN_ID, buildSwitcherEntries, resolveSwapTarget, sessionMetaFor,
+    targetStillListed,
+} from "./switcher.js";
 
 // ── Session identity ─────────────────────────────────────────────────────
 
 // Page URL is /cu/view/{sid} (no templating — the path IS the contract).
-const SESSION_ID = decodeURIComponent(
+// MUTABLE (N2 — main-desktop switcher): tapping a rail entry swaps the
+// stream in place and rewrites the URL via history.replaceState, so deep
+// links keep working. The reserved id "main" targets the REAL desktop.
+let sessionId = decodeURIComponent(
     location.pathname.replace(/\/+$/, "").split("/").pop() || "");
 const VIEW_ONLY = new URLSearchParams(location.search).get("viewonly") === "1";
-const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`
-    + `/cu/view/${encodeURIComponent(SESSION_ID)}/ws`;
+
+function currentWsUrl() {
+    return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`
+        + resolveSwapTarget(sessionId).wsPath;
+}
 
 const LS_MODE = "cuv-touch-mode";          // 'touchpad' | 'direct'
 const LS_KEYS_VISIBLE = "cuv-extra-keys-visible";
@@ -46,6 +56,7 @@ const LS_FN_ROW = "cuv-fn-row-visible";
 const AGENT_ACTING_MS = 1500;
 const MAX_RECONNECT_ATTEMPTS = 8;
 const TICK_MS = 60;
+const SWITCHER_POLL_MS = 4000;
 const MOD_LONGPRESS_MS = 500;              // cli-agents extra-keys parity
 const MOD_ORDER = ["Control", "Alt", "Super", "Shift"];
 
@@ -69,6 +80,7 @@ const endedMsg = $("cuvEndedMsg");
 const endedSessions = $("cuvEndedSessions");
 const extraKeysEl = $("cuvExtraKeys");
 const kbSink = $("cuvKbSink");
+const switcherEl = $("cuvSwitcher");
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -107,8 +119,14 @@ function updateBadges() {
 }
 
 function updateSessionLabel() {
-    const shortId = SESSION_ID.length > 14 ? `${SESSION_ID.slice(0, 14)}…` : SESSION_ID;
-    sessionLabel.textContent = `${session.backend} · ${shortId}${VIEW_ONLY ? " (watch-only)" : ""}`;
+    const watch = VIEW_ONLY ? " (watch-only)" : "";
+    if (sessionId === MAIN_ID) {
+        sessionLabel.textContent = `Main desktop${watch}`;
+        document.title = "CU Live — Main desktop";
+        return;
+    }
+    const shortId = sessionId.length > 14 ? `${sessionId.slice(0, 14)}…` : sessionId;
+    sessionLabel.textContent = `${session.backend} · ${shortId}${watch}`;
     document.title = `CU Live — ${session.backend} ${shortId}`;
 }
 
@@ -542,7 +560,7 @@ function bindAgentActing() {
         if (!d || typeof d !== "object") return;
         if (d.type !== "cu_action" && d.type !== "heartbeat"
             && d.type !== "cu-agent-acting") return;
-        if (d.session_id && d.session_id !== SESSION_ID) return;
+        if (d.session_id && d.session_id !== sessionId) return;
         agentActingEl.classList.add("cuv-active");
         if (agentActingTimer) clearTimeout(agentActingTimer);
         agentActingTimer = setTimeout(
@@ -552,12 +570,16 @@ function bindAgentActing() {
 
 // ── Connection lifecycle ─────────────────────────────────────────────────
 
-async function fetchSessions() {
+// Latest /cu/sessions payload (sessions + additive "main" availability key).
+// Fed by boot, the switcher poll, and reconnect probes; the switcher rail
+// and swap-target metadata read from it.
+let lastStatus = null;
+
+async function fetchStatus() {
     try {
         const resp = await fetch("/cu/sessions", { cache: "no-store" });
         if (!resp.ok) return null;
-        const data = await resp.json();
-        return Array.isArray(data.sessions) ? data.sessions : [];
+        return await resp.json();
     } catch {
         return null;
     }
@@ -574,7 +596,7 @@ function connect() {
     }
     screenEl.textContent = "";
 
-    const inst = new RFB(screenEl, WS_URL, {});
+    const inst = new RFB(screenEl, currentWsUrl(), {});
     rfb = inst;
     inst.viewOnly = VIEW_ONLY;
     inst.scaleViewport = false;  // OUR transform is the only scaling (§4.2)
@@ -604,17 +626,28 @@ function connect() {
 async function scheduleReconnect() {
     if (reconnectTimer) return;
     setStatus("reconnecting");
-    const sessions = await fetchSessions();
-    const stillListed = sessions === null // sessions fetch failed (restart?) — retry
-        || sessions.some((s) => s.session_id === SESSION_ID);
-    if (!stillListed) {
-        showEnded("Session ended", "This CU session is no longer running.", sessions);
+    const status = await fetchStatus();
+    if (status) {
+        lastStatus = status;
+        renderSwitcher();
+    }
+    // Null status (fetch failed — restart race?) always retries; main gates
+    // on the probe's availability, sessions on still being listed.
+    if (!targetStillListed(status, sessionId)) {
+        if (sessionId === MAIN_ID) {
+            showEnded("Main desktop unavailable",
+                      String(status?.main?.reason || "log into the desktop session"),
+                      status ? status.sessions : null);
+        } else {
+            showEnded("Session ended", "This CU session is no longer running.",
+                      status ? status.sessions : null);
+        }
         return;
     }
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
         showEnded("Connection lost",
                   "The session is still listed but the stream would not reconnect.",
-                  sessions);
+                  status ? status.sessions : null);
         return;
     }
     const delay = Math.min(1000 * 2 ** reconnectAttempts, 10000);
@@ -632,7 +665,7 @@ function showEnded(title, msg, sessions) {
     endedMsg.textContent = msg;
     endedSessions.textContent = "";
     for (const s of sessions || []) {
-        if (s.session_id === SESSION_ID || !s.live_view) continue;
+        if (s.session_id === sessionId || !s.live_view) continue;
         const a = document.createElement("a");
         a.href = s.view_url || `/cu/view/${encodeURIComponent(s.session_id)}`;
         a.textContent = `Open ${s.backend} · ${s.width}×${s.height} (${s.operator})`;
@@ -641,22 +674,50 @@ function showEnded(title, msg, sessions) {
     endedCard.hidden = false;
 }
 
-// ── Boot ─────────────────────────────────────────────────────────────────
+// ── Switcher rail (N2 — main-desktop switcher) ───────────────────────────
 
-async function boot() {
-    // Session metadata (native resolution, backend) — /cu/sessions is the
-    // sizing source of truth (§3.4). Fallback keeps the viewer alive if the
-    // fetch races a restart.
-    const sessions = await fetchSessions();
-    const meta = sessions?.find((s) => s.session_id === SESSION_ID);
-    if (meta) {
-        session = { width: meta.width, height: meta.height,
-                    backend: meta.backend, operator: meta.operator };
-    } else {
-        console.warn("[CU-VIEW] session metadata unavailable — assuming 1280x720");
+// Entry-list building / swap-target resolution / metadata lookup are PURE
+// (switcher.js, node-tested); this block is the thin impure renderer + the
+// in-place stream swap.
+
+let switcherSig = "";  // skip DOM rebuilds (and mid-tap button churn) when unchanged
+
+function renderSwitcher() {
+    if (!switcherEl) return;
+    const entries = buildSwitcherEntries(lastStatus, sessionId);
+    const sig = JSON.stringify(entries);
+    if (sig === switcherSig) return;
+    switcherSig = sig;
+    switcherEl.textContent = "";
+    for (const e of entries) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cuv-switch-btn";
+        btn.textContent = e.label;
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", String(e.current));
+        if (e.current) btn.dataset.current = "1";
+        if (!e.available) {
+            // Disabled with the reason as the tooltip (e.g. main.available=false
+            // → "log into the desktop session").
+            btn.disabled = true;
+            btn.title = e.reason;
+        } else {
+            btn.title = e.current ? "Currently streaming" : `Switch to ${e.label}`;
+            btn.addEventListener("click", () => swapStream(e.id));
+        }
+        // Same focus-preservation rule as the extra-keys bar: never steal
+        // focus from the keyboard sink on tap.
+        btn.addEventListener("pointerdown", (ev) => ev.preventDefault());
+        switcherEl.appendChild(btn);
     }
+}
 
-    // Native-res screen target; our wrapper transform does all scaling.
+/** Size the native-res screen target + rebuild the viewport transform and
+ *  touchpad machine for the CURRENT session geometry. Shared by boot and
+ *  swapStream — a swap resets zoom/pan while the cursor layer (overlay +
+ *  gesture machinery) stays alive. */
+function applySessionGeometry() {
     screenEl.style.width = `${session.width}px`;
     screenEl.style.height = `${session.height}px`;
     wrapEl.style.width = `${session.width}px`;
@@ -672,6 +733,58 @@ async function boot() {
     updateSessionLabel();
     updateBadges();
     applyTransform();
+}
+
+/** Swap the stream in place to another rail entry: disconnect the current
+ *  RFB, reconnect to the chosen target's WS proxy, rewrite the URL via
+ *  history.replaceState (deep links keep working), reset zoom/pan. */
+function swapStream(targetId) {
+    if (targetId === sessionId) return;
+    sessionId = targetId;
+    const target = resolveSwapTarget(targetId);
+    history.replaceState(null, "", target.viewPath + location.search);
+
+    const meta = sessionMetaFor(lastStatus, targetId);
+    if (meta) session = meta;  // unknown id: keep previous dims until listed
+    applySessionGeometry();
+
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    reconnectAttempts = 0;
+    ended = false;
+    connect();  // detaches + disconnects the superseded RFB first
+    renderSwitcher();
+}
+
+function startSwitcherPoll() {
+    setInterval(async () => {
+        const status = await fetchStatus();
+        if (status) {
+            lastStatus = status;
+            renderSwitcher();
+        }
+    }, SWITCHER_POLL_MS);
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────────
+
+async function boot() {
+    // Session metadata (native resolution, backend) — /cu/sessions is the
+    // sizing source of truth (§3.4; the "main" key carries the real desktop's
+    // probed resolution). Fallback keeps the viewer alive if the fetch races
+    // a restart.
+    lastStatus = await fetchStatus();
+    const meta = sessionMetaFor(lastStatus, sessionId);
+    if (meta) {
+        session = meta;
+    } else {
+        console.warn("[CU-VIEW] session metadata unavailable — assuming 1280x720");
+    }
+
+    // Native-res screen target; our wrapper transform does all scaling.
+    applySessionGeometry();
     setTouchMode(touchMode);
 
     new ResizeObserver(() => {
@@ -703,6 +816,8 @@ async function boot() {
     bindTouchLayer();
     bindKeyboard();
     bindAgentActing();
+    renderSwitcher();
+    startSwitcherPoll();
     connect();
 }
 

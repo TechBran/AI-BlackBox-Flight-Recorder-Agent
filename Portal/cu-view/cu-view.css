@@ -186,6 +186,45 @@ body {
     border-radius: 8px;
 }
 
+/* ── Switcher rail: [Main desktop] + live sessions (N2) ──────────────── */
+
+#cuvSwitcher {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    background: #131318;
+    border-top: 1px solid #26262e;
+    overflow-x: auto;
+    scrollbar-width: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#cuvSwitcher::-webkit-scrollbar { display: none; }
+#cuvSwitcher:empty { display: none; }
+
+.cuv-switch-btn {
+    flex: 0 0 auto;
+    padding: 5px 10px;
+    background: #1f1f27;
+    border: 1px solid #2d2d38;
+    border-radius: 8px;
+    color: #ccd;
+    font-size: 12px;
+    line-height: 1.2;
+    cursor: pointer;
+    touch-action: manipulation;
+    white-space: nowrap;
+}
+.cuv-switch-btn:active { background: #2a2a36; }
+.cuv-switch-btn:disabled { opacity: 0.45; cursor: default; }
+.cuv-switch-btn[data-current="1"] {
+    background: #2b3a55;
+    border-color: #4a6aa8;
+    color: #fff;
+}
+
 /* ── Extra-keys bar (cloned from cli-agents-extra-keys pattern) ──────── */
 
 #cuvExtraKeys {
