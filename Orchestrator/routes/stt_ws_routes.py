@@ -899,14 +899,27 @@ async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
     stream holds local_stack.voice_session() (D12). NEVER falls back to a
     cloud provider — missing VAD deps or an unmet ceiling is an honest
     stt_error."""
+    from Orchestrator import local_stack
+    from Orchestrator.stt import vad as _vad
     missing = _vad_missing_dep()
+    if missing and "model missing" in missing:
+        # Fresh-box path (live gap 2026-07-23): the ~2.2MB silero model isn't a
+        # wizard row, so the FIRST mic use on a new box lands here. Fetch it
+        # under the D10 loading affordance (ensure_vad_model is lock-guarded,
+        # atomic, bounded-timeout) instead of erroring; only a failed fetch is
+        # an honest error.
+        await websocket.send_json({"type": "stt_status", "state": "loading_models"})
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _vad.ensure_vad_model)
+            missing = _vad_missing_dep()
+        except Exception as e:  # noqa: BLE001 — surfaced as the honest error below
+            missing = f"silero VAD model fetch failed: {e}"
     if missing:
+        print(f"[STT/WS] onbox VAD loop unavailable: {missing}")
         await websocket.send_json({
             "type": "stt_error",
             "message": f"on-box STT unavailable: {missing}"})
         return
-    from Orchestrator import local_stack
-    from Orchestrator.stt import vad as _vad
     async with local_stack.voice_session():
         if not await _warm_and_prime(websocket):
             await websocket.send_json({
