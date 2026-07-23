@@ -2,6 +2,7 @@ package com.aiblackbox.portal.data.repository
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -127,5 +128,32 @@ class QwenVoiceLabParsingTest {
     fun `parses voice_id from mutation responses`() {
         assertEquals("my-narrator", parseQwenVoiceIdResponse("""{"voice_id": "my-narrator", "ok": true}"""))
         assertEquals("", parseQwenVoiceIdResponse("""{"ok": true}"""))
+    }
+
+    // ── clone response (voice_id + at-clone preview, server >= ba81b8fa) ─────
+
+    @Test
+    fun `parses clone response with preview fields`() {
+        val raw = """{"voice_id": "my-narrator", "name": "My Narrator",
+            "preview_b64": "UklGRg==", "preview_mime": "audio/wav"}"""
+        val res = parseQwenCloneResponse(raw)
+        assertEquals("my-narrator", res.voiceId)
+        assertEquals("UklGRg==", res.previewB64)
+        assertEquals("audio/wav", res.previewMime)
+    }
+
+    @Test
+    fun `older backend clone response without preview fields keeps nulls`() {
+        val res = parseQwenCloneResponse("""{"voice_id": "my-narrator", "ok": true}""")
+        assertEquals("my-narrator", res.voiceId)
+        assertNull(res.previewB64)
+        assertNull(res.previewMime)
+    }
+
+    @Test
+    fun `clone response without voice_id yields empty id and null preview`() {
+        val res = parseQwenCloneResponse("""{"ok": true}""")
+        assertEquals("", res.voiceId)
+        assertNull(res.previewB64)
     }
 }

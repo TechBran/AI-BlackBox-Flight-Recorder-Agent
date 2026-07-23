@@ -2,6 +2,7 @@ package com.aiblackbox.portal.ui.voicelab
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
@@ -74,6 +75,28 @@ internal fun resolveVoiceLabGate(
     qwenLoaded && qwenAvailable -> VoiceLabGate.CONTENT
     elevenLoaded && qwenLoaded -> VoiceLabGate.NOT_CONFIGURED
     else -> VoiceLabGate.LOADING
+}
+
+/** What a parser leak (transient non-JSON body) reads as instead of the raw exception. */
+internal const val VOICE_LAB_UNEXPECTED_REPLY =
+    "The server sent an unexpected reply (it may be restarting) — try again in a few seconds."
+
+/**
+ * Map raw client-side failures to something a user can act on. A fetch that
+ * races a server restart gets a transient non-JSON body; kotlinx then throws
+ * SerializationException("Unexpected JSON token at offset ...") which must
+ * never reach the UI verbatim. Pure (no android.util.Log — that stays at the
+ * VM call sites) so the offline unit test drives it directly.
+ */
+internal fun friendlyVoiceLabError(t: Throwable, fallback: String): String {
+    val raw = t.message
+    val parserLeak = t is kotlinx.serialization.SerializationException ||
+        raw?.contains("Unexpected JSON token", ignoreCase = true) == true
+    return when {
+        parserLeak -> VOICE_LAB_UNEXPECTED_REPLY
+        raw.isNullOrBlank() -> fallback
+        else -> raw
+    }
 }
 
 class VoiceLabViewModel(application: Application) : AndroidViewModel(application) {
@@ -167,6 +190,11 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
     val qwenCloneError: StateFlow<String?> = _qwenCloneError.asStateFlow()
     private val _qwenClonePart = MutableStateFlow<ClonePart?>(null)
     val qwenClonePart: StateFlow<ClonePart?> = _qwenClonePart.asStateFlow()
+    // cacheDir WAV decoded from the clone response's preview_b64 (server >=
+    // ba81b8fa synthesizes a preview WITH the new voice at clone time); null on
+    // older backends → the zone renders exactly as before.
+    private val _qwenClonePreviewPath = MutableStateFlow<String?>(null)
+    val qwenClonePreviewPath: StateFlow<String?> = _qwenClonePreviewPath.asStateFlow()
     private val _qwenDesignState = MutableStateFlow(DesignState.IDLE)
     val qwenDesignState: StateFlow<DesignState> = _qwenDesignState.asStateFlow()
     private val _qwenDesignPreviews = MutableStateFlow<List<QwenPreview>>(emptyList())
@@ -175,7 +203,14 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
     val qwenDesignError: StateFlow<String?> = _qwenDesignError.asStateFlow()
 
     companion object {
+        private const val TAG = "VoiceLabVM"
         private const val MAX_RECORD_MS = 5 * 60_000L // 5 min cap
+    }
+
+    /** Log the raw failure, hand the UI the friendly form. */
+    private fun surfaceError(t: Throwable, fallback: String): String {
+        Log.w(TAG, "Voice Lab request failed: ${t.message}", t)
+        return friendlyVoiceLabError(t, fallback)
     }
 
     fun initialize(origin: String) {
@@ -200,7 +235,8 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 val s = repo.fetchStatus()
                 _status.value = s
                 if (s.configured) loadVoices()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "ElevenLabs status probe failed: ${e.message}", e)
                 _status.value = ElevenLabsStatus(configured = false)
             } finally {
                 _statusLoaded.value = true
@@ -324,11 +360,11 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 _cloneError.value = when (e.status) {
                     422 -> "Consent is required to clone a voice."
                     400 -> "Clone rejected: ${e.message}"
-                    else -> e.message
+                    else -> surfaceError(e, "Clone failed")
                 }
             } catch (e: Exception) {
                 _cloneState.value = CloneState.IDLE
-                _cloneError.value = e.message ?: "Clone failed"
+                _cloneError.value = surfaceError(e, "Clone failed")
             }
         }
     }
@@ -354,10 +390,10 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 if (result.previews.isEmpty()) _designError.value = "No previews returned."
             } catch (e: VoiceLabException) {
                 _designState.value = DesignState.IDLE
-                _designError.value = e.message
+                _designError.value = surfaceError(e, "Design failed")
             } catch (e: Exception) {
                 _designState.value = DesignState.IDLE
-                _designError.value = e.message ?: "Design failed"
+                _designError.value = surfaceError(e, "Design failed")
             }
         }
     }
@@ -377,10 +413,10 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 loadVoices()
             } catch (e: VoiceLabException) {
                 _designState.value = DesignState.READY
-                _designError.value = e.message
+                _designError.value = surfaceError(e, "Save failed")
             } catch (e: Exception) {
                 _designState.value = DesignState.READY
-                _designError.value = e.message ?: "Save failed"
+                _designError.value = surfaceError(e, "Save failed")
             }
         }
     }
@@ -394,8 +430,9 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             try {
                 _myVoices.value = repo.fetchVoices().myVoices
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // keep whatever we had; surface nothing loud (status gate covers config)
+                Log.w(TAG, "Voice list fetch failed: ${e.message}", e)
             } finally {
                 _voicesLoading.value = false
             }
@@ -414,9 +451,9 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 }
                 loadVoices()
             } catch (e: VoiceLabException) {
-                _message.value = "Delete failed: ${e.message}"
+                _message.value = "Delete failed: ${surfaceError(e, "request failed")}"
             } catch (e: Exception) {
-                _message.value = "Delete failed: ${e.message}"
+                _message.value = "Delete failed: ${surfaceError(e, "request failed")}"
             }
         }
     }
@@ -435,9 +472,9 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 _libraryResults.value = repo.searchLibrary(query)
                 _librarySearched.value = true
             } catch (e: VoiceLabException) {
-                _message.value = e.message ?: "Library search failed"
+                _message.value = surfaceError(e, "Library search failed")
             } catch (e: Exception) {
-                _message.value = e.message ?: "Library search failed"
+                _message.value = surfaceError(e, "Library search failed")
             } finally {
                 _librarySearching.value = false
             }
@@ -455,9 +492,9 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 _message.value = "\"${sv.name}\" added to your voices."
                 loadVoices() // reuse the existing My Voices refresh
             } catch (e: VoiceLabException) {
-                _message.value = "Add failed: ${e.message}"
+                _message.value = "Add failed: ${surfaceError(e, "request failed")}"
             } catch (e: Exception) {
-                _message.value = "Add failed: ${e.message}"
+                _message.value = "Add failed: ${surfaceError(e, "request failed")}"
             } finally {
                 _libraryAddingId.value = null
             }
@@ -472,7 +509,8 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 val res = repo.fetchXaiVoices()
                 _xaiConfigured.value = res.configured
                 _xaiVoices.value = res.voices
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "xAI voice list fetch failed: ${e.message}", e)
                 _xaiConfigured.value = false   // unreachable == unconfigured (zone hides)
             }
         }
@@ -518,11 +556,11 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 _xaiCloneError.value = when (e.status) {
                     422 -> "Consent is required to clone a voice."
                     400 -> "Clone rejected: ${e.message}"
-                    else -> e.message
+                    else -> surfaceError(e, "Clone failed")
                 }
             } catch (e: Exception) {
                 _xaiCloneState.value = CloneState.IDLE
-                _xaiCloneError.value = e.message ?: "Clone failed"
+                _xaiCloneError.value = surfaceError(e, "Clone failed")
             }
         }
     }
@@ -535,7 +573,7 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 _message.value = "Grok voice deleted."
                 loadXaiVoices()
             } catch (e: Exception) {
-                _message.value = "Delete failed: ${e.message}"
+                _message.value = "Delete failed: ${surfaceError(e, "request failed")}"
             }
         }
     }
@@ -548,7 +586,8 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 val st = repo.fetchQwenStatus()
                 _qwenAvailable.value = st.available
                 if (st.available) loadQwenVoices()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "On-box status probe failed: ${e.message}", e)
                 _qwenAvailable.value = false // unreachable == stack off (zone hides)
             } finally {
                 _qwenLoaded.value = true
@@ -584,9 +623,18 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         }
         _qwenCloneState.value = CloneState.SUBMITTING
         _qwenCloneError.value = null
+        clearQwenClonePreview() // a stale preview must not outlive its clone
         viewModelScope.launch {
             try {
-                repo.cloneQwenVoice(name.trim(), listOf(part.file), consent, description.trim())
+                val result = repo.cloneQwenVoice(name.trim(), listOf(part.file), consent, description.trim())
+                // Same decode path as the design previews: base64 WAV → cacheDir
+                // file → shared AudioPlayerBar. Older backends return no preview
+                // (null) → exactly the previous success behavior.
+                _qwenClonePreviewPath.value = result.previewB64
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { b64 ->
+                        withContext(Dispatchers.IO) { decodeB64WavToCache(b64, "qwen_clone_preview") }
+                    }
                 _qwenCloneState.value = CloneState.IDLE
                 _message.value = "On-box voice \"${name.trim()}\" cloned."
                 clearQwenPart()
@@ -597,13 +645,19 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 _qwenCloneError.value = when (e.status) {
                     422 -> "Consent is required to clone a voice."
                     400 -> "Clone rejected: ${e.message}"
-                    else -> e.message
+                    else -> surfaceError(e, "Clone failed")
                 }
             } catch (e: Exception) {
                 _qwenCloneState.value = CloneState.IDLE
-                _qwenCloneError.value = e.message ?: "Clone failed"
+                _qwenCloneError.value = surfaceError(e, "Clone failed")
             }
         }
+    }
+
+    /** Drop the last clone's preview WAV (new submit, or VM teardown). */
+    private fun clearQwenClonePreview() {
+        _qwenClonePreviewPath.value?.let { runCatching { File(it).delete() } }
+        _qwenClonePreviewPath.value = null
     }
 
     fun qwenDesign(description: String, text: String) {
@@ -623,18 +677,8 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 // can play it exactly like the ElevenLabs preview URLs.
                 _qwenDesignPreviews.value = withContext(Dispatchers.IO) {
                     previews.map { p ->
-                        val path = try {
-                            if (p.audioB64.isBlank()) null else {
-                                val f = File(
-                                    getApplication<Application>().cacheDir,
-                                    "qwen_preview_${System.currentTimeMillis()}_${p.generatedVoiceId.hashCode()}.wav",
-                                )
-                                f.writeBytes(java.util.Base64.getDecoder().decode(p.audioB64))
-                                f.absolutePath
-                            }
-                        } catch (_: Exception) {
-                            null // bad base64 → card renders without a player
-                        }
+                        val path = if (p.audioB64.isBlank()) null
+                        else decodeB64WavToCache(p.audioB64, "qwen_preview_${p.generatedVoiceId.hashCode()}")
                         QwenPreview(p.generatedVoiceId, path)
                     }
                 }
@@ -642,10 +686,10 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 if (_qwenDesignPreviews.value.isEmpty()) _qwenDesignError.value = "No previews returned."
             } catch (e: VoiceLabException) {
                 _qwenDesignState.value = DesignState.IDLE
-                _qwenDesignError.value = e.message
+                _qwenDesignError.value = surfaceError(e, "Design failed")
             } catch (e: Exception) {
                 _qwenDesignState.value = DesignState.IDLE
-                _qwenDesignError.value = e.message ?: "Design failed"
+                _qwenDesignError.value = surfaceError(e, "Design failed")
             }
         }
     }
@@ -665,10 +709,10 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 refreshTtsCatalog() // the new qwen:<slug> id must reach the voice picker
             } catch (e: VoiceLabException) {
                 _qwenDesignState.value = DesignState.READY
-                _qwenDesignError.value = e.message
+                _qwenDesignError.value = surfaceError(e, "Save failed")
             } catch (e: Exception) {
                 _qwenDesignState.value = DesignState.READY
-                _qwenDesignError.value = e.message ?: "Save failed"
+                _qwenDesignError.value = surfaceError(e, "Save failed")
             }
         }
     }
@@ -681,8 +725,9 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             try {
                 _qwenVoices.value = repo.fetchQwenVoices()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // keep whatever we had (gate covers the stack-off case)
+                Log.w(TAG, "On-box voice list fetch failed: ${e.message}", e)
             } finally {
                 _qwenVoicesLoading.value = false
             }
@@ -698,7 +743,7 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 loadQwenVoices()
                 refreshTtsCatalog() // drop the deleted qwen:<slug> from the picker too
             } catch (e: Exception) {
-                _message.value = "Delete failed: ${e.message}"
+                _message.value = "Delete failed: ${surfaceError(e, "request failed")}"
             }
         }
     }
@@ -708,6 +753,23 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
             p.audioPath?.let { runCatching { File(it).delete() } }
         }
         _qwenDesignPreviews.value = emptyList()
+    }
+
+    /**
+     * Decode a base64 WAV (the loopback-only qwen member's preview transport)
+     * to a cacheDir file the shared AudioPlayerBar/MediaPlayer path can play —
+     * used by BOTH the design previews and the at-clone preview. Returns null
+     * on bad base64 (caller renders without a player). Call on Dispatchers.IO.
+     */
+    private fun decodeB64WavToCache(b64: String, prefix: String): String? = try {
+        val f = File(
+            getApplication<Application>().cacheDir,
+            "${prefix}_${System.currentTimeMillis()}.wav",
+        )
+        f.writeBytes(java.util.Base64.getDecoder().decode(b64))
+        f.absolutePath
+    } catch (_: Exception) {
+        null
     }
 
     /**
@@ -732,5 +794,6 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         _xaiClonePart.value?.let { runCatching { it.file.delete() } }
         _qwenClonePart.value?.let { runCatching { it.file.delete() } }
         clearQwenPreviews()
+        clearQwenClonePreview()
     }
 }

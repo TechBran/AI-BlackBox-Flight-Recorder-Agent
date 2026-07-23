@@ -1037,6 +1037,7 @@ private fun QwenZone(viewModel: VoiceLabViewModel, view: android.view.View) {
     val voicesLoading by viewModel.qwenVoicesLoading.collectAsState()
     val cloneState by viewModel.qwenCloneState.collectAsState()
     val cloneError by viewModel.qwenCloneError.collectAsState()
+    val clonePreviewPath by viewModel.qwenClonePreviewPath.collectAsState()
     val part by viewModel.qwenClonePart.collectAsState()
     val designState by viewModel.qwenDesignState.collectAsState()
     val previews by viewModel.qwenDesignPreviews.collectAsState()
@@ -1136,6 +1137,23 @@ private fun QwenZone(viewModel: VoiceLabViewModel, view: android.view.View) {
         )
         AnimatedVisibility(visible = cloneError != null) {
             cloneError?.let { ErrorText(it) }
+        }
+        // At-clone preview (server >= ba81b8fa) — the VM decoded preview_b64 to
+        // a cacheDir WAV; play it through the SAME shared AudioPlayerBar path
+        // the design previews use. Older backends → path stays null, no row.
+        AnimatedVisibility(visible = clonePreviewPath != null) {
+            clonePreviewPath?.let { path ->
+                Column {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "▶ Preview your cloned voice",
+                        color = BbxDim,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    AudioPlayerBar(audioUrl = path, modifier = Modifier.fillMaxWidth())
+                }
+            }
         }
 
         // ── Design: description → previews → save ──

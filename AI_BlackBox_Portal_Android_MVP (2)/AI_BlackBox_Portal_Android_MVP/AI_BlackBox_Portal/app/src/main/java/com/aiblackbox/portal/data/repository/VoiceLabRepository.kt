@@ -197,6 +197,30 @@ internal fun parseQwenVoiceIdResponse(raw: String): String {
         ?.jsonPrimitive?.contentOrNull ?: ""
 }
 
+/**
+ * Result of an on-box clone (POST /qwen/voices/clone). Servers >= ba81b8fa also
+ * return a preview synthesized WITH the new voice at clone time
+ * ({preview_b64, preview_mime:"audio/wav"}); older backends return only
+ * {voice_id} — the preview fields stay null and callers behave exactly as
+ * before (additive contract).
+ */
+data class QwenCloneResult(
+    val voiceId: String,
+    val previewB64: String? = null,
+    val previewMime: String? = null,
+)
+
+/** Parse POST /qwen/voices/clone → {voice_id, preview_b64?, preview_mime?}. */
+internal fun parseQwenCloneResponse(raw: String): QwenCloneResult {
+    val j = Json { ignoreUnknownKeys = true; isLenient = true }
+    val o = j.parseToJsonElement(raw).jsonObject
+    return QwenCloneResult(
+        voiceId = o["voice_id"]?.jsonPrimitive?.contentOrNull ?: "",
+        previewB64 = o["preview_b64"]?.jsonPrimitive?.contentOrNull,
+        previewMime = o["preview_mime"]?.jsonPrimitive?.contentOrNull,
+    )
+}
+
 /** GET /xai/voices → gating (configured=false hides the zone) + cloned voices. */
 data class XaiVoicesResult(val configured: Boolean, val voices: List<XaiVoice>)
 
@@ -485,14 +509,15 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
     /**
      * POST /qwen/voices/clone (multipart: name, consent, description?, files).
      * The proxy 422s without the literal consent flag (ElevenLabs-gate parity).
-     * Returns the new voice_id/slug.
+     * Returns the new voice_id/slug plus, on servers >= ba81b8fa, a base64 WAV
+     * preview synthesized with the new voice (null on older backends).
      */
     suspend fun cloneQwenVoice(
         name: String,
         files: List<File>,
         consent: Boolean,
         description: String = "",
-    ): String {
+    ): QwenCloneResult {
         val builder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("name", name)
@@ -515,7 +540,7 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
                 if (!response.isSuccessful) {
                     throw VoiceLabException(response.code, extractError(body, response.code))
                 }
-                parseQwenVoiceIdResponse(body)
+                parseQwenCloneResponse(body)
             }
         }
     }
