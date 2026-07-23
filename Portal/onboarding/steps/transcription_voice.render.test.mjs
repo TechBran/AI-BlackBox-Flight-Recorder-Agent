@@ -146,6 +146,39 @@ test("the clone button renders DISABLED until consent is checked", () => {
     assert.doesNotMatch(html, /id="ob-stt-clone-consent"[^>]*checked/);
 });
 
+// ── 4b. clone success line: at-clone preview (server >= ba81b8fa) ───────
+test("clone success with preview_b64 renders an inline audio player with the preview label", () => {
+    const html = step.cloneSuccessHtml(
+        { voice_id: "my-narrator", preview_b64: "UklGRg==", preview_mime: "audio/wav" },
+        "My Narrator",
+    );
+    assert.match(html, /Voice cloned: <code>my-narrator<\/code>/);
+    assert.match(html, /Preview your cloned voice/);
+    assert.match(html, /<audio controls[^>]*src="data:audio\/wav;base64,UklGRg=="/);
+});
+
+test("clone success from an older backend (no preview fields) is exactly the text-only line", () => {
+    const html = step.cloneSuccessHtml({ voice_id: "my-narrator" }, "My Narrator");
+    assert.match(html, /Voice cloned: <code>my-narrator<\/code>/);
+    assert.doesNotMatch(html, /<audio/);
+    assert.doesNotMatch(html, /Preview your cloned voice/);
+});
+
+test("clone success falls back to the typed name when voice_id is absent, and escapes it", () => {
+    const html = step.cloneSuccessHtml({}, `<b>"Me"</b>`);
+    assert.match(html, /&lt;b&gt;/, "name is HTML-escaped");
+    assert.doesNotMatch(html, /<b>/);
+});
+
+test("a weird preview_mime falls back to audio/wav (no attribute breakout)", () => {
+    const html = step.cloneSuccessHtml(
+        { voice_id: "v", preview_b64: "QUJD", preview_mime: `audio/wav" onload="x` },
+        "v",
+    );
+    assert.match(html, /src="data:audio\/wav;base64,QUJD"/);
+    assert.doesNotMatch(html, /onload/);
+});
+
 // ── 5. fail-open states ─────────────────────────────────────────────────
 test("stack OFF → the single-line note only: no buttons, no rows, no forms", () => {
     const html = step.voiceSectionHtml(OFF);

@@ -454,6 +454,27 @@ async function verbatimDetail(r) {
     return `HTTP ${r.status}`;
 }
 
+// Success line for the clone mini-flow. Servers >= ba81b8fa also return a
+// preview synthesized WITH the new voice at clone time ({preview_b64,
+// preview_mime:"audio/wav"}) — rendered as an inline data: URL player, the
+// SAME transport renderDesignPreviews uses for audio_b64. Older backends omit
+// the fields → exactly the previous text-only line. Exported pure so the
+// render test drives it without a DOM.
+export function cloneSuccessHtml(j, fallbackName) {
+    const resp = j || {};
+    const vid = resp.voice_id || fallbackName;
+    let html = `Voice cloned: <code>${escapeHtml(vid)}</code> &mdash; it&#39;s now in your voice picker.`;
+    if (resp.preview_b64) {
+        // Defensive attribute hygiene: mime must look like a mime, base64 must
+        // be base64 — anything else falls back / is stripped.
+        const mime = /^[\w.+-]+\/[\w.+-]+$/.test(resp.preview_mime || "") ? resp.preview_mime : "audio/wav";
+        const b64 = String(resp.preview_b64).replace(/[^A-Za-z0-9+/=]/g, "");
+        html += `<span class="ob-stt-clone-preview-label">Preview your cloned voice</span>
+            <audio controls preload="none" src="data:${mime};base64,${b64}"></audio>`;
+    }
+    return html;
+}
+
 async function submitClone(container) {
     if (cloneBusy) return;
     const fileInput = container.querySelector("#ob-stt-clone-file");
@@ -476,9 +497,7 @@ async function submitClone(container) {
         const r = await fetch("/qwen/voices/clone", { method: "POST", body: fd });
         if (!r.ok) throw new Error(await verbatimDetail(r));
         const j = await r.json().catch(() => ({}));
-        const vid = j.voice_id || name;
-        voiceResult(container, "#ob-stt-clone-result",
-            `Voice cloned: <code>${escapeHtml(vid)}</code> &mdash; it&#39;s now in your voice picker.`, false);
+        voiceResult(container, "#ob-stt-clone-result", cloneSuccessHtml(j, name), false);
     } catch (e) {
         voiceResult(container, "#ob-stt-clone-result", escapeHtml(e.message), true);
     } finally {

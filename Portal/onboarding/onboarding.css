@@ -3492,6 +3492,9 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 .ob-stt-consent input { margin-top: 2px; flex: 0 0 auto; }
 .ob-stt-voice-result { font-size: 0.84rem; margin: 10px 0 0; color: #6fdca0; }
 .ob-stt-voice-result-error { color: #e6675b; }
+/* At-clone preview (server >= ba81b8fa): label + inline player inside the result line. */
+.ob-stt-clone-preview-label { display: block; margin-top: 8px; font-size: 0.82rem; font-weight: 500; }
+.ob-stt-voice-result audio { display: block; height: 32px; width: 100%; max-width: 420px; margin-top: 6px; }
 .ob-stt-design-previews { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .ob-stt-design-preview { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     border: 1px solid var(--ob-border, #2a2a33); border-radius: 8px; padding: 8px 12px; }
