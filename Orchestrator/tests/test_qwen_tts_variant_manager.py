@@ -195,3 +195,46 @@ def test_lock_serializes_concurrent_synths(tmp_path, monkeypatch):
     for i, ev in enumerate(be.events):
         if ev[0] == "load":
             assert be.events[i + 1] == ("synth", ev[1])
+
+
+# ── Consistency tuning (2026-07-23): per-reply seed + temperature ─────
+
+class SeedRecordingBackend(FakeBackend):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.seeds = []
+
+    def seed(self, value):
+        self.seeds.append(value)
+        self.events.append(("seed", value))
+
+
+def test_batch_seeds_once_per_reply_before_first_synth(tmp_path, monkeypatch):
+    """The per-reply seed fires ONCE, before the first sub-batch — never per
+    sub-batch (measured+rejected: re-seeding per chunk forces sequential)."""
+    be = SeedRecordingBackend()
+    monkeypatch.setenv("QWEN_TTS_MAX_BATCH", "2")
+    monkeypatch.setenv("QWEN_TTS_SEED", "777")
+    mgr = _mgr(be, tmp_path, monkeypatch)
+    asyncio.run(mgr.synthesize_batch("custom_voice", ["a", "b", "c", "d"], preset="Vivian"))
+    assert be.seeds == [777]
+    kinds = [e[0] for e in be.events]
+    assert kinds.index("seed") < kinds.index("synth_batch")
+    assert kinds.count("synth_batch") == 2  # sub-batched, but seeded once
+
+
+def test_seed_disabled_skips_hook(tmp_path, monkeypatch):
+    be = SeedRecordingBackend()
+    monkeypatch.setenv("QWEN_TTS_SEED", "off")
+    mgr = _mgr(be, tmp_path, monkeypatch)
+    asyncio.run(mgr.synthesize_full("custom_voice", "hi", preset="Vivian"))
+    assert be.seeds == []
+
+
+def test_fake_backend_without_seed_hook_is_fine(tmp_path, monkeypatch):
+    """Backends lacking a seed hook (older fakes) must not crash the manager."""
+    be = FakeBackend()
+    monkeypatch.setenv("QWEN_TTS_SEED", "123")
+    mgr = _mgr(be, tmp_path, monkeypatch)
+    pcm, sr = asyncio.run(mgr.synthesize_full("custom_voice", "hi", preset="Vivian"))
+    assert sr == 22050 and pcm

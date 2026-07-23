@@ -465,7 +465,15 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
     # the old 600 (per-chunk HTTP overhead matters again there).
     if provider == "qwen":
         from Orchestrator import qwen_tts as _qwen_tts_mod
-        default_chunk = 300 if _qwen_tts_mod.native_batch_enabled() else 600
+        # 1000-char chunks on the native-batch path (consistency eval
+        # 2026-07-23): c300 scored 0.744 cross-chunk speaker cosine — halfway
+        # from same-voice (0.91) to a DIFFERENT SPEAKER (0.57), ~7 semitones of
+        # per-reply pitch drift ("different voice per chunk"). c1000 + t0.7 +
+        # per-reply seed measures 0.892-0.924 (statistically the single-call
+        # ceiling) at RTF 0.405 — and replies <= ~1000 chars become ONE call
+        # (zero boundaries) for free. Speed given back vs c300 (21.5s->51.5s on
+        # a 1738-char reply) is the measured price of a stable voice.
+        default_chunk = 1000 if _qwen_tts_mod.native_batch_enabled() else 600
     else:
         default_chunk = 1500 if provider == "openai" else 800
     max_chunk_chars = int(body.get("max_chunk_chars", default_chunk))

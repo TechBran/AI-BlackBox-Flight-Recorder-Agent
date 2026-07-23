@@ -95,6 +95,20 @@ class VariantManager:
                 pass
             raise
 
+    def _seed_request(self):
+        """Apply the per-REPLY generation seed ONCE, before the request's first
+        generate call (consistency eval 2026-07-23: +0.04 cross-chunk speaker
+        cosine, free). Per-chunk/per-sub-batch re-seeding was measured and
+        rejected (forces sequential generation). Caller MUST hold self._lock.
+        No-op when the backend has no seed hook (control-test fakes) or the
+        seed is disabled."""
+        s = settings.generation_seed()
+        if s is None:
+            return
+        hook = getattr(self._backend, "seed", None)
+        if hook is not None:
+            hook(s)
+
     # -- public API -------------------------------------------------------
     async def synthesize_full(self, variant, text, *, preset=None, ref_audio=None,
                               ref_text=None, design_params=None, language=None):
@@ -102,6 +116,7 @@ class VariantManager:
         sample_rate is READ FROM THE MODEL OUTPUT (correction [23])."""
         async with self._lock:
             handle = self._ensure_locked(variant)
+            self._seed_request()
             return await self._run_synth_guarded(
                 self._backend.synth, handle, variant, text,
                 preset=preset, ref_audio=ref_audio, ref_text=ref_text,
@@ -144,6 +159,7 @@ class VariantManager:
             return [], 0
         async with self._lock:
             handle = self._ensure_locked(variant)
+            self._seed_request()   # once per REPLY, not per sub-batch
             out, sr = [], 0
             i = 0
             while i < len(texts):
@@ -170,6 +186,7 @@ class VariantManager:
         await self._lock.acquire()
         try:
             handle = self._ensure_locked(variant)
+            self._seed_request()
             gen = self._backend.synth_stream(
                 handle, variant, text,
                 preset=preset, ref_audio=ref_audio, ref_text=ref_text,
@@ -368,6 +385,21 @@ class TorchQwenBackend:
     def _lang(self, language):
         return language or settings.default_language()
 
+    def seed(self, value):
+        """Per-reply RNG seed (manager calls this once per request under the
+        lock — see VariantManager._seed_request). Lazy torch import keeps the
+        module CUDA-free for control tests."""
+        import torch
+        torch.manual_seed(int(value))
+
+    def _gen_extra(self):
+        """Sampling kwargs shared by every generate call: temperature 0.7 by
+        default (consistency eval 2026-07-23 — tighter cross-chunk speaker
+        cosine, no measured expressiveness loss). None -> defer to the model's
+        generation_config (temperature 0.9)."""
+        t = settings.sampling_temperature()
+        return {} if t is None else {"temperature": t}
+
     def synth(self, handle, variant, text, *, preset=None, ref_audio=None,
               ref_text=None, design_params=None, language=None):
         """Dispatch full generation by variant. Returns (pcm_s16le_bytes, sr).
@@ -380,19 +412,19 @@ class TorchQwenBackend:
         if variant == settings.VARIANT_CUSTOM_VOICE:
             wavs, sr = handle.generate_custom_voice(
                 text=text, speaker=preset, language=lang, instruct=None,
-                max_new_tokens=mnt,
+                max_new_tokens=mnt, **self._gen_extra(),
             )
         elif variant == settings.VARIANT_BASE:
             # No stored transcript -> x-vector-only clone; ref_text present -> ICL.
             x_vector_only = ref_text is None
             wavs, sr = handle.generate_voice_clone(
                 text=text, language=lang, ref_audio=ref_audio, ref_text=ref_text,
-                x_vector_only_mode=x_vector_only, max_new_tokens=mnt,
+                x_vector_only_mode=x_vector_only, max_new_tokens=mnt, **self._gen_extra(),
             )
         elif variant == settings.VARIANT_VOICE_DESIGN:
             wavs, sr = handle.generate_voice_design(
                 text=text, instruct=_design_instruct(design_params), language=lang,
-                max_new_tokens=mnt,
+                max_new_tokens=mnt, **self._gen_extra(),
             )
         else:
             raise ValueError(f"unknown variant {variant!r}")
@@ -413,19 +445,19 @@ class TorchQwenBackend:
         if variant == settings.VARIANT_CUSTOM_VOICE:
             wavs, sr = handle.generate_custom_voice(
                 text=list(texts), speaker=preset, language=lang, instruct=None,
-                max_new_tokens=mnt,
+                max_new_tokens=mnt, **self._gen_extra(),
             )
         elif variant == settings.VARIANT_BASE:
             x_vector_only = ref_text is None
             wavs, sr = handle.generate_voice_clone(
                 text=list(texts), language=lang,
                 ref_audio=ref_audio, ref_text=ref_text,
-                x_vector_only_mode=x_vector_only, max_new_tokens=mnt,
+                x_vector_only_mode=x_vector_only, max_new_tokens=mnt, **self._gen_extra(),
             )
         elif variant == settings.VARIANT_VOICE_DESIGN:
             wavs, sr = handle.generate_voice_design(
                 text=list(texts), instruct=_design_instruct(design_params),
-                language=lang, max_new_tokens=mnt,
+                language=lang, max_new_tokens=mnt, **self._gen_extra(),
             )
         else:
             raise ValueError(f"unknown variant {variant!r}")
@@ -444,7 +476,7 @@ class TorchQwenBackend:
             gen = handle.stream_generate_custom_voice(
                 text=text, speaker=preset, language=lang, instruct=None,
                 emit_every_frames=emit, first_chunk_emit_every=first_emit,
-                max_new_tokens=mnt,
+                max_new_tokens=mnt, **self._gen_extra(),
             )
         elif variant == settings.VARIANT_BASE:
             x_vector_only = ref_text is None
@@ -452,7 +484,7 @@ class TorchQwenBackend:
                 text=text, language=lang, ref_audio=ref_audio, ref_text=ref_text,
                 x_vector_only_mode=x_vector_only,
                 emit_every_frames=emit, first_chunk_emit_every=first_emit,
-                max_new_tokens=mnt,
+                max_new_tokens=mnt, **self._gen_extra(),
             )
         elif variant == settings.VARIANT_VOICE_DESIGN:
             # No streaming method for VoiceDesign — emit the full generation once.

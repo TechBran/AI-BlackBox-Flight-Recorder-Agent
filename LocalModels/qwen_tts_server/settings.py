@@ -152,6 +152,36 @@ def _is_cjk(ch: str) -> bool:
     return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
 
 
+def sampling_temperature():
+    """Generation temperature for every synth call. Default 0.7 (consistency
+    eval 2026-07-23: win_cos 0.793->0.829 at c600 vs the model default 0.9, no
+    measured expressiveness loss; t0.5 adds nothing further). Env
+    QWEN_TTS_TEMPERATURE; the literal "model" (or empty) defers to the model's
+    generation_config default."""
+    raw = os.environ.get("QWEN_TTS_TEMPERATURE", "0.7").strip().lower()
+    if raw in ("", "model", "default"):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.7
+
+
+def generation_seed():
+    """Per-reply RNG seed, applied ONCE per synthesis request (consistency eval
+    2026-07-23: a single torch.manual_seed before the batched generate tightens
+    cross-chunk speaker cosine by ~+0.04, free — the batched path is unchanged;
+    per-CHUNK seeding was measured and REJECTED, it forces sequential calls).
+    Env QWEN_TTS_SEED; "off"/-1 disables."""
+    raw = os.environ.get("QWEN_TTS_SEED", "1234").strip().lower()
+    if raw in ("", "off", "none", "-1"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return 1234
+
+
 def max_new_tokens_for(text: str) -> int:
     """Bound the autoregressive audio-frame budget for ONE synth call, sized to the
     chunk's text length. The model's default is 8192 frames (~11 min at 12Hz); if a

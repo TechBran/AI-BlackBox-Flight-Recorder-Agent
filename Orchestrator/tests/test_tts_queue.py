@@ -48,9 +48,9 @@ def _wav(seconds=0.1, sr=16000) -> bytes:
     return buf.getvalue()
 
 
-def _long_text(n_sentences=4, sent_chars=250) -> str:
-    """n sentences of ~sent_chars so chunk_text_for_tts(max=300) yields one
-    chunk per sentence."""
+def _long_text(n_sentences=4, sent_chars=900) -> str:
+    """n sentences of ~sent_chars so chunk_text_for_tts(max=1000, the
+    consistency-tuned native-batch size) yields one chunk per sentence."""
     body = "word " * ((sent_chars - 10) // 5)
     return " ".join(f"Sentence {i} {body.strip()}." for i in range(n_sentences))
 

@@ -369,3 +369,29 @@ def test_design_save_missing_name_400(client):
 def test_design_save_unknown_gid_404(client):
     r = client.post("/v1/voices/design/save", json={"generated_voice_id": "nope", "name": "X"})
     assert r.status_code == 404
+
+
+# ── Consistency tuning (2026-07-23): sampling settings ────────────────
+
+def test_sampling_temperature_default_and_overrides(monkeypatch):
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "LocalModels"))
+    from qwen_tts_server import settings as s
+    monkeypatch.delenv("QWEN_TTS_TEMPERATURE", raising=False)
+    assert s.sampling_temperature() == 0.7   # eval-tuned default
+    monkeypatch.setenv("QWEN_TTS_TEMPERATURE", "0.5")
+    assert s.sampling_temperature() == 0.5
+    monkeypatch.setenv("QWEN_TTS_TEMPERATURE", "model")
+    assert s.sampling_temperature() is None  # defer to generation_config
+
+
+def test_generation_seed_default_and_off(monkeypatch):
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "LocalModels"))
+    from qwen_tts_server import settings as s
+    monkeypatch.delenv("QWEN_TTS_SEED", raising=False)
+    assert s.generation_seed() == 1234
+    monkeypatch.setenv("QWEN_TTS_SEED", "off")
+    assert s.generation_seed() is None
+    monkeypatch.setenv("QWEN_TTS_SEED", "-1")
+    assert s.generation_seed() is None

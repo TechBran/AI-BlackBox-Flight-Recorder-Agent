@@ -58,7 +58,7 @@ QWEN_SYNTH_LOCK = asyncio.Lock()
 # time = est_audio_s * 0.2 (measured warm RTF 0.178 on the RTX 2000 Ada with
 # A2/A3 landed, rounded up).
 _CHARS_PER_AUDIO_SECOND = 15.0
-_MEASURED_WARM_RTF = 0.2
+_MEASURED_WARM_RTF = 0.45  # c1000 chunks measure RTF 0.405 (consistency eval 2026-07-23); rounded up
 
 _TERMINAL = ("done", "failed", "cancelled")
 
@@ -263,9 +263,12 @@ async def _run_job(job: Dict[str, Any]) -> None:
 
     task_id = job["task_id"]
     text = sanitize_for_speech(job["text"])
-    # Mirror /tts/batch's qwen chunk sizing: 300 on the native-batch path
-    # (smaller chunks -> wider batch -> shorter longest sample), 600 sequential.
-    max_chunk = 300 if qwen_tts.native_batch_enabled() else 600
+    # Mirror /tts/batch's qwen chunk sizing: 1000 on the native-batch path
+    # (consistency eval 2026-07-23 — c300's wide batches caused audible
+    # per-chunk voice drift, cosine 0.744 vs the 0.91 same-voice ceiling;
+    # c1000+t0.7+seed restores 0.892-0.924 and replies <=1000 chars become a
+    # single boundary-free call), 600 sequential.
+    max_chunk = 1000 if qwen_tts.native_batch_enabled() else 600
     chunks = chunk_text_for_tts(text, max_chars=max_chunk)
     if not chunks:
         raise ValueError("text produced no chunks after sanitize/split")
