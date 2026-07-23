@@ -263,8 +263,10 @@ export function audioArtifactBtnHtml(a, downloadingMap = downloading) {
                 data-dl="${escapeHtml(key)}">Download ${size}</button>`;
 }
 
-// One artifact row: label + size chip + its download control.
-function audioArtifactRowHtml(a) {
+// One artifact row: label + size chip + its download control. Exported: the
+// SPEECH step (transcription.js) reuses these exact rows for its on-box TTS
+// section — single source of truth, this step keeps its own section too.
+export function audioArtifactRowHtml(a) {
     const size = a && a.size_gb ? ` &middot; ~${escapeHtml(fmtGb(a.size_gb))} GB` : "";
     return `
         <div class="ob-lm-audio-row" data-artifact="${escapeHtml((a && a.key) || "")}">
@@ -387,10 +389,17 @@ function wireCapRow(container, capId) {
 }
 
 // ── Downloads (NDJSON progress, cloned from the embeddings-pull pattern) ──
-async function startDownload(container, key) {
+// Shared streaming core, exported so the SPEECH step's on-box TTS section can
+// drive the SAME download path + the SAME live `downloading` map (a pull kicked
+// off on one step shows as in-progress on the other). Callbacks keep the
+// DOM/render concerns in each caller:
+//   onProgress(dl) — after seeding + after every NDJSON line ({completed,total,statusText})
+//   onError(e)     — stream/POST failure (progress state is still cleaned up)
+//   onDone()       — always, after the map entry is cleared (refresh status here)
+export async function runArtifactDownload(key, { onProgress, onError, onDone } = {}) {
     if (downloading[key]) return;
     downloading[key] = { completed: 0, total: 0, statusText: "starting" };
-    renderBody(container);
+    if (onProgress) onProgress(downloading[key]);
     try {
         const r = await fetch("/local-models/download", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -418,17 +427,30 @@ async function startDownload(container, key) {
                         downloading[key] = { completed: Number(p.completed) || downloading[key].completed,
                                              total: Number(p.total) || downloading[key].total,
                                              statusText: p.status || "downloading" };
-                        updateDownloadBar(container, key);
+                        if (onProgress) onProgress(downloading[key]);
                     } catch (_) { /* skip malformed line */ }
                 }
             }
         }
     } catch (e) {
-        showHint(container, `Couldn't download: ${e.message}. Try again.`, true);
+        if (onError) onError(e);
     }
     delete downloading[key];
-    status = await fetchJson("/local-models/status");  // reflect downloaded=true
-    renderBody(container);
+    if (onDone) await onDone();
+}
+
+async function startDownload(container, key) {
+    await runArtifactDownload(key, {
+        // First call renders the fresh progress bar via the renderBody fallback
+        // in updateDownloadBar (no .ob-lm-progress-fill yet) — same visual flow
+        // as before the shared-core refactor.
+        onProgress: () => updateDownloadBar(container, key),
+        onError: (e) => showHint(container, `Couldn't download: ${e.message}. Try again.`, true),
+        onDone: async () => {
+            status = await fetchJson("/local-models/status");  // reflect downloaded=true
+            renderBody(container);
+        },
+    });
 }
 
 function updateDownloadBar(container, key) {

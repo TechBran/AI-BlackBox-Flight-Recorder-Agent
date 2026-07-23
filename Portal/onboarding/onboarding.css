@@ -3466,3 +3466,35 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 .ob-lm-audio-done { font-size: 0.82rem; color: #6fdca0; }
 .ob-lm-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 .ob-lm-btn[disabled]:hover { background: transparent; }
+
+/* SPEECH step — voice (TTS downloads + clone/design mini-flows). Reuses the
+   .ob-lm-audio-row / .ob-lm-btn machinery above; empty container when there's
+   no /local-models/status (older backend) — fail-open, nothing renders. */
+.ob-stt-voice { margin-top: 26px; }
+.ob-stt-voice:empty { margin-top: 0; }
+.ob-stt-voice-eyebrow { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .06em;
+    opacity: 0.65; margin-bottom: 8px; }
+.ob-stt-voice-lede { font-size: 0.86rem; opacity: 0.8; margin: 0 0 6px; }
+.ob-stt-voice-note { font-size: 0.84rem; color: var(--ob-muted, #9aa0ac); margin: 4px 0 0; }
+.ob-stt-voice-rows { border: 1px solid var(--ob-border, #2a2a33); border-radius: 10px;
+    padding: 12px 16px; margin-top: 10px; }
+.ob-stt-voice-block { border: 1px solid var(--ob-border, #2a2a33); border-radius: 10px;
+    padding: 14px 16px; margin-top: 12px; }
+.ob-stt-voice-block-title { font-weight: 600; font-size: 0.94rem; }
+.ob-stt-voice-sub { font-size: 0.82rem; opacity: 0.75; margin: 6px 0 0; }
+.ob-stt-voice-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.ob-stt-voice-form[hidden] { display: none; }
+.ob-stt-voice-form .ob-lm-btn { align-self: flex-start; }
+.ob-stt-voice-file { font-size: 0.84rem; }
+.ob-stt-voice-textarea { resize: vertical; min-height: 48px; font: inherit; font-size: 0.86rem; }
+.ob-stt-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 0.82rem;
+    opacity: 0.9; cursor: pointer; }
+.ob-stt-consent input { margin-top: 2px; flex: 0 0 auto; }
+.ob-stt-voice-result { font-size: 0.84rem; margin: 10px 0 0; color: #6fdca0; }
+.ob-stt-voice-result-error { color: #e6675b; }
+.ob-stt-design-previews { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.ob-stt-design-preview { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    border: 1px solid var(--ob-border, #2a2a33); border-radius: 8px; padding: 8px 12px; }
+.ob-stt-design-preview audio { height: 32px; max-width: 100%; flex: 1 1 200px; min-width: 160px; }
+.ob-stt-design-preview-name { font-size: 0.82rem; font-weight: 500; white-space: nowrap; }
+.ob-stt-design-selected { border-color: var(--ob-accent, #6f8cff); }
