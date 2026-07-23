@@ -1,8 +1,8 @@
-# Safe Rename Migration — "AI BlackBox Flight Recorder" (Design)
+# Safe Rename Migration — "AI BlackBox Flight Recorder Agent" (Design)
 
 **Date:** 2026-07-23
 **Status:** DESIGN — awaiting Brandon's sign-off on the open decisions (§7)
-**Goal (Brandon):** Production name **"AI BlackBox Flight Recorder"** everywhere, including the GitHub repo — WITHOUT breaking anything, especially the update pipeline.
+**Goal (Brandon):** Production name **"AI BlackBox Flight Recorder Agent"** everywhere, including the GitHub repo — WITHOUT breaking anything, especially the update pipeline.
 **Survey basis:** Full-repo grep sweep of the dev checkout + read-only SSH probes of MS02 (remotes, systemd units, crontab) + dev-box systemd/crontab/MCP configs/venv shebangs/Android/Tauri/installer templates. Spot-verified 2026-07-23 against `Orchestrator/update/git_ops.py`, `Scripts/install.sh`, `Scripts/update.sh`, and live `git remote -v`.
 
 **Headline verdict: LOW RISK.** The update pipeline operates entirely on the local remote *name* `origin` (URL lives in `.git/config`), GitHub 301-redirects all git operations after a repo rename, only 6 literal repo-URL sites exist outside historical docs, and the target display name is already the shipped branding. Every genuinely fragile reference is a filesystem path or machine identifier that gets **grandfathered**, not renamed.
@@ -13,13 +13,13 @@
 
 | Thing | Name | Where it applies |
 |---|---|---|
-| **GitHub repo slug** | `TechBran/ai-blackbox-flight-recorder` | GitHub repo Settings rename; all clone URLs; `DEFAULT_REMOTE_URL`; installer clone; `Documentation=` unit lines; README |
-| **Product display name** | `AI BlackBox Flight Recorder` | README title, Portal `<title>` + home header, Android `app_name`, Tauri `productName`, systemd `Description=` (cosmetic, new installs only), marketing/docs |
+| **GitHub repo slug** | `TechBran/ai-blackbox-flight-recorder-agent` | GitHub repo Settings rename; all clone URLs; `DEFAULT_REMOTE_URL`; installer clone; `Documentation=` unit lines; README |
+| **Product display name** | `AI BlackBox Flight Recorder Agent` | README title, Portal `<title>` + home header, Android `app_name`, Tauri `productName`, systemd `Description=` (cosmetic, new installs only), marketing/docs |
 | **Short display name** (space-constrained UI) | `AI BlackBox` / `Flight Recorder` | Portal brand-collapsed states, Android launcher (if the full name truncates), tab titles |
 | **Machine identifiers** | **UNCHANGED — grandfathered** (§4) | `com.aiblackbox.portal`, `com.blackbox.setup`, `blackbox-mcp`, `blackbox*.service`, `BLACKBOX_*` env vars, existing checkout directories |
-| **New-install default directory** (fresh boxes only, optional — D5) | `~/Desktop/ai-blackbox-flight-recorder` | `installer/templates/blackbox-apt-install.sh`, `blackbox-install-zellij-binary.sh`, `MCP/deploy/blackbox-mcp.service`, README clone example |
+| **New-install default directory** (fresh boxes only, optional — D5) | `~/Desktop/ai-blackbox-flight-recorder-agent` | `installer/templates/blackbox-apt-install.sh`, `blackbox-install-zellij-binary.sh`, `MCP/deploy/blackbox-mcp.service`, README clone example |
 
-The display name "AI BlackBox Flight Recorder" is **already shipped** in: `README.md:1`, `Portal/index.html:41` (brand-full span), `.env.template:1`, `CLAUDE.md` heading. This migration is a *convergence*, not an introduction.
+The display name "AI BlackBox Flight Recorder Agent" is **already shipped** in: `README.md:1`, `Portal/index.html:41` (brand-full span), `.env.template:1`, `CLAUDE.md` heading. This migration is a *convergence*, not an introduction.
 
 ---
 
@@ -46,16 +46,16 @@ Each stage is independently shippable and independently verifiable. Do not start
 - **Verify:** both remotes print `https://github.com/TechBran/blackbox-poc.git`; both fetches succeed.
 
 ### S1 — Rename the GitHub repo
-- GitHub → repo Settings → rename to `ai-blackbox-flight-recorder`. (Visibility, issues, PRs, stars, collaborators, branch protection, deploy keys, webhooks all survive — keyed to repo id.)
+- GitHub → repo Settings → rename to `ai-blackbox-flight-recorder-agent`. (Visibility, issues, PRs, stars, collaborators, branch protection, deploy keys, webhooks all survive — keyed to repo id.)
 - **Verify (BOTH boxes, old URL still configured):**
   - Dev: `git fetch origin && git rev-parse origin/main` — must succeed via 301 redirect.
   - MS02: same over SSH.
-  - `git ls-remote https://github.com/TechBran/ai-blackbox-flight-recorder.git main` — new URL resolves directly.
+  - `git ls-remote https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git main` — new URL resolves directly.
   - Dev: `curl -s localhost:9091/update/status` — pipeline healthy through the redirect.
 - **Rollback:** rename the repo back in Settings. Nothing else has changed; existing boxes never noticed.
 
 ### S2 — Repoint existing checkouts explicitly (stop depending on the redirect)
-- Dev box: `git remote set-url origin https://github.com/TechBran/ai-blackbox-flight-recorder.git`
+- Dev box: `git remote set-url origin https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git`
 - MS02 (SSH): same in `/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main`.
 - Update the **live** systemd cosmetics on both boxes (informational only, zero runtime effect): `Documentation=` line in `/etc/systemd/system/blackbox.service` (dev + MS02) and MS02's `blackbox-mcp.service` docs line; `sudo systemctl daemon-reload`. May be batched with any later restart — not urgent.
 - **Customer boxes / future-proofing (D2):** add a one-shot self-heal to `Scripts/update.sh` (runs on every update): if `git remote get-url origin` matches the old URL, `set-url` to the new one and log it. Idempotent, delivered over the redirect, retires the redirect dependency fleet-wide without SSH.
@@ -74,7 +74,7 @@ The 6 live literal-URL sites (docs/plans left as historical record — do NOT re
 | `README.md:833` | GitHub link → new |
 
 Cosmetic branding in the same or an immediately-following commit (Brandon's call, D5):
-- `Portal/index.html:5` title → `AI BlackBox Flight Recorder — Portal v<next>`; `:179-180` home header converge on the full name. **Bump `?v=genuiXX` per house rule.**
+- `Portal/index.html:5` title → `AI BlackBox Flight Recorder Agent — Portal v<next>`; `:179-180` home header converge on the full name. **Bump `?v=genuiXX` per house rule.**
 - Update `tests/test_update/test_git_ops.py` expectations for the new `DEFAULT_REMOTE_URL`.
 - **Verify:** `python -m Orchestrator.toolvault.validate` unaffected; update tests pass; grep gate — `grep -rn "TechBran/blackbox-poc" --exclude-dir=venv --exclude-dir=node_modules .` returns ONLY `docs/plans/` + historical docs; dev box pulls the commit through its own `/update/start` (self-hosting proof); Portal hard-refresh shows new titles.
 - **Rollback:** `git revert` the commit; boxes pick up the revert on next update. (Per §2, a wrong URL in `DEFAULT_REMOTE_URL` cannot brick existing boxes — they never read it.)
@@ -83,12 +83,12 @@ Cosmetic branding in the same or an immediately-following commit (Brandon's call
 - `installer/templates/blackbox-apt-install.sh:37` and `installer/templates/blackbox-install-zellij-binary.sh:54`: `BLACKBOX_ROOT` default `/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main` → new default dir (D5). Both already honor `BLACKBOX_ROOT` env override, so old-path boxes are unaffected.
 - `MCP/deploy/blackbox-mcp.service:14,18,20,28`: template paths → new default dir (template only; live units on both boxes are grandfathered).
 - `Scripts/install.sh` needs no path change — it derives `BLACKBOX_ROOT` from its own location (`install.sh:19`); it only gets the S3 URL edits.
-- Tauri installer: `tauri.conf.json:26` `productName` → `AI BlackBox Flight Recorder Setup`; **`identifier` `com.blackbox.setup` UNCHANGED** (changing it = new app to the OS).
+- Tauri installer: `tauri.conf.json:26` `productName` → `AI BlackBox Flight Recorder Agent Setup`; **`identifier` `com.blackbox.setup` UNCHANGED** (changing it = new app to the OS).
 - **Verify (fresh-box gate, per the portable-build rule):** dry-run `install.sh` clone step against the new URL in a scratch dir; shellcheck/spot-read the two templates; confirm `Orchestrator/utils/paths.py` sentinel walk-up (BLACKBOX_ROOT env → CLAUDE.md+Orchestrator/ walk) finds the root under the new dir name — it is name-independent by design.
 - **Rollback:** revert the commit. No existing box reads these defaults.
 
 ### S5 — Android display name (Portal Android app)
-- `app/src/main/res/values/strings.xml:2`: `app_name` `AI BlackBox Portal` → `AI BlackBox Flight Recorder` (or short form if launcher truncation is ugly — check on the Fold).
+- `app/src/main/res/values/strings.xml:2`: `app_name` `AI BlackBox Portal` → `AI BlackBox Flight Recorder Agent` (or short form if launcher truncation is ugly — check on the Fold).
 - **`applicationId`/`namespace` `com.aiblackbox.portal` (app/build.gradle:9,13) UNCHANGED** — survey confirms changing it creates a new app identity that orphans every install and its device pairing. Grandfathered permanently.
 - `UpdatesScreen.kt:311` hint copy ("Clones the BlackBox repo…") — optional wording touch-up; no functional client-side repo name exists (`UpdateRepository.kt` only calls `/update/*`).
 - **Verify:** `./gradlew :app:testDebugUnitTest --offline` (~35s gate); Fold sideload → launcher name renders, app opens, pairing/session intact (proves identity unchanged). Note: `SessionSwitcherTopBarTest.kt:137-139` fixtures show the *directory basename* in zellij labels — unaffected because local dirs are grandfathered.
@@ -112,7 +112,7 @@ GitHub rename alone touches **none** of these. Renaming them is where the actual
 | Historical docs (`docs/plans/*`, `docs/onboarding/*`, `eval/results/*`) with old URL/paths | Historical record; rewriting corrupts provenance and bloats the diff (~60 files of the 538 raw path matches) |
 | `aiblackboxfc.com` references | Marketing domain, orthogonal to the repo rename |
 
-**Rule of thumb:** human-visible strings converge on "AI BlackBox Flight Recorder"; machine identifiers and filesystem paths are permanent legacy. Only *fresh* installs get the new directory default (S4).
+**Rule of thumb:** human-visible strings converge on "AI BlackBox Flight Recorder Agent"; machine identifiers and filesystem paths are permanent legacy. Only *fresh* installs get the new directory default (S4).
 
 ---
 
@@ -151,11 +151,11 @@ There is no stage whose failure strands an existing box: the worst case at every
 
 | # | Decision | Recommendation |
 |---|---|---|
-| **D1** | GitHub slug | `ai-blackbox-flight-recorder` — matches product name, lowercase-kebab GitHub convention. Alternative `blackbox-flight-recorder` if Brandon wants it shorter. Execute S1+S3 within the same working session so literals never lag the rename by more than one update cycle. |
+| **D1** | GitHub slug | `ai-blackbox-flight-recorder-agent` — matches product name, lowercase-kebab GitHub convention. Alternative `blackbox-flight-recorder` if Brandon wants it shorter. Execute S1+S3 within the same working session so literals never lag the rename by more than one update cycle. |
 | **D2** | How existing boxes get `set-url`: manual SSH vs self-heal in `update.sh` | **Both.** Manual SSH for dev+MS02 immediately (S2); ship the idempotent one-shot in `Scripts/update.sh` in the S3 commit so any customer/ZIP box self-heals off the redirect without intervention. ~5 lines, delivered over the redirect itself. |
 | **D3** | Old-name policy | Hard rule: never recreate `TechBran/blackbox-poc`. After both boxes (and any customer boxes) are confirmed on the new URL, *optionally* create an empty archived placeholder repo at the old name whose README points to the new slug — this deliberately kills the redirect in a controlled way and permanently blocks squatting. Do NOT do this before fleet confirmation. |
 | **D4** | Grandfather ratification | Ratify §4 as written — permanent. Local dirs, venvs, unit names, package ids, MCP names, env prefixes stay. |
-| **D5** | New default dir for fresh installs + branding batch timing | Yes to new default dir (`~/Desktop/ai-blackbox-flight-recorder`) — fresh-box gate rule says new boxes should look intentional, and templates already honor `BLACKBOX_ROOT`. Ship S4+S5 cosmetics as a second PR right behind S3 (S3 = correctness, S4/S5 = polish) so a problem in cosmetics never blocks or reverts the URL correctness commit. |
+| **D5** | New default dir for fresh installs + branding batch timing | Yes to new default dir (`~/Desktop/ai-blackbox-flight-recorder-agent`) — fresh-box gate rule says new boxes should look intentional, and templates already honor `BLACKBOX_ROOT`. Ship S4+S5 cosmetics as a second PR right behind S3 (S3 = correctness, S4/S5 = polish) so a problem in cosmetics never blocks or reverts the URL correctness commit. |
 | **D6** | `git_ops.py:29` comment vs reality: comment claims repo is public ("Brandon's T10 decision") but it is private | Surface to Brandon: either (a) flip the repo public at rename time — makes the new clone URL work unauthenticated for fresh installs/lazy_init as the comment intends, or (b) keep private and fix the comment + accept that fresh `install.sh` clones need an auth story (PAT/deploy key) — which they already implicitly do today. The rename itself is neutral here, but the comment must stop lying either way; fix it in the S3 commit. |
 
 ---
