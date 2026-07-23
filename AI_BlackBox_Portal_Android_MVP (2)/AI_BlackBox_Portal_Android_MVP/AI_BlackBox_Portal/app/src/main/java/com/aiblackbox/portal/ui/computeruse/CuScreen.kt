@@ -86,6 +86,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.CuEntrySurface
+import com.aiblackbox.portal.data.api.CuMainStatus
 import com.aiblackbox.portal.data.api.CuSession
 import com.aiblackbox.portal.data.api.CuSessionsClient
 import com.aiblackbox.portal.data.api.chooseCuEntrySurface
@@ -214,6 +215,12 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
     private val _liveSessions = MutableStateFlow<List<CuSession>>(emptyList())
     val liveSessions: StateFlow<List<CuSession>> = _liveSessions.asStateFlow()
 
+    // Main-desktop stream availability (additive `main` key on /cu/sessions,
+    // N1): feeds the Splashtop entry decision — no agent session but a
+    // streamable REAL desktop still routes entry into the live view.
+    private val _mainDesktop = MutableStateFlow(CuMainStatus())
+    val mainDesktop: StateFlow<CuMainStatus> = _mainDesktop.asStateFlow()
+
     // Desktop-first CU (2026-07-23): true once the FIRST /cu/sessions probe
     // has answered (success OR failure). The entry decision — auto-open the
     // live view vs show the "Open live desktop" CTA — must wait for a known
@@ -230,12 +237,15 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
         val api = api ?: return
         viewModelScope.launch {
             try {
-                _liveSessions.value = CuSessionsClient(api).sessions().sessions
+                val state = CuSessionsClient(api).sessions()
+                _liveSessions.value = state.sessions
+                _mainDesktop.value = state.main
             } catch (_: Exception) {
                 // Endpoint missing / network down -> hide the badge, don't crash.
                 // (Web parity: fetch failure still resolves the surface — the
                 // CTA shows and the POST surfaces the real error on tap.)
                 _liveSessions.value = emptyList()
+                _mainDesktop.value = CuMainStatus()
             } finally {
                 _sessionsLoaded.value = true
             }
@@ -686,6 +696,7 @@ fun CuScreen(
 
     // Active virtual CU sessions (live-view badge target)
     val liveSessions by viewModel.liveSessions.collectAsState()
+    val mainDesktop by viewModel.mainDesktop.collectAsState()
     val sessionsLoaded by viewModel.sessionsLoaded.collectAsState()
     val desktopActionInFlight by viewModel.desktopActionInFlight.collectAsState()
 
@@ -707,10 +718,14 @@ fun CuScreen(
         // /cu/view/auto — the server 302s to the best surface (live session,
         // else main desktop) and the page's switcher rail owns any further
         // session-vs-main swapping. chooseCuEntrySurface stays the GATE:
-        // when live-view infra is absent (no streamable session) this screen
-        // remains the screenshot fallback and we never navigate.
-        val choice = chooseCuEntrySurface(liveSessions, selectedDeviceId)
-        if (choice is CuEntrySurface.Stream) onOpenLiveView("auto")
+        // Splashtop semantics (Brandon 2026-07-23) — a streamable MAIN
+        // desktop routes entry into the live view even with zero agent
+        // sessions; only a headless/remote target keeps this screenshot
+        // fallback as the entry surface.
+        val choice = chooseCuEntrySurface(
+            liveSessions, selectedDeviceId, mainDesktop.available)
+        if (choice is CuEntrySurface.Stream ||
+            choice is CuEntrySurface.MainDesktop) onOpenLiveView("auto")
     }
 
     // Bottom clearance for the Composer overlay: measured Composer stack
@@ -790,13 +805,22 @@ fun CuScreen(
         //    CTA (POST /cu/session/open → navigate to the live view),
         //  - remote device / non-streamable sessions → nothing extra; this
         //    screenshot screen IS the fallback surface. ──
-        when (val surface = chooseCuEntrySurface(liveSessions, selectedDeviceId)) {
+        when (val surface = chooseCuEntrySurface(
+            liveSessions, selectedDeviceId, mainDesktop.available)) {
             is CuEntrySurface.Stream -> CuLiveViewBadge(
                 sessionCount = liveSessions.count { it.liveView },
                 backend = surface.session.backend,
                 closeInFlight = desktopActionInFlight,
                 onClick = { onOpenLiveView(surface.session.sessionId) },
                 onClose = { viewModel.closeLiveSession(surface.session.sessionId) },
+            )
+            // Splashtop semantics: the REAL desktop streams — same live badge,
+            // no Close chip (you never "close" the box's own display).
+            is CuEntrySurface.MainDesktop -> CuLiveViewBadge(
+                sessionCount = 0,
+                backend = "main",
+                label = "Main desktop — open live view",
+                onClick = { onOpenLiveView("main") },
             )
             is CuEntrySurface.OpenDesktop -> if (sessionsLoaded) {
                 CuOpenDesktopCta(
@@ -1676,6 +1700,8 @@ private fun CuLiveViewBadge(
     // trailing Close chip (e.g. previews); in-flight disables it.
     onClose: (() -> Unit)? = null,
     closeInFlight: Boolean = false,
+    // Splashtop main-desktop surface: overrides the session-count wording.
+    label: String? = null,
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "liveBadgePulse")
     val dotAlpha by infiniteTransition.animateFloat(
@@ -1706,8 +1732,9 @@ private fun CuLiveViewBadge(
         )
         Spacer(Modifier.width(8.dp))
         Text(
-            text = if (sessionCount > 1) "$sessionCount live sessions — open live view"
-            else "Live session — open live view",
+            text = label
+                ?: if (sessionCount > 1) "$sessionCount live sessions — open live view"
+                else "Live session — open live view",
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
             color = CuAccentDim

@@ -161,6 +161,50 @@ class CuSessionsClientTest {
         assertEquals("stream-unavailable", (choice as CuEntrySurface.Fallback).reason)
     }
 
+    // ── Splashtop main-desktop entry (Brandon 2026-07-23): a streamable REAL
+    // desktop makes the live view the entry surface even with no sessions ──
+
+    @Test fun `parses the additive main key`() = runTest {
+        server.enqueue(MockResponse.Builder().body(
+            """{"active":false,"count":0,"sessions":[],
+               "main":{"available":true,"display":":0","resolution":"3440x1440"}}""").build())
+        assertTrue(client.sessions().main.available)
+    }
+
+    @Test fun `main key absent parses as unavailable`() = runTest {
+        // Pre-N1 Orchestrator payload — additive contract must not break.
+        server.enqueue(MockResponse.Builder().body(
+            """{"active":false,"count":0,"sessions":[]}""").build())
+        assertFalse(client.sessions().main.available)
+    }
+
+    @Test fun `no sessions but streamable main desktop routes to the live view`() {
+        val choice = chooseCuEntrySurface(
+            emptyList(), deviceId = "blackbox", mainAvailable = true)
+        assertTrue(choice is CuEntrySurface.MainDesktop)
+    }
+
+    @Test fun `dead sessions with streamable main still route to the live view`() {
+        // auto resolves to main server-side; the broken session can't stream.
+        val noUrl = CuSession(sessionId = "b", liveView = true, viewUrl = "")
+        val choice = chooseCuEntrySurface(
+            listOf(noUrl), deviceId = "local", mainAvailable = true)
+        assertTrue(choice is CuEntrySurface.MainDesktop)
+    }
+
+    @Test fun `agent session outranks the main desktop`() {
+        val live = CuSession(sessionId = "s1", liveView = true, viewUrl = "/cu/view/s1")
+        val choice = chooseCuEntrySurface(
+            listOf(live), deviceId = "blackbox", mainAvailable = true)
+        assertTrue(choice is CuEntrySurface.Stream)
+    }
+
+    @Test fun `remote device ignores main availability`() {
+        val choice = chooseCuEntrySurface(
+            emptyList(), deviceId = "pixel-fold", mainAvailable = true)
+        assertTrue(choice is CuEntrySurface.Fallback)
+    }
+
     @Test fun `remote device targets never get the local-desktop CTA`() {
         // With no sessions AND with a streamable one — remote is always fallback
         val choiceEmpty = chooseCuEntrySurface(emptyList(), deviceId = "pixel-fold")

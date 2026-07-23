@@ -23,10 +23,24 @@ data class CuSession(
     @SerialName("view_url") val viewUrl: String = "",
 )
 
+/**
+ * Main-desktop stream availability — the additive `main` key on
+ * GET /cu/sessions (N1 native stream). `available=true` means the box has a
+ * logged-in X session the live view can stream via the reserved "main" /
+ * "auto" ids; `reason` names why not (headless box, no xauth, …). Defaults
+ * keep pre-N1 Orchestrators parsing cleanly as "unavailable".
+ */
+@Serializable
+data class CuMainStatus(
+    val available: Boolean = false,
+    val reason: String = "",
+)
+
 @Serializable
 data class CuSessionsState(
     val active: Boolean = false,
     val sessions: List<CuSession> = emptyList(),
+    val main: CuMainStatus = CuMainStatus(),
 )
 
 /**
@@ -95,11 +109,14 @@ fun pickLiveViewSession(sessions: List<CuSession>): CuSession? =
  * pure `chooseDrawerSurface` (cu-viewer-route.js):
  *  - remote device target        → [CuEntrySurface.Fallback] "remote-device"
  *    (there is no LOCAL virtual desktop to open for it — never show the CTA)
- *  - no sessions on local target → [CuEntrySurface.OpenDesktop] (the
- *    "Open live desktop" CTA → POST /cu/session/open)
  *  - a streamable session        → [CuEntrySurface.Stream] — the live view is
  *    the DEFAULT surface; streamable = live_view AND a non-blank view_url
- *  - sessions but none stream    → [CuEntrySurface.Fallback]
+ *  - no streamable session but the REAL desktop streams → [MainDesktop] —
+ *    Splashtop semantics (Brandon 2026-07-23): opening CU with no agent
+ *    still lands in the full live view (zoom + mouse) of the main display
+ *  - no sessions, main unavailable → [CuEntrySurface.OpenDesktop] (the
+ *    "Open live desktop" CTA → POST /cu/session/open)
+ *  - sessions but nothing streams  → [CuEntrySurface.Fallback]
  *    "stream-unavailable" (screenshot-poll viewer stays the surface)
  *
  * PURE — unit-tested in CuSessionsClientTest against fake /cu/sessions data.
@@ -107,18 +124,25 @@ fun pickLiveViewSession(sessions: List<CuSession>): CuSession? =
 sealed interface CuEntrySurface {
     data class OpenDesktop(val reason: String) : CuEntrySurface
     data class Stream(val session: CuSession) : CuEntrySurface
+    data object MainDesktop : CuEntrySurface
     data class Fallback(val reason: String) : CuEntrySurface
 }
 
 fun chooseCuEntrySurface(
     sessions: List<CuSession>,
     deviceId: String? = null,
+    mainAvailable: Boolean = false,
 ): CuEntrySurface {
     if (!deviceId.isNullOrBlank() && deviceId != "blackbox" && deviceId != "local") {
         return CuEntrySurface.Fallback("remote-device")
     }
-    if (sessions.isEmpty()) return CuEntrySurface.OpenDesktop("no-sessions")
     val streamable = sessions.firstOrNull { it.liveView && it.viewUrl.isNotBlank() }
-    return if (streamable != null) CuEntrySurface.Stream(streamable)
+    if (streamable != null) return CuEntrySurface.Stream(streamable)
+    // Splashtop semantics: with no agent session the REAL desktop is still a
+    // first-class live surface — never park the user on the screenshot
+    // fallback when the box can stream its main display. Headless boxes
+    // (main unavailable) keep the CTA/fallback behavior below.
+    if (mainAvailable) return CuEntrySurface.MainDesktop
+    return if (sessions.isEmpty()) CuEntrySurface.OpenDesktop("no-sessions")
     else CuEntrySurface.Fallback("stream-unavailable")
 }
