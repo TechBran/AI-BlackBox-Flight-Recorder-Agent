@@ -1,0 +1,29 @@
+{
+  "gate": "G4s (streaming STT, VAD-gated architecture)",
+  "date": "2026-07-23",
+  "host": "bbx-MS-02-Ultra",
+  "architecture": "orchestrator-side silero v5 VAD (onnxruntime CPU) -> utterance on VAD-close -> G4-validated /upstream/speaches batch path with stt_stream_model (large-v3-turbo-ct2) -> per-utterance finals; rolling stt_delta partials every ~1.5s (drop-frame); D10 warm+PRIME (residency-proving silent-wav prime, not HTTP liveness); D12 voice_session; parked realtime bridge behind ONBOX_STT_REALTIME=0 (protocol audit found it broken live: LOOPBACK_HOST_URL crash + 3s VAD floor)",
+  "result": "PASS",
+  "live_validation": {
+    "ws_client_test": {
+      "clip": "known-text Qwen-TTS clip, 11.2s @24kHz, natural mid-clip pause",
+      "events": "loading_models -> listening -> speech -> 4 cumulative stt_delta partials -> processing -> final#1 -> listening -> speech -> processing -> final#2 -> stt_done",
+      "segmentation": "VAD closed exactly at the clip's natural pause -> 2 utterances (the user-specified chunking semantics)",
+      "transcript_quality": "matches the G4 batch baseline (same synthetic-voice homophone quirks only)"
+    },
+    "user_validation_brandon_fold6": "live mic on Android: 'works beautifully — the live streaming text is instant and very accurate' (2026-07-23)"
+  },
+  "fixes_during_bringup": [
+    "first-use silero model fetch under the loading_models affordance (deps check previously errored instead of fetching -> first mic session on a fresh box died)",
+    "vad-loop stt_errors now logged server-side (were client-only, which hid the above)"
+  ],
+  "adjacent_user_validated_same_day": {
+    "clone_e2e": "phone M4A reference -> upload-time WAV transcode -> stored -> preview synth (fail-fast) -> long TTS in the cloned voice; Brandon: 'clearly hear that it's my cloned voice' (2-min reference, fast clone)",
+    "known_trait": "zero-shot clone conditions on the whole acoustic scene — background noise in the reference is reproduced; clean-mic reference recommended (or elevenlabs_isolate_voice pre-clean)"
+  },
+  "open": [
+    "G5 (audio<->retrieval swap latency) + G6 (mid-stream eviction safety under D12) harnesses committed, formal runs pending",
+    "Android preview-playback button for clone preview_b64 (next APK)",
+    "cold-prime duration formal measurement vs the 30s D10 ceiling"
+  ]
+}
