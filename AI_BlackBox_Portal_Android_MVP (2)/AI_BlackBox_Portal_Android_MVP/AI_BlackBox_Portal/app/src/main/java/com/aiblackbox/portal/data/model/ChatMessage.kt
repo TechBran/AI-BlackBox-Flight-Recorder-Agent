@@ -102,7 +102,12 @@ data class TaskStatus(
     // G3-T13: the CU target device for the "Live" button. Top-level ONLY on
     // /tasks/list; on /tasks/status/{id} it lives inside result_data. Prefer the
     // top-level field, else fall back to result_data — see effectiveDeviceId().
-    @SerialName("device_id") val deviceId: String? = null
+    @SerialName("device_id") val deviceId: String? = null,
+    // M2 multi-desktop (2026-07-23): the CU session this task DRIVES. Top-level
+    // on /tasks/list; inside result_data on /tasks/status/{id}. It routes the
+    // "Live" button to the agent's OWN desktop (/cu/view/{session_id}) instead
+    // of the first streamable session — see effectiveSessionId().
+    @SerialName("session_id") val sessionId: String? = null
 ) {
     /**
      * Resolve the CU device for the "Live" button regardless of which poll path
@@ -113,6 +118,18 @@ data class TaskStatus(
         deviceId?.takeIf { it.isNotBlank() }
             ?: runCatching {
                 resultData?.jsonObject?.get("device_id")?.jsonPrimitive?.contentOrNull
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    /**
+     * Resolve the CU session this task drives, either poll path: top-level
+     * `session_id` (/tasks/list) first, else `session_id` in `result_data`
+     * (/tasks/status/{id}). Null/blank-safe. The "Live" button navigates to
+     * cu_live_view/{this} so it opens the RIGHT agent's desktop.
+     */
+    fun effectiveSessionId(): String? =
+        sessionId?.takeIf { it.isNotBlank() }
+            ?: runCatching {
+                resultData?.jsonObject?.get("session_id")?.jsonPrimitive?.contentOrNull
             }.getOrNull()?.takeIf { it.isNotBlank() }
 
     /**

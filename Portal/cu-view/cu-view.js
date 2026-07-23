@@ -837,6 +837,28 @@ function swapStream(targetId) {
     ended = false;
     connect();  // detaches + disconnects the superseded RFB first
     renderSwitcher();
+    retargetChatToSelection(targetId);
+    // Refresh the activity chrome immediately for the newly-selected session
+    // instead of waiting up to ACTIVITY_POLL_MS.
+    fetchActivity().then(renderActivity);
+}
+
+/** D2 (Brandon 2026-07-23): selecting a desktop in the rail also RE-TARGETS the
+ *  chat — the next prompt drives THIS agent. The cu-view page is a same-origin
+ *  iframe of the Portal, so the operator-scoped localStorage key the chat
+ *  module reads (bb_cu_session_id_<operator>) is shared; write it here. The
+ *  "main" desktop has no agent session, so selecting it clears the pointer
+ *  (the next prompt starts a fresh desktop). No-op inside the Android WebView
+ *  (its localStorage is not the chat's) — harmless. */
+function retargetChatToSelection(targetId) {
+    try {
+        if (targetId === MAIN_ID) return;   // no agent to target
+        const entry = (lastStatus && lastStatus.sessions || [])
+            .find((s) => s.session_id === targetId);
+        const op = entry && entry.operator;
+        if (!op) return;
+        localStorage.setItem(`bb_cu_session_id_${op}`, targetId);
+    } catch (e) { /* cross-origin / storage disabled — non-fatal */ }
 }
 
 function startSwitcherPoll() {

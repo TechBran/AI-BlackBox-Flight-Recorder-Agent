@@ -869,17 +869,27 @@ class NativeMainActivity : ComponentActivity() {
                             visible = showTaskPanel,
                             onDismiss = { showTaskPanel = false },
                             onStopTask = { taskId -> chatViewModel.cancelTask(taskId) },
-                            // Pill "Live" → the NATIVE Computer Use screen (the same
-                            // modal behind the system menu), device preselected and
-                            // the live screenshot stream auto-toggled ON via the
-                            // ?liveDevice hand-off. Replaces the old CU Live-view
-                            // WebView overlay (it bounced users into a browser
-                            // session — wrong surface for the Android MVP).
-                            onLiveView = { devId ->
-                                navController.navigate(
-                                    Routes.COMPUTER_USE +
-                                        "?liveDevice=" + android.net.Uri.encode(devId)
-                                )
+                            // Pill "Live" (M2 multi-desktop, 2026-07-23): a local
+                            // (blackbox) CU task now runs on its OWN virtual
+                            // desktop, so route straight to that agent's Splashtop
+                            // live view (cu_live_view/{session_id}) — the served
+                            // page carries the status chip + STOP + narration
+                            // bubble. A REMOTE device (device_id != blackbox) keeps
+                            // the native ?liveDevice screenshot-stream path, whose
+                            // VNC surface is still correct there.
+                            onLiveView = { task ->
+                                val sid = task.effectiveSessionId()
+                                val dev = task.effectiveDeviceId()
+                                if (!sid.isNullOrBlank() && (dev == null || dev == "blackbox")) {
+                                    navController.navigate(
+                                        "${Routes.CU_LIVE_VIEW}/" + android.net.Uri.encode(sid)
+                                    )
+                                } else {
+                                    navController.navigate(
+                                        Routes.COMPUTER_USE +
+                                            "?liveDevice=" + android.net.Uri.encode(dev ?: "blackbox")
+                                    )
+                                }
                             }
                         )
                     }

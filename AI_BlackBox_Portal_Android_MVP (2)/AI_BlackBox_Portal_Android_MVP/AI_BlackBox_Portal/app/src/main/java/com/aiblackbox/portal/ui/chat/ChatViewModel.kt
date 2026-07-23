@@ -768,7 +768,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 // rationale as progressText: /tasks/list is the SOLE panel
                                 // feed, so thread it HERE or the reasoning window stays empty.
                                 reasoningText = t["reasoning_text"]?.jsonPrimitive?.contentOrNull,
-                                deviceId = t["device_id"]?.jsonPrimitive?.contentOrNull
+                                deviceId = t["device_id"]?.jsonPrimitive?.contentOrNull,
+                                // M2 multi-desktop: the CU session this task drives — routes
+                                // the pill's Live button to the agent's OWN desktop. Same
+                                // sole-feed rationale as the fields above: thread it HERE.
+                                sessionId = t["session_id"]?.jsonPrimitive?.contentOrNull
                             )
                         } catch (_: Exception) { null }
                     }

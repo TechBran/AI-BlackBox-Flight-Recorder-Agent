@@ -80,11 +80,13 @@ fun TaskPanel(
     visible: Boolean,
     onDismiss: () -> Unit,
     // G3-T13 (M3.3): STOP any active pill (POST /tasks/{id}/cancel via the VM).
-    // onLiveView(deviceId): open the NATIVE Computer Use screen with this device
-    // preselected and the live screenshot stream toggled ON (the host navigates
-    // Routes.COMPUTER_USE?liveDevice=… — never a browser/WebView surface).
+    // onLiveView(task): open the running agent's live view. M2 multi-desktop
+    // (2026-07-23): the host now routes a blackbox task with a session id to
+    // its OWN Splashtop desktop (cu_live_view/{sid}); a remote device keeps the
+    // native ?liveDevice= screenshot-stream path. Passing the whole task lets
+    // the host make that decision from effectiveSessionId()/effectiveDeviceId().
     onStopTask: (String) -> Unit = {},
-    onLiveView: (String) -> Unit = {},
+    onLiveView: (TaskStatus) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
@@ -246,7 +248,7 @@ fun TaskPanel(
 private fun TaskItem(
     task: TaskStatus,
     onStopTask: (String) -> Unit,
-    onLiveView: (String) -> Unit
+    onLiveView: (TaskStatus) -> Unit
 ) {
     val isActive = task.status.equals("processing", true) || task.status.equals("pending", true)
     val isComplete = task.status.equals("completed", true)
@@ -423,7 +425,7 @@ private fun TaskItem(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (showLive && liveDeviceId != null) {
-                    PillButton(label = "Live", accent = true) { onLiveView(liveDeviceId) }
+                    PillButton(label = "Live", accent = true) { onLiveView(task) }
                     Spacer(Modifier.width(6.dp))
                 }
                 if (isActive) {
