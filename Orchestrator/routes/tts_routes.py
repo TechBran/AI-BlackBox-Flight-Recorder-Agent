@@ -27,7 +27,7 @@ from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 # External library imports
-from fastapi import HTTPException, WebSocket, Body, UploadFile, File, Form
+from fastapi import HTTPException, WebSocket, Body, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
 
 # Local imports
@@ -319,10 +319,15 @@ def tts_openai(body: dict = Body(...)):
 
 # Thread pool for parallel TTS generation (shared across requests)
 _tts_executor = ThreadPoolExecutor(max_workers=8)
+# Single-flight the on-box (qwen) BATCH synthesis: the qwen-tts member is one GPU
+# (concurrencyLimit 2, but effectively serial), so two overlapping batches only
+# contend + 429. Serialize them here so a retry/second request queues cleanly
+# behind the first instead of piling up on the GPU. Cloud providers are unaffected.
+_qwen_batch_lock = asyncio.Lock()
 
 
 @app.post("/tts/batch")
-async def tts_batch(body: dict = Body(...)):
+async def tts_batch(body: dict = Body(...), request: Request = None):
     """Batch TTS: split text into chunks, generate all in parallel, return combined audio.
 
     Accepts:
@@ -474,21 +479,28 @@ async def tts_batch(body: dict = Body(...)):
         from Orchestrator import qwen_tts
         _bare = voice.split(":", 1)[1] if voice.startswith("qwen:") else voice
 
-        def _qwen_all() -> List[bytes]:
-            # Sequential on purpose: one GPU serializes synthesis anyway, and
-            # the qwen-tts member's concurrencyLimit:2 would 429 a parallel
-            # fan-out. Any non-200 raises -> the endpoint returns 502.
-            # Request WAV: the M6 server emits WAV/PCM only (it 400s mp3/opus —
-            # there is no encoder), so audio_format cannot flow through here.
-            out: List[bytes] = []
-            for ch in chunks:
-                r = qwen_tts.synthesize(_bare, ch, response_format="wav")
-                if r.status_code != 200:
-                    raise HTTPException(502, f"Qwen TTS failed (HTTP {r.status_code}): {r.text[:200]}")
-                out.append(r.content)
-            return out
+        def _qwen_one(ch: str) -> bytes:
+            # WAV only — the M6 server 400s mp3/opus (no encoder). synthesize()
+            # already backs off + retries a 429 (member concurrency contention).
+            r = qwen_tts.synthesize(_bare, ch, response_format="wav")
+            if r.status_code != 200:
+                raise HTTPException(502, f"Qwen TTS failed (HTTP {r.status_code}): {r.text[:200]}")
+            return r.content
 
-        results = await loop.run_in_executor(_tts_executor, _qwen_all)
+        # Single-flight + per-chunk so (a) two batches serialize on the one GPU
+        # instead of contending, and (b) an abandoned request (client navigated
+        # away / retried) STOPS after the current chunk instead of running the
+        # whole batch orphaned — the root of the pile-up that 429-storms the member.
+        results: List = []
+        async with _qwen_batch_lock:
+            for i, ch in enumerate(chunks):
+                if request is not None and await request.is_disconnected():
+                    print(f"[TTS Batch] qwen: client disconnected at chunk {i}/{num_chunks} — stopping")
+                    raise HTTPException(499, "client disconnected")
+                try:
+                    results.append(await loop.run_in_executor(_tts_executor, _qwen_one, ch))
+                except Exception as e:  # noqa: BLE001 — collected below like the other providers
+                    results.append(e)
         # Qwen returns WAV — drive the WAV stitcher + audio/wav mime below
         # (mirrors the Gemini branch's `audio_format = "wav"`).
         audio_format = "wav"

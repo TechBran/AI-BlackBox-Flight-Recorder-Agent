@@ -34,9 +34,17 @@ class FakeBackend:
     def sample_rate(self, handle):
         return handle["sr"]
 
-    def synth(self, handle, text, *, preset=None, ref_audio=None, design_params=None):
+    def synth(self, handle, variant, text, *, preset=None, ref_audio=None,
+              ref_text=None, design_params=None, language=None):
+        # Signature mirrors TorchQwenBackend.synth (G3 rewrite: variant-aware +
+        # ref_text/language threaded through by the manager).
         self.events.append(("synth", handle["variant"]))
         return (b"\x00\x01" * 100, handle["sr"])
+
+    def synth_stream(self, handle, variant, text, *, preset=None, ref_audio=None,
+                     ref_text=None, design_params=None, language=None):
+        self.events.append(("synth_stream", handle["variant"]))
+        yield (b"\x00\x01" * 100, handle["sr"])
 
 
 def _mgr(be, tmp_path, monkeypatch):

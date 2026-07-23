@@ -20,6 +20,7 @@ NEVER wakes the audio group (no cross-group swap just to render the picker).
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -169,17 +170,36 @@ def catalog_group() -> Optional[Dict[str, Any]]:
             "dynamic": True, "voices": voices}
 
 
+# llama-swap returns 429 "Too many requests" when the qwen-tts member's
+# concurrencyLimit is exceeded (a concurrent or piled-up request — e.g. an
+# Auto-TTS queue firing sentences in parallel, or a user retrying a slow batch).
+# One GPU serializes synthesis anyway, so back off and retry rather than
+# hard-failing the caller (which 502'd the whole batch). Env-overridable.
+def _qwen_429_retries() -> int:
+    try:
+        return int(os.environ.get("QWEN_TTS_429_RETRIES", "5"))
+    except ValueError:
+        return 5
+
+
+_QWEN_429_BACKOFF_BASE = 0.5
+_QWEN_429_BACKOFF_MAX = 6.0
+
+
 def synthesize(voice: str, text: str, response_format: str = "wav",
                stream: bool = False) -> "requests.Response":
     """POST the llama-swap /v1/audio/speech proxy (body-`model` auto-routed to
     the qwen-tts member). `voice` is the BARE token (preset name or profile
     slug — the caller strips any `qwen:` prefix). Returns the raw Response so
-    the route decides stream-vs-file. Raises on transport error.
+    the route decides stream-vs-file. Raises on transport error. A 429 (member
+    concurrency limit) is retried with capped exponential backoff so contention
+    with another on-box synth recovers instead of 502-ing the caller.
 
     NB: the M6 server emits WAV/PCM only — its /v1/audio/speech 400s any
     response_format not in ('wav','pcm') (Task 6.4, `test_speech_bad_format_400`).
     Default 'wav' (a proper RIFF container the browser plays); callers pass
     'wav'/'pcm', never 'mp3'/'opus' (there is no mp3/opus encoder in the server)."""
+    import time
     req = {
         "model": QWEN_TTS_MODEL,
         "input": text,
@@ -187,5 +207,14 @@ def synthesize(voice: str, text: str, response_format: str = "wav",
         "response_format": response_format,
         "stream": stream,
     }
-    return requests.post(f"{_base_url()}/audio/speech", json=req,
-                         timeout=QWEN_TTS_TIMEOUT)
+    retries = _qwen_429_retries()
+    attempts = 0
+    while True:
+        r = requests.post(f"{_base_url()}/audio/speech", json=req,
+                          timeout=QWEN_TTS_TIMEOUT)
+        if r.status_code == 429 and attempts < retries:
+            attempts += 1
+            time.sleep(min(_QWEN_429_BACKOFF_BASE * (2 ** (attempts - 1)),
+                           _QWEN_429_BACKOFF_MAX))
+            continue
+        return r
