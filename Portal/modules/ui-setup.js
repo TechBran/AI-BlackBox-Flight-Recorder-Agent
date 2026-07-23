@@ -804,13 +804,24 @@ async function cancelTaskById(taskId) {
     }
 }
 
-/** Open the CU interactive viewer addressed at the task's real device (T11 device_id). */
+/**
+ * Open the CU viewer for a task — streaming client when a live virtual
+ * session exists, else the interactive screenshot modal addressed at the
+ * task's real device (T11 device_id). Routing per design 2026-07-23 §7.1
+ * (M4): remote devices always take the fallback path.
+ */
 async function openLiveView(task) {
     try {
-        const cuInteract = await import('./cu-interact.js');
-        cuInteract.open(undefined, task.device_id);
+        const route = await import('./cu-viewer-route.js');
+        await route.openCuViewer({ deviceId: task.device_id });
     } catch (e) {
         console.error('[TaskMonitor] failed to open CU live view:', e);
+        try {
+            const cuInteract = await import('./cu-interact.js');
+            cuInteract.open(undefined, task.device_id);
+        } catch (e2) {
+            console.error('[TaskMonitor] fallback viewer failed too:', e2);
+        }
     }
 }
 

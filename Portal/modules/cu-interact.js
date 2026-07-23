@@ -6,7 +6,7 @@
  */
 
 import { $ } from './core-utils.js';
-import { getCUDeviceId } from './cu-drawer.js';
+import { getCUDeviceId, getCUSessionId } from './cu-drawer.js';
 
 let modal = null;
 let pollingInterval = null;
@@ -128,8 +128,10 @@ function createModal() {
             });
             setStatus(`Key: ${key}`);
             setTimeout(refreshScreenshot, 200);
-            // Re-focus input so keyboard stays open
-            typingInput.focus();
+            // NO auto re-focus (design 2026-07-23 §4.4): the soft keyboard
+            // opens only when the user taps the typing input themselves —
+            // quick keys must never pop the IME. Parity with the streaming
+            // client's manual keyboard toggle.
         });
     });
 
@@ -497,7 +499,16 @@ function _showFloatingButton(screenshotUrl) {
     floatingBtn.innerHTML = '<span class="cu-floating-dot"></span> Live Browser';
     floatingBtn.title = 'Open interactive browser viewer';
     floatingBtn.addEventListener('click', () => {
-        open(screenshotUrl);
+        // Route stream-vs-fallback (M4): the restored session may have a live
+        // virtual display — prefer the streaming client, fall back to this
+        // modal. Dynamic import avoids a static cycle with cu-viewer-route.
+        import('./cu-viewer-route.js')
+            .then((m) => m.openCuViewer({
+                sessionId: getCUSessionId() || undefined,
+                deviceId: getCUDeviceId(),
+                screenshotUrl
+            }))
+            .catch(() => open(screenshotUrl));
     });
     document.body.appendChild(floatingBtn);
 }

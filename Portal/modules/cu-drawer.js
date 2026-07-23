@@ -142,6 +142,7 @@ function _createDrawer() {
             <button class="cu-drawer-estop" title="Emergency stop">STOP</button>
             <span class="cu-drawer-queue-badge hide"></span>
             <span class="cu-drawer-session-id"></span>
+            <button class="cu-drawer-live" title="Open live view">Live</button>
             <button class="cu-drawer-new" title="New session">New</button>
         </div>
     `;
@@ -342,6 +343,26 @@ function _attachDrawer() {
         }
         newBtn.disabled = false;
     });
+
+    // Live view — route stream-vs-fallback (M4, design 2026-07-23 §7.1):
+    // streaming client when this session is a live virtual session,
+    // screenshot-poll modal automatically otherwise (native mode / remote
+    // device / no-websockify box). Dynamic import keeps the drawer light.
+    const liveBtn = _drawer.querySelector('.cu-drawer-live');
+    if (liveBtn) {
+        liveBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+                const route = await import('./cu-viewer-route.js');
+                await route.openCuViewer({
+                    sessionId: _currentSessionId || getCUSessionId() || undefined,
+                    deviceId: getCUDeviceId()
+                });
+            } catch (err) {
+                console.error('[CU-Drawer] Failed to open live view:', err);
+            }
+        });
+    }
 
     // Wire device selector
     const deviceSelect = _drawer.querySelector('.cu-drawer-device-select');

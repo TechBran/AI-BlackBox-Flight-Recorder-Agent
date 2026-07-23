@@ -1260,7 +1260,20 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                                 if (liveImg) {
                                     liveImg.src = ssUrl;
                                     liveImg.alt = `Screenshot step ${ssStep}`;
-                                    liveImg.onclick = () => openCUInteract(ssUrl);
+                                    // M4 routing (design 2026-07-23 §7.1): open the
+                                    // streaming client when this session has a live
+                                    // virtual display; the screenshot-poll modal is
+                                    // the automatic fallback (native mode / remote
+                                    // device / no-websockify box).
+                                    liveImg.onclick = () => {
+                                        import('./cu-viewer-route.js')
+                                            .then((m) => m.openCuViewer({
+                                                sessionId: getCUSessionId() || undefined,
+                                                deviceId: getCUDeviceId(),
+                                                screenshotUrl: ssUrl
+                                            }))
+                                            .catch(() => openCUInteract(ssUrl));
+                                    };
                                 }
                                 const stepLabel = liveView.querySelector('.cu-live-view-step');
                                 if (stepLabel) stepLabel.textContent = `Step ${ssStep}`;
@@ -3035,10 +3048,17 @@ window.__reconnectCU = function() {
 };
 
 /**
- * Open the interactive browser viewer from the CU background banner.
+ * Open the CU viewer from the CU background banner — streaming client when
+ * the running session has a live virtual display, screenshot-poll modal as
+ * the automatic fallback (M4 routing, design 2026-07-23 §7.1).
  */
 window.__openCUBrowserView = function() {
-    openCUInteract();
+    import('./cu-viewer-route.js')
+        .then((m) => m.openCuViewer({
+            sessionId: getCUSessionId() || undefined,
+            deviceId: getCUDeviceId()
+        }))
+        .catch(() => openCUInteract());
 };
 
 // =============================================================================

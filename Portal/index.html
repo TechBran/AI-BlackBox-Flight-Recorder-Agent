@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui324"/> <!-- v324: on-box TTS async queue (B2) — submit+poll, progress indicator, retry -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui325"/> <!-- v325: CU live-view Portal integration (M4) — stream-vs-fallback routing, drawer Live button, no keyboard-on-tap -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui324"></script> <!-- v324: on-box TTS async queue (B2) — submit+poll, progress indicator, retry -->
+  <script type="module" src="/ui/app-modular.js?v=genui325"></script> <!-- v325: CU live-view Portal integration (M4) — stream-vs-fallback routing, drawer Live button, no keyboard-on-tap -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -1304,10 +1304,12 @@
       </div>
   </div>
 
-  <!-- Computer Use — live-view panel (M9 / D14): one shared watch-only iframe -->
+  <!-- Computer Use — live-view panel: one shared iframe hosting the
+       interactive streaming client (/cu/view/{sid}; design 2026-07-23 M4 —
+       "watch-only" label dropped, the view is interactive since D1/M2) -->
   <div id="cuLiveViewPanel" class="cu-liveview-panel" style="display:none">
     <div class="cu-liveview-head">
-      <span>Computer Use — live view (watch-only)</span>
+      <span>Computer Use — live view</span>
       <button id="cuLiveViewClose" class="cu-liveview-close">✕</button>
     </div>
     <iframe id="cuLiveViewFrame" class="cu-liveview-frame"

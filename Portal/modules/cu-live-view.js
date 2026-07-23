@@ -27,7 +27,7 @@ function renderPill(state) {
     pill.className = 'cu-inuse-pill';
     // Read `latest` at click time — never close over this render's snapshot,
     // which would go stale as sessions rotate while the pill persists.
-    pill.onclick = () => openLiveView(latest.sessions && latest.sessions[0]);
+    pill.onclick = () => openStreamPanel(latest.sessions && latest.sessions[0]);
     (document.getElementById('statusLine') || document.body).appendChild(pill);
   }
   // D14: concurrent virtual sessions → a COUNT badge, not an exclusive lock.
@@ -37,7 +37,10 @@ function renderPill(state) {
     .map(s => `${s.operator} (${s.backend} ${s.width}×${s.height})`).join(' · ');
 }
 
-function openLiveView(session) {
+// Open the streaming client panel for a /cu/sessions entry. Exported so
+// cu-viewer-route.js (M4 entry-point routing: drawer "Live" button, in-bubble
+// screenshot click, task-pill "Live") can reuse the one shared panel.
+export function openStreamPanel(session) {
   if (!session) return;
   let panel = document.getElementById('cuLiveViewPanel');
   let frame = document.getElementById('cuLiveViewFrame');

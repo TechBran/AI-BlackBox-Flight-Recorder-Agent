@@ -1021,6 +1021,31 @@
     opacity: 0.85;
 }
 
+/* ─── Live View Button (M4 — opens streaming client, modal fallback) ─── */
+.cu-drawer-live {
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    color: #86efac;
+    font-size: 0.62rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+    flex-shrink: 0;
+    line-height: 1.3;
+}
+
+.cu-drawer-live:hover:not(:disabled) {
+    background: rgba(34, 197, 94, 0.25);
+    color: #bbf7d0;
+    transform: scale(1.04);
+}
+
+.cu-drawer-live:active:not(:disabled) {
+    transform: scale(0.96);
+}
+
 /* ─── New Session Button ─── */
 .cu-drawer-new {
     padding: 3px 8px;
