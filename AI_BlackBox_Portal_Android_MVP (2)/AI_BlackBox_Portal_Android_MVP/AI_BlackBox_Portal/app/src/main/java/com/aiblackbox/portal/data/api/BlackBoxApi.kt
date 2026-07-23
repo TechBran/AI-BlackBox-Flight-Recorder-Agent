@@ -86,6 +86,22 @@ class BlackBoxApi(private val baseUrl: String) {
         .writeTimeout(STREAM_WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * On-box (qwen) TTS client. `/tts/batch` buffers its WAV and flushes response
+     * headers only AFTER the whole synth finishes (StreamingResponse(iter([combined]))
+     * server-side), so a multi-chunk clip on the one GPU can take far longer than the
+     * plain [client]'s 120s read timeout before the first response byte arrives —
+     * OkHttp then throws SocketTimeoutException at readResponseHeaders. Give TTS a
+     * bounded 300s read window (aligned with the server's per-synth QWEN_TTS_TIMEOUT).
+     * STOPGAP: the robust fix is the async TTS task-queue (submit -> poll), which makes
+     * this a short request regardless of clip length.
+     */
+    private val ttsClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .build()
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     private fun buildRequest(path: String): Request.Builder =
@@ -224,6 +240,9 @@ class BlackBoxApi(private val baseUrl: String) {
     }
 
     fun getClient(): OkHttpClient = client
+
+    /** On-box TTS client (300s read window — see [ttsClient]). Use for /tts/batch. */
+    fun getTtsClient(): OkHttpClient = ttsClient
 
     fun getBaseUrl(): String = baseUrl
 

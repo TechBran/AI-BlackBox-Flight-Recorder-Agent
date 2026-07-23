@@ -417,7 +417,7 @@ class NativeMainActivity : ComponentActivity() {
                                 .post(body.toRequestBody("application/json".toMediaType()))
                                 .build()
                             val response = withContext(Dispatchers.IO) {
-                                api.getClient().newCall(request).execute()
+                                api.getTtsClient().newCall(request).execute()
                             }
                             if (response.isSuccessful) {
                                 val bytes = withContext(Dispatchers.IO) { response.body?.bytes() }
@@ -497,7 +497,7 @@ class NativeMainActivity : ComponentActivity() {
                                         .post(body.toRequestBody("application/json".toMediaType()))
                                         .build()
                                     val response = withContext(Dispatchers.IO) {
-                                        api.getClient().newCall(request).execute()
+                                        api.getTtsClient().newCall(request).execute()
                                     }
                                     if (response.isSuccessful) {
                                         val bytes = withContext(Dispatchers.IO) { response.body?.bytes() }
@@ -558,7 +558,7 @@ class NativeMainActivity : ComponentActivity() {
                                         .post(body.toRequestBody("application/json".toMediaType()))
                                         .build()
                                     val response = withContext(Dispatchers.IO) {
-                                        api.getClient().newCall(request).execute()
+                                        api.getTtsClient().newCall(request).execute()
                                     }
                                     if (response.isSuccessful) {
                                         val bytes = withContext(Dispatchers.IO) { response.body?.bytes() }
