@@ -254,7 +254,13 @@ def tts_openai(body: dict = Body(...)):
         # client `format` hint since Qwen cannot honor mp3/opus.
         _fmt = "wav"
         try:
-            _r = qwen_tts.synthesize(_bare, _text, response_format=_fmt)
+            # B1 serialization unification: this sync-def route runs in the
+            # threadpool, so it acquires the SAME single-flight lock as the
+            # queue worker and /tts/batch via run_locked_sync — no on-box
+            # synth path may bypass it (fail-open when no loop is captured).
+            from Orchestrator import tts_queue as _ttsq
+            _r = _ttsq.run_locked_sync(
+                lambda: qwen_tts.synthesize(_bare, _text, response_format=_fmt))
         except Exception as e:
             return {"status": "fallback", "detail": str(e)}
         if _r.status_code != 200:
@@ -319,11 +325,99 @@ def tts_openai(body: dict = Body(...)):
 
 # Thread pool for parallel TTS generation (shared across requests)
 _tts_executor = ThreadPoolExecutor(max_workers=8)
-# Single-flight the on-box (qwen) BATCH synthesis: the qwen-tts member is one GPU
-# (concurrencyLimit 2, but effectively serial), so two overlapping batches only
-# contend + 429. Serialize them here so a retry/second request queues cleanly
-# behind the first instead of piling up on the GPU. Cloud providers are unaffected.
-_qwen_batch_lock = asyncio.Lock()
+# Single-flight EVERY on-box (qwen) synth path: the qwen-tts member is one GPU
+# (concurrencyLimit 2, but effectively serial), so two overlapping submissions
+# only contend + 429. B1 unification (audit): the ONE lock lives in
+# Orchestrator/tts_queue.py and is shared by the queue worker, this module's
+# /tts/batch qwen branch, and the /tts single-shot qwen branch (via
+# tts_queue.run_locked_sync — that route is sync-def and runs in the
+# threadpool). Cloud providers are unaffected.
+from Orchestrator import tts_queue as _tts_queue
+_qwen_batch_lock = _tts_queue.QWEN_SYNTH_LOCK
+
+
+@app.on_event("startup")
+async def _tts_queue_capture_loop():
+    """Let tts_queue.run_locked_sync reach the app loop from threadpool
+    (sync-def route) threads — the /tts single-shot qwen lock discipline."""
+    _tts_queue.capture_loop()
+
+
+@app.on_event("shutdown")
+async def _tts_queue_shutdown():
+    _tts_queue.shutdown_worker()
+
+
+# =============================================================================
+# B1 (2026-07-22): async on-box TTS queue. On-box (qwen) ONLY — cloud
+# providers stay synchronous and untouched. See Orchestrator/tts_queue.py for
+# the worker/design notes (in-memory v1: a restart drops queued jobs).
+# =============================================================================
+@app.post("/tts/queue")
+async def tts_queue_submit(body: dict = Body(...)):
+    """Enqueue a long on-box TTS job -> IMMEDIATE {task_id, status:"queued",
+    queue_position}. Accepts {text, voice, format?, operator?}; voice must be
+    qwen:-prefixed (or provider=="qwen"). The result is always WAV (the member
+    has no mp3/opus encoder), saved under /ui/uploads/{task_id}.wav."""
+    from Orchestrator import qwen_tts
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "No text provided")
+    voice = (body.get("voice") or "").strip()
+    provider = (body.get("provider") or "").strip().lower()
+    if not (voice.startswith("qwen:") or provider == "qwen"):
+        raise HTTPException(
+            400, "The TTS queue serves on-box (qwen) voices only — cloud "
+                 "providers stay synchronous (use /tts or /tts/batch)")
+    if not qwen_tts._tts_available():
+        raise HTTPException(
+            503, "On-box TTS stack is unavailable (local stack off/unhealthy)")
+    bare = voice.split(":", 1)[1] if voice.startswith("qwen:") else voice
+    if not bare:
+        raise HTTPException(400, "No voice provided")
+    operator = (body.get("operator") or "unknown").strip()
+    st = _tts_queue.submit(text=text, voice=bare, operator=operator)
+    return {"task_id": st["task_id"], "status": st["status"],
+            "queue_position": st["queue_position"], "eta_s": st["eta_s"]}
+
+
+@app.get("/tts/task/{task_id}")
+async def tts_queue_task_status(task_id: str):
+    """Poll one queued TTS job: {task_id, status: queued|generating|done|
+    failed|cancelled, queue_position, subbatch, subbatches_total, elapsed_s,
+    eta_s, audio_url?, error?, retryable?}."""
+    st = _tts_queue.get_status(task_id)
+    if st is None:
+        raise HTTPException(404, f"No such TTS queue task: {task_id} "
+                                 "(note: a service restart drops the queue)")
+    return st
+
+
+@app.get("/tts/queue/status")
+async def tts_queue_whole_status():
+    """Whole-queue summary for the Updates panel."""
+    return _tts_queue.queue_status()
+
+
+@app.post("/tts/task/{task_id}/retry")
+async def tts_queue_task_retry(task_id: str):
+    """Requeue a FAILED job (back of the queue, fresh auto-retry budget)."""
+    if _tts_queue.get_status(task_id) is None:
+        raise HTTPException(404, f"No such TTS queue task: {task_id}")
+    st = _tts_queue.retry(task_id)
+    if st is None:
+        raise HTTPException(409, "Only failed jobs can be retried")
+    return st
+
+
+@app.post("/tts/task/{task_id}/cancel")
+async def tts_queue_task_cancel(task_id: str):
+    """Cancel a job: queued -> immediate; generating -> cooperative (the
+    worker stops at the next sub-batch boundary). Idempotent on terminal."""
+    out = _tts_queue.cancel(task_id)
+    if out is None:
+        raise HTTPException(404, f"No such TTS queue task: {task_id}")
+    return out
 
 
 @app.post("/tts/batch")

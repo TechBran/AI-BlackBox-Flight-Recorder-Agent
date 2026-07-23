@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -174,16 +175,42 @@ def catalog_group() -> Optional[Dict[str, Any]]:
 # concurrencyLimit is exceeded (a concurrent or piled-up request — e.g. an
 # Auto-TTS queue firing sentences in parallel, or a user retrying a slow batch).
 # One GPU serializes synthesis anyway, so back off and retry rather than
-# hard-failing the caller (which 502'd the whole batch). Env-overridable.
-def _qwen_429_retries() -> int:
+# hard-failing the caller (which 502'd the whole batch).
+#
+# DEADLINE-based (audit 2026-07-22): the old fixed 5-attempt count capped total
+# backoff at 13.5s, which could not outlast a REAL synth holding the member
+# (a long batch runs minutes). Retry while elapsed < QWEN_TTS_429_DEADLINE_S
+# (default 60s) with the same capped exponential backoff.
+def _429_deadline_s() -> float:
     try:
-        return int(os.environ.get("QWEN_TTS_429_RETRIES", "5"))
+        return float(os.environ.get("QWEN_TTS_429_DEADLINE_S", "60"))
     except ValueError:
-        return 5
+        return 60.0
 
 
 _QWEN_429_BACKOFF_BASE = 0.5
 _QWEN_429_BACKOFF_MAX = 6.0
+
+# test seams — the deadline tests drive a fake clock through these
+_monotonic = time.monotonic
+_sleep = time.sleep
+
+
+def _post_retry_429(do_post) -> "requests.Response":
+    """Run do_post() and retry 429s with capped exponential backoff until the
+    QWEN_TTS_429_DEADLINE_S budget is spent; then return the last response
+    (callers surface the 429 like any other non-200)."""
+    deadline = _429_deadline_s()
+    start = _monotonic()
+    attempts = 0
+    while True:
+        r = do_post()
+        if r.status_code == 429 and (_monotonic() - start) < deadline:
+            attempts += 1
+            _sleep(min(_QWEN_429_BACKOFF_BASE * (2 ** (attempts - 1)),
+                       _QWEN_429_BACKOFF_MAX))
+            continue
+        return r
 
 
 def synthesize(voice: str, text: str, response_format: str = "wav",
@@ -192,14 +219,14 @@ def synthesize(voice: str, text: str, response_format: str = "wav",
     the qwen-tts member). `voice` is the BARE token (preset name or profile
     slug — the caller strips any `qwen:` prefix). Returns the raw Response so
     the route decides stream-vs-file. Raises on transport error. A 429 (member
-    concurrency limit) is retried with capped exponential backoff so contention
-    with another on-box synth recovers instead of 502-ing the caller.
+    concurrency limit) is retried with capped exponential backoff until the
+    QWEN_TTS_429_DEADLINE_S budget elapses so contention with another on-box
+    synth recovers instead of 502-ing the caller.
 
     NB: the M6 server emits WAV/PCM only — its /v1/audio/speech 400s any
     response_format not in ('wav','pcm') (Task 6.4, `test_speech_bad_format_400`).
     Default 'wav' (a proper RIFF container the browser plays); callers pass
     'wav'/'pcm', never 'mp3'/'opus' (there is no mp3/opus encoder in the server)."""
-    import time
     req = {
         "model": QWEN_TTS_MODEL,
         "input": text,
@@ -207,17 +234,8 @@ def synthesize(voice: str, text: str, response_format: str = "wav",
         "response_format": response_format,
         "stream": stream,
     }
-    retries = _qwen_429_retries()
-    attempts = 0
-    while True:
-        r = requests.post(f"{_base_url()}/audio/speech", json=req,
-                          timeout=QWEN_TTS_TIMEOUT)
-        if r.status_code == 429 and attempts < retries:
-            attempts += 1
-            time.sleep(min(_QWEN_429_BACKOFF_BASE * (2 ** (attempts - 1)),
-                           _QWEN_429_BACKOFF_MAX))
-            continue
-        return r
+    return _post_retry_429(lambda: requests.post(
+        f"{_base_url()}/audio/speech", json=req, timeout=QWEN_TTS_TIMEOUT))
 
 
 # --------------------------------------------------------------------------
@@ -248,11 +266,10 @@ def synthesize_batch(voice: str, texts: List[str],
     Raises QwenBatchUnsupported on 404/405 (old member) and RuntimeError on any
     other non-200 — the /tts/batch route falls back to the sequential path on
     the former and surfaces the latter. 429s back off exactly like
-    synthesize(). Timeout scales with the batch size: the member holds ONE
-    request for the whole reply (sub-batched internally), so the flat 300s
-    single-chunk budget gets a per-chunk allowance on top."""
+    synthesize() (deadline-based). Timeout scales with the batch size: the
+    member holds ONE request for the whole reply (sub-batched internally), so
+    the flat 300s single-chunk budget gets a per-chunk allowance on top."""
     import base64
-    import time
     req = {
         "model": QWEN_TTS_MODEL,
         "inputs": list(texts),
@@ -260,17 +277,8 @@ def synthesize_batch(voice: str, texts: List[str],
         "response_format": response_format,
     }
     timeout = QWEN_TTS_TIMEOUT + 20 * len(texts)
-    retries = _qwen_429_retries()
-    attempts = 0
-    while True:
-        r = requests.post(upstream_url("/v1/audio/speech/batch"), json=req,
-                          timeout=timeout)
-        if r.status_code == 429 and attempts < retries:
-            attempts += 1
-            time.sleep(min(_QWEN_429_BACKOFF_BASE * (2 ** (attempts - 1)),
-                           _QWEN_429_BACKOFF_MAX))
-            continue
-        break
+    r = _post_retry_429(lambda: requests.post(
+        upstream_url("/v1/audio/speech/batch"), json=req, timeout=timeout))
     if r.status_code in (404, 405):
         raise QwenBatchUnsupported(f"member has no batch endpoint (HTTP {r.status_code})")
     if r.status_code != 200:

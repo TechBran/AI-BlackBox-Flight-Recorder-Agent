@@ -134,21 +134,52 @@ def batch_vram_headroom_mb() -> int:
         return 2048
 
 
+# CJK scripts pack far more speech per codepoint than Latin text: one CJK
+# character is roughly a syllable (~2-4 audio frames at 12Hz) where Latin runs
+# ~5 chars/word. Budgeting CJK at the Latin 2.0 frames/char rate starved real
+# Chinese/Japanese/Korean chunks (audit 2026-07-22) — count them at 4.5.
+_CJK_RANGES = (
+    (0x3040, 0x309F),   # Hiragana
+    (0x30A0, 0x30FF),   # Katakana
+    (0x3400, 0x4DBF),   # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0xAC00, 0xD7A3),   # Hangul Syllables
+)
+
+
+def _is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
+
+
 def max_new_tokens_for(text: str) -> int:
     """Bound the autoregressive audio-frame budget for ONE synth call, sized to the
     chunk's text length. The model's default is 8192 frames (~11 min at 12Hz); if a
     generation fails to emit an end-of-speech token it runs to that cap, exceeding
     QWEN_TTS_TIMEOUT and 502-ing the whole batch (Brandon 2026-07-22: 'failed due to
-    timeout'). Natural 12Hz speech is ~0.8 frames/char (~15 chars/s); we allow ~2.5x
-    (QWEN_TTS_FRAMES_PER_CHAR) for pauses/slow voices, a floor for very short text,
-    and a hard ceiling backstop. This keeps every chunk well within the model's
-    generation budget AND its per-chunk synth well under the timeout."""
+    timeout'). Natural 12Hz speech is ~0.8 frames/char (~15 chars/s) for Latin-ish
+    text; we allow ~2.5x (QWEN_TTS_FRAMES_PER_CHAR) for pauses/slow voices. SCRIPT-
+    AWARE (audit fix): CJK codepoints (CJK Unified/Hiragana/Katakana/Hangul) count
+    at QWEN_TTS_FRAMES_PER_CHAR_CJK (4.5) — one CJK char ≈ one syllable, so the
+    Latin rate under-budgeted CJK chunks and truncated their audio. A floor covers
+    very short text and a hard ceiling backstops runaways. This keeps every chunk
+    well within the model's generation budget AND well under the timeout."""
     def _int(name, default):
         try:
             return int(os.environ.get(name, default))
         except ValueError:
             return int(default)
-    per_char = float(os.environ.get("QWEN_TTS_FRAMES_PER_CHAR", "2.0"))
+
+    def _float(name, default):
+        try:
+            return float(os.environ.get(name, default))
+        except ValueError:
+            return float(default)
+    per_char = _float("QWEN_TTS_FRAMES_PER_CHAR", "2.0")
+    per_char_cjk = _float("QWEN_TTS_FRAMES_PER_CHAR_CJK", "4.5")
     floor = _int("QWEN_TTS_MIN_NEW_TOKENS", 256)
     ceil = _int("QWEN_TTS_MAX_NEW_TOKENS", 3072)
-    return max(floor, min(ceil, int(len(text or "") * per_char) + floor))
+    t = text or ""
+    cjk = sum(1 for ch in t if _is_cjk(ch))
+    frames = int((len(t) - cjk) * per_char + cjk * per_char_cjk)
+    return max(floor, min(ceil, frames + floor))
