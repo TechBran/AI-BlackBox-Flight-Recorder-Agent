@@ -206,6 +206,15 @@ def _spawn_stream_procs(display: str, xauth: str) -> Dict[str, subprocess.Popen]
     procs["websockify"] = subprocess.Popen(
         ["websockify", f"127.0.0.1:{MAIN_WS_PORT}", f"127.0.0.1:{MAIN_VNC_PORT}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Wait for the BRIDGE port too (first-connect race, field-found 2026-07-23:
+    # the WS proxy dialed :6099 before websockify bound it -> 1011 'Upstream
+    # unavailable' on the very first main-desktop viewer; the second connect
+    # worked because the pair was already up).
+    if not _wait_port(MAIN_WS_PORT):
+        for p in procs.values():
+            _terminate_proc(p)
+        raise RuntimeError(
+            f"websockify did not come up on 127.0.0.1:{MAIN_WS_PORT}")
     return procs
 
 
