@@ -759,30 +759,10 @@ fun CuScreen(
             onNewSession = onNewSession
         )
 
-        // ── Provider (backend) + Model selector row ──
-        // Provider here is a backend selector (Anthropic vs Google) — local-only for device filtering.
-        // The actual chat provider stays "computer-use"; the model ID determines which backend runs.
-        CuProviderModelRow(
-            selectedBackend = selectedProvider,
-            model = model,
-            liveModels = liveModels,
-            cuModelBackends = cuModelBackends,
-            providerExpanded = providerDropdownExpanded,
-            modelExpanded = modelDropdownExpanded,
-            onProviderExpandedChange = { providerDropdownExpanded = it },
-            onModelExpandedChange = { modelDropdownExpanded = it },
-            onBackendSelected = { backend ->
-                viewModel.selectProvider(backend)
-                // Auto-select first model for new backend
-                val firstModel = cuModelsForBackend(backend, liveModels, cuModelBackends).firstOrNull()?.first
-                if (firstModel != null) onModelChange(firstModel)
-                providerDropdownExpanded = false
-            },
-            onModelSelected = { m ->
-                onModelChange(m)
-                modelDropdownExpanded = false
-            }
-        )
+        // ── Provider + Model row REMOVED (Brandon fit pass 2026-07-23) ──
+        // The composer's model/provider pills already select the CU model on
+        // this screen ("we don't need both") — the top row only cost vertical
+        // space. CuProviderModelRow stays in the file for potential reuse.
 
         // ── Device selector ──
         CuDeviceSelector(

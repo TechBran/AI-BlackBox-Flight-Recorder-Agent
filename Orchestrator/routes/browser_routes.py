@@ -396,11 +396,14 @@ def _cu_view_main() -> HTMLResponse:
     return _serve_cu_client_page("main")
 
 
-def _cu_view_auto():
+def _cu_view_auto(query: str = ""):
     """GET /cu/view/auto — 302 to the right surface: a live agent/manual
     session first, else the main desktop when available, else a friendly
     nothing-to-show page naming the reason. Policy lives in the PURE
-    native_stream.resolve_auto_view; this route only gathers inputs."""
+    native_stream.resolve_auto_view; this route only gathers inputs.
+    The caller's query string is PRESERVED across the redirect — the Android
+    app enters via auto carrying ?ti=&bi= host-inset params (fit pass
+    2026-07-23) and the viewer page reads them from its own URL."""
     from fastapi.responses import RedirectResponse
     from Orchestrator.browser import native_stream
     from Orchestrator.browser.display import get_allocator
@@ -408,7 +411,8 @@ def _cu_view_auto():
         get_allocator().active_sessions(), native_stream.probe_main_desktop())
     if target["kind"] == "none":
         return HTMLResponse(_CU_NOTHING_TO_SHOW.format(reason=target["reason"]))
-    return RedirectResponse(target["url"], status_code=302)
+    url = target["url"] + (f"?{query}" if query else "")
+    return RedirectResponse(url, status_code=302)
 
 
 @app.post("/cu/view/diag")
@@ -445,7 +449,7 @@ def cu_view(session_id: str, request: Request):
     if session_id == "main":
         return _cu_view_main()
     if session_id == "auto":
-        return _cu_view_auto()
+        return _cu_view_auto(request.url.query or "")
     from Orchestrator.browser.display import get_allocator
     h = get_allocator().get(session_id)
     if h is None:

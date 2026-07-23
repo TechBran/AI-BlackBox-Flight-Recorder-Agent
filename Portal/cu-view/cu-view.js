@@ -43,6 +43,23 @@ import {
 const diag = window.__cuvDiag || (() => {});
 diag("module-boot");
 
+// ── Host insets (Fold fit pass 2026-07-23) ───────────────────────────────
+// The Android app draws its WebView edge-to-edge AND floats its composer
+// over the page bottom; it appends ?ti=<px>&bi=<px> so the page's bars clear
+// the system status bar and the composer. Browsers omit the params and fall
+// back to the CSS safe-area env() defaults.
+{
+    const q = new URLSearchParams(location.search);
+    const ti = parseInt(q.get("ti") || "", 10);
+    const bi = parseInt(q.get("bi") || "", 10);
+    if (Number.isFinite(ti) && ti >= 0) {
+        document.documentElement.style.setProperty("--cuv-inset-top", `${ti}px`);
+    }
+    if (Number.isFinite(bi) && bi >= 0) {
+        document.documentElement.style.setProperty("--cuv-inset-bottom", `${bi}px`);
+    }
+}
+
 /** Sample the RFB canvas + report full render geometry. Distinguishes the
  *  black-screen failure modes with numbers instead of screenshots: mean
  *  luminance > ~5 while the user sees black = the canvas HAS the desktop and
@@ -857,11 +874,11 @@ async function boot() {
     });
 
     buildExtraKeys();
-    // Default: visible on coarse pointers, else hidden; persisted choice wins.
+    // Default HIDDEN everywhere (Brandon fit pass 2026-07-23: the key rows
+    // collapse behind the topbar "Keys" toggle — screen space is for the
+    // desktop). Persisted choice wins.
     const savedKeys = localStorage.getItem(LS_KEYS_VISIBLE);
-    setExtraKeysVisible(savedKeys === null
-        ? matchMedia("(pointer: coarse)").matches
-        : savedKeys === "1");
+    setExtraKeysVisible(savedKeys === "1");
 
     bindTouchLayer();
     bindKeyboard();

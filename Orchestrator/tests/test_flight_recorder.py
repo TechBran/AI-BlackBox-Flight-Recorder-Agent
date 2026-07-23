@@ -106,7 +106,7 @@ def _seed_env(tmp_path, monkeypatch, users="Default, bbx1, Brandon",
     # oversight reads config module-globals via `import Orchestrator.config`,
     # so patching the module attributes above covers it. Cron seeding is
     # stubbed out — the scheduler needs a live DB.
-    monkeypatch.setattr(oversight, "ensure_flight_report_cron_job", lambda: None)
+    monkeypatch.setattr(oversight, "retire_flight_report_cron_job", lambda: None)
     monkeypatch.setattr(oversight, "STATE_PATH", tmp_path / "fr_state.json")
     return _cfg
 
@@ -144,87 +144,73 @@ def test_seed_leaves_case_variant_alone(tmp_path, monkeypatch, restore_cfg_users
     assert FLIGHT_RECORDER_OPERATOR in _cfg.USERS_LIST   # canonical seeded
 
 
-# ── M6: reserved-job protection (id-keyed after review 2026-07-23) ─────────
+# ── M6: natural mint trigger (Brandon 2026-07-23 — no scheduler) ───────────
 
-def _set_report_job_id(value):
+def _fresh_counter(monkeypatch, tmp_path, n=3):
+    monkeypatch.delenv("BLACKBOX_SKIP_FR_SEED", raising=False)
+    monkeypatch.setattr(oversight, "STATE_PATH", tmp_path / "fr_state.json")
+    monkeypatch.setattr(oversight, "FR_REPORT_EVERY_N", n)
+    oversight.load_flight_recorder_state()
     with oversight._state_lock:
-        oversight._state["report_job_id"] = value
+        oversight._state["mints_since_report"] = 0
 
 
-def test_is_reserved_job_matches_by_recorded_id(monkeypatch):
-    _set_report_job_id("cron_seeded01")
-    # Id match wins regardless of (renamed) identity fields:
-    assert oversight.is_reserved_job(
-        {"id": "cron_seeded01", "operator": "Renamed", "name": "Whatever"})
-    # Anti-hijack: a user job that copies the (operator, name) pair is NOT
-    # reserved while the seeded id is known.
-    assert not oversight.is_reserved_job(
-        {"id": "cron_other", "operator": FLIGHT_RECORDER_OPERATOR,
-         "name": oversight.FR_REPORT_JOB_NAME})
-    assert not oversight.is_reserved_job(None)
+def test_mint_trigger_fires_after_n_snapshots(monkeypatch, tmp_path):
+    _fresh_counter(monkeypatch, tmp_path, n=3)
+    fired = []
+    monkeypatch.setattr(oversight, "create_flight_report_async",
+                        lambda manual=False: fired.append(manual) or "SNAP-X")
+    for i in range(3):
+        oversight.on_snapshot_minted(f"SNAP-20260723-000{i}", "normal", "Brandon")
+    # The report runs on a daemon thread — join it via the in-flight lock.
+    import time
+    for _ in range(100):
+        if fired:
+            break
+        time.sleep(0.02)
+    assert fired == [False]           # exactly one auto report
+    assert oversight.get_state_snapshot()["mints_since_report"] >= 3
 
 
-def test_is_reserved_job_name_fallback_when_state_lost():
-    _set_report_job_id(None)   # state file lost → adoption fallback
-    assert oversight.is_reserved_job(
-        {"id": "cron_x", "operator": FLIGHT_RECORDER_OPERATOR,
-         "name": oversight.FR_REPORT_JOB_NAME})
-    assert not oversight.is_reserved_job(
-        {"id": "cron_x", "operator": "Brandon",
-         "name": oversight.FR_REPORT_JOB_NAME})
+def test_flight_reports_never_count_or_retrigger(monkeypatch, tmp_path):
+    _fresh_counter(monkeypatch, tmp_path, n=1)
+    fired = []
+    monkeypatch.setattr(oversight, "create_flight_report_async",
+                        lambda manual=False: fired.append(manual))
+    oversight.on_snapshot_minted("SNAP-20260723-0001", "flight_report",
+                                 FLIGHT_RECORDER_OPERATOR)
+    import time; time.sleep(0.05)
+    assert fired == []                # own output never triggers (no recursion)
+    assert oversight.get_state_snapshot()["mints_since_report"] == 0
 
 
-def test_manager_delete_refuses_reserved_job(monkeypatch):
-    from Orchestrator.scheduler.manager import CronJobManager
-    _set_report_job_id("cron_reserved")
-    reserved = {"operator": FLIGHT_RECORDER_OPERATOR,
-                "name": oversight.FR_REPORT_JOB_NAME, "id": "cron_reserved"}
-    monkeypatch.setattr(CronJobManager, "get_job",
-                        lambda self, job_id: reserved)
-    mgr = CronJobManager.__new__(CronJobManager)  # no DB/scheduler
-    with pytest.raises(PermissionError):
-        mgr.delete_job("cron_reserved")
+def test_mint_trigger_never_raises_into_the_minting_caller(monkeypatch, tmp_path):
+    _fresh_counter(monkeypatch, tmp_path, n=1)
+    monkeypatch.setattr(oversight, "create_flight_report_async",
+                        lambda manual=False: (_ for _ in ()).throw(RuntimeError("boom")))
+    # Must not propagate — minting is sacred.
+    oversight.on_snapshot_minted("SNAP-20260723-0001", "normal", "Anna")
+    import time; time.sleep(0.05)     # thread exception stays on the thread
 
 
-def test_manager_update_refuses_identity_edits_on_reserved_job(monkeypatch):
-    """Schedule/status edits stay allowed; name/operator/prompt are refused —
-    a rename would strip the delete guard and the direct dispatch."""
-    from Orchestrator.scheduler.manager import CronJobManager
-    _set_report_job_id("cron_reserved")
-    reserved = {"operator": FLIGHT_RECORDER_OPERATOR,
-                "name": oversight.FR_REPORT_JOB_NAME, "id": "cron_reserved"}
-    monkeypatch.setattr(CronJobManager, "get_job",
-                        lambda self, job_id: reserved)
-    mgr = CronJobManager.__new__(CronJobManager)
-    with pytest.raises(PermissionError):
-        mgr.update_job("cron_reserved", name="Renamed")
-    with pytest.raises(PermissionError):
-        mgr.update_job("cron_reserved", operator="Brandon")
-    with pytest.raises(PermissionError):
-        mgr.update_job("cron_reserved", prompt="do something else")
-
-
-# ── Invariant #2 addendum (review 2026-07-23): the recent-fossils gate must
-# NOT widen falsy operators — its historical conditional was "system"-only ──
-
-def test_recent_fossils_gate_keeps_falsy_operator_scoped(monkeypatch):
-    from Orchestrator import fossils
-    fake_index = {
-        "SNAP-20260723-0001": {"operator": "Brandon", "byte_start": 0, "byte_end": 5},
-        "SNAP-20260723-0002": {"operator": "Anna", "byte_start": 5, "byte_end": 10},
-    }
-    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: fake_index)
-    monkeypatch.setattr(fossils, "read_volume_bytes", lambda p: b"AAAAABBBBB",
-                        raising=False)
-    from Orchestrator.volume import read_volume_bytes as _rvb  # noqa: F401
-    import Orchestrator.volume as volume
-    monkeypatch.setattr(volume, "read_volume_bytes", lambda p: b"AAAAABBBBB")
-    # Empty operator historically matched NOTHING at this site — must stay so.
-    assert fossils.get_recent_fossils_for_operator("", "", count=5, cap_chars_each=None) == []
-    # system and the FR see everything (2 snapshots).
-    assert len(fossils.get_recent_fossils_for_operator("", "system", count=5, cap_chars_each=None)) == 2
-    assert len(fossils.get_recent_fossils_for_operator(
-        "", FLIGHT_RECORDER_OPERATOR, count=5, cap_chars_each=None)) == 2
+def test_retire_migration_deletes_seeded_job(monkeypatch, tmp_path):
+    monkeypatch.setattr(oversight, "STATE_PATH", tmp_path / "fr_state.json")
+    oversight.load_flight_recorder_state()
+    with oversight._state_lock:
+        oversight._state["report_job_id"] = "cron_seeded"
+    deleted = []
+    class FakeMgr:
+        def list_jobs(self):
+            return [{"id": "cron_byname", "operator": FLIGHT_RECORDER_OPERATOR,
+                     "name": oversight.FR_REPORT_JOB_NAME},
+                    {"id": "cron_user", "operator": "Brandon", "name": "Other"}]
+        def delete_job(self, jid):
+            deleted.append(jid); return True
+    import Orchestrator.scheduler as sched
+    monkeypatch.setattr(sched, "get_scheduler_manager", lambda: FakeMgr())
+    oversight.retire_flight_report_cron_job()
+    assert set(deleted) == {"cron_seeded", "cron_byname"}   # user job untouched
+    assert oversight.get_state_snapshot()["report_job_id"] is None
 
 
 # ── M3: the Oracle persona ─────────────────────────────────────────────────

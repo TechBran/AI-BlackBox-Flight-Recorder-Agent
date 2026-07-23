@@ -23,14 +23,16 @@ from Orchestrator.config import (
 
 STATE_PATH = Path("Manifest/flight_recorder_state.json")
 
-# Reserved seeded job identity: (operator, name) is the match key — the id is
-# random at create time and recorded in state. delete_job refuses this pair.
+# Retired scheduled-job identity (kept for the retire migration only).
 FR_REPORT_JOB_NAME = "Flight Report"
-FR_REPORT_JOB_SCHEDULE_DEFAULT = "0 5 * * *"   # daily 05:00 box-local
 
 FR_REPORT_SOURCE_COUNT = CFG.getint("flight_recorder", "source_count", fallback=25)
 FR_MIN_NEW_SNAPSHOTS = CFG.getint("flight_recorder", "min_new_snapshots", fallback=5)
 FR_ESCALATE_CRITICAL = CFG.getboolean("flight_recorder", "escalate_critical", fallback=True)
+# Natural trigger (Brandon 2026-07-23): a flight report mints after every N
+# snapshots minted ACROSS ALL OPERATORS — mirrors the per-operator checkpoint
+# rhythm, no scheduler involved. "It just naturally happens as users mint."
+FR_REPORT_EVERY_N = CFG.getint("flight_recorder", "report_every_n_snapshots", fallback=25)
 
 _state_lock = threading.Lock()
 _state: Dict[str, Any] = {}
@@ -60,6 +62,7 @@ def load_flight_recorder_state() -> Dict[str, Any]:
         _state.setdefault("last_report_at", None)
         _state.setdefault("adopted_preexisting", False)
         _state.setdefault("report_job_id", None)
+        _state.setdefault("mints_since_report", 0)
         _state.setdefault("synthesis_failures", 0)
         _state.setdefault("last_synthesis_error", None)
         return dict(_state)
@@ -133,55 +136,80 @@ def ensure_flight_recorder() -> None:
         # Seeding must never take the service down; next boot retries.
         print(f"[FLIGHT-RECORDER] seeding failed (will retry next boot): {e}")
     try:
-        ensure_flight_report_cron_job()
+        retire_flight_report_cron_job()
     except Exception as e:
-        print(f"[FLIGHT-RECORDER] report-job seeding failed: {e}")
+        print(f"[FLIGHT-RECORDER] report-job retirement failed (non-fatal): {e}")
 
 
-def ensure_flight_report_cron_job() -> None:
-    """Seed-if-absent the daily flight-report job. Honors user edits: an
-    existing job (any schedule, paused or active) is left untouched."""
-    from Orchestrator.scheduler import get_scheduler_manager
-    manager = get_scheduler_manager()
-    existing = [j for j in manager.list_jobs()
-                if j.get("operator") == FLIGHT_RECORDER_OPERATOR
-                and j.get("name") == FR_REPORT_JOB_NAME]
-    if existing:
-        with _state_lock:
-            _state["report_job_id"] = existing[0]["id"]
-        _save_state()
-        return
-    job = manager.create_job(
-        name=FR_REPORT_JOB_NAME,
-        prompt="Generate the flight report. (Reserved job — the scheduler "
-               "dispatches this directly to the oversight module; the prompt "
-               "is documentation, not an LLM instruction.)",
-        schedule=FR_REPORT_JOB_SCHEDULE_DEFAULT,
-        operator=FLIGHT_RECORDER_OPERATOR,
-    )
+def retire_flight_report_cron_job() -> None:
+    """MIGRATION (Brandon 2026-07-23): the scheduled report job is retired —
+    reports now trigger NATURALLY from mint activity (on_snapshot_minted,
+    every FR_REPORT_EVERY_N snapshots across ALL operators). Boxes that got
+    the short-lived seeded job (dev + MS02) have it deleted here; idempotent
+    no-op everywhere else."""
     with _state_lock:
-        _state["report_job_id"] = job["id"]
-    _save_state()
-    print(f"[FLIGHT-RECORDER] seeded report job {job['id']} "
-          f"({FR_REPORT_JOB_SCHEDULE_DEFAULT})")
+        job_id = _state.get("report_job_id")
+    try:
+        from Orchestrator.scheduler import get_scheduler_manager
+        manager = get_scheduler_manager()
+        victims = [job_id] if job_id else []
+        victims += [j["id"] for j in manager.list_jobs()
+                    if j.get("operator") == FLIGHT_RECORDER_OPERATOR
+                    and j.get("name") == FR_REPORT_JOB_NAME
+                    and j["id"] not in victims]
+        for vid in victims:
+            try:
+                if manager.delete_job(vid):
+                    print(f"[FLIGHT-RECORDER] retired scheduled report job {vid} "
+                          "(reports are mint-triggered now)")
+            except Exception as e:
+                print(f"[FLIGHT-RECORDER] could not retire job {vid}: {e}")
+    finally:
+        if job_id:
+            with _state_lock:
+                _state["report_job_id"] = None
+            _save_state()
 
 
-def is_reserved_job(job: Optional[Dict[str, Any]]) -> bool:
-    """The seeded report job may be rescheduled/disabled but never deleted and
-    never identity-renamed. PRIMARY match: the persisted report_job_id (ids
-    are immutable; review 2026-07-23 — a (operator, name) match alone breaks
-    the moment the job is renamed, and hijacks user jobs that happen to share
-    the pair). The (operator, name) pair is the FALLBACK for state-file loss.
-    """
-    if not job:
-        return False
-    recorded = get_state_snapshot().get("report_job_id")
-    if recorded and job.get("id") == recorded:
-        return True
-    if recorded:
-        return False   # id known and different → an ordinary job, never hijacked
-    return bool(job.get("operator") == FLIGHT_RECORDER_OPERATOR
-                and job.get("name") == FR_REPORT_JOB_NAME)
+# ── Natural report trigger (Brandon 2026-07-23) ────────────────────────────
+
+# Non-blocking in-flight guard: at most one auto report at a time.
+_report_in_flight = threading.Lock()
+
+
+def on_snapshot_minted(snap_id: str, snap_type: str, operator: str) -> None:
+    """Called by fossils.update_snapshot_index after EVERY mint — the one
+    choke point all mint paths share. Counts snapshots across ALL operators
+    (checkpoints and app/tool mints included — 'all of the snapshots that go
+    in the system'); after FR_REPORT_EVERY_N, fires a flight report on a
+    background thread. The FR's own flight reports never count and never
+    re-trigger (no recursion). Must NEVER raise into the minting caller."""
+    try:
+        import os
+        if os.getenv("BLACKBOX_SKIP_FR_SEED") == "1":
+            return   # test harnesses: no background reports
+        if snap_type == "flight_report":
+            return
+        with _state_lock:
+            _state["mints_since_report"] = _state.get("mints_since_report", 0) + 1
+            due = _state["mints_since_report"] >= FR_REPORT_EVERY_N
+        if not due:
+            return
+        if not _report_in_flight.acquire(blocking=False):
+            return   # one already synthesizing; the counter keeps it due
+        def _run():
+            try:
+                create_flight_report_async(manual=False)
+            finally:
+                _report_in_flight.release()
+        # Thread, not inline: the caller usually holds mint_lock; the report
+        # takes mint_lock itself for its own append and must not deadlock.
+        threading.Thread(target=_run, daemon=True,
+                         name="flight-report-auto").start()
+        print(f"[FLIGHT-RECORDER] {FR_REPORT_EVERY_N} snapshots since last "
+              f"report — auto flight report triggered by {snap_id}")
+    except Exception as e:
+        print(f"[FLIGHT-RECORDER] mint-trigger error (non-fatal): {e}")
 
 
 # ── Watchtower signal collector (§2.2 — all read-only) ─────────────────────
@@ -459,6 +487,8 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
         if not summary:
             with _state_lock:
                 _state["synthesis_failures"] = _state.get("synthesis_failures", 0) + 1
+                # Back off a full cycle rather than re-firing on every mint.
+                _state["mints_since_report"] = 0
             _save_state()
             print("[FLIGHT-RECORDER] synthesis failed — recorded, will report next cycle")
             return None
@@ -507,6 +537,7 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
         with _state_lock:
             _state["last_report_id"] = snap_id
             _state["last_report_at"] = utc
+            _state["mints_since_report"] = 0   # natural-trigger cycle restarts
         _save_state()
         print(f"[FLIGHT-RECORDER] minted {snap_id} ({len(summary)} chars, "
               f"operators: {', '.join(operators_covered)})")
@@ -520,6 +551,7 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
         with _state_lock:
             _state["synthesis_failures"] = _state.get("synthesis_failures", 0) + 1
             _state["last_synthesis_error"] = str(e)
+            _state["mints_since_report"] = 0   # back off a full cycle
         _save_state()
         return None
 

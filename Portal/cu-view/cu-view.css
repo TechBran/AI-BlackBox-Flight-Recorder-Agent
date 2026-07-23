@@ -20,12 +20,22 @@ body {
 
 /* ── Top status bar ─────────────────────────────────────────────────── */
 
+/* Host insets (Fold fit pass 2026-07-23): --cuv-inset-top/bottom default to
+   the safe-area env (browsers); the Android app overrides them via ?ti=&bi=
+   query params (cu-view.js) because its WebView draws edge-to-edge under the
+   status bar AND floats its own composer over the page bottom. */
+:root {
+    --cuv-inset-top: env(safe-area-inset-top, 0px);
+    --cuv-inset-bottom: env(safe-area-inset-bottom, 0px);
+}
+
 #cuvTopbar {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 5px 10px;
+    padding-top: calc(5px + var(--cuv-inset-top));
     background: #131318;
     border-bottom: 1px solid #26262e;
     font-size: 12px;
@@ -232,10 +242,29 @@ body {
     background: #131318;
     border-top: 1px solid #26262e;
     padding: 4px 6px;
+    padding-bottom: calc(4px + var(--cuv-inset-bottom));
     user-select: none;
     -webkit-user-select: none;
 }
 #cuvExtraKeys[hidden] { display: none; }
+
+/* Bottom inset lands on whichever bar is LAST visible: when the extra keys
+   are hidden (the new default) the switcher rail carries it instead. */
+#cuvSwitcher { padding-bottom: calc(5px + var(--cuv-inset-bottom)); }
+#cuvSwitcher:has(~ #cuvExtraKeys:not([hidden])) { padding-bottom: 5px; }
+
+/* ── Narrow screens (Fold cover / candy-bar portrait) ─────────────────
+   Fit pass 2026-07-23: drop the informational badges, tighten paddings —
+   session label + Fit/Touchpad/Keys/⌨ must all stay reachable at ~360px. */
+@media (max-width: 560px) {
+    #cuvTopbar { gap: 4px; padding-left: 6px; padding-right: 6px; }
+    #cuvResBadge, #cuvZoomBadge { display: none; }
+    #cuvSessionLabel {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        max-width: 26vw;
+    }
+    .cuv-tbtn { padding: 4px 8px; }
+}
 
 .cuv-keys-row {
     display: flex;

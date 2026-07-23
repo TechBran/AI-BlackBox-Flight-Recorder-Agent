@@ -92,24 +92,6 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
         RuntimeError: If the chat API is unreachable, the task fails, or
             the polling timeout is exceeded.
     """
-    # Flight Recorder reserved job: direct dispatch to the oversight module —
-    # no LLM round-trip to *ask* for a report (design 2026-07-23 §7). The
-    # report synthesis itself is the LLM call, inside create_flight_report.
-    # The import guard is NARROW and LOUD (review 2026-07-23): a broken
-    # oversight import must never silently fall through to the /chat path
-    # (which would burn an LLM turn on the placeholder prompt daily).
-    _fr_dispatch = None
-    try:
-        from Orchestrator.oversight import is_reserved_job, create_flight_report_async
-        _fr_dispatch = (is_reserved_job, create_flight_report_async)
-    except ImportError as e:
-        print(f"[FLIGHT-RECORDER] oversight module unavailable in executor: {e}")
-    if _fr_dispatch and _fr_dispatch[0](job):
-        snap_id = await asyncio.to_thread(_fr_dispatch[1], False)
-        return (f"Flight report minted: {snap_id}" if snap_id
-                else "Flight report skipped (insufficient activity) or failed — "
-                     "see /oversight/status")
-
     start_time = time.monotonic()
     prompt = job["prompt"]
     model = job.get("model", "gemini")

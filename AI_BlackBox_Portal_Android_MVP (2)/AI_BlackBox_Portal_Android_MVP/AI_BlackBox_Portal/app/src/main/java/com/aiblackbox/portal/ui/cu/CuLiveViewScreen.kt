@@ -3,9 +3,13 @@ package com.aiblackbox.portal.ui.cu
 import android.annotation.SuppressLint
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.viewinterop.AndroidView
 
 /** CU live view (D9: WebView reuse): loads ${baseUrl}/cu/view/{sessionId} — the
@@ -17,6 +21,21 @@ import androidx.compose.ui.viewinterop.AndroidView
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Modifier) {
+    // Host insets → page (Fold fit pass 2026-07-23): the WebView draws
+    // edge-to-edge under the status bar, and the activity floats its composer
+    // + model pills OVER the page bottom. ?ti=&bi= (CSS px == dp) let the
+    // served viewer pad its topbar clear of the status bar and lift its
+    // switcher/extra-keys bars above the composer stack. The /cu/view/auto
+    // 302 preserves the params server-side.
+    val density = LocalDensity.current
+    val topInsetDp = with(density) {
+        WindowInsets.statusBars.getTop(this).toDp().value.toInt()
+    }
+    // Nav bar + measured-composer allowance (input bubble + pill row + gaps —
+    // mirrors CuScreen's bottomClearance constant).
+    val bottomInsetDp = with(density) {
+        WindowInsets.navigationBars.getBottom(this).toDp().value.toInt()
+    } + 118
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { ctx ->
@@ -77,7 +96,8 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
                 }
                 setBackgroundColor(android.graphics.Color.BLACK)
                 webViewClient = WebViewClient()
-                loadUrl("${baseUrl.trimEnd('/')}/cu/view/$sessionId")
+                loadUrl("${baseUrl.trimEnd('/')}/cu/view/$sessionId" +
+                        "?ti=$topInsetDp&bi=$bottomInsetDp")
             }
         },
         // Release the WebView (JS/DOM-storage engine) on teardown to avoid a leak

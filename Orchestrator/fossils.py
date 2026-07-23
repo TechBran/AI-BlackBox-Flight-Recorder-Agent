@@ -915,6 +915,16 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
         import traceback
         traceback.print_exc()
 
+    # Flight Recorder natural trigger (Brandon 2026-07-23): every mint path
+    # passes through here — the ONE choke point. Counts across all operators;
+    # fires a background flight report every N snapshots. Guarded inside
+    # on_snapshot_minted (never raises, never recurses on flight_report).
+    try:
+        from Orchestrator.oversight import on_snapshot_minted
+        on_snapshot_minted(snap_id, snap_type, operator)
+    except Exception as _fr_e:
+        print(f"[FLIGHT-RECORDER] mint hook failed (non-fatal): {_fr_e}")
+
 def split_snapshots(vol_txt: str) -> List[Tuple[str, int, int]]:
     snaps = []
     pos = 0
