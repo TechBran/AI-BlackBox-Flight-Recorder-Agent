@@ -19,23 +19,31 @@ def _fake_handle(monkeypatch, session_id="sess-1", ws_port=6101, live=True):
 
 
 def test_view_page_renders_for_known_session(monkeypatch):
+    """M2 promoted the inline HTML to the served Portal/cu-view asset set: the
+    page now loads the client module; the WS path is constructed CLIENT-SIDE in
+    cu-view.js from location + /cu/view/{sid}/ws (asserted below on the JS)."""
     _fake_handle(monkeypatch)
     r = TestClient(app).get("/cu/view/sess-1")
     assert r.status_code == 200
-    assert "/cu/view/sess-1/ws" in r.text          # ws proxy PATH injected (not the port)
-    assert "/cu/novnc/core/rfb.js" in r.text        # noVNC module referenced
+    assert "/ui/cu-view/cu-view.js" in r.text        # the served Splashtop client
 
 
-def test_view_page_is_interactive_by_default(monkeypatch):
-    """D1 (2026-07-23 design): the viewer constructs RFB WITHOUT viewOnly —
+def _cu_view_js() -> str:
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[2] / "Portal" / "cu-view" / "cu-view.js").read_text()
+
+
+def test_view_client_is_interactive_by_default():
+    """D1 (2026-07-23 design): the client constructs RFB WITHOUT viewOnly —
     input flows over RFB into this session's own Xvfb. A ?viewonly=1 query
-    param opts back into watch-only, evaluated client-side."""
-    _fake_handle(monkeypatch)
-    r = TestClient(app).get("/cu/view/sess-1")
-    assert r.status_code == 200
-    assert "viewOnly = true" not in r.text          # the old D11 hard gate is gone
-    assert "viewonly" in r.text                      # the query opt-out is wired
-    assert "resizeSession = false" in r.text         # invariant: never resize the agent's screen
+    param opts back into watch-only, evaluated client-side. These behaviors
+    moved into cu-view.js when M2 promoted the inline HTML to served assets."""
+    js = _cu_view_js()
+    assert "viewOnly = true" not in js               # the old D11 hard gate is gone
+    assert 'get("viewonly")' in js                    # the query opt-out is wired
+    assert "/ws" in js and "/cu/view/" in js          # WS proxy path construction
+    assert "resizeSession" in js                      # invariant handled client-side
+    assert "resizeSession = true" not in js           # never resize the agent's screen
 
 
 def test_novnc_vendored_mount_serves_rfb_core():
