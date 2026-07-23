@@ -235,7 +235,12 @@ def cu_sessions():
             "cap": MAX_VIRTUAL_SESSIONS, "sessions": sessions}
 
 
-_CU_VIEW_HTML = """<!doctype html><html><head><meta charset="utf-8">
+# Fallback-only inline viewer (pre-M2 minimal client). The REAL client is the
+# served asset set Portal/cu-view/{index.html,cu-view.js,cu-view.css} — the
+# Splashtop-style touchpad/zoom/extra-keys UX (design 2026-07-23 §4, M2).
+# This string survives solely so /cu/view/{sid} never 500s if the asset tree
+# is missing on a box (fresh-box gate: degraded, never dead).
+_CU_VIEW_FALLBACK_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <title>CU Live View — {session_id}</title>
 <style>html,body{{margin:0;height:100%;background:#0b0b0d;overflow:hidden}}
 #screen{{width:100vw;height:100vh}}</style></head>
@@ -264,6 +269,12 @@ _CU_VIEW_UNAVAILABLE = ("<!doctype html><meta charset=utf-8><body "
 
 @app.get("/cu/view/{session_id}", response_class=HTMLResponse)
 def cu_view(session_id: str):
+    """Serve the interactive CU live-view client (Portal/cu-view/, design
+    2026-07-23 §4/M2). Route contract unchanged: 404 for unknown sessions,
+    install-hint page when live_view is off, HTML otherwise. The page reads
+    its session id from its own URL path and sizes itself from /cu/sessions —
+    no server-side templating. Read fresh per request (prod runs live from
+    the working tree); assets ship via the /ui static mount."""
     from Orchestrator.browser.display import get_allocator
     h = get_allocator().get(session_id)
     if h is None:
@@ -271,7 +282,14 @@ def cu_view(session_id: str):
                             status_code=404)
     if not h.live_view:
         return HTMLResponse(_CU_VIEW_UNAVAILABLE)
-    return HTMLResponse(_CU_VIEW_HTML.format(session_id=session_id))
+    try:
+        from Orchestrator.utils.paths import resolve as _resolve_path
+        html = (_resolve_path("Portal", "cu-view", "index.html")
+                .read_text(encoding="utf-8"))
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+    except OSError as e:
+        print(f"[CU-VIEW] cu-view asset missing, serving inline fallback: {e}")
+        return HTMLResponse(_CU_VIEW_FALLBACK_HTML.format(session_id=session_id))
 
 
 @app.websocket("/cu/view/{session_id}/ws")

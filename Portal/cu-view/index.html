@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- user-scalable=no: the page manages its own pinch-zoom (ViewportTransform);
+     browser-level zoom would fight the gesture layer. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>CU Live View</title>
+<link rel="stylesheet" href="/ui/cu-view/cu-view.css">
+</head>
+<body>
+    <!-- Status chrome: connection dot, session identity, native res, zoom. -->
+    <div id="cuvTopbar">
+        <div id="cuvStatusDot" data-state="connecting" title="Connection state"></div>
+        <span id="cuvSessionLabel">CU session</span>
+        <span id="cuvResBadge" class="cuv-badge">—</span>
+        <span id="cuvZoomBadge" class="cuv-badge">100%</span>
+        <span id="cuvInputLive" class="cuv-badge" hidden>input live</span>
+        <span id="cuvTopbarSpacer"></span>
+        <button id="cuvFitBtn" class="cuv-tbtn" type="button" title="Reset zoom to fit">Fit</button>
+        <button id="cuvModeBtn" class="cuv-tbtn" type="button" aria-pressed="false"
+                title="Toggle touchpad mode (indirect cursor) vs direct mouse">Touchpad</button>
+        <button id="cuvKeysBtn" class="cuv-tbtn" type="button" aria-pressed="false"
+                title="Toggle extra keys bar">Keys</button>
+        <button id="cuvKbBtn" class="cuv-tbtn" type="button" aria-pressed="false"
+                title="Toggle on-screen keyboard">⌨</button>
+    </div>
+
+    <!-- Stage: transformed native-res RFB canvas + gesture/cursor overlays. -->
+    <div id="cuvStage">
+        <div id="cuvCanvasWrap">
+            <div id="cuvScreen"></div>
+        </div>
+        <div id="cuvTouchLayer" data-mode="touchpad"></div>
+        <svg id="cuvCursor" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 2 L4 19 L8.5 15.2 L11.4 21.6 L14.4 20.2 L11.6 13.9 L17.5 13.4 Z"
+                  fill="#fff" stroke="#111" stroke-width="1.6" stroke-linejoin="round"/>
+        </svg>
+        <div id="cuvAgentActing"><span>agent acting…</span></div>
+        <div id="cuvEndedCard" hidden>
+            <div>
+                <h3 id="cuvEndedTitle">Session ended</h3>
+                <p id="cuvEndedMsg">This CU session is no longer running.</p>
+                <div id="cuvEndedSessions"></div>
+                <button id="cuvRetryBtn" class="cuv-tbtn" type="button">Retry</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Extra-keys bar (rows built by cu-view.js from keysyms.js). -->
+    <div id="cuvExtraKeys" hidden></div>
+
+    <!-- Manual-keyboard IME sink: focused ONLY by the ⌨ toggle (no auto-open
+         anywhere — design §4.4). -->
+    <input id="cuvKbSink" type="text" autocomplete="off" autocorrect="off"
+           autocapitalize="off" spellcheck="false" aria-label="Remote keyboard input">
+
+    <script type="module" src="/ui/cu-view/cu-view.js"></script>
+</body>
+</html>

@@ -1,0 +1,272 @@
+/* CU Live View — Splashtop-style remote-desktop client chrome.
+   Design 2026-07-23 §4; served at /cu/view/{sid}, assets under /ui/cu-view/. */
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: #0b0b0d;
+    color: #ddd;
+    font-family: system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── Top status bar ─────────────────────────────────────────────────── */
+
+#cuvTopbar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    background: #131318;
+    border-bottom: 1px solid #26262e;
+    font-size: 12px;
+    min-height: 34px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+#cuvStatusDot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #777;
+    flex: 0 0 auto;
+}
+#cuvStatusDot[data-state="connecting"],
+#cuvStatusDot[data-state="reconnecting"] { background: #d9a53a; animation: cuvPulse 1s infinite; }
+#cuvStatusDot[data-state="connected"] { background: #3ecf6a; animation: none; }
+#cuvStatusDot[data-state="ended"],
+#cuvStatusDot[data-state="failed"] { background: #e05555; animation: none; }
+
+@keyframes cuvPulse { 50% { opacity: 0.35; } }
+
+#cuvSessionLabel {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 34vw;
+}
+
+.cuv-badge {
+    padding: 1px 7px;
+    border-radius: 9px;
+    background: #1f1f27;
+    border: 1px solid #2d2d38;
+    color: #aab;
+    white-space: nowrap;
+}
+
+#cuvInputLive { color: #8fd9a8; border-color: #2c4a36; }
+#cuvInputLive[hidden] { display: none; }
+
+#cuvTopbarSpacer { flex: 1 1 auto; }
+
+.cuv-tbtn {
+    background: #1f1f27;
+    border: 1px solid #2d2d38;
+    color: #ccd;
+    border-radius: 7px;
+    padding: 4px 9px;
+    font-size: 12px;
+    line-height: 1.2;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.cuv-tbtn[aria-pressed="true"] { background: #34344a; border-color: #4a4a6a; color: #fff; }
+.cuv-tbtn:active { background: #2a2a36; }
+
+/* ── Stage: transformed RFB canvas + overlays ───────────────────────── */
+
+#cuvStage {
+    flex: 1 1 auto;
+    position: relative;
+    overflow: hidden;
+    background: #0b0b0d;
+    touch-action: none;
+}
+
+/* The transform wrapper — translate(tx,ty) scale(s), origin 0 0.
+   noVNC scaleViewport is OFF; this is the only scaling in play. */
+#cuvCanvasWrap {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+}
+
+/* noVNC renders into this target at NATIVE resolution. */
+#cuvScreen { line-height: 0; }
+
+/* Input interception layer. ALWAYS active (both modes): every pointer —
+   touch gestures AND direct mouse — must map through the ViewportTransform;
+   noVNC's own canvas handlers would misplace clicks under our CSS scale. */
+#cuvTouchLayer {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    touch-action: none;
+}
+
+/* Virtual cursor — view-space positioned, never scaled by the zoom.
+   High-contrast white arrow with dark outline (the black-on-black lesson). */
+#cuvCursor {
+    position: absolute;
+    z-index: 6;
+    width: 22px;
+    height: 22px;
+    pointer-events: none;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8));
+    transition: opacity 0.15s;
+}
+#cuvCursor[hidden] { display: none; }
+
+/* "Agent acting…" soft-guard dimmer (design §5). */
+#cuvAgentActing {
+    position: absolute;
+    inset: 0;
+    z-index: 8;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 14vh;
+    background: rgba(8, 8, 12, 0.35);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+#cuvAgentActing.cuv-active { opacity: 1; }
+#cuvAgentActing span {
+    background: rgba(20, 20, 28, 0.92);
+    border: 1px solid #3a3a4c;
+    border-radius: 18px;
+    padding: 6px 16px;
+    font-size: 13px;
+    color: #ffb86b;
+}
+
+/* Ended / error card. */
+#cuvEndedCard {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(11, 11, 13, 0.92);
+}
+#cuvEndedCard[hidden] { display: none; }
+#cuvEndedCard > div {
+    max-width: 420px;
+    padding: 22px 26px;
+    background: #16161c;
+    border: 1px solid #2d2d38;
+    border-radius: 12px;
+    text-align: center;
+}
+#cuvEndedCard h3 { margin: 0 0 8px; font-size: 16px; }
+#cuvEndedCard p { margin: 0 0 14px; font-size: 13px; color: #99a; }
+#cuvEndedSessions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+#cuvEndedSessions a {
+    color: #8ab4ff;
+    text-decoration: none;
+    font-size: 13px;
+    padding: 6px;
+    border: 1px solid #2d2d38;
+    border-radius: 8px;
+}
+
+/* ── Extra-keys bar (cloned from cli-agents-extra-keys pattern) ──────── */
+
+#cuvExtraKeys {
+    flex: 0 0 auto;
+    background: #131318;
+    border-top: 1px solid #26262e;
+    padding: 4px 6px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#cuvExtraKeys[hidden] { display: none; }
+
+.cuv-keys-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 3px 0;
+}
+.cuv-keys-row[hidden] { display: none; }
+
+/* Pinned key (Esc) sits OUTSIDE the scroll strip — scroll-container
+   gesture arbitration eats edge taps (the Android dead-Esc lesson). */
+.cuv-keys-pinned { flex: 0 0 auto; }
+
+.cuv-keys-divider {
+    flex: 0 0 auto;
+    width: 1px;
+    align-self: stretch;
+    background: #2d2d38;
+}
+
+.cuv-keys-strip {
+    flex: 1 1 auto;
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.cuv-keys-strip::-webkit-scrollbar { display: none; }
+
+.cuv-key-btn {
+    flex: 0 0 auto;
+    min-width: 40px;
+    padding: 7px 9px;
+    background: #1f1f27;
+    border: 1px solid #2d2d38;
+    border-radius: 7px;
+    color: #ccd;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.cuv-key-btn:active { background: #2a2a36; }
+.cuv-key-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Sticky modifier states: armed (one-shot) / locked. */
+.cuv-key-btn[data-mod-state="armed"] {
+    background: #3a3a55;
+    border-color: #5a5a88;
+    color: #fff;
+}
+.cuv-key-btn[data-mod-state="locked"] {
+    background: #4a3a20;
+    border-color: #8a6a30;
+    color: #ffd9a0;
+}
+
+/* Hidden IME sink for the manual keyboard (§4.4). Kept on-screen but
+   invisible — some mobile IMEs refuse to open for off-screen inputs. */
+#cuvKbSink {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 2px;
+    height: 2px;
+    opacity: 0.01;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    z-index: 1;
+}
