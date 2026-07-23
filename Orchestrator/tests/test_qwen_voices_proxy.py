@@ -47,11 +47,18 @@ def test_qwen_clone_requires_consent(client):
     m_post.assert_not_called()
 
 
-def test_qwen_clone_proxies_upstream_with_consent(client):
+def test_qwen_clone_proxies_upstream_with_consent(client, monkeypatch):
+    """Clone now TRANSCODES the reference to WAV and synthesizes a PREVIEW after
+    the store (2026-07-23 phone-M4A fix) — mock both seams; the proxy contract
+    (singular 'file' field to upstream_url('/v1/voices/clone')) is unchanged."""
+    import Orchestrator.audio_transcode as at
+    monkeypatch.setattr(at, "to_wav_pcm16", lambda b, **k: b"WAVDATA")
     with patch("Orchestrator.qwen_tts.upstream_url",
                return_value="http://127.0.0.1:9098/upstream/qwen-tts/v1/voices/clone") as m_url, \
          patch("Orchestrator.routes.tts_routes.requests.post",
-               return_value=_JResp({"voice_id": "test-slug"})) as m_post:
+               return_value=_JResp({"voice_id": "test-slug"})), \
+         patch("Orchestrator.qwen_tts.synthesize") as m_syn:
+        m_syn.return_value = type("R", (), {"status_code": 200, "content": b"RIFFwav", "text": ""})()
         resp = client.post(
             "/qwen/voices/clone",
             data={"name": "Test", "consent": "true"},
@@ -59,7 +66,10 @@ def test_qwen_clone_proxies_upstream_with_consent(client):
         )
     assert resp.status_code == 200
     assert resp.json()["voice_id"] == "test-slug"
+    assert resp.json().get("preview_b64")           # at-clone preview returned
     m_url.assert_called_once_with("/v1/voices/clone")
+    m_syn.assert_called_once()                       # preview synthesized with the new slug
+    assert m_syn.call_args[0][0] == "test-slug"
     m_post.assert_called_once()
     # The reference audio MUST be forwarded under the singular field name 'file'
     # to match the M6 server (`file: UploadFile = File(...)`); 'files' would 422.
