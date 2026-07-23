@@ -17,8 +17,8 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 4
-        versionName "1.2.0-tts-voice-catalog"
+        versionCode 5
+        versionName "1.3.0-voice-picker-onbox-audio"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }
