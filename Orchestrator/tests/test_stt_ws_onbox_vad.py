@@ -14,7 +14,13 @@ Contract under test:
 - client stop / disconnect -> gate.flush() tail is transcribed and delivered;
 - 429 on the transcription POST is retried; the STREAM model is used;
 - ONBOX_STT_REALTIME=1 routes to the parked realtime bridge (default = VAD);
-- missing VAD deps -> honest stt_error naming the missing piece.
+- missing VAD deps -> honest stt_error naming the missing piece;
+- W3 rolling partials: every ONBOX_STT_PARTIAL_MS while speech is active the
+  OPEN utterance buffer is transcribed and emitted as a cumulative stt_delta
+  (the exact shape the Android live-partials chip / Portal interim consume);
+  DROP-FRAME (one in flight max, due ticks while busy are skipped, never
+  queued); partials stop at SPEECH_END and the final supersedes a stale
+  in-flight result; ONBOX_STT_PARTIALS=0 disables.
 """
 import asyncio
 import base64
@@ -49,9 +55,10 @@ class _FakeClientWS:
 class _FakeGate:
     """Scripted UtteranceGate: each feed() pops the next event list."""
 
-    def __init__(self, feeds=(), flush=None):
+    def __init__(self, feeds=(), flush=None, active=b""):
         self._feeds = [list(f) for f in feeds]
         self._flush = flush
+        self.active = active            # W3: the "open utterance buffer"
         self.fed = []
         self.flushed = 0
 
@@ -63,6 +70,9 @@ class _FakeGate:
         self.flushed += 1
         ev, self._flush = self._flush, None
         return ev
+
+    def active_pcm(self):
+        return self.active
 
 
 def _patch_ready(monkeypatch, *, gate, transcripts):
@@ -375,6 +385,297 @@ def test_vad_missing_dep_reports_model_absent(monkeypatch, tmp_path):
                         lambda: tmp_path / "nope.onnx")
     msg = stt_ws_routes._vad_missing_dep()
     assert msg is not None and "silero" in msg.lower()
+
+
+# ── W3: rolling partials while speech is active ─────────────────────────────
+
+def _audio():
+    return {"type": "stt_audio", "pcm": _PCM}
+
+
+class _ClockedClientWS(_FakeClientWS):
+    """Frames are (dt_seconds, frame) pairs: receiving advances the fake
+    partial clock by dt and yields to the event loop (a real socket receive
+    awaits too), so in-flight partial tasks get scheduled between frames.
+    A frame may be a CALLABLE (runs side effects at that point in the
+    timeline — e.g. releasing a blocked transcriber) returning the frame."""
+
+    def __init__(self, timed_frames, clock):
+        super().__init__([])
+        self._timed = list(timed_frames)
+        self._clock = clock
+
+    async def receive_json(self):
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if not self._timed:
+            raise WebSocketDisconnect()
+        dt, frame = self._timed.pop(0)
+        self._clock["t"] += dt
+        if callable(frame):
+            frame = frame()
+        return frame
+
+
+def _patch_partial_clock(monkeypatch):
+    """Fake clock for the W3 cadence + clean partial-env defaults."""
+    clock = {"t": 0.0}
+    monkeypatch.delenv("ONBOX_STT_PARTIALS", raising=False)
+    monkeypatch.delenv("ONBOX_STT_PARTIAL_MS", raising=False)
+    monkeypatch.setattr(stt_ws_routes, "_monotonic", lambda: clock["t"])
+    return clock
+
+
+def test_partial_cadence_honored_with_fake_clock(monkeypatch):
+    async def scenario():
+        clock = _patch_partial_clock(monkeypatch)
+        gate = _FakeGate(
+            feeds=[[Event(EventKind.SPEECH_START)], [], [], [], [], [], [],
+                   [Event(EventKind.SPEECH_END, b"utt")]],
+            active=b"cur-buf")
+        _patch_ready(monkeypatch, gate=gate, transcripts=["the final"])
+        partial_calls = []
+        partial_texts = ["hello there", "hello there friend"]
+
+        async def _fake_partial(pcm):
+            partial_calls.append((clock["t"], pcm))
+            return partial_texts.pop(0)
+        monkeypatch.setattr(stt_ws_routes, "_transcribe_partial", _fake_partial)
+
+        frames = [
+            (0.1, _audio()),   # SPEECH_START -> first partial due at 1.6
+            (0.5, _audio()),   # t=0.6  not due
+            (1.1, _audio()),   # t=1.7  due -> partial #1; next due 3.2
+            (0.1, _audio()),   # t=1.8  (lets the emit land)
+            (0.7, _audio()),   # t=2.5  not due
+            (0.8, _audio()),   # t=3.3  due -> partial #2; next due 4.8
+            (0.1, _audio()),   # t=3.4  (lets the emit land)
+            (0.1, _audio()),   # t=3.5  SPEECH_END -> final
+            (0.1, {"type": "stt_stop"}),
+        ]
+        client = _ClockedClientWS(frames, clock)
+        await asyncio.wait_for(
+            stt_ws_routes._onbox_vad_loop(client, target="prompt", lang="en",
+                                          sample_rate=24000),
+            timeout=10.0)
+        return client, partial_calls
+
+    client, partial_calls = asyncio.run(scenario())
+    # cadence honored: exactly the two DUE ticks fired, on the open buffer
+    assert [round(t, 2) for t, _ in partial_calls] == [1.7, 3.3]
+    assert all(pcm == b"cur-buf" for _, pcm in partial_calls)
+    # partials go out as CUMULATIVE stt_delta in the exact cloud-bridge shape
+    # (Android live-partials chip + Portal interim consume {type,text,target})
+    deltas = [m for m in client.sent if m.get("type") == "stt_delta"]
+    assert deltas == [
+        {"type": "stt_delta", "text": "hello there", "target": "prompt"},
+        {"type": "stt_delta", "text": "hello there friend", "target": "prompt"},
+    ]
+    finals = [m for m in client.sent if m.get("type") == "stt_final"]
+    assert finals == [{"type": "stt_final", "text": "the final", "target": "prompt"}]
+    assert max(client.sent.index(d) for d in deltas) < client.sent.index(finals[0])
+
+
+def test_inflight_partial_tick_skipped_not_queued(monkeypatch):
+    async def scenario():
+        clock = _patch_partial_clock(monkeypatch)
+        gate = _FakeGate(
+            feeds=[[Event(EventKind.SPEECH_START)], [], [], [],
+                   [Event(EventKind.SPEECH_END, b"utt")]],
+            active=b"cur-buf")
+        _patch_ready(monkeypatch, gate=gate, transcripts=["the final"])
+        release = asyncio.Event()
+        calls = []
+
+        async def _blocked_partial(pcm):
+            calls.append(clock["t"])
+            await release.wait()
+            return "late partial"
+        monkeypatch.setattr(stt_ws_routes, "_transcribe_partial", _blocked_partial)
+
+        def _release_then_audio():
+            release.set()          # free the stuck partial only at the end
+            return _audio()
+
+        frames = [
+            (0.1, _audio()),           # SPEECH_START; due 1.6
+            (1.6, _audio()),           # t=1.7 due -> partial launched (BLOCKED)
+            (1.6, _audio()),           # t=3.3 due but IN FLIGHT -> tick skipped
+            (1.6, _audio()),           # t=4.9 due but IN FLIGHT -> tick skipped
+            (0.1, _release_then_audio),  # t=5.0 release; SPEECH_END -> final
+            (0.1, {"type": "stt_stop"}),
+        ]
+        client = _ClockedClientWS(frames, clock)
+        await asyncio.wait_for(
+            stt_ws_routes._onbox_vad_loop(client, target="prompt", lang="en",
+                                          sample_rate=24000),
+            timeout=10.0)
+        return client, calls
+
+    client, calls = asyncio.run(scenario())
+    # DROP-FRAME: one transcription in flight max — the due ticks at 3.3/4.9
+    # were skipped, not queued
+    assert [round(t, 2) for t in calls] == [1.7]
+    # the released stale result arrives AFTER SPEECH_END -> discarded
+    assert not any(m.get("type") == "stt_delta" for m in client.sent)
+    finals = [m for m in client.sent if m.get("type") == "stt_final"]
+    assert finals == [{"type": "stt_final", "text": "the final", "target": "prompt"}]
+
+
+def test_no_partial_after_speech_end_final_supersedes(monkeypatch):
+    async def scenario():
+        clock = _patch_partial_clock(monkeypatch)
+        gate = _FakeGate(
+            feeds=[[Event(EventKind.SPEECH_START)], [],
+                   [Event(EventKind.SPEECH_END, b"utt")], [], []],
+            active=b"cur-buf")
+        _patch_ready(monkeypatch, gate=gate, transcripts=["the final"])
+        release = asyncio.Event()
+        calls = []
+
+        async def _blocked_partial(pcm):
+            calls.append(clock["t"])
+            await release.wait()
+            return "stale partial"
+        monkeypatch.setattr(stt_ws_routes, "_transcribe_partial", _blocked_partial)
+
+        def _release_then_audio():
+            release.set()
+            return _audio()
+
+        frames = [
+            (0.1, _audio()),           # SPEECH_START; due 1.6
+            (1.6, _audio()),           # t=1.7 -> partial launched (BLOCKED)
+            (0.3, _audio()),           # t=2.0 SPEECH_END -> final (partial in flight)
+            (0.1, _release_then_audio),  # t=2.1 stale partial completes now...
+            (0.1, _audio()),           # t=2.2 ...and MUST be dropped
+            (0.1, {"type": "stt_stop"}),
+        ]
+        client = _ClockedClientWS(frames, clock)
+        await asyncio.wait_for(
+            stt_ws_routes._onbox_vad_loop(client, target="prompt", lang="en",
+                                          sample_rate=24000),
+            timeout=10.0)
+        return client, calls
+
+    client, calls = asyncio.run(scenario())
+    assert calls, "the partial WAS in flight (suppression, not never-ran)"
+    # partials STOP at SPEECH_END: the stale result never reaches the client
+    assert not any(m.get("type") == "stt_delta" for m in client.sent)
+    finals = [m for m in client.sent if m.get("type") == "stt_final"]
+    assert finals == [{"type": "stt_final", "text": "the final", "target": "prompt"}]
+
+
+def test_partials_disabled_by_env_flag(monkeypatch):
+    async def scenario():
+        clock = _patch_partial_clock(monkeypatch)
+        monkeypatch.setenv("ONBOX_STT_PARTIALS", "0")
+        gate = _FakeGate(
+            feeds=[[Event(EventKind.SPEECH_START)], [], [],
+                   [Event(EventKind.SPEECH_END, b"utt")]],
+            active=b"cur-buf")
+        _patch_ready(monkeypatch, gate=gate, transcripts=["the final"])
+        calls = []
+
+        async def _fake_partial(pcm):
+            calls.append(clock["t"])
+            return "must never emit"
+        monkeypatch.setattr(stt_ws_routes, "_transcribe_partial", _fake_partial)
+
+        frames = [
+            (0.1, _audio()),   # SPEECH_START
+            (1.6, _audio()),   # t=1.7 would be due — but partials are OFF
+            (1.6, _audio()),   # t=3.3 would be due — still OFF
+            (0.1, _audio()),   # SPEECH_END -> final
+            (0.1, {"type": "stt_stop"}),
+        ]
+        client = _ClockedClientWS(frames, clock)
+        await asyncio.wait_for(
+            stt_ws_routes._onbox_vad_loop(client, target="prompt", lang="en",
+                                          sample_rate=24000),
+            timeout=10.0)
+        return client, calls
+
+    client, calls = asyncio.run(scenario())
+    assert calls == []                                     # never transcribed
+    assert not any(m.get("type") == "stt_delta" for m in client.sent)
+    finals = [m for m in client.sent if m.get("type") == "stt_final"]
+    assert finals == [{"type": "stt_final", "text": "the final", "target": "prompt"}]
+
+
+def test_hallucination_filtered_partial_suppressed(monkeypatch):
+    async def scenario():
+        clock = _patch_partial_clock(monkeypatch)
+        gate = _FakeGate(
+            feeds=[[Event(EventKind.SPEECH_START)], [], [],
+                   [Event(EventKind.SPEECH_END, b"utt")]],
+            active=b"cur-buf")
+        _patch_ready(monkeypatch, gate=gate, transcripts=["real words"])
+        monkeypatch.setattr(stt_ws_routes, "is_whisper_hallucination",
+                            lambda t: t == "Thank you.")
+
+        async def _fake_partial(pcm):
+            return "Thank you."          # classic whisper silence hallucination
+        monkeypatch.setattr(stt_ws_routes, "_transcribe_partial", _fake_partial)
+
+        frames = [
+            (0.1, _audio()),   # SPEECH_START; due 1.6
+            (1.6, _audio()),   # t=1.7 due -> partial (hallucinated)
+            (0.1, _audio()),   # lets the (suppressed) emit land
+            (0.1, _audio()),   # SPEECH_END -> final
+            (0.1, {"type": "stt_stop"}),
+        ]
+        client = _ClockedClientWS(frames, clock)
+        await asyncio.wait_for(
+            stt_ws_routes._onbox_vad_loop(client, target="prompt", lang="en",
+                                          sample_rate=24000),
+            timeout=10.0)
+        return client
+
+    client = asyncio.run(scenario())
+    assert not any(m.get("type") == "stt_delta" for m in client.sent)
+    finals = [m for m in client.sent if m.get("type") == "stt_final"]
+    assert finals == [{"type": "stt_final", "text": "real words", "target": "prompt"}]
+
+
+def test_partial_env_knobs(monkeypatch):
+    monkeypatch.delenv("ONBOX_STT_PARTIALS", raising=False)
+    monkeypatch.delenv("ONBOX_STT_PARTIAL_MS", raising=False)
+    assert stt_ws_routes._partials_enabled() is True       # default ON
+    assert stt_ws_routes._partial_interval_s() == pytest.approx(1.5)
+    monkeypatch.setenv("ONBOX_STT_PARTIALS", "0")
+    assert stt_ws_routes._partials_enabled() is False
+    monkeypatch.setenv("ONBOX_STT_PARTIAL_MS", "500")
+    assert stt_ws_routes._partial_interval_s() == pytest.approx(0.5)
+    monkeypatch.setenv("ONBOX_STT_PARTIAL_MS", "junk")     # garbage -> default
+    assert stt_ws_routes._partial_interval_s() == pytest.approx(1.5)
+
+
+def test_transcribe_partial_default_wraps_transcribe_utterance(monkeypatch):
+    seen = []
+
+    def _fake(pcm):
+        seen.append(pcm)
+        return "words"
+    monkeypatch.setattr(stt_ws_routes, "_transcribe_utterance", _fake)
+    out = asyncio.run(stt_ws_routes._transcribe_partial(b"pcm-bytes"))
+    assert out == "words"
+    assert seen == [b"pcm-bytes"]
+
+
+def test_gate_active_pcm_exposes_open_utterance():
+    from Orchestrator.stt.vad import UtteranceGate
+    gate = UtteranceGate(sample_rate=16000, min_speech_ms=1, pre_roll_ms=0,
+                         scorer=lambda f: 1.0)
+    assert gate.active_pcm() == b""                        # idle
+    frame = b"\x01\x00" * 512
+    events = gate.feed(frame)
+    assert any(e.kind is EventKind.SPEECH_START for e in events)
+    assert gate.active_pcm() == frame                      # open buffer so far
+    gate.feed(frame)
+    assert gate.active_pcm() == frame * 2                  # grows with speech
+    gate.flush()
+    assert gate.active_pcm() == b""                        # reset after flush
 
 
 # ── priming WAV helper is a real 16k mono WAV ───────────────────────────────

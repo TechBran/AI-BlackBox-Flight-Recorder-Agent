@@ -720,6 +720,42 @@ async def _onbox_bridge(websocket: WebSocket, *, target, lang, sample_rate):
 _ONBOX_REALTIME_ENV = "ONBOX_STT_REALTIME"
 _ONBOX_PRIME_WAV_S = 0.2   # ~0.2s of silence is enough to force whisper residency
 
+# W3 rolling partials (plan 2026-07-22): while speech is active the OPEN
+# utterance buffer is transcribed every ONBOX_STT_PARTIAL_MS and emitted as a
+# cumulative stt_delta. ONBOX_STT_PARTIALS=0 disables (default ON).
+_ONBOX_PARTIALS_ENV = "ONBOX_STT_PARTIALS"
+_ONBOX_PARTIAL_MS_ENV = "ONBOX_STT_PARTIAL_MS"
+_ONBOX_PARTIAL_MS_DEFAULT = 1500
+
+# W3 seam: the rolling-partials scheduler reads time through this module
+# global ONLY, so tests drive the cadence with a fake clock without touching
+# the stdlib time module (stop_ts telemetry stays on time.monotonic).
+_monotonic = time.monotonic
+
+
+def _partials_enabled() -> bool:
+    """Rolling partials are ON unless ONBOX_STT_PARTIALS=0."""
+    return (os.environ.get(_ONBOX_PARTIALS_ENV, "") or "").strip() != "0"
+
+
+def _partial_interval_s() -> float:
+    """Partial cadence in seconds (ONBOX_STT_PARTIAL_MS, default 1500ms;
+    garbage falls back to the default, never crashes the stream)."""
+    raw = (os.environ.get(_ONBOX_PARTIAL_MS_ENV, "") or "").strip()
+    try:
+        ms = int(raw) if raw else _ONBOX_PARTIAL_MS_DEFAULT
+    except ValueError:
+        ms = _ONBOX_PARTIAL_MS_DEFAULT
+    return max(1, ms) / 1000.0
+
+
+async def _transcribe_partial(pcm16: bytes) -> str:
+    """Async partial-transcription seam (module-level so tests monkeypatch a
+    single awaitable): the same G4-validated upstream batch path + STREAM
+    (turbo) model the finals use, run off the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _transcribe_utterance, pcm16)
+
 
 def _onbox_realtime_enabled() -> bool:
     """True only when the operator explicitly opts into the parked realtime
@@ -853,7 +889,12 @@ async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
     UtteranceGate; SPEECH_START -> stt_status{speech}; SPEECH_END(utterance) ->
     stt_status{processing} -> transcribe via the G4-validated upstream batch
     path with the STREAM model -> hallucination filter -> stt_final in the
-    EXACT cloud-bridge event shape. Client stop (or disconnect) -> gate.flush()
+    EXACT cloud-bridge event shape. While speech is active, rolling partials
+    (W3, default ON, ONBOX_STT_PARTIALS=0 disables): every ONBOX_STT_PARTIAL_MS
+    the OPEN utterance buffer is transcribed and emitted as a cumulative
+    stt_delta — DROP-FRAME (one in flight max; a due tick while busy is
+    skipped), partials stop at SPEECH_END, and the final always supersedes a
+    stale in-flight result. Client stop (or disconnect) -> gate.flush()
     -> tail final; the endpoint then emits the terminal stt_done. The whole
     stream holds local_stack.voice_session() (D12). NEVER falls back to a
     cloud provider — missing VAD deps or an unmet ceiling is an honest
@@ -878,6 +919,64 @@ async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
         stop_ts = {"v": None}
         print(f"[STT/WS] onbox VAD loop listening rate={sample_rate}->16000 "
               f"target={target}")
+
+        # ── W3 rolling partials ─────────────────────────────────────────────
+        partials_on = _partials_enabled()
+        partial_interval = _partial_interval_s()
+        speech_active = False
+        speech_gen = 0        # bumped when the utterance closes — stale partials die
+        partial_task = None   # the single in-flight partial task (drop-frame)
+        next_partial_t = None  # fake-clock time the next partial is due
+
+        async def _emit_partial(pcm: bytes, gen: int) -> None:
+            """Transcribe a snapshot of the open utterance buffer and emit an
+            interim stt_delta (cumulative for the utterance — the exact shape
+            the Android live-partials chip and Portal interim text consume).
+            A stale result (the utterance closed while in flight) is dropped —
+            the final always supersedes. Best-effort: failures are logged,
+            never fatal to the stream."""
+            try:
+                text = await _transcribe_partial(pcm)
+            except Exception as e:
+                print(f"[STT/WS] onbox partial transcription failed (dropped): {e!r}")
+                return
+            if gen != speech_gen or not speech_active:
+                return   # utterance closed mid-flight — the final supersedes
+            text = (text or "").strip()
+            if not text or is_whisper_hallucination(text):
+                return   # same whisper output class as finals -> same filter
+            try:
+                await websocket.send_json(
+                    {"type": "stt_delta", "text": text, "target": target})
+            except Exception as e:
+                print(f"[STT/WS] onbox stt_delta delivery failed: {e!r}")
+
+        def _partial_tick() -> None:
+            """Cadence check, run after each inbound audio chunk. DROP-FRAME
+            POLICY: never more than one partial transcription in flight — a
+            due tick while busy is SKIPPED, not queued (bounded GPU load;
+            finals always win)."""
+            nonlocal partial_task, next_partial_t
+            if not partials_on or not speech_active or next_partial_t is None:
+                return
+            if partial_task is not None and not partial_task.done():
+                return   # busy — skip this tick
+            now = _monotonic()
+            if now < next_partial_t:
+                return
+            pcm = gate.active_pcm()
+            if not pcm:
+                return
+            next_partial_t = now + partial_interval
+            partial_task = asyncio.ensure_future(_emit_partial(pcm, speech_gen))
+
+        def _close_partials() -> None:
+            """SPEECH_END / stop / disconnect: stop the cadence and invalidate
+            any in-flight partial (its late result is discarded)."""
+            nonlocal speech_active, speech_gen, next_partial_t
+            speech_active = False
+            speech_gen += 1
+            next_partial_t = None
 
         async def _finish_utterance(pcm: bytes, *, stopping: bool) -> None:
             """Transcribe one closed utterance and deliver its final. On the
@@ -930,11 +1029,16 @@ async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
                     pcm16k = _resample_pcm16(base64.b64decode(pcm_b64), sample_rate, 16000)
                     for ev in gate.feed(pcm16k):
                         if ev.kind is _vad.SPEECH_START:
+                            speech_active = True
+                            next_partial_t = _monotonic() + partial_interval
                             await websocket.send_json({"type": "stt_status", "state": "speech"})
                         elif ev.kind is _vad.SPEECH_END:
+                            _close_partials()   # partials STOP at SPEECH_END
                             await _finish_utterance(ev.pcm, stopping=False)
+                    _partial_tick()
                 elif mtype == "stt_stop":
                     stop_ts["v"] = time.monotonic()
+                    _close_partials()
                     tail = gate.flush()
                     if tail is not None:
                         await _finish_utterance(tail.pcm or b"", stopping=True)
@@ -945,6 +1049,7 @@ async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
             # then re-raise so the endpoint's normal teardown runs.
             if stop_ts["v"] is None:
                 stop_ts["v"] = time.monotonic()
+            _close_partials()
             tail = gate.flush()
             if tail is not None and tail.pcm:
                 try:
@@ -952,6 +1057,11 @@ async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
                 except Exception:
                     pass
             raise
+        finally:
+            # Never leave a stray partial running past the session — a late
+            # stt_delta must not chase the terminal stt_done.
+            if partial_task is not None and not partial_task.done():
+                partial_task.cancel()
 
 
 async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate):

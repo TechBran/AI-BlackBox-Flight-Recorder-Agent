@@ -152,6 +152,16 @@ class UtteranceGate:
             self._scorer.reset()
         return ev
 
+    def active_pcm(self) -> bytes:
+        """Snapshot of the OPEN utterance audio so far (pre-roll + speech),
+        empty unless an utterance is active (SPEECH_START fired, no
+        SPEECH_END yet). Read-only — feeds the /ws/stt rolling-partials path
+        (W3): the current buffer is transcribed on a cadence while speech is
+        active; the SPEECH_END final always supersedes."""
+        if self._state != "active":
+            return b""
+        return b"".join(self._utt)
+
     # ── internals ─────────────────────────────────────────────────────────
 
     def _reset_utterance(self) -> None:
