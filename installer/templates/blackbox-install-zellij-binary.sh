@@ -51,7 +51,7 @@ set -euo pipefail
 VERSION="${1:-}"
 # BLACKBOX_ROOT defaults to the canonical Track 4 customer install path.
 # sudo strips env by default — the default is what gets used in prod.
-BLACKBOX_ROOT="${BLACKBOX_ROOT:-/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main}"
+BLACKBOX_ROOT="${BLACKBOX_ROOT:-/home/bbx/Desktop/ai-blackbox-flight-recorder-agent}"
 PINNED_FILE="${BLACKBOX_ROOT}/installer/templates/zellij-version"
 DEST="/usr/local/bin/zellij"
 

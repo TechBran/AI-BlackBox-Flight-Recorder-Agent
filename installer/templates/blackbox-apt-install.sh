@@ -34,7 +34,7 @@ PACKAGE="${1:-}"
 # BLACKBOX_ROOT defaults to the canonical Track 4 customer install path.
 # Caller (update runner) can override via env var if needed for testing,
 # but sudo strips env by default — the default is what gets used in prod.
-BLACKBOX_ROOT="${BLACKBOX_ROOT:-/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main}"
+BLACKBOX_ROOT="${BLACKBOX_ROOT:-/home/bbx/Desktop/ai-blackbox-flight-recorder-agent}"
 ALLOWLIST_FILE="${BLACKBOX_ROOT}/Scripts/onboarding/system-packages.txt"
 
 if [[ -z "$PACKAGE" ]]; then

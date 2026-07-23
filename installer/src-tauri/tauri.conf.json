@@ -23,7 +23,7 @@
     "shortDescription": "First-run setup for AI BlackBox",
     "longDescription": "Walks you through setting up your AI BlackBox device — Tailscale, API keys, phone pairing, and more."
   },
-  "productName": "BlackBox Setup",
+  "productName": "AI BlackBox Flight Recorder Agent Setup",
   "version": "0.1.1",
   "identifier": "com.blackbox.setup"
 }
