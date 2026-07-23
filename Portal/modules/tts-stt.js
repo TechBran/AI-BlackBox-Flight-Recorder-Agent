@@ -89,6 +89,346 @@ let mediaRec = null;
 let mediaStream = null;
 
 // =============================================================================
+// On-box TTS queue (B2, 2026-07-22)
+//
+// On-box (qwen) voices route through the async server queue (POST /tts/queue
+// -> poll GET /tts/task/{id}) instead of holding one multi-minute /tts/batch
+// request open — the B1 server serializes the single GPU, so the client's job
+// is submit + poll + show honest progress. Cloud providers are UNTOUCHED
+// (synchronous /tts/batch, byte-for-byte the same requests as before).
+// Fail-open: if POST /tts/queue 404s (older backend), callers fall back to
+// the direct /tts/batch path.
+//
+// The state->text / backoff / terminal helpers are PURE (string/number in ->
+// string/number out) and exported for unit tests (tts-stt.queue.test.mjs).
+// =============================================================================
+
+/** Base poll interval for GET /tts/task/{id} (ms). */
+export const TTS_QUEUE_POLL_MS = 1500;
+
+/** Cap for error-backoff poll delay (ms). */
+export const TTS_QUEUE_POLL_MAX_MS = 12000;
+
+/**
+ * True when a /tts/task status is terminal (polling must stop).
+ * @param {string} status - queued|generating|done|failed|cancelled
+ * @returns {boolean}
+ */
+export function isTtsQueueTerminal(status) {
+    return status === "done" || status === "failed" || status === "cancelled";
+}
+
+/**
+ * Poll delay with exponential backoff on consecutive FETCH ERRORS only —
+ * a healthy poll loop stays at TTS_QUEUE_POLL_MS.
+ * @param {number} consecutiveErrors - 0 when the last poll succeeded
+ * @returns {number} Delay in ms (1500, 3000, 6000, 12000 cap)
+ */
+export function ttsQueuePollDelayMs(consecutiveErrors) {
+    const n = Math.max(0, Math.floor(Number(consecutiveErrors) || 0));
+    return Math.min(TTS_QUEUE_POLL_MS * Math.pow(2, n), TTS_QUEUE_POLL_MAX_MS);
+}
+
+/**
+ * Format seconds as m:ss for the progress indicator.
+ * @param {number} seconds
+ * @returns {string} e.g. "1:15"
+ */
+export function formatQueueClock(seconds) {
+    const s = Math.max(0, Math.floor(Number(seconds) || 0));
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Map a GET /tts/task/{id} status payload to the indicator text.
+ * Pure: object in -> string out.
+ *   queued     -> "Queued — N ahead" (N = jobs ahead of this one)
+ *   generating -> "Generating audio… segment M/K (m:ss, ~Xs left)"
+ *   done/failed/cancelled -> terminal labels
+ * @param {Object} st - status payload ({status, queue_position, subbatch,
+ *                      subbatches_total, elapsed_s, eta_s, error})
+ * @returns {string}
+ */
+export function ttsQueueIndicatorText(st) {
+    if (!st || typeof st !== "object") return "Preparing audio…";
+    if (st.status === "queued") {
+        const ahead = Math.max(0, (Math.floor(Number(st.queue_position)) || 1) - 1);
+        return ahead === 0 ? "Queued — starting next"
+                           : `Queued — ${ahead} ahead`;
+    }
+    if (st.status === "generating") {
+        const clock = formatQueueClock(st.elapsed_s);
+        const total = Math.floor(Number(st.subbatches_total)) || 0;
+        const seg = total > 0
+            ? ` segment ${Math.min(total, Math.max(1, Math.floor(Number(st.subbatch)) || 1))}/${total}`
+            : "";
+        const eta = Math.round(Number(st.eta_s) || 0);
+        const etaTxt = eta > 0 ? `, ~${eta}s left` : "";
+        return `Generating audio…${seg} (${clock}${etaTxt})`;
+    }
+    if (st.status === "done") return "Audio ready";
+    if (st.status === "failed") {
+        return "Audio generation failed" + (st.error ? `: ${st.error}` : "");
+    }
+    if (st.status === "cancelled") return "Audio cancelled";
+    return "Preparing audio…";
+}
+
+/** Abortable sleep — rejects with AbortError when the signal fires. */
+function _queueSleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(t);
+            const e = new Error("aborted");
+            e.name = "AbortError";
+            reject(e);
+        };
+        const t = setTimeout(() => {
+            if (signal) signal.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        if (signal) {
+            if (signal.aborted) return onAbort();
+            signal.addEventListener("abort", onAbort, { once: true });
+        }
+    });
+}
+
+/** Fire-and-forget server-side cancel for a queue task. */
+function cancelTtsQueueTask(taskId) {
+    try {
+        fetch(`/tts/task/${encodeURIComponent(taskId)}/cancel`,
+              { method: "POST", keepalive: true }).catch(() => {});
+    } catch (e) { /* page teardown */ }
+}
+
+/**
+ * Submit an on-box TTS job to the queue.
+ * @param {string} text - Speakable text (already sanitized)
+ * @param {Object} voiceConfig - {provider:"qwen", voice}
+ * @param {AbortSignal|null} signal
+ * @returns {Promise<{fallback:boolean, data?:Object}>} fallback:true when the
+ *          backend has no /tts/queue (404) — caller uses direct /tts/batch.
+ * @throws on 400/503/network errors (surfaced to the user, no fallback —
+ *         the direct path would hit the same wall).
+ */
+async function submitTtsQueueJob(text, voiceConfig, signal = null) {
+    const operator = (localStorage.getItem("bbx_operator") || "").trim();
+    const r = await fetch("/tts/queue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        ...(signal ? { signal } : {}),
+        body: JSON.stringify({
+            text: text,
+            provider: "qwen",
+            voice: `qwen:${voiceConfig.voice}`,
+            operator: operator
+        })
+    });
+    if (r.status === 404) {
+        console.warn("[TTS QUEUE] POST /tts/queue 404 (older backend) — falling back to /tts/batch");
+        return { fallback: true };
+    }
+    if (!r.ok) {
+        let detail = "";
+        try { detail = (await r.json()).detail || ""; } catch (e) { /* non-JSON */ }
+        throw new Error(detail || `TTS queue submit failed (HTTP ${r.status})`);
+    }
+    return { fallback: false, data: await r.json() };
+}
+
+/**
+ * Poll GET /tts/task/{id} until terminal. Transient fetch errors back off
+ * (ttsQueuePollDelayMs) and give up after 8 in a row; a 404 means the service
+ * restarted and dropped the in-memory queue (terminal, retryable via resubmit).
+ * @param {string} taskId
+ * @param {Object} opts - {signal?: AbortSignal, onStatus?: (st) => void}
+ * @returns {Promise<Object>} Terminal status payload
+ * @throws AbortError when the signal fires
+ */
+async function pollTtsQueueTask(taskId, { signal = null, onStatus = null } = {}) {
+    let errors = 0;
+    while (true) {
+        if (signal && signal.aborted) {
+            const e = new Error("aborted");
+            e.name = "AbortError";
+            throw e;
+        }
+        let st = null;
+        try {
+            const r = await fetch(`/tts/task/${encodeURIComponent(taskId)}`,
+                                  signal ? { signal } : {});
+            if (r.status === 404) {
+                return { task_id: taskId, status: "failed", retryable: false,
+                         error: "queue task lost (service restarted)" };
+            }
+            if (!r.ok) throw new Error(`poll HTTP ${r.status}`);
+            st = await r.json();
+            errors = 0;
+        } catch (e) {
+            if (e.name === "AbortError") throw e;
+            errors += 1;
+            console.warn(`[TTS QUEUE] poll error ${errors}/8:`, e.message);
+            if (errors >= 8) {
+                return { task_id: taskId, status: "failed", retryable: true,
+                         error: "lost contact with the TTS queue" };
+            }
+        }
+        if (st) {
+            if (onStatus) onStatus(st);
+            if (isTtsQueueTerminal(st.status)) return st;
+        }
+        await _queueSleep(ttsQueuePollDelayMs(errors), signal);
+    }
+}
+
+/** Get-or-create the queue progress indicator on a bubble. */
+function ensureQueueIndicator(bubbleElement) {
+    let el = bubbleElement.querySelector(".tts-queue-indicator");
+    if (el) return el;
+    el = document.createElement("div");
+    el.className = "tts-queue-indicator";
+    el.innerHTML = `<span class="tts-pulse"></span><span class="tts-label">Preparing audio…</span>`;
+    el.style.cssText = `
+        padding: 8px 12px;
+        background: rgba(39, 217, 128, 0.1);
+        border-radius: 8px;
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #27d980;
+    `;
+    const pulse = el.querySelector(".tts-pulse");
+    if (pulse) {
+        pulse.style.cssText = `
+            width: 8px;
+            height: 8px;
+            background: #27d980;
+            border-radius: 50%;
+            animation: ttsPulse 1s infinite;
+        `;
+    }
+    bubbleElement.appendChild(el);
+    return el;
+}
+
+function updateQueueIndicator(el, text) {
+    if (!el) return;
+    const label = el.querySelector(".tts-label");
+    if (label) label.textContent = text;
+}
+
+function removeQueueIndicator(bubbleElement) {
+    const el = bubbleElement.querySelector(".tts-queue-indicator");
+    if (el) el.remove();
+}
+
+/**
+ * Drive one queue task to completion for the MANUAL speak path: poll ->
+ * indicator updates -> on done fetch audio_url into the EXISTING cache/attach
+ * flow (same bubble player + cache key as the direct path) -> on failed show
+ * a Retry affordance on the bubble. Abort cancels polling AND the server job.
+ * @returns {Promise<void>} Resolves when handled (done, failed-with-retry-
+ *          affordance, or cancelled). Throws only on unexpected errors.
+ */
+async function runTtsQueueJob({ taskId, bubbleElement, btn, contentKey, initialStatus = null }) {
+    const abortCtrl = new AbortController();
+    activeTTSAbort = abortCtrl;
+    abortCtrl.signal.addEventListener("abort", () => cancelTtsQueueTask(taskId),
+                                      { once: true });
+    const indicator = ensureQueueIndicator(bubbleElement);
+    if (initialStatus) updateQueueIndicator(indicator, ttsQueueIndicatorText(initialStatus));
+    try {
+        const st = await pollTtsQueueTask(taskId, {
+            signal: abortCtrl.signal,
+            onStatus: (s) => updateQueueIndicator(indicator, ttsQueueIndicatorText(s)),
+        });
+        if (st.status === "done" && st.audio_url) {
+            const resp = await fetch(ensureAbsoluteUrl(st.audio_url),
+                                     { signal: abortCtrl.signal });
+            if (!resp.ok) throw new Error(`audio download failed (HTTP ${resp.status})`);
+            const audioDataURL = await blobToDataURL(await resp.blob());
+            removeQueueIndicator(bubbleElement);
+            const audioCache = getAudioCache();
+            audioCache[contentKey] = audioDataURL;
+            saveAudioCache();
+            bubbleElement.dataset.audioKey = contentKey;
+            attachAudioPlayer(bubbleElement, audioDataURL, true, btn);
+            toast("Audio ready");
+            return;
+        }
+        if (st.status === "failed") {
+            toast("Audio generation failed" + (st.error ? `: ${st.error}` : ""));
+            showQueueRetryAffordance({ taskId, bubbleElement, btn, contentKey });
+            return;
+        }
+        // cancelled (here or elsewhere) — just clean up.
+        removeQueueIndicator(bubbleElement);
+    } catch (e) {
+        if (e.name === "AbortError") {
+            removeQueueIndicator(bubbleElement);
+            return;
+        }
+        removeQueueIndicator(bubbleElement);
+        throw e;
+    } finally {
+        if (activeTTSAbort === abortCtrl) activeTTSAbort = null;
+    }
+}
+
+/**
+ * Failed-job Retry affordance on the bubble: POST /tts/task/{id}/retry then
+ * resume the same poll/attach flow.
+ */
+function showQueueRetryAffordance({ taskId, bubbleElement, btn, contentKey }) {
+    const indicator = ensureQueueIndicator(bubbleElement);
+    updateQueueIndicator(indicator, "Audio generation failed");
+    let retryBtn = indicator.querySelector(".tts-queue-retry");
+    if (retryBtn) retryBtn.remove();
+    retryBtn = document.createElement("button");
+    retryBtn.className = "tts-queue-retry";
+    retryBtn.textContent = "Retry";
+    retryBtn.style.cssText = `
+        margin-left: 8px;
+        padding: 2px 10px;
+        border-radius: 6px;
+        border: 1px solid #27d980;
+        background: transparent;
+        color: #27d980;
+        cursor: pointer;
+        font-size: 12px;
+    `;
+    retryBtn.onclick = async () => {
+        retryBtn.remove();
+        updateQueueIndicator(indicator, "Retrying…");
+        setBubbleState(btn, true);
+        try {
+            const r = await fetch(`/tts/task/${encodeURIComponent(taskId)}/retry`,
+                                  { method: "POST" });
+            if (!r.ok) {
+                // 404 = restart dropped the job; 409 = not in failed state.
+                toast(r.status === 404
+                    ? "Job was lost (service restarted) — press the speaker button again"
+                    : "Retry failed — press the speaker button again");
+                removeQueueIndicator(bubbleElement);
+                return;
+            }
+            await runTtsQueueJob({ taskId, bubbleElement, btn, contentKey });
+        } catch (e) {
+            console.error("[TTS QUEUE] retry error:", e);
+            toast("Retry failed: " + e.message);
+            removeQueueIndicator(bubbleElement);
+        } finally {
+            setBubbleState(btn, false);
+        }
+    };
+    indicator.appendChild(retryBtn);
+}
+
+// =============================================================================
 // Streaming TTS Queue (for Auto-TTS during streaming responses)
 // =============================================================================
 
@@ -118,6 +458,10 @@ class StreamingTTSQueue {
         this.finalized = false;
         this.audioPlayer = null;
         this.playbackAudio = null;
+
+        // On-box (qwen) queue state (B2): one /tts/queue job per response.
+        this.queueAbort = null;
+        this.queueTaskId = null;
 
         // Minimum sentence length to avoid tiny TTS calls
         this.MIN_SENTENCE_LENGTH = 20;
@@ -209,6 +553,11 @@ class StreamingTTSQueue {
         if (this.finalized) return;
 
         this.textBuffer += chunk;
+
+        // On-box (qwen): NO per-sentence fan-out — concurrent /tts/batch
+        // calls 429-storm the single GPU (B2 audit). Accumulate the full
+        // response and submit ONE /tts/queue job at stream end (finalize).
+        if (this.voiceConfig && this.voiceConfig.provider === "qwen") return;
 
         // Check for sentence boundaries
         this._extractSentences();
@@ -399,6 +748,13 @@ class StreamingTTSQueue {
         if (this.finalized) return;
         this.finalized = true;
 
+        // On-box (qwen): one queue job for the WHOLE response (see feedChunk).
+        // Cloud providers keep the per-sentence path below unchanged.
+        if (this.voiceConfig && this.voiceConfig.provider === "qwen") {
+            await this._finalizeViaQueue(fullText || this.textBuffer);
+            return;
+        }
+
         console.log('[StreamingTTS] Finalizing, buffer remaining:', this.textBuffer.length);
 
         // Process any remaining text in buffer
@@ -431,6 +787,132 @@ class StreamingTTSQueue {
         } else if (!this.isPlaying) {
             this._createFinalPlayer();
         }
+    }
+
+    /**
+     * On-box (qwen) auto-TTS finalize: ONE /tts/queue job for the full
+     * response, polled with the same indicator. Fail-open: a 404 from
+     * POST /tts/queue (older backend) falls back to ONE direct /tts/batch
+     * call (still no per-sentence fan-out).
+     * @param {string} fullText - Complete accumulated response text
+     */
+    async _finalizeViaQueue(fullText) {
+        const speakableText = extractSpeakableText(fullText || "");
+        if (!speakableText) {
+            if (this.indicator) this.indicator.remove();
+            return;
+        }
+        this.queueAbort = new AbortController();
+        try {
+            const sub = await submitTtsQueueJob(speakableText, this.voiceConfig,
+                                                this.queueAbort.signal);
+            if (sub.fallback) {
+                // Older backend without /tts/queue — one direct batch call.
+                this._updateIndicator('Generating full audio...');
+                const blob = await this._generateTTS(speakableText);
+                if (blob) {
+                    this.audioBlobs.push(blob);
+                    this.audioUrls.push(URL.createObjectURL(blob));
+                }
+                await this._createFinalPlayer();
+                return;
+            }
+            this.queueTaskId = sub.data.task_id;
+            this._updateIndicator(ttsQueueIndicatorText(
+                { status: "queued", queue_position: sub.data.queue_position }));
+            await this._pollQueueToPlayer(this.queueTaskId);
+        } catch (e) {
+            if (e.name === 'AbortError') {
+                if (this.indicator) this.indicator.remove();
+                return;
+            }
+            console.error('[StreamingTTS] queue error:', e);
+            toast('Audio generation failed: ' + e.message);
+            if (this.indicator) this.indicator.remove();
+        }
+    }
+
+    /**
+     * Poll one queue task to terminal and wire the result into the bubble
+     * player (shared by the first run and the Retry affordance).
+     * @param {string} taskId
+     */
+    async _pollQueueToPlayer(taskId) {
+        const signal = this.queueAbort.signal;
+        signal.addEventListener('abort', () => cancelTtsQueueTask(taskId),
+                                { once: true });
+        const st = await pollTtsQueueTask(taskId, {
+            signal: signal,
+            onStatus: (s) => this._updateIndicator(ttsQueueIndicatorText(s)),
+        });
+        if (st.status === 'done' && st.audio_url) {
+            const resp = await fetch(ensureAbsoluteUrl(st.audio_url), { signal });
+            if (!resp.ok) throw new Error(`audio download failed (HTTP ${resp.status})`);
+            const audioDataURL = await blobToDataURL(await resp.blob());
+            if (this.indicator) this.indicator.remove();
+            const speakBtn = this.bubble.querySelector('.speak-btn');
+            attachAudioPlayer(this.bubble, audioDataURL, true, speakBtn);
+            toast('Streaming TTS complete');
+            return;
+        }
+        if (st.status === 'failed') {
+            toast('Audio generation failed' + (st.error ? `: ${st.error}` : ''));
+            this._showQueueRetry(taskId);
+            return;
+        }
+        // cancelled
+        if (this.indicator) this.indicator.remove();
+    }
+
+    /**
+     * Retry affordance in the streaming indicator: POST /tts/task/{id}/retry
+     * and resume polling into the same player flow.
+     * @param {string} taskId
+     */
+    _showQueueRetry(taskId) {
+        if (!this.indicator) this._createStreamingIndicator();
+        this._updateIndicator('Audio generation failed');
+        const old = this.indicator.querySelector('.tts-queue-retry');
+        if (old) old.remove();
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'tts-queue-retry';
+        retryBtn.textContent = 'Retry';
+        retryBtn.style.cssText = `
+            margin-left: 8px;
+            padding: 2px 10px;
+            border-radius: 6px;
+            border: 1px solid #27d980;
+            background: transparent;
+            color: #27d980;
+            cursor: pointer;
+            font-size: 12px;
+        `;
+        retryBtn.onclick = async () => {
+            retryBtn.remove();
+            this._updateIndicator('Retrying…');
+            try {
+                const r = await fetch(`/tts/task/${encodeURIComponent(taskId)}/retry`,
+                                      { method: 'POST' });
+                if (!r.ok) {
+                    toast(r.status === 404
+                        ? 'Job was lost (service restarted) — use the speaker button'
+                        : 'Retry failed — use the speaker button');
+                    if (this.indicator) this.indicator.remove();
+                    return;
+                }
+                this.queueAbort = new AbortController();
+                await this._pollQueueToPlayer(taskId);
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    if (this.indicator) this.indicator.remove();
+                    return;
+                }
+                console.error('[StreamingTTS] retry error:', e);
+                toast('Retry failed: ' + e.message);
+                if (this.indicator) this.indicator.remove();
+            }
+        };
+        this.indicator.appendChild(retryBtn);
     }
 
     /**
@@ -500,6 +982,12 @@ class StreamingTTSQueue {
      */
     stop() {
         this.finalized = true;
+        // Abort any on-box queue polling; the abort listener POSTs the
+        // server-side /tts/task/{id}/cancel (cooperative, sub-batch boundary).
+        if (this.queueAbort) {
+            this.queueAbort.abort();
+            this.queueAbort = null;
+        }
         if (this.playbackAudio) {
             this.playbackAudio.pause();
             this.playbackAudio = null;
@@ -1314,6 +1802,28 @@ export async function speakToBubble(text, bubbleElement, btn) {
             ttsState.isFetching = false;
             setBubbleState(btn, false);
             return;
+        }
+
+        // On-box (qwen): route through the async server queue (B2) —
+        // submit + poll instead of holding one multi-minute /tts/batch open.
+        // Fail-open: a 404 from POST /tts/queue (older backend) falls through
+        // to the direct /tts/batch path below. Cloud providers never enter
+        // this branch (their requests are byte-for-byte unchanged).
+        if (voiceConfig.provider === "qwen") {
+            const sub = await submitTtsQueueJob(speakableText, voiceConfig);
+            if (!sub.fallback) {
+                console.log(`[TTS QUEUE] Submitted ${sub.data.task_id} `
+                    + `(position ${sub.data.queue_position})`);
+                await runTtsQueueJob({
+                    taskId: sub.data.task_id,
+                    bubbleElement,
+                    btn,
+                    contentKey,
+                    initialStatus: { status: "queued",
+                                     queue_position: sub.data.queue_position },
+                });
+                return;
+            }
         }
 
         console.log(`[TTS] Starting batch generation for ${speakableText.length} characters`);
