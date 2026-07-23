@@ -33,7 +33,7 @@ private const val TAG = "BlackBoxApi"
  * message verbatim but wrap raw transport failures (whose messages are
  * gibberish like "timeout" or "Failed to connect...") in friendlier copy.
  */
-class ApiHttpException(message: String) : IOException(message)
+class ApiHttpException(message: String, val code: Int = 0) : IOException(message)
 
 class BlackBoxApi(private val baseUrl: String) {
 
@@ -141,7 +141,7 @@ class BlackBoxApi(private val baseUrl: String) {
         } catch (_: Exception) {
             null
         }
-        return ApiHttpException(detail?.takeIf { it.isNotBlank() } ?: fallback)
+        return ApiHttpException(detail?.takeIf { it.isNotBlank() } ?: fallback, response.code)
     }
 
     suspend fun get(path: String): String {

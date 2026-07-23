@@ -587,6 +587,23 @@ fun ChatBubble(
                         }
                     }
 
+                    // B3 (2026-07-22): on-box TTS queue status chip. Only the
+                    // qwen queue path sets ttsStatus ("Queued — 2 ahead" /
+                    // "Generating 1/3… 0:45, ~30s left"); cloud providers keep
+                    // the bare spinner (ttsStatus stays null).
+                    if (isTtsGenerating && !message.ttsStatus.isNullOrBlank()) {
+                        Text(
+                            text = message.ttsStatus,
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = BbxAccent,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .align(Alignment.CenterVertically)
+                                .weight(1f, fill = false)
+                        )
+                    }
+
                     // Copy button (matches Portal .bubble-btn.copy-btn)
                     val copyColor by animateColorAsState(
                         targetValue = if (isCopied) HighlightKeyword else Neutral500,

@@ -51,6 +51,10 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.aiblackbox.portal.data.model.TaskStatus
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.repository.TtsQueue
+import com.aiblackbox.portal.data.repository.TtsQueueFailedException
+import com.aiblackbox.portal.data.repository.TtsQueueUnavailableException
+import com.aiblackbox.portal.data.repository.TtsRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.voice.AudioRecorderManager
 import com.aiblackbox.portal.data.voice.SttEvent
@@ -126,6 +130,71 @@ class NativeMainActivity : ComponentActivity() {
         } else {
             pendingMicAction = action
             micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    // =========================================================================
+    // B3 (2026-07-22): on-box (qwen) TTS via the async B1 server queue.
+    // Submit (POST /tts/queue) -> poll (GET /tts/task/{id}, 1.5s cadence) ->
+    // download the finished WAV. Poll requests are SHORT, so this path no
+    // longer leans on the 300s ttsClient read-timeout stopgap. Cloud
+    // providers never come through here — their direct paths are untouched.
+    // =========================================================================
+
+    /**
+     * Queue an on-box clip for a message bubble, driving the live status chip
+     * via chatViewModel.setMessageTtsGenerating(id, true, "Queued — N ahead" /
+     * "Generating M/K…").
+     *
+     * Returns true when HANDLED — audio delivered (player appears) or a
+     * terminal failure was toasted (speaker resets to idle = the retry
+     * affordance) — so the caller must NOT run the direct /tts/batch path.
+     * Returns false ONLY when the backend has no /tts/queue (404, pre-B1
+     * build): the caller falls back to the existing direct call, byte-for-byte
+     * unchanged.
+     */
+    private suspend fun tryQueueTtsForMessage(
+        api: BlackBoxApi,
+        chatViewModel: ChatViewModel,
+        messageId: String,
+        text: String,
+        voice: String,
+        operator: String,
+    ): Boolean {
+        chatViewModel.setMessageTtsGenerating(messageId, true, "Queueing audio…")
+        return try {
+            val bytes = TtsRepository(api).generateViaQueue(
+                text = text, voice = voice, operator = operator,
+            ) { st ->
+                chatViewModel.setMessageTtsGenerating(messageId, true, TtsQueue.statusLine(st))
+            }
+            val tempFile = File(cacheDir, "tts_q_${messageId.take(8)}_${System.currentTimeMillis()}.wav")
+            withContext(Dispatchers.IO) { tempFile.writeBytes(bytes) }
+            // Sets the audio path AND clears ttsGenerating + the status chip.
+            chatViewModel.setMessageTtsAudioUrl(messageId, tempFile.absolutePath)
+            true
+        } catch (e: TtsQueueUnavailableException) {
+            // Pre-B1 backend: clear the chip but KEEP the spinner — the caller
+            // continues straight into the direct /tts/batch path.
+            chatViewModel.setMessageTtsGenerating(messageId, true, null)
+            false
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            chatViewModel.setMessageTtsGenerating(messageId, false)
+            throw e
+        } catch (e: Exception) {
+            Log.e("TTS", "Queue TTS failed: ${e.message}", e)
+            // Reset to idle — tapping the speaker again IS the retry action.
+            chatViewModel.setMessageTtsGenerating(messageId, false)
+            val retryable = (e as? TtsQueueFailedException)?.retryable ?: true
+            val hint = if (retryable) " — tap the speaker to retry" else ""
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    applicationContext,
+                    "Audio failed: ${e.message?.take(80) ?: "unknown error"}$hint",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            true
         }
     }
 
@@ -411,6 +480,13 @@ class NativeMainActivity : ComponentActivity() {
                             }
                             val voiceValue = store.getOperatorVoice(operator).first()
                             val config = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceValue)
+                            // B3: on-box voices go through the async queue when the
+                            // backend has it (404 -> direct /tts/batch fallback below).
+                            if (config.provider == TtsRepository.ON_BOX_PROVIDER &&
+                                tryQueueTtsForMessage(api, chatViewModel, messageId, text, config.voice, operator)
+                            ) {
+                                return@collect
+                            }
                             val body = buildTtsBatchBody(text, config.voice, config.model, "mp3", config.provider, operator)
                             val request = okhttp3.Request.Builder()
                                 .url("${api.getBaseUrl()}/tts/batch")
@@ -491,6 +567,34 @@ class NativeMainActivity : ComponentActivity() {
                                     val api = chatViewModel.getApi() ?: return@launch
                                     val voiceValue = store.getOperatorVoice(operator).first()
                                     val config = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceValue)
+                                    // B3: on-box voices go through the async queue when the
+                                    // backend has it (404 -> direct /tts/batch fallback below).
+                                    // No message bubble here, so no status chip — but the poll
+                                    // path survives arbitrarily long queue waits.
+                                    if (config.provider == TtsRepository.ON_BOX_PROVIDER) {
+                                        val queued: ByteArray? = try {
+                                            TtsRepository(api).generateViaQueue(text, config.voice, operator)
+                                        } catch (e: TtsQueueUnavailableException) {
+                                            null // pre-B1 backend — fall through to /tts/batch
+                                        } catch (e: TtsQueueFailedException) {
+                                            Toast.makeText(
+                                                applicationContext,
+                                                "Audio failed: ${e.message?.take(80)}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                            return@launch
+                                        }
+                                        if (queued != null) {
+                                            val tempFile = File(cacheDir, "tts_${System.currentTimeMillis()}.wav")
+                                            withContext(Dispatchers.IO) { tempFile.writeBytes(queued) }
+                                            val player = MediaPlayer()
+                                            player.setDataSource(tempFile.absolutePath)
+                                            player.prepare()
+                                            player.start()
+                                            player.setOnCompletionListener { it.release(); tempFile.delete() }
+                                            return@launch
+                                        }
+                                    }
                                     val body = buildTtsBatchBody(text, config.voice, config.model, "mp3", config.provider, operator)
                                     val request = okhttp3.Request.Builder()
                                         .url("${api.getBaseUrl()}/tts/batch")
@@ -544,6 +648,16 @@ class NativeMainActivity : ComponentActivity() {
                                     }
                                     val voiceValue = store.getOperatorVoice(operator).first()
                                     val config = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceValue)
+                                    // B3: on-box voices go through the async queue when the
+                                    // backend has it — live chip on the bubble, short poll
+                                    // requests. 404 (pre-B1 backend) returns false and falls
+                                    // through to the direct path below; the outer finally still
+                                    // stops the background service on every exit.
+                                    if (config.provider == TtsRepository.ON_BOX_PROVIDER &&
+                                        tryQueueTtsForMessage(api, chatViewModel, messageId, text, config.voice, operator)
+                                    ) {
+                                        return@launch
+                                    }
                                     // D10 (Task 7.9): on-box (qwen) voices may wait on a GPU group
                                     // swap; show "loading models…" only if the first byte is slow.
                                     slowToastJob = if (config.provider == com.aiblackbox.portal.data.repository.TtsRepository.ON_BOX_PROVIDER) scope.launch {

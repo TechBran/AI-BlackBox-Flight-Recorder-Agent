@@ -1,13 +1,22 @@
 package com.aiblackbox.portal.data.repository
 
 import android.util.Log
+import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlin.math.roundToInt
 
 // =============================================================================
 // TtsRepository — aligned with Portal tts-stt.js
@@ -275,6 +284,118 @@ class TtsRepository(private val api: BlackBoxApi) {
     }
 
     // =========================================================================
+    // On-box TTS queue (B3, 2026-07-22) — Android client for the B1 async
+    // server queue. On-box (qwen) voices submit ONE job (POST /tts/queue) and
+    // poll GET /tts/task/{id} every TtsQueue.POLL_MS instead of holding a
+    // multi-minute /tts/batch request open against OkHttp's read timeout.
+    // Cloud providers NEVER come through here (their paths are untouched).
+    // Fail-open: a 404 from POST /tts/queue (older backend) raises
+    // TtsQueueUnavailableException so the caller falls back to /tts/batch.
+    // All state parsing / status strings / backoff live in the PURE TtsQueue
+    // object below (unit-tested in TtsQueueStateTest, like VoicePicker).
+    // =========================================================================
+
+    /**
+     * Submit one on-box TTS job. Returns the queue task_id.
+     * @throws TtsQueueUnavailableException when the backend has no /tts/queue
+     *         (HTTP 404) — the caller should use the direct /tts/batch path.
+     * @throws Exception on 400/503/network failures (surfaced to the user; the
+     *         direct path would hit the same wall, so no fallback).
+     */
+    suspend fun submitQueue(
+        text: String,
+        voice: String,
+        operator: String = "unknown",
+    ): String {
+        // Mirror the direct path's buildTtsBatchBody: strip non-speakable
+        // content client-side (server sanitize_for_speech still runs too).
+        val body = buildJsonObject {
+            put("text", com.aiblackbox.portal.util.SpeakableText.stripNonSpeakable(text))
+            put("provider", "qwen")
+            put("voice", "qwen:$voice")
+            put("operator", operator)
+        }.toString()
+        val raw = try {
+            api.post("/tts/queue", body)
+        } catch (e: ApiHttpException) {
+            if (e.code == 404) {
+                Log.i(TAG, "POST /tts/queue 404 (older backend) — direct /tts/batch fallback")
+                throw TtsQueueUnavailableException()
+            }
+            throw e
+        }
+        val taskId = try {
+            json.parseToJsonElement(raw).jsonObject["task_id"]?.jsonPrimitive?.contentOrNull
+        } catch (e: Exception) {
+            null
+        }
+        if (taskId.isNullOrBlank()) throw Exception("TTS queue submit returned no task_id")
+        Log.d(TAG, "submitQueue: task_id=$taskId (${text.length} chars, voice=$voice)")
+        return taskId
+    }
+
+    /** One fetch of GET /tts/task/{id}, classified for the poll state machine. */
+    private suspend fun fetchTask(taskId: String): TtsQueueFetch = try {
+        TtsQueueFetch.Body(api.get("/tts/task/$taskId"))
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: ApiHttpException) {
+        if (e.code == 404) TtsQueueFetch.NotFound else TtsQueueFetch.TransportError
+    } catch (e: Exception) {
+        Log.w(TAG, "pollTask transport error: ${e.message}")
+        TtsQueueFetch.TransportError
+    }
+
+    /**
+     * Poll a queued job ONCE and return its typed state. Null on a transient
+     * transport/parse error (caller keeps polling); a 404 maps to the terminal
+     * "queue task lost" failure (the in-memory B1 queue dropped on restart).
+     */
+    suspend fun pollTask(taskId: String): TtsQueueState? = when (val f = fetchTask(taskId)) {
+        is TtsQueueFetch.Body -> TtsQueue.parseState(f.json)
+        TtsQueueFetch.NotFound -> TtsQueue.lostTaskFailure()
+        TtsQueueFetch.TransportError -> null
+    }
+
+    /**
+     * Full submit -> poll(1.5s cadence, error backoff) -> download flow for an
+     * on-box clip. Returns the finished WAV bytes.
+     * [onStatus] fires on every non-terminal poll with the typed state (feed
+     * TtsQueue.statusLine into the bubble chip).
+     * @throws TtsQueueUnavailableException 404 on submit — use /tts/batch.
+     * @throws TtsQueueFailedException terminal queue failure (carries
+     *         [TtsQueueFailedException.retryable] + the task id).
+     */
+    suspend fun generateViaQueue(
+        text: String,
+        voice: String,
+        operator: String = "unknown",
+        onStatus: (TtsQueueState) -> Unit = {},
+    ): ByteArray {
+        val taskId = submitQueue(text, voice, operator)
+        val terminal = TtsQueue.pollLoop(
+            fetch = { fetchTask(taskId) },
+            onStatus = onStatus,
+        )
+        when (terminal) {
+            is TtsQueueState.Done -> {
+                val bytes = api.getBytes(terminal.audioUrl)
+                if (bytes == null || bytes.isEmpty()) {
+                    throw TtsQueueFailedException(
+                        taskId, "audio download failed (${terminal.audioUrl})", retryable = true
+                    )
+                }
+                Log.d(TAG, "generateViaQueue: $taskId done — ${bytes.size} bytes")
+                return bytes
+            }
+            is TtsQueueState.Failed ->
+                throw TtsQueueFailedException(taskId, terminal.error, terminal.retryable)
+            else ->  // pollLoop only returns terminal states
+                throw TtsQueueFailedException(taskId, "unexpected non-terminal state", retryable = true)
+        }
+    }
+
+    // =========================================================================
     // Voice Catalog — GET /tts/catalog (live catalog with offline fallback)
     // Backend shape: {"groups":[{"id","label","voices":[{"id","name","description"}]}]}
     // Returns TTS_VOICE_GROUPS on ANY failure (network, parse, empty).
@@ -418,4 +539,201 @@ object VoicePicker {
 
     /** The voices that populate the second dropdown for the chosen [group]. */
     fun voicesFor(group: VoiceGroup?): List<VoiceOption> = group?.voices ?: emptyList()
+}
+
+// =============================================================================
+// On-box TTS queue — PURE core (B3, 2026-07-22)
+//
+// Typed states, status strings, backoff math, and the poll state machine for
+// the B1 async server queue (POST /tts/queue -> GET /tts/task/{id}). Kept
+// Android/OkHttp-free so it is unit-testable on the JVM (TtsQueueStateTest),
+// exactly like VoicePicker above. Mirrors the web helpers in
+// Portal/modules/tts-stt.js (ttsQueueIndicatorText / ttsQueuePollDelayMs /
+// pollTtsQueueTask) so the two surfaces cannot drift on semantics.
+// =============================================================================
+
+/** Typed state of one queued on-box TTS job (from GET /tts/task/{id}). */
+sealed class TtsQueueState {
+    /** Waiting in the FIFO; [ahead] jobs run before this one. */
+    data class Queued(val ahead: Int) : TtsQueueState()
+
+    /** On the GPU: sub-batch [subbatch] of [total], [elapsedS] in, ~[etaS] left. */
+    data class Generating(
+        val subbatch: Int,
+        val total: Int,
+        val elapsedS: Double,
+        val etaS: Double,
+    ) : TtsQueueState()
+
+    /** Finished — WAV served at [audioUrl] (resolve against baseUrl). */
+    data class Done(val audioUrl: String) : TtsQueueState()
+
+    /** Terminal failure ([retryable] = worth resubmitting). The server's
+     *  `cancelled` state folds in here as a non-retryable failure. */
+    data class Failed(val error: String, val retryable: Boolean) : TtsQueueState()
+}
+
+/** One classified poll fetch — production wraps HTTP, tests inject fakes. */
+sealed class TtsQueueFetch {
+    /** 200 with a body (parse it — garbage counts as a transient error). */
+    data class Body(val json: String) : TtsQueueFetch()
+
+    /** 404: the in-memory B1 queue dropped this task (service restart). */
+    object NotFound : TtsQueueFetch()
+
+    /** Network/timeout/5xx — transient, poll again with backoff. */
+    object TransportError : TtsQueueFetch()
+}
+
+/** POST /tts/queue returned 404: backend predates B1 — use direct /tts/batch. */
+class TtsQueueUnavailableException :
+    Exception("Backend has no /tts/queue (older build) — falling back to /tts/batch")
+
+/** A queue job ended in a terminal failure. */
+class TtsQueueFailedException(
+    val taskId: String,
+    message: String,
+    val retryable: Boolean,
+) : Exception(message)
+
+object TtsQueue {
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    /** Base poll cadence for GET /tts/task/{id}. */
+    const val POLL_MS = 1500L
+
+    /** Cap for the error-backoff poll delay. */
+    const val POLL_MAX_MS = 12000L
+
+    /** Consecutive fetch errors before the poller gives up (retryable). */
+    const val MAX_CONSECUTIVE_ERRORS = 8
+
+    /** Terminal failure for a task the restarted service no longer knows. */
+    fun lostTaskFailure() =
+        TtsQueueState.Failed("queue task lost (service restarted)", retryable = false)
+
+    /**
+     * Parse a raw GET /tts/task/{id} body into a typed state.
+     * Null when unparseable or an unknown status — callers treat that as a
+     * transient error, NOT a crash (a proxy error page must never throw).
+     */
+    fun parseState(raw: String): TtsQueueState? = try {
+        val obj = json.parseToJsonElement(raw).jsonObject
+        when (obj["status"]?.jsonPrimitive?.contentOrNull) {
+            "queued" -> {
+                val pos = obj["queue_position"]?.jsonPrimitive?.intOrNull ?: 1
+                TtsQueueState.Queued(ahead = maxOf(0, pos - 1))
+            }
+            "generating" -> TtsQueueState.Generating(
+                subbatch = obj["subbatch"]?.jsonPrimitive?.intOrNull ?: 0,
+                total = obj["subbatches_total"]?.jsonPrimitive?.intOrNull ?: 0,
+                elapsedS = obj["elapsed_s"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                etaS = obj["eta_s"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+            )
+            "done" -> {
+                val url = obj["audio_url"]?.jsonPrimitive?.contentOrNull
+                if (url.isNullOrBlank()) {
+                    TtsQueueState.Failed("done without audio_url", retryable = false)
+                } else {
+                    TtsQueueState.Done(url)
+                }
+            }
+            "failed" -> TtsQueueState.Failed(
+                error = obj["error"]?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { it.isNotBlank() } ?: "Audio generation failed",
+                retryable = obj["retryable"]?.jsonPrimitive?.booleanOrNull ?: false,
+            )
+            "cancelled" -> TtsQueueState.Failed("Audio cancelled", retryable = false)
+            else -> null
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** True when polling must stop. */
+    fun isTerminal(state: TtsQueueState): Boolean =
+        state is TtsQueueState.Done || state is TtsQueueState.Failed
+
+    /**
+     * Poll delay with exponential backoff on consecutive FETCH ERRORS only —
+     * a healthy loop stays at [POLL_MS] (1500, 3000, 6000, 12000 cap).
+     */
+    fun pollDelayMs(consecutiveErrors: Int): Long {
+        val n = maxOf(0, consecutiveErrors)
+        var delay = POLL_MS
+        repeat(minOf(n, 8)) { delay = minOf(delay * 2, POLL_MAX_MS) }
+        return delay
+    }
+
+    /** Format seconds as m:ss for the progress chip (e.g. "1:15"). */
+    fun formatClock(seconds: Double): String {
+        val s = maxOf(0, seconds.toInt())
+        return "${s / 60}:${(s % 60).toString().padStart(2, '0')}"
+    }
+
+    /**
+     * Bubble-chip text for a typed state. Pure: state in -> string out.
+     *   Queued(0)  -> "Queued — starting next"
+     *   Queued(2)  -> "Queued — 2 ahead"
+     *   Generating -> "Generating 2/5… 1:15, ~30s left"
+     *   Done       -> "Audio ready"
+     *   Failed     -> "Audio failed: <error>"
+     */
+    fun statusLine(state: TtsQueueState): String = when (state) {
+        is TtsQueueState.Queued ->
+            if (state.ahead <= 0) "Queued — starting next"
+            else "Queued — ${state.ahead} ahead"
+        is TtsQueueState.Generating -> {
+            val clock = formatClock(state.elapsedS)
+            val seg = if (state.total > 0) {
+                " ${state.subbatch.coerceIn(1, state.total)}/${state.total}"
+            } else ""
+            val eta = state.etaS.roundToInt()
+            val etaTxt = if (eta > 0) ", ~${eta}s left" else ""
+            "Generating$seg… $clock$etaTxt"
+        }
+        is TtsQueueState.Done -> "Audio ready"
+        is TtsQueueState.Failed -> "Audio failed: ${state.error}"
+    }
+
+    /**
+     * The poll state machine: fetch -> classify -> repeat until terminal.
+     * Only ever returns [TtsQueueState.Done] or [TtsQueueState.Failed]:
+     *  - [TtsQueueFetch.NotFound] -> [lostTaskFailure] (restart dropped the
+     *    in-memory queue; terminal, retryable only via resubmit)
+     *  - [MAX_CONSECUTIVE_ERRORS] transport/parse errors in a row -> a
+     *    retryable "lost contact" failure
+     *  - a healthy body resets the error counter; non-terminal states go to
+     *    [onStatus] and the loop sleeps [pollDelayMs] via [delayMs]
+     * [fetch] and [delayMs] are injected so tests drive it with fake
+     * responses and recorded delays (no real clock, no HTTP).
+     */
+    suspend fun pollLoop(
+        fetch: suspend () -> TtsQueueFetch,
+        onStatus: (TtsQueueState) -> Unit = {},
+        delayMs: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+    ): TtsQueueState {
+        var errors = 0
+        while (true) {
+            var state: TtsQueueState? = null
+            when (val f = fetch()) {
+                is TtsQueueFetch.Body -> {
+                    state = parseState(f.json)
+                    errors = if (state == null) errors + 1 else 0
+                }
+                TtsQueueFetch.NotFound -> return lostTaskFailure()
+                TtsQueueFetch.TransportError -> errors += 1
+            }
+            if (errors >= MAX_CONSECUTIVE_ERRORS) {
+                return TtsQueueState.Failed(
+                    "lost contact with the TTS queue", retryable = true
+                )
+            }
+            if (state != null) {
+                if (isTerminal(state)) return state
+                onStatus(state)
+            }
+            delayMs(pollDelayMs(errors))
+        }
+    }
 }

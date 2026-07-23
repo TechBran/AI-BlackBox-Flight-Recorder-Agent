@@ -542,7 +542,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // - isThinking: no thinking active after restart
                 val cleaned = saved.takeLast(MAX_CHAT_MESSAGES).map { msg ->
                     if (msg.ttsGenerating || msg.isStreaming || msg.isThinking) {
-                        msg.copy(ttsGenerating = false, isStreaming = false, isThinking = false)
+                        msg.copy(ttsGenerating = false, ttsStatus = null, isStreaming = false, isThinking = false)
                     } else msg
                 }
                 _messages.value = cleaned
@@ -2920,16 +2920,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val current = _messages.value.toMutableList()
         val idx = current.indexOfFirst { it.id == messageId }
         if (idx >= 0) {
-            current[idx] = current[idx].copy(ttsAudioUrl = audioUrl, ttsGenerating = false)
+            current[idx] = current[idx].copy(
+                ttsAudioUrl = audioUrl, ttsGenerating = false, ttsStatus = null
+            )
             _messages.value = current
         }
     }
 
-    fun setMessageTtsGenerating(messageId: String, generating: Boolean) {
+    /**
+     * B3: [status] is the on-box queue progress chip ("Queued — 2 ahead" /
+     * "Generating 1/3… 0:45"). Null (the cloud/direct paths) keeps the plain
+     * spinner; it is always cleared when [generating] ends.
+     */
+    fun setMessageTtsGenerating(messageId: String, generating: Boolean, status: String? = null) {
         val current = _messages.value.toMutableList()
         val idx = current.indexOfFirst { it.id == messageId }
         if (idx >= 0) {
-            current[idx] = current[idx].copy(ttsGenerating = generating)
+            current[idx] = current[idx].copy(
+                ttsGenerating = generating,
+                ttsStatus = if (generating) status else null,
+            )
             _messages.value = current
         }
     }

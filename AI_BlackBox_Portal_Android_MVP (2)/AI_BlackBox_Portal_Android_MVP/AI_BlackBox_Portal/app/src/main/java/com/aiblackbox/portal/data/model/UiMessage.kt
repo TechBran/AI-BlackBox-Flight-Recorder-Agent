@@ -23,6 +23,7 @@ data class UiMessage(
     val provenance: Provenance? = null,            // typed retrieval provenance (recent/keyword/semantic/checkpoint)
     val ttsAudioUrl: String? = null,              // URL of generated TTS audio for inline player
     val ttsGenerating: Boolean = false,            // true while TTS is being generated
+    val ttsStatus: String? = null,                 // B3 queue chip text ("Queued — 2 ahead" / "Generating 1/3…"); only meaningful while ttsGenerating
     val sendFailed: Boolean = false                // user turn whose send failed with nothing usable arrived — UI offers retry (default keeps old persisted history loading)
 )
 
