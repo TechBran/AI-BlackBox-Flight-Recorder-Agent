@@ -37,6 +37,22 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
                 // upload, so deny local file:// and content:// access outright.
                 settings.allowFileAccess = false
                 settings.allowContentAccess = false
+                // BLACK-CANVAS FIX (Brandon field find 2026-07-23): the served
+                // page rendered PURE BLACK in this WebView while identical in
+                // Chrome. Prime suspect: WebView "algorithmic darkening" — on
+                // dark-themed apps Android auto-darkens web content and is
+                // notorious for blacking out <canvas>. The page is already
+                // dark-themed; never let the WebView re-shade it.
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    settings.isAlgorithmicDarkeningAllowed = false
+                }
+                @Suppress("DEPRECATION")
+                if (android.os.Build.VERSION.SDK_INT in 29..32) {
+                    settings.forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
+                }
+                // Belt-and-suspenders for canvas compositing in WebView.
+                setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                setBackgroundColor(android.graphics.Color.BLACK)
                 webViewClient = WebViewClient()
                 loadUrl("${baseUrl.trimEnd('/')}/cu/view/$sessionId")
             }
