@@ -28,9 +28,11 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
     // switcher/extra-keys bars above the composer stack. The /cu/view/auto
     // 302 preserves the params server-side.
     val density = LocalDensity.current
+    // +16dp breathing room below the Android status area (Brandon 2026-07-23:
+    // "bring down that toolbar a bit so it's away from the system stuff").
     val topInsetDp = with(density) {
         WindowInsets.statusBars.getTop(this).toDp().value.toInt()
-    }
+    } + 16
     // Nav bar + measured-composer allowance (input bubble + pill row + gaps —
     // mirrors CuScreen's bottomClearance constant).
     val bottomInsetDp = with(density) {

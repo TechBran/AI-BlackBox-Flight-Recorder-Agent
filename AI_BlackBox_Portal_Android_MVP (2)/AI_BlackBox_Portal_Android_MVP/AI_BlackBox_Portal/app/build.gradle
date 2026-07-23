@@ -17,8 +17,8 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 17
-        versionName "1.5.6-splashtop-fit"
+        versionCode 18
+        versionName "1.5.7-toolbar-room"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }

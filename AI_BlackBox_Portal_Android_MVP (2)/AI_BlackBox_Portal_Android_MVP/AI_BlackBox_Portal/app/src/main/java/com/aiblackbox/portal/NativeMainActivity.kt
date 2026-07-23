@@ -781,7 +781,16 @@ class NativeMainActivity : ComponentActivity() {
                     // [AppChromeLayer] scopes the LocalShowAppChrome.current read
                     // to a 1-line composable; without this extraction every
                     // sibling in this setContent body would invalidate on toggle.
-                    AppChromeLayer(forceHide = cliAgentInTerminal) {
+                    // Brandon fit pass 2026-07-23: the CU live view hides the
+                    // operator pill too — no operator switching happens on
+                    // that screen (back out to switch) and the pill was the
+                    // last overlay crowding the viewer's toolbar. The X close
+                    // button (Layer 2.5) stays as the exit affordance.
+                    val chromeRoute = navController
+                        .currentBackStackEntryAsState().value?.destination?.route
+                    val cuLiveViewActive =
+                        chromeRoute?.startsWith(Routes.CU_LIVE_VIEW) == true
+                    AppChromeLayer(forceHide = cliAgentInTerminal || cuLiveViewActive) {
                         BlackBoxTopBar(
                             operator = operator,
                             operators = operators,
