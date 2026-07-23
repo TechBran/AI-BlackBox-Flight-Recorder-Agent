@@ -171,6 +171,36 @@ def _get_android_function_declarations() -> list:
     ]
 
 
+def _budget_contents_images(contents, keep_images: int = 3) -> None:
+    """Replace all but the most recent ``keep_images`` inline images in the
+    request contents with small text parts, IN PLACE (function_call /
+    function_response pairing untouched).
+
+    The gemini twin of budget_screenshots_in_history (Anthropic 413 fix): the
+    loop re-sends the whole contents list every step and appends one full-res
+    screenshot per step, so an unbudgeted run blows Gemini's 131,072-token
+    input cap at ~step 20 (Brandon's MS02 chess game died exactly this way,
+    2026-07-23). Idempotent — elided parts are plain text on later passes.
+    """
+    def _is_image(p) -> bool:
+        inline = getattr(p, "inline_data", None)
+        return inline is not None and (inline.mime_type or "").startswith("image/")
+
+    total = sum(1 for c in contents for p in (c.parts or []) if _is_image(p))
+    if total <= keep_images:
+        return
+    cutoff = total - keep_images
+    seen = 0
+    for c in contents:
+        parts = c.parts or []
+        for idx, p in enumerate(parts):
+            if _is_image(p):
+                seen += 1
+                if seen <= cutoff:
+                    parts[idx] = types.Part.from_text(
+                        text="[earlier screenshot elided to fit the input window]")
+
+
 async def _capture_screenshot(session: GeminiCUSession) -> bytes:
     """Capture a screenshot from the target device.
     For desktop/browser: the NATIVE frame, unresized. For android: ADB as-is.
@@ -495,10 +525,15 @@ async def run_gemini_cu_loop(
     # session.conversation_history and re-injecting would balloon the prompt.
     is_first_turn = not getattr(session, "conversation_history", None)
     operator = resolve_operator(session.operator, "[GEMINI-CU]")
+    # max_chars is MANDATORY here: gemini CU's 131,072-token input limit is
+    # shared with per-step screenshots; an uncapped retrieval once injected
+    # 311,810 chars and every long run 400'd at ~step 20 (MS02 chess,
+    # 2026-07-23). ~20K chars ≈ 5K tokens of memory — plenty for CU hints.
     fossil_text, provenance = retrieve_for_agent(
         user_text=prompt,
         operator=operator,
         log_prefix="[GEMINI-CU]",
+        max_chars=20_000,
     )
     # Always stash provenance on the session and yield it to the consumer
     # (REST `/run` ignores it; SSE `/stream` forwards it; chat-provider
@@ -582,6 +617,12 @@ async def run_gemini_cu_loop(
 
         session.current_step = step
         yield {"type": "cu_step", "data": {"step": step, "total": MAX_ITERATIONS}}
+
+        # Token-budget guard: keep only the last K screenshots in the request.
+        # The loop appends one full-res frame per step; unbudgeted, a run dies
+        # at ~step 20 on Gemini's 131,072-token input cap (MS02 chess,
+        # 2026-07-23) — the gemini twin of the Anthropic 413 fix.
+        _budget_contents_images(contents)
 
         # Call Gemini API
         print(f"[GEMINI CU] Step {step}: calling API with {len(contents)} content blocks, system_instruction={len(str(config.system_instruction or ''))} chars")

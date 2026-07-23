@@ -57,6 +57,7 @@ def retrieve_for_agent(
     user_text: str,
     operator: str,
     log_prefix: str,
+    max_chars: Optional[int] = None,
 ) -> Tuple[str, Dict[str, List[str]]]:
     """Fetch fossil context for an agent session.
 
@@ -64,6 +65,13 @@ def retrieve_for_agent(
     — agent transports treat any retrieval failure as a degrade-to-empty
     (with warning) rather than fatal. The retrieval layer's own [CONTEXT]
     log prefix is set from `log_prefix` so each transport's logs are tagged.
+
+    ``max_chars`` (optional) hard-caps the returned fossil text. Callers with
+    a small model input window MUST set it: Gemini CU has a 131,072-token
+    input limit shared with per-step screenshots, and an uncapped retrieval
+    once injected 311,810 chars (~76K tokens) into system_instruction —
+    every long run then died on a 400 (Brandon's chess game, MS02
+    2026-07-23). None preserves the CLI agents' unbounded behavior.
     """
     try:
         fossil_text, prov = build_fossil_context(
@@ -71,6 +79,12 @@ def retrieve_for_agent(
             operator=operator,
             log_prefix=f"{log_prefix} [CONTEXT]",
         )
+        if max_chars is not None and len(fossil_text) > max_chars:
+            print(f"{log_prefix} fossil context {len(fossil_text)} chars > "
+                  f"budget {max_chars} — truncating")
+            fossil_text = (fossil_text[:max_chars]
+                           + "\n[fossil context truncated to fit the model's "
+                             "input window]")
         return fossil_text, normalize_provenance(prov)
     except ValueError as e:
         # build_fossil_context only raises ValueError for empty operator —
