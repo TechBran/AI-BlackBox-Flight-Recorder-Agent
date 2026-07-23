@@ -73,8 +73,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -86,6 +84,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.api.CuSession
+import com.aiblackbox.portal.data.api.CuSessionsClient
+import com.aiblackbox.portal.data.api.pickLiveViewSession
 import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -204,6 +205,24 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
     // Preflight result (null = not fetched or fetch failed -> no banner)
     private val _preflight = MutableStateFlow<CuPreflight?>(null)
     val preflight: StateFlow<CuPreflight?> = _preflight.asStateFlow()
+
+    // Active virtual CU sessions from GET /cu/sessions (design 2026-07-23 M5):
+    // feeds the live-view badge; fetch failures keep the last value silently
+    // (offline boxes / pre-live-view Orchestrators must not crash the screen).
+    private val _liveSessions = MutableStateFlow<List<CuSession>>(emptyList())
+    val liveSessions: StateFlow<List<CuSession>> = _liveSessions.asStateFlow()
+
+    fun refreshLiveSessions() {
+        val api = api ?: return
+        viewModelScope.launch {
+            try {
+                _liveSessions.value = CuSessionsClient(api).sessions().sessions
+            } catch (_: Exception) {
+                // Endpoint missing / network down -> hide the badge, don't crash
+                _liveSessions.value = emptyList()
+            }
+        }
+    }
 
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
@@ -510,6 +529,12 @@ fun CuScreen(
     // preselected and the live screenshot stream toggled ON. Null (the system-menu
     // entry) changes nothing.
     initialLiveDeviceId: String? = null,
+    // Design 2026-07-23 M5 (D9): opens the streaming live-view client
+    // (CuLiveViewScreen WebView on /cu/view/{sessionId}) for an active virtual
+    // session. Wired to a NavGraph route by the caller; the badge below only
+    // shows when /cu/sessions reports a live_view-capable session, so this
+    // screen stays the fallback surface everywhere else.
+    onOpenLiveView: (String) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: CuViewModel = viewModel()
 ) {
@@ -560,6 +585,16 @@ fun CuScreen(
         }
     }
 
+    // Live-view badge feed: poll /cu/sessions while this screen is composed
+    // (4s — Portal cu-live-view.js parity). Cancelled automatically when the
+    // composable leaves composition.
+    LaunchedEffect(origin) {
+        while (true) {
+            viewModel.refreshLiveSessions()
+            delay(4000)
+        }
+    }
+
     // Auto-start polling when CU agent is running, stop when done
     LaunchedEffect(cuStatus) {
         if (cuStatus == "running" && !isPolling) {
@@ -579,6 +614,9 @@ fun CuScreen(
     // the next screen entry (parity with the Portal drawer banner)
     val preflight by viewModel.preflight.collectAsState()
     var preflightDismissed by remember { mutableStateOf(false) }
+
+    // Active virtual CU sessions (live-view badge target)
+    val liveSessions by viewModel.liveSessions.collectAsState()
 
     // Bottom clearance for the Composer overlay: measured Composer stack
     // (16dp outer padding + 48dp input bubble + ~46dp pill row, per
@@ -648,6 +686,18 @@ fun CuScreen(
                 deviceDropdownExpanded = false
             }
         )
+
+        // ── Live-view badge (design 2026-07-23 M5): shown only when a virtual
+        // session actually streams (live_view=true). Tap opens the WebView
+        // streaming client; this screen remains the screenshot-poll fallback. ──
+        val liveTarget = pickLiveViewSession(liveSessions)
+        if (liveTarget != null) {
+            CuLiveViewBadge(
+                sessionCount = liveSessions.count { it.liveView },
+                backend = liveTarget.backend,
+                onClick = { onOpenLiveView(liveTarget.sessionId) }
+            )
+        }
     }
 
     @Composable
@@ -697,7 +747,9 @@ fun CuScreen(
                                         .coerceIn(0, resH)
                                     view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                     viewModel.click(x, y)
-                                    showTypingInput = true
+                                    // Design 2026-07-23 §4.4: tap = click ONLY.
+                                    // The keyboard opens via the manual ⌨ button
+                                    // in CuQuickActions, never on tap.
                                 }
                             }
                         },
@@ -745,7 +797,7 @@ fun CuScreen(
 
     @Composable
     fun ViewerControls() {
-        // ── Typing input — appears after tapping the screen ──
+        // ── Typing input — opened by the manual ⌨ toggle in the quick-actions row ──
         if (showTypingInput) {
             CuTypingInput(
                 text = typingText,
@@ -770,7 +822,9 @@ fun CuScreen(
             },
             onScroll = { direction ->
                 viewModel.scroll(resW / 2, resH / 2, direction)
-            }
+            },
+            keyboardShown = showTypingInput,
+            onToggleKeyboard = { showTypingInput = !showTypingInput }
         )
 
         // Status bar
@@ -1418,6 +1472,10 @@ private fun CuStopButton(onClick: () -> Unit) {
 private fun CuQuickActions(
     onSendKey: (String) -> Unit,
     onScroll: (String) -> Unit,
+    // Manual keyboard toggle (design 2026-07-23 §4.4): the ONLY way the typing
+    // input opens — tap-to-open on the viewer is removed.
+    keyboardShown: Boolean = false,
+    onToggleKeyboard: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -1438,6 +1496,12 @@ private fun CuQuickActions(
         CuCompactButton(label = "\u21E5", onClick = { onSendKey("Tab") })
         CuCompactButton(label = "\u232B", onClick = { onSendKey("BackSpace") })
         CuCompactButton(label = "Esc", onClick = { onSendKey("Escape") })
+        // Manual keyboard toggle \u2014 highlighted while the typing input is open
+        CuCompactButton(
+            label = "\u2328",
+            onClick = onToggleKeyboard,
+            active = keyboardShown
+        )
 
         Spacer(Modifier.weight(1f))
 
@@ -1449,12 +1513,15 @@ private fun CuQuickActions(
 @Composable
 private fun CuCompactButton(
     label: String,
+    // Toggle-style highlight (keyboard button while the typing input is open).
+    // Declared BEFORE onClick so trailing-lambda call sites keep working.
+    active: Boolean = false,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val bgAlpha by animateFloatAsState(
-        targetValue = if (pressed) 0.18f else 0.08f,
+        targetValue = if (pressed) 0.18f else if (active) 0.14f else 0.08f,
         animationSpec = tween(DurationFast, easing = EaseStandard),
         label = "compactBtnBg"
     )
@@ -1463,7 +1530,11 @@ private fun CuCompactButton(
         modifier = Modifier
             .clip(RoundedCornerShape(RadiusSm))
             .background(Color.White.copy(alpha = bgAlpha))
-            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(RadiusSm))
+            .border(
+                1.dp,
+                if (active) CuSuccess.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.12f),
+                RoundedCornerShape(RadiusSm)
+            )
             .clickFeedback(
                 interactionSource = interaction,
                 indication = null,
@@ -1475,13 +1546,72 @@ private fun CuCompactButton(
         Text(
             text = label,
             fontSize = 13.sp,
-            color = BbxDim
+            color = if (active) CuSuccess else BbxDim
         )
     }
 }
 
 // =============================================================================
-// Typing Input — appears after tapping the remote desktop, keyboard pops up
+// Live-view badge — Portal "● N agents running — watch" pill parity
+// (cu-live-view.js). Rendered only when /cu/sessions reports a session with
+// live_view=true; tap opens the streaming WebView client (CuLiveViewScreen).
+// =============================================================================
+
+@Composable
+private fun CuLiveViewBadge(
+    sessionCount: Int,
+    backend: String,
+    onClick: () -> Unit,
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "liveBadgePulse")
+    val dotAlpha by infiniteTransition.animateFloat(
+        initialValue = 1f, targetValue = 0.4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "liveBadgeDot"
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(PillShape)
+            .background(CuAccentBg)
+            .border(1.dp, CuAccentBorder, PillShape)
+            .clickFeedback(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(CuSuccess.copy(alpha = dotAlpha))
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = if (sessionCount > 1) "$sessionCount live sessions — open live view"
+            else "Live session — open live view",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = CuAccentDim
+        )
+        Spacer(Modifier.weight(1f))
+        if (backend.isNotBlank()) {
+            Text(
+                text = backend,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                color = Neutral500
+            )
+        }
+    }
+}
+
+// =============================================================================
+// Typing Input — opened via the manual ⌨ toggle in CuQuickActions (never on tap)
 // =============================================================================
 
 @Composable
@@ -1492,13 +1622,9 @@ private fun CuTypingInput(
     onKey: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val focusRequester = remember { FocusRequester() }
-
-    // Auto-focus to pop up the keyboard immediately
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
-    }
-
+    // No auto-focus (design 2026-07-23 §4.4): this bar now opens ONLY from the
+    // manual ⌨ toggle, and the IME rises when the user taps the field — the
+    // keyboard never pops on its own.
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1510,13 +1636,12 @@ private fun CuTypingInput(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        // Text field — auto-focused to bring up keyboard
+        // Text field — user taps it to raise the keyboard (no auto-focus)
         OutlinedTextField(
             value = text,
             onValueChange = onTextChange,
             modifier = Modifier
-                .weight(1f)
-                .focusRequester(focusRequester),
+                .weight(1f),
             placeholder = { Text("Type here...", color = Neutral500, fontSize = 14.sp) },
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = BbxWhite,

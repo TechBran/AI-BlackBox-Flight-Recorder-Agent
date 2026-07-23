@@ -41,4 +41,19 @@ class CuSessionsClientTest {
         assertFalse(state.active)
         assertTrue(state.sessions.isEmpty())
     }
+
+    // ── pickLiveViewSession (pure) — CU live-view entry-point target choice ──
+
+    @Test fun `picker prefers the first live_view-capable session`() {
+        val noStream = CuSession(sessionId = "a", liveView = false)
+        val live1 = CuSession(sessionId = "b", liveView = true)
+        val live2 = CuSession(sessionId = "c", liveView = true)
+        assertEquals("b", pickLiveViewSession(listOf(noStream, live1, live2))?.sessionId)
+    }
+
+    @Test fun `picker returns null when no session streams`() {
+        val noStream = CuSession(sessionId = "a", liveView = false)
+        assertEquals(null, pickLiveViewSession(listOf(noStream)))
+        assertEquals(null, pickLiveViewSession(emptyList()))
+    }
 }

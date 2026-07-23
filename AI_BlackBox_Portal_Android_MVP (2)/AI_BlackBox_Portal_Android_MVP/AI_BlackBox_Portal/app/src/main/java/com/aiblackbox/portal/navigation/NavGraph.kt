@@ -31,6 +31,7 @@ import com.aiblackbox.portal.ui.timeline.TimelineScreen
 import com.aiblackbox.portal.ui.cellular.CellularScreen
 import com.aiblackbox.portal.ui.cli_agent.CliAgentScreen
 import com.aiblackbox.portal.ui.computeruse.CuScreen
+import com.aiblackbox.portal.ui.cu.CuLiveViewScreen
 import com.aiblackbox.portal.ui.robotics.RoboticsScreen
 import com.aiblackbox.portal.ui.media.MediaBrowserScreen
 import com.aiblackbox.portal.ui.telephony.TelephonyScreen
@@ -59,6 +60,11 @@ object Routes {
     const val GOOGLE_SSML = "google_ssml"
     const val GEMINI_PRO_TTS = "gemini_pro_tts"
     const val COMPUTER_USE = "computer_use"
+    // CU streaming live view (design 2026-07-23 M5, D9 WebView reuse): loads
+    // the Orchestrator-served /cu/view/{sessionId} noVNC client in a WebView.
+    // Reached from CuScreen's live-sessions badge; CuScreen itself stays the
+    // screenshot-poll fallback surface.
+    const val CU_LIVE_VIEW = "cu_live_view"
     const val CLI_AGENT = "cli_agent"
     const val ROBOTICS = "robotics"
     const val AGENT = "agent"
@@ -208,7 +214,27 @@ fun BlackBoxNavGraph(
                 onSpeak = onSpeak,
                 onSpeakWithId = onSpeakWithId,
                 initialLiveDeviceId = liveDevice.ifBlank { null },
+                // Live-sessions badge tap → streaming WebView client. Session
+                // ids are server-minted slugs but Uri.encode defends the route
+                // pattern regardless.
+                onOpenLiveView = { sessionId ->
+                    navController.navigate(
+                        "${Routes.CU_LIVE_VIEW}/${Uri.encode(sessionId)}"
+                    )
+                },
             )
+        }
+        composable(
+            route = "${Routes.CU_LIVE_VIEW}/{sessionId}",
+            arguments = listOf(navArgument("sessionId") {
+                type = NavType.StringType
+            })
+        ) { backStackEntry ->
+            val sessionId =
+                backStackEntry.arguments?.getString("sessionId").orEmpty()
+            // D9 (WebView reuse): the served /cu/view page IS the client —
+            // gestures/cursor/extra-keys all ship server-side; zero Kotlin UI.
+            CuLiveViewScreen(baseUrl = origin, sessionId = sessionId)
         }
         composable(
             Routes.CLI_AGENT,

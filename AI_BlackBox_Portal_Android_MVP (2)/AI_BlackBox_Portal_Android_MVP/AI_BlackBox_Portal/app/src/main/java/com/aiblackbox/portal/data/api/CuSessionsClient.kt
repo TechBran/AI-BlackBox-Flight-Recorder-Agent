@@ -39,3 +39,13 @@ class CuSessionsClient(private val api: BlackBoxApi) {
         return api.json.decodeFromString(CuSessionsState.serializer(), body)
     }
 }
+
+/**
+ * Which session should the live-view entry point open? First session whose
+ * quartet actually streams (`live_view=true` — websockify+noVNC present);
+ * null when nothing is watchable (badge hidden, fallback viewer only).
+ * Pure — unit-tested in CuSessionsClientTest. The served /cu/view page owns
+ * session *switching*; this only picks the landing session.
+ */
+fun pickLiveViewSession(sessions: List<CuSession>): CuSession? =
+    sessions.firstOrNull { it.liveView }
