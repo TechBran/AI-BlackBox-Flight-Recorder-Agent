@@ -14,6 +14,8 @@ clients. The client contract is provider-agnostic:
           {"type":"stt_error","message":...}
           {"type":"stt_done"}                  (terminal — ALWAYS the last frame)
           {"type":"stt_status","state":"loading_models"}   (onbox warm affordance, additive)
+          {"type":"stt_status","state":"listening"|"speech"|"processing"}
+              (onbox VAD loop lifecycle, additive — cloud bridges never send them)
 
 stt_delta.text is the CUMULATIVE interim transcript so far (client replaces the
 interim region); stt_final.text is the full final (client commits).
@@ -56,6 +58,7 @@ the test suite can monkeypatch them.
 import asyncio
 import base64
 import json
+import os
 import time
 
 import websockets
@@ -170,7 +173,13 @@ async def run_stt_bridge(websocket: WebSocket, provider: str, start: dict):
     elif provider == "openai":
         await _openai_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     elif provider == "onbox":
-        await _onbox_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
+        if _onbox_realtime_enabled():
+            # PARKED Design-B realtime-WS bridge (pre-1.0 /v1/realtime event
+            # schema, never verified live) — opt-in via ONBOX_STT_REALTIME=1
+            # pending the protocol audit. The VAD-gated loop is the default.
+            await _onbox_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
+        else:
+            await _onbox_vad_loop(websocket, target=target, lang=lang, sample_rate=sample_rate)
     elif provider == "local":
         await _local_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     else:
@@ -667,12 +676,16 @@ async def _relay_realtime(websocket: WebSocket, upstream_ws, *, target, sample_r
 
 
 async def _onbox_bridge(websocket: WebSocket, *, target, lang, sample_rate):
-    """On-box Design-B streaming STT bridge. Warms the audio group through the
-    llama-swap :9098 /upstream passthrough (with the D10 loading affordance),
-    then connects DIRECT to the pinned Speaches :9099/v1/realtime for near-real-
-    time latency. The whole stream runs inside local_stack.voice_session() so
-    retrieval-group dispatch serializes behind it (D12). NEVER falls back to a
-    cloud provider — an unmet warm ceiling is an honest stt_error."""
+    """PARKED (2026-07-23, W2): on-box Design-B realtime-WS streaming bridge.
+    It assumes the pre-1.0 Speaches /v1/realtime event schema, which has never
+    been verified live — reachable ONLY via ONBOX_STT_REALTIME=1 pending the
+    protocol audit; the VAD-gated loop (_onbox_vad_loop) is the default onbox
+    path. Warms the audio group through the llama-swap :9098 /upstream
+    passthrough (with the D10 loading affordance), then connects DIRECT to the
+    pinned Speaches :9099/v1/realtime for near-real-time latency. The whole
+    stream runs inside local_stack.voice_session() so retrieval-group dispatch
+    serializes behind it (D12). NEVER falls back to a cloud provider — an unmet
+    warm ceiling is an honest stt_error."""
     from Orchestrator import local_stack
     async with local_stack.voice_session():
         if not await _warm_audio_group(websocket):
@@ -694,6 +707,251 @@ async def _onbox_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                 await upstream_ws.close()
             except Exception:
                 pass
+
+
+# =============================================================================
+# On-box VAD-gated streaming STT loop (W2, plan 2026-07-22) — the DEFAULT onbox
+# path. Server-side silero VAD segments the inbound stream into utterances;
+# each time the gate closes the utterance is transcribed through the
+# G4-validated Speaches upstream BATCH path (no dependency on the unverified
+# pre-1.0 /v1/realtime schema).
+# =============================================================================
+
+_ONBOX_REALTIME_ENV = "ONBOX_STT_REALTIME"
+_ONBOX_PRIME_WAV_S = 0.2   # ~0.2s of silence is enough to force whisper residency
+
+
+def _onbox_realtime_enabled() -> bool:
+    """True only when the operator explicitly opts into the parked realtime
+    bridge (ONBOX_STT_REALTIME=1). Default OFF -> the VAD-gated loop."""
+    return (os.environ.get(_ONBOX_REALTIME_ENV, "") or "").strip() == "1"
+
+
+def _vad_missing_dep() -> "str | None":
+    """Preflight the VAD dependencies at stream start. Returns a human-readable
+    message NAMING the missing piece (onnxruntime / silero model file), or None
+    when the gate can run. A missing dep is an honest stt_error — NEVER a
+    silent fall to a cloud provider (D10)."""
+    try:
+        import onnxruntime  # noqa: F401 — pinned in requirements.txt
+    except Exception as e:
+        return (f"onnxruntime is not available ({e.__class__.__name__}: {e}) — "
+                f"install the pinned onnxruntime for on-box VAD")
+    try:
+        from Orchestrator.stt import vad as _vad
+        path = _vad.default_vad_model_path()
+    except Exception as e:
+        return f"silero VAD model path could not be resolved: {e}"
+    try:
+        present = path.exists() and path.stat().st_size > 0
+    except OSError as e:
+        return f"silero VAD model unreadable at {path}: {e}"
+    if not present:
+        return (f"silero VAD model missing at {path} — download it via the "
+                f"wizard (local-models key 'silero-vad')")
+    return None
+
+
+def _make_utterance_gate():
+    """Gate factory (module-level so tests inject a scripted fake). The real
+    gate scores with silero v5 ONNX on CPU; inbound audio is resampled to
+    16 kHz mono before feeding (the v5 frame contract)."""
+    from Orchestrator.stt.vad import UtteranceGate
+    return UtteranceGate(sample_rate=16000)
+
+
+def _pcm16_to_wav(pcm: bytes, sample_rate: int = 16000) -> bytes:
+    """Wrap raw 16-bit mono PCM in a WAV container (Speaches wants a real
+    audio file on the batch path, not bare PCM)."""
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _silence_wav(duration_s: float = _ONBOX_PRIME_WAV_S, sample_rate: int = 16000) -> bytes:
+    """A ~0.2s silent 16k mono WAV — the D10 priming payload."""
+    return _pcm16_to_wav(b"\x00\x00" * int(sample_rate * duration_s), sample_rate)
+
+
+def _transcribe_utterance(pcm16: bytes) -> str:
+    """Blocking per-utterance transcription (run in an executor): 16k mono PCM
+    -> WAV -> the G4-validated upstream Speaches batch path with the STREAM
+    (turbo) model — utterance latency matters, NOT the large-v3 batch model.
+    The llama-swap 429 concurrency retry lives in onbox_transcribe_upstream."""
+    from Orchestrator import local_stack
+    from Orchestrator.stt.file_transcribe import onbox_transcribe_upstream
+    return onbox_transcribe_upstream(
+        _pcm16_to_wav(pcm16), "audio/wav", "utterance.wav",
+        model=local_stack.stt_stream_model())
+
+
+def _prime_stt_model_sync(timeout_s: float) -> None:
+    """Blocking prime: transcribe ~0.2s of silence through the upstream batch
+    path with the STREAM model, forcing whisper residency (raises on failure)."""
+    from Orchestrator import local_stack
+    from Orchestrator.stt.file_transcribe import onbox_transcribe_upstream
+    onbox_transcribe_upstream(
+        _silence_wav(), "audio/wav", "prime.wav",
+        model=local_stack.stt_stream_model(), timeout=timeout_s)
+
+
+async def _prime_stt_model(timeout_s: float) -> None:
+    """Async wrapper (module-level so tests monkeypatch one awaitable); runs
+    the blocking prime POST off the event loop."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _prime_stt_model_sync, timeout_s)
+
+
+async def _warm_and_prime(websocket: WebSocket) -> bool:
+    """D10 warm affordance, residency-proven (2026-07-22 bridge audit): the old
+    gate stopped at /upstream/speaches/health 200, which proves HTTP liveness,
+    NOT whisper residency — the first utterance after any eviction was lost. So
+    after health goes 200 we PRIME by transcribing ~0.2s of silence with the
+    STREAM model (measured ~20s cold — fits inside the 30s D10 ceiling) and
+    only then does the caller report listening. Returns False when the ceiling
+    passes or the prime fails; the caller then emits an honest stt_error —
+    NEVER a silent cloud fallback."""
+    from Orchestrator import local_stack
+    await websocket.send_json({"type": "stt_status", "state": "loading_models"})
+    url = local_stack.speaches_warm_url()
+    deadline = time.monotonic() + _ONBOX_WARM_CEILING_S
+    while True:
+        if await _probe_speaches_health(url):
+            break
+        if time.monotonic() >= deadline:
+            print(f"[STT/WS] onbox warm ceiling ({_ONBOX_WARM_CEILING_S}s) exceeded "
+                  f"before health 200 — honest stt_error")
+            return False
+        await asyncio.sleep(_ONBOX_WARM_POLL_S)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        print("[STT/WS] onbox warm consumed the full D10 ceiling — no time to prime")
+        return False
+    try:
+        t0 = time.monotonic()
+        await asyncio.wait_for(_prime_stt_model(remaining), timeout=remaining)
+        print(f"[STT/WS] onbox whisper primed in {time.monotonic() - t0:.1f}s "
+              f"(residency proven, not just health)")
+    except Exception as e:
+        print(f"[STT/WS] onbox prime failed within the D10 ceiling: {e!r}")
+        return False
+    return True
+
+
+async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
+    """On-box VAD-gated streaming STT — the default onbox path (W2).
+
+    Session start: warm + PRIME the audio group (D10 affordance, 30s ceiling ->
+    honest stt_error), then listen. Per inbound chunk: decode/resample to 16k
+    mono (same inbound pipeline the cloud bridges use) and feed the silero
+    UtteranceGate; SPEECH_START -> stt_status{speech}; SPEECH_END(utterance) ->
+    stt_status{processing} -> transcribe via the G4-validated upstream batch
+    path with the STREAM model -> hallucination filter -> stt_final in the
+    EXACT cloud-bridge event shape. Client stop (or disconnect) -> gate.flush()
+    -> tail final; the endpoint then emits the terminal stt_done. The whole
+    stream holds local_stack.voice_session() (D12). NEVER falls back to a
+    cloud provider — missing VAD deps or an unmet ceiling is an honest
+    stt_error."""
+    missing = _vad_missing_dep()
+    if missing:
+        await websocket.send_json({
+            "type": "stt_error",
+            "message": f"on-box STT unavailable: {missing}"})
+        return
+    from Orchestrator import local_stack
+    from Orchestrator.stt import vad as _vad
+    async with local_stack.voice_session():
+        if not await _warm_and_prime(websocket):
+            await websocket.send_json({
+                "type": "stt_error",
+                "message": "on-box STT models still loading — please retry"})
+            return
+        await websocket.send_json({"type": "stt_status", "state": "listening"})
+        gate = _make_utterance_gate()
+        loop = asyncio.get_running_loop()
+        stop_ts = {"v": None}
+        print(f"[STT/WS] onbox VAD loop listening rate={sample_rate}->16000 "
+              f"target={target}")
+
+        async def _finish_utterance(pcm: bytes, *, stopping: bool) -> None:
+            """Transcribe one closed utterance and deliver its final. On the
+            stop path a filtered/empty transcript still yields an authoritative
+            EMPTY stt_final (cloud-bridge contract: the client discards, not
+            resurrects, its interim); mid-stream it is simply suppressed and
+            the loop resumes listening."""
+            if not pcm:
+                return
+            await websocket.send_json({"type": "stt_status", "state": "processing"})
+            try:
+                text = await loop.run_in_executor(None, _transcribe_utterance, pcm)
+            except Exception as e:
+                # Honest per-utterance failure — surfaced, never swallowed into
+                # a silent cloud fallback. Mid-stream the session survives.
+                print(f"[STT/WS] onbox utterance transcription FAILED: {e!r}")
+                try:
+                    await websocket.send_json({
+                        "type": "stt_error",
+                        "message": f"on-box transcription failed: {e}"})
+                except Exception:
+                    pass
+                if not stopping:
+                    await websocket.send_json({"type": "stt_status", "state": "listening"})
+                return
+            text = (text or "").strip()
+            if text and is_whisper_hallucination(text):
+                print(f"[STT/WS] onbox stt_final FILTERED (hallucination) "
+                      f"text_len={len(text)}")
+                text = ""
+            if text:
+                await _send_final(websocket, "onbox",
+                                  {"type": "stt_final", "text": text, "target": target},
+                                  stop_ts)
+            elif stopping:
+                await _send_final(websocket, "onbox",
+                                  {"type": "stt_final", "text": "", "target": target},
+                                  stop_ts)
+            if not stopping:
+                await websocket.send_json({"type": "stt_status", "state": "listening"})
+
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                mtype = msg.get("type")
+                if mtype == "stt_audio":
+                    pcm_b64 = msg.get("pcm", "")
+                    if not pcm_b64:
+                        continue
+                    pcm16k = _resample_pcm16(base64.b64decode(pcm_b64), sample_rate, 16000)
+                    for ev in gate.feed(pcm16k):
+                        if ev.kind is _vad.SPEECH_START:
+                            await websocket.send_json({"type": "stt_status", "state": "speech"})
+                        elif ev.kind is _vad.SPEECH_END:
+                            await _finish_utterance(ev.pcm, stopping=False)
+                elif mtype == "stt_stop":
+                    stop_ts["v"] = time.monotonic()
+                    tail = gate.flush()
+                    if tail is not None:
+                        await _finish_utterance(tail.pcm or b"", stopping=True)
+                    return
+        except WebSocketDisconnect:
+            # Abrupt client drop without stt_stop: commit the open tail
+            # best-effort (the socket is usually gone; failed sends are fine),
+            # then re-raise so the endpoint's normal teardown runs.
+            if stop_ts["v"] is None:
+                stop_ts["v"] = time.monotonic()
+            tail = gate.flush()
+            if tail is not None and tail.pcm:
+                try:
+                    await _finish_utterance(tail.pcm, stopping=True)
+                except Exception:
+                    pass
+            raise
 
 
 async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate):

@@ -114,22 +114,31 @@ def _local_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> s
         return r.text.strip()
 
 
-def _onbox_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
-    """Transcribe via the on-box Speaches member through the llama-swap front door.
-    Uses the UPSTREAM PROXY path (/upstream/speaches/v1/audio/transcriptions), NOT
-    body-model auto-routing: llama-swap routes to the speaches member by URL (so its
-    drain/TTL accounting still sees the request), which leaves the request body
-    `model` free to carry the WHISPER model id that Speaches uses to pick the model.
-    Body-model routing would 404 ('no router for requested model') because the
-    whisper id is not a llama-swap member name (the member is 'speaches'). A
-    llama-swap 429 (concurrency limit) is retried with capped backoff."""
+def onbox_transcribe_upstream(audio_bytes: bytes, content_type: str, filename: str,
+                              *, model: "str | None" = None,
+                              timeout: float = 120) -> str:
+    """SHARED on-box upstream batch transcription (additive refactor, W2 plan
+    2026-07-22): transcribe via the on-box Speaches member through the llama-swap
+    front door. Uses the UPSTREAM PROXY path
+    (/upstream/speaches/v1/audio/transcriptions), NOT body-model auto-routing:
+    llama-swap routes to the speaches member by URL (so its drain/TTL accounting
+    still sees the request), which leaves the request body `model` free to carry
+    the WHISPER model id that Speaches uses to pick the model. Body-model routing
+    would 404 ('no router for requested model') because the whisper id is not a
+    llama-swap member name (the member is 'speaches'). A llama-swap 429
+    (concurrency limit) is retried with capped backoff.
+
+    `model=None` keeps the batch default (stt_batch_model) for the file path;
+    the /ws/stt VAD loop passes stt_stream_model() explicitly — per-utterance
+    latency wants the turbo model, not large-v3. `timeout` is overridable so the
+    D10 warm-prime call can bound itself to the remaining ceiling."""
     from Orchestrator import local_stack
     url = f"{local_stack.base_url_root()}/upstream/speaches/v1/audio/transcriptions"
-    model = local_stack.stt_batch_model()
+    model = model or local_stack.stt_batch_model()
     attempts = 0
     while True:
         files = {"file": (filename, audio_bytes, content_type)}
-        r = requests.post(url, data={"model": model}, files=files, timeout=120)
+        r = requests.post(url, data={"model": model}, files=files, timeout=timeout)
         if r.status_code == 429 and attempts < _ONBOX_429_RETRIES:
             attempts += 1
             time.sleep(min(_ONBOX_429_BACKOFF_BASE * (2 ** (attempts - 1)), _ONBOX_429_BACKOFF_MAX))
@@ -145,6 +154,12 @@ def _onbox_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> s
         return (r.json().get("text") or "").strip()
     except Exception:
         return r.text.strip()
+
+
+def _onbox_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
+    """Batch-model wrapper kept for the transcribe_bytes dispatch (the shared
+    body lives in onbox_transcribe_upstream)."""
+    return onbox_transcribe_upstream(audio_bytes, content_type, filename)
 
 
 def _google_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
