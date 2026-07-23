@@ -186,8 +186,12 @@ def test_cu_sessions_endpoint_reflects_live_set(monkeypatch):
     for sid in list(a._sessions):  # start from a clean singleton
         a.release(sid)
     try:
-        assert cu_sessions() == {"active": False, "sessions": [], "count": 0,
-                                 "cap": disp.MAX_VIRTUAL_SESSIONS}
+        empty = cu_sessions()
+        # "main" is the ADDITIVE main-desktop availability key (2026-07-23) —
+        # asserted structurally here, in depth by test_cu_main_stream.py.
+        assert "available" in empty.pop("main")
+        assert empty == {"active": False, "sessions": [], "count": 0,
+                         "cap": disp.MAX_VIRTUAL_SESSIONS}
         a.allocate("badge-1", backend="anthropic", operator="op")
         a.allocate("badge-2", backend="google", operator="op")
         resp = cu_sessions()

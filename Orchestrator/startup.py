@@ -239,6 +239,14 @@ async def _cu_display_reaper():
         get_allocator().reap_orphans()  # sweep restart-survivor children once
     except Exception as e:
         print(f"[STARTUP] CU display orphan reap skipped: {e}")
+    # Main-desktop stream pair (native_stream, ports 5999/6099): a restart
+    # survivor with no returning viewer would linger forever — sweep it once
+    # here too (spawn-time reap only covers the reconnect case).
+    try:
+        from Orchestrator.browser.native_stream import reap_orphan_stream_procs
+        reap_orphan_stream_procs()
+    except Exception as e:
+        print(f"[STARTUP] main-stream orphan reap skipped: {e}")
 
     async def _loop():
         interval = max(60.0, VIRTUAL_DISPLAY_TTL / 3.0)

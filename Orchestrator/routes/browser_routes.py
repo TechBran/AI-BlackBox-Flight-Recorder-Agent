@@ -300,11 +300,29 @@ def cu_session_close(session_id: str):
 def cu_sessions():
     """Live virtual-CU sessions — powers the Portal/Android "N agents running —
     watch" badge (D14: a badge, not a lock; concurrent sessions are allowed up to
-    the cap). Native-mode exclusivity is enforced separately by display_arbiter."""
+    the cap). Native-mode exclusivity is enforced separately by display_arbiter.
+
+    ADDITIVE (main-desktop streaming, Brandon 2026-07-23): a "main" key reports
+    the REAL desktop's availability {available, display, resolution} so clients
+    render the session-vs-main switcher from this ONE payload."""
+    from Orchestrator.browser import native_stream
     from Orchestrator.browser.display import get_allocator, MAX_VIRTUAL_SESSIONS
     sessions = get_allocator().active_sessions()
+    try:
+        main = native_stream.public_main_status()
+    except Exception as e:  # the badge must never die on a probe hiccup
+        main = {"available": False, "reason": f"probe failed: {e}"}
     return {"active": bool(sessions), "count": len(sessions),
-            "cap": MAX_VIRTUAL_SESSIONS, "sessions": sessions}
+            "cap": MAX_VIRTUAL_SESSIONS, "sessions": sessions, "main": main}
+
+
+@app.get("/cu/main/status")
+def cu_main_status():
+    """Availability of the REAL desktop for main-desktop streaming: logged-in X
+    session + resolvable xauth -> {available, display, resolution}; otherwise
+    {available: false, reason} (mirrors the preflight display check)."""
+    from Orchestrator.browser import native_stream
+    return native_stream.public_main_status()
 
 
 # Fallback-only inline viewer (pre-M2 minimal client). The REAL client is the
@@ -339,21 +357,17 @@ _CU_VIEW_UNAVAILABLE = ("<!doctype html><meta charset=utf-8><body "
     "running — install <code>novnc</code> + <code>websockify</code> to watch.</p>")
 
 
-@app.get("/cu/view/{session_id}", response_class=HTMLResponse)
-def cu_view(session_id: str):
-    """Serve the interactive CU live-view client (Portal/cu-view/, design
-    2026-07-23 §4/M2). Route contract unchanged: 404 for unknown sessions,
-    install-hint page when live_view is off, HTML otherwise. The page reads
-    its session id from its own URL path and sizes itself from /cu/sessions —
-    no server-side templating. Read fresh per request (prod runs live from
-    the working tree); assets ship via the /ui static mount."""
-    from Orchestrator.browser.display import get_allocator
-    h = get_allocator().get(session_id)
-    if h is None:
-        return HTMLResponse("<!doctype html><body>No active CU session for that id.",
-                            status_code=404)
-    if not h.live_view:
-        return HTMLResponse(_CU_VIEW_UNAVAILABLE)
+_CU_NOTHING_TO_SHOW = ("<!doctype html><meta charset=utf-8><body "
+    "style='font-family:system-ui;background:#0b0b0d;color:#ddd;padding:2rem'>"
+    "<h3>Nothing to show</h3><p>No live Computer Use session is running and the "
+    "main desktop is not streamable: {reason}.</p>")
+
+
+def _serve_cu_client_page(session_id: str) -> HTMLResponse:
+    """The served Splashtop-style client (Portal/cu-view/). The page reads its
+    session id — including the literal "main" — from its own URL path and
+    derives its WS path from location, so ONE asset serves both surfaces. Read
+    fresh per request (prod runs live from the working tree)."""
     try:
         from Orchestrator.utils.paths import resolve as _resolve_path
         html = (_resolve_path("Portal", "cu-view", "index.html")
@@ -364,26 +378,70 @@ def cu_view(session_id: str):
         return HTMLResponse(_CU_VIEW_FALLBACK_HTML.format(session_id=session_id))
 
 
-@app.websocket("/cu/view/{session_id}/ws")
-async def cu_view_ws(websocket: WebSocket, session_id: str):
-    """Reverse-proxy the viewer's WebSocket to this session's loopback websockify.
-    Loopback-only target; the Tailscale perimeter is the auth boundary (§9)."""
+def _cu_view_main() -> HTMLResponse:
+    """GET /cu/view/main — the SAME client page, backed by the native-desktop
+    stream instead of a session's Xvfb."""
+    from Orchestrator.browser import native_stream
+    from Orchestrator.browser.display import _live_view_available
+    status = native_stream.probe_main_desktop()
+    if not status.get("available"):
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><body "
+            "style='font-family:system-ui;background:#0b0b0d;color:#ddd;"
+            "padding:2rem'><h3>Main desktop unavailable</h3><p>"
+            f"{status.get('reason', 'log into the desktop session')}.</p>",
+            status_code=503)
+    if not _live_view_available():
+        return HTMLResponse(_CU_VIEW_UNAVAILABLE)
+    return _serve_cu_client_page("main")
+
+
+def _cu_view_auto():
+    """GET /cu/view/auto — 302 to the right surface: a live agent/manual
+    session first, else the main desktop when available, else a friendly
+    nothing-to-show page naming the reason. Policy lives in the PURE
+    native_stream.resolve_auto_view; this route only gathers inputs."""
+    from fastapi.responses import RedirectResponse
+    from Orchestrator.browser import native_stream
+    from Orchestrator.browser.display import get_allocator
+    target = native_stream.resolve_auto_view(
+        get_allocator().active_sessions(), native_stream.probe_main_desktop())
+    if target["kind"] == "none":
+        return HTMLResponse(_CU_NOTHING_TO_SHOW.format(reason=target["reason"]))
+    return RedirectResponse(target["url"], status_code=302)
+
+
+@app.get("/cu/view/{session_id}", response_class=HTMLResponse)
+def cu_view(session_id: str):
+    """Serve the interactive CU live-view client (Portal/cu-view/, design
+    2026-07-23 §4/M2). Route contract unchanged for real session ids: 404 for
+    unknown sessions, install-hint page when live_view is off, HTML otherwise.
+    The page reads its session id from its own URL path and sizes itself from
+    /cu/sessions — no server-side templating. Two RESERVED ids are dispatched
+    specially (never treated as session lookups): "main" streams the REAL
+    desktop; "auto" 302s to the best available surface."""
+    if session_id == "main":
+        return _cu_view_main()
+    if session_id == "auto":
+        return _cu_view_auto()
+    from Orchestrator.browser.display import get_allocator
+    h = get_allocator().get(session_id)
+    if h is None:
+        return HTMLResponse("<!doctype html><body>No active CU session for that id.",
+                            status_code=404)
+    if not h.live_view:
+        return HTMLResponse(_CU_VIEW_UNAVAILABLE)
+    return _serve_cu_client_page(session_id)
+
+
+async def _proxy_ws_to_loopback(websocket: WebSocket, target: str) -> None:
+    """Pump an ALREADY-ACCEPTED client WS to a loopback websockify target and
+    propagate the upstream close code. Shared by the per-session and
+    main-desktop stream paths — ONE proxy code path."""
     import asyncio
     import websockets
     from websockets.exceptions import ConnectionClosed
-    from Orchestrator.browser.display import get_allocator
 
-    h = get_allocator().get(session_id)
-    # Plain accept() — mirror the proven app_proxy_websocket pattern. noVNC 1.x
-    # and websockify both default to binary frames without requiring the
-    # Sec-WebSocket-Protocol header, and a transparent proxy does not forward it
-    # (forcing subprotocol="binary" when the client offered none breaks the
-    # handshake).
-    await websocket.accept()
-    if h is None or not h.live_view:
-        await websocket.close(code=1008, reason="No live view for session")
-        return
-    target = f"ws://127.0.0.1:{h.ws_port}/"
     try:
         upstream = await websockets.connect(target, max_size=None, open_timeout=10)
     except Exception as e:
@@ -434,3 +492,54 @@ async def cu_view_ws(websocket: WebSocket, session_id: str):
                 await websocket.close(code=code, reason=reason)
         except Exception:
             pass
+
+
+async def _cu_view_ws_main(websocket: WebSocket) -> None:
+    """WS /cu/view/main/ws — proxy to the refcounted REAL-desktop stream
+    (native_stream spawns x11vnc+websockify on the first viewer, reaps after
+    the last + grace). SECURITY: this streams the REAL desktop; the Tailscale
+    perimeter is the auth boundary as everywhere else, and every connect and
+    disconnect is logged here for auditability."""
+    from Orchestrator.browser import native_stream
+    await websocket.accept()
+    mgr = native_stream.get_native_stream()
+    try:
+        ws_port = mgr.acquire()
+    except RuntimeError as e:
+        print(f"[CU-MAIN] main-desktop stream refused: {e}")
+        await websocket.close(code=1008, reason=str(e)[:120])
+        return
+    client = getattr(websocket, "client", None)
+    peer = f"{client.host}:{client.port}" if client else "unknown"
+    print(f"[CU-MAIN] main-desktop stream WS CONNECT from {peer} "
+          f"(viewers={mgr.viewers})")
+    try:
+        await _proxy_ws_to_loopback(websocket, f"ws://127.0.0.1:{ws_port}/")
+    finally:
+        mgr.release()
+        print(f"[CU-MAIN] main-desktop stream WS DISCONNECT from {peer} "
+              f"(viewers={mgr.viewers})")
+
+
+@app.websocket("/cu/view/{session_id}/ws")
+async def cu_view_ws(websocket: WebSocket, session_id: str):
+    """Reverse-proxy the viewer's WebSocket to this session's loopback websockify.
+    Loopback-only target; the Tailscale perimeter is the auth boundary (§9).
+    The reserved id "main" is dispatched to the refcounted native-desktop
+    stream — never a session lookup."""
+    from Orchestrator.browser.display import get_allocator
+
+    if session_id == "main":
+        await _cu_view_ws_main(websocket)
+        return
+    h = get_allocator().get(session_id)
+    # Plain accept() — mirror the proven app_proxy_websocket pattern. noVNC 1.x
+    # and websockify both default to binary frames without requiring the
+    # Sec-WebSocket-Protocol header, and a transparent proxy does not forward it
+    # (forcing subprotocol="binary" when the client offered none breaks the
+    # handshake).
+    await websocket.accept()
+    if h is None or not h.live_view:
+        await websocket.close(code=1008, reason="No live view for session")
+        return
+    await _proxy_ws_to_loopback(websocket, f"ws://127.0.0.1:{h.ws_port}/")
