@@ -39,15 +39,15 @@ fi
 # Repo is public (Brandon's T10 decision) so HTTPS clone needs no credentials.
 if [[ ! -d "$BLACKBOX_ROOT/.git" ]]; then
     if [[ -z "$(ls -A "$BLACKBOX_ROOT" 2>/dev/null)" ]]; then
-        echo "[install] $BLACKBOX_ROOT is empty — cloning blackbox-poc..."
-        sudo -u "$REAL_USER" git clone https://github.com/TechBran/blackbox-poc.git "$BLACKBOX_ROOT"
+        echo "[install] $BLACKBOX_ROOT is empty — cloning ai-blackbox-flight-recorder-agent..."
+        sudo -u "$REAL_USER" git clone https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git "$BLACKBOX_ROOT"
     else
         echo "[install] $BLACKBOX_ROOT has ZIP install content — lazy-initializing git..."
         sudo -u "$REAL_USER" bash -c "
             set -e
             cd '$BLACKBOX_ROOT'
             git init -q
-            git remote add origin https://github.com/TechBran/blackbox-poc.git
+            git remote add origin https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git
             git fetch -q origin main
             # Mark main as the working branch but DON'T checkout. Customer ZIP
             # files stay in place. First update via the wizard does the diff
@@ -578,7 +578,7 @@ echo "[install] Installing blackbox.service..."
 sudo tee /etc/systemd/system/blackbox.service > /dev/null <<EOF
 [Unit]
 Description=AI BlackBox Orchestrator
-Documentation=https://github.com/TechBran/blackbox-poc
+Documentation=https://github.com/TechBran/ai-blackbox-flight-recorder-agent
 After=network-online.target zellij-web.service
 Wants=network-online.target zellij-web.service
 # Restart rate limiting (audit empirical fix: these belong in [Unit], not [Service]

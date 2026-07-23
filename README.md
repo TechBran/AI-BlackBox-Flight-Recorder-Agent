@@ -57,8 +57,8 @@ every paired device.
 
 ```bash
 # 1. Clone the repo into your install location of choice
-git clone https://github.com/TechBran/blackbox-poc.git ~/Desktop/blackbox-poc
-cd ~/Desktop/blackbox-poc
+git clone https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git ~/Desktop/ai-blackbox-flight-recorder-agent
+cd ~/Desktop/ai-blackbox-flight-recorder-agent
 
 # 2. Run the installer — handles apt packages, Python venv, Node + CLI agents,
 #    MCP server, systemd unit, sudoers, Tailscale, and the Tauri wizard wrapper.
@@ -830,7 +830,7 @@ titled "Licensing Inquiry" on this repository.
 
 ## Contact + Support
 
-- GitHub: https://github.com/TechBran/blackbox-poc
+- GitHub: https://github.com/TechBran/ai-blackbox-flight-recorder-agent
 - Issues: file at the repo's Issues tab
 - Operator: Brandon (TechBran)
 

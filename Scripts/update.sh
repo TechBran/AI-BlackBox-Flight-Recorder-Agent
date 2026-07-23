@@ -58,6 +58,16 @@ if ! git remote get-url origin > /dev/null 2>&1; then
     exit 3
 fi
 
+# ── Origin self-heal (repo renamed 2026-07-23) ──
+# blackbox-poc → ai-blackbox-flight-recorder-agent. GitHub 301-redirects the
+# old slug, so this line is DELIVERED over the redirect and then retires the
+# dependency on it. Idempotent; never recreate a repo named blackbox-poc —
+# that would hijack any box that hasn't run this yet.
+if git remote get-url origin | grep -q "TechBran/blackbox-poc"; then
+    git remote set-url origin https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git
+    echo "[update] origin re-pointed to the renamed repo (ai-blackbox-flight-recorder-agent)."
+fi
+
 # ── Fetch latest ──
 echo "[update] Fetching latest from $(git remote get-url origin)..."
 if ! git fetch origin main 2>&1; then

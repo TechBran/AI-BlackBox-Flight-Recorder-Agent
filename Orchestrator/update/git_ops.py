@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Optional
 
 
-# Canonical public repo (Brandon's T10 decision makes this public).
-DEFAULT_REMOTE_URL = "https://github.com/TechBran/blackbox-poc.git"
+# Canonical public repo (renamed 2026-07-23; GitHub 301-redirects the old
+# blackbox-poc slug indefinitely — see Scripts/update.sh's origin self-heal).
+DEFAULT_REMOTE_URL = "https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git"
 
 
 def _git(root: Path, *args: str, check: bool = True,
