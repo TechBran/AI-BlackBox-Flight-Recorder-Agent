@@ -58,6 +58,24 @@ from Orchestrator.config import (
 )
 
 
+def _publish_session_link(task_id: str, session) -> None:
+    """M2 multi-desktop (2026-07-23): join the task row and the CU session in
+    BOTH directions at launch — session.task_id lets the live-view activity
+    endpoint find the row's narration; the row's session_id (+ view_url) lets
+    every Live button open THIS task's own desktop instead of the first
+    streamable session. Best-effort: a DB hiccup must never kill a launch."""
+    session.task_id = task_id
+    try:
+        from Orchestrator.tasks import task_db, update_task
+        task = task_db.get_task(task_id)
+        rd = dict(task.result_data or {}) if task else {}
+        rd["session_id"] = session.session_id
+        rd["view_url"] = f"/cu/view/{session.session_id}"
+        update_task(task_id, session_id=session.session_id, result_data=rd)
+    except Exception as e:
+        print(f"[CU-HEADLESS] session-link publish failed (non-fatal): {e}")
+
+
 def _failure(message: str, screenshots=None, steps: int = 0, tokens=None) -> dict:
     screenshots = screenshots or []
     return {
@@ -474,6 +492,7 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
         session.native_mode = bool(native_mode and environment == "desktop")
         session.status = "starting"
         session.user_message = prompt
+        _publish_session_link(task_id, session)
 
         screenshots: list = []
         agen = run_gemini_cu_loop(
@@ -569,6 +588,7 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
             )
 
         session.touch()
+        _publish_session_link(task_id, session)
         if session.device_id != device_id:
             print(f"[CU-HEADLESS] Switching device {session.device_id} -> {device_id} for {operator}")
             session.device_id = device_id

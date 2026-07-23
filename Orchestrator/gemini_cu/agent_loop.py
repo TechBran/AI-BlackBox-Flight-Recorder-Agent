@@ -16,6 +16,7 @@ from google import genai
 from google.genai import types
 
 from Orchestrator.browser.actions import ActionExecutor, COORD_SPACE_GEMINI
+from Orchestrator.browser.session_manager import fold_event_to_reasoning
 
 from Orchestrator.gemini_cu.config import (
     DEFAULT_CU_MODEL, MAX_ITERATIONS, MAX_WALL_CLOCK,
@@ -675,7 +676,9 @@ async def run_gemini_cu_loop(
                 text_parts.append(part.text)
 
         if text_parts:
-            yield {"type": "content", "data": {"text": "\n".join(text_parts), "step": step}}
+            _evt = {"type": "content", "data": {"text": "\n".join(text_parts), "step": step}}
+            fold_event_to_reasoning(session, _evt)  # M4 live-view narration
+            yield _evt
 
         # If no function calls, task is complete
         if not function_calls:
@@ -690,7 +693,15 @@ async def run_gemini_cu_loop(
             fargs = dict(fc.args) if fc.args else {}
             print(f"[GEMINI CU] Action: {fname} | Raw args: {fargs}")
 
-            yield {"type": "cu_action", "data": {"action": fname, "params": fargs, "step": step}}
+            _evt = {"type": "cu_action", "data": {"action": fname, "params": fargs, "step": step}}
+            fold_event_to_reasoning(session, _evt)  # M4 live-view narration
+            # cu_log parity (M4): the field existed on GeminiCUSession but
+            # nothing wrote it — the activity endpoint's latest_action needs it.
+            # getattr-guarded: narration bookkeeping must never kill a run.
+            _log = getattr(session, "cu_log", None)
+            if isinstance(_log, list):
+                _log.append({"type": "action", "action": fname, "step": step})
+            yield _evt
 
             # Build response data dict — always include url (required by API)
             response_data = {"url": f"{session.environment}://{session.device_id}"}

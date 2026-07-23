@@ -120,6 +120,7 @@ const AGENT_ACTING_MS = 1500;
 const MAX_RECONNECT_ATTEMPTS = 8;
 const TICK_MS = 60;
 const SWITCHER_POLL_MS = 4000;
+const ACTIVITY_POLL_MS = 2500;             // M4 status/narration cadence
 const MOD_LONGPRESS_MS = 500;              // cli-agents extra-keys parity
 const MOD_ORDER = ["Control", "Alt", "Super", "Shift"];
 
@@ -144,6 +145,15 @@ const endedSessions = $("cuvEndedSessions");
 const extraKeysEl = $("cuvExtraKeys");
 const kbSink = $("cuvKbSink");
 const switcherEl = $("cuvSwitcher");
+// M4 activity chrome.
+const agentChip = $("cuvAgentChip");
+const stopBtn = $("cuvStopBtn");
+const narrationEl = $("cuvNarration");
+const narrToggle = $("cuvNarrToggle");
+const narrDot = $("cuvNarrDot");
+const narrLatest = $("cuvNarrLatest");
+const narrChevron = $("cuvNarrChevron");
+const narrBody = $("cuvNarrBody");
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -839,6 +849,100 @@ function startSwitcherPoll() {
     }, SWITCHER_POLL_MS);
 }
 
+// ── M4: live activity (status chip + STOP + narration bubble) ──────────────
+
+let narrExpanded = false;
+let lastNarrationLen = 0;
+
+const STATUS_LABEL = {
+    running: "working", starting: "starting", complete: "done",
+    error: "error", stopped: "stopped", idle: "idle",
+};
+
+function renderActivity(act) {
+    // No live agent on this session (or the main desktop): hide all agent
+    // chrome — the desktop is yours to drive directly.
+    if (!act || sessionId === MAIN_ID) {
+        agentChip.hidden = true;
+        stopBtn.hidden = true;
+        narrationEl.hidden = true;
+        return;
+    }
+    const status = act.status || "idle";
+    const label = STATUS_LABEL[status] || status;
+    agentChip.hidden = false;
+    agentChip.textContent = act.step
+        ? `${label} · step ${act.step}${act.total ? "/" + act.total : ""}`
+        : label;
+    agentChip.dataset.state = status;
+
+    const working = status === "running" || status === "starting";
+    stopBtn.hidden = !working;
+
+    const tail = (act.reasoning_tail || "").trim();
+    const latest = (act.latest_action ? `→ ${act.latest_action}` : "")
+        || tail.split("\n").filter(Boolean).slice(-1)[0] || label;
+    if (tail || working) {
+        narrationEl.hidden = false;
+        narrLatest.textContent = latest.slice(0, 80);
+        narrDot.dataset.state = status;
+        if (narrExpanded) {
+            const atBottom = narrBody.scrollHeight - narrBody.scrollTop
+                <= narrBody.clientHeight + 24;
+            narrBody.textContent = tail || "(no narration yet)";
+            // Autoscroll only when the user is already at the bottom AND new
+            // text arrived — never yank them up while they read back.
+            if (atBottom && tail.length !== lastNarrationLen) {
+                narrBody.scrollTop = narrBody.scrollHeight;
+            }
+            lastNarrationLen = tail.length;
+        }
+    } else {
+        narrationEl.hidden = true;
+    }
+}
+
+async function fetchActivity() {
+    if (sessionId === MAIN_ID) return null;
+    try {
+        const r = await fetch(`/cu/session/${encodeURIComponent(sessionId)}/activity`,
+            { cache: "no-store" });
+        if (!r.ok) return null;      // 404 = no such live session
+        return await r.json();
+    } catch (e) {
+        return null;
+    }
+}
+
+function startActivityPoll() {
+    setInterval(async () => {
+        renderActivity(await fetchActivity());
+    }, ACTIVITY_POLL_MS);
+}
+
+function bindActivityChrome() {
+    narrToggle.addEventListener("click", () => {
+        narrExpanded = !narrExpanded;
+        narrBody.hidden = !narrExpanded;
+        narrToggle.setAttribute("aria-expanded", narrExpanded ? "true" : "false");
+        narrChevron.textContent = narrExpanded ? "▾" : "▸";
+        if (narrExpanded) narrBody.scrollTop = narrBody.scrollHeight;
+    });
+    stopBtn.addEventListener("click", async () => {
+        stopBtn.disabled = true;
+        stopBtn.textContent = "Stopping…";
+        try {
+            await fetch(`/cu/session/${encodeURIComponent(sessionId)}/stop`,
+                { method: "POST" });
+        } catch (e) { /* best-effort */ }
+        // Let the next activity poll reflect the new state, then restore.
+        setTimeout(() => {
+            stopBtn.disabled = false;
+            stopBtn.textContent = "Stop";
+        }, 1500);
+    });
+}
+
 // ── Boot ─────────────────────────────────────────────────────────────────
 
 async function boot() {
@@ -887,8 +991,10 @@ async function boot() {
     bindTouchLayer();
     bindKeyboard();
     bindAgentActing();
+    bindActivityChrome();
     renderSwitcher();
     startSwitcherPoll();
+    startActivityPoll();
     connect();
 }
 

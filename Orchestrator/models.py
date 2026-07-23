@@ -284,6 +284,13 @@ class Task:
     # growing, scrollable/expandable reasoning the pill's expanded view renders.
     # EPHEMERAL UI state — never minted. NULL for non-CU tasks.
     reasoning_text: Optional[str] = None
+    # M2 multi-desktop (2026-07-23): the CU session this task DRIVES, promoted to a
+    # real column (device_id precedent) so /tasks/list can project it without the
+    # result_data blob. It is what lets every Live button open the task's OWN
+    # desktop (/cu/view/{session_id}) instead of the first streamable session, and
+    # lets the live-view page join sid -> task row for narration. Mirrored from
+    # result_data['session_id'] by save_task; NULL for non-CU tasks.
+    session_id: Optional[str] = None
 
 class TaskDatabase:
     """SQLite-based task persistence"""
@@ -323,7 +330,8 @@ class TaskDatabase:
                 google_video_uri TEXT,
                 progress_text TEXT,
                 device_id TEXT,
-                reasoning_text TEXT
+                reasoning_text TEXT,
+                session_id TEXT
             )
         """)
 
@@ -373,6 +381,16 @@ class TaskDatabase:
             # Column already exists
             pass
 
+        # M2 multi-desktop: the CU session a task drives — same idempotent
+        # ADD COLUMN precedent. Populated by save_task (mirrored from
+        # result_data['session_id']) / update_task(session_id=...).
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
         # F2 (Part 1): index for `ORDER BY created_at DESC`. Without it /tasks/list
         # (polled every 2s by the task pill) did a full SCAN + a TEMP B-TREE sort
         # (~1s, GIL-held). CREATE INDEX IF NOT EXISTS is idempotent; a fresh
@@ -412,6 +430,11 @@ class TaskDatabase:
         device_id_val = task.device_id
         if device_id_val is None and isinstance(task.result_data, dict):
             device_id_val = task.result_data.get("device_id")
+        # M2: mirror session_id the same way (writers may set either the attr
+        # or result_data['session_id']).
+        session_id_val = task.session_id
+        if session_id_val is None and isinstance(task.result_data, dict):
+            session_id_val = task.result_data.get("session_id")
 
         conn = self._connect()
         cursor = conn.cursor()
@@ -419,8 +442,8 @@ class TaskDatabase:
             INSERT OR REPLACE INTO tasks
             (task_id, task_type, status, created_at, updated_at, prompt, input_file,
              result_url, result_data, error_message, progress, operator, image_data,
-             google_video_uri, progress_text, device_id, reasoning_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             google_video_uri, progress_text, device_id, reasoning_text, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.task_id, task.task_type, task.status, task.created_at, task.updated_at,
             task.prompt, task.input_file, task.result_url,
@@ -433,7 +456,8 @@ class TaskDatabase:
             # Accumulating CU narration. Included so a whole-row flush preserves it:
             # update_task read-modify-writes via get_task (which reads reasoning_text
             # back), so the terminal COMPLETED save never wipes the transcript.
-            task.reasoning_text
+            task.reasoning_text,
+            session_id_val
         ))
         conn.commit()
         conn.close()
@@ -505,7 +529,8 @@ class TaskDatabase:
             google_video_uri=row[13] if len(row) > 13 else None,
             progress_text=row[14] if len(row) > 14 else None,
             device_id=row[15] if len(row) > 15 else None,
-            reasoning_text=row[16] if len(row) > 16 else None
+            reasoning_text=row[16] if len(row) > 16 else None,
+            session_id=row[17] if len(row) > 17 else None
         )
 
     def get_task_list(self, operator: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -523,7 +548,7 @@ class TaskDatabase:
         """
         _cols = ("task_id", "task_type", "status", "progress", "created_at",
                  "updated_at", "result_url", "operator", "prompt",
-                 "progress_text", "device_id", "reasoning_text")
+                 "progress_text", "device_id", "reasoning_text", "session_id")
         select = ", ".join(_cols)
         conn = self._connect()
         cursor = conn.cursor()
@@ -566,7 +591,8 @@ class TaskDatabase:
                 google_video_uri=row[13] if len(row) > 13 else None,
                 progress_text=row[14] if len(row) > 14 else None,
                 device_id=row[15] if len(row) > 15 else None,
-                reasoning_text=row[16] if len(row) > 16 else None
+                reasoning_text=row[16] if len(row) > 16 else None,
+                session_id=row[17] if len(row) > 17 else None
             ))
         return tasks
 

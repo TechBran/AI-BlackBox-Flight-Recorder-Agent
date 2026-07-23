@@ -439,19 +439,53 @@ async def test_gemini_chat_launch_refused_when_display_taken(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gemini_chat_reconnect_does_not_claim_or_leak(monkeypatch):
-    """C3 / reentrancy: a reconnect/queue turn (own session already running) does
-    NOT launch, so it never claims — and the finally leaves the table clean. The
-    operator is never self-blocked."""
+async def test_gemini_chat_true_reconnect_does_not_claim_or_leak(monkeypatch):
+    """C3 / reentrancy: a TRUE reconnect (same message, own session running) does
+    NOT launch, so it never claims — the finally leaves the table clean and the
+    operator is never self-blocked. (Under D1 multi-desktop a DIFFERENT prompt
+    now spawns a new desktop instead of queueing — covered below.)"""
     monkeypatch.setattr("Orchestrator.config.GOOGLE_API_KEY", "fake", raising=False)
+    own = _register_gemini_chat("brandon", status="running")
+    own.user_message = "first task"
+    # A reconnect falls through to the stream's queue-consumer loop; seed the
+    # None sentinel so it exits instead of blocking on an empty queue.
+    own.event_queue.put_nowait(None)
+
+    events = await _drive(cr.stream_gemini_computer_use(
+        [{"role": "user", "content": "first task"}], "", "brandon", device_id="blackbox"))
+    # A matching message is a reconnect, not a new prompt: no new desktop, no leak.
+    assert not any(e["type"] == "error" for e in events)   # never self-blocked
+    assert not any(e.get("data", {}).get("new_desktop") for e in events
+                   if e["type"] == "cu_session")
+    assert not da._reservations                            # no leak (C3)
+
+
+@pytest.mark.asyncio
+async def test_gemini_chat_busy_new_prompt_spawns_desktop_without_leak(monkeypatch):
+    """D1 multi-desktop (2026-07-23): a NEW prompt while the own session is busy
+    appends a brand-new desktop (cu_session new_desktop=True) instead of queueing,
+    and a virtual launch never claims the physical-display arbiter — so the table
+    stays clean."""
+    monkeypatch.setattr("Orchestrator.config.GOOGLE_API_KEY", "fake", raising=False)
+    monkeypatch.setattr(cr, "build_cu_context", lambda *a, **k: ("", {}))
+
+    async def _noop_loop(session, *a, **k):
+        # Push the None sentinel so the stream's queue-consumer loop exits
+        # (the real driver does this at the end of its run).
+        session.event_queue.put_nowait(None)
+    monkeypatch.setattr(cr, "_gemini_cu_agent_loop", _noop_loop)
+
     own = _register_gemini_chat("brandon", status="running")
     own.user_message = "first task"
 
     events = await _drive(cr.stream_gemini_computer_use(
-        [{"role": "user", "content": "a different follow-up"}], "", "brandon", device_id="blackbox"))
-    assert any(e["type"] == "cu_queued" for e in events)
+        [{"role": "user", "content": "a different follow-up"}], "", "brandon",
+        device_id="blackbox"))
+    new_desktops = [e for e in events
+                    if e["type"] == "cu_session" and e.get("data", {}).get("new_desktop")]
+    assert new_desktops, "a busy agent + new prompt must append a new desktop"
     assert not any(e["type"] == "error" for e in events)   # never self-blocked
-    assert not da._reservations                            # no leak (C3)
+    assert not da._reservations                            # virtual launch never claims
 
 
 def test_all_three_chat_streams_release_via_agent_task_done_callback():

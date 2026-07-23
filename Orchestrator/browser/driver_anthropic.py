@@ -45,6 +45,10 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
         return session.capture_screenshot_bytes()
 
     async def emit(evt):
+        # M4: mirror narration onto the session's bounded tail — the live-view
+        # bubble's only store for chat-launched runs (no task row to poll).
+        from Orchestrator.browser.session_manager import fold_event_to_reasoning
+        fold_event_to_reasoning(session, evt)
         try:
             session.event_queue.put_nowait(evt)
         except asyncio.QueueFull:

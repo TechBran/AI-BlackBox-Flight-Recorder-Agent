@@ -47,6 +47,7 @@ from Orchestrator.browser.screenshot import (
     resize_screenshot, screenshot_to_base64,
     save_screenshot_to_uploads,
 )
+from Orchestrator.browser.session_manager import fold_event_to_reasoning
 from Orchestrator.config import OPENAI_API_KEY
 from Orchestrator.openai_cu.config import (
     OPENAI_CU_MODEL_DEFAULT, OPENAI_CU_WIDTH, OPENAI_CU_HEIGHT,
@@ -487,7 +488,9 @@ async def run_openai_cu_loop(
         # ── Surface reasoning summaries / assistant text ──
         texts, message_texts = _collect_text(response)
         if texts:
-            yield {"type": "content", "data": {"text": "\n".join(texts), "step": step}}
+            _evt = {"type": "content", "data": {"text": "\n".join(texts), "step": step}}
+            fold_event_to_reasoning(session, _evt)  # M4 live-view narration
+            yield _evt
 
         computer_calls = [item for item in (getattr(response, "output", None) or [])
                           if getattr(item, "type", None) == "computer_call"]
@@ -513,9 +516,18 @@ async def run_openai_cu_loop(
 
             for action in batch:
                 a_type = getattr(action, "type", "unknown")
-                yield {"type": "cu_action",
-                       "data": {"action": a_type, "params": _action_params(action),
-                                "step": step}}
+                _evt = {"type": "cu_action",
+                        "data": {"action": a_type, "params": _action_params(action),
+                                 "step": step}}
+                fold_event_to_reasoning(session, _evt)  # M4 live-view narration
+                # cu_log parity (M4): latest_action for the activity endpoint.
+                # getattr-guarded — narration bookkeeping must never kill a run
+                # (and test stubs are not full sessions).
+                _log = getattr(session, "cu_log", None)
+                if isinstance(_log, list):
+                    _log.append({"type": "action", "action": a_type,
+                                 "step": step})
+                yield _evt
 
                 result = await _execute_openai_action(action, session.actions)
                 if not result.get("success", True):

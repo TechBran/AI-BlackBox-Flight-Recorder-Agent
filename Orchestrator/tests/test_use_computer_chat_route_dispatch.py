@@ -195,13 +195,16 @@ def test_every_use_computer_branch_routes_through_executor():
     )
 
 
-def test_stream_branch_still_calls_the_browser_task_helper():
+def test_stream_branches_still_call_the_browser_task_helper():
     """Pins the seam the _browser_task_event extraction created.
 
     The helper's own behavior is covered below, but a tested helper proves
-    nothing if the shipping branch stops calling it: delete the call site and
-    every other test in this file still passes (verified). Nothing else looks
-    for it — the property test above asserts only that .execute() is called.
+    nothing if the shipping branches stop calling it. M3 (2026-07-23) extended
+    the emit from the single Anthropic stream to EVERY provider's use_computer
+    branch (openai/gemini/xai + anthropic), so the in-chat agent pill appears
+    no matter which model launched the run. Guard that every use_computer
+    branch that yields to the client also calls the helper — a dropped call
+    site silently stops browser_task while the unit tests below keep passing.
     """
     callers = [
         b.lineno for b in _use_computer_branches(_CHAT_ROUTES)
@@ -210,11 +213,12 @@ def test_stream_branch_still_calls_the_browser_task_helper():
             for c in _branch_body_calls(b)
         )
     ]
-    assert len(callers) == 1, (
-        "expected exactly ONE use_computer branch (the Anthropic stream branch) to "
-        f"call _browser_task_event, found {len(callers)} at {callers}. If the call "
-        "site was removed, the stream branch silently stops emitting browser_task "
-        "while the helper's unit tests keep passing."
+    assert len(callers) >= 4, (
+        "expected the use_computer branches across the streaming providers "
+        "(anthropic/openai/gemini/xai) to call _browser_task_event, found "
+        f"{len(callers)} at {callers}. If a call site was removed, that "
+        "provider's stream silently stops emitting browser_task while the "
+        "helper's unit tests keep passing."
     )
 
 

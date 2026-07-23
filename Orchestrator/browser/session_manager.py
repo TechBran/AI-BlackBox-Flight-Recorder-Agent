@@ -68,6 +68,10 @@ class ComputerUseSession:
         self.display = None                  # DisplayHandle when virtual, else None
         self.actions = ActionExecutor()
         self.conversation_history: list = []  # Anthropic-format messages
+        # Human-readable reason for the last ensure_browser failure — the chat
+        # streams surface it so a cap-hit reads "all 3 desktops in use", never
+        # a generic "Failed to start browser session" (D1 cap surfacing).
+        self.last_error: str = ""
         self.screenshot_count: int = 0
         self.total_tokens: Dict[str, int] = {"input": 0, "output": 0}
         self.last_activity: float = time.time()
@@ -75,6 +79,14 @@ class ComputerUseSession:
         # ── Background task state ──
         self.event_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self.agent_task: Optional[asyncio.Task] = None
+        # The task row this session is currently driving (M2 sid->task join;
+        # set by headless._publish_session_link, cleared per turn).
+        self.task_id: Optional[str] = None
+        # Bounded rolling tail of the model's live narration (thinking +
+        # spoken responses + action lines) — what the live-view bubble renders
+        # (M4). Fed by fold_event_to_reasoning from all three drivers; the
+        # ONLY narration store reachable for chat-launched runs (no task row).
+        self.reasoning_tail: str = ""
         self.status: str = "idle"           # idle | running | complete | error | stopped | queued
         self.final_response: str = ""
         self.final_thinking: str = ""
@@ -172,6 +184,8 @@ class ComputerUseSession:
             except asyncio.QueueEmpty:
                 break
         self.agent_task = None
+        self.task_id = None
+        self.reasoning_tail = ""
         self.status = "idle"
         self.stop_requested = False
         self.final_response = ""
@@ -231,6 +245,7 @@ class ComputerUseSession:
                     self.session_id, backend=backend, operator=self.operator)
             except Exception as e:
                 print(f"[CU-SESSION] display allocation failed for {self.operator}: {e}")
+                self.last_error = str(e)
                 return False
             # Re-bind the input executor to THIS session's display, unscaled.
             from Orchestrator.browser.actions import (
@@ -240,6 +255,7 @@ class ComputerUseSession:
                                           coord_space=coord, native_mode=False,
                                           resolution=(self.display.width,
                                                       self.display.height))
+        self.last_error = ""
         self.display.touch()
         if not self.chrome.is_running():
             return self.chrome.start(url, handle=self.display)
@@ -268,13 +284,24 @@ _sessions: Dict[str, ComputerUseSession] = {}
 _operator_sessions: Dict[str, str] = {}  # operator → session_id
 
 
-def get_or_create_session(operator: str, session_id: Optional[str] = None, device_id: str = "blackbox") -> ComputerUseSession:
+def get_or_create_session(operator: str, session_id: Optional[str] = None,
+                          device_id: str = "blackbox",
+                          force_new: bool = False) -> ComputerUseSession:
     """Get existing session or create new one.
 
+    - force_new=True: skip every lookup and append a brand-new session (D1,
+      2026-07-23 multi-desktop semantics — a busy agent keeps its desktop and
+      the new prompt gets its own).
     - If session_id provided and exists: return it (validate operator matches)
     - If session_id provided but not found: create new session with that ID
-    - If no session_id: check operator's active session, else create new
+    - If no session_id: check operator's CURRENT session (MRU pointer), else
+      create new. _operator_sessions is an MRU pointer only — an operator may
+      hold multiple live sessions; older ones stay reachable by explicit id.
     - device_id: target device for screenshot/actions ("blackbox" = local)
+
+    Multi-desktop (2026-07-23): the old cross-operator reclaim loop (destroy
+    every other operator's idle session on fresh create) is GONE — sessions
+    are per-desktop now and only expiry/explicit close removes them.
 
     Does NOT arbitrate the local display (M1-T6): single-display arbitration is
     per-LAUNCH and lives at the launch sites (see the display_arbiter). This is
@@ -282,53 +309,49 @@ def get_or_create_session(operator: str, session_id: Optional[str] = None, devic
     """
     global _sessions, _operator_sessions
 
-    # ── Lookup by session_id if provided ──
-    if session_id and session_id in _sessions:
-        session = _sessions[session_id]
-        if session.operator == operator:
-            if session.is_alive() and not session.is_expired():
-                session.touch()
-                return session
+    if not force_new:
+        # ── Lookup by session_id if provided ──
+        if session_id and session_id in _sessions:
+            session = _sessions[session_id]
+            if session.operator == operator:
+                if session.is_alive() and not session.is_expired():
+                    session.touch()
+                    return session
+                else:
+                    # Expired or dead — clean up and recreate
+                    _cleanup_session(session_id)
             else:
-                # Expired or dead — clean up and recreate
-                _cleanup_session(session_id)
-        else:
-            # Operator mismatch — ignore the session_id, fall through
-            print(f"[CU-SESSION] session_id {session_id[:8]} belongs to {session.operator}, not {operator}")
+                # Operator mismatch — ignore the session_id, fall through
+                print(f"[CU-SESSION] session_id {session_id[:8]} belongs to {session.operator}, not {operator}")
 
-    # ── Lookup by operator ──
-    if operator in _operator_sessions:
-        existing_sid = _operator_sessions[operator]
-        if existing_sid in _sessions:
-            session = _sessions[existing_sid]
-            if session.is_alive() and not session.is_expired():
-                session.touch()
-                return session
-            else:
-                _cleanup_session(existing_sid)
+        # ── Lookup by operator (MRU pointer) ──
+        if operator in _operator_sessions:
+            existing_sid = _operator_sessions[operator]
+            if existing_sid in _sessions:
+                session = _sessions[existing_sid]
+                if session.is_alive() and not session.is_expired():
+                    session.touch()
+                    return session
+                else:
+                    _cleanup_session(existing_sid)
 
-    # ── Reclaim other operators' non-running sessions (one browser session lives
-    #    on the display at a time). Condition matches the pre-M1-T6 loop exactly
-    #    (it destroyed every other-operator session that was not "running"). ──
-    for sid, s in list(_sessions.items()):
-        if s.operator != operator and s.status != "running":
-            print(f"[CU-SESSION] Destroying {s.operator}'s idle session for new session: {operator}")
-            _cleanup_session(sid)
-
-    # NOTE (M1-T6 per-launch redesign): this function does NOT arbitrate the
-    # display. Arbitration is PER-LAUNCH, made at the actual launch sites
-    # (browser/headless.run_cu_task and the chat CU streams) via the display
-    # arbiter's try_claim, so session REUSE is guarded too — keying a claim to a
-    # session here would leave every reuse launch window unguarded (review C1/C2).
-    # This function owns session lifecycle only: reuse (returned above), idle
-    # cleanup (above), and fresh creation (below).
-
-    # ── Create fresh session ──
-    session = ComputerUseSession(operator, session_id=session_id, device_id=device_id)
+    # ── Create fresh session (force_new never reuses the caller's session_id —
+    #    that id names the BUSY session the prompt is escaping from) ──
+    session = ComputerUseSession(operator,
+                                 session_id=None if force_new else session_id,
+                                 device_id=device_id)
     _sessions[session.session_id] = session
     _operator_sessions[operator] = session.session_id
-    print(f"[CU-SESSION] Created new session {session.session_id[:8]} for {operator}")
+    print(f"[CU-SESSION] Created new session {session.session_id[:8]} for {operator}"
+          + (" (forced new desktop)" if force_new else ""))
     return session
+
+
+def get_session_by_id(session_id: str) -> Optional[ComputerUseSession]:
+    """Operator-agnostic lookup for the live-view activity/stop endpoints (M4)
+    — the served page knows only its sid. Tailscale is the auth perimeter, as
+    for every /cu/view surface."""
+    return _sessions.get(session_id)
 
 
 def get_session(operator: str, session_id: str = "") -> Optional[ComputerUseSession]:
@@ -353,15 +376,23 @@ def get_operator_session(operator: str) -> Optional[ComputerUseSession]:
 
 
 def _cleanup_session(session_id: str):
-    """Internal: remove a session from both dicts and destroy it."""
+    """Internal: remove a session from both dicts and destroy it. When the
+    removed session was the operator's MRU pointer, repair the pointer to
+    their most-recent surviving session (multi-desktop 2026-07-23) — a dead
+    key would orphan every older desktop from no-id lookups."""
     global _sessions, _operator_sessions
     if session_id in _sessions:
         session = _sessions[session_id]
         session.destroy()
-        # Remove from operator map
-        if _operator_sessions.get(session.operator) == session_id:
-            del _operator_sessions[session.operator]
         del _sessions[session_id]
+        if _operator_sessions.get(session.operator) == session_id:
+            survivors = [s for s in _sessions.values()
+                         if s.operator == session.operator]
+            if survivors:
+                newest = max(survivors, key=lambda s: s.last_activity)
+                _operator_sessions[session.operator] = newest.session_id
+            else:
+                del _operator_sessions[session.operator]
 
 
 def destroy_session(operator: str):
@@ -424,6 +455,50 @@ def cleanup_old_screenshots(uploads_dir: str = None, max_age_days: int = 7):
                 pass
     if removed:
         print(f"[CU-SESSION] Cleaned up {removed} old screenshots")
+
+
+# M4: bound for the session-held narration tail the live-view bubble polls.
+# Mirrors the task-row reasoning_text discipline (rolling tail, hard clamp) so
+# the 2-3s activity poll ships a small payload.
+REASONING_TAIL_MAX_CHARS = 8000
+
+
+def fold_event_to_reasoning(session, evt: dict) -> None:
+    """Fold ONE driver event into the session's bounded narration tail (M4).
+
+    Shared by all three CU drivers so the live-view activity endpoint reads
+    one store regardless of backend or launch path. Handles both payload
+    shapes: Anthropic streams raw str deltas for thinking/content; the
+    Gemini/OpenAI loops yield {"text": ..., "step": N} dicts. cu_action events
+    become "→ action(...)" lines — the floor that keeps the bubble non-empty
+    for terse models. Never raises (a narration hiccup must not kill a run).
+    """
+    try:
+        etype = evt.get("type")
+        data = evt.get("data")
+        text = ""
+        if etype in ("thinking", "content"):
+            if isinstance(data, dict):
+                text = data.get("text", "") or ""
+            elif isinstance(data, str):
+                text = data
+        elif etype == "cu_action":
+            d = data or {}
+            action = d.get("action") or "action"
+            params = d.get("params")
+            inner = ""
+            if isinstance(params, dict):
+                inner = ", ".join(
+                    str(v)[:60] for k, v in params.items() if k != "action")
+            step = d.get("step")
+            prefix = f"[step {step}] " if step is not None else ""
+            text = f"\n{prefix}→ {action}({inner})\n"
+        if not text:
+            return
+        tail = (getattr(session, "reasoning_tail", "") or "") + text
+        session.reasoning_tail = tail[-REASONING_TAIL_MAX_CHARS:]
+    except Exception:
+        pass
 
 
 def budget_screenshots_in_history(history: list, keep_images: int = 3) -> list:

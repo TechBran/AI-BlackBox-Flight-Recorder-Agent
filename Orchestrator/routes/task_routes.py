@@ -96,6 +96,10 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
             # expanded pill renders (scrollable). Bounded (rolling tail) so the
             # polled payload stays small; None/absent for non-CU tasks.
             "reasoning_text": t.get("reasoning_text"),
+            # M2 multi-desktop: the CU session this task drives — the key that
+            # lets every Live button open the task's OWN desktop
+            # (/cu/view/{session_id}) instead of the first streamable session.
+            "session_id": t["session_id"],
         } for t in filtered_tasks],
         "total_tasks": len(all_tasks),
         "filtered_count": len(filtered_tasks)

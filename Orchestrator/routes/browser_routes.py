@@ -289,6 +289,89 @@ async def cu_session_open(req: Optional[CuSessionOpenIn] = Body(default=None)):
     }
 
 
+def _find_cu_session_by_id(session_id: str):
+    """Resolve a CU session BY ID across BOTH managers (M4): the served
+    live-view page knows only its sid — no operator, no backend."""
+    from Orchestrator.browser.session_manager import get_session_by_id
+    s = get_session_by_id(session_id)
+    if s is not None:
+        return s
+    try:
+        from Orchestrator.gemini_cu.session_manager import (
+            get_session_by_id as gemini_get_by_id)
+        return gemini_get_by_id(session_id)
+    except Exception:
+        return None
+
+
+@app.get("/cu/session/{session_id}/activity")
+def cu_session_activity(session_id: str):
+    """Live activity for ONE CU session — the feed behind the live-view page's
+    status chip + narration bubble (M4, design 2026-07-23). Small payload,
+    polled at 2-3s alongside the existing /cu/sessions switcher poll.
+
+    reasoning_tail prefers the session's own bounded tail (the only store for
+    chat-launched runs); a task-launched run whose tail is empty falls back to
+    the task row's reasoning_text (the _drain_and_fold transcript)."""
+    s = _find_cu_session_by_id(session_id)
+    if s is None:
+        return JSONResponse({"error": f"Unknown CU session: {session_id}"},
+                            status_code=404)
+    latest_action = None
+    log = getattr(s, "cu_log", None) or []
+    for entry in reversed(log):
+        if entry.get("type") == "action":
+            latest_action = entry.get("action")
+            break
+    tail = getattr(s, "reasoning_tail", "") or ""
+    task_id = getattr(s, "task_id", None)
+    if not tail and task_id:
+        try:
+            from Orchestrator.tasks import task_db
+            row = task_db.get_task(task_id)
+            tail = (row.reasoning_text or "") if row else ""
+        except Exception:
+            pass
+    return {
+        "session_id": s.session_id,
+        "operator": s.operator,
+        "status": s.status,
+        "step": s.current_step,
+        "total": getattr(s, "total_steps", 0),
+        "latest_action": latest_action,
+        "reasoning_tail": tail,
+        "task_id": task_id,
+        "queue_length": len(getattr(s, "prompt_queue", []) or []),
+    }
+
+
+@app.post("/cu/session/{session_id}/stop")
+def cu_session_stop(session_id: str):
+    """ONE stop button for the live view (M4): a task-launched session routes
+    through tasks.cancel_task (mint hygiene + CANCELLED row + cu-stop); a
+    chat-launched session gets request_stop() directly."""
+    s = _find_cu_session_by_id(session_id)
+    if s is None:
+        return JSONResponse({"error": f"Unknown CU session: {session_id}"},
+                            status_code=404)
+    task_id = getattr(s, "task_id", None)
+    if task_id:
+        try:
+            from Orchestrator import tasks as tasks_mod
+            row = tasks_mod.task_db.get_task(task_id)
+            status = getattr(row, "status", None)
+            status_val = getattr(status, "value", status)
+            if row is not None and str(status_val) in ("pending", "processing"):
+                tasks_mod.cancel_task(task_id)
+                print(f"[CU-STOP] session {session_id[:8]} -> task cancel {task_id}")
+                return {"success": True, "mode": "task_cancel", "task_id": task_id}
+        except Exception as e:
+            print(f"[CU-STOP] task-cancel path failed, falling back: {e}")
+    s.request_stop()
+    print(f"[CU-STOP] session {session_id[:8]} -> request_stop")
+    return {"success": True, "mode": "session_stop"}
+
+
 @app.post("/cu/session/{session_id}/close")
 def cu_session_close(session_id: str):
     """Explicitly end a CU session (manual desktop or otherwise). Calls the

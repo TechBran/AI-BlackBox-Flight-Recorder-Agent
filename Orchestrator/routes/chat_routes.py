@@ -152,6 +152,25 @@ def _browser_task_event(cu_result, tool_input: Dict) -> Optional[Dict]:
             "data": {"task_id": task_id, "prompt": tool_input.get("prompt", "")}}
 
 
+_CLI_AGENT_TOOLS = ("claude_code_task", "gemini_cli_task", "codex_cli_task")
+
+
+def _cli_task_event(tool_result, tool_name: str, tool_input) -> "Optional[Dict]":
+    """The `cli_task` SSE event for a CLI-agent tool dispatch, or None (M3,
+    2026-07-23). Sibling of _browser_task_event: the CLI launch surfaces
+    task_id in ToolResult.data (cli_agent/tool_support.launch), so the in-chat
+    agent pill can attach to the run. Emitted from every streaming catch-all
+    (the CLI tools have no dedicated branch)."""
+    if tool_name not in _CLI_AGENT_TOOLS:
+        return None
+    task_id = (getattr(tool_result, "data", None) or {}).get("task_id")
+    if not task_id:
+        return None
+    return {"type": "cli_task",
+            "data": {"task_id": str(task_id), "tool": tool_name,
+                     "prompt": ((tool_input or {}).get("prompt", "") or "")[:200]}}
+
+
 def _last_user_msg(messages) -> str:
     """Extract text from the last user message (for ToolVault prompt injection).
 
@@ -2731,6 +2750,9 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 tool_result = cu_result.result
                                 print(f"[OPENAI-STREAM] use_computer: {tool_result[:100]}")
                                 yield {"type": "tool_result", "data": f"Computer Use: {tool_result[:80]}"}
+                                _bt = _browser_task_event(cu_result, func_args)
+                                if _bt:
+                                    yield _bt
 
                             elif func_name in ("list_devices", "control_android_device",
                                                "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
@@ -2752,6 +2774,9 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 print(f"[OPENAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
                                 yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
+                                _ct = _cli_task_event(tool_exec_result, func_name, func_args)
+                                if _ct:
+                                    yield _ct
                                 _mkind = _media_kind(func_name)
                                 if _mkind and getattr(tool_exec_result, "data", None):
                                     _mtid = tool_exec_result.data.get("task_id")
@@ -3616,6 +3641,9 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 if not result_message:
                                     result_message = f"Tool '{tool_name}' executed successfully (no output)."
                                 print(f"\033[33m[TOOLVAULT-EXEC] {tool_name} (catch-all): {result_message[:120]}\033[0m")
+                                _ct = _cli_task_event(tool_result, tool_name, tool_input)
+                                if _ct:
+                                    yield _ct
                                 _mkind = _media_kind(tool_name)
                                 if _mkind and getattr(tool_result, "data", None):
                                     _mtid = tool_result.data.get("task_id")
@@ -4129,7 +4157,23 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
                 incoming_user_text = content
             break
 
-    # ── Queue detection: if task is running/starting and this is a NEW prompt, queue it ──
+    # ── D1 multi-desktop (2026-07-23): a NEW prompt while this session is busy
+    #    appends a BRAND-NEW desktop — the running agent keeps working on its
+    #    own display; you return to it via the live-view rail. Replaces the old
+    #    enqueue-into-the-busy-agent behavior. Reconnect/same-message flows
+    #    still take the queue/reconnect branch below. ──
+    if (session.status in ("running", "starting")
+            and incoming_user_text
+            and incoming_user_text != "[reconnect]"
+            and incoming_user_text != session.user_message):
+        session = get_or_create_session(operator, device_id=device_id, force_new=True)
+        print(f"[CU-STREAM] Busy agent -> new desktop {session.session_id[:8]} for {operator}")
+        # Re-emit so the frontend repoints its stored session id at the NEW desktop.
+        yield {"type": "cu_session", "data": {"session_id": session.session_id,
+                                              "device_id": session.device_id,
+                                              "new_desktop": True}}
+
+    # ── Queue detection: reconnect/same-message paths for a busy session ──
     if session.status in ("running", "starting") and (not session.agent_task or not session.agent_task.done() or session.status == "starting"):
         if incoming_user_text and incoming_user_text != "[reconnect]" and incoming_user_text != session.user_message:
             # New prompt while task is running/starting → queue it
@@ -4169,7 +4213,7 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
             session.native_mode = bool(native_mode)
             # Local device — start display + Chrome
             if not await session.ensure_browser("about:blank", backend="anthropic"):
-                yield {"type": "error", "data": "Failed to start browser session"}
+                yield {"type": "error", "data": session.last_error or "Failed to start browser session"}
                 return
 
             if not session.native_mode and (session.display is None
@@ -4436,6 +4480,18 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
                 incoming_user_text = content
             break
 
+    # ── D1 multi-desktop (2026-07-23): busy agent + new prompt -> brand-new
+    #    desktop (gemini manager twin); the running agent keeps its display. ──
+    if (session.status in ("running", "starting")
+            and incoming_user_text
+            and incoming_user_text != "[reconnect]"
+            and incoming_user_text != session.user_message):
+        session = gemini_get_or_create(operator, session.device_id,
+                                       session.environment, force_new=True)
+        print(f"[GEMINI-CU-STREAM] Busy agent -> new desktop {session.session_id[:8]} for {operator}")
+        yield {"type": "cu_session", "data": {"session_id": session.session_id,
+                                              "new_desktop": True}}
+
     # ── Queue/reconnect detection (same pattern as Anthropic CU) ──
     if session.status in ("running", "starting") and (not session.agent_task or not session.agent_task.done() or session.status == "starting"):
         if incoming_user_text and incoming_user_text != "[reconnect]" and incoming_user_text != session.user_message:
@@ -4504,6 +4560,17 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
         cu_fossil_context, cu_provenance = build_cu_context(user_text, operator)
         session.provenance = cu_provenance
         if cu_fossil_context:
+            # HARD cap for gemini CU (the chat-path half of the MS02 chess-game
+            # 400, 2026-07-23): this injection once reached 311,810 chars (~78K
+            # tokens) against the preview model's 131,072-token input limit
+            # shared with per-step screenshots. Twin of the agent_loop's
+            # retrieve_for_agent max_chars=20_000.
+            if len(cu_fossil_context) > 20_000:
+                print(f"[GEMINI-CU-STREAM] fossil context {len(cu_fossil_context)} chars"
+                      f" > 20000 budget — truncating")
+                cu_fossil_context = (cu_fossil_context[:20_000]
+                                     + "\n[fossil context truncated to fit the "
+                                       "model's input window]")
             system_prompt += "\n\n" + cu_fossil_context
             print(f"[GEMINI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
@@ -4718,6 +4785,18 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
                 incoming_user_text = content
             break
 
+    # ── D1 multi-desktop (2026-07-23): busy agent + new prompt -> brand-new
+    #    desktop; the running agent keeps its own display. ──
+    if (session.status in ("running", "starting")
+            and incoming_user_text
+            and incoming_user_text != "[reconnect]"
+            and incoming_user_text != session.user_message):
+        session = get_or_create_session(operator, device_id=device_id, force_new=True)
+        print(f"[OPENAI-CU-STREAM] Busy agent -> new desktop {session.session_id[:8]} for {operator}")
+        yield {"type": "cu_session", "data": {"session_id": session.session_id,
+                                              "device_id": session.device_id,
+                                              "new_desktop": True}}
+
     # ── Queue/reconnect detection (same pattern as Anthropic/Gemini CU) ──
     if session.status in ("running", "starting") and (not session.agent_task or not session.agent_task.done() or session.status == "starting"):
         if incoming_user_text and incoming_user_text != "[reconnect]" and incoming_user_text != session.user_message:
@@ -4763,7 +4842,7 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
         #    session.capture_screenshot_bytes(), which needs the per-session
         #    display). Virtual (default) allocates; native uses the shared display. ──
         if not await session.ensure_browser("about:blank", backend="openai"):
-            yield {"type": "error", "data": "Failed to start browser session"}
+            yield {"type": "error", "data": session.last_error or "Failed to start browser session"}
             return
         if not session.native_mode and (session.display is None
                                         or not session.display.get_env()):
@@ -5569,6 +5648,9 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                     }
                                 })
                                 yield {"type": "tool_result", "data": f"Computer Use: {result_message[:80]}"}
+                                _bt = _browser_task_event(cu_result, func_args)
+                                if _bt:
+                                    yield _bt
                             elif func_name in ("list_devices", "control_android_device",
                                                "get_current_time",
                                                "get_task_status", "get_snapshot", "list_recent_snapshots",
@@ -5603,6 +5685,9 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 if not result_message:
                                     result_message = f"Tool '{func_name}' executed successfully (no output)."
                                 print(f"\033[33m[TOOLVAULT-EXEC] {func_name} (gemini catch-all): {result_message[:120]}\033[0m", flush=True)
+                                _ct = _cli_task_event(tool_exec_result, func_name, func_args)
+                                if _ct:
+                                    yield _ct
                                 _mkind = _media_kind(func_name)
                                 if _mkind and getattr(tool_exec_result, "data", None):
                                     _mtid = tool_exec_result.data.get("task_id")
@@ -6124,6 +6209,9 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 tool_result = cu_result.result
                                 print(f"[XAI-STREAM] use_computer: {tool_result[:100]}")
                                 yield {"type": "tool_result", "data": f"Computer Use: {tool_result[:80]}"}
+                                _bt = _browser_task_event(cu_result, func_args)
+                                if _bt:
+                                    yield _bt
 
                             elif func_name in ("list_devices", "control_android_device",
                                                "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
@@ -6145,6 +6233,9 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 print(f"[XAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
                                 yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
+                                _ct = _cli_task_event(tool_exec_result, func_name, func_args)
+                                if _ct:
+                                    yield _ct
                                 _mkind = _media_kind(func_name)
                                 if _mkind and getattr(tool_exec_result, "data", None):
                                     _mtid = tool_exec_result.data.get("task_id")
@@ -6724,6 +6815,9 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 print(f"[CUSTOM-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
                                 yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
+                                _ct = _cli_task_event(tool_exec_result, func_name, func_args)
+                                if _ct:
+                                    yield _ct
                                 _mkind = _media_kind(func_name)
                                 if _mkind and getattr(tool_exec_result, "data", None):
                                     _mtid = tool_exec_result.data.get("task_id")
@@ -7645,11 +7739,16 @@ def resolve_cu_session(operator: str, session_id: str = "", model: str = ""):
 
 @app.get("/chat/cu-status")
 async def cu_status(request: Request):
-    """Return the status of the current Computer Use background task."""
+    """Return the status of the current Computer Use background task.
+
+    ``session_id`` (optional, multi-desktop 2026-07-23) reports THAT session
+    instead of the operator's MRU one — with multiple live desktops the MRU
+    fallback can name the wrong agent."""
     operator = request.query_params.get("operator", current_default())
     cu_model = request.query_params.get("model", "")
+    session_id = request.query_params.get("session_id", "")
 
-    session = resolve_cu_session(operator, "", cu_model)
+    session = resolve_cu_session(operator, session_id, cu_model)
     if not session:
         return {"status": "idle", "step": 0, "total": 0}
 

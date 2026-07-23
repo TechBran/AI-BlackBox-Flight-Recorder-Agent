@@ -67,6 +67,11 @@ class GeminiCUSession:
         # Background task state
         self.event_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self.agent_task: Optional[asyncio.Task] = None
+        # The task row this session is currently driving (M2 sid->task join).
+        self.task_id: Optional[str] = None
+        # Bounded live-narration tail for the live-view bubble (M4) — fed by
+        # session_manager.fold_event_to_reasoning from the gemini loop.
+        self.reasoning_tail: str = ""
         self.status: str = "idle"
         self.final_response: str = ""
         self.error_message: str = ""
@@ -168,6 +173,8 @@ class GeminiCUSession:
         self.error_message = ""
         self.current_step = 0
         self.stop_requested = False
+        self.task_id = None
+        self.reasoning_tail = ""
         while not self.event_queue.empty():
             try:
                 self.event_queue.get_nowait()
@@ -218,23 +225,28 @@ _operator_sessions: Dict[str, str] = {}
 
 
 def get_or_create_session(operator: str, device_id: str, environment: str,
-                          session_id: Optional[str] = None) -> GeminiCUSession:
-    if session_id and session_id in _sessions:
-        session = _sessions[session_id]
-        if session.operator == operator and not session.is_expired():
-            session.touch()
-            return session
-
-    if operator in _operator_sessions:
-        sid = _operator_sessions[operator]
-        if sid in _sessions:
-            session = _sessions[sid]
-            if not session.is_expired():
+                          session_id: Optional[str] = None,
+                          force_new: bool = False) -> GeminiCUSession:
+    """force_new=True appends a brand-new session (D1 multi-desktop,
+    2026-07-23) — the busy agent keeps its desktop; _operator_sessions is the
+    MRU pointer only."""
+    if not force_new:
+        if session_id and session_id in _sessions:
+            session = _sessions[session_id]
+            if session.operator == operator and not session.is_expired():
                 session.touch()
                 return session
-            else:
-                session.destroy()
-                del _sessions[sid]
+
+        if operator in _operator_sessions:
+            sid = _operator_sessions[operator]
+            if sid in _sessions:
+                session = _sessions[sid]
+                if not session.is_expired():
+                    session.touch()
+                    return session
+                else:
+                    session.destroy()
+                    del _sessions[sid]
 
     session = GeminiCUSession(operator, device_id, environment, session_id)
     _sessions[session.session_id] = session
@@ -242,6 +254,11 @@ def get_or_create_session(operator: str, device_id: str, environment: str,
     print(f"[GEMINI CU] Created session {session.session_id} for {operator} "
           f"targeting {device_id} ({environment})")
     return session
+
+
+def get_session_by_id(session_id: str) -> Optional[GeminiCUSession]:
+    """Operator-agnostic lookup for the live-view activity/stop endpoints (M4)."""
+    return _sessions.get(session_id)
 
 
 def get_session(operator: str) -> Optional[GeminiCUSession]:

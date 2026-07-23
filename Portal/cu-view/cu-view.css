@@ -101,6 +101,103 @@ body {
 .cuv-tbtn[aria-pressed="true"] { background: #34344a; border-color: #4a4a6a; color: #fff; }
 .cuv-tbtn:active { background: #2a2a36; }
 
+/* ── M4: agent status chip + STOP + narration bubble ────────────────── */
+
+/* Working/idle/error chip in the topbar — color-coded by state. */
+#cuvAgentChip { color: #aab; }
+#cuvAgentChip[hidden] { display: none; }
+#cuvAgentChip[data-state="running"],
+#cuvAgentChip[data-state="starting"] {
+    color: #ffd9a0; border-color: #8a6a30; background: #2a2415;
+}
+#cuvAgentChip[data-state="complete"] { color: #8fd9a8; border-color: #2c4a36; }
+#cuvAgentChip[data-state="error"],
+#cuvAgentChip[data-state="stopped"] { color: #e79; border-color: #5a2c38; }
+
+.cuv-stop {
+    color: #ffb3b3;
+    border-color: #6a2d2d;
+    background: #2a1618;
+    font-weight: 600;
+}
+.cuv-stop:active { background: #3a1e20; }
+.cuv-stop:disabled { opacity: 0.55; cursor: default; }
+.cuv-tbtn[hidden] { display: none; }
+
+/* Narration bubble — anchored bottom-left over the stage, ABOVE the switcher
+   rail and any host composer (bottom inset lives on the body). Collapsed is a
+   single latest-line pill; expanded reveals a scrolling transcript. */
+#cuvNarration {
+    position: absolute;
+    left: 8px;
+    bottom: calc(8px + var(--cuv-inset-bottom));
+    z-index: 9;
+    max-width: min(78vw, 460px);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    pointer-events: none;   /* the toggle re-enables itself */
+}
+#cuvNarration[hidden] { display: none; }
+
+.cuv-narr-toggle {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    max-width: 100%;
+    background: rgba(20, 20, 28, 0.92);
+    border: 1px solid #3a3a4c;
+    border-radius: 16px;
+    padding: 6px 12px;
+    color: #dde;
+    font-size: 12px;
+    line-height: 1.25;
+    cursor: pointer;
+    touch-action: manipulation;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+.cuv-narr-toggle:active { background: rgba(30, 30, 40, 0.95); }
+
+.cuv-narr-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #777;
+    flex: 0 0 auto;
+}
+.cuv-narr-dot[data-state="running"],
+.cuv-narr-dot[data-state="starting"] { background: #ffb86b; animation: cuvPulse 1s infinite; }
+.cuv-narr-dot[data-state="complete"] { background: #3ecf6a; }
+.cuv-narr-dot[data-state="error"],
+.cuv-narr-dot[data-state="stopped"] { background: #e05555; }
+
+#cuvNarrLatest {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#cuvNarrChevron { flex: 0 0 auto; color: #99a; font-size: 11px; }
+
+#cuvNarrBody {
+    pointer-events: auto;
+    max-height: 40vh;
+    overflow-y: auto;
+    background: rgba(16, 16, 22, 0.95);
+    border: 1px solid #2d2d38;
+    border-radius: 12px;
+    padding: 10px 12px;
+    color: #cdd;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    -webkit-overflow-scrolling: touch;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+}
+#cuvNarrBody[hidden] { display: none; }
+
 /* ── Stage: transformed RFB canvas + overlays ───────────────────────── */
 
 #cuvStage {
