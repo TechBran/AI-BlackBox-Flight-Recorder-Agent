@@ -32,9 +32,13 @@ def test_google_missing_creds_raises_runtimeerror(monkeypatch):
 
 
 def test_onbox_transcribe_posts_to_9098_with_model(monkeypatch):
+    """G4 routing (2026-07-22): batch STT posts to the UPSTREAM PROXY path
+    /upstream/speaches/v1/audio/transcriptions — llama-swap routes by URL (the
+    member is 'speaches'), leaving the body `model` free for the whisper id.
+    Body-model routing on :9098/v1 404s ('no router for requested model')."""
     from Orchestrator.stt import file_transcribe as ft
     from Orchestrator import local_stack
-    monkeypatch.setattr(local_stack, "base_url", lambda: "http://127.0.0.1:9098/v1")
+    monkeypatch.setattr(local_stack, "base_url_root", lambda: "http://127.0.0.1:9098")
     monkeypatch.setattr(local_stack, "stt_batch_model", lambda: "Systran/faster-whisper-large-v3")
     captured = {}
 
@@ -50,7 +54,7 @@ def test_onbox_transcribe_posts_to_9098_with_model(monkeypatch):
     monkeypatch.setattr(ft.requests, "post", _post)
     out = ft.transcribe_bytes(b"RIFF...", "audio/wav", provider="onbox", filename="a.wav")
     assert out == "hello"
-    assert captured["url"] == "http://127.0.0.1:9098/v1/audio/transcriptions"
+    assert captured["url"] == "http://127.0.0.1:9098/upstream/speaches/v1/audio/transcriptions"
     assert captured["model"] == "Systran/faster-whisper-large-v3"
 
 

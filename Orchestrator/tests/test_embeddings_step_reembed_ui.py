@@ -60,8 +60,10 @@ def test_card_renders_the_store_strategy():
 
 
 def test_strategy_line_is_wired_into_the_card():
-    # renderCard must actually render the strategy line (not just define it).
-    assert "strategyHtml(m)" in _fn("renderCard")
+    # The two-card redesign (2026-07-22) moved strategy under the Advanced
+    # disclosure: renderCard renders advancedHtml, which renders strategyHtml.
+    assert "advancedHtml(m" in _fn("renderCard")
+    assert "strategyHtml(m)" in _fn("advancedHtml")
 
 
 # ── Task 2.2 — Re-embed button (active + non-active built cards) ──────
@@ -88,9 +90,11 @@ def test_reembed_wired_in_card_actions():
 
 
 def test_card_actions_render_the_reembed_control():
-    # Active card (was blurb-only) and non-active built cards get it.
-    body = _fn("cardActionsHtml")
-    assert "reembedHtml(m)" in body
+    # The two-card redesign (2026-07-22) moved re-embed under the Advanced
+    # disclosure (advancedHtml), which renderCard renders for active/selected
+    # cards — same reachability, new home.
+    assert "reembedHtml(m)" in _fn("advancedHtml")
+    assert "advancedHtml(m" in _fn("renderCard")
 
 
 # ── startReembed mirrors startMigrate (launch/attach idiom) ──────────
