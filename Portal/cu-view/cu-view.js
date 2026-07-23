@@ -73,6 +73,8 @@ function paintProbe(tag) {
         diag(`probe-${tag}`,
             `lum=${lum} cnv=${canvas.width}x${canvas.height}@${cr.width.toFixed(0)}x${cr.height.toFixed(0)} ` +
             `stage=${r.width.toFixed(0)}x${r.height.toFixed(0)} ` +
+            `inner=${window.innerWidth}x${window.innerHeight} ` +
+            `body=${document.body.clientWidth}x${document.body.clientHeight} ` +
             `scale=${vp ? vp.scale.toFixed(4) : "?"} tx=${vp ? vp.tx.toFixed(0) : "?"} ` +
             `ty=${vp ? vp.ty.toFixed(0) : "?"} dpr=${devicePixelRatio} vis=${document.visibilityState}`);
     } catch (e) { diag(`probe-${tag}`, `fail:${e.message || e}`); }

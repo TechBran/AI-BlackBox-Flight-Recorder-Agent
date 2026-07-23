@@ -21,6 +21,20 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
         modifier = modifier.fillMaxSize(),
         factory = { ctx ->
             WebView(ctx).apply {
+                // ROOT CAUSE of the v1.5.0–1.5.4 black screen (paint-probe
+                // verdict 2026-07-23: viewport 599x0 CSS px = full inner-screen
+                // WIDTH x ZERO height, stream healthy, desktop rendered into a
+                // 2x1px sliver): a WebView constructed WITHOUT LayoutParams
+                // inside Compose's AndroidView can get measured at zero height
+                // on the first pass and the renderer stays locked there. The
+                // canonical fix — explicit MATCH_PARENT params so every
+                // measure pass resolves full-size. (The wizard WebView dodges
+                // this via Column+weight; this one sits in a nav-destination
+                // Box and does not.)
+                layoutParams = android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                )
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
