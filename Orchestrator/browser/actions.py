@@ -139,9 +139,22 @@ def _jitter(base_ms: float = 0) -> float:
     return (base_ms + random.uniform(20, 80)) / 1000.0
 
 
-def _run_xdotool(*args, display_number: int = ACTIVE_DISPLAY) -> subprocess.CompletedProcess:
-    """Run an xdotool command on the active display."""
-    if NATIVE_MODE:
+def _run_xdotool(*args, display_number: int = ACTIVE_DISPLAY,
+                 native: Optional[bool] = None) -> subprocess.CompletedProcess:
+    """Run an xdotool command against a display.
+
+    ``native`` picks the environment: True -> the real desktop's env
+    (XAUTHORITY/DBUS via get_native_env); False -> a clean env pinned to
+    ``:display_number`` (a per-session Xvfb). None (legacy callers) falls back
+    to the box-global NATIVE_MODE.
+
+    Display-coherence fix (2026-07-23): this function previously ignored the
+    passed display_number whenever the box-global NATIVE_MODE was true, so a
+    virtual session's clicks landed on the operator's REAL desktop while its
+    live view streamed the virtual one.
+    """
+    use_native = NATIVE_MODE if native is None else bool(native)
+    if use_native:
         env = {**os.environ, **get_native_env()}
     else:
         env = {"DISPLAY": f":{display_number}", "PATH": "/usr/bin:/usr/local/bin:/bin"}
@@ -211,14 +224,22 @@ class ActionExecutor:
     """
 
     def __init__(self, display_number: int = DISPLAY_NUMBER,
-                 coord_space: str = COORD_SPACE_ANTHROPIC, native_mode: Optional[bool] = None):
+                 coord_space: str = COORD_SPACE_ANTHROPIC, native_mode: Optional[bool] = None,
+                 resolution: Optional[tuple] = None):
         self.display_number = display_number
         if coord_space not in _COORD_SPACES:
             raise ValueError(
                 f"unknown coord_space {coord_space!r}; expected one of {_COORD_SPACES}")
         self.coord_space = coord_space
-        self.use_ydotool = _use_ydotool()
         self.native_mode = NATIVE_MODE if native_mode is None else native_mode
+        # ydotool injects at the kernel seat (/dev/uinput) — events can only
+        # ever reach the REAL session, never an Xvfb display. A virtual
+        # executor must pin xdotool or its input lands on the operator's
+        # desktop (the Wayland half of the 2026-07-23 coherence fix).
+        self.use_ydotool = _use_ydotool() if self.native_mode else False
+        # The bound display's (width, height) — the de-normalization basis for
+        # normalized coord spaces on virtual displays.
+        self.resolution = tuple(resolution) if resolution else None
 
     def to_native(self, x: int, y: int) -> tuple:
         """Convert model-space coordinates to native desktop pixels using the
@@ -232,10 +253,26 @@ class ActionExecutor:
             detect_native_resolution, CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT,
         )
         if not self.native_mode:
+            if self.coord_space == COORD_SPACE_GEMINI:
+                # Gemini replies 0-999 normalized — de-normalize against the
+                # SESSION display's resolution (identity passthrough compressed
+                # every click into the top-left ~70% of the screen).
+                if self.resolution:
+                    w, h = self.resolution
+                else:
+                    from Orchestrator.gemini_cu.config import (
+                        GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT)
+                    w, h = GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT
+                # /1000 per Google's CU contract (0-999 = 1000 buckets); /999
+                # mapped coordinate 999 one past the last pixel (review find).
+                return int(x / 1000 * w), int(y / 1000 * h)
+            # anthropic-1280: model coords ARE pixels in the frame it saw, and a
+            # virtual display renders at exactly that frame size — identity.
             return int(x), int(y)
         w, h = detect_native_resolution()
         if self.coord_space == COORD_SPACE_GEMINI:
-            return int(x / 999 * w), int(y / 999 * h)
+            # /1000 per Google's CU contract — see the virtual branch above.
+            return int(x / 1000 * w), int(y / 1000 * h)
         # anthropic-1280 (default): same math + int() truncation as the old
         # module-level _scale_coord (x * (w / CU_DISPLAY_WIDTH)) — bit-identical.
         sx, sy = w / CU_DISPLAY_WIDTH, h / CU_DISPLAY_HEIGHT
@@ -264,7 +301,7 @@ class ActionExecutor:
         if self.use_ydotool:
             _run_ydotool("mousemove", "--absolute", "--", str(x), str(y))
         else:
-            _run_xdotool("mousemove", "--sync", str(x), str(y), display_number=self.display_number)
+            _run_xdotool("mousemove", "--sync", str(x), str(y), display_number=self.display_number, native=self.native_mode)
 
     def _click_button(self, button: int) -> None:
         """button: 1=left, 2=middle, 3=right (xdotool numbering)."""
@@ -273,7 +310,7 @@ class ActionExecutor:
             btn_map = {1: "0xC0", 2: "0xC2", 3: "0xC1"}
             _run_ydotool("click", btn_map.get(button, "0xC0"))
         else:
-            _run_xdotool("click", str(button), display_number=self.display_number)
+            _run_xdotool("click", str(button), display_number=self.display_number, native=self.native_mode)
 
     def _click_button_repeat(self, button: int, repeat: int, delay_ms: int = 80) -> None:
         if self.use_ydotool:
@@ -281,7 +318,7 @@ class ActionExecutor:
             _run_ydotool("click", "--repeat", str(repeat),
                          "--next-delay", str(delay_ms), btn_map.get(button, "0xC0"))
         else:
-            _run_xdotool("click", "--repeat", str(repeat), "--delay", str(delay_ms), str(button), display_number=self.display_number)
+            _run_xdotool("click", "--repeat", str(repeat), "--delay", str(delay_ms), str(button), display_number=self.display_number, native=self.native_mode)
 
     def _button_down(self, button: int) -> None:
         if self.use_ydotool:
@@ -289,20 +326,20 @@ class ActionExecutor:
             down_map = {1: "0x40", 2: "0x42", 3: "0x41"}
             _run_ydotool("click", down_map.get(button, "0x40"))
         else:
-            _run_xdotool("mousedown", str(button), display_number=self.display_number)
+            _run_xdotool("mousedown", str(button), display_number=self.display_number, native=self.native_mode)
 
     def _button_up(self, button: int) -> None:
         if self.use_ydotool:
             up_map = {1: "0x80", 2: "0x82", 3: "0x81"}
             _run_ydotool("click", up_map.get(button, "0x80"))
         else:
-            _run_xdotool("mouseup", str(button), display_number=self.display_number)
+            _run_xdotool("mouseup", str(button), display_number=self.display_number, native=self.native_mode)
 
     def _type_text(self, text: str) -> None:
         if self.use_ydotool:
             _run_ydotool("type", "--key-delay", "12", text)
         else:
-            _run_xdotool("type", "--clearmodifiers", "--delay", "12", text, display_number=self.display_number)
+            _run_xdotool("type", "--clearmodifiers", "--delay", "12", text, display_number=self.display_number, native=self.native_mode)
 
     def _key_combo(self, text: str) -> None:
         """Press a key combo like 'Return' or 'ctrl+a'."""
@@ -312,7 +349,7 @@ class ActionExecutor:
             # Fall through: unknown key → try xdotool (silent no-op on Wayland,
             # but better than crashing — and useful if XWayland window is focused)
             print(f"[actions] ydotool can't translate key '{text}', falling through to xdotool")
-        _run_xdotool("key", "--clearmodifiers", text, display_number=self.display_number)
+        _run_xdotool("key", "--clearmodifiers", text, display_number=self.display_number, native=self.native_mode)
 
     def _key_down(self, text: str) -> None:
         if self.use_ydotool:
@@ -320,7 +357,7 @@ class ActionExecutor:
             if codes:
                 _run_ydotool("key", *[f"{kc}:1" for kc in codes])
                 return
-        _run_xdotool("keydown", "--clearmodifiers", text, display_number=self.display_number)
+        _run_xdotool("keydown", "--clearmodifiers", text, display_number=self.display_number, native=self.native_mode)
 
     def _key_up(self, text: str) -> None:
         if self.use_ydotool:
@@ -329,7 +366,7 @@ class ActionExecutor:
                 # Release in reverse order
                 _run_ydotool("key", *[f"{kc}:0" for kc in reversed(codes)])
                 return
-        _run_xdotool("keyup", "--clearmodifiers", text, display_number=self.display_number)
+        _run_xdotool("keyup", "--clearmodifiers", text, display_number=self.display_number, native=self.native_mode)
 
     # --- Click actions ---
 
@@ -423,7 +460,7 @@ class ActionExecutor:
             button_map = {"up": "4", "down": "5", "left": "6", "right": "7"}
             button = button_map.get(direction, "5")
             for _ in range(clicks):
-                _run_xdotool("click", button, display_number=self.display_number)
+                _run_xdotool("click", button, display_number=self.display_number, native=self.native_mode)
                 time.sleep(0.02)
         return {"success": True, "message": f"Scroll {direction} x{clicks} ticks at {coordinate}"}
 

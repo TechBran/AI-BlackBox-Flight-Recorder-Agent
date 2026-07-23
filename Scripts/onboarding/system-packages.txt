@@ -25,6 +25,11 @@ x11vnc                   # SHOULD_HAVE # remote desktop CU
 xvfb                     # MUST_HAVE # CU per-session virtual X displays (CU gates on this)
 websockify               # SHOULD_HAVE # CU live-view WS bridge (noVNC transport)
 novnc                    # SHOULD_HAVE # CU live-view browser client
+# ── CU populated agent desktop (production-readiness M2, 2026-07-23) ──
+tint2                    # SHOULD_HAVE # CU agent desktop panel/taskbar
+pcmanfm                  # SHOULD_HAVE # CU agent desktop icons + file manager
+xterm                    # SHOULD_HAVE # CU agent desktop terminal (openbox menu)
+python3-tk               # FEATURE_OPTIONAL # CU click-accuracy harness target app (diagnostics/cu_harness)
 mpg123                   # SHOULD_HAVE # audio playback
 alsa-utils               # SHOULD_HAVE # audio devices
 pulseaudio-utils         # SHOULD_HAVE # PulseAudio control

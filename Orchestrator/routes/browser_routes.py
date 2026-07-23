@@ -22,6 +22,10 @@ class BrowserRunIn(BaseModel):
     system_prompt: Optional[str] = None
     device_id: Optional[str] = "blackbox"
     native_mode: Optional[bool] = False
+    # CU model id — resolves the backend (anthropic/openai/google) exactly as
+    # the use_computer tool does; empty = the Anthropic default. Added for the
+    # per-backend click-accuracy harness (M0, 2026-07-23); additive.
+    model: Optional[str] = None
 
 
 @app.post("/browser/run")
@@ -42,6 +46,7 @@ def browser_run(req: BrowserRunIn):
             "system_prompt": req.system_prompt,
             "device_id": req.device_id or "blackbox",
             "native_mode": bool(req.native_mode),
+            "model": req.model or "",
         }
     )
 
@@ -127,7 +132,7 @@ async def browser_click(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "left_click" if button == "left" else "right_click", coordinate=[x, y])
     else:
-        result = click(x, y, button)
+        result = click(x, y, button, session_id=body.get("session_id"))
     return result
 
 
@@ -139,7 +144,7 @@ async def browser_type(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "type", text=text)
     else:
-        result = type_text(text)
+        result = type_text(text, session_id=body.get("session_id"))
     return result
 
 
@@ -151,7 +156,7 @@ async def browser_key(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "key", text=key)
     else:
-        result = press_key(key)
+        result = press_key(key, session_id=body.get("session_id"))
     return result
 
 
@@ -166,7 +171,7 @@ async def browser_scroll(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "scroll", coordinate=[x, y], direction=direction, amount=clicks)
     else:
-        result = scroll(x, y, direction, clicks)
+        result = scroll(x, y, direction, clicks, session_id=body.get("session_id"))
     return result
 
 

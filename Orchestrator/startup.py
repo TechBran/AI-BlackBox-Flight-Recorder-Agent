@@ -277,6 +277,14 @@ async def _cu_display_reaper():
                 cleanup_inactive_sessions(timeout=SESSION_TIMEOUT)
             except Exception as e:
                 print(f"[CU-SESSION] idle sweep skipped: {e}")
+            # Gemini sessions hold per-session displays too (2026-07-23) —
+            # sweep their expired sessions or a stale chat session pins one of
+            # the few display slots for the full display TTL.
+            try:
+                from Orchestrator.gemini_cu.session_manager import cleanup_expired_sessions
+                cleanup_expired_sessions()
+            except Exception as e:
+                print(f"[GEMINI CU] idle sweep skipped: {e}")
 
     asyncio.create_task(_loop())
 

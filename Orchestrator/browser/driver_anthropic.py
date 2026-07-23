@@ -79,6 +79,14 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
             await emit({"type": "cu_step", "data": {"step": step, "total": cu_max_steps}})
             print(f"[CU-BG] Step {step}/{cu_max_steps} for {operator}")
 
+            # ── 413 guard: re-budget screenshots EVERY iteration ──
+            # The request re-sends the whole history, so without this a long run
+            # accumulates one PNG per step and dies on Anthropic's per-request
+            # caps ("request_too_large" — Brandon's "too much to do" error).
+            # Stripping only at task-save (the old behavior) was the bug.
+            from Orchestrator.browser.session_manager import budget_screenshots_in_history
+            history = budget_screenshots_in_history(history)
+
             # ── Stream API call ──
             payload = {
                 "model": model,
@@ -90,6 +98,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
             }
 
             thinking_buffer = ""
+            thinking_signature = ""
             content_buffer = ""
             current_block_type = None
             stop_reason = None
@@ -116,8 +125,26 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                                             block = event.get("content_block", {})
                                             current_block_type = block.get("type")
                                             if current_block_type == "thinking":
+                                                # Per-BLOCK reset: a response can carry
+                                                # multiple thinking blocks; without this the
+                                                # second block's history entry would embed the
+                                                # first's text under the second's signature —
+                                                # a signature-verification 400 on replay.
+                                                thinking_buffer = ""
+                                                thinking_signature = ""
                                                 await emit({"type": "thinking_start", "data": ""})
+                                            elif current_block_type == "redacted_thinking":
+                                                # Arrives complete in the start event; must be
+                                                # round-tripped verbatim like signed thinking.
+                                                assistant_content_blocks.append({
+                                                    "type": "redacted_thinking",
+                                                    "data": block.get("data", ""),
+                                                })
                                             elif current_block_type == "text":
+                                                # Per-block reset (same class as the thinking
+                                                # dup): a 2nd text block in one response would
+                                                # otherwise re-embed the 1st's text.
+                                                content_buffer = ""
                                                 await emit({"type": "content_start", "data": ""})
                                             elif current_block_type == "tool_use":
                                                 current_tool_use = {
@@ -144,13 +171,29 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                                             elif delta_type == "input_json_delta":
                                                 if current_tool_use is not None:
                                                     current_tool_use["_input_json"] += delta.get("partial_json", "")
+                                            elif delta_type == "signature_delta":
+                                                # The thinking block's replay credential. Models
+                                                # with adaptive/interleaved thinking (sonnet-5 era)
+                                                # emit thinking even when the request sets no
+                                                # thinking param — replaying the block WITHOUT its
+                                                # signature 400s the very next request
+                                                # ("thinking.signature: Field required"; caught
+                                                # live by the M0 click battery, 2026-07-23).
+                                                thinking_signature += delta.get("signature", "")
 
                                         elif event_type == "content_block_stop":
                                             if current_block_type == "thinking":
                                                 await emit({"type": "thinking_end", "data": ""})
-                                                assistant_content_blocks.append({
+                                                block_out = {
                                                     "type": "thinking", "thinking": thinking_buffer
-                                                })
+                                                }
+                                                if thinking_signature:
+                                                    block_out["signature"] = thinking_signature
+                                                    assistant_content_blocks.append(block_out)
+                                                # An unsigned thinking block is NOT replayable —
+                                                # the API rejects it outright, so drop it from
+                                                # history (the thinking text still streamed to
+                                                # the UI above).
                                             elif current_block_type == "text":
                                                 assistant_content_blocks.append({
                                                     "type": "text", "text": content_buffer

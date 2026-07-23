@@ -55,7 +55,7 @@ def runner_env(monkeypatch):
 
     monkeypatch.setattr(
         "Orchestrator.browser.screenshot.capture_screenshot_display",
-        lambda n: b"\x89PNG-fake")
+        lambda n, native=None: b"\x89PNG-fake")
     monkeypatch.setattr(
         "Orchestrator.browser.screenshot.capture_screenshot",
         lambda *a, **k: b"\x89PNG-fake")

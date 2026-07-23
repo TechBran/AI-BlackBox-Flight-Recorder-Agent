@@ -16,6 +16,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Optional
 
 from Orchestrator.browser.config import (
     DISPLAY_NUMBER, DISPLAY_WIDTH, DISPLAY_HEIGHT, CDP_PORT,
@@ -94,14 +95,24 @@ def capture_screenshot_portal() -> bytes:
     return png_bytes
 
 
-def capture_screenshot_display(display_number: int = ACTIVE_DISPLAY) -> bytes:
-    """Capture the full virtual display via scrot. Returns PNG bytes.
+def capture_screenshot_display(display_number: int = ACTIVE_DISPLAY,
+                               native: Optional[bool] = None) -> bytes:
+    """Capture the full display via scrot. Returns PNG bytes.
 
     This captures EVERYTHING on the display — Chrome, terminals, any GUI app.
     On Wayland, only X11/XWayland windows are captured (not the full desktop).
+
+    ``native`` picks the environment: True -> the real desktop's env
+    (get_native_env); False -> a clean env pinned to ``:display_number`` (a
+    per-session Xvfb). None (legacy callers) falls back to the box-global
+    NATIVE_MODE. Display-coherence fix (2026-07-23): this function previously
+    ignored the passed display_number whenever NATIVE_MODE, so virtual-session
+    agents grounded every decision on a screenshot of the operator's REAL
+    desktop.
     """
     import tempfile
-    if NATIVE_MODE:
+    use_native = NATIVE_MODE if native is None else bool(native)
+    if use_native:
         env = get_native_env()
     else:
         env = {"DISPLAY": f":{display_number}", "PATH": "/usr/bin:/usr/local/bin:/bin"}

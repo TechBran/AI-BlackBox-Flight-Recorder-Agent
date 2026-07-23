@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Right-click application menu for CU agent virtual desktops (M2,
+     2026-07-23). Resolved via XDG_CONFIG_HOME=<repo>/Orchestrator/browser/
+     assets/xdg, set on the openbox spawn in display.py, so the relative
+     <file>menu.xml</file> in openbox-rc.xml finds this regardless of where
+     the repo lives. Entries exec plain commands (no .desktop indirection);
+     a missing binary simply no-ops when clicked. -->
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="Applications">
+    <item label="Terminal">
+      <action name="Execute"><command>xterm -fa Monospace -fs 11 -bg black -fg white</command></action>
+    </item>
+    <item label="File Manager">
+      <action name="Execute"><command>pcmanfm</command></action>
+    </item>
+    <item label="Web Browser (Chrome)">
+      <action name="Execute"><command>google-chrome --no-first-run</command></action>
+    </item>
+    <item label="Text Editor">
+      <action name="Execute"><command>xterm -fa Monospace -fs 11 -e nano</command></action>
+    </item>
+    <separator/>
+    <item label="Reconfigure Desktop">
+      <action name="Reconfigure"/>
+    </item>
+  </menu>
+</openbox_menu>

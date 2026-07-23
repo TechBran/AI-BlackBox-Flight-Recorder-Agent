@@ -350,8 +350,13 @@ async def run_openai_cu_loop(
         }]
 
     # ── Optional URL navigation before the first screenshot ──
-    if url:
-        executor = ActionExecutor()
+    # SESSION executor only (both callers pass url=None today — ensure_browser
+    # handles navigation — but this branch previously built a bare
+    # ActionExecutor() that was never even imported: a NameError landmine that,
+    # import-fixed, would have typed onto the box-global display instead of the
+    # session's (review find, 2026-07-23)).
+    if url and getattr(session, "actions", None) is not None:
+        executor = session.actions
         await asyncio.to_thread(executor.execute, "key", text="ctrl+l")
         await asyncio.sleep(0.2)
         await asyncio.to_thread(executor.execute, "type", text=url)

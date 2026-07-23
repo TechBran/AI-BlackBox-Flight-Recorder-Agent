@@ -56,7 +56,7 @@ def test_qwen_clone_proxies_upstream_with_consent(client, monkeypatch):
     with patch("Orchestrator.qwen_tts.upstream_url",
                return_value="http://127.0.0.1:9098/upstream/qwen-tts/v1/voices/clone") as m_url, \
          patch("Orchestrator.routes.tts_routes.requests.post",
-               return_value=_JResp({"voice_id": "test-slug"})), \
+               return_value=_JResp({"voice_id": "test-slug"})) as m_post, \
          patch("Orchestrator.qwen_tts.synthesize") as m_syn:
         m_syn.return_value = type("R", (), {"status_code": 200, "content": b"RIFFwav", "text": ""})()
         resp = client.post(

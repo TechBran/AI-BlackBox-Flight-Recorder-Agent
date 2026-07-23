@@ -54,6 +54,15 @@ class GeminiCUSession:
         # Per-session virtual display (M9). Virtual by default; native is opt-in.
         self.native_mode: bool = False
         self.display = None
+        # Session-bound ActionExecutor once ensure_display() binds one — the
+        # single input authority for this session's display (2026-07-23
+        # display-coherence fix; the loop previously built bare executors that
+        # inherited the box-global NATIVE_MODE and drove the real desktop).
+        self.actions = None
+        # Chrome on THIS session's display — started by ensure_display for the
+        # "browser" environment / url tasks (a Chrome-less Xvfb has nothing for
+        # the url preamble to type into; review find, 2026-07-23).
+        self.chrome = None
 
         # Background task state
         self.event_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
@@ -78,6 +87,60 @@ class GeminiCUSession:
     def display_number(self) -> int:
         from Orchestrator.browser.config import ACTIVE_DISPLAY
         return self.display.display_num if self.display is not None else ACTIVE_DISPLAY
+
+    def ensure_display(self, start_url: str = None) -> bool:
+        """Bind this session to its OWN virtual display (browser/desktop only).
+
+        Mirrors ComputerUseSession.ensure_browser: allocate a per-session Xvfb
+        at the Gemini native resolution (1440x900 via resolution_for_backend),
+        bind a session-scoped ActionExecutor — gemini-999 coord space
+        de-normalized against THIS display's resolution — and, for the
+        "browser" environment or a url task, start Chrome ON that display (a
+        Chrome-less Xvfb gives the url preamble nothing to type into).
+        Historically Gemini sessions NEVER allocated (display stayed None →
+        display_number fell back to the real desktop). Android targets and the
+        explicit native opt-in are no-ops. Idempotent; touches the handle."""
+        if self.native_mode or self.environment == "android":
+            return True
+        from Orchestrator.browser.display import get_allocator
+        # Heal a stale handle after a TTL reap (allocator registration is the
+        # truth) — mirrors ComputerUseSession.ensure_browser.
+        if self.display is not None and get_allocator().get(self.session_id) is not self.display:
+            print(f"[GEMINI CU] display {self.display.display} for "
+                  f"{self.session_id[:8]} was reaped — reallocating")
+            self.display = None
+            self.actions = None
+            if self.chrome is not None:
+                try:
+                    self.chrome.stop()
+                except Exception:
+                    pass
+                self.chrome = None
+        if self.display is None:
+            try:
+                self.display = get_allocator().allocate(
+                    self.session_id, backend="gemini", operator=self.operator)
+            except Exception as e:
+                print(f"[GEMINI CU] display allocation failed for {self.operator}: {e}")
+                return False
+            from Orchestrator.browser.actions import ActionExecutor, COORD_SPACE_GEMINI
+            self.actions = ActionExecutor(
+                display_number=self.display.display_num,
+                coord_space=COORD_SPACE_GEMINI, native_mode=False,
+                resolution=(self.display.width, self.display.height))
+        self.display.touch()
+        if self.environment == "browser" or start_url:
+            try:
+                if self.chrome is None:
+                    from Orchestrator.browser.chrome import ChromeInstance
+                    self.chrome = ChromeInstance(operator=self.operator)
+                if not self.chrome.is_running():
+                    self.chrome.start(start_url or "about:blank", handle=self.display)
+            except Exception as e:
+                # Chrome trouble degrades to a desktop-only display, never a
+                # dead session — the model can still use the app menu/panel.
+                print(f"[GEMINI CU] Chrome start failed (non-fatal): {e}")
+        return True
 
     def trim_history(self, max_messages: int = 200):
         """Cap conversation history to prevent token explosion."""
@@ -132,6 +195,20 @@ class GeminiCUSession:
 
     def destroy(self):
         self.request_stop()
+        if self.chrome is not None:
+            try:
+                self.chrome.stop()
+            except Exception as e:
+                print(f"[GEMINI CU] Chrome stop failed for {self.operator}: {e}")
+            self.chrome = None
+        if self.display is not None:
+            from Orchestrator.browser.display import get_allocator
+            try:
+                get_allocator().release(self.session_id)
+            except Exception as e:
+                print(f"[GEMINI CU] display release failed for {self.operator}: {e}")
+            self.display = None
+            self.actions = None
         self.conversation_history.clear()
 
 
@@ -198,6 +275,26 @@ def create_task_session(operator: str, device_id: str,
     session = GeminiCUSession(operator, device_id, environment)
     _sessions[session.session_id] = session
     return session
+
+
+def cleanup_expired_sessions() -> int:
+    """Sweep expired, non-running Gemini sessions so their per-session displays
+    free promptly. Without this, an expired (300s) chat session pinned one of
+    the MAX_VIRTUAL_SESSIONS display slots for the full 1800s display TTL —
+    three stale gemini chat turns could exhaust the allocator (review find,
+    2026-07-23). Called from the startup TTL sweep alongside the browser
+    session sweep. Returns the number of sessions destroyed."""
+    removed = 0
+    for sid, s in list(_sessions.items()):
+        running = s.agent_task is not None and not s.agent_task.done()
+        if s.is_expired() and not running and s.status != "running":
+            print(f"[GEMINI CU] sweeping expired session {sid[:8]} ({s.operator})")
+            s.destroy()
+            _sessions.pop(sid, None)
+            if _operator_sessions.get(s.operator) == sid:
+                _operator_sessions.pop(s.operator, None)
+            removed += 1
+    return removed
 
 
 def destroy_task_session(session: GeminiCUSession):

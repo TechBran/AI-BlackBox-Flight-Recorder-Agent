@@ -25,16 +25,28 @@ def test_no_hardcoded_display_in_prompt():
 
 @pytest.mark.asyncio
 async def test_click_at_routes_through_executor(monkeypatch):
+    """Clicks route through the SESSION-BOUND executor (2026-07-23 coherence
+    contract: ensure_display binds session.actions; bare fallbacks are gone)."""
     calls = []
     class FakeExecutor:
         coord_space = "gemini-999"
-        def __init__(self, *a, **k): assert k.get("coord_space") == "gemini-999"
         def execute(self, action, **params):
             calls.append((action, params)); return {"success": True}
         def to_native(self, x, y): return (x, y)
-    monkeypatch.setattr(G, "ActionExecutor", FakeExecutor)
     class S:
         environment = "desktop"; device_id = "blackbox"
+        native_mode = False; actions = FakeExecutor()
     result = await G._execute_predefined_action(S(), "click_at", {"x": 500, "y": 500})
     assert result["success"]
     assert calls and calls[0][0] == "left_click"
+
+
+@pytest.mark.asyncio
+async def test_virtual_session_without_executor_fails_loudly():
+    """A destroyed-mid-step virtual session must ERROR, never fall back to a
+    bare executor that would drive the operator's real desktop."""
+    class S:
+        environment = "desktop"; device_id = "blackbox"
+        native_mode = False; actions = None
+    result = await G._execute_predefined_action(S(), "click_at", {"x": 1, "y": 1})
+    assert result["success"] is False

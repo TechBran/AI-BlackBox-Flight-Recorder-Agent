@@ -105,7 +105,15 @@ class ComputerUseSession:
             capture_screenshot, capture_screenshot_display,
         )
         if self.display is not None:
-            return capture_screenshot_display(self.display.display_num)
+            # Touch per capture: last_activity otherwise only moves at turn
+            # START, so the TTL reaper (VIRTUAL_DISPLAY_TTL idle) could tear a
+            # display down under a >30-min agent mid-run (review find,
+            # 2026-07-23). A capture happens every step — the honest heartbeat.
+            self.display.touch()
+            # native=False pins the capture env to THIS handle's :N — without it
+            # the box-global NATIVE_MODE short-circuit captured the real desktop
+            # (the 2026-07-23 display-coherence fix).
+            return capture_screenshot_display(self.display.display_num, native=False)
         return capture_screenshot()
 
     def request_stop(self):
@@ -204,6 +212,19 @@ class ComputerUseSession:
         if self.native_mode:
             return True
         from Orchestrator.browser.display import get_allocator
+        # Heal a stale handle: the TTL reaper (or an explicit release) may have
+        # torn our display down while this session object lived on — allocator
+        # registration is the truth, not our cached reference. Without this the
+        # session is unhealable: every capture/click hits a dead Xvfb forever
+        # (review find, 2026-07-23).
+        if self.display is not None and get_allocator().get(self.session_id) is not self.display:
+            print(f"[CU-SESSION] display {self.display.display} for "
+                  f"{self.session_id[:8]} was reaped — reallocating")
+            self.display = None
+            try:
+                self.chrome.stop()
+            except Exception:
+                pass
         if self.display is None:
             try:
                 self.display = get_allocator().allocate(
@@ -216,16 +237,21 @@ class ComputerUseSession:
                 ActionExecutor, COORD_SPACE_GEMINI, COORD_SPACE_ANTHROPIC)
             coord = COORD_SPACE_GEMINI if backend in ("google", "gemini") else COORD_SPACE_ANTHROPIC
             self.actions = ActionExecutor(display_number=self.display.display_num,
-                                          coord_space=coord, native_mode=False)
+                                          coord_space=coord, native_mode=False,
+                                          resolution=(self.display.width,
+                                                      self.display.height))
         self.display.touch()
         if not self.chrome.is_running():
             return self.chrome.start(url, handle=self.display)
         return True
 
     def destroy(self):
-        """Release this session's virtual display + Chrome. Native: nothing."""
-        if self.native_mode:
-            return
+        """Release this session's virtual display + Chrome.
+
+        Gates on resources actually HELD, never on the mutable per-turn
+        native_mode flag: a session that allocated a display on a virtual turn
+        and was later flipped native would otherwise leak its quartet + Chrome
+        + slot forever (review find, 2026-07-23)."""
         try:
             self.chrome.stop()
         except Exception as e:
@@ -398,6 +424,84 @@ def cleanup_old_screenshots(uploads_dir: str = None, max_age_days: int = 7):
                 pass
     if removed:
         print(f"[CU-SESSION] Cleaned up {removed} old screenshots")
+
+
+def budget_screenshots_in_history(history: list, keep_images: int = 3) -> list:
+    """Return a copy of an Anthropic-format history with only the most recent
+    ``keep_images`` image blocks intact; every older screenshot becomes a
+    one-line text placeholder in the same position (tool_use/tool_result
+    pairing preserved). Non-mutating and idempotent.
+
+    THE 413 guard (2026-07-23): the CU send loop re-sends the whole history
+    every iteration, so without a per-turn budget a long run accumulates up to
+    CU_MAX_ITERATIONS full-res PNGs and dies on Anthropic's per-request caps
+    (~100 images / ~32MB — surfaced as "request_too_large" at step ~10 on a
+    native 3440x1440 capture). Call this at the top of EVERY send.
+    """
+    placeholder_text = ("[Earlier screenshot elided to keep the request under "
+                        "the API size caps]")
+
+    def _count(msgs) -> int:
+        n = 0
+        for msg in msgs:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if block.get("type") == "image":
+                    n += 1
+                elif (block.get("type") == "tool_result"
+                      and isinstance(block.get("content"), list)):
+                    n += sum(1 for item in block["content"]
+                             if item.get("type") == "image")
+        return n
+
+    total = _count(history)
+    if total <= keep_images:
+        return history
+
+    cutoff = total - keep_images  # image ordinals 1..cutoff get elided
+    seen = 0
+    out = []
+    for msg in history:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            continue
+        new_content = []
+        changed = False
+        for block in content:
+            if block.get("type") == "image":
+                seen += 1
+                if seen <= cutoff:
+                    new_content.append({"type": "text", "text": placeholder_text})
+                    changed = True
+                else:
+                    new_content.append(block)
+            elif (block.get("type") == "tool_result"
+                  and isinstance(block.get("content"), list)):
+                inner_new = []
+                inner_changed = False
+                for item in block["content"]:
+                    if item.get("type") == "image":
+                        seen += 1
+                        if seen <= cutoff:
+                            inner_new.append({"type": "text",
+                                              "text": placeholder_text})
+                            inner_changed = True
+                        else:
+                            inner_new.append(item)
+                    else:
+                        inner_new.append(item)
+                if inner_changed:
+                    new_content.append({**block, "content": inner_new})
+                    changed = True
+                else:
+                    new_content.append(block)
+            else:
+                new_content.append(block)
+        out.append({**msg, "content": new_content} if changed else msg)
+    return out
 
 
 def strip_screenshots_from_history(history: list) -> list:

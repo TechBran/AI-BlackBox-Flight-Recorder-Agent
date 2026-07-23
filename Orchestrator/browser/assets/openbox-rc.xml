@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Minimal VALID Openbox config for CU session displays (2026-07-23).
-     /dev/null parsed as an empty XML document, so EVERY virtual session's WM
-     popped an "Openbox Syntax Error" dialog onto the agent's desktop — invisible
-     until the live view existed (Brandon found it minimizing the agent's
-     browser). An empty <openbox_config> root parses cleanly and yields stock
-     defaults, which is all a headless agent display needs. -->
-<openbox_config xmlns="http://openbox.org/3.4/rc"></openbox_config>

@@ -9,6 +9,7 @@ correctness). display_arbiter.py still owns native-mode mutual exclusion; this
 module owns virtual-session lifecycle only.
 """
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -28,6 +29,12 @@ VIRTUAL_DISPLAY_TTL = 1800.0 # idle seconds before the TTL reaper (reap_idle) te
 _STARTUP_WAIT = 1.0          # seconds to let Xvfb come up before openbox/x11vnc
 _WM_STARTUP_WAIT = 0.3       # seconds to let openbox settle before x11vnc attaches
 _NOVNC_DIR = "/usr/share/novnc"
+
+# Release/teardown order — dependents first, the X server last. EVERY role
+# _start_quartet can register MUST appear here or its process leaks on reap
+# (guarded by test_cu_desktop_population.test_teardown_order_covers_every_
+# spawnable_role).
+_TEARDOWN_ORDER = ("websockify", "x11vnc", "pcmanfm", "tint2", "openbox", "xvfb")
 
 
 def resolution_for_backend(backend: str) -> tuple:
@@ -218,17 +225,52 @@ class DisplayAllocator:
                 _terminate_proc(p)
             raise RuntimeError(f"Xvfb {h.display} failed to become ready")
         env = h.get_env()
+        _assets = os.path.join(os.path.dirname(__file__), "assets")
+        # Per-session XDG config seed (M2): openbox + pcmanfm read their config
+        # through XDG_CONFIG_HOME, so a WRITABLE per-slot dir (never the repo
+        # tree — pcmanfm writes prefs back on exit) is seeded with our shipped
+        # assets: the openbox right-click app menu, and a pcmanfm.conf whose
+        # show_wm_menu=1 hands desktop right-clicks to the WM — without it
+        # pcmanfm --desktop swallows them with its OWN file menu and the
+        # Applications menu is unreachable (smoke-test find, 2026-07-23).
+        xdg = self._seed_xdg_config(h, _assets)
+        de_env = {**env, "XDG_CONFIG_HOME": xdg} if xdg else dict(env)
+        # GTK apps prefer Wayland whenever WAYLAND_DISPLAY leaks into the env —
+        # pcmanfm would then draw on the operator's REAL session instead of
+        # this Xvfb. Pin the backend to X11 (review find, 2026-07-23).
+        de_env["GDK_BACKEND"] = "x11"
         # 2. openbox WM (DISPLAY via env — the singleton's name-match kill of
         #    'openbox' by argv was a dead no-op: DISPLAY lives in env, not argv).
-        #    --config-file gets a minimal VALID rc.xml: /dev/null parsed as an
-        #    empty XML document, so every session's WM popped an "Openbox Syntax
-        #    Error" dialog onto the agent's desktop (live-view field find,
-        #    2026-07-23 — invisible until humans could watch agent screens).
-        _rc = os.path.join(os.path.dirname(__file__), "assets", "openbox-rc.xml")
+        #    NO --config-file (M2 evolution, 2026-07-23): openbox falls back to
+        #    the distro rc (/etc/xdg/openbox/rc.xml) — full stock mouse/key
+        #    bindings INCLUDING the Root right-click -> root-menu binding, which
+        #    a partial custom rc silently LACKED (a missing <mouse> section is
+        #    not filled from defaults — smoke-proven: no menu ever opened). The
+        #    rc's relative <file>menu.xml</file> resolves through
+        #    XDG_CONFIG_HOME to OUR seeded Applications menu. This also
+        #    retires the /dev/null-config "Openbox Syntax Error" dialog fix by
+        #    construction — no config flag, nothing malformed to parse.
         procs["openbox"] = subprocess.Popen(
-            ["openbox", "--config-file", _rc if os.path.exists(_rc) else "/dev/null"],
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ["openbox"],
+            env=de_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(_WM_STARTUP_WAIT)
+        # 2b. Lightweight DE population (M2, 2026-07-23): tint2 panel/taskbar/
+        #     launcher + pcmanfm desktop icons & file manager, so the agent has
+        #     a COMPLETE desktop — it can open apps/folders instead of a blank
+        #     managed root with a lone Chrome. Availability-guarded: a box
+        #     without the packages still gets a working (bare) display.
+        if shutil.which("tint2"):
+            _tint2rc = os.path.join(_assets, "tint2rc")
+            procs["tint2"] = subprocess.Popen(
+                ["tint2"] + (["-c", _tint2rc] if os.path.exists(_tint2rc) else []),
+                env=de_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if shutil.which("pcmanfm"):
+            # --desktop draws icons/wallpaper; the dedicated profile (seeded
+            # above) keeps the agent desktop's prefs out of the operator's own
+            # pcmanfm config AND carries show_wm_menu=1.
+            procs["pcmanfm"] = subprocess.Popen(
+                ["pcmanfm", "--desktop", "--profile", "cu-agent"],
+                env=de_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # 3. x11vnc bound to loopback on THIS session's rfbport (no session dbus).
         procs["x11vnc"] = subprocess.Popen(
             ["x11vnc", "-display", h.display, "-forever", "-shared", "-nopw",
@@ -242,6 +284,29 @@ class DisplayAllocator:
             h.live_view = True
         self._procs[h.session_id] = procs
         h.pids = {role: p.pid for role, p in procs.items()}  # introspection mirror
+
+    def _seed_xdg_config(self, h: DisplayHandle, assets_dir: str) -> str:
+        """Create/refresh the per-slot XDG config dir the DE processes read.
+        Returns its path, or "" on failure (DE processes then fall back to
+        stock defaults — degraded, never dead). Slot-keyed (bounded by
+        MAX_VIRTUAL_SESSIONS) and refreshed on every allocate, so repo asset
+        edits reach the next session without cleanup bookkeeping."""
+        try:
+            xdg = os.path.join("/tmp", f"cu-agent-xdg-{h.slot}")
+            ob_dir = os.path.join(xdg, "openbox")
+            pf_dir = os.path.join(xdg, "pcmanfm", "cu-agent")
+            os.makedirs(ob_dir, exist_ok=True)
+            os.makedirs(pf_dir, exist_ok=True)
+            src_menu = os.path.join(assets_dir, "xdg", "openbox", "menu.xml")
+            if os.path.exists(src_menu):
+                shutil.copyfile(src_menu, os.path.join(ob_dir, "menu.xml"))
+            src_conf = os.path.join(assets_dir, "pcmanfm-cu-agent.conf")
+            if os.path.exists(src_conf):
+                shutil.copyfile(src_conf, os.path.join(pf_dir, "pcmanfm.conf"))
+            return xdg
+        except OSError as e:
+            print(f"[DISPLAY] XDG seed failed for slot {h.slot} (non-fatal): {e}")
+            return ""
 
     def get(self, session_id: str) -> Optional[DisplayHandle]:
         with self._lock:
@@ -260,7 +325,7 @@ class DisplayAllocator:
         # Teardown the tracked children we own (Popen objects), outside the lock.
         # Dependents before Xvfb. This kills the SPECIFIC pids we spawned — never
         # a process-name kill.
-        for role in ("websockify", "x11vnc", "openbox", "xvfb"):
+        for role in _TEARDOWN_ORDER:
             p = procs.get(role)
             if p is not None:
                 _terminate_proc(p)

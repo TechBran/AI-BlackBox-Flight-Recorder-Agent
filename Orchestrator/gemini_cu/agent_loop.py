@@ -186,10 +186,18 @@ async def _capture_screenshot(session: GeminiCUSession) -> bytes:
     """
     if session.environment in ("browser", "desktop"):
         from Orchestrator.browser.screenshot import capture_screenshot_display
+        # Touch per capture — the honest activity heartbeat, so the display TTL
+        # reaper never tears the Xvfb down under a long-running agent.
+        if session.display is not None:
+            session.display.touch()
         # to_thread: capture is a blocking subprocess — keep the event loop
-        # free for other Orchestrator requests during a CU step. session.display_number
-        # is the per-session :N when a virtual display is allocated, else ACTIVE_DISPLAY.
-        return await asyncio.to_thread(capture_screenshot_display, session.display_number)
+        # free for other Orchestrator requests during a CU step. With a
+        # per-session display allocated, native=False pins the capture to the
+        # session's :N (the box-global NATIVE_MODE must not stomp it); with
+        # display=None (native opt-in) the legacy env decision applies.
+        return await asyncio.to_thread(
+            capture_screenshot_display, session.display_number,
+            native=False if session.display is not None else None)
     elif session.environment == "android":
         from Orchestrator.adb.commands import ADBCommands
         cmds = ADBCommands(session.device_id)
@@ -203,11 +211,22 @@ async def _execute_predefined_action(session: GeminiCUSession,
                                       action_name: str, args: dict) -> dict:
     """Execute a predefined Gemini CU action."""
     if session.environment in ("browser", "desktop"):
-        # All desktop input routes through ActionExecutor with the gemini-999
-        # coordinate space: it converts normalized 0-999 coords to native pixels
-        # at LIVE resolution (to_native) and picks ydotool on Wayland / xdotool
-        # on X11 automatically.
-        executor = ActionExecutor(coord_space=COORD_SPACE_GEMINI)
+        # All desktop input routes through the SESSION-BOUND executor: it
+        # de-normalizes 0-999 coords against the session display's own
+        # resolution and targets that display's :N. NEVER fall back to a bare
+        # executor for a virtual session — if the session was destroyed
+        # mid-step, a bare executor would inherit the box-global NATIVE_MODE
+        # and land the rest of the step on the operator's REAL desktop
+        # (review find, 2026-07-23). Only the explicit native opt-in may
+        # construct a native executor.
+        executor = getattr(session, "actions", None)
+        if executor is None:
+            if getattr(session, "native_mode", False):
+                executor = ActionExecutor(coord_space=COORD_SPACE_GEMINI,
+                                          native_mode=True)
+            else:
+                return {"success": False,
+                        "message": "Session display is gone (destroyed mid-step)"}
 
         if action_name == "click_at":
             x, y = args.get("x", 0), args.get("y", 0)
@@ -271,6 +290,33 @@ async def _execute_predefined_action(session: GeminiCUSession,
                 executor.execute,
                 "left_click_drag",
                 start_coordinate=[sx, sy], coordinate=[dx, dy])
+        elif action_name == "open_web_browser":
+            # The model's native recovery action on a browserless desktop —
+            # previously fell through to "Unknown browser action" (review find,
+            # 2026-07-23). Spawn/focus Chrome ON this session's display.
+            try:
+                if getattr(session, "chrome", None) is None:
+                    from Orchestrator.browser.chrome import ChromeInstance
+                    session.chrome = ChromeInstance(operator=session.operator)
+                if not session.chrome.is_running():
+                    started = await asyncio.to_thread(
+                        session.chrome.start, "about:blank", session.display)
+                    if not started:
+                        return {"success": False,
+                                "error": "Browser failed to start"}
+                    await asyncio.sleep(2)
+                return {"success": True, "action": "open_web_browser"}
+            except Exception as e:
+                return {"success": False, "error": f"open_web_browser failed: {e}"}
+        elif action_name == "go_back":
+            return await asyncio.to_thread(executor.execute, "key", text="alt+Left")
+        elif action_name == "go_forward":
+            return await asyncio.to_thread(executor.execute, "key", text="alt+Right")
+        elif action_name == "search":
+            # Focus the address bar — typing there searches by default.
+            await asyncio.to_thread(executor.execute, "key", text="ctrl+l")
+            return {"success": True, "action": "search",
+                    "message": "Address bar focused — type the search query"}
         else:
             return {"success": False, "error": f"Unknown browser action: {action_name}"}
 
@@ -379,7 +425,12 @@ def _default_system_prompt(session: GeminiCUSession) -> str:
             "You are the AI BlackBox — a Computer Use agent controlling a Linux desktop. "
             "You can see the screen through screenshots and interact via click, type, "
             "scroll, and navigation actions.\n\n"
-            "The desktop is a real Linux machine. "
+            "The desktop is a real Linux machine with a taskbar at the bottom "
+            "(app launcher buttons on its left) and a right-click Applications "
+            "menu on the desktop background (Terminal, File Manager, Web "
+            "Browser). No browser is running until you open one — use the "
+            "open_web_browser action, a taskbar launcher, or the right-click "
+            "menu before navigating to any website.\n\n"
             "Your coordinates are normalized 0-999. (0,0) = top-left, (999,999) = bottom-right.\n\n"
             "Click in the CENTER of UI elements for best accuracy. "
             "Locate every target VISUALLY in the CURRENT screenshot before each click — "
@@ -425,6 +476,16 @@ async def run_gemini_cu_loop(
     start_time = time.time()
     session.status = "running"
     session.current_step = 0
+
+    # Per-session display (2026-07-23 coherence fix): bind/allocate BEFORE the
+    # first capture so screenshots, clicks, and the live view all target this
+    # session's own :N — never the operator's real desktop. One choke point
+    # covers every launch path (chat stream, headless task, /run route).
+    # start_url threads through so a url task gets Chrome ON this display.
+    if not session.ensure_display(start_url=url):
+        session.status = "error"
+        yield {"type": "error", "data": {"message": "Virtual display allocation failed"}}
+        return
 
     tools = _build_tools(session.environment)
     print(f"[GEMINI CU] run_gemini_cu_loop started: env={session.environment}, model={model_name}, tools={len(tools)}")
@@ -488,9 +549,12 @@ async def run_gemini_cu_loop(
             ])
         ]
 
-    # Navigate to URL if browser/desktop mode
-    if url and session.environment in ("browser", "desktop"):
-        executor = ActionExecutor()
+    # Navigate to URL if browser/desktop mode. Session executor ONLY — no
+    # bare-executor fallback (it would land keys on the real desktop); with no
+    # executor, skip: ensure_display's Chrome start already navigated there.
+    if url and session.environment in ("browser", "desktop") \
+            and getattr(session, "actions", None) is not None:
+        executor = session.actions
         await asyncio.to_thread(executor.execute, "key", text="ctrl+l")
         await asyncio.sleep(0.2)
         await asyncio.to_thread(executor.execute, "type", text=url)

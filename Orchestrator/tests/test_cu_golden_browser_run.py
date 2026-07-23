@@ -170,7 +170,7 @@ def golden_env(monkeypatch):
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(
         "Orchestrator.browser.screenshot.capture_screenshot_display",
-        lambda n: _tiny_png())
+        lambda n, native=None: _tiny_png())
     monkeypatch.setattr(
         "Orchestrator.browser.screenshot.capture_screenshot",
         lambda *a, **k: _tiny_png())
