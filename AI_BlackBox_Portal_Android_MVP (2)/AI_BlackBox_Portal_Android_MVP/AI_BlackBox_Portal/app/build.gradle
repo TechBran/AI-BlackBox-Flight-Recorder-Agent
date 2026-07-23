@@ -17,8 +17,8 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 11
-        versionName "1.5.0-cu-live-view"
+        versionCode 12
+        versionName "1.5.1-desktop-first-cu"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }

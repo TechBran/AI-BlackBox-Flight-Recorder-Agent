@@ -61,6 +61,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,9 +85,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.api.CuEntrySurface
 import com.aiblackbox.portal.data.api.CuSession
 import com.aiblackbox.portal.data.api.CuSessionsClient
-import com.aiblackbox.portal.data.api.pickLiveViewSession
+import com.aiblackbox.portal.data.api.chooseCuEntrySurface
 import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -212,14 +214,77 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
     private val _liveSessions = MutableStateFlow<List<CuSession>>(emptyList())
     val liveSessions: StateFlow<List<CuSession>> = _liveSessions.asStateFlow()
 
+    // Desktop-first CU (2026-07-23): true once the FIRST /cu/sessions probe
+    // has answered (success OR failure). The entry decision — auto-open the
+    // live view vs show the "Open live desktop" CTA — must wait for a known
+    // state instead of firing on the initial emptyList() placeholder.
+    private val _sessionsLoaded = MutableStateFlow(false)
+    val sessionsLoaded: StateFlow<Boolean> = _sessionsLoaded.asStateFlow()
+
+    // In-flight guard for POST /cu/session/open + /cu/session/{sid}/close
+    // (mirrors the web CTA's disabled state — no double-spawns on double-tap).
+    private val _desktopActionInFlight = MutableStateFlow(false)
+    val desktopActionInFlight: StateFlow<Boolean> = _desktopActionInFlight.asStateFlow()
+
     fun refreshLiveSessions() {
         val api = api ?: return
         viewModelScope.launch {
             try {
                 _liveSessions.value = CuSessionsClient(api).sessions().sessions
             } catch (_: Exception) {
-                // Endpoint missing / network down -> hide the badge, don't crash
+                // Endpoint missing / network down -> hide the badge, don't crash.
+                // (Web parity: fetch failure still resolves the surface — the
+                // CTA shows and the POST surfaces the real error on tap.)
                 _liveSessions.value = emptyList()
+            } finally {
+                _sessionsLoaded.value = true
+            }
+        }
+    }
+
+    /**
+     * "Open live desktop" CTA: ensure-or-create the operator's live virtual
+     * desktop (POST /cu/session/open), then hand the session id to the caller
+     * to navigate straight into the streaming live view (web _openLiveDesktop
+     * parity). Failures land in the status line; nothing navigates.
+     */
+    fun openLiveDesktop(operator: String, onOpened: (String) -> Unit) {
+        val api = api ?: return
+        if (_desktopActionInFlight.value) return
+        viewModelScope.launch {
+            _desktopActionInFlight.value = true
+            try {
+                val opened = CuSessionsClient(api).openSession(operator.ifBlank { null })
+                _statusText.value =
+                    if (opened.reused) "Reattached to the live desktop" else "Live desktop ready"
+                refreshLiveSessions()
+                onOpened(opened.sessionId)
+            } catch (e: Exception) {
+                _statusText.value = "Open desktop failed: ${e.message ?: "network error"}"
+            } finally {
+                _desktopActionInFlight.value = false
+            }
+        }
+    }
+
+    /**
+     * Explicit session end (POST /cu/session/{sid}/close). A 404 means the
+     * session was already reaped — either way the sessions list is refreshed
+     * so the surface decision (badge vs CTA) updates immediately.
+     */
+    fun closeLiveSession(sessionId: String) {
+        val api = api ?: return
+        if (_desktopActionInFlight.value) return
+        viewModelScope.launch {
+            _desktopActionInFlight.value = true
+            try {
+                CuSessionsClient(api).closeSession(sessionId)
+                _statusText.value = "Live desktop closed"
+            } catch (e: Exception) {
+                _statusText.value = "Close failed: ${e.message ?: "network error"}"
+            } finally {
+                _desktopActionInFlight.value = false
+                refreshLiveSessions()
             }
         }
     }
@@ -531,10 +596,14 @@ fun CuScreen(
     initialLiveDeviceId: String? = null,
     // Design 2026-07-23 M5 (D9): opens the streaming live-view client
     // (CuLiveViewScreen WebView on /cu/view/{sessionId}) for an active virtual
-    // session. Wired to a NavGraph route by the caller; the badge below only
-    // shows when /cu/sessions reports a live_view-capable session, so this
-    // screen stays the fallback surface everywhere else.
+    // session. Wired to a NavGraph route by the caller. Desktop-first CU: with
+    // a streamable session this fires AUTOMATICALLY on entry (live view is the
+    // default surface); this screen stays the explicit fallback otherwise.
     onOpenLiveView: (String) -> Unit = {},
+    // Desktop-first CU: operator forwarded to POST /cu/session/open so a later
+    // agent task for this operator attaches to the manually opened session.
+    // Blank -> omitted from the payload (server default).
+    operator: String = "",
     modifier: Modifier = Modifier,
     viewModel: CuViewModel = viewModel()
 ) {
@@ -617,6 +686,26 @@ fun CuScreen(
 
     // Active virtual CU sessions (live-view badge target)
     val liveSessions by viewModel.liveSessions.collectAsState()
+    val sessionsLoaded by viewModel.sessionsLoaded.collectAsState()
+    val desktopActionInFlight by viewModel.desktopActionInFlight.collectAsState()
+
+    // ── Desktop-first entry routing (2026-07-23): when a streamable live
+    // session EXISTS at screen entry, the streaming live view is the DEFAULT
+    // surface — navigate straight to it. Decided ONCE per back-stack entry
+    // (rememberSaveable), after the FIRST /cu/sessions probe answers, so:
+    //  - backing out of the live view lands here WITHOUT re-bouncing (this
+    //    screen is the explicit fallback surface),
+    //  - a session appearing minutes later never yanks the user away,
+    //  - the pill "Live" hand-off (initialLiveDeviceId) keeps its validated
+    //    native screenshot-stream flow untouched. ──
+    var desktopFirstRouted by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(sessionsLoaded) {
+        if (desktopFirstRouted || !sessionsLoaded) return@LaunchedEffect
+        desktopFirstRouted = true
+        if (initialLiveDeviceId != null) return@LaunchedEffect
+        val choice = chooseCuEntrySurface(liveSessions, selectedDeviceId)
+        if (choice is CuEntrySurface.Stream) onOpenLiveView(choice.session.sessionId)
+    }
 
     // Bottom clearance for the Composer overlay: measured Composer stack
     // (16dp outer padding + 48dp input bubble + ~46dp pill row, per
@@ -687,16 +776,31 @@ fun CuScreen(
             }
         )
 
-        // ── Live-view badge (design 2026-07-23 M5): shown only when a virtual
-        // session actually streams (live_view=true). Tap opens the WebView
-        // streaming client; this screen remains the screenshot-poll fallback. ──
-        val liveTarget = pickLiveViewSession(liveSessions)
-        if (liveTarget != null) {
-            CuLiveViewBadge(
+        // ── Desktop-first surface row (2026-07-23, Portal cu-drawer parity):
+        //  - streamable session → live badge (tap re-opens the live view;
+        //    entry already routed there by default) + explicit Close action
+        //    (POST /cu/session/{sid}/close),
+        //  - no sessions on the local target → prominent "Open live desktop"
+        //    CTA (POST /cu/session/open → navigate to the live view),
+        //  - remote device / non-streamable sessions → nothing extra; this
+        //    screenshot screen IS the fallback surface. ──
+        when (val surface = chooseCuEntrySurface(liveSessions, selectedDeviceId)) {
+            is CuEntrySurface.Stream -> CuLiveViewBadge(
                 sessionCount = liveSessions.count { it.liveView },
-                backend = liveTarget.backend,
-                onClick = { onOpenLiveView(liveTarget.sessionId) }
+                backend = surface.session.backend,
+                closeInFlight = desktopActionInFlight,
+                onClick = { onOpenLiveView(surface.session.sessionId) },
+                onClose = { viewModel.closeLiveSession(surface.session.sessionId) },
             )
+            is CuEntrySurface.OpenDesktop -> if (sessionsLoaded) {
+                CuOpenDesktopCta(
+                    inFlight = desktopActionInFlight,
+                    onClick = {
+                        viewModel.openLiveDesktop(operator) { sid -> onOpenLiveView(sid) }
+                    },
+                )
+            }
+            is CuEntrySurface.Fallback -> Unit
         }
     }
 
@@ -1562,6 +1666,10 @@ private fun CuLiveViewBadge(
     sessionCount: Int,
     backend: String,
     onClick: () -> Unit,
+    // Desktop-first CU (2026-07-23): explicit session end. Null hides the
+    // trailing Close chip (e.g. previews); in-flight disables it.
+    onClose: (() -> Unit)? = null,
+    closeInFlight: Boolean = false,
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "liveBadgePulse")
     val dotAlpha by infiniteTransition.animateFloat(
@@ -1607,6 +1715,67 @@ private fun CuLiveViewBadge(
                 color = Neutral500
             )
         }
+        if (onClose != null) {
+            Spacer(Modifier.width(10.dp))
+            // Nested clickable: the chip consumes its own taps, the rest of
+            // the pill still opens the live view.
+            Box(
+                modifier = Modifier
+                    .clip(PillShape)
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .border(1.dp, CuAccentBorder, PillShape)
+                    .clickFeedback(enabled = !closeInFlight) { onClose() }
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = if (closeInFlight) "…" else "✕ Close",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (closeInFlight) Neutral500 else CuError
+                )
+            }
+        }
+    }
+}
+
+// =============================================================================
+// "Open live desktop" CTA — desktop-first CU (2026-07-23), Portal
+// .cu-drawer-open-desktop parity. Rendered only when the local target has NO
+// live session; tap POSTs /cu/session/open and navigates straight into the
+// streaming live view.
+// =============================================================================
+
+@Composable
+private fun CuOpenDesktopCta(
+    inFlight: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(PillShape)
+            .background(CuAccentBg)
+            .border(1.dp, CuAccentBorder, PillShape)
+            .clickFeedback(enabled = !inFlight) { onClick() }
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        if (inFlight) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                color = CuAccent
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(
+            text = if (inFlight) "Opening desktop…" else "Open live desktop",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (inFlight) Neutral500 else CuAccentDim
+        )
     }
 }
 

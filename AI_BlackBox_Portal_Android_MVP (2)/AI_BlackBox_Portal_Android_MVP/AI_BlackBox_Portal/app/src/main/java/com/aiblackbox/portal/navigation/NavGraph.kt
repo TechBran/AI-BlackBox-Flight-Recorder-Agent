@@ -214,7 +214,9 @@ fun BlackBoxNavGraph(
                 onSpeak = onSpeak,
                 onSpeakWithId = onSpeakWithId,
                 initialLiveDeviceId = liveDevice.ifBlank { null },
-                // Live-sessions badge tap → streaming WebView client. Session
+                // Desktop-first CU: badge tap AND default entry routing land on
+                // the streaming WebView client; the CTA's POST /cu/session/open
+                // also ends up here with the freshly opened session id. Session
                 // ids are server-minted slugs but Uri.encode defends the route
                 // pattern regardless.
                 onOpenLiveView = { sessionId ->
@@ -222,6 +224,9 @@ fun BlackBoxNavGraph(
                         "${Routes.CU_LIVE_VIEW}/${Uri.encode(sessionId)}"
                     )
                 },
+                // Threaded so POST /cu/session/open pins the manual session to
+                // this operator (a later agent task for them attaches to it).
+                operator = operator,
             )
         }
         composable(
