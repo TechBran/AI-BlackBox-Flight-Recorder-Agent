@@ -756,6 +756,10 @@ function renderSwitcher() {
     if (sig === switcherSig) return;
     switcherSig = sig;
     switcherEl.textContent = "";
+    // A rail with ONE entry is pure duplication of the topbar's session
+    // label (Brandon 2026-07-23) — render only when there is something to
+    // switch BETWEEN. :empty CSS hides the bar entirely.
+    if (entries.length <= 1) return;
     for (const e of entries) {
         const btn = document.createElement("button");
         btn.type = "button";
