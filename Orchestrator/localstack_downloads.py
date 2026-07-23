@@ -165,6 +165,21 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
         "repo_pending_g3": False,
         "approx_gb": 3.0,
     },
+    # Silero VAD v5 ONNX (~2.2MB) — the streaming utterance gate for the
+    # /ws/stt onbox VAD-gated loop (W1, Orchestrator/stt/vad.py). Repo note:
+    # the canonical snakers4/silero-vad HF repo answers 401 to anonymous
+    # requests (verified 2026-07-23), so we pin the public onnx-community
+    # export of the SAME v5 graph (fp32 onnx/model.onnx, 2,243,022 bytes).
+    # vad.ensure_vad_model() lazily fetches this exact entry if the wizard
+    # button never ran — both paths land on the same MODELS_DIR dest.
+    "silero-vad": {
+        "kind": "file",
+        "label": "Silero VAD v5 (streaming speech detector)",
+        "repo": "onnx-community/silero-vad",
+        "filename": "onnx/model.onnx",
+        "dest": "silero_vad_v5.onnx",
+        "approx_gb": 0.003,
+    },
     # Legacy bundled all-variants convenience key (D-2) — RETAINED, marked
     # bundled, so existing per-member status rows / callers don't vanish. Not an
     # artifact child (MEMBER_ARTIFACTS lists the per-variant splits instead).
@@ -189,7 +204,9 @@ DOWNLOAD_MANIFEST: dict[str, dict] = {
 # are the per-variant splits. Whisper hangs off the speaches (STT) member.
 MEMBER_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "qwen-tts": ("qwen-tts-base", "qwen-tts-custom-voice", "qwen-tts-voice-design"),
-    "speaches": ("whisper",),
+    "speaches": ("whisper",),  # silero-vad is manifest-downloadable by key but
+                               # not a wizard child row — vad.ensure_vad_model()
+                               # lazily fetches the ~2MB file at first VAD use.
 }
 
 # ── download singleton ────────────────────────────────────────────────────

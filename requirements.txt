@@ -52,6 +52,7 @@ apscheduler>=3.10.4
 # Numeric / Scientific (audio resampling, tensor ops)
 numpy>=2.4.0
 scipy>=1.17.0
+onnxruntime==1.27.0      # silero VAD v5 CPU inference (Orchestrator/stt/vad.py, lazy import); == pinned — the W1 gate depends on the exact v5 graph I/O contract (speaches loose-pin lesson)
 
 # HTML / XML Parsing
 beautifulsoup4>=4.14.0
