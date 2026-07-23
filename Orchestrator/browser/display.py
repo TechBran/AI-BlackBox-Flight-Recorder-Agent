@@ -220,9 +220,14 @@ class DisplayAllocator:
         env = h.get_env()
         # 2. openbox WM (DISPLAY via env — the singleton's name-match kill of
         #    'openbox' by argv was a dead no-op: DISPLAY lives in env, not argv).
+        #    --config-file gets a minimal VALID rc.xml: /dev/null parsed as an
+        #    empty XML document, so every session's WM popped an "Openbox Syntax
+        #    Error" dialog onto the agent's desktop (live-view field find,
+        #    2026-07-23 — invisible until humans could watch agent screens).
+        _rc = os.path.join(os.path.dirname(__file__), "assets", "openbox-rc.xml")
         procs["openbox"] = subprocess.Popen(
-            ["openbox", "--config-file", "/dev/null"], env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ["openbox", "--config-file", _rc if os.path.exists(_rc) else "/dev/null"],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(_WM_STARTUP_WAIT)
         # 3. x11vnc bound to loopback on THIS session's rfbport (no session dbus).
         procs["x11vnc"] = subprocess.Popen(
