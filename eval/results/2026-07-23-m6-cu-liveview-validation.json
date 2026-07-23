@@ -1,0 +1,24 @@
+{
+  "milestone": "M6 — CU Splashtop live-view validation (MS02)",
+  "date": "2026-07-23",
+  "host": "bbx-MS-02-Ultra",
+  "result": "TRANSPORT PASS — the interactive pipeline is field-proven; full agent-driven run blocked by an account state (Anthropic credits), not code",
+  "proven_live": {
+    "session_spawn": "POST /browser/run -> virtual session 2d0a4010 with live_view:true, view_url, 1280x720",
+    "served_client": "GET /cu/view/{sid} 200 (the Splashtop client page)",
+    "rfb_interactive_pipe": "raw RFB spoken through the Orchestrator WS proxy: server greeting 'RFB 003.008', security None accepted, ClientInit/ServerInit OK, PointerEvent accepted, 64KB FramebufferUpdate received",
+    "session_correct_display": "ServerInit name 'bbx-MS-02-Ultra:100' — the SESSION'S OWN Xvfb (:100), not the global display; the input-wrong-display bug class is structurally closed on this channel"
+  },
+  "defects_found_and_fixed_during_validation": [
+    "CU_CHROME_PATH hardcoded /opt/google/chrome/chrome -> every virtual CU session on chromium-only boxes (MS02) died with 'Failed to start browser session'; now resolves configured-path > /opt chrome > which(google-chrome|google-chrome-stable|chromium|chromium-browser) (52c3e519). Post-fix, MS02 resolves /snap/bin/chromium and the flow proceeds past browser start.",
+    "test_cu_view_routes staleness after M2 promoted the inline HTML to served assets (adc91592)"
+  ],
+  "blocked_remaining": {
+    "full_agent_driven_session": "Anthropic API 400 'credit balance too low' on MS02's key — billing state, Brandon's call (top up, or run CU via another backend). The honesty pipeline correctly minted TASK FAILED snapshots for both failed runs.",
+    "fold_validation": "M5 — human gesture/UX validation on the Fold with v1.5.0 (touchpad feel, pinch, extra keys, manual keyboard)"
+  },
+  "observations": [
+    "Failed-at-start sessions linger until the session-manager's lazy expiry (cleanup runs on the NEXT session request, no background reaper) — untidy but bounded; candidate polish.",
+    "Preflight warns native display env missing XAUTHORITY — native-mode concern only, virtual sessions unaffected."
+  ]
+}
