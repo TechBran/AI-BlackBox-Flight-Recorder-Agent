@@ -218,6 +218,29 @@ def _spawn_stream_procs(display: str, xauth: str) -> Dict[str, subprocess.Popen]
     return procs
 
 
+def _wake_display() -> None:
+    """Best-effort un-blank of the real display when a viewer attaches: DPMS
+    force-on + screensaver reset via xset, using the SAME display/xauthority the
+    availability probe found. Never raises — a locked/blanked screen streaming
+    black is a UX bug, not a functional one, and waking must not break attach.
+    (The GNOME LOCK screen still requires the user's password — this only wakes
+    the panel so the lock UI is visible instead of a black rectangle.)"""
+    try:
+        status = probe_main_desktop()
+        if not status.get("available"):
+            return
+        env = dict(os.environ)
+        env["DISPLAY"] = str(status.get("display", ":0"))
+        xauth = str(status.get("xauthority", "") or "")
+        if xauth:
+            env["XAUTHORITY"] = xauth
+        for args in (["xset", "dpms", "force", "on"], ["xset", "s", "reset"]):
+            subprocess.run(args, env=env, timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:  # noqa: BLE001 — never let waking break attach
+        print(f"[CU-MAIN] display wake skipped: {e}")
+
+
 # ── Refcounted manager ────────────────────────────────────────────────────
 
 
@@ -253,7 +276,10 @@ class NativeDesktopStream:
     def acquire(self) -> int:
         """Register a viewer; spawn the stream pair if it isn't running.
         Returns the loopback websockify port to proxy to. Raises RuntimeError
-        when the desktop is unavailable or the pair can't start."""
+        when the desktop is unavailable or the pair can't start. Every viewer
+        attach also pokes the display awake (field finding 2026-07-23: Brandon's
+        first main-desktop view was a faithfully-streamed BLACK screen — the
+        box's GNOME session sat blanked at the screensaver)."""
         with self._lock:
             if self._reap_timer is not None:
                 self._reap_timer.cancel()
@@ -271,6 +297,7 @@ class NativeDesktopStream:
                     str(status["display"]), str(status.get("xauthority", "")))
                 print(f"[CU-MAIN] attached to real desktop {status['display']} "
                       f"(rfb {MAIN_VNC_PORT}, ws {MAIN_WS_PORT})")
+            _wake_display()   # un-blank DPMS/screensaver so the first frame isn't black
             self._viewers += 1
             return MAIN_WS_PORT
 
