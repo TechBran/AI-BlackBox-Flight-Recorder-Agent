@@ -162,3 +162,79 @@ def test_tts_batch_qwen_upstream_error_502(client):
         resp = client.post("/tts/batch",
                            json={"text": "Hi.", "provider": "qwen", "voice": "Vivian"})
     assert resp.status_code == 502
+
+
+# ── Clone transcode + preview (2026-07-23: phone M4A landmine) ────────
+
+def test_clone_transcodes_reference_and_returns_preview(client, monkeypatch):
+    """The route transcodes every part to WAV before forwarding, then returns a
+    preview synthesized with the new voice."""
+    from Orchestrator.routes import tts_routes as tr
+    import Orchestrator.audio_transcode as at
+    monkeypatch.setattr(at, "to_wav_pcm16", lambda b, **k: b"WAVDATA")
+    captured = {}
+
+    def _post(url, data=None, files=None, timeout=None):
+        captured["files"] = files
+        class R:
+            status_code = 200
+            def json(self): return {"voice_id": "testvoice", "name": "TestVoice"}
+        return R()
+    monkeypatch.setattr(tr.requests, "post", _post)
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp()) as m_syn:
+        resp = client.post("/qwen/voices/clone",
+                           data={"name": "TestVoice", "consent": "true"},
+                           files={"files": ("clip.m4a", b"M4ADATA", "audio/mp4")})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # forwarded as WAV, singular 'file' field
+    fname, (sent_name, sent_bytes, sent_mime) = captured["files"][0]
+    assert fname == "file" and sent_name.endswith(".wav")
+    assert sent_bytes == b"WAVDATA" and sent_mime == "audio/wav"
+    # preview synthesized with the new slug and returned
+    m_syn.assert_called_once()
+    assert m_syn.call_args[0][0] == "testvoice"
+    assert body.get("preview_b64") and body.get("preview_mime") == "audio/wav"
+
+
+def test_clone_undecodable_reference_422s_before_member(client, monkeypatch):
+    import Orchestrator.audio_transcode as at
+    from Orchestrator.routes import tts_routes as tr
+
+    def _boom(b, **k):
+        raise at.TranscodeError("could not decode the reference audio: bad stream")
+    monkeypatch.setattr(at, "to_wav_pcm16", _boom)
+    called = {}
+    monkeypatch.setattr(tr.requests, "post",
+                        lambda *a, **k: called.setdefault("member", True))
+    resp = client.post("/qwen/voices/clone",
+                       data={"name": "X", "consent": "true"},
+                       files={"files": ("clip.m4a", b"JUNK", "audio/mp4")})
+    assert resp.status_code == 422
+    assert "reference audio unusable" in resp.json()["detail"]
+    assert "member" not in called  # never forwarded
+
+
+def test_clone_preview_failure_deletes_profile_and_422s(client, monkeypatch):
+    """A stored reference the model can't actually synthesize with must not
+    survive as a landmine in the picker (Brandon 2026-07-23)."""
+    from Orchestrator.routes import tts_routes as tr
+    import Orchestrator.audio_transcode as at
+    monkeypatch.setattr(at, "to_wav_pcm16", lambda b, **k: b"WAVDATA")
+
+    def _post(url, data=None, files=None, timeout=None):
+        class R:
+            status_code = 200
+            def json(self): return {"voice_id": "badvoice", "name": "Bad"}
+        return R()
+    monkeypatch.setattr(tr.requests, "post", _post)
+    deleted = {}
+    with patch("Orchestrator.qwen_tts.synthesize", return_value=_Resp(status=500)), \
+         patch("Orchestrator.qwen_tts.delete_profile",
+               side_effect=lambda s: deleted.setdefault("slug", s) or True):
+        resp = client.post("/qwen/voices/clone",
+                           data={"name": "Bad", "consent": "true"},
+                           files={"files": ("clip.wav", b"RIFF", "audio/wav")})
+    assert resp.status_code == 422
+    assert "could not synthesize a preview" in resp.json()["detail"]
+    assert deleted.get("slug") == "badvoice"

@@ -1302,27 +1302,39 @@ async def qwen_voices_clone(
     files: List[UploadFile] = File(...),
 ):
     """Clone a voice from reference audio (~3s min). Requires the literal
-    consent flag — 422 without it, mirroring the ElevenLabs gate. Forwards the
-    multipart to the qwen-tts server via /upstream/qwen-tts/v1/voices/clone."""
+    consent flag — 422 without it, mirroring the ElevenLabs gate.
+
+    2026-07-23 (Brandon's phone clone): the reference is TRANSCODED TO WAV here
+    before forwarding — phone recorders send AAC/M4A/3GPP, which the member's
+    synthesis-time decoder (libsndfile) cannot read, so a stored raw M4A cloned
+    'successfully' and then 500'd on EVERY speak. After storing, a short PREVIEW
+    is synthesized with the new voice: it is returned (preview_b64/sample-rate
+    from the WAV) so the UI can play it, and it FAIL-FASTS a reference the model
+    cannot actually use — the broken profile is deleted and the clone returns an
+    honest 422 instead of leaving a landmine in the voice picker."""
     if (consent or "").strip().lower() != "true":
         raise HTTPException(422, "consent required to clone a voice")
     from Orchestrator import qwen_tts
+    from Orchestrator.audio_transcode import TranscodeError, to_wav_pcm16
+    loop = asyncio.get_running_loop()
     # Forward under the SINGULAR field name 'file' — the M6 server declares
-    # `file: UploadFile = File(...)` (Task 6.6), so forwarding 'files' (plural)
-    # would 422 the member (missing required 'file'). The proxy still accepts a
-    # list from the browser (a single reference clip is the norm) and forwards
-    # each part as 'file'.
+    # `file: UploadFile = File(...)` (Task 6.6). Every part is normalized to
+    # 16-bit mono 24k WAV (executor-offloaded; ffmpeg is CPU-bound).
     fwd_files = []
     for f in files:
-        fwd_files.append(("file", (f.filename or "clip.wav", await f.read(),
-                                   f.content_type or "application/octet-stream")))
+        raw = await f.read()
+        try:
+            wav = await loop.run_in_executor(_tts_executor, lambda b=raw: to_wav_pcm16(b))
+        except TranscodeError as e:
+            raise HTTPException(422, f"reference audio unusable ({f.filename or 'clip'}): {e}")
+        base = (f.filename or "clip").rsplit(".", 1)[0]
+        fwd_files.append(("file", (f"{base}.wav", wav, "audio/wav")))
     data = {"name": name, "consent": "true"}
     if description:
         data["description"] = description
     # Blocking HTTP in an ASYNC route freezes the whole event loop for up to
     # QWEN_TTS_TIMEOUT (300s of GPU synth) — every chat/WS/STT surface stalls
     # (audit CRITICAL 2026-07-22). Offload to the TTS executor.
-    loop = asyncio.get_running_loop()
     try:
         r = await loop.run_in_executor(_tts_executor, lambda: requests.post(
             qwen_tts.upstream_url("/v1/voices/clone"),
@@ -1331,7 +1343,27 @@ async def qwen_voices_clone(
         raise HTTPException(502, f"qwen-tts clone unreachable: {e}")
     if r.status_code != 200:
         raise HTTPException(r.status_code, r.text[:400])
-    return r.json()
+    out = r.json()
+    # Preview synth = the fail-fast validation + the audible confirmation the
+    # clone flow was missing ('it immediately finished... no preview').
+    slug = (out.get("voice_id") or "").strip()
+    if slug:
+        try:
+            pr = await loop.run_in_executor(_tts_executor, lambda: qwen_tts.synthesize(
+                slug, "Hi — this is your cloned voice speaking from the BlackBox."))
+            if pr.status_code != 200:
+                raise RuntimeError(f"HTTP {pr.status_code}: {pr.text[:200]}")
+            out["preview_b64"] = base64.b64encode(pr.content).decode()
+            out["preview_mime"] = "audio/wav"
+        except Exception as e:  # noqa: BLE001 — broken clone must not survive
+            try:
+                qwen_tts.delete_profile(slug)
+            except Exception:
+                pass
+            raise HTTPException(
+                422, f"clone stored but the voice could not synthesize a preview "
+                     f"({e}) — the profile was removed; try a clearer/longer clip")
+    return out
 
 
 @app.post("/qwen/voices/design")
