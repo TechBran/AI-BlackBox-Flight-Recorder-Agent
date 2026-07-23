@@ -1,0 +1,187 @@
+{
+  "gate": "G5",
+  "title": "audio<->retrieval cross-group swap latency (llama-swap exclusive groups)",
+  "date": "2026-07-23",
+  "host": "bbx-MS-02-Ultra",
+  "gpu": {
+    "baseline_mib_at_start": 7562,
+    "peak_mib_overall": 14336,
+    "budget_mib": 16380,
+    "headroom_at_peak_mib": 2044,
+    "note": "peak occurs while the 8GB embed/rerank member is resident plus swap transients; no OOM at any point",
+    "model": "RTX 2000 Ada 16GB"
+  },
+  "result": "PASS",
+  "verdict": {
+    "retrieval_to_audio": "cold TTS 6.8s warm-cache / 9.8s cold-cache end-to-end; swap+load component ~4.6s (warm-cache) \u2014 within the ~5-8s plan expectation warm-cache, ~1.8s over it on a fully cold page cache",
+    "audio_to_retrieval": "first search after TTS costs only ~0.18s more than steady state (4.69s vs 4.51s) \u2014 the D13 per-search intra-group swap dominates; the direct embed component is 2.65s warm-cache / 4.59s cold-cache, well under the ~6-10s expectation",
+    "stt_session_start_d10": "ws connect -> stt_status listening: 4.43s median cold member / 0.58s warm / 5.10s worst cold-page-cache \u2014 6x headroom under the 30s D10 ceiling, inside the ~5-8s plan expectation",
+    "vram": "peak 14336 MiB during swaps (budget 16380) \u2014 never overlapped groups into an OOM"
+  },
+  "methodology": {
+    "real_requests": "All primary numbers are production requests through the Orchestrator (:9091): POST /tts/batch voice=qwen:Vivian (short 1-chunk text, constant across cold/warm so cold-minus-warm isolates swap+load), GET /debug/context?query=... (the production hybrid retrieval pipeline: query embed via active provider qwen3-embedding-8b-local + localstack rerank-qwen3-8b over candidates), and a real /ws/stt onbox session timed from ws connect to stt_status{listening} (the D10 warm+prime path).",
+    "state_setting": "Residency forced between reps via :9098 (direct embed to land the retrieval group / TTS to land the audio group) and verified with llama-swap /running before and after every measured request.",
+    "reps": "3 reps per direction, median + range reported. Warm baselines measured immediately after each cold rep (ttl=600 so no idle-unload interference).",
+    "page_cache": "Primary numbers ran with model files in the OS page cache (steady-state box). A second pass dropped caches (sync; echo 3 > drop_caches) before EACH single measurement for true cold-disk numbers.",
+    "component_corroboration": "diagnostics/localstack/swap_cost.py (committed G5 harness) run from the Orchestrator venv: --scope cross and --scope intra, --cache warm, 5 iters.",
+    "driver": "scratch driver /tmp/g5_driver.py + /tmp/g5_cold_rep.py + /tmp/g5_stt_once.py on MS02 (measurement-only; no repo changes)"
+  },
+  "measurements": {
+    "1_retrieval_resident_to_first_tts": {
+      "endpoint": "POST :9091/tts/batch {voice: qwen:Vivian, text: 41 chars}",
+      "state_before": [
+        "embed-qwen3-8b"
+      ],
+      "state_after": [
+        "qwen-tts"
+      ],
+      "cold_total_wall_s": {
+        "n": 3,
+        "median_s": 6.825,
+        "min_s": 6.796,
+        "max_s": 6.882
+      },
+      "warm_synth_baseline_s": {
+        "n": 6,
+        "median_s": 2.244,
+        "min_s": 2.231,
+        "max_s": 2.313
+      },
+      "swap_plus_load_component_s": {
+        "n": 3,
+        "median_s": 4.57,
+        "min_s": 4.553,
+        "max_s": 4.59
+      },
+      "cold_page_cache_total_wall_s": {
+        "n": 3,
+        "median_s": 9.804,
+        "min_s": 9.717,
+        "max_s": 9.99
+      },
+      "cold_page_cache_component_s": 7.56,
+      "gpu_peak_mib": 9338,
+      "note": "cold wall = evict retrieval member + boot qwen-tts uvicorn + load 1.7B variant + synth; plan expectation ~5-8s: met warm-cache (6.8s), exceeded by ~1.8s only on a fully dropped page cache (9.8s)"
+    },
+    "2_audio_resident_to_first_search": {
+      "endpoint": "GET :9091/debug/context (production hybrid retrieve: keyword + semantic embed + rerank)",
+      "state_before": [
+        "qwen-tts"
+      ],
+      "state_after": [
+        "rerank-qwen3-8b"
+      ],
+      "cold_search_wall_s": {
+        "n": 3,
+        "median_s": 4.693,
+        "min_s": 4.654,
+        "max_s": 4.753
+      },
+      "warm_search_baseline_s": {
+        "n": 3,
+        "median_s": 4.512,
+        "min_s": 4.498,
+        "max_s": 4.537
+      },
+      "cross_group_extra_s": 0.181,
+      "gpu_peak_mib": 14336,
+      "note": "warm is BARELY cheaper than cold: every search pays the D13 sequential-retrieval intra-group swap (embed loads evicting rerank, then rerank loads evicting embed), so evicting the audio group first adds only ~0.18s. Steady-state search cost on this box is ~4.5s wall.",
+      "component_isolation_direct_9098": {
+        "audio_to_embed_warm_cache_s": {
+          "n": 5,
+          "min_s": 2.546,
+          "median_s": 2.645,
+          "max_s": 2.665,
+          "p90_s": 2.661,
+          "p95_s": 2.663,
+          "p99_s": 2.665
+        },
+        "retrieval_to_tts_warm_cache_s": {
+          "n": 5,
+          "min_s": 5.509,
+          "median_s": 5.524,
+          "max_s": 5.528,
+          "p90_s": 5.527,
+          "p95_s": 5.527,
+          "p99_s": 5.528
+        },
+        "embed_to_rerank_intra_warm_cache_s": {
+          "n": 5,
+          "min_s": 1.599,
+          "median_s": 1.62,
+          "max_s": 1.635,
+          "p90_s": 1.63,
+          "p95_s": 1.632,
+          "p99_s": 1.634
+        },
+        "audio_to_embed_cold_page_cache_s": {
+          "n": 3,
+          "median_s": 4.588,
+          "min_s": 4.579,
+          "max_s": 4.667
+        },
+        "embed_to_rerank_intra_cold_page_cache_s": {
+          "n": 2,
+          "median_s": 4.723,
+          "min_s": 4.709,
+          "max_s": 4.736
+        }
+      }
+    },
+    "3_stt_session_start_d10": {
+      "endpoint": "WS :9091/ws/stt stt_start -> stt_status{loading_models} -> stt_status{listening} (default onbox VAD loop; _warm_and_prime warms the audio group via /upstream/speaches/health then primes whisper with 0.2s silence)",
+      "cold_member_connect_to_listening_s": {
+        "n": 3,
+        "median_s": 4.427,
+        "min_s": 4.371,
+        "max_s": 4.467
+      },
+      "warm_member_connect_to_listening_s": {
+        "n": 3,
+        "median_s": 0.577,
+        "min_s": 0.576,
+        "max_s": 0.579
+      },
+      "cold_page_cache_connect_to_listening_s": {
+        "n": 2,
+        "median_s": 4.97,
+        "min_s": 4.837,
+        "max_s": 5.104
+      },
+      "loading_affordance": "stt_status{loading_models} arrived 14-44 ms after connect in every session (cold and warm)",
+      "d10_ceiling_s": 30.0,
+      "worst_observed_s": 5.104,
+      "plan_expectation_s": "5-8",
+      "note": "cold = speaches process down (retrieval group resident); llama-swap boots speaches (static :9099) + whisper load + prime. Worst case incl. dropped page cache 5.10s -> ~6x headroom under the 30s D10 ceiling; warm sessions re-pay only the prime (~0.58s)."
+    }
+  },
+  "residency_at_start": [
+    "qwen-tts"
+  ],
+  "residency_at_end": [
+    "speaches"
+  ],
+  "raw": {
+    "orchestrator_level": "/tmp/g5_raw.json (MS02)",
+    "cold_cache_reps": {
+      "retrieval_to_tts_s": [
+        9.99,
+        9.717,
+        9.804
+      ],
+      "audio_to_embed_s": [
+        4.667,
+        4.579,
+        4.588
+      ],
+      "embed_to_rerank_s": [
+        4.709,
+        4.736
+      ],
+      "stt_connect_to_listening_s": [
+        4.837,
+        5.104
+      ]
+    }
+  }
+}

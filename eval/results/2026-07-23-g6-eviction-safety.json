@@ -1,0 +1,194 @@
+{
+  "gate": "G6",
+  "title": "mid-stream eviction safety (D12 voice_session hold) + inverse D10 wait/warm",
+  "date": "2026-07-23",
+  "host": "bbx-MS-02-Ultra",
+  "gpu": "RTX 2000 Ada 16GB (16380 MiB)",
+  "result": "PASS",
+  "d12_behavior_observed": "HELD - in both injected runs the production retrieval search (GET /debug/context: query embed via localstack embed-qwen3-8b + rerank-qwen3-8b) fired mid-utterance was held by local_stack.voice_session()/retrieval_gate and completed AFTER the WS closed. Holds (6.24s and 3.41s) stayed under the 8.0s RETRIEVAL_GATE_TIMEOUT_S, so neither search took the degradation path: both ran the full semantic+rerank pipeline post-release (relevant_count identical to no-voice baseline). Zero \"retrieval gate held ... past the gate timeout\" lines in the journal. llama-swap /running sampled every 1s shows speaches resident in 100%% of streaming-window samples; the audio-group eviction by the released search happened only AFTER session close (proven by injected_late needing a fresh 4.58s warm because injected_mid's released search had evicted audio between sessions).",
+  "methodology": {
+    "stream": "Real /ws/stt onbox sessions (default VAD loop), live protocol stt_start/stt_audio(b64 PCM16)/stt_stop; 11.21s 24kHz reference clip /tmp/qwen_batch_test.wav streamed in 0.1s frames at real-time pacing (0.1s sleep/frame).",
+    "injection": "GET :9091/debug/context?query=... fired from a background thread when the send loop crossed 50%% (injected_mid) and 75%% (injected_late) of the clip.",
+    "decision_math": "PASS/FAIL from the committed harness diagnostics/localstack/stt_evict_safety.py decide() (insufficient_partials / partial_count_drop / inter_partial_stall / transcript equality vs an uninjected control run, gap tolerance 1.0s).",
+    "residency_proof": "llama-swap /running sampled every 1.0s for the whole injected session (scratch ResidencyTimeline thread).",
+    "oom_watch": "nvidia-smi memory.used sampled every 0.5s across the whole gate; dmesg + both service journals grepped after.",
+    "driver": "scratch driver /tmp/g6_driver.py on MS02 (measurement-only; no repo changes); raw: /tmp/g6_raw.json"
+  },
+  "control_run": {
+    "t_listening_s": 4.125,
+    "loading_affordance_seen": true,
+    "n_partials": 5,
+    "max_partial_gap_s": 1.555,
+    "finals": [
+      "Hello, from the on-box Quen Text2 speech engine. This is a second sentence to force chunking. And a third.",
+      "Good measure."
+    ],
+    "stt_done": true,
+    "t_stop_sent_s": 15.513,
+    "t_done_s": 16.079,
+    "t_ws_closed_s": 16.08,
+    "error": null
+  },
+  "injected_mid": {
+    "t_listening_s": 0.576,
+    "loading_affordance_seen": true,
+    "n_partials": 5,
+    "max_partial_gap_s": 1.544,
+    "finals": [
+      "Hello, from the on-box Quen Text2 speech engine. This is a second sentence to force chunking. And a third.",
+      "Good measure."
+    ],
+    "stt_done": true,
+    "t_stop_sent_s": 12.016,
+    "t_done_s": 12.582,
+    "t_ws_closed_s": 12.583,
+    "error": null,
+    "inject_at_clip_fraction": 0.5,
+    "search": {
+      "fired_at_rel_s": 6.344,
+      "returned_at_rel_s": 18.126,
+      "wall_s": 11.781,
+      "http_status": 200,
+      "relevant_count": 3,
+      "completed_after_ws_close": true,
+      "held_by_voice_session_s": 6.239
+    },
+    "residency_streaming_window": "qwen-tts+speaches in all 12 samples"
+  },
+  "injected_late": {
+    "t_listening_s": 4.58,
+    "loading_affordance_seen": true,
+    "n_partials": 5,
+    "max_partial_gap_s": 1.54,
+    "finals": [
+      "Hello, from the on-box Quen Text2 speech engine. This is a second sentence to force chunking. And a third.",
+      "Good measure."
+    ],
+    "stt_done": true,
+    "t_stop_sent_s": 15.998,
+    "t_done_s": 16.567,
+    "t_ws_closed_s": 16.568,
+    "error": null,
+    "inject_at_clip_fraction": 0.75,
+    "search": {
+      "fired_at_rel_s": 13.154,
+      "returned_at_rel_s": 22.226,
+      "wall_s": 9.072,
+      "http_status": 200,
+      "relevant_count": 3,
+      "completed_after_ws_close": true,
+      "held_by_voice_session_s": 3.414
+    },
+    "residency_streaming_window": "speaches in all 12 samples"
+  },
+  "assertions": {
+    "a_stream_not_broken": {
+      "verdict": "PASS",
+      "evidence": {
+        "harness_decide_mid": {
+          "audio_cut_off": false,
+          "cut_off_reasons": [],
+          "extra_gap_s": -0.011,
+          "transcript_match": true,
+          "pass": true
+        },
+        "harness_decide_late": {
+          "audio_cut_off": false,
+          "cut_off_reasons": [],
+          "extra_gap_s": -0.015,
+          "transcript_match": true,
+          "pass": true
+        },
+        "detail": "Both injected runs: stt_done terminal, 5/5 partials retained vs control, max inter-partial gap UNCHANGED (extra_gap -0.011s / -0.015s), transcript byte-identical to control after normalization, whisper (speaches) resident in every 1s residency sample of the streaming window."
+      }
+    },
+    "b_search_completes_after_session": {
+      "verdict": "PASS",
+      "evidence": {
+        "injected_mid": "fired t=6.344s, WS closed 12.583s, returned 18.126s -> held 6.24s by the voice session, completed 5.54s after close; wall 11.78s vs ~4.5s no-voice steady-state baseline (G5 M2) = +7.3s hold cost",
+        "injected_late": "fired t=13.154s, WS closed 16.568s, returned 22.226s -> held 3.41s, wall 9.07s",
+        "gate_timeout_path": "not taken (both holds < RETRIEVAL_GATE_TIMEOUT_S=8.0s); no gate-timeout log lines; full semantic results returned (relevant_count=3, matching baseline)"
+      }
+    },
+    "c_no_oom": {
+      "verdict": "PASS",
+      "evidence": {
+        "gpu_peak_mib": 14336,
+        "budget_mib": 16380,
+        "headroom_mib": 2044,
+        "dmesg": "no OOM-killer events, no CUDA errors",
+        "journals": "no error/oom/failed lines in blackbox.service or blackbox-models.service beyond benign speaches-boot health-probe connection-refused churn"
+      }
+    },
+    "d_both_groups_functional_after": {
+      "verdict": "PASS",
+      "evidence": {
+        "embed_ok": true,
+        "embed_s": 2.613,
+        "rerank_ok": true,
+        "rerank_s": 2.623,
+        "tts_s": 6.197,
+        "tts_ok": true,
+        "stt_ok": true,
+        "stt_listening_s": 4.159,
+        "stt_transcript": "Hello, from the Unboxed Quintext",
+        "embeddings_status_health": {
+          "state": "ok",
+          "detail": "",
+          "successor": null,
+          "successor_slug": null
+        },
+        "rerank_status_available": true,
+        "rerank_status_model": "qwen3-reranker-8b-local",
+        "residency": [
+          "qwen-tts",
+          "speaches"
+        ]
+      }
+    },
+    "inverse_stream_waits_per_d10": {
+      "verdict": "PASS",
+      "evidence": {
+        "setup": "retrieval group resident (embed primed), search launched first, /ws/stt opened 1.0s into it",
+        "stream": {
+          "t_listening_s": 6.501,
+          "loading_affordance_seen": true,
+          "n_partials": 2,
+          "max_partial_gap_s": 1.521,
+          "finals": [
+            "Hello, from the on-box Quen Text2 speech engine."
+          ],
+          "stt_done": true,
+          "t_stop_sent_s": 10.542,
+          "t_done_s": 11.151,
+          "t_ws_closed_s": 11.151,
+          "error": null
+        },
+        "search_wall_s": 3.167,
+        "detail": "stt_status{loading_models} affordance emitted immediately; listening reached at 6.50s (D10 ceiling 30s); streamed 4s of the clip -> correct utterance final + stt_done; NO stt_error, NO silent failure, NO cloud fallback. The stream's audio-group warm queued behind the in-flight retrieval work exactly as designed (llama-swap drains, then swaps).",
+        "caveat": "the embedder was already resident so the concurrent search finished fast (3.17s, ~2.2s after stream open) - the stream waited behind a SHORT search here; the fully-cold bound comes from G5 M3 (worst connect->listening 5.10s incl. dropped page cache, still 6x under the ceiling)"
+      }
+    }
+  },
+  "anomalies": [
+    "llama-swap logs 'proxy error: dial tcp 127.0.0.1:9099: connect: connection refused' pairs during every speaches boot - the /upstream/speaches/health warm probes hitting the pinned static port before uvicorn binds. Benign (the poll loop retries at 1s and the D10 affordance covers it); no client-visible failure.",
+    "Whisper renders 'on-box Qwen text to speech' as 'on-box Quen Text2 speech' consistently in control AND injected runs - STT accuracy quirk of the reference clip, irrelevant to eviction safety (transcript equality is control-vs-injected).",
+    "Post-check STT streamed only the first 3s of the clip and transcribed the truncated audio loosely ('Hello, from the Unboxed Quintext') - truncation artifact, session mechanics (listening/final/stt_done) all clean."
+  ],
+  "services_at_signoff": {
+    "blackbox.service": "active",
+    "blackbox-models.service": "active",
+    "embeddings_health": {
+      "state": "ok",
+      "detail": "",
+      "successor": null,
+      "successor_slug": null
+    },
+    "rerank_available": true,
+    "residency": [
+      "qwen-tts",
+      "speaches"
+    ],
+    "gpu_used_mib_at_end": 6883
+  }
+}
