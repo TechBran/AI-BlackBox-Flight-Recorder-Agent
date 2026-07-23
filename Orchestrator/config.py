@@ -140,6 +140,28 @@ TTS_TIMEOUT   = CFG.getint("audio","timeout_ms",fallback=120000)
 USERS_LIST     = [u.strip() for u in CFG.get("users","list",fallback="Brandon").split(",") if u.strip()]
 USERS_DEFAULT  = CFG.get("users","default",fallback=(USERS_LIST[0] if USERS_LIST else "Operator")).strip()
 
+# ── Flight Recorder operator (design 2026-07-23) ────────────────────────────
+# The permanent, undeletable overseer that ships on every box. Reserved names
+# are refused by /operator/add (case-insensitive) and /operator/{name} DELETE.
+# Explicitly NOT "system": that magic string carries notification/task
+# suppression side effects an overseer must not inherit.
+FLIGHT_RECORDER_OPERATOR = "Flight Recorder"
+RESERVED_OPERATORS = {FLIGHT_RECORDER_OPERATOR, "system"}
+
+
+def reads_all_operators(op) -> bool:
+    """Operators whose retrieval scope is the WHOLE ledger (read-only widening).
+
+    Reproduces the historical conditionals of the retrieval.py semantic gate
+    and fossils._decode_scored_snapshots (BOTH already widened empty/None AND
+    "system") and adds ONLY the Flight Recorder. NOT used by
+    get_recent_fossils_for_operator, whose historical gate widened solely
+    "system" — that site inlines its own check (review 2026-07-23). Write
+    paths stamp the requesting operator into every mint, so widened reads
+    never produce writes under another operator's name.
+    """
+    return not op or op == "system" or op == FLIGHT_RECORDER_OPERATOR
+
 
 def current_default() -> str:
     """The live default operator. Reflects admin add/remove_operator updates to

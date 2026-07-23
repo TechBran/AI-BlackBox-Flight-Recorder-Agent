@@ -23,6 +23,7 @@ export async function render(container, { next, back, skip, sigil }) {
     // Fetch current operator list — try/catch so a network blip doesn't
     // hard-block setup. Empty existing list falls through to fresh-install UX.
     let existing = [];
+    let reserved = [];
     try {
         const r = await fetch("/onboarding/current-config");
         if (r.ok) {
@@ -32,14 +33,30 @@ export async function render(container, { next, back, skip, sigil }) {
     } catch (_e) {
         // Silent fallback — wizard still usable for fresh installs
     }
+    // Reserved operators (Flight Recorder): lock badge instead of remove.
+    // Additive `reserved` key on GET /operators — never hardcode the name.
+    try {
+        const ro = await fetch("/operators");
+        if (ro.ok) {
+            const rj = await ro.json();
+            if (Array.isArray(rj.reserved)) reserved = rj.reserved;
+        }
+    } catch (_e) { /* older server — rows just keep their remove buttons */ }
+    existing = existing.map(o => ({ ...o, reserved: reserved.includes(o.name) }));
 
+    // Human operators = non-reserved. The Flight Recorder is ALWAYS present
+    // after seeding, so every "fresh box" branch keys on humans, not raw
+    // existing (review 2026-07-23 — raw length killed the type-a-name row).
+    const humanCount = (s) => s.existing.filter(o => !o.reserved).length;
     const state = {
         existing,
-        // Fresh install (existing empty) → start with one editable row to
+        // Fresh install (no HUMAN operators) → start with one editable row to
         // preserve the original "type a name to begin" UX. Otherwise start
         // empty — customer clicks "+ Add another" if they want to add more.
-        pending: existing.length === 0 ? [{ id: 0, name: "" }] : [],
+        pending: existing.filter(o => !o.reserved).length === 0
+            ? [{ id: 0, name: "" }] : [],
     };
+    state.humanCount = () => humanCount(state);
 
     container.innerHTML = renderShell(sigil);
     rerender(container, state);
@@ -70,9 +87,12 @@ function renderShell(sigil) {
                     Name your <em>operators</em>.
                 </h1>
                 <p class="ob-step-lede">
-                    Each operator gets their own conversation history,
-                    preferences, and memory. Add one to start &mdash; you can
-                    always add more later from the System Menu.
+                    Each operator gets their own workspace and history. The box
+                    also ships with the <strong>Flight Recorder</strong> &mdash;
+                    a permanent overseer that reads all operators' history to
+                    maintain the ledger and report on the whole system. Add an
+                    operator to start &mdash; you can always add more later from
+                    the System Menu.
                 </p>
                 <div class="ob-operator-rows" id="ob-operator-rows"></div>
                 <button type="button" class="ob-add-row" id="ob-operator-add">
@@ -112,7 +132,7 @@ function rerender(container, state) {
 
     // Pending (editable) rows
     state.pending.forEach((row, idx) => {
-        html += renderPendingRow(row, idx, state.existing.length === 0);
+        html += renderPendingRow(row, idx, state.humanCount() === 0);
     });
 
     rowsEl.innerHTML = html;
@@ -122,15 +142,21 @@ function rerender(container, state) {
 
 function renderExistingRow(op) {
     const safeName = escapeHtml(op.name);
-    return `
-        <div class="ob-operator-row ob-operator-row-existing" data-name="${safeName}">
-            <span class="ob-operator-name-existing">${safeName}</span>
-            <button
+    // Reserved operators (Flight Recorder): permanent — lock badge, no remove.
+    // The server's DELETE guard is the invariant; this is the courtesy UI.
+    const action = op.reserved
+        ? `<span class="ob-row-lock" title="Permanent — the box's Flight Recorder"
+                 aria-label="Permanent operator">🔒</span>`
+        : `<button
                 type="button"
                 class="ob-row-remove ob-row-remove-existing"
                 data-name="${safeName}"
                 aria-label="Remove operator ${safeName}"
-            >&times;</button>
+            >&times;</button>`;
+    return `
+        <div class="ob-operator-row ob-operator-row-existing" data-name="${safeName}">
+            <span class="ob-operator-name-existing">${safeName}${op.reserved ? " <em class=\"ob-row-overseer\">— box overseer</em>" : ""}</span>
+            ${action}
         </div>
     `;
 }
@@ -219,7 +245,7 @@ async function removeExistingOperator(name, container, state) {
             state.existing = state.existing.filter(o => o.name !== name);
             // If existing is now empty AND no pending rows yet, give the
             // customer a default editable row so they can re-seed.
-            if (state.existing.length === 0 && state.pending.length === 0) {
+            if (state.humanCount() === 0 && state.pending.length === 0) {
                 state.pending = [{ id: nextRowId++, name: "" }];
             }
             clearError(container);
@@ -251,7 +277,7 @@ function updateSaveButton(container, state) {
         .filter(n => n && NAME_RE.test(n));
 
     // Always-enabled when existing is non-empty (can advance with no changes)
-    const canAdvance = state.existing.length > 0 || validPending.length > 0;
+    const canAdvance = state.humanCount() > 0 || validPending.length > 0;
     saveBtn.disabled = !canAdvance;
 
     // Adapt label: no pending changes → "Continue →"; otherwise "Save & continue →"
@@ -300,7 +326,7 @@ async function onSave(container, state, next) {
     }
 
     // Must have at least 1 operator total (existing + valid pending)
-    if (state.existing.length === 0 && validPending.length === 0) {
+    if (state.humanCount() === 0 && validPending.length === 0) {
         showError(container, "Add at least one operator (letters, numbers, _ or -).");
         return;
     }
@@ -327,7 +353,7 @@ async function onSave(container, state, next) {
 
         // Persist DEFAULT_OPERATOR ONLY if existing was empty AND we added a new one.
         // Otherwise leave the existing default alone (Brandon's box already has one).
-        if (state.existing.length === 0 && validPending.length > 0) {
+        if (state.humanCount() === 0 && validPending.length > 0) {
             saveBtn.innerHTML = "Saving default&hellip;";
             const saveR = await fetch("/onboarding/save", {
                 method: "POST",

@@ -396,6 +396,10 @@ def list_operators():
     return {
         "operators": USERS_LIST,
         "default": _cfg.USERS_DEFAULT,
+        # Additive (design 2026-07-23 §10): reserved operators present in the
+        # list — frontends render lock badges / pinning from THIS, never a
+        # hardcoded name. Existing clients ignore the extra key.
+        "reserved": [op for op in _cfg.RESERVED_OPERATORS if op in USERS_LIST],
     }
 
 @app.get("/tts/status")
@@ -1206,6 +1210,22 @@ def add_operator(body: dict = Body(...)):
     if not operator_name:
         raise HTTPException(status_code=400, detail="Operator name is required")
 
+    # Reserved-name shadow guard (design 2026-07-23 §3): nobody may pre-claim
+    # or case-shadow a reserved operator. The exact reserved name that's
+    # ALREADY present falls through to the normal "exists" response below.
+    from Orchestrator.config import RESERVED_OPERATORS
+    for reserved in RESERVED_OPERATORS:
+        if operator_name.lower() == reserved.lower() and operator_name != reserved:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{operator_name}' shadows the reserved operator '{reserved}'",
+            )
+    if operator_name in RESERVED_OPERATORS and operator_name not in USERS_LIST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{operator_name}' is a reserved system operator name",
+        )
+
     try:
         # Read current operators from config (module-global read; no rebind — see below)
         current_list = USERS_LIST.copy()
@@ -1257,6 +1277,15 @@ def remove_operator(name: str):
     if not name or not name.strip():
         raise HTTPException(status_code=400, detail="Operator name required")
     name = name.strip()
+
+    # Flight Recorder permanence (design 2026-07-23 §5): reserved operators
+    # cannot be removed on any surface — this server guard is the invariant.
+    from Orchestrator.config import RESERVED_OPERATORS
+    if name in RESERVED_OPERATORS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{name}' is a permanent system operator and cannot be removed",
+        )
 
     current_list = USERS_LIST.copy()
 

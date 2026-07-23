@@ -1393,13 +1393,17 @@ def _load_token_map() -> Dict[str, str]:
                 for tok, op in data.items():
                     if not (isinstance(tok, str) and tok and isinstance(op, str) and op):
                         continue
-                    if op.strip().lower() == "system":
-                        # "system"/blank = span-ALL operators. That is a trusted
-                        # stdio/local capability, NEVER a remote bearer token --
-                        # else one token reads every operator's snapshots.
+                    if op.strip().lower() in ("system", "flight recorder"):
+                        # "system"/"Flight Recorder"/blank = span-ALL operators.
+                        # That is a trusted stdio/local capability, NEVER a
+                        # remote bearer token -- else one token reads every
+                        # operator's snapshots. ("Flight Recorder" is the
+                        # permanent overseer operator, design 2026-07-23 §6:
+                        # remote cross-operator access stays CLOSED in v1;
+                        # string literal here per the MCP lean-venv rule.)
                         logger.error("M3 AUTH: refusing token tid=%s bound to "
-                                     "operator 'system' (span-all is not a remote "
-                                     "capability).", _token_id(tok))
+                                     "span-all operator %r (not a remote "
+                                     "capability).", _token_id(tok), op.strip())
                         continue
                     merged[tok] = op
     except Exception as e:
@@ -1413,13 +1417,17 @@ def _load_token_map() -> Dict[str, str]:
                 for tok, op in data.items():
                     if not (isinstance(tok, str) and tok and isinstance(op, str) and op):
                         continue
-                    if op.strip().lower() == "system":
-                        # "system"/blank = span-ALL operators. That is a trusted
-                        # stdio/local capability, NEVER a remote bearer token --
-                        # else one token reads every operator's snapshots.
+                    if op.strip().lower() in ("system", "flight recorder"):
+                        # "system"/"Flight Recorder"/blank = span-ALL operators.
+                        # That is a trusted stdio/local capability, NEVER a
+                        # remote bearer token -- else one token reads every
+                        # operator's snapshots. ("Flight Recorder" is the
+                        # permanent overseer operator, design 2026-07-23 §6:
+                        # remote cross-operator access stays CLOSED in v1;
+                        # string literal here per the MCP lean-venv rule.)
                         logger.error("M3 AUTH: refusing token tid=%s bound to "
-                                     "operator 'system' (span-all is not a remote "
-                                     "capability).", _token_id(tok))
+                                     "span-all operator %r (not a remote "
+                                     "capability).", _token_id(tok), op.strip())
                         continue
                     merged[tok] = op
         except Exception as e:

@@ -747,8 +747,21 @@ export async function initOperatorSelector() {
         const j = await r.json();
         const serverOps = (j.users && Array.isArray(j.users.list)) ? j.users.list : [];
 
-        // All operators now come from server (config.ini)
-        const allOps = serverOps;
+        // Reserved operators (Flight Recorder) — additive `reserved` key on
+        // GET /operators (design 2026-07-23 §10). Never hardcode the name;
+        // graceful [] on older servers.
+        let reservedOps = [];
+        try {
+            const ro = await fetch("/operators");
+            const rj = await ro.json();
+            if (Array.isArray(rj.reserved)) reservedOps = rj.reserved;
+        } catch (_) { /* older server — no pinning */ }
+
+        // Reserved pinned at the top of the dropdown, rest in server order.
+        const allOps = [
+            ...serverOps.filter(n => reservedOps.includes(n)),
+            ...serverOps.filter(n => !reservedOps.includes(n)),
+        ];
 
         const def = (j.users && j.users.default) ? j.users.default : (allOps[0] || "Operator");
         const sel = document.getElementById("operatorSelect");
@@ -759,8 +772,9 @@ export async function initOperatorSelector() {
         allOps.forEach(name => {
             const opt = document.createElement("option");
             opt.value = name;
-            opt.textContent = abbreviateOperator(name);
-            opt.title = name; // Full name on hover
+            const isReserved = reservedOps.includes(name);
+            opt.textContent = (isReserved ? "⬛ " : "") + abbreviateOperator(name);
+            opt.title = isReserved ? `${name} — Box overseer` : name;
             sel.appendChild(opt);
         });
 

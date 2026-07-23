@@ -752,6 +752,21 @@ class CronJobManager:
         if not updates:
             return self.get_job(job_id)
 
+        # Flight Recorder reserved job: schedule/status edits are welcome
+        # (user-tunable cadence, disable honored) but identity-mutating edits
+        # would strip the delete guard and the executor's direct dispatch
+        # (review 2026-07-23) — refuse them like delete.
+        if any(k in updates for k in ("name", "operator", "prompt")):
+            try:
+                from Orchestrator.oversight import is_reserved_job
+                if is_reserved_job(self.get_job(job_id)):
+                    raise PermissionError(
+                        "The Flight Report job's identity is reserved — its "
+                        "schedule and enabled state may be changed, but not "
+                        "its name, operator, or prompt")
+            except ImportError as e:
+                print(f"[FLIGHT-RECORDER] reserved-job guard unavailable: {e}")
+
         # Central field validation (M2.1). Only validate the fields actually
         # being updated (partial=True) — but resolve the *effective* delivery
         # and delivery_target by merging the update over the existing job, so a
@@ -840,7 +855,23 @@ class CronJobManager:
 
         Returns:
             True if a job was deleted, False if not found.
+
+        Raises:
+            PermissionError: for the Flight Recorder's reserved report job
+                (design 2026-07-23 §7) — it may be edited or disabled, never
+                deleted; startup reseeds it if the DB is hand-edited.
         """
+        try:
+            from Orchestrator.oversight import is_reserved_job
+        except ImportError as e:
+            # Loud, never silent: a broken oversight import would otherwise
+            # quietly strip the permanence guard (review 2026-07-23).
+            print(f"[FLIGHT-RECORDER] reserved-job guard unavailable: {e}")
+        else:
+            if is_reserved_job(self.get_job(job_id)):
+                raise PermissionError(
+                    "The Flight Report job is reserved and cannot be deleted "
+                    "(disable it instead)")
         # Remove from scheduler first
         try:
             existing = self.scheduler.get_job(job_id)

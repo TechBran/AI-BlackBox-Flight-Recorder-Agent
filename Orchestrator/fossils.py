@@ -385,7 +385,8 @@ def _decode_scored_snapshots(scored, operator: str,
         meta = index.get(snap_id)
         if not meta:
             continue
-        if operator and operator != "system" and meta.get("operator") != operator:
+        from Orchestrator.config import reads_all_operators
+        if not reads_all_operators(operator) and meta.get("operator") != operator:
             continue
         start = meta["byte_start"]
         end = meta["byte_end"]
@@ -997,8 +998,14 @@ def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars
         # Read file as bytes to allow proper byte-offset indexing
         vol_bytes = read_volume_bytes(VOL_PATH)
 
-        # Filter by operator - "system" sees all operators
-        if op == "system":
+        # Filter by operator - "system" and the Flight Recorder see all
+        # operators. DELIBERATELY NOT reads_all_operators(): this site's
+        # historical conditional widened ONLY "system" (never empty/None,
+        # unlike the retrieval.py/_decode gates) — review 2026-07-23 caught
+        # that the helper here would newly widen falsy operators reaching
+        # tasks.py's non-stream path. Invariant #2: falsy stays scoped.
+        from Orchestrator.config import FLIGHT_RECORDER_OPERATOR
+        if op == "system" or op == FLIGHT_RECORDER_OPERATOR:
             matching = [(snap_id, meta) for snap_id, meta in index.items()]
         else:
             matching = [(snap_id, meta) for snap_id, meta in index.items() if meta.get("operator") == op]

@@ -304,6 +304,27 @@ def build_fossil_context(
     # Checkpoints stay UN-deduped: they are a pinned section, not a discovery channel.
     checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CP)
 
+    # Flight Recorder (design 2026-07-23 §2.4): its turns additionally pin the
+    # most recent flight report(s) + a LIVE watchtower digest, so "is
+    # everything OK?" answers from fresh signals. Other operators' contexts
+    # are untouched (flight_report is a distinct pinned type — invariant #3).
+    flight_report_snaps: list[str] = []
+    fr_digest_block = ""
+    try:
+        from Orchestrator.config import FLIGHT_RECORDER_OPERATOR
+        if operator == FLIGHT_RECORDER_OPERATOR:
+            from Orchestrator.oversight import (
+                get_recent_flight_reports, collect_oversight_signals,
+                format_signals_digest,
+            )
+            flight_report_snaps = get_recent_flight_reports(count=max(1, CP))
+            fr_digest_block = (
+                "=== LIVE SYSTEM HEALTH (collected this turn) ===\n"
+                + format_signals_digest(collect_oversight_signals())
+            )
+    except Exception as _fr_e:
+        print(f"{log_prefix} Flight Recorder context sections failed (non-fatal): {_fr_e}")
+
     # Provenance — same shape as chat_routes.build_streaming_context returns
     recent_ids_list = extract_snap_ids(recent_snaps)
     keyword_ids = extract_snap_ids(keyword_snaps)
@@ -402,6 +423,13 @@ def build_fossil_context(
     # section-count header, which contributed to the model under-counting.
     def _assemble() -> str:
         parts = list(context_parts)  # media block — never dropped by the guard
+        # Flight Recorder pins ride in the hot attention region, above even
+        # checkpoints: the live digest first (freshest), then report pins.
+        if fr_digest_block:
+            parts.append(fr_digest_block)
+        if flight_report_snaps:
+            parts.append(_fenced("Flight Report", flight_report_snaps,
+                                 extract_snap_ids(flight_report_snaps)))
         if checkpoint_snaps:
             parts.append(_fenced("Checkpoint", checkpoint_snaps, extract_snap_ids(checkpoint_snaps)))
         if recent_snaps:

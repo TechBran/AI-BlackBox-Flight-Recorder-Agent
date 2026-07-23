@@ -503,10 +503,13 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     qv_np = np.asarray(qv, dtype=np.float32)
     qdim = qv_np.shape[0]
 
-    # 3. operator scoping (None == see everything).
+    # 3. operator scoping (None == see everything; Flight Recorder reads all —
+    #    reads_all_operators reproduces the old conditional byte-for-byte for
+    #    every pre-existing operator value).
     allowed_ids = None
     index = load_snapshot_index()
-    if operator and operator != "system":
+    from Orchestrator.config import reads_all_operators
+    if not reads_all_operators(operator):
         allowed_ids = {
             sid for sid, meta in index.items() if meta.get("operator") == operator
         }

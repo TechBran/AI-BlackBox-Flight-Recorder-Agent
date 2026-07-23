@@ -213,6 +213,9 @@ async def update_cron_job(job_id: str, body: CronJobUpdate):
     except ValueError as e:
         # Surface central validation failures (M2.1) as a 400, not a 500.
         raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError as e:
+        # Flight Recorder reserved job: identity edits refused (schedule OK).
+        raise HTTPException(status_code=400, detail=str(e))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job": job}
@@ -222,7 +225,11 @@ async def update_cron_job(job_id: str, body: CronJobUpdate):
 async def delete_cron_job(job_id: str):
     """Delete a cron job (UI only, not available to AI models)."""
     manager = get_scheduler_manager()
-    success = manager.delete_job(job_id)
+    try:
+        success = manager.delete_job(job_id)
+    except PermissionError as e:
+        # Flight Recorder's reserved report job: disable, never delete.
+        raise HTTPException(status_code=400, detail=str(e))
     if not success:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": "deleted", "job_id": job_id}

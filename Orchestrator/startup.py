@@ -165,6 +165,15 @@ def startup_check_index():
     # Load operator preferences (cross-device sync)
     load_operator_preferences()
 
+    # Flight Recorder: seed the permanent overseer operator + its report job.
+    # Idempotent; startup IS the migration for existing boxes (update = pull
+    # + restart), and reconciliation for hand-edited config.ini.
+    try:
+        from Orchestrator.oversight import ensure_flight_recorder
+        ensure_flight_recorder()
+    except Exception as e:
+        logger.error("Flight Recorder seeding failed (non-fatal): %s", e)
+
     # Load registered apps from disk
     load_app_registry()
 
