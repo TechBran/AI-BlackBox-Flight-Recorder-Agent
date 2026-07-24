@@ -384,20 +384,29 @@ def window_guard_tokens(server: dict | None, model: str | None = None) -> int:
 # model by id (SEED); the wizard-confirmed model_modalities map overrides at
 # runtime via model_modality(). EDIT the patterns to teach a new local family.
 MODALITY_PATTERNS = {
+    # "ignore" wins over everything: rerankers are not chat-able and have no
+    # picker of their own (reranker selection is the Memory step / embeddings
+    # registry, a separate mechanism). Checked FIRST so "bge-reranker-*" lands
+    # here instead of matching the "bge" embedding pattern, and "rerank-*"
+    # never leaks into the chat catalog as a default model (bit MS02's
+    # llama-swap 2026-07-23: rerank-qwen3-8b became /models/custom default_id).
+    "ignore": ("rerank",),
     "image": ("z-image", "zimage", "flux", "qwen-image", "sdxl", "sd3", "sd-turbo",
               "stable-diffusion", "playground-v", "kolors", "hidream", "pixart"),
     "tts":   ("tts", "-speech", "speech-", "kokoro", "piper", "xtts", "bark",
               "vibevoice", "orpheus", "parler", "styletts", "melotts", "chatterbox"),
     "stt":   ("whisper", "-stt", "stt-", "transcrib", "parakeet", "scribe",
-              "distil-whisper", "faster-whisper", "canary", "moonshine"),
+              "distil-whisper", "faster-whisper", "canary", "moonshine", "speaches"),
     "embedding": ("embed", "bge", "gte", "e5-", "nomic-embed", "mxbai", "jina-embed",
                   "arctic-embed", "snowflake-arctic-embed"),
 }
-_ROUTABLE_MODALITIES = ("image", "tts", "stt", "embedding")  # precedence; else -> chat
+_ROUTABLE_MODALITIES = ("image", "tts", "stt", "embedding")  # routing targets
+_SEED_PRECEDENCE = ("ignore",) + _ROUTABLE_MODALITIES  # classify order; else -> chat
 
 
 def classify_model(model_id: object) -> str:
-    """Seed modality for a bare model id: 'image'|'tts'|'stt'|'embedding'|'chat'.
+    """Seed modality for a bare model id:
+    'ignore'|'image'|'tts'|'stt'|'embedding'|'chat'.
 
     Name-pattern allowlist + an ``*-image`` suffix fallback; default 'chat'. Only
     a SEED -- the persisted model_modalities map (wizard-confirmed) wins at runtime
@@ -406,7 +415,7 @@ def classify_model(model_id: object) -> str:
     if not isinstance(model_id, str):
         return "chat"
     m = model_id.lower()
-    for modality in _ROUTABLE_MODALITIES:
+    for modality in _SEED_PRECEDENCE:
         if any(p in m for p in MODALITY_PATTERNS[modality]):
             return modality
     if m.endswith("-image") or m.endswith("_image"):

@@ -15,6 +15,25 @@ def test_classify_model_families():
         assert cs.classify_model(mid) == expected, mid
 
 
+def test_classify_model_rerank_and_audio_gateways_never_seed_chat():
+    """MS02 llama-swap regression (2026-07-23): rerank-qwen3-8b and speaches
+    seeded 'chat', leaked into /models/custom, and the reranker became
+    default_id. Rerankers seed 'ignore' (checked FIRST so bge-reranker-* beats
+    the 'bge' embedding pattern); the Speaches audio gateway seeds 'stt'."""
+    assert cs.classify_model("rerank-qwen3-8b") == "ignore"
+    assert cs.classify_model("bge-reranker-v2-m3") == "ignore"
+    assert cs.classify_model("speaches") == "stt"
+    # The full MS02 quartet, end to end:
+    assert cs.classify_models(
+        ["embed-qwen3-8b", "qwen-tts", "rerank-qwen3-8b", "speaches"]
+    ) == {
+        "embed-qwen3-8b": "embedding",
+        "qwen-tts": "tts",
+        "rerank-qwen3-8b": "ignore",
+        "speaches": "stt",
+    }
+
+
 def test_classify_model_non_string():
     assert cs.classify_model(None) == "chat"
     assert cs.classify_model(123) == "chat"
