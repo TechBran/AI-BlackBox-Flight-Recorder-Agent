@@ -145,15 +145,15 @@ const endedSessions = $("cuvEndedSessions");
 const extraKeysEl = $("cuvExtraKeys");
 const kbSink = $("cuvKbSink");
 const switcherEl = $("cuvSwitcher");
-// M4 activity chrome.
+// M4 activity chrome (docked narration strip, Brandon 2026-07-24).
 const agentChip = $("cuvAgentChip");
 const stopBtn = $("cuvStopBtn");
 const narrationEl = $("cuvNarration");
-const narrToggle = $("cuvNarrToggle");
+const narrHeader = $("cuvNarrHeader");
 const narrDot = $("cuvNarrDot");
-const narrLatest = $("cuvNarrLatest");
+const narrStatus = $("cuvNarrStatus");
 const narrChevron = $("cuvNarrChevron");
-const narrBody = $("cuvNarrBody");
+const narrStream = $("cuvNarrStream");
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -892,11 +892,14 @@ const STATUS_LABEL = {
 
 function renderActivity(act) {
     // No live agent on this session (or the main desktop): hide all agent
-    // chrome — the desktop is yours to drive directly.
+    // chrome — the desktop is yours to drive directly, stage gets full height.
     if (!act || sessionId === MAIN_ID) {
         agentChip.hidden = true;
         stopBtn.hidden = true;
-        narrationEl.hidden = true;
+        if (!narrationEl.hidden) {
+            narrationEl.hidden = true;
+            requestStageRefit();     // the dock vanished — reclaim its space
+        }
         return;
     }
     const status = act.status || "idle";
@@ -911,26 +914,43 @@ function renderActivity(act) {
     stopBtn.hidden = !working;
 
     const tail = (act.reasoning_tail || "").trim();
-    const latest = (act.latest_action ? `→ ${act.latest_action}` : "")
-        || tail.split("\n").filter(Boolean).slice(-1)[0] || label;
     if (tail || working) {
+        const wasHidden = narrationEl.hidden;
         narrationEl.hidden = false;
-        narrLatest.textContent = latest.slice(0, 80);
+        if (wasHidden) requestStageRefit();   // dock appeared — stage shrinks
         narrDot.dataset.state = status;
-        if (narrExpanded) {
-            const atBottom = narrBody.scrollHeight - narrBody.scrollTop
-                <= narrBody.clientHeight + 24;
-            narrBody.textContent = tail || "(no narration yet)";
-            // Autoscroll only when the user is already at the bottom AND new
-            // text arrived — never yank them up while they read back.
-            if (atBottom && tail.length !== lastNarrationLen) {
-                narrBody.scrollTop = narrBody.scrollHeight;
-            }
+        // Header status: the current action (or step) as a one-glance summary.
+        narrStatus.textContent = act.latest_action
+            ? `${label} · ${act.latest_action}` : label;
+        // The dock ALWAYS live-streams the tail (both collapsed 3-line preview
+        // AND expanded); only the window HEIGHT changes on expand. Autoscroll
+        // to the newest line unless the user has scrolled up to read back.
+        if (tail.length !== lastNarrationLen) {
+            const atBottom = narrStream.scrollHeight - narrStream.scrollTop
+                <= narrStream.clientHeight + 24;
+            narrStream.textContent = tail || "(waiting for the agent…)";
+            if (atBottom) narrStream.scrollTop = narrStream.scrollHeight;
             lastNarrationLen = tail.length;
         }
     } else {
-        narrationEl.hidden = true;
+        if (!narrationEl.hidden) {
+            narrationEl.hidden = true;
+            requestStageRefit();
+        }
     }
+}
+
+/** The docked strip changes the stage's height; the ResizeObserver on the
+ *  stage refits the RFB transform, but nudge it on the next frame so the
+ *  fit-to-view is correct the instant the dock shows/hides/expands. */
+function requestStageRefit() {
+    requestAnimationFrame(() => {
+        const r = stageEl.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && vp) {
+            vp.resize(r.width, r.height);
+            applyTransform();
+        }
+    });
 }
 
 async function fetchActivity() {
@@ -952,12 +972,16 @@ function startActivityPoll() {
 }
 
 function bindActivityChrome() {
-    narrToggle.addEventListener("click", () => {
+    // Tapping the header expands/collapses the dock (CSS height swap). The
+    // stage refits after the height transition so the desktop stays fit.
+    narrHeader.addEventListener("click", () => {
         narrExpanded = !narrExpanded;
-        narrBody.hidden = !narrExpanded;
-        narrToggle.setAttribute("aria-expanded", narrExpanded ? "true" : "false");
-        narrChevron.textContent = narrExpanded ? "▾" : "▸";
-        if (narrExpanded) narrBody.scrollTop = narrBody.scrollHeight;
+        narrationEl.classList.toggle("cuv-expanded", narrExpanded);
+        narrHeader.setAttribute("aria-expanded", narrExpanded ? "true" : "false");
+        if (narrExpanded) narrStream.scrollTop = narrStream.scrollHeight;
+        // Refit after the 0.18s height transition settles (+ a nudge now).
+        requestStageRefit();
+        setTimeout(requestStageRefit, 200);
     });
     stopBtn.addEventListener("click", async () => {
         stopBtn.disabled = true;

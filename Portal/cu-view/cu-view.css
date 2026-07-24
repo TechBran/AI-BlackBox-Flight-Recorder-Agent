@@ -40,15 +40,27 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
-    padding-top: calc(5px + var(--cuv-inset-top));
+    /* Tightened (Brandon 2026-07-24: "shave a bit off the top… one or two
+       lines we can get back"). The inset still clears the Android status bar. */
+    padding: 2px 8px;
+    padding-top: calc(2px + var(--cuv-inset-top));
     background: #131318;
     border-bottom: 1px solid #26262e;
     font-size: 12px;
-    min-height: 34px;
+    min-height: 28px;
     user-select: none;
     -webkit-user-select: none;
+    /* Horizontally SCROLLABLE (Brandon 2026-07-24): on the Fold cover screen
+       the badges + Fit/Touchpad/Keys/⌨/Stop can't all fit — let the bar scroll
+       sideways instead of clipping. Items are flex:0 0 auto so they keep their
+       size and the row scrolls; the scrollbar is hidden (touch-drag / wheel). */
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
 }
+#cuvTopbar::-webkit-scrollbar { display: none; }
 
 #cuvStatusDot {
     width: 9px;
@@ -66,6 +78,7 @@ body {
 @keyframes cuvPulse { 50% { opacity: 0.35; } }
 
 #cuvSessionLabel {
+    flex: 0 0 auto;
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -74,6 +87,7 @@ body {
 }
 
 .cuv-badge {
+    flex: 0 0 auto;          /* never shrink — the bar scrolls instead */
     padding: 1px 7px;
     border-radius: 9px;
     background: #1f1f27;
@@ -85,9 +99,12 @@ body {
 #cuvInputLive { color: #8fd9a8; border-color: #2c4a36; }
 #cuvInputLive[hidden] { display: none; }
 
-#cuvTopbarSpacer { flex: 1 1 auto; }
+/* min-width lets the spacer collapse to 0 when the bar overflows (so it
+   scrolls) but push the right-side buttons over when everything fits. */
+#cuvTopbarSpacer { flex: 1 1 auto; min-width: 0; }
 
 .cuv-tbtn {
+    flex: 0 0 auto;          /* never shrink — the bar scrolls instead */
     background: #1f1f27;
     border: 1px solid #2d2d38;
     color: #ccd;
@@ -124,40 +141,49 @@ body {
 .cuv-stop:disabled { opacity: 0.55; cursor: default; }
 .cuv-tbtn[hidden] { display: none; }
 
-/* Narration bubble — anchored bottom-left over the stage, ABOVE the switcher
-   rail and any host composer (bottom inset lives on the body). Collapsed is a
-   single latest-line pill; expanded reveals a scrolling transcript. */
+/* Docked live-narration strip (Brandon 2026-07-24): a real column child that
+   RESERVES 2-3 lines at the bottom (the stage shrinks around it — never an
+   overlay), between the stage and the switcher rail. Tap the header to expand
+   into a taller scrolling transcript. */
 #cuvNarration {
-    position: absolute;
-    left: 8px;
-    bottom: calc(8px + var(--cuv-inset-bottom));
-    z-index: 9;
-    max-width: min(78vw, 460px);
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    pointer-events: none;   /* the toggle re-enables itself */
+    background: #101014;
+    border-top: 1px solid #26262e;
+    user-select: text;
+    -webkit-user-select: text;
 }
 #cuvNarration[hidden] { display: none; }
 
-.cuv-narr-toggle {
-    pointer-events: auto;
+/* Slim tappable header: dot + "Agent" + live status + expand chevron. */
+#cuvNarrHeader {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 7px;
-    max-width: 100%;
-    background: rgba(20, 20, 28, 0.92);
-    border: 1px solid #3a3a4c;
-    border-radius: 16px;
-    padding: 6px 12px;
-    color: #dde;
-    font-size: 12px;
-    line-height: 1.25;
+    width: 100%;
+    padding: 3px 10px;
+    background: #131318;
+    border: 0;
+    color: #ccd;
+    font-size: 11px;
+    line-height: 1.3;
     cursor: pointer;
     touch-action: manipulation;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+    text-align: left;
 }
-.cuv-narr-toggle:active { background: rgba(30, 30, 40, 0.95); }
+#cuvNarrHeader:active { background: #191922; }
+#cuvNarrTitle { flex: 0 0 auto; font-weight: 600; color: #aab; }
+#cuvNarrStatus {
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #99a;
+}
+#cuvNarrHeaderSpacer { flex: 1 1 auto; min-width: 6px; }
+#cuvNarrChevron { flex: 0 0 auto; color: #99a; font-size: 11px; }
 
 .cuv-narr-dot {
     width: 8px;
@@ -172,31 +198,24 @@ body {
 .cuv-narr-dot[data-state="error"],
 .cuv-narr-dot[data-state="stopped"] { background: #e05555; }
 
-#cuvNarrLatest {
-    flex: 1 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-#cuvNarrChevron { flex: 0 0 auto; color: #99a; font-size: 11px; }
-
-#cuvNarrBody {
-    pointer-events: auto;
-    max-height: 40vh;
+/* The live-text window. Collapsed = ~3 lines (the preview Brandon asked for);
+   expanded (via the header toggle) = a taller scrollable transcript. Height
+   transitions so the stage refit reads as a smooth resize. */
+#cuvNarrStream {
+    flex: 0 0 auto;
+    height: 4.4em;                 /* ~3 lines at line-height 1.45 */
     overflow-y: auto;
-    background: rgba(16, 16, 22, 0.95);
-    border: 1px solid #2d2d38;
-    border-radius: 12px;
-    padding: 10px 12px;
+    padding: 5px 10px 6px;
     color: #cdd;
     font-size: 12px;
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
     -webkit-overflow-scrolling: touch;
-    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+    transition: height 0.18s ease;
 }
-#cuvNarrBody[hidden] { display: none; }
+#cuvNarration.cuv-expanded #cuvNarrStream { height: 40vh; }
+#cuvNarration.cuv-expanded #cuvNarrChevron { transform: rotate(180deg); }
 
 /* ── Stage: transformed RFB canvas + overlays ───────────────────────── */
 

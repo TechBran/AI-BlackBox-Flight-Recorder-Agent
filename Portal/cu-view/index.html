@@ -56,18 +56,21 @@
         </div>
     </div>
 
-    <!-- M4: live model narration bubble ("task manager" style). Collapsed =
-         one line of the latest action/thought; tap to expand into a scrolling
-         transcript. Hidden until an activity poll returns narration. Sits
-         above the switcher rail, over the stage bottom-left. -->
+    <!-- M4 (revised 2026-07-24, Brandon): DOCKED live-narration strip. Not an
+         overlay — it reserves 2-3 lines at the bottom so the stage shrinks to
+         make room (never covers the desktop). Tap the header to expand into a
+         taller scrolling transcript. Hidden until an activity poll returns
+         narration; sits between the stage and the switcher rail. -->
     <div id="cuvNarration" hidden aria-live="polite">
-        <button id="cuvNarrToggle" class="cuv-narr-toggle" type="button"
-                aria-expanded="false" title="Show what the model is doing">
+        <button id="cuvNarrHeader" type="button" aria-expanded="false"
+                title="Expand / collapse the agent's live narration">
             <span id="cuvNarrDot" class="cuv-narr-dot"></span>
-            <span id="cuvNarrLatest">…</span>
-            <span id="cuvNarrChevron">▸</span>
+            <span id="cuvNarrTitle">Agent</span>
+            <span id="cuvNarrStatus"></span>
+            <span id="cuvNarrHeaderSpacer"></span>
+            <span id="cuvNarrChevron" aria-hidden="true">▴</span>
         </button>
-        <div id="cuvNarrBody" hidden></div>
+        <div id="cuvNarrStream"></div>
     </div>
 
     <!-- Switcher rail (N2): [Main desktop] + every live session, built by
@@ -117,6 +120,6 @@
             });
         })();
     </script>
-    <script type="module" src="/ui/cu-view/cu-view.js?v=fit4"></script>
+    <script type="module" src="/ui/cu-view/cu-view.js?v=fit5"></script>
 </body>
 </html>
