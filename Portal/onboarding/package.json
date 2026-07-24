@@ -1,0 +1,4 @@
+{
+    "//": "Node-only marker so `node --test steps/*.render.test.mjs` loads the wizard's .js step modules as the ES modules they are (Node 18 has no module auto-detection; without this the dynamic import parses them as CJS and dies on the first `import`). Browsers never read package.json — zero runtime effect on the served wizard.",
+    "type": "module"
+}
