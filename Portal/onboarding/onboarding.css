@@ -1187,9 +1187,15 @@ body::after {
             "input reveal"
             "validate validate";
     }
-    .ob-provider-input { grid-area: input; }
-    .ob-reveal-btn { grid-area: reveal; }
-    .ob-validate-btn { grid-area: validate; }
+    /* Scoped to .ob-provider-input-row: .ob-provider-input is also used by
+     * the custom-server cards (plain single-column grids with NO named
+     * areas). Unscoped grid-area pinned all of a card's inputs into one
+     * implicit cell — they stacked, only the last (the type=number context
+     * field) stayed visible/tappable, which on phones read as "Base URL only
+     * accepts numbers" (Fold, 2026-07-23). */
+    .ob-provider-input-row .ob-provider-input { grid-area: input; }
+    .ob-provider-input-row .ob-reveal-btn { grid-area: reveal; }
+    .ob-provider-input-row .ob-validate-btn { grid-area: validate; }
 }
 
 /* ════════════════════════════════════════════════════════════════
