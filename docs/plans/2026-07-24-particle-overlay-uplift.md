@@ -462,7 +462,13 @@ Orchestrator/weather.py          provider adapters -> internal BbxCondition enum
 GET /weather/current             -> {effect, intensity, drift, gust, is_day,
                                      condition, observed_at, stale}
 ToolVault/tools/get_weather/     schema.json + executor.py (greenfield - there is
-                                 no weather tool today; the agent gets it too)
+                                 no weather tool today; the agent gets it too).
+                                 groups: chat, mcp, cron, phone. Optional
+                                 `location` (free text or lat/lon, defaults to
+                                 configured home) + optional `days` for forecast.
+                                 Per ADDING_A_TOOL.md: validate with
+                                 `python -m Orchestrator.toolvault.validate`,
+                                 then `POST /toolvault/reload` (no restart).
 config.ini [weather]             provider, home lat/lon/label, units, cache_ttl
 ```
 
