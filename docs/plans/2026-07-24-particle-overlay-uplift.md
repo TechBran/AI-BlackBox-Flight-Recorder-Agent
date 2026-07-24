@@ -32,7 +32,9 @@ ParticleFieldTest (JVM).
   resolves **server-side on the box**, BYOK via the wizard. The one item still needing
   Brandon's nod is which provider ships as the *default*: keyless Open-Meteo
   (non-commercial licence) vs Google Weather BYOK (commercial-safe). Everything else in
-  M6 is provider-agnostic and can be built before that call.
+  M6 is provider-agnostic and can be built before that call. (Research leans Google as the
+  shipped default *because* Open-Meteo's free tier is non-commercial; Open-Meteo stays as
+  the keyless dev/personal-box adapter.)
 
 ---
 
@@ -467,18 +469,30 @@ config.ini [weather]             provider, home lat/lon/label, units, cache_ttl
 The endpoint returns an **already-resolved effect id**, not raw weather, so the two
 surfaces can never disagree and neither ships a mapping table.
 
-**Provider — BYOK via the wizard, matching every other credential in this product:**
-- Default **Open-Meteo**, keyless, emits WMO codes natively — correct and free for a
-  self-hosted personal box. The wizard must surface that its free tier is
-  **non-commercial only**, since this product ships with public pricing and Stripe.
-- **Google Maps Platform Weather API** as the commercial-safe BYOK option: GA since
-  2025-06-30, 10,000 free calls/month then $0.15/1k, plain server-side REST. Each
-  operator's own key means each gets their own free tier. Requires the "Includes weather
-  data from Google" attribution; note the Japan/Korea coverage gap, and keep the cache a
-  short-TTL refresh cache (not an archive) to stay clear of Maps ToS §3.2.3.
+**Provider — two adapters behind one interface, BYOK via the wizard, matching every other
+credential in this product. Which one ships as DEFAULT is Brandon's call:**
+- **Google Maps Platform Weather API — recommended default for a shipping product.** GA
+  since 2025-06-30, 10,000 free calls/month then $0.15/1k, plain server-side REST, and it
+  fits the existing GCP billing. Each operator's own key = each operator's own free tier,
+  so it costs us nothing per box. Requires the "Includes weather data from Google"
+  attribution; note the **Japan/Korea coverage gap**, and keep the cache a short-TTL
+  refresh cache (not an archive) to stay clear of Maps ToS §3.2.3.
+- **Open-Meteo — the keyless zero-setup path.** No key at all, emits WMO codes natively,
+  perfect for a personal self-hosted box and for development before a key exists. Its free
+  tier is **explicitly non-commercial** (CC-BY 4.0, <10k calls/day; commercial use needs a
+  paid plan), so for a product with public pricing it is the *dev / no-key-yet* adapter
+  rather than the commercial default. The wizard must state this inline where it is chosen.
 - **Normalize at the adapter boundary into our own `BbxCondition` enum.** Google's ~56
   named types and WMO's ~28 numeric codes do **not** map cleanly onto each other; isolating
   this now makes a provider swap painless later.
+
+**Confirmed greenfield (nothing to retrofit):** there is no weather tool among the ~95 in
+`ToolVault/tools/`, and `config.ini` has **no location or timezone keys at all** (sections
+today: paths, auto_mint, checkpoint, budget, users, context, snapshot, audio, pairing,
+models, computer_use, control_phone, retrieval, rerank, benchmark). Add a `[weather]`
+section mirroring the shape of `[computer_use]`: `provider`, `home_lat`, `home_lon`,
+`units`, `cache_ttl_seconds` (default 600). **Home coordinates come from the onboarding
+wizard, never hard-coded** — fresh-box portability rule.
 
 **Location — operator-entered, zero permissions.** A city field in the wizard, geocoded
 via the keyless Open-Meteo geocoding API, persisted server-side as lat/lon/timezone/label
