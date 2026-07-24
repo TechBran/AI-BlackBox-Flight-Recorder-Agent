@@ -347,13 +347,22 @@ def cu_session_activity(session_id: str):
 
 @app.post("/cu/session/{session_id}/stop")
 def cu_session_stop(session_id: str):
-    """ONE stop button for the live view (M4): a task-launched session routes
-    through tasks.cancel_task (mint hygiene + CANCELLED row + cu-stop); a
-    chat-launched session gets request_stop() directly."""
+    """ONE stop button for the live view (M4): stop the agent on the resolved
+    session, and for a task-launched run ALSO land the row CANCELLED (mint
+    hygiene) via tasks.cancel_task.
+
+    CRITICAL under multi-desktop (review find 2026-07-23): request_stop() is
+    called DIRECTLY on the session THIS sid resolved to — never only via
+    cancel_task, whose registered cu cancel handle carries no session_id and
+    re-resolves through the operator MRU pointer, which can now name a
+    DIFFERENT desktop. A safety STOP must stop the desktop the user is
+    watching, not the operator's newest one."""
     s = _find_cu_session_by_id(session_id)
     if s is None:
         return JSONResponse({"error": f"Unknown CU session: {session_id}"},
                             status_code=404)
+    # Always stop the CORRECT agent first — the session we resolved by id.
+    s.request_stop()
     task_id = getattr(s, "task_id", None)
     if task_id:
         try:
@@ -362,12 +371,14 @@ def cu_session_stop(session_id: str):
             status = getattr(row, "status", None)
             status_val = getattr(status, "value", status)
             if row is not None and str(status_val) in ("pending", "processing"):
+                # Row hygiene only (CANCELLED + skip-mint). The agent is already
+                # stopping via the direct request_stop above, so a wrong-MRU
+                # re-resolve inside cancel_task can no longer leave it running.
                 tasks_mod.cancel_task(task_id)
-                print(f"[CU-STOP] session {session_id[:8]} -> task cancel {task_id}")
+                print(f"[CU-STOP] session {session_id[:8]} -> request_stop + task cancel {task_id}")
                 return {"success": True, "mode": "task_cancel", "task_id": task_id}
         except Exception as e:
-            print(f"[CU-STOP] task-cancel path failed, falling back: {e}")
-    s.request_stop()
+            print(f"[CU-STOP] task-cancel path failed (agent already stopping): {e}")
     print(f"[CU-STOP] session {session_id[:8]} -> request_stop")
     return {"success": True, "mode": "session_stop"}
 

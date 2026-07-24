@@ -821,6 +821,7 @@ function applySessionGeometry() {
  *  history.replaceState (deep links keep working), reset zoom/pan. */
 function swapStream(targetId) {
     if (targetId === sessionId) return;
+    const prevSessionId = sessionId;   // for the D2 chat re-target/clear below
     sessionId = targetId;
     const target = resolveSwapTarget(targetId);
     history.replaceState(null, "", target.viewPath + location.search);
@@ -837,7 +838,7 @@ function swapStream(targetId) {
     ended = false;
     connect();  // detaches + disconnects the superseded RFB first
     renderSwitcher();
-    retargetChatToSelection(targetId);
+    retargetChatToSelection(targetId, prevSessionId);
     // Refresh the activity chrome immediately for the newly-selected session
     // instead of waiting up to ACTIVITY_POLL_MS.
     fetchActivity().then(renderActivity);
@@ -850,11 +851,19 @@ function swapStream(targetId) {
  *  "main" desktop has no agent session, so selecting it clears the pointer
  *  (the next prompt starts a fresh desktop). No-op inside the Android WebView
  *  (its localStorage is not the chat's) — harmless. */
-function retargetChatToSelection(targetId) {
+function retargetChatToSelection(targetId, prevSessionId) {
     try {
-        if (targetId === MAIN_ID) return;   // no agent to target
-        const entry = (lastStatus && lastStatus.sessions || [])
-            .find((s) => s.session_id === targetId);
+        const sessions = (lastStatus && lastStatus.sessions) || [];
+        if (targetId === MAIN_ID) {
+            // Main has no agent: CLEAR the operator's pointer so the next chat
+            // prompt starts a FRESH desktop (D2). The main entry carries no
+            // operator, so resolve it from the session we're LEAVING.
+            const leaving = sessions.find((s) => s.session_id === prevSessionId);
+            const op = leaving && leaving.operator;
+            if (op) localStorage.removeItem(`bb_cu_session_id_${op}`);
+            return;
+        }
+        const entry = sessions.find((s) => s.session_id === targetId);
         const op = entry && entry.operator;
         if (!op) return;
         localStorage.setItem(`bb_cu_session_id_${op}`, targetId);

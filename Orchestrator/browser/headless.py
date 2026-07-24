@@ -631,6 +631,13 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
 
         # ── Reset task state for this run ──
         session.reset_task_state()
+        # Re-establish the M2 sid->task link: reset_task_state clears task_id
+        # (it is per-run state), but _publish_session_link ran BEFORE the reset,
+        # so the in-memory link would be lost — breaking the live-view STOP's
+        # task-cancel routing and the activity endpoint's reasoning_text
+        # fallback (review find, 2026-07-23). The row's session_id column is
+        # already written; this restores the in-memory half.
+        session.task_id = task_id
         # Rebind the event queue to THIS event loop (worker thread's asyncio.run);
         # see ComputerUseSession.fresh_event_queue for the cross-loop rationale.
         session.fresh_event_queue()

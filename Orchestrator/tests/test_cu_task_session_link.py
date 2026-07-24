@@ -84,3 +84,52 @@ def test_reset_task_state_clears_the_task_link():
     s.task_id = "t-old"
     s.reset_task_state()
     assert s.task_id is None
+
+
+def test_run_cu_task_relinks_task_id_after_reset():
+    """Regression (review 2026-07-23): run_cu_task publishes the sid->task link
+    BEFORE reset_task_state, which clears session.task_id — so the anthropic/
+    openai task path must RE-STAMP task_id after the reset or the live-view
+    STOP falls to session_stop (skipping CANCELLED row hygiene) and the
+    activity endpoint reports task_id=null. Source-level guard: the re-stamp
+    must sit after the reset call in run_cu_task."""
+    import inspect
+    from Orchestrator.browser.headless import run_cu_task
+    src = inspect.getsource(run_cu_task)
+    reset_pos = src.index("reset_task_state()")
+    relink_pos = src.index("session.task_id = task_id", reset_pos)
+    assert relink_pos > reset_pos, \
+        "run_cu_task must re-stamp session.task_id AFTER reset_task_state()"
+
+
+def test_cu_session_stop_always_stops_the_resolved_session(monkeypatch):
+    """Regression (review 2026-07-23): under multi-desktop the STOP button must
+    request_stop() the session THIS sid resolved to, never rely solely on
+    cancel_task (whose cu handle re-resolves via the operator MRU pointer and
+    can hit a DIFFERENT desktop)."""
+    from Orchestrator.routes import browser_routes
+    from Orchestrator.browser import session_manager as bsm
+    monkeypatch.setattr(bsm.ComputerUseSession, "destroy", lambda self: None)
+    bsm._sessions.clear(); bsm._operator_sessions.clear()
+    try:
+        target = bsm.get_or_create_session("op")   # the watched desktop
+        target.status = "running"
+        target.task_id = "task-A"
+        # A newer desktop is the operator MRU — cancel_task's re-resolve would
+        # wrongly hit THIS one.
+        newer = bsm.get_or_create_session("op", force_new=True)
+        newer.status = "running"
+        stopped = {}
+        monkeypatch.setattr(bsm.ComputerUseSession, "request_stop",
+                            lambda self: stopped.setdefault(self.session_id, True))
+
+        class _Row:
+            status = "processing"
+        monkeypatch.setattr("Orchestrator.tasks.task_db",
+                            type("D", (), {"get_task": staticmethod(lambda t: _Row())})())
+        monkeypatch.setattr("Orchestrator.tasks.cancel_task", lambda t: {"success": True})
+        browser_routes.cu_session_stop(target.session_id)
+        assert stopped.get(target.session_id) is True   # the watched one stopped
+        assert newer.session_id not in stopped           # not the MRU sibling
+    finally:
+        bsm._sessions.clear(); bsm._operator_sessions.clear()
