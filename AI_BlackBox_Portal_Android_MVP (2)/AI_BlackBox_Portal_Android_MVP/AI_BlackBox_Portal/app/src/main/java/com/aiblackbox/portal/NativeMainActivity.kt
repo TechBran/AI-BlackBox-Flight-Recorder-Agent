@@ -1012,6 +1012,13 @@ class NativeMainActivity : ComponentActivity() {
                                 // first, else the main desktop.
                                 navController.navigate("${Routes.CU_LIVE_VIEW}/auto")
                             },
+                            onCliTerminal = {
+                                // Composer shortcut (Brandon 2026-07-24): the
+                                // terminal apex of the left-action triangle opens
+                                // the CLI Agents terminal (same route as the
+                                // Settings → CLI Agents entry).
+                                navController.navigate(Routes.CLI_AGENT)
+                            },
                             onWhisper = {
                                 // Tap-toggle dictation via /ws/stt (Brandon 2026-07-05).
                                 // Tap 1 = start + live-append; tap 2 = just STOP. The

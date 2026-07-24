@@ -692,6 +692,18 @@ async function initApp() {
     // Track 3. The init function wires the button click itself.
     initCLIAgentsModal();
 
+    // CLI Agents composer shortcut (Brandon 2026-07-24): the terminal button
+    // in the composer's left-action triangle jumps straight into the CLI
+    // terminal. It proxies the existing tools-menu opener (#btnCLIAgents,
+    // wired above by initCLIAgentsModal) so there is one source of truth for
+    // the open flow — the same pattern the Computer Use shortcut uses.
+    const btnCliTerminal = $('btnCliTerminal');
+    if (btnCliTerminal) {
+        btnCliTerminal.addEventListener('click', () => {
+            document.getElementById('btnCLIAgents')?.click();
+        });
+    }
+
     // Voice Agents Tools button — opens a modal with provider tabs (GPT
     // Realtime / Gemini Live / Grok Live). The voice-agents-modal handles
     // lazy init of the three underlying provider modules on first open;

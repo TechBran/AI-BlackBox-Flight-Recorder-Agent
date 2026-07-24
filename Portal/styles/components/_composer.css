@@ -112,6 +112,59 @@
 }
 
 /* =====================================================================
+   LEFT-ACTION TRIANGLE (Brandon 2026-07-24)
+   attach + computer = the base; the CLI-terminal shortcut is raised at
+   the apex between them. The cluster is taller than a single button, so
+   the input bubble grows a little up + down — eating the small gap that
+   sat between the bubble and the provider/model selector row.
+   ===================================================================== */
+.composer-actions-tri {
+  position: relative;
+  flex: 0 0 auto;
+  width: 74px;
+  height: 56px;
+  align-self: center; /* center the triangle in the bubble regardless of
+                         the textarea's own (bottom-aligned) height */
+  margin-right: 2px;
+}
+
+.composer-actions-tri .input-action-btn {
+  position: absolute;
+}
+
+/* Apex — centered horizontally, raised to the top of the cluster. */
+.composer-actions-tri .tri-apex {
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.composer-actions-tri .tri-apex:hover {
+  transform: translateX(-50%) scale(1.05);
+}
+
+.composer-actions-tri .tri-apex:active {
+  transform: translateX(-50%) scale(0.95);
+}
+
+/* Base — the two originals, pinned to the bottom corners of the cluster. */
+.composer-actions-tri .tri-base-left {
+  bottom: 0;
+  left: 0;
+}
+
+.composer-actions-tri .tri-base-right {
+  bottom: 0;
+  right: 0;
+}
+
+/* Give the bubble the extra vertical room the triangle needs (was driven
+   by a single 36px button + textarea padding). */
+.composer .input-row .textarea-wrapper {
+  min-height: 64px;
+}
+
+/* =====================================================================
    ROW 2: Control Row - Floating bubbles with transparent gap
    ===================================================================== */
 .composer .control-row {

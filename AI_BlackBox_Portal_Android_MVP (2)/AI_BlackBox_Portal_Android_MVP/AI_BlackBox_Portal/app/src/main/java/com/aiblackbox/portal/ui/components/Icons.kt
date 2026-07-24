@@ -167,6 +167,43 @@ fun ComputerIcon(
 }
 
 /**
+ * Terminal icon for the composer's CLI Agents shortcut (Brandon 2026-07-24:
+ * the raised apex of the left-action triangle — one tap into the CLI
+ * terminal). A rounded window + a ">" prompt chevron + a command line,
+ * drawn like its Attach/Computer siblings. Deliberately distinct from
+ * [ComputerIcon] (which has a stand + base and no chevron).
+ */
+@Composable
+fun TerminalIcon(
+    modifier: Modifier = Modifier.size(18.dp),
+    color: Color = Neutral500,
+    strokeWidth: Float = 2f
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        // Window frame
+        drawRoundRect(
+            color = color,
+            topLeft = Offset(w * 0.08f, h * 0.16f),
+            size = Size(w * 0.84f, h * 0.68f),
+            cornerRadius = CornerRadius(w * 0.09f, w * 0.09f),
+            style = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
+        // ">" prompt chevron
+        val chevron = Path().apply {
+            moveTo(w * 0.26f, h * 0.38f)
+            lineTo(w * 0.41f, h * 0.50f)
+            lineTo(w * 0.26f, h * 0.62f)
+        }
+        drawPath(chevron, color, style = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        // Command line
+        drawLine(color, Offset(w * 0.52f, h * 0.62f), Offset(w * 0.74f, h * 0.62f),
+                 strokeWidth = strokeWidth, cap = StrokeCap.Round)
+    }
+}
+
+/**
  * Send arrow icon (upward arrow).
  */
 @Composable

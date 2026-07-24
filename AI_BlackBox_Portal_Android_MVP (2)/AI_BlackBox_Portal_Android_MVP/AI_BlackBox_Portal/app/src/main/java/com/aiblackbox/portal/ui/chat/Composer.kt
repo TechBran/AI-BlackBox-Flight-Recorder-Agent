@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.ui.components.AttachIcon
 import com.aiblackbox.portal.ui.components.ComputerIcon
+import com.aiblackbox.portal.ui.components.TerminalIcon
 import com.aiblackbox.portal.ui.components.MicIcon
 import com.aiblackbox.portal.ui.components.RecordAudioIcon
 import com.aiblackbox.portal.ui.components.SendIcon
@@ -98,6 +99,10 @@ fun Composer(
     // (CU_LIVE_VIEW/auto -> the server 302s to the best surface: a running
     // agent's desktop first, else the main desktop).
     onComputerUse: () -> Unit = {},
+    // CLI Agents shortcut (Brandon 2026-07-24): the raised apex of the
+    // left-action triangle — one tap into the CLI terminal. Composer stays
+    // nav-agnostic; the host navigates to Routes.CLI_AGENT.
+    onCliTerminal: () -> Unit = {},
     onWhisper: () -> Unit = {},
     onRecordAudio: () -> Unit = {},
     // Opens the LIVE voice-agent screen (full spoken conversation). Distinct from
@@ -216,27 +221,54 @@ fun Composer(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom
             ) {
-                // Attach button (inside bubble, matches Portal .input-action-btn)
-                IconButton(
-                    onClick = {
-                        view.performPressFeedback()
-                        onAttach()
-                    },
-                    modifier = Modifier.size(40.dp)
+                // Left-action triangle (Brandon 2026-07-24): attach + computer
+                // form the base; the CLI-terminal shortcut is raised at the
+                // apex between them. The 56dp cluster is taller than a single
+                // button, so the bubble grows a little — absorbing the gap that
+                // sat above the provider/model selector row.
+                Box(
+                    modifier = Modifier
+                        .width(74.dp)
+                        .height(56.dp)
                 ) {
-                    AttachIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
-                }
+                    // Apex: CLI Agents terminal.
+                    IconButton(
+                        onClick = {
+                            view.performPressFeedback()
+                            onCliTerminal()
+                        },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .align(Alignment.TopCenter)
+                    ) {
+                        TerminalIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
+                    }
 
-                // Computer Use shortcut (right of attach — Brandon's circled
-                // spot, 2026-07-23): jump straight to the agent desktop.
-                IconButton(
-                    onClick = {
-                        view.performPressFeedback()
-                        onComputerUse()
-                    },
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    ComputerIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
+                    // Base-left: attach.
+                    IconButton(
+                        onClick = {
+                            view.performPressFeedback()
+                            onAttach()
+                        },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .align(Alignment.BottomStart)
+                    ) {
+                        AttachIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
+                    }
+
+                    // Base-right: Computer Use (jump straight to the agent desktop).
+                    IconButton(
+                        onClick = {
+                            view.performPressFeedback()
+                            onComputerUse()
+                        },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .align(Alignment.BottomEnd)
+                    ) {
+                        ComputerIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
+                    }
                 }
 
                 // Text field — ALWAYS visible (never swapped for the waveform).
