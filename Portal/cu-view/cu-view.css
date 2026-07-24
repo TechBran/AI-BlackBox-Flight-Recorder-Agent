@@ -203,7 +203,9 @@ body {
    transitions so the stage refit reads as a smooth resize. */
 #cuvNarrStream {
     flex: 0 0 auto;
-    height: 4.4em;                 /* ~3 lines at line-height 1.45 */
+    /* ~4 lines at line-height 1.45 — Brandon 2026-07-24 "three to four good
+       lines to show lively what's happening". */
+    height: 5.9em;
     overflow-y: auto;
     padding: 5px 10px 6px;
     color: #cdd;
