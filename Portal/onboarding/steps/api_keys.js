@@ -788,7 +788,6 @@ function renderCustomEditCard(row) {
 function renderCustomAddCard(row) {
     const rid = escapeHtml(String(row.id));
     const dis = row.busy ? "disabled" : "";
-    const canSubmit = !row.busy && row.alias.trim().length > 0 && row.base_url.trim().length > 0;
     return `
         <div class="ob-provider-card ob-custom-server-card" data-add-id="${rid}">
             <div class="ob-provider-header">
@@ -796,12 +795,12 @@ function renderCustomAddCard(row) {
                 <button type="button" class="ob-row-remove" data-action="add-discard" data-add-id="${rid}" ${dis} aria-label="Discard new server row">&times;</button>
             </div>
             <div style="${CUSTOM_FIELDS_STYLE}">
-                <label class="ob-field-label" for="ob-custom-new-alias-${rid}">Alias</label>
+                <label class="ob-field-label" for="ob-custom-new-alias-${rid}">Alias &mdash; required</label>
                 <input type="text" class="ob-provider-input" id="ob-custom-new-alias-${rid}"
                     data-field="alias" data-add-id="${rid}"
                     value="${escapeHtml(row.alias)}" placeholder="e.g. workstation-llama" maxlength="64"
                     autocomplete="off" autocapitalize="off" spellcheck="false" ${dis} />
-                <label class="ob-field-label" for="ob-custom-new-url-${rid}" style="${CUSTOM_LABEL_GAP_STYLE}">Base URL</label>
+                <label class="ob-field-label" for="ob-custom-new-url-${rid}" style="${CUSTOM_LABEL_GAP_STYLE}">Base URL &mdash; required</label>
                 <input type="text" class="ob-provider-input" id="ob-custom-new-url-${rid}"
                     data-field="base_url" data-add-id="${rid}"
                     value="${escapeHtml(row.base_url)}" placeholder="http://192.168.1.50:8080/v1"
@@ -819,7 +818,11 @@ function renderCustomAddCard(row) {
                     autocomplete="off" ${dis} />
             </div>
             <div class="ob-provider-configured-row">
-                <button type="button" class="ob-validate-btn" data-action="add-validate" data-add-id="${rid}" ${canSubmit ? "" : "disabled"}>Validate &amp; Add</button>
+                <!-- Always clickable (except mid-flight): a disabled-until-valid
+                     gate dead-ends users when autofill/paste sets a field
+                     without firing input events (Fold, 2026-07-24). The click
+                     handler re-reads the DOM and explains what's missing. -->
+                <button type="button" class="ob-validate-btn" data-action="add-validate" data-add-id="${rid}" ${dis}>Validate &amp; Add</button>
             </div>
             <div class="ob-provider-status" data-status="${escapeHtml(row.statusKind || "idle")}">${row.statusHtml || ""}</div>
         </div>
@@ -831,22 +834,22 @@ function wireCustomRows(container, state) {
     if (!rowsEl) return;
 
     // Field inputs → mutate state only (no rerender, so typing keeps focus).
+    // Wired to BOTH input and change: Android WebView autofill/paste can set a
+    // value firing only change (or neither — the submit paths re-read the DOM
+    // as a last-resort sync for exactly that case).
     rowsEl.querySelectorAll(".ob-provider-input[data-field]").forEach(input => {
-        input.addEventListener("input", () => {
+        const mirror = () => {
             const field = input.dataset.field;
             if (input.dataset.addId != null) {
                 const row = customState.adding.find(r => String(r.id) === input.dataset.addId);
-                if (!row) return;
-                row[field] = input.value;
-                // Toggle this card's Validate & Add without a rerender.
-                const card = input.closest("[data-add-id]");
-                const btn = card && card.querySelector('[data-action="add-validate"]');
-                if (btn) btn.disabled = row.busy || !(row.alias.trim() && row.base_url.trim());
+                if (row) row[field] = input.value;
             } else if (input.dataset.serverId) {
                 const row = customState.servers.find(r => r.server.id === input.dataset.serverId);
                 if (row && row.edit) row.edit[field] = input.value;
             }
-        });
+        };
+        input.addEventListener("input", mirror);
+        input.addEventListener("change", mirror);
     });
 
     // Action buttons (view + edit + add cards).
@@ -1060,6 +1063,14 @@ function startCustomEdit(row, container, state) {
 async function saveCustomEdit(row, container, state) {
     if (row.busy) return;
     const sv = row.server;
+    // Same autofill-proofing as validateAndAddCustomServer: re-read the edit
+    // card's inputs so values set without input/change events aren't lost.
+    const card = container.querySelector(`.ob-custom-server-card[data-server-id="${sv.id}"]`);
+    if (card && row.edit) {
+        card.querySelectorAll(".ob-provider-input[data-field]").forEach(input => {
+            row.edit[input.dataset.field] = input.value;
+        });
+    }
     const alias = (row.edit.alias || "").trim();
     const baseUrl = (row.edit.base_url || "").trim();
     const apiKey = (row.edit.api_key || "").trim();
@@ -1259,10 +1270,31 @@ async function removeCustomServer(row, container, state) {
 // the server may simply be powered off right now.
 async function validateAndAddCustomServer(row, container, state) {
     if (row.busy) return;
-    const alias = row.alias.trim();
-    const baseUrl = row.base_url.trim();
+    // DOM is the source of truth at submit time: autofill/paste can fill a
+    // field without firing input OR change events, leaving the mirrored state
+    // stale. Re-read this card's inputs before gating (rerenders repaint from
+    // state, so the sync also keeps the typed values alive through the error
+    // path below).
+    const card = container.querySelector(`[data-add-id="${row.id}"]`);
+    if (card) {
+        card.querySelectorAll(".ob-provider-input[data-field]").forEach(input => {
+            row[input.dataset.field] = input.value;
+        });
+    }
+    const alias = (row.alias || "").trim();
+    const baseUrl = (row.base_url || "").trim();
     const apiKey = (row.api_key || "").trim();
-    if (!alias || !baseUrl) return;
+    if (!alias || !baseUrl) {
+        const msg = !alias && !baseUrl
+            ? "Alias and Base URL are required"
+            : !alias
+                ? "Alias is required — give this server a short name"
+                : "Base URL is required — e.g. http://192.168.1.50:8080/v1";
+        setCustomStatus(row, "error", customErrorPill(msg));
+        rerenderCustom(container, state);
+        return;
+    }
+    setCustomStatus(row, "idle", "");
 
     // Context window: numbers only (parseInt + NaN reject with the field's
     // own error pill); blank = server default (32768).
