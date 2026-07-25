@@ -104,7 +104,26 @@ function makeSprite(size, r, g, b) {
     gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
     x.fillStyle = gr;
     x.fillRect(0, 0, size, size);
+    dither(x, size);
     return c;
+}
+// A 64px radial gradient magnified ~4x on a black backdrop is the textbook
+// banding case, and banding is the single most visible "cheap" artifact we have.
+// Triangular-distributed noise at ±1/255 breaks the flat bands into dither.
+// Paid ONCE at bake time (six sprites), zero per-frame cost.
+function dither(x, size) {
+    const img = x.getImageData(0, 0, size, size);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] === 0) continue;                     // leave fully transparent px alone
+        // Triangular PDF (sum of two uniforms) — flatter spectrum than uniform.
+        const n = (Math.random() + Math.random() - 1) * 1.5;
+        d[i] = Math.max(0, Math.min(255, d[i] + n));
+        d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n));
+        d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n));
+        d[i + 3] = Math.max(0, Math.min(255, d[i + 3] + n));
+    }
+    x.putImageData(img, 0, 0);
 }
 function ensureSprites() {
     if (EMBER_SPR) return;
@@ -236,14 +255,21 @@ class StarParticle {
         this.trail = []; this.life = 1; this.dead = false;
         if (initial) this.y = Math.random() * h * 1.5; // stagger the first fill
     }
-    update(time, active) {
+    // dt60 = elapsed frames at the 60 Hz reference (1.0 at 60 fps, 0.5 at 120 Hz).
+    // The physics constants below are expressed as per-60Hz-tick deltas — the
+    // original code integrated them once per FRAME, so the field ran ~2x fast on
+    // a 120 Hz display and crawled on a throttled tab. Multiplying the
+    // ACCUMULATING terms by dt60 is mathematically identical at 60 fps (dt60 = 1),
+    // so the approved look is preserved exactly, and correct everywhere else.
+    // `vy` is an assignment, not an accumulation, so it is deliberately unscaled.
+    update(time, active, dt60 = 1) {
         const w = this.layer._w, h = this.layer._h;
         const turbX = Math.sin(time * 0.0003 + this.oscillationOffset) * STAR_CONFIG.turbulence * 0.3;
         const turbY = Math.cos(time * 0.0004 + this.oscillationOffset) * STAR_CONFIG.turbulence * 0.15;
         const oscillation = Math.sin(time * this.oscillationSpeed + this.oscillationOffset) * this.oscillationAmplitude * 0.002;
-        this.vx += (turbX * 0.005 + oscillation - this.vx * 0.02);
+        this.vx += (turbX * 0.005 + oscillation - this.vx * 0.02) * dt60;
         this.vy = this.baseVy + turbY * 0.005;
-        this.x += this.vx; this.y += this.vy;
+        this.x += this.vx * dt60; this.y += this.vy * dt60;
         if (STAR_CONFIG.trailLength > 0) {
             this.trail.unshift({ x: this.x, y: this.y, size: this.size, opacity: this.opacity });
             if (this.trail.length > STAR_CONFIG.trailLength) this.trail.pop();
@@ -251,8 +277,11 @@ class StarParticle {
         const f1 = Math.sin(time * this.flickerSpeed + this.flickerOffset);
         const f2 = Math.sin(time * this.flickerSpeed * 0.7 + this.flickerOffset * 1.3);
         const flicker = (f1 + f2 * 0.5) / 1.5;
-        this.opacity += (this.baseOpacity * (0.7 + flicker * 0.3) - this.opacity) * 0.05;
-        this.size += (this.baseSize * (0.9 + flicker * 0.1) - this.size) * 0.05;
+        // Exponential approach — also a per-tick rate, so it scales with dt60 too
+        // (clamped: a long stall must not overshoot past the target).
+        const k = Math.min(1, 0.05 * dt60);
+        this.opacity += (this.baseOpacity * (0.7 + flicker * 0.3) - this.opacity) * k;
+        this.size += (this.baseSize * (0.9 + flicker * 0.1) - this.size) * k;
         if (this.y < h * 0.2) { this.life = this.y / (h * 0.2); this.opacity *= this.life; }
         if (this.y < -50 || this.x < -50 || this.x > w + 50) {
             if (active) this.reset(false); else this.dead = true;
@@ -270,9 +299,9 @@ class StarField {
         });
         this._spawned = true;
     }
-    update(time, active) {
+    update(time, active, dt60 = 1) {
         if (!this._spawned) this.spawn();
-        for (let i = 0; i < this.particles.length; i++) if (!this.particles[i].dead) this.particles[i].update(time, active);
+        for (let i = 0; i < this.particles.length; i++) if (!this.particles[i].dead) this.particles[i].update(time, active, dt60);
     }
     rearm() { this.particles.forEach(p => { if (p.dead) p.reset(false); p.dead = false; }); }
 }
@@ -306,12 +335,15 @@ function initStars() {
 }
 function drawStars(now, dt, isActive) {
     // Original compositing: full clear each frame + soft radial-gradient particles
-    // (source-over); trails are drawn explicitly by drawStarParticle. Motion is the
-    // original per-frame integration (not dt-scaled) to match the exact prior feel.
+    // (source-over); trails are drawn explicitly by drawStarParticle.
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, width, height);
     if (!starSim) initStars();
-    starSim.update(now, isActive !== false);
+    // Convert to 60 Hz reference ticks and clamp both ends, matching the shipped
+    // Android port (ParticleField.kt: (dtSec*60).coerceIn(0.25, 4)) so the two
+    // surfaces move at the same speed. Guards against a huge post-stall jump.
+    const dt60 = Math.max(0.25, Math.min(4, dt * 60));
+    starSim.update(now, isActive !== false, dt60);
     const ps = starSim.particles;
     for (let i = 0; i < ps.length; i++) if (!ps[i].dead) drawStarParticle(ctx, ps[i]);
 }
@@ -321,7 +353,10 @@ function drawStars(now, dt, isActive) {
 // =============================================================================
 let mCols = [], mSize = 16, mChars = [];
 function initMatrix() {
-    mSize = Math.max(13, Math.round(width / 78));
+    // Clamp BOTH ends. Only the floor existed, so on a wide monitor (width/78)
+    // ran away and produced giant coarse glyphs — the same "everything is huge"
+    // symptom as the canvas bug, from a different cause.
+    mSize = Math.max(13, Math.min(22, Math.round(width / 78)));
     const cols = Math.ceil(width / mSize);
     mCols = [];
     for (let i = 0; i < cols; i++) mCols.push({ y: Math.random() * -height, sp: mSize * (3 + Math.random() * 6), last: 0, glyph: null });
@@ -389,7 +424,21 @@ function ensureCanvas() {
     resize();
     resizeObs = new ResizeObserver(resize);
     resizeObs.observe(host);
+    watchDpr();
     return true;
+}
+// devicePixelRatio changes with no resize of the host box: dragging the window
+// to a different-density monitor, changing OS display scale, or browser page
+// zoom. resize() only ran from the host ResizeObserver, so the backing store
+// went stale (blurry) until some unrelated layout change happened to fire it.
+// A resolution media query is the documented way to observe this, and it must
+// re-register after each change because the query pins the OLD value.
+function watchDpr() {
+    if (typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    const onChange = () => { resize(); watchDpr(); };
+    if (typeof mql.addEventListener === 'function') mql.addEventListener('change', onChange, { once: true });
+    else if (typeof mql.addListener === 'function') mql.addListener(onChange);  // older Safari
 }
 function resize() {
     if (!canvas || !host) return;
