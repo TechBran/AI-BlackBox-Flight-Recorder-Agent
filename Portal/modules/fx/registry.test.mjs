@@ -118,17 +118,24 @@ test("a typo'd clearPolicy or blend fails at REGISTRATION, not at 60fps", () => 
 // 2. Unknown-id fallback
 // ---------------------------------------------------------------------------
 
-test("an unknown id falls back to Rising Stars", () => {
-    assert.equal(DEFAULT_EFFECT_ID, "stars");
-    assert.equal(resolveEffectId("nope"), "stars");
-    assert.equal(resolveEffectId(undefined), "stars");
-    assert.equal(resolveEffectId(null), "stars");
+test("an unknown id falls back to the shipped default", () => {
+    // Ledger Rain is the default (Brandon 2026-07-25: "it fits the black box
+    // aesthetic perfectly"). Asserted explicitly so a catalogue reorder cannot
+    // silently change what a fresh install opens on — the default is a decision,
+    // not whatever sits first in the list. Everything else here asserts the
+    // FALLBACK RELATIONSHIP against DEFAULT_EFFECT_ID rather than a literal, so
+    // changing the default again stays a one-line edit.
+    assert.equal(DEFAULT_EFFECT_ID, "ledger");
+    assert.equal(resolveEffectId("nope"), DEFAULT_EFFECT_ID);
+    assert.equal(resolveEffectId(undefined), DEFAULT_EFFECT_ID);
+    assert.equal(resolveEffectId(null), DEFAULT_EFFECT_ID);
     assert.equal(resolveEffectId("matrix"), "matrix", "a known id is passed through untouched");
+    assert.equal(resolveEffectId("stars"), "stars", "a known id is passed through untouched");
 });
 
 test("loadEffect on an unknown id resolves the fallback, not a rejection", async () => {
     const d = await loadEffect("does-not-exist");
-    assert.equal(d.id, "stars");
+    assert.equal(d.id, DEFAULT_EFFECT_ID);
 });
 
 // ---------------------------------------------------------------------------

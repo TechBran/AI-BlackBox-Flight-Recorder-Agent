@@ -50,7 +50,7 @@ class BlackBoxStore(private val context: Context) {
 
     // Particle FIELD style — "stars" / "embers" / "matrix" (default "stars").
     // Orthogonal to emberMode (which governs OFF/GENERATING/ALWAYS visibility).
-    val particleMode: Flow<String> = context.dataStore.data.map { it[KEY_PARTICLE_MODE] ?: "stars" }
+    val particleMode: Flow<String> = context.dataStore.data.map { it[KEY_PARTICLE_MODE] ?: "ledger" }
     suspend fun setParticleMode(value: String) { context.dataStore.edit { it[KEY_PARTICLE_MODE] = value } }
 
     // Particle INTENSITY — 0.25×…2.0× count multiplier (default 1.0 = today's field).

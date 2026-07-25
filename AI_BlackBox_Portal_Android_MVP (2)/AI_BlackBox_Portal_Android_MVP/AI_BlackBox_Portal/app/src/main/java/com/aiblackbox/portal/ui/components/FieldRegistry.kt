@@ -62,7 +62,7 @@ object FieldEffects {
     )
 
     /** The fallback effect — first in the catalogue, i.e. Rising Stars. */
-    val default: FieldEffect get() = CATALOGUE[0]
+    val default: FieldEffect get() = byId[ParticleMode.LEDGER] ?: CATALOGUE[0]
 
     private val byId: Map<String, FieldEffect> = CATALOGUE.associateBy { it.id }
 

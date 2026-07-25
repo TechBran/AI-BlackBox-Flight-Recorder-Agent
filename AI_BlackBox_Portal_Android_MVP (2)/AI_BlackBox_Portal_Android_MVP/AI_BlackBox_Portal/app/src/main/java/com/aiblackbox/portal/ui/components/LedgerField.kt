@@ -158,6 +158,11 @@ private const val LEDGER_SIZE_MAX = 1.2f
 /** Seconds for a freshly-resolved lead glyph to settle out of its flare. */
 private const val LEDGER_FLARE_T = 0.16f
 
+/** Flare for a ROUTINE noise character — a whisper. A full 1.0 here is what made
+ *  the field strobe; the full value is reserved for an id locking on or
+ *  completing, which are the only two moments worth drawing the eye. */
+private const val LEDGER_NOISE_FLARE = 0.18f
+
 /** Trail rows at/below this depth re-randomise (the tail dissolves to noise). */
 private const val LEDGER_DISSOLVE_AT = 6
 
@@ -507,11 +512,13 @@ class LedgerSim(
     /** Advance the column by one row: the next id character, or noise. */
     private fun pushGlyph(c: LedgerColumn) {
         val glyph: Int
+        var flareStrength = LEDGER_NOISE_FLARE
         if (c.word >= 0) {
             val seq = seqs[c.word]
             glyph = seq[c.wp++]
             if (c.wp >= seq.size) {                       // id complete → dissolve back into noise
                 c.word = -1; c.wp = 0
+                flareStrength = 1f                        // a finished id is worth a glow
                 c.gap = 2 + (rnd() * 9f).toInt()
                 // …and sometimes hold a beat, so a finished id can actually be read
                 // before it slides off the bottom.
@@ -521,11 +528,13 @@ class LedgerSim(
             glyph = LEDGER_NOISE[pickIndex(LEDGER_NOISE.size)]
             if (c.kind == LEDGER_KIND_LEDGER && --c.gap <= 0) {
                 c.word = pickIndex(seqs.size); c.wp = 0   // lock on
+                flareStrength = 1f                        // ...and so is one starting
             }
         }
         c.hp = (c.hp + 1) % LEDGER_MAX_TRAIL
         c.buf[c.hp] = glyph
-        c.flare = 1f                                      // fresh character resolves bright, then settles
+        // Routine noise barely glints; an id resolving or completing glows.
+        c.flare = flareStrength
     }
 
     /**
@@ -559,7 +568,14 @@ class LedgerSim(
             // SIZE = the shared curve × this column's OWN envelope depth.
             c.lb = ledgerBucket(ledgerSizeCurve(p) * c.envSize)
             c.tb = if (c.lb > 0) c.lb - 1 else 0          // trail one size step behind the head
-            val la = floor((0.62f + 0.38f * c.flare) * LEDGER_LEAD_STEPS).toInt() - 1
+            // Brandon on the Fold (2026-07-25): "it's like it's flickering at me".
+            // The lead glyph used to swing 0.62 -> 1.00 on EVERY character advance,
+            // a 38% brightness jump several times a second per column. That is a
+            // strobe, not a glint. The swing is now 18%, and a FULL flare is
+            // reserved for the moments that actually mean something (an id locking
+            // on or completing) — see advance(). Ledger Rain is the shipped default
+            // field, so it has to be restful to sit behind text all day.
+            val la = floor((0.82f + 0.18f * c.flare) * LEDGER_LEAD_STEPS).toInt() - 1
             c.la = la.coerceIn(0, LEDGER_LEAD_STEPS - 1)
             if (c.y > heightDp + c.tail) respawn(c, initial = false)
         }

@@ -3,6 +3,7 @@ package com.aiblackbox.portal
 import com.aiblackbox.portal.ui.components.EmberSim
 import com.aiblackbox.portal.ui.components.FieldEffects
 import com.aiblackbox.portal.ui.components.FirefliesSim
+import com.aiblackbox.portal.ui.components.LedgerSim
 import com.aiblackbox.portal.ui.components.MatrixSim
 import com.aiblackbox.portal.ui.components.ParticleMode
 import com.aiblackbox.portal.ui.components.StarSim
@@ -26,11 +27,11 @@ class ParticleFieldTest {
     private val scale = density / 3.1f
 
     // ── ParticleMode.parse — the persistence normalizer (the pinned logic) ──
-    @Test fun `parse defaults unknown and null to stars`() {
-        assertEquals(ParticleMode.STARS, ParticleMode.parse(null))
-        assertEquals(ParticleMode.STARS, ParticleMode.parse(""))
-        assertEquals(ParticleMode.STARS, ParticleMode.parse("bogus"))
-        assertEquals(ParticleMode.STARS, ParticleMode.parse("stars"))
+    @Test fun `parse defaults unknown and null to the shipped default`() {
+        assertEquals(FieldEffects.default.id, ParticleMode.parse(null))
+        assertEquals(FieldEffects.default.id, ParticleMode.parse(""))
+        assertEquals(FieldEffects.default.id, ParticleMode.parse("bogus"))
+        assertEquals(ParticleMode.STARS, ParticleMode.parse("stars"))   // a known id round-trips to ITSELF
     }
 
     @Test fun `parse normalizes case and whitespace`() {
@@ -69,12 +70,18 @@ class ParticleFieldTest {
     }
 
     @Test fun `an id from a newer build falls back instead of crashing`() {
-        // A stored value this build has never heard of must resolve to STARS —
-        // downgrading an install can never leave it with an unselectable field.
-        assertEquals(ParticleMode.STARS, ParticleMode.parse("holograms-v9"))
-        assertEquals(ParticleMode.STARS, FieldEffects.resolve("holograms-v9").id)
-        assertEquals(ParticleMode.STARS, FieldEffects.default.id)
-        assertTrue(newFieldSim("holograms-v9") is StarSim)
+        // A stored value this build has never heard of must resolve to the shipped
+        // DEFAULT — downgrading an install can never leave it with an unselectable
+        // field. (Asserted against FieldEffects.default rather than a literal, so
+        // changing the default is a one-line decision and not a test rewrite.)
+        assertEquals(FieldEffects.default.id, ParticleMode.parse("holograms-v9"))
+        assertEquals(FieldEffects.default.id, FieldEffects.resolve("holograms-v9").id)
+        // Ledger Rain is the shipped default (Brandon 2026-07-25: "it fits the
+        // black box aesthetic perfectly"). Asserted so a catalogue reorder cannot
+        // silently change what a fresh install opens on — the default is a
+        // decision, not whatever happens to sit at index 0.
+        assertEquals(ParticleMode.LEDGER, FieldEffects.default.id)
+        assertTrue(newFieldSim("holograms-v9") is LedgerSim)
     }
 
     @Test fun `the factory maps each shipped id to its own sim type`() {

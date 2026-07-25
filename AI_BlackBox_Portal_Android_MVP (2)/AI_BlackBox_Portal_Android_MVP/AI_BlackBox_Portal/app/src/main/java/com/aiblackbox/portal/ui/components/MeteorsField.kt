@@ -144,7 +144,15 @@ private const val TAU = 6.2831855f
 // and is deliberately NOT scaled by the count dial: a meteor field that got busy
 // at Ultra would stop being a meteor field.
 // -----------------------------------------------------------------------------
-internal const val METEOR_POOL = 8
+// Brandon, second pass on the Fold (2026-07-25): "the meteors are there, they
+// look great, but it doesn't happen enough." The first pass took the mean gap
+// from ~19s to ~4.7s, which was a big improvement and still too sparse to read
+// as an active field on a device you glance at. Now ~1.85s mean, so a meteor is
+// almost always either on screen or moments away, and showers are commoner.
+// The CHARACTER is unchanged and must stay so: a meteor is still a brief event
+// with a tapering tail, spawn-biased to the edges and out of the centre 40%
+// where reading happens — this is a busier sky, not a constant stream.
+internal const val METEOR_POOL = 10
 
 /**
  * Seconds of quiet before the FIRST streak of a session.
@@ -154,8 +162,8 @@ internal const val METEOR_POOL = 8
  * impression of this effect is a starfield and nothing else. Still an opening
  * BEAT — just one you can sit through.
  */
-internal const val METEOR_FIRST_MIN = 0.8f
-internal const val METEOR_FIRST_MAX = 3.0f
+internal const val METEOR_FIRST_MIN = 0.4f
+internal const val METEOR_FIRST_MAX = 1.4f
 
 /**
  * …and between every event after that.
@@ -166,11 +174,11 @@ internal const val METEOR_FIRST_MAX = 3.0f
  * meteor every few seconds, still an order of magnitude longer than the ≈0.4 s a
  * streak is actually on screen, which is what keeps it an EVENT and not a stream.
  */
-internal const val METEOR_SILENCE_MIN = 2.4f
-internal const val METEOR_SILENCE_MAX = 7.0f
+internal const val METEOR_SILENCE_MIN = 0.9f
+internal const val METEOR_SILENCE_MAX = 2.8f
 
 /** Occasionally 2-3 arrive in quick succession, then a longer lull. */
-internal const val METEOR_SHOWER_CHANCE = 0.16f
+internal const val METEOR_SHOWER_CHANCE = 0.26f
 internal const val METEOR_SHOWER_EXTRA = 2
 
 /** Spacing WITHIN a shower. Floored just above a dust streak's own lifetime so a

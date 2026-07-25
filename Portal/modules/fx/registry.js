@@ -33,7 +33,9 @@
 export const EFFECTS = new Map();
 
 /** Fallback for an unknown/absent persisted id. */
-export const DEFAULT_EFFECT_ID = 'stars';
+// Ledger Rain is the shipped default (Brandon 2026-07-25: "it fits the black box aesthetic perfectly").
+// It is a DEFAULT, not a lock-in — any operator selection persists and wins, and an existing install keeps whatever it already had, since a stored value is only ever replaced by the user.
+export const DEFAULT_EFFECT_ID = 'ledger';
 
 const NOOP = () => {};
 

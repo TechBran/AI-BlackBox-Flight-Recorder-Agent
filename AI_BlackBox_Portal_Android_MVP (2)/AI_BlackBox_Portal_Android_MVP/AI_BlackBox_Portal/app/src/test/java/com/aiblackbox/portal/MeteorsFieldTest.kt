@@ -312,9 +312,18 @@ class MeteorsFieldTest {
             for (i in 1 until b.size) gaps.add(b[i] - b[i - 1])
         }
         collect(long); collect(run(sim(seed = 5), 300f)); collect(run(sim(seed = 8), 300f))
-        assertTrue("there must be genuinely long silences, ${gaps.max()} s is not one", gaps.max() >= 5.0)
-        assertTrue("mean gap ${gaps.average()} s is a stream, not punctuation", gaps.average() >= 2.0)
-        assertTrue("mean gap ${gaps.average()} s is back to 'nothing is happening'", gaps.average() <= 6.0)
+        // Re-tuned AGAIN on 2026-07-25 after a second Fold pass: "the meteors are
+        // there, they look great, but it doesn't happen enough." The previous
+        // bounds (max >= 5 s, mean >= 2 s) encoded the FIRST correction and now
+        // contradict the second — this is the third data point from the device and
+        // it wins over a bound derived from the desktop-authored schedule.
+        // The "event, not a stream" half of the character is NOT weakened by this:
+        // it is guarded above by the duty-cycle assertion (a streak is on screen
+        // < 30% of frames), which is the assertion that would actually catch the
+        // field turning into a downpour.
+        assertTrue("there must still be quiet stretches, ${gaps.max()} s is not one", gaps.max() >= 2.4)
+        assertTrue("mean gap ${gaps.average()} s is a stream, not punctuation", gaps.average() >= 1.0)
+        assertTrue("mean gap ${gaps.average()} s is back to 'nothing is happening'", gaps.average() <= 3.2)
         assertTrue("showers exist: sometimes two arrive together", gaps.any { it < 2.0 })
     }
 
