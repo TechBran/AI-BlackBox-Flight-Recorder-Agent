@@ -1,30 +1,27 @@
 /**
  * ember-fx.js
- * Background particle FIELD for the chat backdrop — a three-mode field that
+ * Background particle FIELD for the chat backdrop — a selectable field that
  * fades in WHILE the AI is generating (text streaming, non-streaming polling,
  * agent-CLI, OR image/video/music) and gracefully drains when generation ends.
  * The single red "Signal" telemetry line renders in its OWN layer in FRONT of
  * this field (see docs/plans/2026-07-13-system-telemetry-stream-design.md).
  *
- * Three selectable fields (ported from the approved prototype, Appendix A of the
- * design doc — the-signal-prototype.html):
- *   - 'stars'   Rising Stars  — DEFAULT. Parallax depth layers, power-skewed
- *                 sizes, de-synced twinkle (per-star phase+speed), glow sprite
- *                 only on the brightest ~10%, crisp cores (clears each frame,
- *                 additive over the black .chat — identical compositing to the
- *                 field this replaces, so the default look does not regress).
- *   - 'embers'  Embers        — curl-noise divergence-free swirl, blackbody
- *                 white-hot→deep-red ramp by particle life, pre-rendered sprite
- *                 atlas drawn twice (faint glow + bright core) under additive
- *                 blend, heat-persistence smear, buoyancy + drag + sparks.
- *   - 'matrix'  Matrix        — column rain, translucent trail fade, bright
- *                 leading glyph + dim green trail, per-column speed variance,
- *                 katakana + digits.
+ * THIS FILE IS THE ENGINE, NOT THE EFFECTS. The fields themselves live in
+ * Portal/modules/fx/effects/ and are registered in fx/effects/index.js; the
+ * engine only ever talks to the registry (fx/registry.js). Adding a field is
+ * one module + one line in that index — never an edit here.
  *
- * The particle mode is ORTHOGONAL to the Off/While-generating/Always VISIBILITY
+ * What the engine owns, and no effect may touch:
+ *   - the canvas, its backing store and the DPR transform (fx/sizing.js)
+ *   - clearPolicy: how the previous frame is disposed of (clear / fade / none)
+ *   - blend: the compositing mode, which is PER-EFFECT (additive is right for
+ *     emissive fields and wrong for snow/fog, which blow out to white)
+ *   - the rAF loop, the generation-driven activation and the drain
+ *
+ * The particle field is ORTHOGONAL to the Off/While-generating/Always VISIBILITY
  * setting (that setting is unchanged; see `mode` / setMode / bb_ember_mode).
- * Particle mode persists in localStorage (bb_particle_mode) and is switched at
- * runtime via the exported setParticleMode(mode) (for a later settings UI).
+ * The selected field persists in localStorage (bb_particle_mode) and is switched
+ * at runtime via the exported setParticleMode(id).
  *
  * Design invariants preserved verbatim from the shipped generation-ember effect:
  *  - ONE <canvas id="emberCanvas"> mounted as the first child of
@@ -48,6 +45,14 @@
 // engine that had a shipped, invisible-at-dpr=1 bug and no test. See sizing.js
 // for why RESOLUTION (backingStore) and GEOMETRY (apparentScale) must stay apart.
 import { backingStore } from './fx/sizing.js';
+import { ensureSprites } from './fx/sprites.js';
+import {
+    DEFAULT_EFFECT_ID, createEnv, hasEffect, resolveEffectId, loadEffect, effectList,
+    applyClearPolicy, applyBlend, resetBlend,
+} from './fx/registry.js';
+// Catalogue only — stubs with a lazy loader. Importing this costs nothing but
+// the id/label table; no simulation code is fetched until a field is selected.
+import './fx/effects/index.js';
 
 // ---- Field tuning -----------------------------------------------------------
 // density/intensity are the two prototype tuning knobs; fixed to 1.0 here (no
@@ -61,7 +66,10 @@ const DRAIN_MAX_MS = 650;
 // =============================================================================
 const REASONS = new Set();   // active generation reasons (dom, media, manual…)
 let mode = 'always';         // VISIBILITY: 'off'|'generating'|'always' (bb_ember_mode)
-let particleMode = 'stars';  // FIELD: 'stars'|'embers'|'matrix' (bb_particle_mode)
+let particleMode = DEFAULT_EFFECT_ID;   // FIELD: an id from the registry (bb_particle_mode)
+let effect = null;           // the loaded descriptor for particleMode (null while importing)
+let wantedEffectId = null;   // the id whose import is in flight (guards a fast double switch)
+let pendingField = null;     // 'init' | 'rearm' — deferred until the module + canvas exist
 let host = null;             // <section class="chat">
 let canvas = null;
 let ctx = null;
@@ -77,59 +85,17 @@ let drainStartT = 0;         // rAF timestamp the current drain began (0 = not d
 let lastT = 0;               // rAF timestamp of the previous frame (delta timing)
 let surge = 0;               // load-reactivity (0 = calm baseline; no driver in this task)
 
+// The environment handed to every effect hook. rand/clock are injected here (not
+// reached for as globals inside effects) so effect physics can be driven from a
+// headless unit test with a seeded generator.
+const env = createEnv();
+
 const prefersReduced = typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 // Coarse-pointer (touch) halves particle counts. Evaluated ONCE at module load —
 // baseCount() runs every frame, so never create an MQL ~60×/s in the hot path.
 const coarsePointer = typeof window.matchMedia === 'function' &&
     window.matchMedia('(pointer:coarse)').matches;
-
-// =============================================================================
-// Pre-rendered sprite atlas — drawImage() instead of per-particle gradients
-// (the #1 perf win). Built lazily on first canvas init so a non-DOM import
-// (unit test / SSR) never touches document.
-// =============================================================================
-let EMBER_SPR = null;   // blackbody ramp: white-hot core → deep ember red
-let STAR_SPR = null;    // soft warm-white blob for the hero-star glow
-// blackbody-ish ember ramp: white-hot core -> deep ember red
-const RAMP = [[255, 255, 240], [255, 238, 150], [255, 182, 64], [255, 110, 22], [201, 44, 6], [92, 16, 5]];
-
-function makeSprite(size, r, g, b) {
-    const c = document.createElement('canvas');
-    c.width = c.height = size;
-    const x = c.getContext('2d');
-    const gr = x.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    gr.addColorStop(0, `rgba(${r},${g},${b},1)`);
-    gr.addColorStop(0.35, `rgba(${r},${g},${b},.5)`);
-    gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
-    x.fillStyle = gr;
-    x.fillRect(0, 0, size, size);
-    dither(x, size);
-    return c;
-}
-// A 64px radial gradient magnified ~4x on a black backdrop is the textbook
-// banding case, and banding is the single most visible "cheap" artifact we have.
-// Triangular-distributed noise at ±1/255 breaks the flat bands into dither.
-// Paid ONCE at bake time (six sprites), zero per-frame cost.
-function dither(x, size) {
-    const img = x.getImageData(0, 0, size, size);
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4) {
-        if (d[i + 3] === 0) continue;                     // leave fully transparent px alone
-        // Triangular PDF (sum of two uniforms) — flatter spectrum than uniform.
-        const n = (Math.random() + Math.random() - 1) * 1.5;
-        d[i] = Math.max(0, Math.min(255, d[i] + n));
-        d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n));
-        d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n));
-        d[i + 3] = Math.max(0, Math.min(255, d[i + 3] + n));
-    }
-    x.putImageData(img, 0, 0);
-}
-function ensureSprites() {
-    if (EMBER_SPR) return;
-    EMBER_SPR = RAMP.map(c => makeSprite(64, c[0], c[1], c[2]));
-    STAR_SPR = makeSprite(48, 255, 252, 246);
-}
 
 // =============================================================================
 // Shared field helpers
@@ -141,271 +107,51 @@ function baseCount() {
     if (coarsePointer) n *= 0.5;
     return Math.max(60, Math.min(n, 1200));
 }
-const emberScale = () => Math.max(0.4, Math.min(2.4, (width * height) / (1440 * 900))) * FIELD.density;
-
-// cheap 2-octave sine curl-noise potential ψ → divergence-free swirl
-function pot(x, y, t) {
-    return Math.sin(x * 0.0065 + t * 0.22) * Math.cos(y * 0.0065 - t * 0.16)
-        + 0.5 * Math.sin(x * 0.013 - t * 0.31) * Math.cos(y * 0.013 + t * 0.26);
-}
+// Viewport-area × density multiplier. Effects read it as env.scale rather than
+// recomputing it, so there is one definition of "how busy is this viewport".
+const fieldScale = () => Math.max(0.4, Math.min(2.4, (width * height) / (1440 * 900))) * FIELD.density;
 
 // =============================================================================
-// Field: EMBERS (curl-noise + blackbody ramp + additive sprites + smear)
+// Effect selection + lifecycle (the only dispatch in this file)
 // =============================================================================
-let embers = [];
-function spawnEmber(n) {
-    for (let i = 0; i < n; i++) {
-        const spark = Math.random() < 0.08, ml = 2.6 + Math.random() * 3.6; // long life → floats across
-        embers.push({
-            x: Math.random() * width, y: Math.random() * height,            // ANYWHERE on screen (not just the bottom)
-            vx: (Math.random() - 0.5) * 16, vy: -(4 + Math.random() * 14),   // gentle float, not a bottom jet
-            life: 1, decay: 1 / ml, r: spark ? (1.2 + Math.random() * 1.3) : (2.5 + Math.random() * 6),
-            spark, fade: Math.random() * 6.28, hue0: Math.floor(Math.random() * 3) // 0..2 varied warm heat
-        });
-    }
-}
-function drawEmbers(now, dt, isActive) {
-    const ts = now * 0.001;
-    // heat-persistence smear (soft glowing trails). NO bottom ground-glow — real
-    // embers float across the WHOLE screen, not a fireball at the base.
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = 'rgba(8,6,10,0.20)';
-    ctx.fillRect(0, 0, width, height);
-    // keep a full-screen population while generating (seeded full via initField)
-    if (isActive) {
-        const target = Math.round((150 + surge * 160) * emberScale());
-        let acc = (drawEmbers._a || 0) + (30 + surge * 90) * emberScale() * dt;
-        while (acc >= 1 && embers.length < target * 1.3) { spawnEmber(1); acc--; }
-        drawEmbers._a = acc;
-    }
-    ctx.globalCompositeOperation = 'lighter';
-    const eps = 3;
-    for (let i = embers.length - 1; i >= 0; i--) {
-        const p = embers[i];
-        p.life -= p.decay * dt;
-        if (p.life <= 0) { embers[i] = embers[embers.length - 1]; embers.pop(); continue; }
-        // curl-noise swirl (gentle) + slow float — drifts everywhere, doesn't jet up
-        const cvx = (pot(p.x, p.y + eps, ts) - pot(p.x, p.y - eps, ts));
-        const cvy = -(pot(p.x + eps, p.y, ts) - pot(p.x - eps, p.y, ts));
-        p.vx += cvx * 5200 * dt; p.vy += cvy * 5200 * dt;
-        p.vy -= 9 * p.life * dt;                   // gentle buoyancy (slow float up)
-        if (p.spark) p.vy += 60 * dt;              // sparks drift down a touch
-        p.vx *= (1 - 0.9 * dt); p.vy *= (1 - 0.9 * dt); // drag
-        p.x += p.vx * dt; p.y += p.vy * dt;
-        // wrap horizontally so the field stays full across the whole width
-        if (p.x < -20) p.x = width + 20; else if (p.x > width + 20) p.x = -20;
-        const breathe = 0.6 + 0.4 * Math.sin(ts * 1.3 + p.fade);          // soft per-ember flicker
-        const idx = p.spark ? 0 : Math.max(0, Math.min(RAMP.length - 1, p.hue0 + Math.round((1 - p.life) * 3)));
-        const spr = EMBER_SPR[idx];                                       // varied warm heat, cooling as it ages
-        const al = (p.spark ? 0.85 : 0.55) * Math.min(1, p.life * 1.4) * breathe * FIELD.intensity;
-        // faint big glow + bright core (cheap bloom)
-        const grr = p.r * (p.spark ? 3.5 : 4.2); ctx.globalAlpha = al * 0.22; ctx.drawImage(spr, p.x - grr, p.y - grr, grr * 2, grr * 2);
-        const cr = p.r * (p.spark ? 1.5 : 1.9); ctx.globalAlpha = al; ctx.drawImage(spr, p.x - cr, p.y - cr, cr * 2, cr * 2);
-    }
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-    if (embers.length > 3000) embers.splice(0, embers.length - 3000);
+function refreshEnv(now, dt) {
+    env.width = width; env.height = height; env.dpr = dpr;
+    env.now = now; env.dt = dt;
+    env.active = active;
+    env.scale = fieldScale();
+    env.intensity = FIELD.intensity;
+    env.surge = surge;
 }
 
-// =============================================================================
-// Field: RISING STARS — the ORIGINAL warm ember-rising field, restored verbatim
-// from the pre-3-mode engine (d125f05^). This is the look Brandon confirmed he
-// wants for "Rising Stars" ("I liked the way it looked before, it was perfect").
-// UI-free StarField of StarParticles, rendered via soft radial-gradient glow.
-// =============================================================================
-const STAR_CONFIG = {
-    layers: [
-        { count: 40, speed: 0.3, size: [0.5, 1], opacity: 0.25 }, // far / tiny
-        { count: 50, speed: 0.5, size: [1, 2],   opacity: 0.4  }, // mid / small
-        { count: 30, speed: 0.8, size: [1.5, 3], opacity: 0.7  }  // fore / medium
-    ],
-    colors: [
-        { r: 255, g: 74, b: 74 }, { r: 255, g: 120, b: 50 }, { r: 255, g: 180, b: 50 },
-        { r: 255, g: 220, b: 100 }, { r: 255, g: 250, b: 200 }
-    ],
-    colorWeights: [0.3, 0.3, 0.2, 0.15, 0.05],
-    glowIntensity: 10, turbulence: 0.6, riseSpeed: 0.8, flickerSpeed: 0.015, trailLength: 2
-};
-function starPickColor() {
-    const rand = Math.random(); let cumulative = 0;
-    for (let i = 0; i < STAR_CONFIG.colorWeights.length; i++) {
-        cumulative += STAR_CONFIG.colorWeights[i];
-        if (rand < cumulative) return STAR_CONFIG.colors[i];
-    }
-    return STAR_CONFIG.colors[0];
-}
-class StarParticle {
-    constructor(layer) { this.layer = layer; this.reset(true); }
-    reset(initial) {
-        const w = this.layer._w, h = this.layer._h;
-        this.x = Math.random() * w;
-        this.y = h + Math.random() * 100;
-        this.size = this.layer.size[0] + Math.random() * (this.layer.size[1] - this.layer.size[0]);
-        this.baseSize = this.size;
-        this.color = starPickColor();
-        this.vx = (Math.random() - 0.5) * 2 * this.layer.speed;
-        this.vy = -(0.5 + Math.random() * 0.5) * STAR_CONFIG.riseSpeed * this.layer.speed;
-        this.baseVy = this.vy;
-        this.oscillationOffset = Math.random() * Math.PI * 2;
-        this.oscillationSpeed = 0.005 + Math.random() * 0.008;
-        this.oscillationAmplitude = 5 + Math.random() * 10;
-        this.flickerOffset = Math.random() * Math.PI * 2;
-        this.flickerSpeed = STAR_CONFIG.flickerSpeed * (0.8 + Math.random() * 0.4);
-        this.opacity = this.layer.opacity; this.baseOpacity = this.layer.opacity;
-        this.trail = []; this.life = 1; this.dead = false;
-        if (initial) this.y = Math.random() * h * 1.5; // stagger the first fill
-    }
-    // dt60 = elapsed frames at the 60 Hz reference (1.0 at 60 fps, 0.5 at 120 Hz).
-    // The physics constants below are expressed as per-60Hz-tick deltas — the
-    // original code integrated them once per FRAME, so the field ran ~2x fast on
-    // a 120 Hz display and crawled on a throttled tab. Multiplying the
-    // ACCUMULATING terms by dt60 is mathematically identical at 60 fps (dt60 = 1),
-    // so the approved look is preserved exactly, and correct everywhere else.
-    // `vy` is an assignment, not an accumulation, so it is deliberately unscaled.
-    update(time, active, dt60 = 1) {
-        const w = this.layer._w, h = this.layer._h;
-        const turbX = Math.sin(time * 0.0003 + this.oscillationOffset) * STAR_CONFIG.turbulence * 0.3;
-        const turbY = Math.cos(time * 0.0004 + this.oscillationOffset) * STAR_CONFIG.turbulence * 0.15;
-        const oscillation = Math.sin(time * this.oscillationSpeed + this.oscillationOffset) * this.oscillationAmplitude * 0.002;
-        this.vx += (turbX * 0.005 + oscillation - this.vx * 0.02) * dt60;
-        this.vy = this.baseVy + turbY * 0.005;
-        this.x += this.vx * dt60; this.y += this.vy * dt60;
-        if (STAR_CONFIG.trailLength > 0) {
-            this.trail.unshift({ x: this.x, y: this.y, size: this.size, opacity: this.opacity });
-            if (this.trail.length > STAR_CONFIG.trailLength) this.trail.pop();
-        }
-        const f1 = Math.sin(time * this.flickerSpeed + this.flickerOffset);
-        const f2 = Math.sin(time * this.flickerSpeed * 0.7 + this.flickerOffset * 1.3);
-        const flicker = (f1 + f2 * 0.5) / 1.5;
-        // Exponential approach — also a per-tick rate, so it scales with dt60 too
-        // (clamped: a long stall must not overshoot past the target).
-        const k = Math.min(1, 0.05 * dt60);
-        this.opacity += (this.baseOpacity * (0.7 + flicker * 0.3) - this.opacity) * k;
-        this.size += (this.baseSize * (0.9 + flicker * 0.1) - this.size) * k;
-        if (this.y < h * 0.2) { this.life = this.y / (h * 0.2); this.opacity *= this.life; }
-        if (this.y < -50 || this.x < -50 || this.x > w + 50) {
-            if (active) this.reset(false); else this.dead = true;
-        }
-    }
-}
-class StarField {
-    constructor() { this.width = 0; this.height = 0; this.particles = []; this._spawned = false; }
-    resize(w, h) { this.width = w; this.height = h; this.particles.forEach(p => { p.layer._w = w; p.layer._h = h; }); }
-    spawn() {
-        this.particles = [];
-        STAR_CONFIG.layers.forEach(base => {
-            const layer = Object.assign({}, base, { _w: this.width, _h: this.height });
-            for (let i = 0; i < base.count; i++) this.particles.push(new StarParticle(layer));
-        });
-        this._spawned = true;
-    }
-    update(time, active, dt60 = 1) {
-        if (!this._spawned) this.spawn();
-        for (let i = 0; i < this.particles.length; i++) if (!this.particles[i].dead) this.particles[i].update(time, active, dt60);
-    }
-    rearm() { this.particles.forEach(p => { if (p.dead) p.reset(false); p.dead = false; }); }
-}
-function drawStarParticle(c, p) {
-    if (STAR_CONFIG.trailLength > 0) {
-        for (let i = 0; i < p.trail.length; i++) {
-            const t = p.trail[i];
-            const trailOpacity = t.opacity * (1 - i / STAR_CONFIG.trailLength) * 0.5;
-            const trailSize = t.size * (1 - i / STAR_CONFIG.trailLength);
-            c.beginPath(); c.arc(t.x, t.y, trailSize, 0, Math.PI * 2);
-            c.fillStyle = `rgba(${p.color.r},${p.color.g},${p.color.b},${trailOpacity})`; c.fill();
-        }
-    }
-    const g = c.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * STAR_CONFIG.glowIntensity);
-    g.addColorStop(0, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity * 0.8})`);
-    g.addColorStop(0.1, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity * 0.4})`);
-    g.addColorStop(0.4, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity * 0.1})`);
-    g.addColorStop(1, `rgba(${p.color.r},${p.color.g},${p.color.b},0)`);
-    c.beginPath(); c.arc(p.x, p.y, p.size * STAR_CONFIG.glowIntensity, 0, Math.PI * 2); c.fillStyle = g; c.fill();
-    const cg = c.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
-    cg.addColorStop(0, `rgba(255,255,255,${p.opacity})`);
-    cg.addColorStop(0.3, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity})`);
-    cg.addColorStop(1, `rgba(${p.color.r},${p.color.g},${p.color.b},0)`);
-    c.beginPath(); c.arc(p.x, p.y, p.size, 0, Math.PI * 2); c.fillStyle = cg; c.fill();
-}
-let starSim = null;
-function initStars() {
-    if (!starSim) starSim = new StarField();
-    starSim.resize(width, height);
-    starSim.spawn();
-}
-function drawStars(now, dt, isActive) {
-    // Original compositing: full clear each frame + soft radial-gradient particles
-    // (source-over); trails are drawn explicitly by drawStarParticle.
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.clearRect(0, 0, width, height);
-    if (!starSim) initStars();
-    // Convert to 60 Hz reference ticks and clamp both ends, matching the shipped
-    // Android port (ParticleField.kt: (dtSec*60).coerceIn(0.25, 4)) so the two
-    // surfaces move at the same speed. Guards against a huge post-stall jump.
-    const dt60 = Math.max(0.25, Math.min(4, dt * 60));
-    starSim.update(now, isActive !== false, dt60);
-    const ps = starSim.particles;
-    for (let i = 0; i < ps.length; i++) if (!ps[i].dead) drawStarParticle(ctx, ps[i]);
+// Apply a deferred init/rearm once BOTH the effect module and the canvas exist.
+// 'init' is a hard (re)build (mode switch); 'rearm' is the lazy revive used on
+// activation — per-effect semantics live in the descriptor, not here.
+function applyPendingField() {
+    if (!effect || !canvas || !pendingField) return;
+    refreshEnv(lastT, 0);
+    if (pendingField === 'init') effect.init(env);
+    else effect.rearm(env);
+    pendingField = null;
 }
 
-// =============================================================================
-// Field: MATRIX (column rain)
-// =============================================================================
-let mCols = [], mSize = 16, mChars = [];
-function initMatrix() {
-    // Clamp BOTH ends. Only the floor existed, so on a wide monitor (width/78)
-    // ran away and produced giant coarse glyphs — the same "everything is huge"
-    // symptom as the canvas bug, from a different cause.
-    mSize = Math.max(13, Math.min(22, Math.round(width / 78)));
-    const cols = Math.ceil(width / mSize);
-    mCols = [];
-    for (let i = 0; i < cols; i++) mCols.push({ y: Math.random() * -height, sp: mSize * (3 + Math.random() * 6), last: 0, glyph: null });
-    if (!mChars.length) {
-        for (let c = 0x30A0; c < 0x30FF; c++) mChars.push(String.fromCharCode(c)); // katakana
-        '0123456789ABCDEF<>*+'.split('').forEach(c => mChars.push(c));              // digits/symbols
-    }
-}
-function drawMatrix(now, dt) {
-    // translucent trail fade (green-black smear) → glowing falling trails
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = 'rgba(4,7,5,0.085)';
-    ctx.fillRect(0, 0, width, height);
-    ctx.font = `${mSize}px ui-monospace,monospace`;
-    ctx.textBaseline = 'top';
-    const k = (1 + surge * 0.8) * (0.6 + 0.6 * Math.min(emberScale(), 2));
-    // intensity is constant per frame → build both fillStyles ONCE, not per column.
-    const leadStyle = `rgba(200,255,210,${0.9 * FIELD.intensity})`;   // bright leading glyph
-    const trailStyle = `hsla(135,90%,55%,${0.5 * FIELD.intensity})`;  // dim green trail glyph
-    for (let i = 0; i < mCols.length; i++) {
-        const c = mCols[i], x = i * mSize;
-        if (now - c.last > 36) { c.glyph = mChars[(Math.random() * mChars.length) | 0]; c.last = now; }
-        ctx.fillStyle = leadStyle;
-        ctx.fillText(c.glyph || mChars[0], x, c.y);
-        ctx.fillStyle = trailStyle;
-        ctx.fillText(mChars[(i * 7 + ((now / 90) | 0)) % mChars.length], x, c.y - mSize);
-        c.y += c.sp * k * dt;
-        if (c.y > height + Math.random() * height * 0.3) { c.y = Math.random() * -40; c.sp = mSize * (3 + Math.random() * 6); }
-    }
-    ctx.globalCompositeOperation = 'source-over';
-}
-
-// =============================================================================
-// Field lifecycle
-// =============================================================================
-const DRAW = { stars: drawStars, embers: drawEmbers, matrix: drawMatrix };
-
-// (re)prepare the arrays for a given field. Called on init, on activation and
-// whenever the particle mode changes so switching re-inits the field cleanly.
-function initField(m) {
-    if (m === 'stars') initStars();
-    else if (m === 'matrix') initMatrix();
-    else if (m === 'embers') { embers = []; drawEmbers._a = 0; spawnEmber(Math.round(140 * emberScale())); }
-}
-// ensure the active field has state to draw (lazy — never resets a live field)
-function ensureFieldReady(m) {
-    if (m === 'stars') { if (!starSim || !starSim._spawned) initStars(); else starSim.rearm(); }
-    else if (m === 'matrix' && mCols.length === 0) initMatrix();
-    else if (m === 'embers' && embers.length === 0) spawnEmber(Math.round(140 * emberScale())); // seed full so it doesn't drip in
+// Lazily import the selected field. Returns a promise for callers that care;
+// the engine itself is fire-and-forget (the loop simply draws nothing until the
+// module lands, which is at most a frame or two behind the CSS fade-in).
+function useEffect(id) {
+    const wanted = resolveEffectId(id);
+    if (effect && effect.id === wanted) return Promise.resolve(effect);
+    wantedEffectId = wanted;
+    effect = null;
+    env.state = {};                       // each field owns its own scratch space
+    return loadEffect(wanted).then((d) => {
+        if (wantedEffectId !== wanted) return null;   // superseded by a newer selection
+        effect = d;
+        applyPendingField();
+        return d;
+    }).catch((err) => {
+        console.warn('[EmberFX] failed to load field "' + wanted + '"', err);
+        return null;
+    });
 }
 
 // =============================================================================
@@ -415,7 +161,7 @@ function ensureCanvas() {
     if (canvas) return true;
     host = document.querySelector('section.chat') || document.querySelector('.chat');
     if (!host) return false;
-    ensureSprites();
+    env.sprites = ensureSprites();
     canvas = document.createElement('canvas');
     canvas.id = 'emberCanvas';
     canvas.setAttribute('aria-hidden', 'true');
@@ -464,12 +210,9 @@ function resize() {
     canvas.style.width = w + 'px';
     canvas.style.height = h + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // Matrix column count is width-derived, so re-init it on resize — but ONLY when
-    // matrix is the live field. Stars self-heal in drawStars via the count check;
-    // embers self-fill from an empty array. Switching TO matrix re-inits via
-    // setParticleMode → initField (and ensureFieldReady on activation).
-    if (particleMode === 'matrix') initMatrix();
-    else if (particleMode === 'stars' && starSim) starSim.resize(width, height);
+    // Let the live field react (column counts, re-scatter…). Effects that don't
+    // care declare a no-op resize — the engine has no per-field knowledge.
+    if (effect) { refreshEnv(lastT, 0); effect.resize(env); }
 }
 function clearCanvas() {
     if (!ctx) return;
@@ -481,7 +224,17 @@ function loop(now) {
     if (document.hidden) { rafId = 0; return; }  // browser pauses rAF; bail cleanly
     let dt = (now - lastT) / 1000; lastT = now;
     dt = Math.min(dt, 0.05);                      // clamp so motion is frame-rate independent
-    (DRAW[particleMode] || drawStars)(now, dt, active);
+    if (effect) {
+        refreshEnv(now, dt);
+        effect.update(dt, env);
+        // The engine owns compositing: dispose of the last frame per the field's
+        // declared policy, select its blend, draw, then hand the context back
+        // neutral. No effect ever sets globalCompositeOperation itself.
+        applyClearPolicy(ctx, effect, env);
+        applyBlend(ctx, effect);
+        effect.draw(ctx, env);
+        resetBlend(ctx);
+    }
     surge *= Math.exp(-2.8 * dt);                 // decay load-reactivity toward calm
     // Bound the drain: once generation ends, keep animating through the CSS opacity
     // fade, then force-stop so the loop can't idle-spin. 'always' mode never enters
@@ -498,7 +251,7 @@ function loop(now) {
     rafId = requestAnimationFrame(loop);
 }
 function startLoop() {
-    lastT = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    lastT = env.clock();
     if (!running) { running = true; rafId = requestAnimationFrame(loop); }
     else if (!rafId) { rafId = requestAnimationFrame(loop); }
 }
@@ -512,8 +265,8 @@ function applyState() {
         if (prefersReduced) return;            // honor reduced-motion: no-op
         if (!ensureCanvas()) { active = false; return; }
         resize();
-        ensureFieldReady(particleMode);        // make sure the field has state
-        if (particleMode === 'embers') { embers = []; drawEmbers._a = 0; } // fresh rise each turn
+        pendingField = 'rearm';                // make sure the field has state
+        applyPendingField();                   // (deferred if the module is still loading)
         drainStartT = 0;
         canvas.classList.add('on');            // fade in (CSS opacity)
         startLoop();
@@ -547,26 +300,32 @@ function setMode(m) {
     }
 }
 
-// ---- PARTICLE mode: stars | embers | matrix (persisted, bb_particle_mode) ----
+// ---- PARTICLE field: any registered effect id (persisted, bb_particle_mode) --
+// ONE whitelist, derived from the registry (hasEffect). It used to be written
+// out three times — here, in setParticleMode and on the window.EmberFX surface —
+// and the three copies were free to drift.
 function loadParticleMode() {
     try {
         const m = localStorage.getItem('bb_particle_mode');
-        if (m === 'stars' || m === 'embers' || m === 'matrix') particleMode = m;
+        if (hasEffect(m)) particleMode = m;
     } catch (e) { /* private mode / disabled storage */ }
 }
-// EXPORTED setter so a settings UI (a later task) can switch fields live.
+function persistParticleMode(m) {
+    try { localStorage.setItem('bb_particle_mode', m); } catch (e) { /* private mode */ }
+}
+// EXPORTED setter so the settings UI can switch fields live.
 function setParticleMode(m) {
-    if (m !== 'stars' && m !== 'embers' && m !== 'matrix') return;
+    if (!hasEffect(m)) return;
     if (m === particleMode) return;
     particleMode = m;
-    try { localStorage.setItem('bb_particle_mode', m); } catch (e) {}
+    persistParticleMode(m);
     // Re-init the newly selected field and clear any residue (smear/trail) from
-    // the previous one so the switch is clean. If the loop is live it picks the
-    // new DRAW routine on the next frame; if idle, the next activation re-inits.
-    if (canvas) {
-        initField(m);
-        clearCanvas();
-    }
+    // the previous one so the switch is clean. The import is lazy, so the init
+    // is deferred until the module lands; if the loop is live it picks the new
+    // field on the next frame, and if idle the next activation rearms it.
+    pendingField = 'init';
+    useEffect(m);
+    if (canvas) { applyPendingField(); clearCanvas(); }
 }
 function getParticleMode() { return particleMode; }
 
@@ -594,7 +353,7 @@ function queueRecompute() {
 function onVisibility() {
     if (document.hidden) return;
     queueRecompute();                         // re-sync detection after returning
-    if (running && !rafId) { lastT = performance.now(); rafId = requestAnimationFrame(loop); } // resume render
+    if (running && !rafId) { lastT = env.clock(); rafId = requestAnimationFrame(loop); } // resume render
 }
 
 // ---- Public init ------------------------------------------------------------
@@ -609,14 +368,18 @@ export function initEmberFX() {
             markGenerating: () => {},
             setMode: (m) => { if (m === 'off' || m === 'generating' || m === 'always') { mode = m; try { localStorage.setItem('bb_ember_mode', m); } catch (e) {} } },
             getMode: () => mode,
-            setParticleMode: (m) => { if (m === 'stars' || m === 'embers' || m === 'matrix') { particleMode = m; try { localStorage.setItem('bb_particle_mode', m); } catch (e) {} } },
-            getParticleMode: () => particleMode,
+            setParticleMode: (m) => { if (hasEffect(m)) { particleMode = m; persistParticleMode(m); } },
+            getParticleMode,
+            listParticleModes: effectList,
             isActive: () => false,
             _reduced: true
         };
-        console.log('[EmberFX] prefers-reduced-motion — particle field disabled (mode=' + particleMode + ')');
+        console.log('[EmberFX] prefers-reduced-motion — particle field disabled (field=' + particleMode + ')');
         return;
     }
+    // Warm the selected field now (idle, off the critical path) so it is resident
+    // before the first generation rather than one import behind it.
+    useEffect(particleMode);
     const history = document.getElementById('history');
     const thinking = document.getElementById('thinkingIndicator');
     mutationObs = new MutationObserver(queueRecompute);
@@ -636,6 +399,7 @@ export function initEmberFX() {
         getMode: () => mode,
         setParticleMode,
         getParticleMode,
+        listParticleModes: effectList,   // [{id,label}] for a registry-driven picker
         isActive: () => active
     };
     // Apply the persisted VISIBILITY mode: 'always' forces-on; 'off'/'generating' sync from the DOM.
@@ -663,9 +427,11 @@ export function initEmberModeControl() {
     sync(); // reflect the initial selection (works even without :has() support)
 }
 
-// Reflect the persisted PARTICLE style into the settings radio group + drive
+// Reflect the persisted PARTICLE field into the settings radio group + drive
 // setParticleMode on change. Sibling of initEmberModeControl (same markup/idiom):
 // the ember-mode control governs VISIBILITY, this one governs the FIELD look.
+// (M5 replaces the hand-written radios with options generated from
+// window.EmberFX.listParticleModes(); this still works either way.)
 export function initParticleModeControl() {
     const radios = document.querySelectorAll('input[name="particleMode"]');
     if (!radios.length) return;
@@ -684,6 +450,6 @@ export function initParticleModeControl() {
     sync(); // reflect the initial selection (works even without :has() support)
 }
 
-// Exposed for a later settings UI / external drivers.
+// Exposed for the settings UI / external drivers.
 export { setParticleMode, getParticleMode };
 export default { initEmberFX, initEmberModeControl, initParticleModeControl, setParticleMode, getParticleMode };
