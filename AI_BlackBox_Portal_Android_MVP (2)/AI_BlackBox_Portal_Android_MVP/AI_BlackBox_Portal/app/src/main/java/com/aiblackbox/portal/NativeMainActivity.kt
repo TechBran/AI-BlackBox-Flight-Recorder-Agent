@@ -43,7 +43,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -55,6 +58,8 @@ import com.aiblackbox.portal.data.repository.TtsQueue
 import com.aiblackbox.portal.data.repository.TtsQueueFailedException
 import com.aiblackbox.portal.data.repository.TtsQueueUnavailableException
 import com.aiblackbox.portal.data.repository.TtsRepository
+import com.aiblackbox.portal.data.location.LocationPermissionUx
+import com.aiblackbox.portal.data.location.LocationProvider
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.voice.AudioRecorderManager
 import com.aiblackbox.portal.data.voice.SttEvent
@@ -312,6 +317,58 @@ class NativeMainActivity : ComponentActivity() {
                 // Raw audio recorder for Gemini audio analysis
                 val rawAudioRecorder = remember { AudioRecorderManager(applicationContext) }
                 var isRawAudioRecording by remember { mutableStateOf(false) }
+
+                // ─────────────────────────────────────────────────────────────
+                // M1 (2026-07-24) — location permission, asked ONCE, ever.
+                //
+                // The ask is deliberately decoupled from the send: tapping send fires
+                // the turn IMMEDIATELY and, in parallel, may surface this rationale.
+                // A prompt never waits on a permission dialog, and the turn that
+                // triggers the ask simply goes out without location (as does every
+                // turn, if the answer is no). LocationPermissionUx.shouldAsk holds the
+                // whole policy; the latch is written BEFORE the dialog appears, so
+                // dismissing it counts as the one ask we get — silent forever after.
+                // ─────────────────────────────────────────────────────────────
+                var showLocationRationale by remember { mutableStateOf(false) }
+                val locationPermLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { /* Silent either way. Granted → next turn carries location. Denied → never asked again. */ }
+                val maybeAskForLocation: () -> Unit = {
+                    scope.launch {
+                        runCatching {
+                            val attach = store.locationAttachEnabled.first()
+                            val asked = store.locationPermissionAsked.first()
+                            val granted = LocationProvider(applicationContext).hasPermission()
+                            if (LocationPermissionUx.shouldAsk(attach, granted, asked)) {
+                                store.setLocationPermissionAsked(true)
+                                showLocationRationale = true
+                            } else if (granted && !asked) {
+                                // Granted by some other route — burn the latch anyway.
+                                store.setLocationPermissionAsked(true)
+                            }
+                        }
+                    }
+                }
+                if (showLocationRationale) {
+                    AlertDialog(
+                        onDismissRequest = { showLocationRationale = false },
+                        title = { Text(LocationPermissionUx.RATIONALE_TITLE) },
+                        text = { Text(LocationPermissionUx.RATIONALE_BODY) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showLocationRationale = false
+                                runCatching {
+                                    locationPermLauncher.launch(LocationPermissionUx.REQUESTED_PERMISSIONS)
+                                }
+                            }) { Text(LocationPermissionUx.RATIONALE_CONFIRM) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showLocationRationale = false }) {
+                                Text(LocationPermissionUx.RATIONALE_DISMISS)
+                            }
+                        },
+                    )
+                }
 
                 // File attachments state
                 val attachments = remember { mutableStateListOf<AttachmentItem>() }
@@ -963,6 +1020,9 @@ class NativeMainActivity : ComponentActivity() {
                                     sttBaseBefore = ""
                                     sttBaseAfter = ""
                                 }
+                                // M1: first-use location ask. Fire-and-forget — it never
+                                // gates, delays, or blocks the send below.
+                                maybeAskForLocation()
                                 // Upload attachments first, then send message with URLs
                                 val hasAttachments = attachments.isNotEmpty()
                                 val hasPreUploaded = preUploadedUrls.isNotEmpty()

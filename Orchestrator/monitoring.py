@@ -287,6 +287,10 @@ def render_snapshot_body_v71(info: dict, snap_id: str, utc: str, reason: str,
     p = gauges.get("p", 0); c = gauges.get("c", 0); t = gauges.get("t", p + c)
     model = gauges.get("model", "")
     op_line = gauges.get("operator", current_operator())
+    # M1 location ride-along: pre-formatted "lat,lon · City, State" (or "").
+    # Absent/blank -> NO gauge line at all (a locationless turn's snapshot is
+    # byte-identical to what it was before this field existed).
+    location = str(gauges.get("location") or "").strip()
 
     gm = "yes" if provenance.get("gm", True) else "no"
     recent = provenance.get("recent", [])
@@ -301,6 +305,7 @@ def render_snapshot_body_v71(info: dict, snap_id: str, utc: str, reason: str,
     if show_drift:  gauges_lines.append(f"DRIFT: {drift}")
     if show_tokens: gauges_lines.append(f"TOKENS (since last mint): prompt={p}, completion={c}, total={t}")
     if inc_model and model: gauges_lines.append(f"MODEL: {model}")
+    if location: gauges_lines.append(f"LOCATION: {location}")
     gauges_lines += [f"OPERATOR: {op_line}", "MODE: Normal"]
 
     prov_lines = []

@@ -30,6 +30,19 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <!-- M1 (2026-07-24) — LOCATION RIDES ALONG WITH THE PROMPT.
+         Read ONCE at send time, on a turn the operator just took, and attached to that
+         request (data/location/LocationProvider.kt). NOT a tracking system: no polling,
+         no background service, no location history.
+         WHILE-IN-USE ONLY. ACCESS_BACKGROUND_LOCATION is DELIBERATELY ABSENT and must
+         stay absent — capture happens only in direct response to a send, so background
+         access buys nothing while carrying the heaviest Play Data Safety / review burden
+         Android has. Adding it is a design violation, not an enhancement.
+         COARSE alone is enough for "what's near me"; FINE is requested so a phone that
+         already grants precise location gives the better fix. Either one satisfies the
+         provider's permission check. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <!-- Storage permissions for downloading files -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>

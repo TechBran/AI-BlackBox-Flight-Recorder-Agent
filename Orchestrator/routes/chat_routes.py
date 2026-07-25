@@ -11,6 +11,7 @@ import base64
 import contextvars
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -37,6 +38,7 @@ from Orchestrator.fossils import extract_snap_ids, format_snapshot_for_delivery,
 from Orchestrator.media import get_recent_media_artifacts
 from Orchestrator.models import TaskType
 from Orchestrator.monitoring import drift_state_for
+from Orchestrator import location as user_location  # M1: per-turn location ride-along (pure, dependency-free)
 from Orchestrator.state import get_state, save_operator_state
 from Orchestrator.tasks import create_task, generate_prompt_slug, STREAM_EXCERPT
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
@@ -82,6 +84,54 @@ def _set_origin_device_id(value: Optional[str]) -> None:
     primary-device fallback path."""
     v = (value or "").strip()
     _ORIGIN_DEVICE_ID.set(v or None)
+
+
+# -----------------------------------------------------------------------------
+# M1 location ride-along (per-turn metadata, sibling of origin_device_id above).
+#
+# The phone attaches {lat, lon, city, state} to the prompt it was already
+# sending; one line is appended to the user text so it reaches the model AND the
+# conversation_log item the mint renders. NOT a tracking system: no polling, no
+# history, no location-minted snapshots.
+#
+# The streaming routes only STREAM — the client records the turn afterwards via
+# POST /chat/save, a separate request. This single-slot carry hands the turn's
+# location from the stream request to the save that records it. It is NOT a
+# location store: exactly one slot per operator, OVERWRITTEN by every stream
+# turn (including with None when the client sends none, so a Portal turn can
+# never inherit a phone turn's fix), consumed once, and expired after
+# _LOCATION_CARRY_TTL_S. An explicit `location` on /chat/save always wins.
+# -----------------------------------------------------------------------------
+_LOCATION_CARRY: Dict[str, tuple] = {}
+_LOCATION_CARRY_TTL_S = 900.0
+_LOCATION_CARRY_LOCK = threading.Lock()
+
+
+def _stash_turn_location(operator: str, loc: Optional[dict]) -> None:
+    """Record (or clear) the location for this operator's in-flight turn."""
+    try:
+        with _LOCATION_CARRY_LOCK:
+            if loc:
+                _LOCATION_CARRY[operator or ""] = (time.time(), loc)
+            else:
+                _LOCATION_CARRY.pop(operator or "", None)
+    except Exception:
+        pass
+
+
+def _take_turn_location(operator: str) -> Optional[dict]:
+    """Pop this operator's carried location (once). None when absent/stale."""
+    try:
+        with _LOCATION_CARRY_LOCK:
+            entry = _LOCATION_CARRY.pop(operator or "", None)
+        if not entry:
+            return None
+        stamped, loc = entry
+        if (time.time() - stamped) > _LOCATION_CARRY_TTL_S:
+            return None
+        return loc
+    except Exception:
+        return None
 
 
 # Pre-built tool lists for each provider (static fallback)
@@ -7310,6 +7360,18 @@ async def chat_stream(request: Request):
         # M3: originating device (self-reported by the Android app; Portal EventSource
         # leaves it unset → primary-device fallback). Request-scoped for the whole turn.
         _set_origin_device_id(request.query_params.get("origin_device_id"))
+        # M1: optional per-turn location, JSON-encoded query param (the Portal
+        # EventSource leaves it unset -> None -> perfect no-op). Untrusted input:
+        # normalize() validates and returns None for anything junk, and the whole
+        # parse is guarded — a bad location can never fail a chat turn.
+        turn_location = None
+        try:
+            _loc_raw = request.query_params.get("location")
+            if _loc_raw:
+                turn_location = user_location.normalize(json.loads(_loc_raw))
+        except Exception:
+            turn_location = None
+        _stash_turn_location(operator, turn_location)
 
         if not messages_json:
             return JSONResponse(status_code=400, content={"error": "messages parameter required"})
@@ -7354,6 +7416,12 @@ async def chat_stream(request: Request):
         context_messages, provenance, telemetry = build_streaming_context(messages, operator, provider,
                                                                window_guard_tokens=guard)
         telemetry["model"] = model
+
+        # M1: the location rides along INSIDE the user prompt block. Applied
+        # AFTER context building on purpose — retrieval/tool-injection queries
+        # stay byte-identical to today; only what the model reads changes.
+        # No location -> the same list object back -> perfect no-op.
+        context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
 
         async def generate_sse():
             """Generate SSE events from provider stream."""
@@ -7441,6 +7509,15 @@ async def chat_stream_post(request: Request):
         # Portal/MCP → None → operator's primary-device fallback. Request-scoped so it
         # threads into every tool executor built during this turn.
         _set_origin_device_id(body.get("origin_device_id"))
+        # M1: optional per-turn location object {lat, lon, city, state} sent by
+        # the Android app alongside the prompt. Absent (Portal/MCP/cron) -> None
+        # -> perfect no-op. Untrusted input: normalize() rejects anything junk.
+        turn_location = None
+        try:
+            turn_location = user_location.normalize(body.get("location"))
+        except Exception:
+            turn_location = None
+        _stash_turn_location(operator, turn_location)
 
         if not messages:
             return JSONResponse(status_code=400, content={"error": "messages required"})
@@ -7480,6 +7557,10 @@ async def chat_stream_post(request: Request):
         context_messages, provenance, telemetry = build_streaming_context(messages, operator, provider,
                                                                window_guard_tokens=guard)
         telemetry["model"] = model
+
+        # M1: location rides along inside the user prompt block (see the GET
+        # route). Applied after context building so retrieval stays unchanged.
+        context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
 
         async def generate_sse():
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
@@ -7618,6 +7699,21 @@ async def chat_save(request: Request):
         else:
             snap_text = assistant_response_unwrapped
 
+        # M1 location ride-along. The turn's location is whatever the client
+        # sent here, else the one carried from this turn's /chat/stream request
+        # (popped once). Appending it to `user_message` is what puts the line in
+        # the ledger: perform_mint renders conversation_log verbatim. Fully
+        # guarded — a location can never fail a save/mint. Absent -> unchanged
+        # text and an empty gauge, byte-identical to today.
+        turn_location = None
+        try:
+            carried = _take_turn_location(operator)  # always pop, never let one linger
+            turn_location = user_location.normalize(body.get("location")) or carried
+            if turn_location and user_message:
+                user_message = user_location.append_location_to_text(user_message, turn_location)
+        except Exception:
+            turn_location = None
+
         # Add to conversation log (this is what perform_mint reads from)
         if user_message:
             s.add_conversation_turn({"role": "user", "utc": utc_now, "text": user_message})
@@ -7632,6 +7728,12 @@ async def chat_save(request: Request):
 
         # Update context metadata for snapshot
         s.last_context_meta["model"] = model
+        # M1: the snapshot's LOCATION gauge value, threaded exactly like `model`
+        # (perform_mint reads it out of last_context_meta into `gauges`). Set
+        # UNCONDITIONALLY — "" for a locationless turn, so a phone turn's fix can
+        # never bleed into the next Portal turn's snapshot, and no gauge line is
+        # rendered at all.
+        s.last_context_meta["location"] = user_location.format_location_gauge(turn_location)
         s.last_context_meta["usage_last"] = {
             "prompt_tokens": tokens.get("prompt", 0),
             "completion_tokens": tokens.get("completion", 0),

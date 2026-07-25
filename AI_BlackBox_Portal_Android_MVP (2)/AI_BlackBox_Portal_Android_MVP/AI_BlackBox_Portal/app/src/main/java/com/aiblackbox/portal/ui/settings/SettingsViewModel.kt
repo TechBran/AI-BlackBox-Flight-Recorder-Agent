@@ -207,6 +207,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setEmberMode(value: String) { viewModelScope.launch { store.setEmberMode(value) } }
 
+    /**
+     * M1 — stop/resume attaching location to prompts WITHOUT touching the OS permission.
+     * Off is honoured immediately (ChatViewModel mirrors the flow), and no location is
+     * even read on the next send.
+     */
+    fun setLocationAttachEnabled(value: Boolean) {
+        viewModelScope.launch { store.setLocationAttachEnabled(value) }
+    }
+
     fun setParticleMode(value: String) { viewModelScope.launch { store.setParticleMode(value) } }
 
     fun setParticleIntensity(value: Float) { viewModelScope.launch { store.setParticleIntensity(value) } }

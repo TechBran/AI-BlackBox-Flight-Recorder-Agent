@@ -469,6 +469,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var currentProvider = "gemini"
     private var currentModel = ""
 
+    // M1 — send-time location capture. Lazy so a surface that never sends (and a JVM
+    // test that never touches it) never constructs it.
+    private val locationProvider by lazy {
+        com.aiblackbox.portal.data.location.LocationProvider(appContext)
+    }
+
+    // Mirrors BlackBoxStore.locationAttachEnabled. Defaults TRUE, but with no OS
+    // permission granted the provider still returns null — so a fresh install attaches
+    // nothing until the operator says yes.
+    private var locationAttachEnabled = true
+
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     init {
@@ -497,6 +508,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             launch { store.model.collect { currentModel = it } }
+            // M1: the operator's "attach location" switch, live. Flipping it in Settings
+            // takes effect on the very next send with no restart.
+            launch { store.locationAttachEnabled.collect { locationAttachEnabled = it } }
             // Task W5: track the active on-device model selection. When the user
             // picks a different installed model via the Model Manager ("Use"), the
             // chosen slug is persisted under "model_local"; honor it so
@@ -2050,14 +2064,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val originDeviceId = withContext(Dispatchers.IO) {
                     com.aiblackbox.portal.data.remote.TailnetAddress.localTailnetIpv4()
                 }
+                // M1 (2026-07-24): the operator's location RIDES ALONG with this prompt.
+                // Read once, here, at send time — never polled, never stored, never its
+                // own snapshot. Bounded by LocationProvider.CAPTURE_BUDGET_MS (~1s) and
+                // fully self-silencing: toggle off, permission denied, no fix, or any
+                // throw all give null, and a null location is a PERFECT NO-OP on the wire
+                // (the backend appends nothing and the turn is identical to today's).
+                // The outer runCatching is belt-and-braces — nothing about location may
+                // ever fail a chat turn.
+                // Off the main thread, same as the originDeviceId read above: the
+                // last-known-fix read is a binder call and the pre-API-33 Geocoder
+                // overload does real I/O.
+                val location = withContext(Dispatchers.IO) {
+                    runCatching { locationProvider.capture(locationAttachEnabled) }.getOrNull()
+                }
                 val flow = if (imageUrls.isEmpty()) {
                     repo.sendStream(text, history, currentOperator, currentProvider, currentModel.ifBlank { null },
                         sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera,
-                        originDeviceId = originDeviceId)
+                        originDeviceId = originDeviceId, location = location)
                 } else {
                     repo.sendStreamMultimodal(text, imageUrls, history, currentOperator, currentProvider, currentModel.ifBlank { null },
                         sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera,
-                        originDeviceId = originDeviceId)
+                        originDeviceId = originDeviceId, location = location)
                 }
 
                 flow.collect { event ->

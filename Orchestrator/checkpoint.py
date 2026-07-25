@@ -261,6 +261,10 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         c = usage_last.get("completion_tokens", 0)
         t = usage_last.get("total_tokens", p + c)
         model_name = s.last_context_meta.get("model", "")
+        # M1 location ride-along: same mechanism as `model` — the recording route
+        # stamps last_context_meta, the mint hands it to the renderer. "" (the
+        # default, and what a locationless turn writes) renders NO gauge line.
+        location_gauge = s.last_context_meta.get("location", "") or ""
         drift = drift_state_for(s)
 
         gm_flag = s.last_context_meta.get("gm_excerpt", True)
@@ -274,7 +278,8 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
 
         body = render_snapshot_body_v71(
             info1, snap_id, utc, reason, log_lines,
-            gauges={"drift": drift, "p": p, "c": c, "t": t, "model": model_name, "operator": operator},
+            gauges={"drift": drift, "p": p, "c": c, "t": t, "model": model_name, "operator": operator,
+                    "location": location_gauge},
             provenance={"gm": gm_flag, "recent": recent_ids, "relevant": relevant_ids},
         )
 
@@ -285,7 +290,8 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
             snap_id = next_snap_id_from_tail(info1["tail_id"])
             body = render_snapshot_body_v71(
                 info1, snap_id, utc, reason, log_lines,
-                gauges={"drift": drift, "p": p, "c": c, "t": t, "model": model_name, "operator": operator},
+                gauges={"drift": drift, "p": p, "c": c, "t": t, "model": model_name, "operator": operator,
+                        "location": location_gauge},
                 provenance={"gm": gm_flag, "recent": recent_ids, "relevant": relevant_ids},
             )
 
@@ -326,6 +332,10 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         arc_path, digest, arc_utc = archive_volume()
 
         s.last_mint_index = len(s.conversation_log)
+        # M1: the location belonged to the turn just minted — consume it, so a
+        # later mint on a route that never stamps one (cron /chat, CU, on-device)
+        # can never inherit a stale fix.
+        s.last_context_meta["location"] = ""
         s.conv_turns_since  = 0
         s.conv_tokens_since = 0
         s.ctx_tokens_since  = 0

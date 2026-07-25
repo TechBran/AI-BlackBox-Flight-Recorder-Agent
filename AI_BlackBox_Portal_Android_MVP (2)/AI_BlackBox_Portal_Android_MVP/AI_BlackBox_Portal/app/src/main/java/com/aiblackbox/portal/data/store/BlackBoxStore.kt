@@ -30,6 +30,8 @@ class BlackBoxStore(private val context: Context) {
         val KEY_PARTICLE_MODE = stringPreferencesKey("particle_mode")
         val KEY_PARTICLE_INTENSITY = floatPreferencesKey("particle_intensity")
         val KEY_PARTICLE_QUALITY = stringPreferencesKey("particle_quality")
+        val KEY_LOCATION_ATTACH = booleanPreferencesKey("location_attach")
+        val KEY_LOCATION_ASKED = booleanPreferencesKey("location_permission_asked")
     }
 
     // Origin (server URL)
@@ -68,6 +70,27 @@ class BlackBoxStore(private val context: Context) {
         context.dataStore.data.map { ParticleQuality.parse(it[KEY_PARTICLE_QUALITY]) }
     suspend fun setParticleQuality(value: String) {
         context.dataStore.edit { it[KEY_PARTICLE_QUALITY] = ParticleQuality.parse(value) }
+    }
+
+    // M1 — ATTACH LOCATION to the prompt (default ON, but inert until the OS permission
+    // is granted, so the effective default on a fresh install is still "no location").
+    // This is the operator's OWN switch, deliberately separate from the OS permission:
+    // turning it off stops attaching location WITHOUT making them dig through system
+    // settings to revoke, and turning it back on needs no re-prompt.
+    val locationAttachEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[KEY_LOCATION_ATTACH] ?: true }
+    suspend fun setLocationAttachEnabled(value: Boolean) {
+        context.dataStore.edit { it[KEY_LOCATION_ATTACH] = value }
+    }
+
+    // Have we ALREADY put the location permission prompt in front of this operator?
+    // Latched true the first time we ask and never reset, which is what makes a denial
+    // silent and PERMANENT: the app asks exactly once, ever, and afterwards the only way
+    // back is the operator's own trip to system settings. No nagging, by design.
+    val locationPermissionAsked: Flow<Boolean> =
+        context.dataStore.data.map { it[KEY_LOCATION_ASKED] ?: false }
+    suspend fun setLocationPermissionAsked(value: Boolean) {
+        context.dataStore.edit { it[KEY_LOCATION_ASKED] = value }
     }
 
     // CLI Agent Provider

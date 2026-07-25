@@ -4,6 +4,7 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.SSEClient
 import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.model.ChatMessage
+import com.aiblackbox.portal.data.location.UserLocation
 import com.aiblackbox.portal.data.model.HealthResponse
 import com.aiblackbox.portal.data.model.SaveRequest
 import com.aiblackbox.portal.data.model.StreamRequest
@@ -31,7 +32,8 @@ class ChatRepository(private val api: BlackBoxApi) {
         sessionId: String? = null,
         deviceId: String? = null,
         camera: String? = null,
-        originDeviceId: String? = null
+        originDeviceId: String? = null,
+        location: UserLocation? = null
     ): Flow<SSEEvent> {
         val messages = history + ChatMessage(
             role = "user",
@@ -45,7 +47,8 @@ class ChatRepository(private val api: BlackBoxApi) {
             sessionId = sessionId,
             deviceId = deviceId,
             camera = camera,
-            originDeviceId = originDeviceId
+            originDeviceId = originDeviceId,
+            location = location
         )
         val body = api.json.encodeToString(StreamRequest.serializer(), request)
         return sseClient.stream("/chat/stream", body)
@@ -64,7 +67,8 @@ class ChatRepository(private val api: BlackBoxApi) {
         sessionId: String? = null,
         deviceId: String? = null,
         camera: String? = null,
-        originDeviceId: String? = null
+        originDeviceId: String? = null,
+        location: UserLocation? = null
     ): Flow<SSEEvent> {
         val contentArray = buildJsonArray {
             add(buildJsonObject {
@@ -89,7 +93,8 @@ class ChatRepository(private val api: BlackBoxApi) {
             sessionId = sessionId,
             deviceId = deviceId,
             camera = camera,
-            originDeviceId = originDeviceId
+            originDeviceId = originDeviceId,
+            location = location
         )
         val body = api.json.encodeToString(StreamRequest.serializer(), request)
         return sseClient.stream("/chat/stream", body)

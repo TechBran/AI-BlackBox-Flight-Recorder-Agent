@@ -17,8 +17,8 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 24
-        versionName "1.6.3-ledger-default"
+        versionCode 25
+        versionName "1.7.0-location-rides-along"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }

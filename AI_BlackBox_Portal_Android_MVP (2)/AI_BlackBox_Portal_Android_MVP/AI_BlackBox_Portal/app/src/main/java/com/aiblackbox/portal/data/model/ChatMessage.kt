@@ -38,7 +38,15 @@ data class StreamRequest(
     // device-control tool triggered by THIS chat defaults to targeting THIS phone.
     // Null for surfaces that can't self-identify → backend falls back to the
     // operator's primary device (unchanged behavior).
-    @SerialName("origin_device_id") val originDeviceId: String? = null
+    @SerialName("origin_device_id") val originDeviceId: String? = null,
+    // M1 (2026-07-24): this phone's location AT SEND TIME, so the model can answer
+    // "what's near me" from the same turn and the ledger records it once, on the
+    // snapshot that turn already mints. Same seam and same rules as originDeviceId
+    // above — per-turn metadata, never its own subsystem.
+    // Null for every surface without a fix (Portal, CLI terminals, cron, denied
+    // permission, settings toggle off, no GPS lock inside the 1s budget) → the
+    // backend appends nothing and behavior is unchanged.
+    val location: com.aiblackbox.portal.data.location.UserLocation? = null
 )
 
 @Serializable

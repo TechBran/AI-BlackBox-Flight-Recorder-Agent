@@ -154,6 +154,15 @@ fun SettingsSheet(
         initial = com.aiblackbox.portal.ui.components.ParticleQuality.DEFAULT,
     )
 
+    // M1 — attach-location switch + the LIVE OS grant, so the caption can describe the
+    // effective state rather than implying the toggle alone is enough. Re-read on every
+    // recomposition (cheap, and it picks up a grant made in system settings without a
+    // restart); this is a read-only check — it never triggers a permission prompt.
+    val locationAttach by viewModel.store.locationAttachEnabled.collectAsState(initial = true)
+    val locationPermitted = remember(locationAttach) {
+        com.aiblackbox.portal.data.location.LocationProvider(context).hasPermission()
+    }
+
     val perProviderModel by viewModel.store.getString("model_$provider", "")
         .collectAsState(initial = "")
     val selectedModel = perProviderModel.ifBlank { currentModel }
@@ -880,6 +889,41 @@ fun SettingsSheet(
                 checked = streaming,
                 onCheckedChange = { viewModel.setStreamingEnabled(it) },
                 checkedColor = BbxAccent
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // M1 — Attach location (2026-07-24)
+            //
+            // The operator's OWN switch, separate from the OS permission on purpose:
+            // turning it off stops attaching location without a trip to system
+            // settings, and back on needs no re-prompt. Location is read once per
+            // send — there is no polling and no background service — so "off" here
+            // means nothing is read at all.
+            //
+            // The caption tells the TRUTH about the effective state: the toggle
+            // alone does nothing until Android has granted the permission, and if
+            // that was denied we say so quietly and point at system settings
+            // instead of re-prompting (asked once, ever — LocationPermissionUx).
+            // ══════════════════════════════════════════════════════════════
+            ToggleRow(
+                label = "Attach location to messages",
+                checked = locationAttach,
+                onCheckedChange = { viewModel.setLocationAttachEnabled(it) },
+                checkedColor = BbxAccent
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                if (!locationAttach) {
+                    "Off — nothing about your location leaves this device."
+                } else if (locationPermitted) {
+                    "Your city and coordinates ride along with each message you send, so the assistant can answer questions about where you are. Read at send time only."
+                } else {
+                    "Waiting on Android's location permission — grant it in system settings to start attaching."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
             )
 
             Spacer(Modifier.height(8.dp))
