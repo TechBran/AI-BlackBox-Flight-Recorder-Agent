@@ -79,6 +79,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -916,35 +921,77 @@ fun SettingsSheet(
             Spacer(Modifier.height(12.dp))
 
             // ══════════════════════════════════════════════════════════════
-            // Particle style — Rising Stars (default) / Embers / Matrix.
+            // Particle style — driven entirely by FieldEffects.CATALOGUE (see
+            // ui/components/FieldRegistry.kt); first entry is the default.
             // Orthogonal to the Ember Backdrop visibility setting above: this
             // picks the FIELD look; that decides WHEN it shows. Live-switches.
+            //
+            // IDIOM — a dropdown, deliberately, because the catalogue GROWS
+            // (4 → 13 → …) and this picker's footprint must not grow with it:
+            //   • SingleChoiceSegmentedButtonRow (what this was) is ONE
+            //     non-wrapping row. It was already cramped at 4 entries on a
+            //     968px cover screen and squeezes every label toward ellipsis
+            //     as entries are added — the failure this replaces.
+            //   • A FlowRow of FilterChips only moves that growth onto the
+            //     vertical axis: 13 effects is ~5 chip rows on a ~360dp-wide
+            //     screen and climbs with every effect, so one cosmetic setting
+            //     would out-weigh every functional control around it.
+            //   • SettingsDropdown is O(1) tall no matter how large the
+            //     catalogue gets, always shows the current selection on its
+            //     collapsed row, and is the SAME control Voice / Provider /
+            //     Model / Operator already use — so it inherits the sheet's
+            //     glass visual language for free, and its list renders in a
+            //     Popup (its own window, capped at 400dp and self-scrolling),
+            //     which the sheet's scroll container can never clip.
+            //
+            // NOTHING below is per-effect. Rows come from ParticleMode.ALL and
+            // ParticleMode.label(), both derived from the catalogue, so a new
+            // effect shows up here with zero edits to this file.
             // ══════════════════════════════════════════════════════════════
             SectionHeader("Particle style", BbxAccent)
-            val particleOptions = com.aiblackbox.portal.ui.components.ParticleMode.ALL.map { mode ->
-                mode to com.aiblackbox.portal.ui.components.ParticleMode.label(mode)
-            }
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                particleOptions.forEachIndexed { index, (value, label) ->
-                    SegmentedButton(
-                        selected = particleMode == value,
-                        onClick = { viewModel.setParticleMode(value) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = particleOptions.size),
-                        colors = SegmentedButtonDefaults.colors(
-                            activeContainerColor = BbxAccent.copy(alpha = 0.15f),
-                            activeContentColor = BbxAccent,
-                            activeBorderColor = BbxAccent.copy(alpha = 0.4f),
-                            inactiveContainerColor = Neutral100,
-                            inactiveContentColor = Neutral700,
-                            inactiveBorderColor = Neutral300,
-                        ),
-                        label = { Text(label, style = MaterialTheme.typography.bodyMedium) },
+
+            var showParticleMenu by remember { mutableStateOf(false) }
+            // parse() first: a stored id this build doesn't know falls back to the
+            // default, so the trigger row and the checked row always agree (the
+            // raw value could otherwise match no row while the label showed one).
+            val currentField = com.aiblackbox.portal.ui.components.ParticleMode.parse(particleMode)
+
+            SettingsDropdown(
+                label = "Particle style",
+                value = com.aiblackbox.portal.ui.components.ParticleMode.label(currentField),
+                expanded = showParticleMenu,
+                onExpandedChange = { showParticleMenu = it },
+            ) {
+                com.aiblackbox.portal.ui.components.ParticleMode.ALL.forEach { value ->
+                    val isSelected = currentField == value
+                    DropdownMenuItem(
+                        // TalkBack reads the checked row as "selected"; the ✓ says
+                        // the same thing in SHAPE, so the choice survives colour
+                        // blindness and high-contrast/greyscale modes.
+                        modifier = Modifier.semantics { selected = isSelected },
+                        text = {
+                            Text(
+                                com.aiblackbox.portal.ui.components.ParticleMode.label(value),
+                                color = if (isSelected) BbxAccent else BbxWhite,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        },
+                        trailingIcon = if (isSelected) {
+                            { Text("✓", color = BbxAccent) }
+                        } else null,
+                        onClick = {
+                            feedback()
+                            viewModel.setParticleMode(value)
+                            showParticleMenu = false
+                        },
                     )
                 }
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                "Rising Stars drift, Embers glow, Matrix rains.",
+                // Catalogue-agnostic on purpose: naming effects here would be a
+                // per-effect hard-code that silently rots as the list grows.
+                "Pick the look of the field. Takes effect immediately.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = BbxDim,
             )
@@ -1318,7 +1365,7 @@ private fun CollapsibleSection(
 /** Settings dropdown — glass-styled dropdown for Voice, Provider, Model, Operator */
 @Composable
 private fun SettingsDropdown(
-    @Suppress("unused") label: String,
+    label: String,
     value: String,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
@@ -1329,10 +1376,21 @@ private fun SettingsDropdown(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // A11y: `label` was previously unused, so screen readers got only
+                // the bare value plus the "▾" glyph read as its own anonymous node
+                // ("black down-pointing small triangle"). Merging one labelled
+                // DropdownList node fixes that for EVERY caller (Voice, Provider,
+                // Model, Operator, Particle style) — announcement only, no pixels
+                // move. Focus + Enter/Space activation come free with clickable,
+                // which is what makes this reachable from a hardware keyboard.
+                .semantics {
+                    contentDescription = "$label, $value"
+                    stateDescription = if (expanded) "Expanded" else "Collapsed"
+                }
                 .clip(RoundedCornerShape(RadiusMd))
                 .background(Neutral200)
                 .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
-                .clickFeedback { onExpandedChange(true) }
+                .clickFeedback(role = Role.DropdownList) { onExpandedChange(true) }
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {

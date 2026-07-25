@@ -3,8 +3,9 @@ package com.aiblackbox.portal.ui.components
 // =============================================================================
 // EmberParticles — the background particle-FIELD overlay shown behind the chat
 // and the generation screens. Historically an ember-only effect; it is now the
-// mount point for the switchable 3-mode field (Rising Stars / Embers / Matrix,
-// see ParticleField.kt). This file owns only:
+// mount point for the switchable field catalogue (Rising Stars / Embers / Matrix
+// / Fireflies / …, registered in FieldRegistry.kt, engine in ParticleField.kt).
+// This file owns only:
 //   • EmberMode / LocalEmberMode  — the OFF/GENERATING/ALWAYS VISIBILITY setting
 //     (unchanged; the persisted `ember_mode` preference).
 //   • EmberOverlay / EmberBackdrop — the Compose layers + the battery-safe frame
@@ -140,9 +141,14 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
 
     val density = LocalDensity.current
     val scale = density.density / FIELD_REFERENCE_DENSITY
-    // Pre-bake the sprite atlas ONCE per density (never in the hot loop).
-    val sprites = remember(density) { buildFieldSprites(density) }
+    // The per-effect RESOURCE BAG: shared sprite atlas (baked lazily, once) plus
+    // whatever private assets this effect bakes. Keyed on (density, effect) so a
+    // look never inherits the previous one's assets and an effect that needs no
+    // atlas (matrix) never pays to bake one. Never touched in the hot loop.
+    val res = remember(density, particleMode) { FieldResources(density) }
     // Reusable draw-phase scratch (sprite paint + matrix glyph paint + dst rect).
+    // PER-OVERLAY, deliberately: it holds a MUTABLE Paint/RectF and sharing it
+    // between two overlays would let one frame's alpha leak into another's.
     val paints = remember { FieldPaints() }
     // Fresh sim per FIELD mode (and per count multiplier) → switching either
     // re-inits cleanly with no residue.
@@ -227,7 +233,7 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
                     // Reading the frame clock HERE invalidates only the DRAW phase
                     // (never recomposition) each animation frame.
                     val nowMs = frame.longValue / 1_000_000.0
-                    drawParticleField(sim, sprites, paints, nowMs)
+                    drawParticleField(sim, res, paints, nowMs)
                 }
             },
     )

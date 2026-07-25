@@ -1,8 +1,8 @@
 package com.aiblackbox.portal.ui.components
 
 // =============================================================================
-// ParticleField — the 3-mode background particle field behind the chat + the
-// generation screens. A faithful native port of the web module
+// ParticleField — the ENGINE for the background particle field behind the chat +
+// the generation screens. A faithful native port of the web module
 //   Portal/modules/ember-fx.js
 // which itself implements Appendix A of
 //   docs/plans/2026-07-13-system-telemetry-stream-design.md
@@ -19,6 +19,16 @@ package com.aiblackbox.portal.ui.components
 //                drag + sparks, ground heat-glow.
 //   • matrix  Matrix        — column rain, bright leading glyph + fading green
 //                trail, per-column speed variance, katakana + digits.
+//   • …plus everything else registered in FieldRegistry.kt (fireflies, …).
+//
+// THE TWO SEAMS (added 2026-07-24 so the catalogue can grow without this file
+// growing with it — see ADDING_AN_EFFECT.md):
+//   • RENDERER   a sim carries its own drawing (FieldSim.render, a DrawScope
+//                member extension). There is NO central `when (sim)` type-switch
+//                any more; adding an effect never edits this file.
+//   • REGISTRY   the id/label/factory catalogue lives in FieldRegistry.kt and is
+//                the ONE place an effect is registered. ParticleMode.ALL/parse/
+//                label and newFieldSim all derive from it.
 //
 // Architecture (all performance-first, per Appendix A):
 //   • ONE Compose Canvas per overlay reads a frame clock (mutableLongState) so
@@ -62,34 +72,8 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-// =============================================================================
-// ParticleMode — the persisted FIELD look, and the CompositionLocal that carries
-// it down to EmberOverlay (provided ONCE at the activity root from the
-// `particle_mode` preference; default STARS). Orthogonal to EmberMode, which
-// governs OFF/GENERATING/ALWAYS visibility.
-// =============================================================================
-object ParticleMode {
-    const val STARS = "stars"
-    const val EMBERS = "embers"
-    const val MATRIX = "matrix"
-
-    /** Persisted values in preferred display order (drives the settings picker). */
-    val ALL = listOf(STARS, EMBERS, MATRIX)
-
-    /** Normalize any stored/legacy value to a known mode; unknown/null → STARS. */
-    fun parse(raw: String?): String = when (raw?.trim()?.lowercase()) {
-        EMBERS -> EMBERS
-        MATRIX -> MATRIX
-        else -> STARS
-    }
-
-    /** Human label for the picker. */
-    fun label(mode: String): String = when (parse(mode)) {
-        EMBERS -> "Embers"
-        MATRIX -> "Matrix"
-        else -> "Rising Stars"
-    }
-}
+// (ParticleMode — the persisted FIELD look — now lives in FieldRegistry.kt,
+//  derived from the effect catalogue instead of restating it.)
 
 /** Provided once at the activity root from the persisted setting; read by EmberOverlay. */
 val LocalParticleMode = staticCompositionLocalOf { ParticleMode.STARS }
@@ -114,10 +98,16 @@ internal val FIELD_BLEND =
     if (android.os.Build.VERSION.SDK_INT < 28) BlendMode.SrcOver else BlendMode.Plus
 
 // =============================================================================
-// FieldSim — the UI-free contract every field implements. resize/update/rearm
-// touch only plain Kotlin state (no Compose types) so they run in JVM tests.
+// FieldSim — the contract every field implements.
+//
+// resize/update/rearm touch only plain Kotlin state (no Compose types) so the
+// PHYSICS runs in JVM tests. `render` is the drawing seam: a sim carries its own
+// draw routine, so the engine dispatches virtually and adding an effect never
+// edits a central switch. It is a DrawScope member extension, which means the
+// body reads exactly like the old top-level `DrawScope.drawX(...)` helpers
+// (drawSpriteF, drawContext.canvas.nativeCanvas, …) with no plumbing.
 // =============================================================================
-sealed interface FieldSim {
+interface FieldSim {
     /** Set the field size + DPI. Spawns lazily on the first valid size; a size
      *  change grows/trims (or rebuilds) in place — never a full re-scatter of a
      *  live field on a no-op resize (the Canvas calls this every frame). */
@@ -129,22 +119,32 @@ sealed interface FieldSim {
 
     /** Fresh start on a new activation (embers clear so each turn rises fresh). */
     fun rearm()
+
+    /**
+     * Draw the CURRENT state. Called once per frame from the Canvas draw phase;
+     * must never mutate simulation state (that is [update]'s job) and must never
+     * allocate. [res] is the per-(density, effect) resource bag — take what you
+     * need from it OUTSIDE the particle loop; [paints] is the per-overlay scratch.
+     */
+    fun DrawScope.render(res: FieldResources, paints: FieldPaints, nowMs: Double)
 }
 
-/**
- * Build the sim for a mode. Unknown modes resolve to STARS via ParticleMode.parse.
- *
- * [countScale] is the combined intensity × quality particle-count multiplier
- * (see ParticleTuning). It is a CONSTRUCTOR parameter, not mutable state: the
- * budget is baked into pool sizes at spawn, so EmberOverlay keys `remember` on it
- * and a change builds a fresh sim — the same clean re-init a mode switch gets.
- * Defaults to 1.0 (today's counts) so every existing call site is unchanged.
- */
-fun newFieldSim(mode: String, countScale: Float = 1f): FieldSim = when (ParticleMode.parse(mode)) {
-    ParticleMode.EMBERS -> EmberSim(countScale)
-    ParticleMode.MATRIX -> MatrixSim(countScale)
-    else -> StarSim(countScale)
+// =============================================================================
+// FieldRandom — the injectable randomness seam (the Kotlin twin of the web
+// engine's `env.rand`). A `fun interface` returning a primitive Double, so a
+// seeded generator can drive a sim from a JVM test with ZERO boxing in the hot
+// path — which `() -> Double` would not give you.
+//
+// The three shipped sims predate this and call Math.random() directly; NEW
+// effects should take a FieldRandom so their physics is reproducible under test.
+// =============================================================================
+fun interface FieldRandom {
+    /** Uniform in [0, 1), exactly like Math.random(). */
+    fun next(): Double
 }
+
+/** Production randomness. The default for every effect factory. */
+val SystemFieldRandom = FieldRandom { Math.random() }
 
 // =============================================================================
 // Sprite atlas — pre-baked radial blobs (ImageBitmap) so the hot draw loop never
@@ -213,7 +213,7 @@ class FieldPaints {
  * the same, just no longer rounded); a floor of 1 px keeps the tiniest trail
  * sprites from thinning out.
  */
-private fun DrawScope.drawSpriteF(
+internal fun DrawScope.drawSpriteF(
     bmp: android.graphics.Bitmap,
     cx: Float,
     cy: Float,
@@ -259,6 +259,51 @@ fun buildFieldSprites(density: Density): FieldSprites = FieldSprites(
     ember = RAMP.map { buildRadialSprite(it[0], it[1], it[2], density) },
     star = buildRadialSprite(255, 252, 246, density),
 )
+
+/**
+ * Bake ONE radial sprite in an arbitrary colour, for an effect that needs a blob
+ * the shared warm atlas doesn't have (a cold-blue snowflake, a green glyph glow).
+ * Call it from [FieldResources.bake] so the result is memoized per (density,
+ * effect) — NEVER from a draw or update loop.
+ */
+fun bakeRadialSprite(r: Int, g: Int, b: Int, density: Density): ImageBitmap =
+    buildRadialSprite(r, g, b, density)
+
+// =============================================================================
+// FieldResources — the PER-EFFECT resource bag, built once per (density, effect)
+// by EmberOverlay and reused for every frame of that effect's life.
+//
+// Why a bag and not one growing struct: each new effect wants its own baked
+// asset, and stuffing them all into FieldSprites would make every effect pay the
+// memory + bake cost of every other effect's assets. So:
+//   • [atlas]  the SHARED warm blackbody ramp + white-hot star sprite. Lazy, so a
+//              field that never touches it (matrix) never bakes 7 bitmaps.
+//   • [bake]   effect-private assets, memoized under a string key you own.
+//
+// NOT thread-safe and deliberately so — everything here is touched only from the
+// Compose draw phase (one thread). Keep FieldPaints separate and PER-OVERLAY: it
+// holds a MUTABLE scratch Paint/RectF and must never be shared between overlays.
+// =============================================================================
+class FieldResources(private val density: Density) {
+    /** The shared ember-ramp + star atlas. Baked on first use, then reused. */
+    val atlas: FieldSprites by lazy(LazyThreadSafetyMode.NONE) { buildFieldSprites(density) }
+
+    private val extras = HashMap<String, Any>()
+
+    /**
+     * Fetch (baking on first request) an effect-private resource.
+     *
+     * ```kotlin
+     * val flake = res.bake("snow.flake") { d -> bakeRadialSprite(214, 236, 255, d) }
+     * ```
+     * Key it with your effect id so two effects can never collide. The lookup is
+     * allocation-free but is still a hash probe — hoist it ABOVE the particle
+     * loop, once per frame.
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Any> bake(key: String, build: (Density) -> T): T =
+        extras.getOrPut(key) { build(density) } as T
+}
 
 // =============================================================================
 // Field: RISING STARS — the ORIGINAL warm rising-ember field, restored from the
@@ -388,6 +433,9 @@ class StarSim(countScale: Float = 1f) : FieldSim {
         for (p in parts) if (!p.dead) return   // only re-stagger once fully drained
         for (p in parts) { p.reset(width, height, scale); p.y = (Math.random() * height * 1.5).toFloat() }
     }
+
+    override fun DrawScope.render(res: FieldResources, paints: FieldPaints, nowMs: Double) =
+        drawStars(this@StarSim, res.atlas, paints, nowMs)
 }
 
 private fun DrawScope.drawStars(sim: StarSim, sprites: FieldSprites, paints: FieldPaints, nowMs: Double) {
@@ -524,6 +572,9 @@ class EmberSim(countScale: Float = 1f) : FieldSim {
         spawnAcc = 0f
         seedFull()   // refill the whole screen on re-activation
     }
+
+    override fun DrawScope.render(res: FieldResources, paints: FieldPaints, nowMs: Double) =
+        drawEmbers(this@EmberSim, res.atlas.emberNative, paints, nowMs)
 }
 
 private fun DrawScope.drawEmbers(
@@ -613,6 +664,9 @@ class MatrixSim(countScale: Float = 1f) : FieldSim {
     }
 
     override fun rearm() { /* matrix rains continuously; nothing to reset */ }
+
+    override fun DrawScope.render(res: FieldResources, paints: FieldPaints, nowMs: Double) =
+        drawMatrix(this@MatrixSim, paints.matrix, nowMs)
 }
 
 private fun argb(a: Float, r: Int, g: Int, b: Int): Int =
@@ -649,17 +703,16 @@ private fun DrawScope.drawMatrix(sim: MatrixSim, paint: android.graphics.Paint, 
 }
 
 // =============================================================================
-// Dispatch — one entry point the Canvas calls; picks the draw routine per mode.
+// Dispatch — one entry point the Canvas calls. It is a VIRTUAL call into the
+// sim's own renderer, deliberately: the old `when (sim)` type-switch meant every
+// new effect had to edit this file, and forgetting the branch drew nothing with
+// no error. Nothing here ever needs to change again.
 // =============================================================================
 internal fun DrawScope.drawParticleField(
     sim: FieldSim,
-    sprites: FieldSprites,
+    res: FieldResources,
     paints: FieldPaints,
     nowMs: Double,
 ) {
-    when (sim) {
-        is StarSim -> drawStars(sim, sprites, paints, nowMs)
-        is EmberSim -> drawEmbers(sim, sprites.emberNative, paints, nowMs)
-        is MatrixSim -> drawMatrix(sim, paints.matrix, nowMs)
-    }
+    with(sim) { render(res, paints, nowMs) }
 }

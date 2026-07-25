@@ -1,9 +1,12 @@
 package com.aiblackbox.portal
 
 import com.aiblackbox.portal.ui.components.EmberSim
+import com.aiblackbox.portal.ui.components.FieldEffects
+import com.aiblackbox.portal.ui.components.FirefliesSim
 import com.aiblackbox.portal.ui.components.MatrixSim
 import com.aiblackbox.portal.ui.components.ParticleMode
 import com.aiblackbox.portal.ui.components.StarSim
+import com.aiblackbox.portal.ui.components.newFieldSim
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -36,11 +39,49 @@ class ParticleFieldTest {
         assertEquals(ParticleMode.MATRIX, ParticleMode.parse("Matrix"))
     }
 
-    @Test fun `ALL lists the three modes in order with labels`() {
-        assertEquals(listOf(ParticleMode.STARS, ParticleMode.EMBERS, ParticleMode.MATRIX), ParticleMode.ALL)
+    @Test fun `ALL leads with the three shipped modes in order with labels`() {
+        // The shipped three keep their order and their PERSISTED ids; the
+        // catalogue may only ever grow past them (FieldRegistry.CATALOGUE).
+        assertEquals(
+            listOf(ParticleMode.STARS, ParticleMode.EMBERS, ParticleMode.MATRIX),
+            ParticleMode.ALL.take(3),
+        )
         assertEquals("Rising Stars", ParticleMode.label(ParticleMode.STARS))
         assertEquals("Embers", ParticleMode.label(ParticleMode.EMBERS))
         assertEquals("Matrix", ParticleMode.label(ParticleMode.MATRIX))
+    }
+
+    // ── The registry: ONE list everything else derives from ──
+    @Test fun `every catalogue entry round-trips parse label and newFieldSim`() {
+        assertEquals("ALL is exactly the catalogue's ids", FieldEffects.ids, ParticleMode.ALL)
+        assertEquals("ids are unique", ParticleMode.ALL.size, ParticleMode.ALL.toSet().size)
+        for (effect in FieldEffects.CATALOGUE) {
+            assertEquals("id survives parse", effect.id, ParticleMode.parse(effect.id))
+            assertEquals("label comes from the catalogue", effect.label, ParticleMode.label(effect.id))
+            assertEquals(effect.id, effect.id.trim().lowercase())   // persistence-safe
+            assertTrue("label is non-empty", effect.label.isNotBlank())
+            // …and the factory actually builds a live field for it.
+            val sim = newFieldSim(effect.id)
+            sim.resize(width, height, scale, density)
+            sim.update(nowMs = 16.0, dtSec = 0.016f, active = true)
+            sim.rearm()
+        }
+    }
+
+    @Test fun `an id from a newer build falls back instead of crashing`() {
+        // A stored value this build has never heard of must resolve to STARS —
+        // downgrading an install can never leave it with an unselectable field.
+        assertEquals(ParticleMode.STARS, ParticleMode.parse("holograms-v9"))
+        assertEquals(ParticleMode.STARS, FieldEffects.resolve("holograms-v9").id)
+        assertEquals(ParticleMode.STARS, FieldEffects.default.id)
+        assertTrue(newFieldSim("holograms-v9") is StarSim)
+    }
+
+    @Test fun `the factory maps each shipped id to its own sim type`() {
+        assertTrue(newFieldSim(ParticleMode.STARS) is StarSim)
+        assertTrue(newFieldSim(ParticleMode.EMBERS) is EmberSim)
+        assertTrue(newFieldSim(ParticleMode.MATRIX) is MatrixSim)
+        assertTrue(newFieldSim(ParticleMode.FIREFLIES) is FirefliesSim)
     }
 
     // ── Rising Stars (restored ORIGINAL warm rising-ember field) ──
