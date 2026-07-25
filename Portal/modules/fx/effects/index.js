@@ -17,6 +17,21 @@
  */
 import { registerEffect } from '../registry.js';
 
-registerEffect({ id: 'stars',  label: 'Rising Stars', load: () => import('./stars.js') });
-registerEffect({ id: 'embers', label: 'Embers',       load: () => import('./embers.js') });
-registerEffect({ id: 'matrix', label: 'Matrix',       load: () => import('./matrix.js') });
+// --- shipped fields (the three that predate the registry) --------------------
+registerEffect({ id: 'stars',      label: 'Rising Stars',        load: () => import('./stars.js') });
+registerEffect({ id: 'embers',     label: 'Embers',              load: () => import('./embers.js') });
+registerEffect({ id: 'matrix',     label: 'Matrix',              load: () => import('./matrix.js') });
+
+// --- v1 catalogue (2026-07-24) -----------------------------------------------
+// Ordered calmest-first: the top of this list is what a new operator meets, and
+// the quiet fields are the ones that stay tolerable behind text all day.
+registerEffect({ id: 'fireflies',  label: 'Fireflies',           load: () => import('./fireflies.js') });
+registerEffect({ id: 'slipstream', label: 'Slipstream',          load: () => import('./slipstream.js') });
+registerEffect({ id: 'bokeh',      label: 'Bokeh Depth',         load: () => import('./bokeh.js') });
+registerEffect({ id: 'meteors',    label: 'Meteor Fall',         load: () => import('./meteors.js') });
+registerEffect({ id: 'cinders',    label: 'Cinders on the Wind', load: () => import('./cinders.js') });
+registerEffect({ id: 'snow',       label: 'Drift Snow',          load: () => import('./snow.js') });
+registerEffect({ id: 'rain',       label: 'Rainfall',            load: () => import('./rain.js') });
+registerEffect({ id: 'fog',        label: 'Low Fog',             load: () => import('./fog.js') });
+registerEffect({ id: 'aurora',     label: 'Aurora Curtain',      load: () => import('./aurora.js') });
+registerEffect({ id: 'ledger',     label: 'Ledger Rain',         load: () => import('./ledger.js') });

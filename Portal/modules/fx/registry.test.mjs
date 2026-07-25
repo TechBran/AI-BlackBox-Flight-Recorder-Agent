@@ -224,12 +224,28 @@ test("resetBlend hands the context back neutral", () => {
 test("the catalogue is complete and synchronous BEFORE any module is imported", () => {
     // Persistence and the settings picker both need the id/label list at page
     // load; the simulations must not be fetched until one is selected.
-    assert.deepEqual(effectIds(), ["stars", "embers", "matrix"]);
-    assert.deepEqual(effectList(), [
-        { id: "stars", label: "Rising Stars" },
-        { id: "embers", label: "Embers" },
-        { id: "matrix", label: "Matrix" },
-    ]);
+    //
+    // Asserts the INVARIANT, not a frozen list. Pinning the exact ids here would
+    // mean "adding an effect is one line" is a lie — every new effect would also
+    // have to edit this test, which is the coupling the registry exists to
+    // delete. What must hold is: the three shipped fields are present, the
+    // default resolves, every entry is well-formed, and nothing is a duplicate.
+    const ids = effectIds();
+    for (const shipped of ["stars", "embers", "matrix"]) {
+        assert.ok(ids.includes(shipped), `shipped field ${shipped} missing from the catalogue`);
+    }
+    assert.ok(ids.includes(DEFAULT_EFFECT_ID), "the default effect must be registered");
+    assert.equal(new Set(ids).size, ids.length, "duplicate effect ids in the catalogue");
+
+    for (const entry of effectList()) {
+        assert.equal(typeof entry.id, "string");
+        assert.ok(entry.id.length, "every catalogue entry needs an id");
+        assert.equal(typeof entry.label, "string");
+        assert.ok(entry.label.length, `effect ${entry.id} has no label for the picker`);
+        // The label must be available WITHOUT loading the module — that is the
+        // whole point of the stub.
+        assert.ok(getEffect(entry.id).label, `effect ${entry.id} label is not synchronous`);
+    }
 });
 
 test("registering an effect is the ONLY step needed to join the whitelist", () => {
