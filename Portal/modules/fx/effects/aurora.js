@@ -49,7 +49,7 @@ const TAU = Math.PI * 2;
 /** Curtains live in the TOP fraction of the canvas. Nothing draws below it. */
 const BAND_FRAC = 0.55;
 /** Ceiling on the TOTAL additive alpha any single column may accumulate. */
-const PEAK_ALPHA = 0.08;
+const PEAK_ALPHA = 0.165;
 /** Analytic worst-case simultaneous strips over one column (see header). */
 const MAX_STACK = 6;
 /** Per-strip alpha ceiling. The budget, divided by the worst case. */

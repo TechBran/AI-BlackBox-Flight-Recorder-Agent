@@ -60,11 +60,11 @@ const SLIPSTREAM = {
     eps: 3,              // finite-difference step, same as embers
     resetPerSec: 1.5,    // = 2.5% of the field per 60 Hz frame, refresh-invariant
     margin: 24,          // px outside the box before a thread is recycled
-    maxLinePx: 1.5,      // THE legibility cap (CSS px — ctx is pre-scaled by dpr)
+    maxLinePx: 1.05,      // THE legibility cap (CSS px — ctx is pre-scaled by dpr)
     maxAlpha: 0.30,      // THE other one
     minAlpha: 0.015,     // below this a thread is skipped, not drawn at 0
     // Quantised stroke widths (all <= maxLinePx) and the edges that bisect them.
-    widths: [0.65, 1.0, 1.4], widthEdges: [0.82, 1.2],
+    widths: [0.45, 0.7, 1.0], widthEdges: [0.82, 1.2],
     // THREE sub-populations. Weights sum to 1.
     //  filament — the hair; the bulk of the field, rides the curl exactly
     //  veil     — slower, wider, laggier: broad folding sheets behind the hair

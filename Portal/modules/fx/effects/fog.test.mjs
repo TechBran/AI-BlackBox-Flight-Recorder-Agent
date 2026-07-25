@@ -146,8 +146,15 @@ test("veils are enormous — the brief's 400-900px quads, not particles", () => 
 // 3. THE LEGIBILITY BUDGET (the assertion this file exists for)
 // ---------------------------------------------------------------------------
 
-test("no tuning value can exceed the hard 6% ceiling", () => {
-    assert.equal(MAX_VEIL_ALPHA, 0.06);
+test("no tuning value can exceed the declared per-quad ceiling", () => {
+    // Asserts the RELATIONSHIP (every kind sits under the declared ceiling), not
+    // a frozen number. The ceiling itself was raised 0.06 -> 0.115 on 2026-07-24
+    // because Brandon could not see the effect AT ALL in the FX Lab — a veil so
+    // faint it is invisible has no value and its budget is protecting nothing.
+    // The absolute upper bound that actually matters (body-text contrast over
+    // the accumulated field) is asserted separately, from drawn output.
+    assert.ok(MAX_VEIL_ALPHA <= 0.14,
+        `per-quad ceiling ${MAX_VEIL_ALPHA} is high enough to threaten text contrast`);
     for (const [name, k] of Object.entries(VEIL_KINDS)) {
         assert.ok(k.alpha[1] <= MAX_VEIL_ALPHA, `${name} tops out at ${k.alpha[1]}, above the ceiling`);
     }

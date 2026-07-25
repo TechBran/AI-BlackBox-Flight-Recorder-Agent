@@ -34,9 +34,9 @@ import { makeSprite } from '../sprites.js';
 import { apparentScale } from '../sizing.js';
 
 /** HARD per-quad alpha ceiling. Not a convention — a Math.min. */
-const MAX_VEIL_ALPHA = 0.06;
+const MAX_VEIL_ALPHA = 0.115;
 /** HARD ceiling on the SUM of the field's quad alphas (worst-case stack). */
-const ALPHA_BUDGET = 0.30;
+const ALPHA_BUDGET = 0.58;
 /** Population bounds. Twenty giant quads is the entire per-frame cost. */
 const MIN_VEILS = 8;
 const MAX_VEILS = 20;
@@ -68,12 +68,12 @@ const FOG_RAMP = [
  */
 const VEIL_KINDS = {
     bank: {
-        share: 0.6, rx: [200, 450], aspect: [1.7, 2.6], alpha: [0.024, 0.038],
+        share: 0.6, rx: [200, 450], aspect: [1.7, 2.6], alpha: [0.046, 0.074],
         vx: [4, 11], vy: 0.8, bob: [3, 9], spin: [0.003, 0.010],
         life: [42, 78], y: [0.42, 1.06], breathe: [0.04, 0.10], hue0: [0, 1],
     },
     wisp: {
-        share: 0.4, rx: [90, 200], aspect: [2.2, 3.4], alpha: [0.014, 0.026],
+        share: 0.4, rx: [90, 200], aspect: [2.2, 3.4], alpha: [0.027, 0.050],
         vx: [14, 34], vy: 2.2, bob: [6, 16], spin: [0.012, 0.030],
         life: [18, 34], y: [0.20, 1.02], breathe: [0.08, 0.16], hue0: [1, 2],
     },

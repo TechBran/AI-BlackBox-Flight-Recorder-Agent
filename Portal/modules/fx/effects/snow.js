@@ -100,6 +100,45 @@ function bakeRamp() {
 }
 export const RAMP_LUT = bakeRamp();
 
+// ── Flake sprite ─────────────────────────────────────────────────────────────
+// A flake was originally drawn as 1-3 CONCENTRIC FILLED ARCS at decreasing
+// alpha. Every ctx.arc() fill has a hard edge, so stacking them produced
+// visible concentric bands — Brandon saw it immediately and called it "a bubble
+// inside a bubble" (2026-07-24). A soft falloff cannot be faked with arcs; it
+// needs an actual gradient. So: bake one tinted sprite per ramp stop at import
+// and blit it, which is smooth AND ~3x fewer draw calls per flake.
+//
+// The stop list is a gaussian-ish shoulder rather than makeSprite's tighter
+// 0/0.35/1 curve — an out-of-focus flake has no discernible edge at all.
+const SPRITE_PX = 64;
+const SPRITE_STOPS = [[0, 1], [0.22, 0.82], [0.42, 0.46], [0.62, 0.18], [0.82, 0.05], [1, 0]];
+const SPRITE_LUT = new Array(RAMP_STEPS).fill(null);
+
+function bakeFlakeSprite(rgb) {
+    // Guarded so importing this module in a headless test never touches document.
+    if (typeof document === 'undefined') return null;
+    const c = document.createElement('canvas');
+    c.width = c.height = SPRITE_PX;
+    const x = c.getContext('2d');
+    const h = SPRITE_PX / 2;
+    const g = x.createRadialGradient(h, h, 0, h, h, h);
+    for (const [stop, a] of SPRITE_STOPS) g.addColorStop(stop, `rgba(${rgb},${a})`);
+    x.fillStyle = g;
+    x.fillRect(0, 0, SPRITE_PX, SPRITE_PX);
+    return c;
+}
+
+/** Sprite for a ramp index, baked on first use (never in the hot path twice). */
+function flakeSprite(idx) {
+    let s = SPRITE_LUT[idx];
+    if (s === null) {
+        // RAMP_LUT holds 'rgb(r,g,b)'; reuse its interpolation rather than
+        // re-deriving the colour maths in a second place.
+        s = SPRITE_LUT[idx] = bakeFlakeSprite(RAMP_LUT[idx].slice(4, -1));
+    }
+    return s;
+}
+
 /**
  * Size/alpha envelope over life: swell in over the first 18% of the fall, hold,
  * taper over the last 22%. Smoothstepped so the fade has no visible corner.
@@ -278,24 +317,30 @@ export const descriptor = {
         const intensity = env.intensity, top = RAMP_STEPS - 1;
         for (let i = 0; i < st.planes.length; i++) {
             const pl = st.planes[i], cfg = pl.cfg, list = pl.list;
-            // Per-plane constants hoisted out of the flake loop.
-            const rings = cfg.rings, spread = 1 + cfg.soft;
-            // The blurrier the plane, the DIMMER its core relative to its halo —
-            // that redistribution is what reads as out of focus rather than small.
-            const core = 1 - 0.45 * Math.min(1, cfg.soft);
+            // Per-plane constants hoisted out of the flake loop. `soft` now
+            // widens the SPRITE rather than adding halo rings: a blurrier plane
+            // spreads the same light over a larger radius, which is what being
+            // out of focus actually is.
+            const spread = 1 + 0.85 * cfg.soft;
             for (let j = 0; j < list.length; j++) {
                 const f = list[j];
                 const curve = sizeCurve(f.life);
-                const r = f.r * f.sizeEnv * (0.62 + 0.38 * curve);          // SIZE OVER LIFE
+                const r = f.r * f.sizeEnv * (0.62 + 0.38 * curve) * spread;  // SIZE OVER LIFE
                 const a = cfg.alpha * (0.10 + 0.90 * curve) * intensity;
-                if (a <= 0.002 || r <= 0.05) continue;                      // sub-pixel/invisible: skip the arcs
-                let idx = Math.round((f.life + f.bias) * top);              // COLOUR RAMP BY LIFE
+                if (a <= 0.002 || r <= 0.05) continue;                       // sub-pixel/invisible: skip the blit
+                let idx = Math.round((f.life + f.bias) * top);               // COLOUR RAMP BY LIFE
                 idx = idx < 0 ? 0 : (idx > top ? top : idx);
-                ctx.fillStyle = RAMP_LUT[idx];
-                for (let k = rings - 1; k >= 0; k--) {                      // widest ring first, core lands on top
-                    ctx.globalAlpha = a * HALO_A[k] * (k === 0 ? core : 1);
+                const spr = flakeSprite(idx);
+                ctx.globalAlpha = a;
+                if (spr) {
+                    const d = r * 2;
+                    ctx.drawImage(spr, f.x - r, f.y - r, d, d);
+                } else {
+                    // Headless/no-document fallback: a single soft-less disc.
+                    // Never reached in a browser; keeps unit tests drawable.
+                    ctx.fillStyle = RAMP_LUT[idx];
                     ctx.beginPath();
-                    ctx.arc(f.x, f.y, r * (1 + (HALO_R[k] - 1) * spread), 0, TAU);
+                    ctx.arc(f.x, f.y, r, 0, TAU);
                     ctx.fill();
                 }
             }
