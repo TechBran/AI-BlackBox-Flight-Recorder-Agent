@@ -1,0 +1,4 @@
+{
+    "//": "Node-only marker so `node --test Portal/**/*.test.mjs` loads the Portal's .js files as the ES modules they already are. Node 18 has no module auto-detection: without this it parses them as CommonJS and every named import fails ('The requested module is a CommonJS module'). Verified: nothing under Portal/ uses module.exports or require(). Browsers never read package.json — zero effect on the served Portal.",
+    "type": "module"
+}

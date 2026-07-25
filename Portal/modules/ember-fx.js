@@ -44,6 +44,11 @@
  *    canvas when idle (no battery-burning idle loop) and pauses when hidden.
  */
 
+// Canvas sizing math lives in its own module because it is the one part of this
+// engine that had a shipped, invisible-at-dpr=1 bug and no test. See sizing.js
+// for why RESOLUTION (backingStore) and GEOMETRY (apparentScale) must stay apart.
+import { backingStore } from './fx/sizing.js';
+
 // ---- Field tuning -----------------------------------------------------------
 // density/intensity are the two prototype tuning knobs; fixed to 1.0 here (no
 // tuning panel in the Portal). DRAIN_MAX_MS bounds the post-generation drain so
@@ -390,10 +395,25 @@ function resize() {
     if (!canvas || !host) return;
     const w = host.clientWidth, h = host.clientHeight;
     if (w === 0 || h === 0) return;            // ignore transient 0-measure (e.g. display:none)
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const store = backingStore(w, h, window.devicePixelRatio);
+    // No-op guard: ResizeObserver fires on every composer keystroke that changes
+    // height. Reassigning canvas.width/height WIPES the buffer, which visibly
+    // resets the ember heat-smear and the matrix rain, and reallocates ~18 MB.
+    if (canvas.width === store.w && canvas.height === store.h) {
+        width = w; height = h;
+        return;
+    }
+    dpr = store.dpr;
     width = w; height = h;
-    canvas.width = Math.floor(w * dpr);
-    canvas.height = Math.floor(h * dpr);
+    canvas.width = store.w;
+    canvas.height = store.h;
+    // Pin the CSS box explicitly. The stylesheet already does this (width/height
+    // 100%), but a <canvas> is a replaced element that falls back to its
+    // INTRINSIC attribute size the moment that rule is missing — which is
+    // exactly the bug that shipped. Belt and braces: never trust the stylesheet
+    // alone for the one property that silently magnifies the entire field.
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // Matrix column count is width-derived, so re-init it on resize — but ONLY when
     // matrix is the live field. Stars self-heal in drawStars via the count check;

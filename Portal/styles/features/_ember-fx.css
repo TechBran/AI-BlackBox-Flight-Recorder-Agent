@@ -12,6 +12,19 @@
 #emberCanvas {
     position: absolute;
     inset: 0;
+    /* A <canvas> is a REPLACED element. `inset: 0` does NOT stretch it: with
+       width:auto an absolutely-positioned replaced element lays out at its
+       INTRINSIC size (its width/height content attributes, which resize() sets
+       to w * devicePixelRatio), and the over-constrained inset is ignored.
+       Without these two declarations the whole field is displayed at dpr x
+       magnification and 1/dpr resolution — measured 2.00x at a device scale
+       factor of 2 and 3. dpr=1 hides it completely, which is how it survived
+       from the engine's first commit to 2026-07-24.
+       The landing-page original this was ported from set width/height 100%;
+       the port dropped them. Do not remove. */
+    width: 100%;
+    height: 100%;
+    display: block;
     z-index: 0;
     pointer-events: none;
     opacity: 0;
