@@ -31,14 +31,21 @@ import kotlin.math.min
  *
  *   1. the PARALLAX CORRELATION — size/alpha/speed/sprite-form must move together
  *      across the four planes, or the screen flattens into confetti;
- *   2. the LEGIBILITY BUDGET — the near discs are enormous, so alpha is the whole
- *      budget; measured against the real --muted body-text colour (BbxDim,
- *      #C9C9C9), not a vibe;
+ *   2. the LEGIBILITY BUDGET, BOTH WAYS — the near discs are enormous, so alpha is
+ *      the whole budget, measured as real WCAG contrast against the --muted
+ *      body-text colour (BbxDim, #C9C9C9) rather than as a vibe; and since
+ *      2026-07-25 there is a FLOOR under it too, because a backdrop nobody can
+ *      see is also a failure and its budget is protecting nothing (see ANDROID
+ *      LIGHT RANGE in BokehField.kt);
  *   3. delta timing — identical motion at 60 and 120 Hz;
  *   4. THE DPI LAW — density changes resolution, never apparent geometry;
  *   5. pooling — the same particle objects for the life of the field.
  *
- * Mirrors Portal/modules/fx/effects/bokeh.test.mjs — keep them in step.
+ * Mirrors Portal/modules/fx/effects/bokeh.test.mjs — keep them in step, EXCEPT
+ * for the light range, which is deliberately Android-specific and is pinned here
+ * from both sides so nobody "restores parity" and puts the field back in the dark.
+ * (The donut sprite's own profile is not testable here — it needs Compose
+ * graphics — so its rim/hollow contract lives in bakeBokehDonut's doc.)
  */
 class BokehFieldTest {
 
@@ -102,6 +109,12 @@ class BokehFieldTest {
         0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 
     private val mutedL = luminance(201f, 201f, 201f)
+
+    /** WCAG contrast ratio of the body text against a disc of luminance [l].
+     *  AA for body text is 4.5:1. Note it also reads as a DIMNESS meter: as a
+     *  disc fades to nothing the ratio climbs toward mutedL/0.05 = 12.7:1, so a
+     *  suspiciously high number means "invisible", not "safe". */
+    private fun contrast(l: Double): Double = (mutedL + 0.05) / (l + 0.05)
 
     // ── 1. Four planes, populated, ordered ──
 
@@ -271,8 +284,9 @@ class BokehFieldTest {
 
     // ── 5. The legibility budget — this is a backdrop behind chat text ──
 
-    @Test fun `a LARGE disc is never brighter than the near-plane alpha cap`() {
+    @Test fun `a LARGE disc stays under the alpha cap — and over the visibility floor`() {
         var largeSeen = 0
+        var worstAlpha = 0f
         for (v in viewports()) {
             val s = simFor(v, 41)
             for (f in 1..1000) {
@@ -283,13 +297,21 @@ class BokehFieldTest {
                     largeSeen++
                     val a = bokehAlpha(p, now)
                     assertTrue("${p.plane.id} disc at alpha $a on ${v[0]}x${v[1]}", a < BOKEH_NEAR_ALPHA_CAP)
+                    worstAlpha = max(worstAlpha, a)
                 }
             }
         }
         assertTrue("nothing large was drawn — the assertion proved nothing", largeSeen > 0)
+        // …and the floor, which is Brandon's Fold report (2026-07-25: "just seems
+        // really dim, hard to tell that that one is actually on") turned into an
+        // invariant. 0.06 was the ENTIRE ceiling back when the discs were
+        // invisible; it is now the FLOOR, so restoring the web alphas (near 0.042
+        // / inner 0.052) fails here instead of shipping a field nobody can see.
+        // Measured: 0.092 — the near plane's cap, reached at the breathe peak.
+        assertTrue("the big discs are invisible again (worst alpha $worstAlpha)", worstAlpha >= 0.06f)
     }
 
-    @Test fun `no disc — nor a three-deep stack — outshines the muted body text`() {
+    @Test fun `no disc — nor a three-deep stack — comes near the body-text contrast floor`() {
         val s = sim(seed = 43)
         var worst = 0.0
         var worstStack = 0.0
@@ -306,8 +328,17 @@ class BokehFieldTest {
             }
         }
         assertTrue("nothing large was drawn — the assertion proved nothing", worst > 0.0)
-        assertTrue("a single disc (L=$worst) outshines --muted (L=$mutedL)", worst <= mutedL)
-        assertTrue("a 3-stack (L=$worstStack) outshines --muted (L=$mutedL)", worstStack <= mutedL)
+        // Asserted as the CONTRAST RATIO, not the old `L <= mutedL` literal. That
+        // literal only bit at roughly 0.78 alpha — it would not have noticed the
+        // light-range lift, or a lift ten times bigger. WCAG AA for body text is
+        // 4.5:1. Measured on this seed: 10.9:1 for the brightest single large
+        // disc (inside the 9.5–11.1:1 band the web fields measured) and 6.1:1 for
+        // three of them stacked dead-on, which a 2-disc near plane cannot even
+        // produce. The cap in BokehField.kt is set exactly where that modelled
+        // 3-stack would land on 4.5:1, so these two bars are what actually bound
+        // the effect's brightness.
+        assertTrue("a single large disc is at ${contrast(worst)}:1 (AA is 4.5:1)", contrast(worst) >= 7.0)
+        assertTrue("a 3-deep stack is at ${contrast(worstStack)}:1 (AA is 4.5:1)", contrast(worstStack) >= 4.5)
     }
 
     @Test fun `the whole field lays down less ink than the published budget`() {
@@ -328,7 +359,12 @@ class BokehFieldTest {
                 peak = max(peak, ink / (v[0] * v[1]).toDouble())
             }
         }
-        assertTrue("the field is invisible — the budget proved nothing", peak > 0.0005)
+        // The FLOOR is the other half of the budget, and it is deliberately no
+        // longer a token 0.05%: the shipped web alphas measure 0.21% here (which
+        // on a 3.1-density OLED is the "hard to tell that that one is actually on"
+        // Brandon reported), and the Fold-calibrated set measures 0.45%. 0.30%
+        // sits between them, so a parity restore fails instead of shipping dark.
+        assertTrue("the field is too dim to see (peak ink ${peak * 100}%)", peak > 0.0030)
         assertTrue("peak ink ${peak * 100}% > budget ${BOKEH_INK_BUDGET * 100}%", peak <= BOKEH_INK_BUDGET)
     }
 

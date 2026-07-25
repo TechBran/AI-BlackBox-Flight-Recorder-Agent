@@ -4,41 +4,95 @@ package com.aiblackbox.portal.ui.components
 // Field: LOW FOG (id "fog") — the CHEAPEST field in the catalogue and the one
 // with the highest legibility risk.
 //
-// A faithful native port of the web module
+// A native port of the web module
 //   Portal/modules/fx/effects/fog.js
-// (its physics tests: Portal/modules/fx/effects/fog.test.mjs).
+// (its physics tests: Portal/modules/fx/effects/fog.test.mjs) — see the
+// ANDROID DIVERGENCE block below for where and why the two now differ.
 //
-// Barely-there veils of grey drifting across the black at different speeds, so
-// the backdrop reads as weather with depth instead of flat paint. The whole
-// effect is 8–20 ENORMOUS soft radial quads per frame — no noise, no shader, no
-// per-pixel work. The 64 px-sprite-blown-up-to-1400 px mush that is a DEFECT for
-// embers (visible blur on a 6 px spark) is the FEATURE here: it is exactly the
-// soft-edged falloff a fog bank needs, for free.
+// Veils of grey ROLLING across the black at different speeds, so the backdrop
+// reads as weather with depth instead of flat paint. The whole effect is 10–24
+// enormous soft radial quads per frame — no noise, no shader, no per-pixel work.
+// The sprite-blown-up-to-1200 px mush that is a DEFECT for embers (visible blur
+// on a 6 px spark) is the FEATURE here: it is exactly the soft-edged falloff a
+// fog bank needs, for free.
+//
+// ── ANDROID DIVERGENCE FROM fog.js (2026-07-25) — DO NOT "RESTORE PARITY" ────
+//
+// Brandon, Fold 6 (density 3.1, 120 Hz), testing all thirteen effects:
+//   "Low fog — not really seeing anything here on the Android side. I don't see
+//    any shade of fog rolling across the screen doing something here. Needs to
+//    be more animated, we should probably look at how we can enhance that."
+//
+// Two independent defects, both of which the web numbers cause on this surface:
+//
+//  1. INVISIBLE. The web authors alpha in CSS px at an apparent scale near 1.0;
+//     Android multiplies geometry by apparentScale 0.5 AND density 3.1, and the
+//     web's 2.7–7.4% per-quad alphas then composite (SrcOver, on black, through
+//     a radial falloff whose area-weighted mean is ~0.34 of its peak) to an
+//     AVERAGE screen lift of ~1% — about TWO grey levels out of 255. That is
+//     not "subtle", it is not rendering. Measured against #C9C9C9 body text the
+//     old field sat at 12.6:1 where pure black is 12.7:1 — i.e. the budget was
+//     protecting nothing, because there was nothing there.
+//     Per-quad alphas are now ~2.7× the web's and the field-wide budget ~3.2×.
+//     The cross-surface contract is the same APPARENT RESULT, not the same
+//     numbers.
+//
+//  2. STATIC. The web's bob/breathe/spin "Hz" are RADIANS PER SECOND, not Hz —
+//     sin(t · 0.05) has a period of 126 SECONDS, and spin at 0.003 rad/s is one
+//     revolution per 35 minutes. Every oscillator was therefore a DC offset and
+//     every quad a rigid blob sliding at 6–17 device px/s (a bank crossed the
+//     Fold in 1–3 minutes). The rates below are 4–10× the web's and are now
+//     asserted at the TABLE level: every veil completes at least one full bob
+//     and one full breathe cycle, and turns at least ~30°, WITHIN ITS OWN
+//     LIFETIME (FogFieldTest."the weather is actually ANIMATED"). Lateral drift
+//     is ~6× — the slowest bank crosses a reference phone in under 30 s, the
+//     fastest wisp in ~5 s, and that ratio IS the parallax.
+//
+//  Two consequences of the new speeds that the old numbers hid:
+//   • WRAP MARGIN. Veils were far too slow to ever reach an edge; they now wrap
+//     constantly. The margin is the veil's MAXIMUM DRAWN extent
+//     (rx × sizeEnv × (1 + breatheAmp) + swayAmp — see [FogVeil.marginX]), not
+//     its bare rx: swell × sizeEnv × breathe can reach 1.66×, so the old margin
+//     would have teleported a two-thirds-visible bank across the screen.
+//   • SWAY. A draw-time horizontal companion to the bob, on a rate incommensurate
+//     with it, so a bank surges and eases instead of translating linearly. It is
+//     draw-only (like the bob) — zero physics cost, zero effect on the dt tests.
 //
 // ── THE LEGIBILITY BUDGET — the reason this file is careful ──────────────────
 //
 // This is a BACKDROP behind chat body text. Unlike embers or stars, which put
 // light in a few small places, fog raises the AVERAGE luminance of the backdrop
 // UNIFORMLY — precisely what erodes the contrast of the text sitting on top of
-// it. So the ceiling is enforced in CODE, twice, exactly as the web module does:
+// it. So the ceiling is enforced in CODE, twice:
 //
 //   FOG_MAX_VEIL_ALPHA   a HARD per-quad ceiling, applied with coerceAtMost at
 //                        BOTH the compute site (update) and the draw site
-//                        (render). No tuning value in the kinds table may exceed
-//                        it, and FogFieldTest asserts that.
+//                        ([fogQuadAlpha], AFTER the Intensity dial). No tuning
+//                        value in the kinds table may exceed it, and
+//                        FogFieldTest asserts the ceiling as a CONTRAST property
+//                        (a quad pinned at the ceiling still clears 7:1 against
+//                        #C9C9C9) rather than as a frozen literal.
 //   FOG_ALPHA_BUDGET     a HARD field-wide ceiling on the SUM of the quad
-//                        alphas. A per-quad cap alone is not enough: twenty 11%
+//                        alphas. A per-quad cap alone is not enough: twenty-four
 //                        veils stacked are a white wash. update() normalises the
 //                        whole field down to the budget once per frame
 //                        ([FogSim.budgetK]), so the worst-case luminance lift is
 //                        bounded no matter what the population does.
+//
+// The measured operating point at the default dial (reference Fold canvas,
+// 1080×2400, 14 veils) is an average backdrop lift of ~6% alpha → ~11.8:1
+// against #C9C9C9, inside the 9.5–11.1:1 band the web fields measured and well
+// clear of WCAG AA's 4.5:1. FogFieldTest integrates that number from the
+// SHIPPING sprite falloff and the SHIPPING draw alphas every run.
 //
 // COMPOSITING IS SrcOver — deliberately NOT the engine's additive FIELD_BLEND.
 // Fog is not emissive; under Plus/'lighter' the overlaps would blow out to white,
 // which is the exact failure the budget exists to prevent. That is why this
 // effect draws through its OWN baked paint (see FOG_PAINT_KEY) instead of
 // FieldPaints.sprite, which carries the additive blend every other field wants.
-// It is the one and only reason this file does not use drawSpriteF.
+// It is the one and only reason this file does not use drawSpriteF — and it is
+// why the Intensity dial's brightness channel (FieldPaints.alphaScale) has to be
+// applied HERE, by hand, in [fogQuadAlpha]: drawSpriteF's multiply never runs.
 //
 // ── The three premium rules, as they land here ──────────────────────────────
 //   1. SIZE OVER LIFE with a per-particle envelope: fogSwell(age) dilates a veil
@@ -47,8 +101,8 @@ package com.aiblackbox.portal.ui.components
 //      the same size and none of them is a constant blob.
 //   2. LIFE-INDEXED COLOUR RAMP: FOG_RAMP is walked by age (hue0 + round(age×2)),
 //      so a veil is born cool slate (fresh, backlit) and ages through neutral
-//      into warm dust. Never a flat grey — that is what stops twenty overlapping
-//      quads from reading as one sheet.
+//      into warm dust. Never a flat grey — that is what stops two dozen
+//      overlapping quads from reading as one sheet.
 //   3. TWO SUB-POPULATIONS: banks (slow, deep, huge) and wisps (quick, small,
 //      shredded). The speed difference IS the parallax.
 //
@@ -62,39 +116,58 @@ package com.aiblackbox.portal.ui.components
 // population target — never an alpha, never a period, never a lifetime.
 //
 // dt. All motion is PIXELS PER SECOND multiplied by dtSec directly — no
-// `dt * 60` normalizer (the web module already uses this convention, so its
-// constants transfer byte-for-byte). The bob/breathe oscillators run off a
-// PRIVATE clock advanced by dtSec, NOT off nowMs: a parked frame loop must
-// resume the weather where it left it rather than teleporting every veil to a
-// new common phase on resume.
+// `dt * 60` normalizer. The bob/sway/breathe oscillators run off a PRIVATE clock
+// advanced by dtSec, NOT off nowMs: a parked frame loop must resume the weather
+// where it left it rather than teleporting every veil to a new common phase on
+// resume.
 // =============================================================================
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
 // -----------------------------------------------------------------------------
-// The legibility ceilings. These are MEASURED values from the web side (real
-// WCAG contrast over the accumulated field) — they are not style, and they are
-// not to be re-tuned by feel on this surface.
+// The legibility ceilings. NOT style, and not to be re-tuned by feel: both are
+// asserted by FogFieldTest as CONTRAST properties measured over the shipping
+// draw path, so raising either one fails the build the moment the backdrop would
+// start eating body text.
 // -----------------------------------------------------------------------------
 
-/** HARD per-quad alpha ceiling. Not a convention — a coerceAtMost, twice.
- *  (Raised 0.06 → 0.115 on the web on 2026-07-24: a veil so faint it is
- *  invisible has no value and its budget is protecting nothing. The web's
- *  fog.js prose still says "6%" in one line; 0.115 is the shipped constant and
- *  its own test asserts `MAX_VEIL_ALPHA <= 0.14`.) */
-internal const val FOG_MAX_VEIL_ALPHA = 0.115f
+/** HARD per-quad alpha ceiling. Not a convention — a coerceAtMost, twice, the
+ *  second time AFTER the Intensity dial (see [fogQuadAlpha]).
+ *
+ *  Diverges from fog.js' 0.115 (which itself came up from 0.06 on 2026-07-24 for
+ *  the same reason): at 0.115 the field measured ~1% average screen lift on a
+ *  density-3.1 phone — two grey levels, i.e. invisible. A single quad pinned at
+ *  0.24 composites to grey ~48 on black and still clears 8.1:1 against #C9C9C9
+ *  body text, where AA needs 4.5:1. */
+internal const val FOG_MAX_VEIL_ALPHA = 0.24f
 
-/** HARD ceiling on the SUM of the field's quad alphas (worst-case stack). */
-internal const val FOG_ALPHA_BUDGET = 0.58f
+/** HARD ceiling on the SUM of the field's quad alphas (worst-case stack), at the
+ *  reference Intensity dial. Diverges from fog.js' 0.58 for the same reason and
+ *  by roughly the same factor; the resulting AVERAGE backdrop lift is the number
+ *  that is actually asserted (≥ 9:1 body-text contrast at the default dial,
+ *  ≥ 8:1 at the maximum). */
+internal const val FOG_ALPHA_BUDGET = 1.85f
 
-/** Population bounds. Twenty giant quads is the ENTIRE per-frame cost. */
-internal const val FOG_MIN_VEILS = 8
-internal const val FOG_MAX_VEILS = 20
+/** Population bounds. Two dozen giant quads is the ENTIRE per-frame cost — and
+ *  the fill cost is FLAT against the old 8–20 because the veils came down in
+ *  size at the same time (see FOG_BANK.rxMax: 450 → 390 web px). More, smaller
+ *  banks is also what lets them pass IN FRONT OF each other, which is the cue
+ *  the eye actually reads as motion. */
+internal const val FOG_MIN_VEILS = 10
+internal const val FOG_MAX_VEILS = 24
 
 /**
  * WEB CSS px → reference-density DEVICE px.
@@ -103,8 +176,8 @@ internal const val FOG_MAX_VEILS = 20
  * apparentScale(cssBox), which clamps to 0.5 on a phone-shaped viewport. A CSS
  * px is a dp, and FIELD_REFERENCE_DENSITY turns a dp into 3.1 device px:
  *     0.5 × 3.1 = 1.55
- * Keeping this factor explicit lets every number in the kinds table below stay
- * BYTE-IDENTICAL to fog.js, so the two surfaces can be diffed forever.
+ * Keeping this factor explicit lets every LENGTH in the kinds table below stay
+ * comparable to fog.js, so the two surfaces can still be diffed.
  *
  * Note it is applied to VELOCITY as well as size. The web applies `st.geo` to
  * radii but not to `vx`; on a phone-shaped box geo IS 0.5, so scaling both by
@@ -129,7 +202,8 @@ private const val FOG_PAINT_KEY = "fog.paint"
 /**
  * Colour ramp, indexed by LIFE (young → old). Never a flat grey: a veil is born
  * cool slate (fresh, backlit) and ages through neutral into warm dust, which is
- * what stops twenty overlapping quads from reading as one grey sheet.
+ * what stops two dozen overlapping quads from reading as one grey sheet.
+ * Byte-identical to fog.js — the alpha does the work, not the colour.
  */
 internal val FOG_RAMP = arrayOf(
     intArrayOf(172, 186, 204),   // cool slate — freshly formed
@@ -138,13 +212,106 @@ internal val FOG_RAMP = arrayOf(
     intArrayOf(190, 180, 168),   // warm, dissipating
 )
 
+// -----------------------------------------------------------------------------
+// The sprite: one soft radial puff per ramp stop.
+//
+// Baked at 160 px rather than the shared atlas' 64 px because a fog quad is
+// magnified 7–15× (a bank is ~1200 device px across): a 64 px gradient stretched
+// that far BANDS on an OLED, and banding is the one artefact that says "this is
+// a stretched bitmap" instead of "this is fog". 4 × 160² × 4 B ≈ 410 KB, baked
+// once per (density, effect) and freed with the effect.
+//
+// The falloff is kept as DATA rather than a literal inside the bake so
+// FogFieldTest can INTEGRATE it: the number that decides whether a backdrop is
+// legible is the AREA-WEIGHTED MEAN alpha of a quad (a paragraph of text spans
+// the whole quad), not its sub-pixel core — see [fogSpriteMeanAlpha]. Two
+// parallel arrays, not an Array<Pair>, so the constant costs no boxed pairs at
+// class-init.
+//
+// The profile is fuller than the shared bake's (mean 0.339 vs 0.266) — a fog
+// bank is a volume, not a point light — while the outer 25% still eases to zero,
+// so at the ceiling alpha the outermost visible ring is ~1.6% and there is no
+// ellipse edge to see.
+// -----------------------------------------------------------------------------
+private const val FOG_SPRITE_PX = 160
+
+internal val FOG_SPRITE_STOPS = floatArrayOf(0.00f, 0.20f, 0.38f, 0.56f, 0.74f, 0.88f, 1.00f)
+internal val FOG_SPRITE_ALPHAS = floatArrayOf(1.00f, 0.90f, 0.71f, 0.46f, 0.22f, 0.08f, 0.00f)
+
+/**
+ * AREA-WEIGHTED MEAN alpha of the sprite: ∫₀¹ 2r·α(r) dr over the piecewise-
+ * linear falloff above, evaluated exactly (α is linear on each segment, so the
+ * integral is closed-form — no sampling, no drift between the bake and the test).
+ *
+ * This is THE conversion between "peak quad alpha" and "how much this quad
+ * actually lifts the screen", and it is what FogFieldTest multiplies the drawn
+ * alphas by to measure the backdrop's average luminance. Pure maths, no state.
+ */
+internal fun fogSpriteMeanAlpha(): Float {
+    var acc = 0f
+    for (i in 0 until FOG_SPRITE_STOPS.size - 1) {
+        val r0 = FOG_SPRITE_STOPS[i]
+        val r1 = FOG_SPRITE_STOPS[i + 1]
+        val dr = r1 - r0
+        if (dr <= 0f) continue
+        val a0 = FOG_SPRITE_ALPHAS[i]
+        val m = (FOG_SPRITE_ALPHAS[i + 1] - a0) / dr
+        val d2 = r1 * r1 - r0 * r0
+        val d3 = r1 * r1 * r1 - r0 * r0 * r0
+        acc += a0 * d2 + 2f * m * (d3 / 3f - r0 * d2 / 2f)
+    }
+    return acc
+}
+
+private fun bakeFogSprite(r: Int, g: Int, b: Int, density: Density): android.graphics.Bitmap {
+    val bitmap = ImageBitmap(FOG_SPRITE_PX, FOG_SPRITE_PX)
+    // Fully-qualified bitmap-backed Canvas factory (distinct from the @Composable Canvas).
+    val canvas = androidx.compose.ui.graphics.Canvas(bitmap)
+    val drawScope = CanvasDrawScope()
+    val radius = FOG_SPRITE_PX / 2f
+    val center = Offset(radius, radius)
+    val base = Color(r / 255f, g / 255f, b / 255f, 1f)
+    drawScope.draw(
+        density,
+        LayoutDirection.Ltr,
+        canvas,
+        Size(FOG_SPRITE_PX.toFloat(), FOG_SPRITE_PX.toFloat()),
+    ) {
+        drawCircle(
+            brush = Brush.radialGradient(
+                // Built from the arrays above so the bake and the legibility
+                // integral can never drift apart. Allocates — and may: this runs
+                // four times per density, never in a frame.
+                colorStops = Array(FOG_SPRITE_STOPS.size) { i ->
+                    FOG_SPRITE_STOPS[i] to base.copy(alpha = FOG_SPRITE_ALPHAS[i])
+                },
+                center = center,
+                radius = radius,
+            ),
+            radius = radius,
+            center = center,
+        )
+    }
+    return bitmap.asAndroidBitmap()
+}
+
+/**
+ * Fog's PRIVATE bitmap paint. Deliberately NOT [FieldPaints.sprite]: that one
+ * carries [FIELD_BLEND] (additive from API 28 up), and additive is exactly what
+ * two dozen overlapping veils behind body text must not be. Default Paint
+ * blending is SrcOver, which is what we want, so there is nothing to set beyond
+ * filtering.
+ */
+private fun newFogPaint(): android.graphics.Paint =
+    android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply { isAntiAlias = true }
+
 /**
  * THE TWO SUB-POPULATIONS.
  *
  *   bank — the slow deep layer that gives the black its depth: huge, ponderous,
- *          long-lived, barely rotating, sitting low in the frame.
+ *          long-lived, turning slowly, sitting low in the frame.
  *   wisp — the quicker shreds in front of them: smaller, thinner, shorter-lived,
- *          bobbing harder and spinning ~3× faster.
+ *          bobbing/swaying harder and spinning ~3× faster.
  *
  * The SPEED difference IS the parallax, and the SIZE difference is what makes it
  * read as two layers rather than one population at two distances.
@@ -152,9 +319,14 @@ internal val FOG_RAMP = arrayOf(
  * [rxMin]/[rxMax] is the LONG (horizontal) radius in WEB CSS px (see
  * [FOG_WEB_TO_REF_PX]); the quad is an ellipse (rx / aspect) because a rotating
  * radially-symmetric circle is invisible — rotation only reads on a
- * non-circular quad. Times are seconds; spin is rad/s; the rest is
- * dimensionless. Every [alphaMax] here is below [FOG_MAX_VEIL_ALPHA] by
- * construction, and FogFieldTest asserts it.
+ * non-circular quad. Times are seconds; [spinMin]/[spinMax], [bobHzMin] and
+ * [breatheHzMin] are RADIANS PER SECOND (the web's field names say "Hz" and are
+ * wrong by 2π — a rate of 0.05 there is one cycle every two minutes, which is
+ * how the effect came to be static); the rest is dimensionless.
+ *
+ * Every [alphaMax] here is below [FOG_MAX_VEIL_ALPHA] by construction, every
+ * oscillator completes a full cycle inside [lifeMin], and FogFieldTest asserts
+ * both at the table level so a future tuning pass cannot quietly undo either.
  */
 internal class FogVeilKind(
     val share: Float,
@@ -164,31 +336,40 @@ internal class FogVeilKind(
     val vxMin: Float, val vxMax: Float,
     val vy: Float,
     val bobMin: Float, val bobMax: Float,
+    val bobHzMin: Float, val bobHzMax: Float,
+    val swayMin: Float, val swayMax: Float,
     val spinMin: Float, val spinMax: Float,
     val lifeMin: Float, val lifeMax: Float,
     val yMin: Float, val yMax: Float,
     val breatheMin: Float, val breatheMax: Float,
+    val breatheHzMin: Float, val breatheHzMax: Float,
     val hue0Lo: Int, val hue0Hi: Int,
 )
 
 internal val FOG_BANK = FogVeilKind(
     share = 0.6f,
-    rxMin = 200f, rxMax = 450f, aspectMin = 1.7f, aspectMax = 2.6f,
-    alphaMin = 0.046f, alphaMax = 0.074f,
-    vxMin = 4f, vxMax = 11f, vy = 0.8f,
-    bobMin = 3f, bobMax = 9f, spinMin = 0.003f, spinMax = 0.010f,
-    lifeMin = 42f, lifeMax = 78f, yMin = 0.42f, yMax = 1.06f,
-    breatheMin = 0.04f, breatheMax = 0.10f, hue0Lo = 0, hue0Hi = 1,
+    rxMin = 180f, rxMax = 390f, aspectMin = 1.7f, aspectMax = 2.6f,
+    alphaMin = 0.135f, alphaMax = 0.200f,
+    vxMin = 26f, vxMax = 56f, vy = 3.6f,
+    bobMin = 10f, bobMax = 26f, bobHzMin = 0.30f, bobHzMax = 0.62f,
+    swayMin = 8f, swayMax = 20f,
+    spinMin = 0.020f, spinMax = 0.046f,
+    lifeMin = 26f, lifeMax = 48f, yMin = 0.34f, yMax = 1.08f,
+    breatheMin = 0.10f, breatheMax = 0.20f, breatheHzMin = 0.30f, breatheHzMax = 0.55f,
+    hue0Lo = 0, hue0Hi = 1,
 )
 
 internal val FOG_WISP = FogVeilKind(
     share = 0.4f,
-    rxMin = 90f, rxMax = 200f, aspectMin = 2.2f, aspectMax = 3.4f,
-    alphaMin = 0.027f, alphaMax = 0.050f,
-    vxMin = 14f, vxMax = 34f, vy = 2.2f,
-    bobMin = 6f, bobMax = 16f, spinMin = 0.012f, spinMax = 0.030f,
-    lifeMin = 18f, lifeMax = 34f, yMin = 0.20f, yMax = 1.02f,
-    breatheMin = 0.08f, breatheMax = 0.16f, hue0Lo = 1, hue0Hi = 2,
+    rxMin = 95f, rxMax = 180f, aspectMin = 2.2f, aspectMax = 3.4f,
+    alphaMin = 0.085f, alphaMax = 0.135f,
+    vxMin = 68f, vxMax = 140f, vy = 9.0f,
+    bobMin = 18f, bobMax = 40f, bobHzMin = 0.70f, bobHzMax = 1.25f,
+    swayMin = 16f, swayMax = 38f,
+    spinMin = 0.052f, spinMax = 0.115f,
+    lifeMin = 11f, lifeMax = 20f, yMin = 0.14f, yMax = 1.02f,
+    breatheMin = 0.20f, breatheMax = 0.36f, breatheHzMin = 0.65f, breatheHzMax = 1.15f,
+    hue0Lo = 1, hue0Hi = 2,
 )
 
 // -----------------------------------------------------------------------------
@@ -224,41 +405,63 @@ internal fun fogFieldScale(areaDp: Float, countScale: Float): Float =
     ((areaDp / FOG_REF_AREA_DP).coerceIn(0.4f, 2.4f) * countScale).coerceIn(0.12f, 4.0f)
 
 /** Population target. Bounded HARD at both ends — this is a backdrop, and the
- *  ceiling is what keeps the frame at ~20 quads on the largest viewport. */
+ *  ceiling is what keeps the frame at ~24 quads on the largest viewport. A
+ *  phone-shaped box floors at fieldScale 0.4 and gets 14. */
 internal fun fogVeilCount(fieldScale: Float): Int =
-    (9f + 5f * fieldScale).roundToInt().coerceIn(FOG_MIN_VEILS, FOG_MAX_VEILS)
+    (12f + 6f * fieldScale).roundToInt().coerceIn(FOG_MIN_VEILS, FOG_MAX_VEILS)
 
 /**
- * THE DRAW-SITE CEILING. Per-quad ceiling #2: [budgetK] is always ≤ 1 so this is
- * a backstop, and it is the line that must never be deleted. Shared with
- * FogFieldTest so the assertion tests the shipping code, not a copy of it.
+ * THE DRAW-SITE CEILING, and the ONLY place the Intensity dial reaches fog.
+ *
+ * [budgetK] is always ≤ 1, so on its own the clamp would be a backstop — but
+ * [alphaScale] (FieldPaints.alphaScale, i.e. ParticleTuning.brightnessScale,
+ * 0.55–1.6×) can push a quad past the ceiling, and this coerceAtMost is what
+ * stops it. Fog draws through its own SrcOver paint and therefore never passes
+ * through drawSpriteF, so if this multiply is deleted the dial silently stops
+ * brightening the effect, and if the clamp is deleted the legibility budget
+ * silently stops holding. Shared with FogFieldTest so the assertions test the
+ * shipping code, not a copy of it.
  */
-internal fun fogQuadAlpha(a: Float, budgetK: Float): Float =
-    (a * budgetK).coerceAtMost(FOG_MAX_VEIL_ALPHA)
+internal fun fogQuadAlpha(a: Float, budgetK: Float, alphaScale: Float): Float {
+    val dial = if (alphaScale.isFinite() && alphaScale > 0f) alphaScale else 1f
+    return (a * budgetK * dial).coerceAtMost(FOG_MAX_VEIL_ALPHA).coerceAtLeast(0f)
+}
 
 // -----------------------------------------------------------------------------
 // One veil. A POOLED slot: recycled in place, never reallocated, so the hot path
 // allocates nothing at all. `wisp` is a property of the SLOT, not of the draw —
 // a bank does not become a wisp when it is recycled.
 //
-// Lengths (rx, ry, vx, vy, bobAmp) are WEB CSS px and are multiplied by
-// FogSim.g at USE, never baked in, so a density or size change re-scales the
-// live field instead of stranding it.
+// Lengths (rx, ry, vx, vy, bobAmp, swayAmp, marginX/Y) are WEB CSS px and are
+// multiplied by FogSim.g at USE, never baked in, so a density or size change
+// re-scales the live field instead of stranding it.
 // -----------------------------------------------------------------------------
 class FogVeil internal constructor(val wisp: Boolean) {
     var x = 0f; var y = 0f
     var rx = 0f                 // long (horizontal) radius, web CSS px
     var ry = 0f                 // short radius — always < rx, or rotation is invisible
     var sizeEnv = 1f            // per-particle size-envelope multiplier ── premium rule 1
-    var alpha0 = 0f             // this veil's own alpha, before envelope + budget
+    /** The largest SIZE multiplier this veil can ever be drawn at: its own
+     *  sizeEnv × its own breathe peak (fogSwell tops out at exactly 1). */
+    var swellMax = 1f
+    /** Half-width of the veil's maximum DRAWN footprint including the draw-time
+     *  sway, in web CSS px. This — not `rx` — is the wrap margin and the upwind
+     *  spawn offset: a veil that wrapped on its bare radius would teleport with
+     *  up to two thirds of itself still on screen (swellMax reaches 1.66). */
+    var marginX = 0f
+    /** Same, vertically, including the draw-time bob. */
+    var marginY = 0f
+    var alpha0 = 0f             // this veil's own alpha, before envelope + budget + dial
     var a = 0f                  // CURRENT per-quad alpha (already ceiling-clamped)
     var vx = 0f                 // downwind drift, web CSS px/s
     var vy = 0f                 // slow vertical layering, web CSS px/s
     var bobAmp = 0f             // draw-time vertical bob, web CSS px
-    var bobHz = 0f
+    var bobHz = 0f              // rad/s
+    var swayAmp = 0f            // draw-time horizontal sway, web CSS px
+    var swayHz = 0f             // rad/s, incommensurate with bobHz → a lissajous roll
     var breatheAmp = 0f         // draw-time size oscillation, dimensionless
-    var breatheHz = 0f
-    var phase = 0f              // private offset shared by bob + breathe
+    var breatheHz = 0f          // rad/s
+    var phase = 0f              // private offset shared by bob + sway + breathe
     var rot = 0f                // radians
     var spin = 0f               // rad/s, signed
     var life = 1f               // 1 → 0
@@ -272,9 +475,9 @@ class FogVeil internal constructor(val wisp: Boolean) {
  *
  * [countScale] is the intensity × quality budget multiplier (ParticleTuning) —
  * it reaches the POPULATION only, exactly as the web folds its dials into
- * env.scale. It must never reach an alpha: the web's `env.intensity` is a hard
- * 1.0 baseline (ember-fx.js `FIELD.intensity`) and the legibility ceilings above
- * are calibrated against that.
+ * env.scale. It must never reach an alpha; the Intensity dial's BRIGHTNESS
+ * channel is a separate, draw-phase-only input (FieldPaints.alphaScale, applied
+ * in [fogQuadAlpha] under the hard per-quad ceiling).
  *
  * [rand] is the injectable randomness seam, so FogFieldTest can drive the whole
  * simulation from a seeded generator.
@@ -307,8 +510,8 @@ class FogSim(
     var budgetK = 1f
         private set
 
-    /** Private phase clock for the bob/breathe oscillators, advanced by dtSec.
-     *  Double because a long session would run a Float out of precision. */
+    /** Private phase clock for the bob/sway/breathe oscillators, advanced by
+     *  dtSec. Double because a long session would run a Float out of precision. */
     private var clock = 0.0
 
     /** Test/inspection view of the pool. Never called from the hot path. */
@@ -354,9 +557,9 @@ class FogSim(
      *
      * Kinds are assigned the way the web assigns them: fill banks up to
      * round(target × bank share), then wisps. That makes the mix exact at ANY
-     * population (8 veils → 5 banks / 3 wisps; 20 → 12 / 8), which a per-veil
-     * coin flip could not promise — a field of twenty wisps and no banks has no
-     * depth at all.
+     * population (14 veils → 8 banks / 6 wisps; 24 → 14 / 10), which a per-veil
+     * coin flip could not promise — a field of two dozen wisps and no banks has
+     * no depth at all.
      */
     private fun retarget(initial: Boolean) {
         val want = targetCount()
@@ -385,11 +588,8 @@ class FogSim(
      *
      * [initial] staggers the first fill across the screen and across the life
      * cycle; a recycled veil instead re-enters from the UPWIND edge, off-screen
-     * by its own radius, and lets the envelope fade it in — a veil must never pop
-     * into existence in the middle of the frame.
-     *
-     * The rand() call ORDER is the web module's, verbatim, so a seeded run can be
-     * diffed against fog.js field by field.
+     * by its full DRAWN margin, and lets the envelope fade it in — a veil must
+     * never pop into existence in the middle of the frame.
      */
     private fun reseed(p: FogVeil, initial: Boolean) {
         val k = if (p.wisp) FOG_WISP else FOG_BANK
@@ -400,20 +600,30 @@ class FogSim(
         p.vx = wind * pick(k.vxMin, k.vxMax)        // one prevailing wind for the field
         p.vy = (rnd() - 0.5f) * 2f * k.vy           // slow vertical layering
         p.bobAmp = pick(k.bobMin, k.bobMax)
-        p.bobHz = 0.05f + rnd() * 0.12f
+        p.bobHz = pick(k.bobHzMin, k.bobHzMax)
+        p.swayAmp = pick(k.swayMin, k.swayMax)
+        // Incommensurate with the bob on purpose: equal rates would trace a
+        // straight diagonal, which reads as a slide. A ratio near — but never at
+        // — 2/3 traces an open lissajous, which reads as a roll.
+        p.swayHz = p.bobHz * (0.52f + rnd() * 0.36f)
         p.breatheAmp = pick(k.breatheMin, k.breatheMax)
-        p.breatheHz = 0.04f + rnd() * 0.09f
+        p.breatheHz = pick(k.breatheHzMin, k.breatheHzMax)
         p.phase = rnd() * FOG_TAU
         p.rot = rnd() * FOG_TAU
         p.spin = pick(k.spinMin, k.spinMax) * (if (rnd() < 0.5f) -1f else 1f)
         p.decay = 1f / pick(k.lifeMin, k.lifeMax)
         p.hue0 = k.hue0Lo + (rnd() * (k.hue0Hi - k.hue0Lo + 1)).toInt()
         p.y = height * pick(k.yMin, k.yMax)
+        // DERIVED, once per life: the veil's maximum drawn footprint. Recomputed
+        // here rather than per frame because every input is fixed for this life.
+        p.swellMax = p.sizeEnv * (1f + p.breatheAmp)
+        p.marginX = p.rx * p.swellMax + p.swayAmp
+        p.marginY = p.ry * p.swellMax + p.bobAmp
         if (initial) {
             p.x = rnd() * width
             p.life = 0.15f + rnd() * 0.85f          // stagger: they must not all die together
         } else {
-            p.x = if (wind > 0f) -p.rx * g else width + p.rx * g
+            p.x = if (wind > 0f) -p.marginX * g else width + p.marginX * g
             p.life = 1f
         }
         p.a = 0f
@@ -438,11 +648,12 @@ class FogSim(
             p.y += p.vy * gg * dtSec
             p.rot += p.spin * dtSec
             if (p.rot > FOG_TAU) p.rot -= FOG_TAU else if (p.rot < -FOG_TAU) p.rot += FOG_TAU
-            // Wrap by the veil's OWN radius so a 1400 px bank never clips at an
-            // edge — a hard-edged fog bank is the most obvious "these are quads"
-            // tell there is.
-            val mx = p.rx * gg
-            val my = p.ry * gg
+            // Wrap by the veil's own MAXIMUM DRAWN extent (radius × swellMax plus
+            // its sway/bob amplitude) so a 1200 px bank never clips at an edge —
+            // a hard-edged fog bank is the most obvious "these are quads" tell
+            // there is, and at these speeds veils wrap constantly.
+            val mx = p.marginX * gg
+            val my = p.marginY * gg
             if (p.x < -mx) p.x = width + mx else if (p.x > width + mx) p.x = -mx
             if (p.y < -my) p.y = height + my else if (p.y > height + my) p.y = -my
             // Per-quad ceiling #1 (compute site).
@@ -467,14 +678,13 @@ class FogSim(
     override fun DrawScope.render(res: FieldResources, paints: FieldPaints, nowMs: Double) {
         if (pool.isEmpty()) return
         // ── hoisted: one lookup per FRAME, never per particle ──
-        // Our own grey ramp, baked through the shared radial bake (the same
-        // gradient profile the web's makeSprite() uses) and memoized under our
-        // own key. Fog never touches res.atlas, so the warm ember atlas is never
-        // baked while this field is selected.
+        // Our own grey ramp, baked large (see FOG_SPRITE_PX) and memoized under
+        // our own key. Fog never touches res.atlas, so the warm ember atlas is
+        // never baked while this field is selected.
         val ramp: Array<android.graphics.Bitmap> = res.bake(FOG_SPRITE_KEY) { d ->
             Array(FOG_RAMP.size) { i ->
                 val c = FOG_RAMP[i]
-                bakeRadialSprite(c[0], c[1], c[2], d).asAndroidBitmap()
+                bakeFogSprite(c[0], c[1], c[2], d)
             }
         }
         // Our own SrcOver paint. FieldPaints.sprite carries FIELD_BLEND (additive
@@ -483,26 +693,25 @@ class FogSim(
         // so this is still zero allocation per frame; FieldResources is
         // remembered PER OVERLAY and only ever touched from the draw phase, so a
         // mutable paint living in it is safe by the same rule FieldPaints is.
-        val paint: android.graphics.Paint = res.bake(FOG_PAINT_KEY) { _ ->
-            android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply {
-                isAntiAlias = true
-                // SrcOver is the Paint default and it is DELIBERATE: additive
-                // would blow twenty overlapping veils out to white.
-            }
-        }
+        val paint: android.graphics.Paint = res.bake(FOG_PAINT_KEY) { _ -> newFogPaint() }
         val top = ramp.size - 1
         val ts = clock
         val gg = g
         val k = budgetK
+        // The Intensity dial's BRIGHTNESS channel. drawSpriteF applies this for
+        // every sprite-based field; fog draws through its own paint, so it has to
+        // do it by hand — see fogQuadAlpha, which also holds the hard ceiling.
+        val dial = paints.alphaScale
         val canvas = drawContext.canvas.nativeCanvas
         val dst = paints.dst                       // per-overlay scratch; never ours to keep
         for (p in pool) {
             // Per-quad ceiling #2 (draw site). THE line that must never be deleted.
-            val a = fogQuadAlpha(p.a, k)
+            val a = fogQuadAlpha(p.a, k, dial)
             if (a <= 0.003f) continue              // same cull threshold as drawSpriteF
             val age = 1f - p.life
-            // Breathe: a slow private size oscillation, on this veil's own Hz and
-            // phase, so the field never pulses in unison.
+            // Breathe: a private size oscillation, on this veil's own rate and
+            // phase, completing at least a full cycle within its life so the quad
+            // visibly swells and settles instead of sitting at a fixed size.
             val breathe = 1f + p.breatheAmp * sin(ts * p.breatheHz + p.phase).toFloat()
             // SIZE = life curve × per-particle envelope × breathe. Never constant.
             val sw = fogSwell(age) * p.sizeEnv * breathe
@@ -512,13 +721,17 @@ class FogSim(
             // COLOUR RAMP indexed by life: cool slate when fresh, warm dust when
             // dissipating, each sub-population starting on its own stop.
             val idx = (p.hue0 + (age * 2f).roundToInt()).coerceIn(0, top)
+            // Bob + sway: a draw-time lissajous on top of the linear drift, which
+            // is what turns "sliding rectangle of grey" into "rolling bank". Both
+            // are inside marginX/marginY, so neither can expose an edge at a wrap.
+            val x = p.x + sin(ts * p.swayHz + p.phase * 1.7f).toFloat() * p.swayAmp * gg
             val y = p.y + sin(ts * p.bobHz + p.phase).toFloat() * p.bobAmp * gg
             paint.alpha = (a * 255f).roundToInt()
             // Rotate about the veil's own centre. The quad is an ELLIPSE, which is
-            // the only reason the (very slow) spin is visible at all.
+            // the only reason the (slow) spin is visible at all.
             dst.set(-rx, -ry, rx, ry)
             val restore = canvas.save()
-            canvas.translate(p.x, y)
+            canvas.translate(x, y)
             canvas.rotate(p.rot * FOG_RAD_TO_DEG)
             canvas.drawBitmap(ramp[idx], null, dst, paint)
             canvas.restoreToCount(restore)

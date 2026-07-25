@@ -8,7 +8,9 @@ import com.aiblackbox.portal.ui.components.RAIN_LEAN
 import com.aiblackbox.portal.ui.components.RAIN_LEAN_JITTER
 import com.aiblackbox.portal.ui.components.RAIN_LEAN_SHEAR
 import com.aiblackbox.portal.ui.components.RAIN_MAX_DROPS
+import com.aiblackbox.portal.ui.components.RAIN_MAX_STROKE_DEVICE_PX
 import com.aiblackbox.portal.ui.components.RAIN_MIN_DROPS
+import com.aiblackbox.portal.ui.components.RAIN_MIN_STROKE_DEVICE_PX
 import com.aiblackbox.portal.ui.components.RAIN_NEAR_ALPHA_CEILING
 import com.aiblackbox.portal.ui.components.RAIN_PLANES
 import com.aiblackbox.portal.ui.components.RAIN_RAMP
@@ -18,6 +20,7 @@ import com.aiblackbox.portal.ui.components.RAIN_WEB_TO_REF_PX
 import com.aiblackbox.portal.ui.components.RainDrop
 import com.aiblackbox.portal.ui.components.RainSim
 import com.aiblackbox.portal.ui.components.rainAlphaEnvelope
+import com.aiblackbox.portal.ui.components.rainDrawnAlpha
 import com.aiblackbox.portal.ui.components.rainLengthEnvelope
 import com.aiblackbox.portal.ui.components.rainPlaneCount
 import com.aiblackbox.portal.ui.components.rainPopulationScale
@@ -251,17 +254,104 @@ class RainFieldTest {
     @Test fun `alpha-weighted ink over the viewport stays under the backdrop budget`() {
         // The real legibility number: how much light the field puts between the
         // page and the reader. sum(length × width × alpha) / viewport area.
-        // Modelled at the shipped tuning: ~0.033%, i.e. a little over half the
-        // web's 0.059% (the phone viewport is taller per drop). The bounds are
-        // deliberately close — a tweak that triples the ink fails here rather
-        // than quietly costing the chat text its contrast.
+        //
+        // BOUNDS MOVED 2026-07-25 with the ANDROID PRESENCE BOOST (see the note
+        // above RAIN_PLANES). They used to be 0.0001..0.0009 around a modelled
+        // 0.033%, which was HALF the web's own 0.059% — and the web is the field
+        // the 9.5–11.1:1 contrast against #C9C9C9 body text was measured on. Half
+        // of a comfortably-legible field is not a safety margin, it is an
+        // invisible field, which is what Brandon reported on the Fold. The
+        // shipped tuning now models at ~0.050%: still UNDER the web's, i.e. still
+        // inside the measured-safe envelope, with the ceiling left at ~2x it so a
+        // tweak that doubles the ink from here still fails the build.
+        //
+        // This is a BUDGET, deliberately loose on both sides. The exact guard
+        // against someone "restoring web parity" and re-thinning the strokes is
+        // `every plane strokes wide enough to read as a line` below, which is
+        // pure arithmetic on the constants and cannot drift with the seed.
         val s = sim(seed = 37)
         run(s, 300)
         var ink = 0.0
         for (p in live(s)) ink += streakLen(p).toDouble() * (p.wid * g) * p.a
         val coverage = ink / (width * height)
-        assertTrue("ink coverage ${coverage * 100}% — too loud for a backdrop", coverage < 0.0009)
-        assertTrue("ink coverage ${coverage * 100}% — the field is invisible", coverage > 0.0001)
+        assertTrue("ink coverage ${coverage * 100}% — too loud for a backdrop", coverage < 0.0011)
+        assertTrue("ink coverage ${coverage * 100}% — the field is invisible", coverage > 0.0003)
+    }
+
+    @Test fun `every plane strokes wide enough to read as a line, and never as a bar`() {
+        // THE PRESENCE FLOOR. Canvas coordinates are DEVICE px, and below roughly
+        // 1.5 of them antialiasing spreads a stroke across two pixel columns at a
+        // third coverage each — then the plane's alpha multiplies THAT. The far
+        // plane used to be 0.55 web px = 0.85 device px, i.e. half the population
+        // rendering as noise rather than as rain. Asserted as a PROPERTY (device
+        // px at the reference density) rather than as the literal web numbers,
+        // because the web numbers are exactly what does not survive × 0.5 × 3.1.
+        for (li in RAIN_PLANES.indices) {
+            val px = RAIN_PLANES[li].width * RAIN_WEB_TO_REF_PX
+            assertTrue(
+                "plane $li strokes at $px device px — under the $RAIN_MIN_STROKE_DEVICE_PX px " +
+                    "floor, it will antialias into noise",
+                px >= RAIN_MIN_STROKE_DEVICE_PX,
+            )
+        }
+        // …and the other end: the widest stroke the config can produce is a near
+        // plane heavy drop. Past this it stops being a streak and starts being a
+        // bar sitting behind a glyph stem.
+        val widest = RAIN_PLANES.last().width * RAIN_HEAVY.width * RAIN_WEB_TO_REF_PX
+        assertTrue(
+            "the heaviest near drop strokes at $widest device px — that is a bar, not rain",
+            widest < RAIN_MAX_STROKE_DEVICE_PX,
+        )
+        // Width still reinforces depth. It is no longer the 1:1.64:2.64 spread the
+        // web authors (lifting the far plane over the floor compressed it to
+        // ~1:1.30:1.90) — depth is carried by SPEED → streak length here, and that
+        // ordering is asserted from the simulation above. Width must still ORDER
+        // with depth, it just no longer has to carry it alone.
+        assertTrue(
+            "widths must deepen with proximity",
+            RAIN_PLANES[0].width < RAIN_PLANES[1].width &&
+                RAIN_PLANES[1].width < RAIN_PLANES[2].width,
+        )
+    }
+
+    @Test fun `the Intensity dial reaches the stroke alpha, and cannot blow past the text`() {
+        // Rain is a LINE field: it bakes its own stroke paint and never calls
+        // drawSpriteF, which is where every sprite-based effect picks up
+        // FieldPaints.alphaScale for free. So the dial only reaches it through
+        // rainDrawnAlpha, and if that ever stops being true the Intensity slider
+        // silently goes back to adding drops of identical faintness — which is
+        // exactly what Brandon hit ("scale all the way up and I just barely can
+        // see the rain"). Both render tiers go through this one function.
+        val near = RAIN_PLANES.last().alpha * RAIN_HEAVY.alpha
+
+        // The default dial is a NO-OP: the boost is opt-in, not a silent re-tune.
+        assertEquals(
+            "the default dial must draw the stored alpha unchanged",
+            near, rainDrawnAlpha(near, ParticleTuning.brightnessScale(1f)), 1e-6f,
+        )
+
+        val up = ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MAX)
+        val down = ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MIN)
+        assertTrue("turning Intensity up must actually brighten the rain", up > 1.3f)
+        assertTrue(
+            "the dial does not reach the stroke — the slider is count-only again",
+            rainDrawnAlpha(near, up) > near * 1.3f,
+        )
+        assertTrue("turning Intensity down must dim it", rainDrawnAlpha(near, down) < near)
+
+        // The ceiling the dial can reach. RAIN_NEAR_ALPHA_CEILING governs the
+        // field at the DEFAULT dial (asserted on the simulation elsewhere); this
+        // is the absolute brightest alpha that can ever hit the canvas, and it has
+        // to stay far enough under opaque that slate-blue streaks behind #C9C9C9
+        // body text are still a backdrop. rain.js applies the same term (`inten`).
+        val brightest = rainDrawnAlpha(near, up)
+        assertTrue("the dial can drive rain to $brightest alpha — that is not a backdrop", brightest < 0.40f)
+
+        // Soundness: alpha is a fraction, and a corrupt dial must degrade to the
+        // stored alpha rather than paint a NaN (which strokes as garbage).
+        assertEquals(1f, rainDrawnAlpha(0.9f, 4f), 1e-6f)
+        assertEquals(near, rainDrawnAlpha(near, Float.NaN), 1e-6f)
+        assertEquals(0f, rainDrawnAlpha(0f, up), 0f)
     }
 
     // ── 4. The three premium rules ──

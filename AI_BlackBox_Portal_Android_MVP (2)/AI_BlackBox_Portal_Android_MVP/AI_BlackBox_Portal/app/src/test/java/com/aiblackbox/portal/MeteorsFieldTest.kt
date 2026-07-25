@@ -7,7 +7,9 @@ import com.aiblackbox.portal.ui.components.METEOR_DUST
 import com.aiblackbox.portal.ui.components.METEOR_FIREBALL
 import com.aiblackbox.portal.ui.components.METEOR_FIREBALL_CHANCE
 import com.aiblackbox.portal.ui.components.METEOR_FIRST_MIN
+import com.aiblackbox.portal.ui.components.METEOR_HEAD_R
 import com.aiblackbox.portal.ui.components.METEOR_LIFE_MAX
+import com.aiblackbox.portal.ui.components.METEOR_MIN_HEAD_PX
 import com.aiblackbox.portal.ui.components.METEOR_POOL
 import com.aiblackbox.portal.ui.components.METEOR_RAMP
 import com.aiblackbox.portal.ui.components.METEOR_RAMP_STEPS
@@ -45,10 +47,14 @@ import kotlin.math.min
  *   2. THE SCHEDULE CORRELATES WITH NOTHING — identical spawn times whether the
  *      machine is idle or generating, and rearm() (the one hook that fires on
  *      activation) never pulls an event forward.
- *   3. LONG SILENCES — a low duty cycle with real multi-second gaps IS the effect.
+ *   3. THE RATE — a meteor lands every few seconds (so a phone glance sees one)
+ *      and the gaps still dominate (so it is punctuation, not a curtain).
  *   4. delta-timing, the DPI law, a fixed pool, and no NaN.
  *
- * Mirrors Portal/modules/fx/effects/meteors.test.mjs — keep them in step.
+ * Mirrors Portal/modules/fx/effects/meteors.test.mjs, EXCEPT where the Fold 6
+ * device pass (2026-07-25) deliberately diverged — the schedule and the stroke
+ * width. Those two are re-expressed as properties rather than as the web's
+ * literals, each with the reason inline; everything else stays in step.
  */
 class MeteorsFieldTest {
 
@@ -168,7 +174,13 @@ class MeteorsFieldTest {
             peak = max(peak, pool.count { it.alive })
         }
         assertTrue("no streak ever spawned in 300 s", peak >= 1)
-        assertTrue("a meteor field must read as sparse; peaked at $peak", peak <= 5)
+        // WAS: peak <= 5, at the web's ~19 s mean gap. The gap is now ~3.4 s
+        // (2026-07-25 Fold pass — see `a meteor lands every few seconds…`), and a
+        // shower still fires 3-4 streaks back to back at 0.35-1.20 s spacing, so a
+        // handful can legitimately overlap. The PROPERTY is unchanged and is what
+        // this bound protects: the field must never SATURATE its 8-slot pool into a
+        // continuous curtain. Emptiness is asserted directly by the duty cycle test.
+        assertTrue("a meteor field must never saturate into a curtain; peaked at $peak", peak <= 6)
     }
 
     @Test fun `the starfield is a low, viewport-independent count with two layers`() {
@@ -206,8 +218,14 @@ class MeteorsFieldTest {
                     if (!m.alive) continue
                     // Exactly what render() draws: half-width from the size-over-life
                     // envelope, the head core disc, and the tail reaching back inward.
+                    // The head constants come from the effect, not from literals, so
+                    // the Fold-6 width uplift (2026-07-25) is measured here rather
+                    // than assumed away — the streaks are now ~2x thicker and this is
+                    // the assertion that proves the extra light still lands outside
+                    // the reading zone (spawnMeteor subtracts a head guard from the
+                    // x cap for exactly this reason).
                     val hw = m.width * meteorEnvelope(1f - m.life) * m.envMul
-                    val headR = max(0.4f, hw * 1.15f)
+                    val headR = max(METEOR_MIN_HEAD_PX, hw * METEOR_HEAD_R)
                     val tailX = m.x - m.ux * m.tail
                     for (x in floatArrayOf(m.x - headR, m.x + headR, tailX - hw / 2f, tailX + hw / 2f)) {
                         assertTrue("seed $seed: streak pixel at x=$x is in the reading zone", x <= lo || x >= hi)
@@ -243,8 +261,18 @@ class MeteorsFieldTest {
     @Test fun `streaks are thin and brief — the two halves of 'you barely saw it'`() {
         val r = run(sim(seed = 3), 300f)                      // 5 minutes
         assertTrue("only ${r.streaks.size} streaks sampled", r.streaks.size >= 8)
-        val widest = r.streaks.maxOf { it.widest }
-        assertTrue("head width $widest px is not a hairline (gs=$gs)", widest <= 3.2f * gs)
+        // WAS: widest <= 3.2 × gs, mirroring the web's 3.2-CSS-px pin. That literal
+        // was raised on 2026-07-25 because it was pinning a stroke that had already
+        // lost: web widths × apparentScale 0.5 × density 3.1 put the taper under one
+        // DEVICE pixel, where an antialiased line dissolves into grey noise before
+        // alpha is even applied ("I can't really see anything happening there").
+        // So assert the PROPERTY the literal was protecting instead of the literal:
+        // the head is still a HAIRLINE IN PHYSICAL TERMS — under 3 dp of stroke on
+        // any screen — which is a bright thread, never a bar of light. (Same result
+        // as the web, different number: the cross-surface contract is the apparent
+        // look, not the constant.)
+        val widestDp = r.streaks.maxOf { it.widest } / density
+        assertTrue("head width $widestDp dp is not a hairline", widestDp <= 3.0f)
         val longest = r.streaks.maxOf { it.dur }
         assertTrue("a streak lingered $longest s", longest <= METEOR_LIFE_MAX + 0.05f)
         // The web asserts 0.1 s on its 1400-CSS-px box; a phone is narrower in web
@@ -255,13 +283,28 @@ class MeteorsFieldTest {
 
     // ── 3. THE TIMING — long silences, correlated with nothing ──
 
-    @Test fun `long silences dominate - low duty cycle with multi-second gaps`() {
+    @Test fun `a meteor lands every few seconds, and the gaps still dominate`() {
         val long = run(sim(seed = 21), 900f)                  // 15 minutes
         assertTrue("only ${long.births.size} streaks in 900 s", long.births.size >= 20)
-        assertTrue("a streak was on screen ${(long.duty * 100).toInt()}% of frames — that is a screensaver",
-            long.duty < 0.15f)
+        // WAS: duty < 0.15, mean gap >= 8 s, longest gap >= 10 s — the web schedule
+        // ([16, 34] s, ~19 s mean). Re-tuned on 2026-07-25 after the Fold 6 pass:
+        // "I can't really see anything happening there… make that one more
+        // animated." At a 19 s mean gap the MEDIAN PHONE GLANCE CONTAINS NO METEOR,
+        // so the effect reads as broken rather than as sparse. The bounds below now
+        // assert the two halves of the character that actually matter, and the rate
+        // sits between them:
+        //   • it is an EVENT, not a stream  — the screen is empty most of the time,
+        //     and every gap is many times a streak's own ~0.4 s life;
+        //   • it is VISIBLE ON A GLANCE     — several land in the first minute.
+        assertTrue("a streak was on screen ${(long.duty * 100).toInt()}% of frames — that is a stream, not an event",
+            long.duty < 0.30f)
         assertTrue("the field opens quiet, not with a streak", long.births[0] >= METEOR_FIRST_MIN)
-        // Pool the gaps across three seeds: showers are a 12% event, so a single
+        // BRANDON'S ASK, PINNED. A phone is glanced at for a few seconds; the first
+        // minute must contain several streaks or the effect is invisible in practice.
+        val minute = run(sim(seed = 21), 60f).births
+        assertTrue("only ${minute.size} streaks in the first minute — a glance would see none",
+            minute.size >= 8)
+        // Pool the gaps across three seeds: showers are a 16% event, so a single
         // 15-minute sample is a thin basis for "showers exist".
         val gaps = ArrayList<Double>()
         fun collect(r: RunResult) {
@@ -269,8 +312,9 @@ class MeteorsFieldTest {
             for (i in 1 until b.size) gaps.add(b[i] - b[i - 1])
         }
         collect(long); collect(run(sim(seed = 5), 300f)); collect(run(sim(seed = 8), 300f))
-        assertTrue("there must be genuinely long silences", gaps.max() >= 10.0)
-        assertTrue("mean gap ${gaps.average()} s is too chatty", gaps.average() >= 8.0)
+        assertTrue("there must be genuinely long silences, ${gaps.max()} s is not one", gaps.max() >= 5.0)
+        assertTrue("mean gap ${gaps.average()} s is a stream, not punctuation", gaps.average() >= 2.0)
+        assertTrue("mean gap ${gaps.average()} s is back to 'nothing is happening'", gaps.average() <= 6.0)
         assertTrue("showers exist: sometimes two arrive together", gaps.any { it < 2.0 })
     }
 
@@ -319,14 +363,14 @@ class MeteorsFieldTest {
         val pl = FloatArray(pool.size)
         val was = BooleanArray(pool.size)
         var checked = 0
-        // 400 s, where meteors.test.mjs samples 200. Meteor Fall is SPARSE BY
-        // DESIGN — an 8-slot pool, a ~19 s mean gap, and almost always zero alive —
-        // and a phone is far narrower in web px than the web test's 1400-CSS-px
-        // box, so a streak reaches the edge cull in ~0.26 s instead of ~0.38 s and
-        // contributes ~35% fewer per-frame samples. Same threshold as the web
-        // (> 200 samples), collected over a window sized for this geometry: making
-        // the field busier to satisfy a test would destroy the effect. (Same
-        // adjustment, same cause, as the 0.08 s duration floor above.)
+        // 400 s, where meteors.test.mjs samples 200. Meteor Fall is still SPARSE —
+        // an 8-slot pool and ~9 frames in 10 with nothing alive — and a phone is far
+        // narrower in web px than the web test's 1400-CSS-px box, so a streak
+        // reaches the edge cull in ~0.26 s instead of ~0.38 s and contributes ~35%
+        // fewer per-frame samples. Same threshold as the web (> 200 samples),
+        // collected over a window sized for this geometry. (The window is kept as-is
+        // after the 2026-07-25 rate uplift: it now oversamples, which only makes the
+        // assertion stronger.)
         for (f in 1..24000) {
             for (i in pool.indices) {
                 was[i] = pool[i].alive; px[i] = pool[i].x; py[i] = pool[i].y; pl[i] = pool[i].life
@@ -378,7 +422,10 @@ class MeteorsFieldTest {
         assertTrue("no cut-off at death", meteorEnvelope(0.95f) < peak * 0.15f)
         // …and every streak carries its OWN depth (0.82..1.24) over that curve, so
         // no two streaks are the same brightness ramp and none is a constant bar.
-        val muls = run(sim(seed = 52), 300f).streaks.map { it.envMul }
+        // 60 s, not 300: at the 2026-07-25 rate that is already ~17 streaks, and a
+        // strict all-distinct assertion on a 24-bit float gets birthday-flaky once
+        // the sample runs into the hundreds. Same property, tighter sample.
+        val muls = run(sim(seed = 52), 60f).streaks.map { it.envMul }
         assertTrue("only ${muls.size} streaks to judge", muls.size >= 8)
         assertEquals("the envelope depth must be per-particle", muls.size, muls.toSet().size)
         assertTrue("envelope depth out of band: ${muls.min()}..${muls.max()}",

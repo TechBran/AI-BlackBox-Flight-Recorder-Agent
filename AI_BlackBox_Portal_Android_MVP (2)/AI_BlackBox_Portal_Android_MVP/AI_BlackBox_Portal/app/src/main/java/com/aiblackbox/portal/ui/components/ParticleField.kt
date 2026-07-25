@@ -199,6 +199,26 @@ class FieldPaints {
             typeface = android.graphics.Typeface.MONOSPACE
         }
     val dst: android.graphics.RectF = android.graphics.RectF()
+
+    /**
+     * BRIGHTNESS multiplier from the Intensity dial, applied to every alpha the
+     * effects draw with.
+     *
+     * Brandon on the Fold (2026-07-25), with the dial at maximum: "I have the
+     * scale all the way up and I just barely can see the rain", "I have the range
+     * for the snow drift completely up for intensity... it's just not so bright".
+     * He was right, and it was a design gap: Intensity fed ParticleTuning.countScale
+     * ONLY, so turning it up added MORE particles of exactly the same faintness.
+     * On a dark backdrop that reads as almost no change.
+     *
+     * This cannot be done with the overlay's graphicsLayer alpha — that is already
+     * carrying the fade, and alpha CLAMPS AT 1.0, so it can only ever dim. To
+     * actually brighten, the multiplier has to reach each draw call's own alpha.
+     * drawSpriteF is the shared path for every sprite-based field, so applying it
+     * there covers most of the catalogue in one place; line- and text-based fields
+     * (slipstream, rain, matrix, ledger) apply it at their own draw sites.
+     */
+    var alphaScale: Float = 1f
 }
 
 /**
@@ -221,10 +241,11 @@ internal fun DrawScope.drawSpriteF(
     a: Float,
     paints: FieldPaints,
 ) {
-    if (a <= 0.003f || rad <= 0.1f) return   // same cull thresholds as the Int path
+    val av = a * paints.alphaScale           // Intensity dial drives BRIGHTNESS, not just count
+    if (av <= 0.003f || rad <= 0.1f) return   // same cull thresholds as the Int path
     val half = rad.coerceAtLeast(0.5f)       // ≥ 1 px wide, as dstSize.coerceAtLeast(1) was
     paints.dst.set(cx - half, cy - half, cx + half, cy + half)
-    paints.sprite.alpha = (a.coerceIn(0f, 1f) * 255f).roundToInt()
+    paints.sprite.alpha = (av.coerceIn(0f, 1f) * 255f).roundToInt()
     drawContext.canvas.nativeCanvas.drawBitmap(bmp, null, paints.dst, paints.sprite)
 }
 

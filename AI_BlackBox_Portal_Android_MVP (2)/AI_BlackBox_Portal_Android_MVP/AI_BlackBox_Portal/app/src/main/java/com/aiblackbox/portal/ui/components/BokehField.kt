@@ -4,11 +4,13 @@ package com.aiblackbox.portal.ui.components
 // Field: BOKEH DEPTH (id "bokeh") — huge, softly defocused discs lolling in the
 // foreground while razor-sharp pinpricks of dust creep past far behind them.
 //
-// A faithful native port of the web module
+// A native port of the web module
 //   Portal/modules/fx/effects/bokeh.js
-// (its physics tests: Portal/modules/fx/effects/bokeh.test.mjs). Every tuning
-// number below is BYTE-IDENTICAL to that file so the two surfaces can be diffed
-// forever; nothing here was re-tuned by feel.
+// (its physics tests: Portal/modules/fx/effects/bokeh.test.mjs). Every PHYSICS
+// number below — sizes, speeds, lifetimes, curves, the population formula — is
+// BYTE-IDENTICAL to that file so the two surfaces can be diffed forever. The
+// LIGHT RANGE is the one deliberate divergence, documented under ANDROID LIGHT
+// RANGE below; nothing here was re-tuned by feel.
 //
 // The depth is not faked with a blur filter — it is FOUR CORRELATED PARALLAX
 // PLANES (Rising Stars has three) where size, alpha, speed, lifetime and SPRITE
@@ -30,13 +32,54 @@ package com.aiblackbox.portal.ui.components
 // past behind it. Slow-and-huge in front is what sells "lens", not "landscape".
 //
 // ── LEGIBILITY (this is a BACKDROP behind chat text) ─────────────────────────
-// The near discs are enormous — a 200 px disc at a "modest-looking" 15% alpha
-// would put more light on the screen than the body text does. ALPHA IS THE
-// ENTIRE BUDGET here: every large disc is hard-capped under 6%, and bokehAlpha()
-// CLAMPS to the plane cap so no envelope, breathe or gain can ever lift it. The
-// caps, the population formula and the published ink budget are ported exactly
-// from the web module, where they were measured against real WCAG contrast
-// against --muted (#C9C9C9 = BbxDim); BokehFieldTest re-measures all three.
+// The near discs are enormous — a 300-device-px-WIDE disc at a "modest-looking"
+// 15% alpha would put more light on the screen than the body text does. ALPHA IS
+// THE ENTIRE BUDGET here: every large disc is hard-capped under BOKEH_NEAR_ALPHA_CAP
+// and bokehAlpha() CLAMPS to the plane cap, so no envelope, breathe or gain can
+// ever lift it. The cap is not a vibe — BokehFieldTest measures the worst large
+// disc as real WCAG contrast against --muted (#C9C9C9 = BbxDim) body text and
+// requires it to clear AA (4.5:1) even in a three-deep additive stack, and it
+// measures the whole field's ink against the published budget.
+//
+// ── ANDROID LIGHT RANGE (a DELIBERATE divergence from bokeh.js) ──────────────
+// Brandon, Galaxy Fold 6 (density 3.1, 120 Hz OLED), 2026-07-25:
+//   "Bokeh depth — that one can use a bit more intensity for the light range,
+//    just seems really dim, hard to tell that that one is actually on."
+// He was right, and the web numbers are why. A near-plane rim was drawn at alpha
+// 0.042 = 10/255 of its ramp colour; measured as WCAG contrast against #C9C9C9
+// that is 11.96:1 — DIMMER than any web field ever measured (they sit at
+// 9.5–11.1:1, against an AA floor of 4.5:1). An effect nobody can see has no
+// value and its budget is protecting nothing, so the plane alphas were lifted
+// ~2.2x and the donut re-baked:
+//
+//   plane   bokeh.js   here     why
+//   dust    0.42       0.55     pinpricks: too small to ever be a "large disc"
+//   grain   0.13       0.24     small soft motes, likewise
+//   inner   0.052      0.115    the plane that actually reads as "bokeh" here
+//   near    0.042      0.092    = 0.8 x inner, the web's own near/inner ratio
+//
+// Measured after the lift (BokehFieldTest re-measures every one of these): worst
+// single large disc 10.9:1, worst modelled three-deep stack 6.1:1, peak field
+// ink 0.45% of the viewport against the UNCHANGED 1.25% budget. The strict
+// far→near ordering (each plane dimmer than the one behind it) is untouched —
+// that ordering is what keeps this depth instead of confetti.
+//
+// Two smaller divergences with the same root cause:
+//   • DUST radius is 1.2–2.4 web px, not 0.9–2.0. At apparent scale 0.5 and
+//     density 3.1 the web's 0.9 lands at a 0.89 DEVICE px radius — a sub-pixel
+//     sprite that antialiases into fizz before its alpha is even applied. 1.2
+//     puts the smallest pinprick at 1.19 device px, so the far plane reads as a
+//     crisp point rather than noise. Still 1.7x clear of grain's 4.0 floor.
+//   • The donut's HOLLOW is deeper (0.07/0.11 where the web has 0.10/0.16) and
+//     its rim is a short PLATEAU instead of a knife-edge stop (see
+//     bakeBokehDonut). Lifting the plane alpha without deepening the hollow
+//     would have turned the near plane into a bright mass; instead the
+//     rim-to-centre contrast goes 10:1 → 14.3:1 while the disc's area-weighted
+//     coverage DROPS 6.5%, so the ring takes the whole lift and the wash does
+//     not. The rim is what sells "defocused lens" rather than "dim blob".
+//
+// DO NOT "restore parity" with bokeh.js here. The cross-surface contract is the
+// same APPARENT RESULT, and these are the numbers that deliver it at density 3.1.
 //
 // ── The two Android-specific contracts (get these wrong and it ships broken) ──
 //
@@ -112,11 +155,13 @@ internal class BokehPlane(
  * confetti. Lifetimes deliberately overlap: nothing should die on a schedule.
  */
 internal val BOKEH_PLANES = arrayOf(
+    // Alphas (and the dust radius) are the Fold-calibrated set — see ANDROID
+    // LIGHT RANGE in the header before touching one. Everything else is bokeh.js.
     //           id        count  r (web px)   alpha    speed (web px/s) life (s)     bob   donut
-    BokehPlane("dust",  46, 0.9f, 2.0f, 0.42f, 34f, 48f, 7f, 15f, 11f, false),
-    BokehPlane("grain", 18, 4.0f, 9.0f, 0.13f, 20f, 29f, 12f, 22f, 9f, false),
-    BokehPlane("inner", 9, 22f, 44f, 0.052f, 11f, 17f, 22f, 38f, 7f, true),
-    BokehPlane("near", 5, 48f, 96f, 0.042f, 6f, 10f, 30f, 52f, 5f, true),
+    BokehPlane("dust",  46, 1.2f, 2.4f, 0.55f, 34f, 48f, 7f, 15f, 11f, false),
+    BokehPlane("grain", 18, 4.0f, 9.0f, 0.24f, 20f, 29f, 12f, 22f, 9f, false),
+    BokehPlane("inner", 9, 22f, 44f, 0.115f, 11f, 17f, 22f, 38f, 7f, true),
+    BokehPlane("near", 5, 48f, 96f, 0.092f, 6f, 10f, 30f, 52f, 5f, true),
 )
 
 // -----------------------------------------------------------------------------
@@ -126,16 +171,26 @@ internal val BOKEH_PLANES = arrayOf(
 //
 //   LARGE_DISC   at or above this DRAWN radius (web CSS px) a disc covers text,
 //                not gaps…
-//   ALPHA_CAP    …so its alpha must stay under this. Both near planes are
+//   ALPHA_CAP    …so its alpha must stay under this. Both donut planes are
 //                configured below it and bokehAlpha() clamps, so it cannot drift.
+//                0.12 is not arbitrary: it is exactly where the test's modelled
+//                three-deep additive stack of maximum-alpha large discs lands on
+//                the WCAG AA floor (4.5:1) against #C9C9C9 body text. So the
+//                clamp is the hard ceiling and the CONTRAST test is the real
+//                budget — a plane pushed to the cap trips the contrast test.
+//                (Was 0.06, the web's number, when the planes were 2.2x dimmer.)
 //   INK_BUDGET   Σ alpha·πr² over the whole field, as a fraction of the viewport.
-//                A conservative over-estimate (every sprite falls off to zero long
-//                before its nominal radius), set just above the measured worst
-//                case so that adding a plane or lifting an alpha TRIPS the test
-//                instead of shipping.
+//                UNCHANGED from the web module. A conservative over-estimate
+//                (every sprite falls off to zero long before its nominal radius,
+//                and a donut lays down only ~0.38 of its nominal alpha over its
+//                own area), so the real wash is well under what it measures. The
+//                light-range lift moved the measured peak 0.21% → 0.45% of a
+//                1.25% budget: still a live tripwire for adding a plane or
+//                lifting an alpha again. The test also pins a visibility FLOOR
+//                under it, so "restoring" the web alphas fails too.
 // -----------------------------------------------------------------------------
 internal const val BOKEH_LARGE_DISC_PX = 24f
-internal const val BOKEH_NEAR_ALPHA_CAP = 0.06f
+internal const val BOKEH_NEAR_ALPHA_CAP = 0.12f
 internal const val BOKEH_INK_BUDGET = 0.0125f
 
 /** Fraction of life spent fading up… */
@@ -257,9 +312,27 @@ private const val BOKEH_SOLID_KEY = "bokeh.solid"
 private const val BOKEH_DONUT_PX = 128
 
 /**
- * THE ANNULUS. Centre alpha is 0.10 rather than 0 — a truly hollow centre reads
- * as a soap bubble, whereas a dim, flat interior with a hot rim at 0.93 reads as
- * a defocused aperture. Stops are byte-identical to bokeh.js's bakeDonut().
+ * THE ANNULUS. The centre is dim but never zero — a truly hollow centre reads as
+ * a soap bubble, whereas a flat, dim interior under a hot rim reads as a
+ * defocused aperture.
+ *
+ * TWO DIVERGENCES from bokeh.js's bakeDonut(), both required by the light-range
+ * lift (see ANDROID LIGHT RANGE in the header):
+ *
+ *  1. DEEPER HOLLOW — 0.07/0.11 where the web has 0.10/0.16. The plane alphas
+ *     went up ~2.2x; without this the interior would have gone up with them and
+ *     a 300-px-wide near disc would read as a bright MASS, not a ring. Now the
+ *     rim takes the whole lift: rim-to-centre contrast 10:1 → 14.3:1, while the
+ *     disc's area-weighted coverage actually falls 6.5%. The interior still
+ *     lands at ~2/255 on screen, which is the "flat dim fill" the illusion wants.
+ *
+ *  2. RIM PLATEAU — full alpha is held across 0.90…0.955 instead of touching it
+ *     at a single 0.93 stop. The inner plane draws this 128 px sprite at a 34–68
+ *     px radius, i.e. MINIFIED up to 2:1, and Android's bilinear sampler has no
+ *     mipmaps: a knife-edge peak one texel wide gets sampled straight past, so
+ *     the one edge that carries the whole illusion quietly attenuates. A plateau
+ *     several texels wide survives that. The ramps either side are unchanged in
+ *     spirit (soft in, softer out), so the near plane still reads SOFT.
  */
 private fun bakeBokehDonut(r: Int, g: Int, b: Int, density: Density): ImageBitmap {
     val bitmap = ImageBitmap(BOKEH_DONUT_PX, BOKEH_DONUT_PX)
@@ -274,11 +347,12 @@ private fun bakeBokehDonut(r: Int, g: Int, b: Int, density: Density): ImageBitma
         drawRect(
             brush = Brush.radialGradient(
                 colorStops = arrayOf(
-                    0.0f to base.copy(alpha = 0.10f),
-                    0.55f to base.copy(alpha = 0.16f),
-                    0.82f to base.copy(alpha = 0.55f),
-                    0.93f to base,                        // the rim
-                    0.985f to base.copy(alpha = 0.35f),
+                    0.0f to base.copy(alpha = 0.07f),     // hollow: present, not lit
+                    0.55f to base.copy(alpha = 0.11f),
+                    0.86f to base.copy(alpha = 0.52f),
+                    0.90f to base,                        // the rim…
+                    0.955f to base,                       // …held, so minification cannot eat it
+                    0.99f to base.copy(alpha = 0.34f),
                     1.0f to base.copy(alpha = 0f),
                 ),
                 center = Offset(radius, radius),
@@ -484,6 +558,16 @@ class BokehSim(
     override fun rearm() { /* deliberately nothing — see the doc above. */ }
 
     override fun DrawScope.render(res: FieldResources, paints: FieldPaints, nowMs: Double) {
+        // THE INTENSITY DIAL'S BRIGHTNESS MULTIPLIER (FieldPaints.alphaScale) is
+        // applied inside drawSpriteF, which every disc goes through — this field
+        // draws no lines, text or gradients of its own, so there is nothing here
+        // that could miss it. Note the ordering: bokehAlpha() clamps to the plane
+        // cap, THEN drawSpriteF multiplies by alphaScale, so the dial at maximum
+        // (1.41x) can carry the biggest disc to ~0.163. That is deliberate and
+        // still measures ~8.9:1 against #C9C9C9 body text — twice the WCAG AA
+        // floor — because a dial that cannot actually brighten anything is the
+        // exact bug this effect was reported for.
+        //
         // Hoisted: one hash probe per FRAME, not per particle. Both lambdas capture
         // nothing, so they are singletons — no per-frame allocation.
         val donut = res.bake(BOKEH_DONUT_KEY) { d -> bakeBokehAtlas(d, true) }

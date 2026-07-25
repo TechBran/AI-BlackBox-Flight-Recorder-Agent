@@ -126,6 +126,8 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
     // count multiplier. Defaults (1.0 × High) resolve to exactly 1.0 → today's
     // counts. Quantized in ParticleTuning so a slider drag can't re-key the sim
     // on float noise; a real change rebuilds the sim (counts are baked at spawn).
+    // Intensity drives BOTH count and brightness — see ParticleTuning.brightnessScale.
+    val brightness = ParticleTuning.brightnessScale(LocalParticleIntensity.current)
     val countScale = ParticleTuning.countScale(
         LocalParticleIntensity.current,
         LocalParticleQuality.current,
@@ -230,6 +232,10 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
                 // Keep the sim sized to the canvas (spawns once; re-runs on size change).
                 sim.resize(size.width, size.height, scale, density.density)
                 onDrawBehind {
+                    // Push the Intensity dial's brightness into every draw call.
+                    // Set per-frame (not once) because the dial can move while the
+                    // field is live, and FieldPaints is per-overlay mutable scratch.
+                    paints.alphaScale = brightness
                     // Reading the frame clock HERE invalidates only the DRAW phase
                     // (never recomposition) each animation frame.
                     val nowMs = frame.longValue / 1_000_000.0

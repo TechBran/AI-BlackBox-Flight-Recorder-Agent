@@ -1,6 +1,7 @@
 package com.aiblackbox.portal
 
 import com.aiblackbox.portal.ui.components.AURORA_BAND_FRAC
+import com.aiblackbox.portal.ui.components.AURORA_BASE_WOBBLE_FRAC
 import com.aiblackbox.portal.ui.components.AURORA_GRAD_STOPS
 import com.aiblackbox.portal.ui.components.AURORA_MAX_STACK
 import com.aiblackbox.portal.ui.components.AURORA_OVERLAP
@@ -14,6 +15,7 @@ import com.aiblackbox.portal.ui.components.FieldRandom
 import com.aiblackbox.portal.ui.components.ParticleTuning
 import com.aiblackbox.portal.ui.components.auroraFoldEnvelope
 import com.aiblackbox.portal.ui.components.auroraStripCount
+import com.aiblackbox.portal.ui.components.auroraXWindow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,16 +30,29 @@ import kotlin.math.sin
 /**
  * Aurora Curtain physics — headless, seeded, no Compose / Android graphics.
  *
- * The risk this effect carries is not "does it look nice", it is "does a large
- * bright REGION sit on top of the chat text". So the legibility budget is an
- * ACTUAL ASSERTION here — measured additive alpha per pixel column over 1000
- * frames — not a comment claiming the arithmetic works out.
+ * This effect carries TWO risks, and after the 2026-07-25 Fold session we know
+ * both of them bite:
+ *
+ *   1. TOO BRIGHT — a large bright REGION sitting on top of the chat text. The
+ *      legibility budget is an ACTUAL ASSERTION here: measured additive alpha per
+ *      pixel column over 1000 frames, not a comment claiming the arithmetic works
+ *      out.
+ *   2. TOO DIM — which is what actually shipped. Brandon on the device: "Aurora
+ *      curtain — I don't see anything happening here at all." The geometry was
+ *      fine; the alphas quantized to 3/255 through android.graphics.Paint's 8-bit
+ *      alpha and the field was literally black. An effect nobody can see has no
+ *      value and its budget is protecting nothing, so the budget now has a FLOOR
+ *      as well as a ceiling and both are measured the same way.
  *
  * The probe drives [AuroraSim.blit], which is the SAME call the renderer draws
  * from (it resolves one strip's destination rect, alpha and tint and mutates
- * nothing), so what is measured here is exactly what reaches the screen.
+ * nothing), and weights by [auroraXWindow], which is baked into the sprite the
+ * renderer blits — so what is measured here is exactly what reaches the screen.
  *
- * Mirrors Portal/modules/fx/effects/aurora.test.mjs — keep them in step.
+ * Mirrors Portal/modules/fx/effects/aurora.test.mjs, EXCEPT where AuroraField.kt
+ * documents a deliberate divergence (alpha ceiling, horizontal window, base
+ * wobble, ragged base, per-ray brightness). Those are device-measured; do not
+ * "restore parity" on them.
  */
 class AuroraFieldTest {
 
@@ -45,6 +60,17 @@ class AuroraFieldTest {
     private val height = 2400f
     private val density = 3.1f                       // FIELD_REFERENCE_DENSITY → scale 1
     private val scale = 1f
+
+    private companion object {
+        /**
+         * Float-rounding headroom on the budget assertions, NOT slack in the
+         * guarantee. The runtime normalizer divides in Float, so a column that is
+         * clamped to exactly the ceiling can land one ulp above it. 1e-6 of a 0.32
+         * ceiling is 0.0003% — invisible, and four orders of magnitude below the
+         * ~1-6% the measured peak actually sits under the ceiling in practice.
+         */
+        const val BUDGET_EPS = 1e-6
+    }
 
     /** mulberry32 — the same deterministic PRNG the web test uses. */
     private fun seeded(seed: Int = 1): FieldRandom {
@@ -63,9 +89,17 @@ class AuroraFieldTest {
 
     /**
      * Stand-in for the canvas that measures what actually gets blitted.
+     *
      * [cols] accumulates alpha per device-pixel column for ONE frame — under
      * additive blending that sum IS the brightness the chat text has to compete
-     * with, and the baked gradient's own alpha is ≤ 1, so this is an upper bound.
+     * with. Two deliberate properties:
+     *   • it weights by [auroraXWindow], because that window is baked into the
+     *     sprite: a ray is only at its full alpha along its centre line;
+     *   • it ignores the vertical ramp (whose alpha is ≤ 1) and ignores y
+     *     entirely, so the number is an UPPER BOUND on any real pixel.
+     * AuroraSim.measureBudget bounds the same quantity with a per-bucket maximum
+     * of the same window, so this per-pixel probe can never exceed what the sim
+     * measured — the ceiling below is a guarantee, not a lucky sample.
      */
     private class Probe(widthPx: Float) {
         val w = ceil(widthPx).toInt().coerceAtLeast(1)
@@ -78,6 +112,10 @@ class AuroraFieldTest {
         var maxH = 0f
         var xSum = 0.0
         val tints = HashSet<Int>()
+        /** Every per-strip alpha handed to paint.alpha — the 8-bit floor probe. */
+        val alphas = ArrayList<Float>()
+        var minGain = Float.MAX_VALUE
+        var maxGain = -Float.MAX_VALUE
 
         fun frame() { cols.fill(0.0); xSum = 0.0 }
         fun endFrame() { for (v in cols) if (v > maxColumn) maxColumn = v }
@@ -92,10 +130,18 @@ class AuroraFieldTest {
             if (h > maxH) maxH = h
             xSum += o[0].toDouble()
             tints.add(o[5].toInt())
+            alphas.add(o[4])
+            val wid = o[2] - o[0]
+            if (wid <= 0f) return
             val lo = max(0, floor(o[0]).toInt())
             val hi = min(w - 1, ceil(o[2]).toInt())
-            for (i in lo..hi) cols[i] += o[4].toDouble()
+            for (i in lo..hi) {
+                cols[i] += (o[4] * auroraXWindow(((i + 0.5f) - o[0]) / wid)).toDouble()
+            }
         }
+
+        /** Median of the alphas that reached paint. Sorting a copy — test-only. */
+        fun medianAlpha(): Float = alphas.sorted()[alphas.size / 2]
     }
 
     /** One frame, exactly as EmberOverlay's loop drives it (plus the probe). */
@@ -104,6 +150,8 @@ class AuroraFieldTest {
         for (f in 1..frames) {
             s.update(f * dt * 1000.0, dt, true)
             if (probe == null) continue
+            if (s.budgetGain < probe.minGain) probe.minGain = s.budgetGain
+            if (s.budgetGain > probe.maxGain) probe.maxGain = s.budgetGain
             probe.frame()
             for (i in s.strips.indices) if (s.blit(i, out)) probe.add(out)
             probe.endFrame()
@@ -153,7 +201,7 @@ class AuroraFieldTest {
         assertTrue("no rate overlap between sheets", r1.min() > r0.max())
     }
 
-    // ── 2. THE LEGIBILITY BUDGET ──
+    // ── 2. THE LEGIBILITY BUDGET — a ceiling AND a floor ──
 
     @Test fun `total additive alpha in any column never exceeds the budget`() {
         // 1000 frames at 60 Hz ≈ 16 s — several full fold cycles of both sheets.
@@ -162,9 +210,55 @@ class AuroraFieldTest {
         run(s, probe, 1000)
         assertTrue("expected a busy field, got ${probe.calls} blits", probe.calls > 10000)
         assertTrue("peak column alpha ${probe.maxColumn} busts the $AURORA_PEAK_ALPHA budget",
-            probe.maxColumn <= AURORA_PEAK_ALPHA + 1e-9)
-        assertTrue("budget is barely used (${probe.maxColumn}) — the field would be invisible",
-            probe.maxColumn > AURORA_PEAK_ALPHA * 0.2)
+            probe.maxColumn <= AURORA_PEAK_ALPHA + BUDGET_EPS)
+    }
+
+    @Test fun `the field is actually BRIGHT ENOUGH TO SEE — the regression Brandon hit`() {
+        // THE FLOOR. This is the assertion the shipped version failed on the Fold:
+        // it drew, it moved, and it was invisible. Both halves are asserted as
+        // PROPERTIES of what reaches the canvas, not as literals, so a retune that
+        // keeps the effect visible is free to move the constants.
+        val s = sim(seed = 0xA47)
+        val probe = Probe(width)
+        run(s, probe, 1000)
+
+        // (a) The field must USE the legibility budget it was granted. The shipped
+        //     version peaked at 44% of its own budget and averaged 9% of it,
+        //     because per-strip alpha was PEAK_ALPHA / MAX_STACK — an analytic
+        //     worst case a pixel essentially never sees.
+        assertTrue("peak column alpha ${probe.maxColumn} uses under 70% of the " +
+            "$AURORA_PEAK_ALPHA budget — the field is leaving light on the table",
+            probe.maxColumn > AURORA_PEAK_ALPHA * 0.7)
+
+        // (b) SURVIVES 8-BIT. android.graphics.Paint takes an integer alpha, so an
+        //     alpha under 1/510 is floored to nothing and the baked ramp (also
+        //     8-bit, premultiplied) drops most of a strip well before that. The
+        //     shipped version handed paint a median of 3/255 and a max of 7/255.
+        val med = (probe.medianAlpha() * 255f).roundToInt()
+        val top = (probe.alphas.max() * 255f).roundToInt()
+        assertTrue("median strip alpha quantizes to $med/255 — at that level most of " +
+            "the baked ramp rounds to zero and the curtain is black", med >= 8)
+        assertTrue("brightest strip alpha quantizes to $top/255 — no curtain ever " +
+            "reads as light", top >= 20)
+    }
+
+    @Test fun `the runtime normalizer can only ever dim, and never crushes the field`() {
+        // The ceiling is enforced at RUNTIME (AuroraSim.measureBudget) instead of
+        // by dividing the per-strip alpha by a worst case that never happens. Two
+        // invariants make that safe: the gain is a gain (≤ 1, so it cannot brighten
+        // past the budget) and it is not a sledgehammer (a frame is never dimmed to
+        // the point of re-creating the invisible-field bug).
+        for (cs in floatArrayOf(1f, ParticleTuning.COUNT_SCALE_MAX)) {
+            val s = sim(seed = 0xB33, countScale = cs)
+            val probe = Probe(width)
+            run(s, probe, 400)
+            assertTrue("countScale $cs leaked ${probe.maxColumn} past the budget",
+                probe.maxColumn <= AURORA_PEAK_ALPHA + BUDGET_EPS)
+            assertTrue("gain ${probe.maxGain} at countScale $cs would BRIGHTEN past the budget",
+                probe.maxGain <= 1f + 1e-6f)
+            assertTrue("gain ${probe.minGain} at countScale $cs dims the field into nothing",
+                probe.minGain > 0.3f)
+        }
     }
 
     @Test fun `nothing is ever drawn below the top 55 percent of the canvas`() {
@@ -189,12 +283,26 @@ class AuroraFieldTest {
             assertTrue("stop offsets must be strictly increasing",
                 AURORA_GRAD_STOPS[i][0] > AURORA_GRAD_STOPS[i - 1][0])
         }
+        // …and the ramp must not spend its body under Android's 8-bit alpha floor,
+        // which is what made the top of every curtain quantize to black. At the
+        // median strip alpha the ramp's own alpha has to clear ~1/255 over most of
+        // the strip, so the interior stops need real height.
+        val interior = AURORA_GRAD_STOPS.drop(1).dropLast(1)
+        assertTrue("the ramp is too thin to survive 8-bit quantization",
+            interior.all { it[1] >= 0.3f })
     }
 
-    @Test fun `the per-strip alpha ceiling is the budget divided by the worst-case stack`() {
-        // If someone retunes OVERLAP or WOBBLE_FRAC without redoing MAX_STACK, the
-        // measured budget test above starts failing — this pins the derivation.
-        assertEquals(AURORA_PEAK_ALPHA / AURORA_MAX_STACK, AURORA_STRIP_ALPHA, 0f)
+    @Test fun `the per-strip alpha ceiling is tuned, not derived from the worst-case stack`() {
+        // DELIBERATE DIVERGENCE from aurora.js, and the whole fix: STRIP_ALPHA used
+        // to be PEAK_ALPHA / MAX_STACK. MAX_STACK = 6 is a correct GEOMETRIC bound
+        // and is still pinned below, but paying it on every strip made the typical
+        // pixel ~11x darker than the legibility budget allowed. The ceiling now
+        // lives at runtime (previous test); this one guards the derivation the
+        // geometry still owes, and that no strip exceeds its own declared ceiling.
+        val naive = AURORA_PEAK_ALPHA / AURORA_MAX_STACK
+        assertTrue("STRIP_ALPHA $AURORA_STRIP_ALPHA is back to the naive worst-case " +
+            "quotient $naive — that is the bug that made this effect invisible",
+            AURORA_STRIP_ALPHA > naive * 2f)
         val perSheet = ceil(AURORA_OVERLAP).toInt() + ceil(2f * AURORA_WOBBLE_FRAC).toInt() - 1
         assertTrue("MAX_STACK $AURORA_MAX_STACK is below the derived worst case",
             AURORA_MAX_STACK >= perSheet * AURORA_SHEETS.size)
@@ -205,17 +313,37 @@ class AuroraFieldTest {
             sim().strips.all { it.alphaMax <= AURORA_STRIP_ALPHA + 1e-9f })
     }
 
-    @Test fun `a maxed-out count dial cannot brighten the field past the budget`() {
-        // The Android spelling of the web's intensity guard: intensity lands on the
-        // strip COUNT here, and more strips means more overlap per column.
-        val s = sim(seed = 0xB33, countScale = ParticleTuning.COUNT_SCALE_MAX)
-        val probe = Probe(width)
-        run(s, probe, 400)
-        assertTrue("countScale ${ParticleTuning.COUNT_SCALE_MAX} leaked ${probe.maxColumn} past the budget",
-            probe.maxColumn <= AURORA_PEAK_ALPHA + 1e-9)
+    // ── 3. The horizontal window — soft-edged rays, and an exact budget bound ──
+
+    @Test fun `the ray window is a unimodal soft-edged bell that keeps most of its light`() {
+        assertEquals("a ray must fade to nothing at its own edge, or rays abut in a " +
+            "picket fence", 0f, auroraXWindow(0f), 0f)
+        assertEquals(0f, auroraXWindow(1f), 0f)
+        assertEquals("full alpha along the ray's centre line", 1f, auroraXWindow(0.5f), 1e-6f)
+        assertEquals("a NaN must not leak light", 0f, auroraXWindow(Float.NaN), 0f)
+        assertEquals(0f, auroraXWindow(-0.2f), 0f)
+        assertEquals(0f, auroraXWindow(1.4f), 0f)
+        var prev = -1f
+        var area = 0.0
+        for (i in 0..1000) {
+            val u = i / 1000f
+            val v = auroraXWindow(u)
+            assertTrue("window out of range at $u: $v", v in 0f..1f)
+            assertEquals("the window must be symmetric about the ray's axis",
+                v, auroraXWindow(1f - u), 1e-5f)
+            // UNIMODAL is what makes AuroraSim.measureBudget's per-bucket maximum an
+            // exact bound rather than a sample: monotone up to the crest is half of it.
+            if (u <= 0.5f) {
+                assertTrue("the window must rise monotonically to its crest", v >= prev - 1e-6f)
+                prev = v
+            }
+            area += v / 1001.0
+        }
+        assertTrue("mean window $area — a ray that soft loses too much light to read",
+            area > 0.6)
     }
 
-    // ── 3. Premium rule (a): size over life, with a per-strip envelope ──
+    // ── 4. Premium rule (a): size over life, with a per-strip envelope ──
 
     @Test fun `the size-over-life curve opens fast, closes slow, and is zero at both ends`() {
         assertEquals(0f, auroraFoldEnvelope(0f), 0f)
@@ -243,7 +371,45 @@ class AuroraFieldTest {
             probe.maxH / probe.minH > 2f)
     }
 
-    // ── 4. Premium rule (b): colour ramp indexed by life ──
+    // ── 5. Banding, not a slab: per-ray tone and a ragged base line ──
+
+    @Test fun `neighbouring rays differ in BRIGHTNESS, not just in phase`() {
+        // A sheet whose rays are all equally bright reads as one translucent slab
+        // however well its geometry ripples. (Divergence from aurora.js, which
+        // gives every strip in a sheet the same alpha ceiling.)
+        val s = sim(seed = 0xA47)
+        val b = s.strips.map { it.bright }
+        assertEquals("brightness must be per-strip, not shared", b.size, b.toSet().size)
+        // Asserted as a SPREAD, not a ratio of extremes: with ~36 draws the range of
+        // a uniform population is the stable statistic (its ratio is not).
+        assertTrue("ray brightness spans only ${b.max() - b.min()} — that is a slab",
+            b.max() - b.min() > 0.2f)
+        assertTrue("a ray may dim itself, never brighten past its sheet's ceiling",
+            b.all { it in 0.01f..1f })
+    }
+
+    @Test fun `the base line is RAGGED and still never crosses the clamp`() {
+        val s = sim(seed = 0xA47)
+        for (sheet in 0..1) {
+            val sh = AURORA_SHEETS[sheet]
+            val bases = s.strips.filter { it.sheet == sheet }.map { it.baseY0 }
+            assertTrue("${sh.key} hangs from one ruled line — that is a slab edge",
+                bases.toSet().size > bases.size * 0.9)
+            val nominal = height * sh.baseFrac
+            assertTrue("a base may only ever be lifted ABOVE the sheet's nominal line",
+                bases.all { it <= nominal + 1e-3f && it >= nominal - height * sh.baseJit - 1e-3f })
+        }
+        // The undulation must be big enough to read: the web's 9 CSS px landed at
+        // 0.6% of a 2400 px screen, which is no undulation at all.
+        assertTrue("base wobble must be a real fraction of the band",
+            AURORA_BASE_WOBBLE_FRAC >= 0.02f)
+        for (p in s.strips) {
+            assertEquals("wobble amplitude is a band fraction, not a CSS px length",
+                height * AURORA_BAND_FRAC * AURORA_BASE_WOBBLE_FRAC, p.ay, 1e-2f)
+        }
+    }
+
+    // ── 6. Premium rule (b): colour ramp indexed by life ──
 
     @Test fun `tint is indexed by life, and the two sheets occupy different ramp regions`() {
         val top = AURORA_TINTS.size - 1
@@ -268,7 +434,7 @@ class AuroraFieldTest {
         for (c in AURORA_TINTS) assertEquals(3, c.size)
     }
 
-    // ── 5. The multi-octave curtain (the thing that makes it a curtain, not a blob) ──
+    // ── 7. The multi-octave curtain (the thing that makes it a curtain, not a blob) ──
 
     @Test fun `x motion is a 3-octave sum with distinct frequencies and a per-strip phase step`() {
         for (sh in AURORA_SHEETS) {
@@ -324,7 +490,7 @@ class AuroraFieldTest {
         assertTrue("the field did not move over 900 frames", abs(later - first) > 1.0)
     }
 
-    // ── 6. Frame-rate independence and the DPI law ──
+    // ── 8. Frame-rate independence and the DPI law ──
 
     @Test fun `60 Hz and 120 Hz reach the same field after the same elapsed time`() {
         val a = sim(seed = 0x51D)
@@ -344,12 +510,15 @@ class AuroraFieldTest {
     @Test fun `density changes resolution, never apparent geometry`() {
         // THE DPI LAW. The same physical screen at 1x and 2x density: every spatial
         // quantity must come out exactly 2x in pixels, i.e. identical in apparent
-        // size. Population is dp-box derived, so it must NOT change.
+        // size. Population is dp-box derived, so it must NOT change — and neither
+        // may the budget gain, which is measured from ratios only.
         val lo = AuroraSim(1f, seeded(88)).also { it.resize(width, height, 1f, 3.1f) }
         val hi = AuroraSim(1f, seeded(88)).also { it.resize(width * 2f, height * 2f, 2f, 6.2f) }
         assertEquals("population is dp-derived, not px-derived", lo.strips.size, hi.strips.size)
         run(lo, null, 300)
         run(hi, null, 300)
+        assertEquals("the legibility gain is a ratio — density may not touch it",
+            lo.budgetGain, hi.budgetGain, 1e-5f)
         val a = FloatArray(6)
         val b = FloatArray(6)
         var checked = 0
@@ -358,8 +527,9 @@ class AuroraFieldTest {
             val q = hi.strips[i]
             assertEquals("stored fold state is density-free", p.life, q.life, 1e-6f)
             assertEquals("…and so is the per-strip envelope", p.env0, q.env0, 1e-6f)
+            assertEquals("…and the per-ray brightness", p.bright, q.bright, 1e-6f)
             assertEquals("x amplitude must be exactly 2x", p.ax0 * 2f, q.ax0, 1e-3f)
-            assertEquals("the base wobble is a CSS-px length — 2x", p.ay * 2f, q.ay, 1e-3f)
+            assertEquals("the base wobble is a band fraction — 2x in px", p.ay * 2f, q.ay, 1e-3f)
             val drewLo = lo.blit(i, a)
             val drewHi = hi.blit(i, b)
             assertEquals("the same strips must draw at both densities", drewLo, drewHi)
@@ -374,7 +544,7 @@ class AuroraFieldTest {
         assertTrue("nothing was drawn — the comparison proved nothing", checked > 20)
     }
 
-    // ── 7. Hot path, lifecycle, determinism ──
+    // ── 9. Hot path, lifecycle, determinism ──
 
     @Test fun `the frame loop draws no randomness and never rebuilds the pool`() {
         var calls = 0
@@ -396,9 +566,10 @@ class AuroraFieldTest {
         run(s, probe, 1000)
         assertEquals("a non-finite value reached the canvas", 0, probe.bad)
         assertTrue(s.clock.isFinite())
+        assertTrue("the budget gain went non-finite", s.budgetGain.isFinite())
         for (p in s.strips) {
-            for (v in floatArrayOf(p.life, p.rate, p.env0, p.slotX, p.drawW, p.hMax, p.baseY0,
-                    p.ay, p.ax0, p.ax1, p.ax2, p.alphaMax, p.hueLo)) {
+            for (v in floatArrayOf(p.life, p.rate, p.env0, p.bright, p.baseJit, p.slotX, p.drawW,
+                    p.hMax, p.baseY0, p.ay, p.ax0, p.ax1, p.ax2, p.alphaMax, p.hueLo)) {
                 assertTrue("a strip field went non-finite ($v)", v.isFinite())
             }
             assertTrue("life escaped [0,1): ${p.life}", p.life >= 0f && p.life < 1f)
@@ -423,9 +594,11 @@ class AuroraFieldTest {
         assertEquals("a height change must not re-scatter the field", before, s.strips.map { it.life })
         assertTrue("survivors keep their slot object", s.strips.withIndex().all { (i, p) -> p === slots[i] })
         // …but the LAYOUT must follow the new viewport, or the clamp line is stale.
+        // (The base line is per-strip now — its ragged offset is stored on the strip
+        // and re-applied to the NEW height, which is what keeps it density-free.)
         for (p in s.strips) {
             assertEquals("base line must track the new height",
-                shorter * AURORA_SHEETS[p.sheet].baseFrac, p.baseY0, 1e-3f)
+                shorter * (AURORA_SHEETS[p.sheet].baseFrac - p.baseJit), p.baseY0, 1e-3f)
         }
     }
 
@@ -449,7 +622,7 @@ class AuroraFieldTest {
         // …and the budget still holds after all that churn.
         val probe = Probe(2560f)
         run(s, probe, 300)
-        assertTrue("post-resize budget ${probe.maxColumn}", probe.maxColumn <= AURORA_PEAK_ALPHA + 1e-9)
+        assertTrue("post-resize budget ${probe.maxColumn}", probe.maxColumn <= AURORA_PEAK_ALPHA + BUDGET_EPS)
         assertTrue("post-resize clamp broke", probe.maxBottom <= 1440f * AURORA_BAND_FRAC + 1e-3f)
     }
 

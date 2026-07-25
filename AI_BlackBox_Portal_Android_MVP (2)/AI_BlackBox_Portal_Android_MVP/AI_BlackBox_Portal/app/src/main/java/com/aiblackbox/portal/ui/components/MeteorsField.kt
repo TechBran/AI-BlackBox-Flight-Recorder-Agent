@@ -3,17 +3,63 @@ package com.aiblackbox.portal.ui.components
 // =============================================================================
 // Field: METEOR FALL (id "meteors") — the SPARSEST field in the catalogue.
 //
-// A faithful native port of the web module
+// A native port of the web module
 //   Portal/modules/fx/effects/meteors.js
-// (its physics tests: Portal/modules/fx/effects/meteors.test.mjs).
+// (its physics tests: Portal/modules/fx/effects/meteors.test.mjs), RE-TUNED for a
+// phone — see the divergence block below before you touch a number.
 //
-// A quiet two-layer starfield that never stops, and — every 13 to 27 seconds —
-// ONE hairline streak that rips diagonally across a corner and is gone before you
-// are sure you saw it. The meteor pool is 8 and almost always ZERO of them are
-// alive. The effect is the WAIT; the streak is the punctuation.
+// A quiet two-layer starfield that never stops, and — every few seconds — ONE
+// bright streak that rips diagonally across a corner and is gone before you are
+// sure you saw it. The meteor pool is 8 and ~9 frames in 10 have ZERO of them
+// alive. The gap is still the effect; the streak is still the punctuation.
 //
 // Registration line the catalogue needs (FieldRegistry.kt, appended, never moved):
 //     FieldEffect("meteors", "Meteor Fall") { n, r -> MeteorsSim(n, r) },
+//
+// ── DIVERGENCE FROM THE WEB MODULE (Fold 6 device pass, 2026-07-25) ───────────
+//
+// Brandon, looking at a real Galaxy Fold 6 (density 3.1, 120 Hz OLED): "Meteor
+// fall — I can't really see anything happening there on the Android side. I see a
+// few particles floating around but maybe we can make that one brighter and more
+// animated." The "few particles" are the starfield, which works. Two independent
+// things were wrong, and BOTH are Android-only:
+//
+//   RATE. The web tuning is silence [16, 34] s → a measured ≈19 s mean gap. On a
+//   desktop backdrop you live with that; on a phone, which someone glances at for
+//   three or four seconds, the MEDIAN GLANCE CONTAINS NO METEOR AT ALL, so the
+//   effect reads as broken rather than as sparse. The gap is now [2.4, 7.0] s
+//   (≈3.4 s mean once showers are counted) and the opening silence [0.8, 3.0] s
+//   instead of [9, 19] s. The CHARACTER is preserved and is still asserted, not
+//   asserted away: a streak is still a sub-second event with a tapering tail, the
+//   pool is still a hard 8, every gap is still many times a streak's own life, and
+//   a meteor is on screen in only ~12% of frames.
+//
+//   BRIGHTNESS. Two causes, both invisible from the .js:
+//     • THE INTENSITY DIAL COULD NOT REACH THIS EFFECT. FieldPaints.alphaScale is
+//       applied inside drawSpriteF, but the star cores, the tail stroke and the
+//       head core all draw through THIS effect's own Paints — so turning the dial
+//       up did nothing to any of them. Every one now multiplies by
+//       `paints.alphaScale` at its own draw site.
+//     • SUB-PIXEL STROKES. The web authors widths in CSS px at an apparent scale
+//       near 1.0. Here the same numbers pass through apparentScale 0.5 AND density
+//       3.1 (= WEB_TO_REF_PX), so a 0.85–1.40 CSS px dust streak became ≈1.0–1.8
+//       DEVICE px at the envelope peak, and its 9-segment taper fell under one
+//       pixel immediately. An antialiased sub-pixel stroke does not read as a
+//       line, it reads as noise — and that happens BEFORE alpha is applied, so no
+//       alpha change alone could ever have fixed it. Widths are therefore roughly
+//       doubled, the stroke floor is a real ≈1.15 device px, the tail alpha falls
+//       off as (1−a)^1.45 instead of ^1.9, and the head carries a tight bloom pass
+//       on top of the wide one.
+//
+// This is the "same APPARENT RESULT, not the same numbers" contract. DO NOT
+// "restore web parity" on the numbers below: the parity is in the LOOK, and these
+// are the numbers that produce the web look at density 3.1.
+//
+// The LEGIBILITY BUDGET is untouched, and it is what makes the extra brightness
+// safe: every streak is still solved AT SPAWN to stay inside the outer 28% of the
+// width (see (2) below), so none of this new light can land where chat text is
+// read. The stars — which DO cross the reading box — keep their web alphas and
+// their 0.42 centre dim exactly as measured.
 //
 // ── Three things here are load-bearing and look like omissions if you skim ────
 //
@@ -100,21 +146,37 @@ private const val TAU = 6.2831855f
 // -----------------------------------------------------------------------------
 internal const val METEOR_POOL = 8
 
-/** Seconds of quiet before the FIRST streak of a session. */
-internal const val METEOR_FIRST_MIN = 9f
-internal const val METEOR_FIRST_MAX = 19f
+/**
+ * Seconds of quiet before the FIRST streak of a session.
+ *
+ * DIVERGES FROM WEB (which waits 9-19 s). A phone backdrop is judged in the first
+ * few seconds after the screen lights up; a 9-19 s opening silence means the first
+ * impression of this effect is a starfield and nothing else. Still an opening
+ * BEAT — just one you can sit through.
+ */
+internal const val METEOR_FIRST_MIN = 0.8f
+internal const val METEOR_FIRST_MAX = 3.0f
 
-/** …and between every event after that (measured mean gap ≈ 19 s). */
-internal const val METEOR_SILENCE_MIN = 16f
-internal const val METEOR_SILENCE_MAX = 34f
+/**
+ * …and between every event after that.
+ *
+ * DIVERGES FROM WEB ([16, 34] s, ≈19 s measured mean). See the RATE note in the
+ * file header: at a 19 s mean gap the median phone glance contains no meteor, so
+ * the effect reads as broken. ≈3.4 s mean here once showers are folded in — a
+ * meteor every few seconds, still an order of magnitude longer than the ≈0.4 s a
+ * streak is actually on screen, which is what keeps it an EVENT and not a stream.
+ */
+internal const val METEOR_SILENCE_MIN = 2.4f
+internal const val METEOR_SILENCE_MAX = 7.0f
 
-/** Occasionally 2-3 arrive in quick succession, then a long lull. */
-internal const val METEOR_SHOWER_CHANCE = 0.12f
+/** Occasionally 2-3 arrive in quick succession, then a longer lull. */
+internal const val METEOR_SHOWER_CHANCE = 0.16f
 internal const val METEOR_SHOWER_EXTRA = 2
 
-/** Spacing WITHIN a shower. */
-internal const val METEOR_BURST_GAP_MIN = 0.30f
-internal const val METEOR_BURST_GAP_MAX = 1.35f
+/** Spacing WITHIN a shower. Floored just above a dust streak's own lifetime so a
+ *  shower reads as a run of distinct events, never as one smeared bar. */
+internal const val METEOR_BURST_GAP_MIN = 0.35f
+internal const val METEOR_BURST_GAP_MAX = 1.20f
 
 /** Radians off vertical (25°-53°) — diagonal, never a rain. */
 internal const val METEOR_ANGLE_MIN = 0.44f
@@ -142,6 +204,16 @@ internal const val METEOR_SEGMENTS = 9
 
 internal const val METEOR_FIREBALL_CHANCE = 0.26f
 
+// ── Drawn-size bounds, so the EDGE BUDGET stays provable from the spawn params ──
+/** Maximum of [meteorEnvelope] (≈0.819 at t≈0.135). An upper bound, never exact. */
+internal const val METEOR_ENV_PEAK = 0.82f
+
+/** Maximum per-particle envelope depth (`envMul`, drawn from 0.82..1.24). */
+internal const val METEOR_ENV_MUL_MAX = 1.24f
+
+/** Head core radius as a multiple of the head half-width. */
+internal const val METEOR_HEAD_R = 1.15f
+
 /** Starfield: a LOW, viewport-independent count (it is the sky, not a field),
  *  scaled only by the intensity × quality dial and clamped hard at both ends. */
 internal const val METEOR_STAR_COUNT = 44
@@ -162,6 +234,11 @@ internal const val METEOR_STAR_MAX = 90
  *
  * Speeds/widths are WEB CSS px (see [WEB_TO_REF_PX]); `tailK` is in seconds
  * (tail = speed × k, so the tail LENGTH ENCODES SPEED); the rest is dimensionless.
+ *
+ * WIDTHS AND ALPHAS DIVERGE FROM meteors.js — see the BRIGHTNESS note in the file
+ * header. Speeds, tail ratios, ramp bands and spans are byte-identical to the web
+ * and must stay that way; only the two axes that lost to the density difference
+ * (stroke width, alpha) were re-tuned, plus a touch more bloom to match.
  */
 internal class MeteorKind(
     val speedMin: Float, val speedMax: Float,
@@ -173,16 +250,20 @@ internal class MeteorKind(
     val glow: Float,
 )
 
+// web widths 0.85..1.40 → ×WEB_TO_REF_PX ×envelope ≈ 1.0..1.8 DEVICE px, taper
+// under 1 px by the second segment: invisible before alpha was even considered.
 internal val METEOR_DUST = MeteorKind(
     speedMin = 900f, speedMax = 1420f, tailKMin = 0.090f, tailKMax = 0.135f,
-    widthMin = 0.85f, widthMax = 1.40f, alphaMin = 0.42f, alphaMax = 0.60f,
-    ramp0Min = 0.02f, ramp0Max = 0.12f, span = 0.72f, glow = 4.6f,
+    widthMin = 1.80f, widthMax = 2.80f, alphaMin = 0.72f, alphaMax = 0.92f,
+    ramp0Min = 0.02f, ramp0Max = 0.12f, span = 0.72f, glow = 5.2f,
 )
 
+// …same story one size up (web 1.50..2.50). The fireball must stay strictly
+// thicker and brighter than dust — two populations that overlap read as one.
 internal val METEOR_FIREBALL = MeteorKind(
     speedMin = 620f, speedMax = 950f, tailKMin = 0.150f, tailKMax = 0.200f,
-    widthMin = 1.50f, widthMax = 2.50f, alphaMin = 0.62f, alphaMax = 0.80f,
-    ramp0Min = 0.18f, ramp0Max = 0.28f, span = 0.62f, glow = 6.2f,
+    widthMin = 3.00f, widthMax = 4.60f, alphaMin = 0.95f, alphaMax = 1.00f,
+    ramp0Min = 0.18f, ramp0Max = 0.28f, span = 0.62f, glow = 6.8f,
 )
 
 /**
@@ -236,6 +317,37 @@ internal const val METEOR_RAMP_STEPS = 20
 
 /** Colour stops per baked tail gradient. */
 private const val METEOR_TAIL_STOPS = 10
+
+/**
+ * How fast the tail fades from head to tip: alpha ∝ (1 − a)^this.
+ *
+ * DIVERGES FROM WEB (1.9). Combined with an already-low streak alpha and a
+ * sub-pixel stroke, ^1.9 put everything past the first third of the tail under the
+ * antialiasing floor here — the streak read as a dot with a smudge. 1.45 still
+ * TAPERS to nothing (it must: a tail that ends is a bar of light), it just does it
+ * over a length you can see.
+ */
+private const val METEOR_TAIL_FALLOFF = 1.45f
+
+/**
+ * RESOLUTION floors, DEVICE px — deliberately NOT scaled by density.
+ *
+ * Below roughly one device pixel an antialiased stroke stops being a line and
+ * becomes a faint dusting of grey, which is exactly the failure Brandon saw. These
+ * are the same kind of floor as the star core's 0.35 px and drawSpriteF's own
+ * cull: a lower bound on what the RASTERISER can render, not a geometry length. If
+ * they scaled, a denser screen would grow fatter streaks.
+ */
+internal const val METEOR_MIN_STROKE_PX = 1.15f
+internal const val METEOR_MIN_HEAD_PX = 0.9f
+
+/** Bloom passes around the head: one wide+faint, one tight+bright. The wide pass
+ *  is the web's single glow; the tight one is what makes the head read as a hot
+ *  point at phone size instead of a coloured dot. Both go through drawSpriteF, so
+ *  both already carry FieldPaints.alphaScale. */
+private const val METEOR_BLOOM_WIDE = 0.40f
+private const val METEOR_BLOOM_TIGHT = 0.85f
+private const val METEOR_BLOOM_TIGHT_R = 2.0f
 
 /** Sample [ramp] at 0..1 and pack it as 0xRRGGBB. Allocation-free. */
 internal fun meteorRampRgb(ramp: Array<IntArray>, t: Float): Int {
@@ -495,10 +607,28 @@ class MeteorsSim(
         val room = (METEOR_EDGE_LIMIT - 0.015f) * w / max(0.25f, sinA)
         val tail = min(min(speed * pick(k.tailKMin, k.tailKMax), 0.34f * min(w, h)), room)
 
+        // The stroke is drawn BEFORE the x cap is chosen, because the cap now has to
+        // account for it. The web could skip this: its streaks were ~1 CSS px, well
+        // inside the 0.02 W of slack between edgeLimit (0.28) and centreBox (0.30).
+        // At the widths this port needs the head disc is up to ~8 device px, so the
+        // slack is no longer obviously enough — and "obviously enough" is the whole
+        // value of solving the budget at spawn. Subtracting the widest the head core
+        // can EVER be drawn (envelope peak × max per-particle depth × head radius)
+        // keeps the guarantee provable from the spawn parameters alone.
+        val wid = pick(k.widthMin, k.widthMax) * gg
+        val headGuard = wid * METEOR_ENV_PEAK * METEOR_ENV_MUL_MAX * METEOR_HEAD_R
+
         // Head x is capped so head + (tail reaching inward) stays in the outer band.
         val xMin = 0.015f * w
-        val xMax = METEOR_EDGE_LIMIT * w - sinA * tail
-        val x0 = xMin + rnd() * max(0f, xMax - xMin)
+        val xMax = METEOR_EDGE_LIMIT * w - sinA * tail - headGuard
+        // The outer min() only bites in the degenerate case xMax < xMin (a canvas so
+        // narrow that a maximal tail eats the whole band), where the range collapses
+        // to xMin and the guard would otherwise be skipped. One comparison, and the
+        // budget then holds for ANY viewport rather than for plausible ones.
+        val x0 = min(
+            xMin + rnd() * max(0f, xMax - xMin),
+            max(0f, METEOR_EDGE_LIMIT * w - headGuard),
+        )
 
         p.x = if (side < 0f) x0 else w - x0
         p.y = (-0.10f + rnd() * 0.30f) * h                     // top edge band
@@ -516,7 +646,7 @@ class MeteorsSim(
         p.life = 1f
         p.decay = 1f / max(METEOR_LIFE_MIN, min(METEOR_LIFE_MAX, span))
         p.envMul = 0.82f + rnd() * 0.42f                       // per-particle envelope
-        p.width = pick(k.widthMin, k.widthMax) * gg
+        p.width = wid                                          // rolled above: the cap needed it
         p.alpha = pick(k.alphaMin, k.alphaMax)
         p.ramp0 = pick(k.ramp0Min, k.ramp0Max)
         p.span = k.span
@@ -581,6 +711,12 @@ class MeteorsSim(
         val fill = gfx.fill
         val stroke = gfx.stroke
         val gg = g
+        // THE INTENSITY DIAL'S BRIGHTNESS MULTIPLIER. drawSpriteF applies it for
+        // us, but this effect also draws through its OWN Paints (star cores, tail
+        // stroke, head core) — those bypass drawSpriteF entirely, so without this
+        // the dial would move the halos and leave everything crisp untouched.
+        // Hoisted once per FRAME, never read per particle.
+        val aScale = paints.alphaScale
         // The reading box, recomputed once per frame (never per particle).
         val bx0 = METEOR_CENTRE_BOX * width
         val bx1 = width - bx0
@@ -602,7 +738,8 @@ class MeteorsSim(
             // COLOUR RAMP indexed by the star's own tone AND its current twinkle:
             // a star cools slightly as it dims, which is what stops the sky reading
             // as one flat blue-white dust.
-            fill.color = meteorArgb(al, METEOR_STAR_RGB[meteorRampIndex(s.tone * 0.8f + 0.2f * (1f - s.k))])
+            fill.color =
+                meteorArgb(al * aScale, METEOR_STAR_RGB[meteorRampIndex(s.tone * 0.8f + 0.2f * (1f - s.k))])
             // 0.35 px is a RESOLUTION floor (device px, like drawSpriteF's own), not
             // a geometry length — it must not scale, or a dense screen grows dots.
             nc.drawCircle(s.x, s.y, max(0.35f, rad), fill)
@@ -622,25 +759,35 @@ class MeteorsSim(
             val headIdx = meteorRampIndex(p.ramp0 + METEOR_AGE_SHIFT * t)
             val tx = p.ux * p.tail                             // head → head − velocity×k
             val ty = p.uy * p.tail
-            // Cheap bloom (one wide faint pass), the embers/fireflies idiom. This is
-            // a RADIAL falloff at 30% of an already-low alpha, so its visible extent
-            // is a fraction of its radius — the same latitude the web takes with it.
-            drawSpriteF(halo, p.x, p.y, hw * p.glow, al * 0.30f, paints)
+            // Two bloom passes, the embers/fireflies idiom: one WIDE and faint (the
+            // web's single glow — a radial falloff, so its visible extent is a
+            // fraction of its radius) and one TIGHT and bright right under the head.
+            // The tight pass is the divergence: at phone size the head core is only
+            // a ~3 px disc, and without something hot around it the streak reads as
+            // a coloured dot rather than as something burning. Both draw through
+            // drawSpriteF, which already applies paints.alphaScale — do NOT multiply
+            // by aScale here or the dial would land twice.
+            drawSpriteF(halo, p.x, p.y, hw * p.glow, al * METEOR_BLOOM_WIDE, paints)
+            drawSpriteF(halo, p.x, p.y, hw * METEOR_BLOOM_TIGHT_R, al * METEOR_BLOOM_TIGHT, paints)
             if (p.tail > 0.5f) {
                 // Re-aim the CACHED gradient down this streak, then stroke the tail
                 // as segments whose width tapers to a point. Colour and alpha come
                 // from the shader, so the taper is continuous instead of nine steps.
                 gfx.aimTail(p.kind, headIdx, p.x, p.y, -tx, -ty)
-                stroke.alpha = (al.coerceIn(0f, 1f) * 255f).roundToInt()
+                stroke.alpha = ((al * aScale).coerceIn(0f, 1f) * 255f).roundToInt()
                 for (j in 0 until METEOR_SEGMENTS) {
                     val a = j / METEOR_SEGMENTS.toFloat()
                     val b = (j + 1f) / METEOR_SEGMENTS
-                    stroke.strokeWidth = max(0.35f, hw * METEOR_SEG_TAPER[j])
+                    // The floor is what stops the far half of the taper dissolving:
+                    // it holds every segment at a full device pixel and lets the
+                    // GRADIENT do the fading, which is what a taper should look like
+                    // once the geometry is under the rasteriser's resolution.
+                    stroke.strokeWidth = max(METEOR_MIN_STROKE_PX, hw * METEOR_SEG_TAPER[j])
                     nc.drawLine(p.x - tx * a, p.y - ty * a, p.x - tx * b, p.y - ty * b, stroke)
                 }
             }
-            fill.color = meteorArgb(al, METEOR_HEAD_RGB[headIdx])
-            nc.drawCircle(p.x, p.y, max(0.4f, hw * 1.15f), fill)
+            fill.color = meteorArgb(al * aScale, METEOR_HEAD_RGB[headIdx])
+            nc.drawCircle(p.x, p.y, max(METEOR_MIN_HEAD_PX, hw * METEOR_HEAD_R), fill)
         }
     }
 }
@@ -679,8 +826,9 @@ private fun buildTailGradient(headT: Float, span: Float): LinearGradient {
         val a = j / (METEOR_TAIL_STOPS - 1f)
         stops[j] = a
         // Colour walks `span` further along the ramp toward the tail; alpha falls
-        // off as (1−a)^1.9 so the streak thins into black instead of ending.
-        colors[j] = meteorArgb((1f - a).pow(1.9f), meteorRampRgb(METEOR_RAMP, headT + span * a))
+        // off as (1−a)^METEOR_TAIL_FALLOFF so the streak thins into black instead
+        // of ending.
+        colors[j] = meteorArgb((1f - a).pow(METEOR_TAIL_FALLOFF), meteorRampRgb(METEOR_RAMP, headT + span * a))
     }
     return LinearGradient(0f, 0f, 1f, 0f, colors, stops, Shader.TileMode.CLAMP)
 }

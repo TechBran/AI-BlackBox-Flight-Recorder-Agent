@@ -27,6 +27,10 @@ package com.aiblackbox.portal.ui.components
 //     — so snow deliberately does NOT use it and bakes its own SrcOver paint
 //     through FieldResources instead. Same reason the population is capped at
 //     [SNOW_MAX_FLAKES] rather than scaling freely with the viewport.
+//     COROLLARY, and the bug it caused: because snow bypasses [drawSpriteF] it
+//     does NOT inherit that helper's `a * paints.alphaScale` multiply, so when
+//     Intensity gained a BRIGHTNESS channel the whole dial was a no-op here. The
+//     multiply is applied by hand in [render] instead — see [snowDrawAlpha].
 //
 //   ONE BAKED SPRITE PER FLAKE, NOT CONCENTRIC ARCS. The web shipped a flake as
 //     1–3 stacked filled arcs at decreasing alpha; every arc fill has a hard
@@ -52,6 +56,49 @@ package com.aiblackbox.portal.ui.components
 //      `life + bias`; the per-flake bias de-banks it so two flakes at the same
 //      height are not the same colour.
 //   3. THREE SUB-POPULATIONS (far / mid / near), correlated into depth.
+//
+// ── BRIGHTNESS PASS 2026-07-25 — a DELIBERATE divergence from snow.js ────────
+//
+// Brandon, Fold 6 (density 3.1, 120 Hz OLED), Intensity at maximum: "it does look
+// like snow particles are moving, looks a lot better than before. We could make it
+// a bit brighter, the white particles could be a shade brighter or two … while I
+// can see the snow it is just not so bright."
+//
+// Three things were dimming it, fixed together. DO NOT "restore parity" with the
+// .js constants — the web numbers are correct FOR THE WEB and were never dim
+// there; the cross-surface contract is the same APPARENT RESULT, not the same
+// literals:
+//
+//   1. THE DIAL DID NOT REACH THE ALPHA. Intensity only ever scaled COUNT here,
+//      and the new brightness channel rides [drawSpriteF], which snow bypasses
+//      (see the SrcOver note above). Turning the dial up added more flakes of
+//      identical faintness. [render] now multiplies by paints.alphaScale itself.
+//
+//   2. THE SPRITE SPENT ITS ALPHA ON ITS OWN TAIL. The gaussian shoulder's
+//      area-weighted mean alpha was ~0.23 of peak — i.e. ~77% of the nominal
+//      per-plane ceiling was being thrown away into a halo too faint to see at
+//      3.1 density, where a mid flake is only ~5 device px across to begin with.
+//      Widening the shoulder (see the sprite stops) carries ~0.36 of peak — about
+//      1.6x the light per flake at an UNCHANGED peak alpha, so the worst-case
+//      single pixel behind a glyph did not get any brighter. This is the cheapest
+//      brightness in the file and the reason the ceilings only had to move a
+//      little; the falloff still reaches zero smoothly, so there is still no
+//      discernible edge (the "bubble inside a bubble" failure stays fixed).
+//
+//   3. THE CEILINGS WERE AUTHORED FOR CSS px AT SCALE ~1. A web flake covers
+//      ~1.55x the apparent radius of ours before antialiasing; sub-pixel geometry
+//      then antialiases the outer ramp toward invisibility BEFORE alpha is
+//      applied. The per-plane ceilings are lifted ~1.2x (0.30/0.40/0.34 →
+//      0.36/0.48/0.42), keeping the web's far < near < mid ORDERING, which is the
+//      part that carries the legibility logic (near flakes are big and blurred, so
+//      they stay below mid). The colour ramp's cold ENDS are lifted the same way:
+//      a flake fading in at the top was drawing rgb(150,176,210) at a quarter
+//      alpha, which is grey dust, not snow.
+//
+// The budget is still a budget: [SNOW_MAX_FLAKES] is untouched, the blend is still
+// SrcOver, and [SNOW_ALPHA_CAP] is a NEW hard guard rail that no plane ceiling ×
+// life curve × dial setting can cross. SnowFieldTest pins the properties (ordering,
+// cap, bounded lift) rather than the old literals.
 //
 // ── The two Android-specific contracts ───────────────────────────────────────
 //
@@ -122,7 +169,11 @@ private const val SNOW_LEAN = 0.12f
 //   fall / sway          WEB CSS px per SECOND — sway is a velocity amplitude
 //   swayW                flutter angular frequency, rad/s (dimensionless in px)
 //   soft                 blur spread: how far past the core the halo reaches
-//   alpha                THE PER-PLANE ALPHA CEILING (see the legibility budget)
+//   alpha                THE PER-PLANE ALPHA CEILING (see the legibility budget).
+//                        DIVERGES from snow.js by ~1.2x — header, brightness pass
+//                        item 3. What must NOT change is the ORDERING
+//                        far < near < mid: the near plane is the big blurred one,
+//                        so it stays under mid no matter how bright the field gets.
 //   gust                 share of the global gust this plane rides (parallax)
 //
 // (The web's vestigial `rings` field is gone: it counted the stacked arcs the
@@ -143,14 +194,14 @@ internal class SnowPlaneCfg(
 internal val SNOW_FAR = SnowPlaneCfg(
     count = 112, sizeMin = 0.6f, sizeMax = 1.15f, fallMin = 11f, fallMax = 19f,
     swayMin = 3f, swayMax = 8f, swayWMin = 1.1f, swayWMax = 2.0f,
-    soft = 0.30f, alpha = 0.30f, gust = 0.32f,
+    soft = 0.30f, alpha = 0.36f, gust = 0.32f,      // web 0.30
 )
 
 /** MID — the body of the field. */
 internal val SNOW_MID = SnowPlaneCfg(
     count = 88, sizeMin = 1.3f, sizeMax = 2.3f, fallMin = 23f, fallMax = 38f,
     swayMin = 8f, swayMax = 16f, swayWMin = 1.4f, swayWMax = 2.6f,
-    soft = 0.85f, alpha = 0.40f, gust = 0.68f,
+    soft = 0.85f, alpha = 0.48f, gust = 0.68f,      // web 0.40
 )
 
 /** NEAR — big, fast, blurred. Rides the gust hardest: that is PARALLAX (screen
@@ -158,7 +209,7 @@ internal val SNOW_MID = SnowPlaneCfg(
 internal val SNOW_NEAR = SnowPlaneCfg(
     count = 44, sizeMin = 2.6f, sizeMax = 4.8f, fallMin = 46f, fallMax = 78f,
     swayMin = 13f, swayMax = 26f, swayWMin = 1.8f, swayWMax = 3.2f,
-    soft = 1.55f, alpha = 0.34f, gust = 1.15f,
+    soft = 1.55f, alpha = 0.42f, gust = 1.15f,      // web 0.34
 )
 
 internal val SNOW_PLANES = arrayOf(SNOW_FAR, SNOW_MID, SNOW_NEAR)
@@ -264,6 +315,33 @@ internal fun snowSizeOverLife(life: Float): Float = 0.62f + 0.38f * snowSizeCurv
  *  flake ever gets is 10% of it — it fades, it never pops. */
 internal fun snowAlphaOverLife(life: Float): Float = 0.10f + 0.90f * snowSizeCurve(life)
 
+/**
+ * The hard ceiling on ANY drawn flake alpha, after the plane ceiling, the life
+ * curve and the Intensity dial have all had their say.
+ *
+ * The dial ([ParticleTuning.brightnessScale]) tops out at √2 ≈ 1.41, so at the
+ * shipped ceilings the brightest thing on screen is 0.48 × 1.0 × 1.41 ≈ 0.68 and
+ * this never binds. It exists so it CANNOT be crossed later: at SrcOver over
+ * black, alpha IS the composited luminance, and a white flake core much past ~0.7
+ * starts to approach #C9C9C9 body text — at which point a glyph sitting on a flake
+ * loses its edge. A guard rail, not a tuning knob.
+ */
+internal const val SNOW_ALPHA_CAP = 0.72f
+
+/**
+ * The exact alpha [render] draws a flake with — extracted as a PURE function so
+ * the legibility contract is assertable from a plain JVM test (render itself is a
+ * DrawScope extension and is not).
+ *
+ * [alphaScale] is FieldPaints.alphaScale, the Intensity dial's BRIGHTNESS channel.
+ * Snow bakes its own SrcOver paint and therefore bypasses [drawSpriteF], which is
+ * where every other sprite field picks that multiply up for free — so it is
+ * applied here by hand. Without this the dial only ever added more flakes of
+ * identical faintness (Brandon, Fold, 2026-07-25).
+ */
+internal fun snowDrawAlpha(planeAlpha: Float, life: Float, alphaScale: Float): Float =
+    min(SNOW_ALPHA_CAP, planeAlpha * snowAlphaOverLife(life) * alphaScale)
+
 // -----------------------------------------------------------------------------
 // Colour ramp — moonlit steel-blue high, near-white mid-fall, dusty settle low.
 //
@@ -272,12 +350,20 @@ internal fun snowAlphaOverLife(life: Float): Float = 0.10f + 0.90f * snowSizeCur
 // SPRITES, baked lazily on first request (see SnowSprites). Keeping the step
 // count identical keeps the ramp maths diffable against snow.js.
 // -----------------------------------------------------------------------------
+// The COLD ENDS are lifted toward white vs snow.js (brightness pass item 3, see
+// the header). `life` indexes this ramp, so stop 0 is what a flake wears while it
+// is fading IN at the top of the screen and stop 4 what it wears fading OUT at the
+// bottom — i.e. the two stops that spend the most time at low envelope alpha. The
+// web's rgb(150,176,210) at a quarter alpha over black composites to about
+// rgb(38,44,53): grey dust. Lifting the ends keeps the same journey (steel-blue
+// high → near-white mid-fall → dusty settle low) and the same COLD hue (blue ≥ red
+// at every stop, which SnowFieldTest pins) while reading as snow rather than soot.
 private val SNOW_RAMP = arrayOf(
-    intArrayOf(150, 176, 210),
-    intArrayOf(200, 220, 242),
-    intArrayOf(238, 247, 255),
-    intArrayOf(216, 232, 249),
-    intArrayOf(178, 198, 224),
+    intArrayOf(188, 208, 234),      // web 150,176,210
+    intArrayOf(220, 234, 250),      // web 200,220,242
+    intArrayOf(246, 251, 255),      // web 238,247,255
+    intArrayOf(232, 242, 253),      // web 216,232,249
+    intArrayOf(204, 220, 240),      // web 178,198,224
 )
 
 internal const val SNOW_RAMP_STEPS = 48
@@ -304,8 +390,31 @@ internal fun snowRampStop(i: Int): Int {
 // The stop list is a gaussian-ish SHOULDER rather than the shared atlas's tighter
 // 0 / 0.35 / 1 curve (bakeRadialSprite) — an out-of-focus flake has no
 // discernible edge at all, which is precisely what the arcs got wrong.
+//
+// The shoulder is WIDER than snow.js's [[0,1],[.22,.82],[.42,.46],[.62,.18],
+// [.82,.05],[1,0]] — brightness pass item 2 in the header. Area-weighted
+// (∫2u·α du over the disc) the web curve carries ~0.23 of peak alpha and this one
+// ~0.36: about 1.6x the light per flake with the PEAK alpha unchanged, so the
+// worst case for text contrast (a glyph sitting on a flake core) did not move at
+// all. That matters here in a way it does not on the web: at density 3.1 a mid
+// flake is ~5 device px across, so the web's outer ramp lands under 1.5 device px
+// and antialiases into noise before alpha is ever applied. The tail still eases to
+// zero, so there is still no edge to see.
 // -----------------------------------------------------------------------------
 private const val SNOW_SPRITE_PX = 64
+
+/**
+ * The flake falloff, core → rim, as parallel (stop, alpha) arrays.
+ *
+ * Kept as data rather than a literal inside the bake so SnowFieldTest can
+ * INTEGRATE it: the number that decides whether a backdrop is legible is the
+ * AREA-WEIGHTED MEAN alpha of a flake (a glyph stroke spans many device px), not
+ * the single sub-pixel core, and that integral is the assertion that replaced the
+ * old "never raise cfg.alpha" literal. Two arrays, not an Array<Pair>, so the
+ * constant costs no boxed pairs at class-init.
+ */
+internal val SNOW_SPRITE_STOPS = floatArrayOf(0.00f, 0.30f, 0.50f, 0.70f, 0.88f, 1.00f)
+internal val SNOW_SPRITE_ALPHAS = floatArrayOf(1.00f, 0.92f, 0.60f, 0.26f, 0.07f, 0.00f)
 
 private fun bakeFlakeSprite(r: Int, g: Int, b: Int, density: Density): android.graphics.Bitmap {
     val bitmap = ImageBitmap(SNOW_SPRITE_PX, SNOW_SPRITE_PX)
@@ -323,14 +432,12 @@ private fun bakeFlakeSprite(r: Int, g: Int, b: Int, density: Density): android.g
     ) {
         drawCircle(
             brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.00f to base,
-                    0.22f to base.copy(alpha = 0.82f),
-                    0.42f to base.copy(alpha = 0.46f),
-                    0.62f to base.copy(alpha = 0.18f),
-                    0.82f to base.copy(alpha = 0.05f),
-                    1.00f to base.copy(alpha = 0f),
-                ),
+                // Built from the arrays above so the bake and the legibility test
+                // can never drift apart. Allocates — and may: this runs at most 48
+                // times per density, never in a frame.
+                colorStops = Array<Pair<Float, Color>>(SNOW_SPRITE_STOPS.size) { i ->
+                    SNOW_SPRITE_STOPS[i] to base.copy(alpha = SNOW_SPRITE_ALPHAS[i])
+                },
                 center = center,
                 radius = radius,
             ),
@@ -621,6 +728,12 @@ class SnowSim(
         val dst = paints.dst
         val gg = g
         val top = SNOW_RAMP_STEPS - 1
+        // The Intensity dial's BRIGHTNESS channel. Hoisted: one field read per
+        // frame, never per flake. Snow bakes its own SrcOver paint and so bypasses
+        // drawSpriteF, which is where the rest of the catalogue picks this up —
+        // without this line the dial only ever added more flakes of the same
+        // faintness. See snowDrawAlpha.
+        val aScale = paints.alphaScale
         for (i in planeArr.indices) {
             val pl = planeArr[i]
             val cfg = pl.cfg
@@ -633,9 +746,11 @@ class SnowSim(
                 val f = list[j]
                 // SIZE OVER LIFE × the flake's own envelope depth. Never constant.
                 val r = f.r * gg * f.sizeEnv * snowSizeOverLife(f.life) * spread
-                // ALPHA: the plane's ceiling, scaled by the same life curve. The
-                // ceiling is the measured legibility budget — never raise it.
-                val a = cfg.alpha * snowAlphaOverLife(f.life)
+                // ALPHA: the plane's ceiling × the same life curve × the Intensity
+                // dial, hard-capped at SNOW_ALPHA_CAP. The ceilings are the
+                // legibility budget — lift them only with a contrast argument and
+                // a device check (see the header's brightness pass).
+                val a = snowDrawAlpha(cfg.alpha, f.life, aScale)
                 if (a <= 0.002f || r <= 0.05f) continue      // sub-pixel/invisible: skip the blit
                 // COLOUR RAMP BY LIFE, de-banked by the flake's private bias.
                 var idx = ((f.life + f.bias) * top).roundToInt()

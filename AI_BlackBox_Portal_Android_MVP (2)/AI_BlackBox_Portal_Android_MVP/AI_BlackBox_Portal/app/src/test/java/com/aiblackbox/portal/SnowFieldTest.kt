@@ -2,6 +2,7 @@ package com.aiblackbox.portal
 
 import com.aiblackbox.portal.ui.components.FieldRandom
 import com.aiblackbox.portal.ui.components.ParticleTuning
+import com.aiblackbox.portal.ui.components.SNOW_ALPHA_CAP
 import com.aiblackbox.portal.ui.components.SNOW_FAR
 import com.aiblackbox.portal.ui.components.SNOW_MARGIN
 import com.aiblackbox.portal.ui.components.SNOW_MAX_FLAKES
@@ -9,10 +10,13 @@ import com.aiblackbox.portal.ui.components.SNOW_MID
 import com.aiblackbox.portal.ui.components.SNOW_NEAR
 import com.aiblackbox.portal.ui.components.SNOW_PLANES
 import com.aiblackbox.portal.ui.components.SNOW_RAMP_STEPS
+import com.aiblackbox.portal.ui.components.SNOW_SPRITE_ALPHAS
+import com.aiblackbox.portal.ui.components.SNOW_SPRITE_STOPS
 import com.aiblackbox.portal.ui.components.SnowFlake
 import com.aiblackbox.portal.ui.components.SnowGust
 import com.aiblackbox.portal.ui.components.SnowSim
 import com.aiblackbox.portal.ui.components.snowAlphaOverLife
+import com.aiblackbox.portal.ui.components.snowDrawAlpha
 import com.aiblackbox.portal.ui.components.snowFieldScale
 import com.aiblackbox.portal.ui.components.snowPlaneCounts
 import com.aiblackbox.portal.ui.components.snowRampStop
@@ -22,6 +26,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sign
 
 /**
@@ -33,8 +38,11 @@ import kotlin.math.sign
  * caught by staring at a phone:
  *
  *   - the LEGIBILITY BUDGET: never more than [SNOW_MAX_FLAKES] flakes at any
- *     viewport or dial setting, and the per-plane ALPHA CEILINGS are exactly the
- *     web's. This is a backdrop behind chat text.
+ *     viewport or dial setting, and a flake never dims body text past WCAG AA.
+ *     This is a backdrop behind chat text. NOTE the ceilings are no longer pinned
+ *     to the web's literals — the 2026-07-25 brightness pass lifted them for
+ *     density (see the header of SnowField.kt), so what is pinned here is the
+ *     PROPERTY (bounded lift, web ordering, measured contrast) instead.
  *   - the DEPTH CORRELATION: size, speed, sway, blur and gust response rise
  *     together across the three planes. Break it and parallax collapses to a flat
  *     field of dots.
@@ -112,22 +120,160 @@ class SnowFieldTest {
         assertTrue(snowFieldScale(1e12f, 3f).isFinite())
     }
 
-    @Test fun `alpha ceilings are the web's, and alpha is a curve over life`() {
-        // These three numbers were measured against real WCAG contrast on the web
-        // side. They are a CEILING, not a target — never raise one.
-        assertEquals(0.30f, SNOW_FAR.alpha, 0f)
-        assertEquals(0.40f, SNOW_MID.alpha, 0f)
-        assertEquals(0.34f, SNOW_NEAR.alpha, 0f)
+    // The WEB's per-plane ceilings. Kept as the REFERENCE the Android numbers are
+    // measured against, NOT as the values themselves: web lengths are CSS px at an
+    // apparent scale near 1, ours are multiplied by 0.5 x 3.1 and the outer ramp
+    // antialiases toward invisibility before alpha is ever applied, so equal
+    // literals do not produce an equal apparent result. Brandon, Fold 6, Intensity
+    // at maximum (2026-07-25): "while I can see the snow it is just not so bright."
+    private val webAlpha = mapOf("far" to 0.30f, "mid" to 0.40f, "near" to 0.34f)
+
+    /** WCAG 2.x relative luminance of an 8-bit sRGB triple. */
+    private fun luminance(r: Int, g: Int, b: Int): Double {
+        fun ch(v: Int): Double {
+            val s = v / 255.0
+            return if (s <= 0.03928) s / 12.92 else Math.pow((s + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    }
+
+    private fun contrast(a: Double, b: Double): Double =
+        (maxOf(a, b) + 0.05) / (minOf(a, b) + 0.05)
+
+    /** #C9C9C9 — the body-text grey this backdrop sits behind. */
+    private val bodyTextLuminance = luminance(0xC9, 0xC9, 0xC9)
+
+    /**
+     * Area-weighted mean alpha of the flake sprite: ∫2u·α(u)du over the unit disc,
+     * α piecewise-linear between the stops. THIS, not the core, is what a glyph
+     * sits on — a stroke spans many device px while the sprite core is a single
+     * sub-pixel — so it is the number the contrast assertion below uses.
+     */
+    private fun spriteMeanAlpha(): Double {
+        assertEquals("stop/alpha arrays must stay parallel", SNOW_SPRITE_STOPS.size, SNOW_SPRITE_ALPHAS.size)
+        var acc = 0.0
+        for (i in 0 until SNOW_SPRITE_STOPS.size - 1) {
+            val u0 = SNOW_SPRITE_STOPS[i].toDouble()
+            val u1 = SNOW_SPRITE_STOPS[i + 1].toDouble()
+            val a0 = SNOW_SPRITE_ALPHAS[i].toDouble()
+            val a1 = SNOW_SPRITE_ALPHAS[i + 1].toDouble()
+            val m = (a1 - a0) / (u1 - u0)
+            val c = a0 - m * u0                                     // α(u) = m·u + c
+            acc += (2.0 * m / 3.0) * (u1 * u1 * u1 - u0 * u0 * u0) + c * (u1 * u1 - u0 * u0)
+        }
+        return acc
+    }
+
+    @Test fun `the alpha ceilings are a BOUNDED lift over the web, in the web's order`() {
+        // A PROPERTY, not three literals. The ceilings moved on 2026-07-25; what may
+        // not move is (a) their ordering and (b) how far they are allowed to travel.
+        assertTrue(
+            "far must stay the faintest and near must stay under mid — near is the big" +
+                " blurred plane and is the real contrast risk (${SNOW_FAR.alpha}," +
+                " ${SNOW_MID.alpha}, ${SNOW_NEAR.alpha})",
+            SNOW_FAR.alpha < SNOW_NEAR.alpha && SNOW_NEAR.alpha < SNOW_MID.alpha,
+        )
+        for ((name, cfg) in listOf("far" to SNOW_FAR, "mid" to SNOW_MID, "near" to SNOW_NEAR)) {
+            val k = cfg.alpha / webAlpha.getValue(name)
+            assertTrue(
+                "the $name plane (${cfg.alpha}) is DIMMER than the web — the density" +
+                    " argument only ever justified going UP",
+                k >= 1f,
+            )
+            assertTrue(
+                "the $name plane is ${k}x the web ceiling: that is a redesign, not \"a" +
+                    " shade brighter or two\"",
+                k <= 1.35f,
+            )
+            assertTrue("the $name ceiling ${cfg.alpha} is past half-opaque", cfg.alpha <= 0.5f)
+        }
         assertEquals(250, SNOW_MAX_FLAKES)
-        // The per-flake multiplier can never push a plane past its ceiling …
+    }
+
+    @Test fun `alpha is a curve over life, and the Intensity dial actually reaches it`() {
+        // The per-flake multiplier band is unchanged: a flake fades, it never pops.
         var life = -0.5f
         while (life <= 1.5f) {
             val a = snowAlphaOverLife(life)
             assertTrue("alpha multiplier $a out of 0.10..1.0 at life $life", a >= 0.10f && a <= 1.0f)
             life += 0.01f
         }
-        // … and the brightest flake on screen is still under 0.4 alpha.
-        assertTrue(SNOW_PLANES.all { it.alpha * snowAlphaOverLife(0.5f) <= 0.40f })
+        // THE REGRESSION THIS TEST EXISTS FOR. Snow bakes its own SrcOver paint and
+        // so bypasses drawSpriteF, which is where every other sprite field picks up
+        // FieldPaints.alphaScale — so before 2026-07-25 the Intensity dial only ever
+        // added MORE flakes of identical faintness. Brightness must be monotonic in
+        // the dial, and the default dial must still be the identity.
+        val dim = ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MIN)
+        val nominal = ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_DEFAULT)
+        val hot = ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MAX)
+        assertTrue(
+            "the Intensity dial does not brighten snow — alphaScale is not wired into render",
+            snowDrawAlpha(SNOW_MID.alpha, 0.5f, dim) < snowDrawAlpha(SNOW_MID.alpha, 0.5f, nominal) &&
+                snowDrawAlpha(SNOW_MID.alpha, 0.5f, nominal) < snowDrawAlpha(SNOW_MID.alpha, 0.5f, hot),
+        )
+        assertEquals(
+            "at the default dial the drawn alpha is exactly the plane ceiling",
+            SNOW_MID.alpha, snowDrawAlpha(SNOW_MID.alpha, 0.5f, nominal), 1e-6f,
+        )
+        // The life curve still bounds it from below: 10% of the ceiling, never 0.
+        assertEquals(
+            SNOW_MID.alpha * 0.10f, snowDrawAlpha(SNOW_MID.alpha, 0f, nominal), 1e-6f,
+        )
+    }
+
+    @Test fun `no plane, life or dial setting can cross the alpha hard cap`() {
+        assertTrue("the cap itself drifted past the contrast argument", SNOW_ALPHA_CAP <= 0.72f)
+        val dials = floatArrayOf(
+            ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MIN),
+            1f,
+            ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MAX),
+            1.6f,   // brightnessScale's own clamp ceiling, in case INTENSITY_MAX ever rises
+            99f,    // and a garbage value: the cap is a guard rail, not an assumption
+        )
+        for (cfg in SNOW_PLANES) {
+            var life = 0f
+            while (life <= 1f) {
+                for (d in dials) {
+                    val a = snowDrawAlpha(cfg.alpha, life, d)
+                    assertTrue("drawn alpha $a crossed the cap at life $life, dial $d", a <= SNOW_ALPHA_CAP + 1e-6f)
+                }
+                life += 0.01f
+            }
+        }
+        // At the SHIPPED ceilings the cap must still be SLACK: it is a guard rail for
+        // future edits, not something the current look leans on.
+        assertTrue(
+            "the shipped field is already sitting on the cap — the lift went too far",
+            snowDrawAlpha(SNOW_MID.alpha, 0.5f, ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MAX)) <
+                SNOW_ALPHA_CAP,
+        )
+    }
+
+    @Test fun `the brightest flake still clears WCAG AA behind body text`() {
+        // This replaces the old literal ("the brightest flake is still under 0.40
+        // alpha"), which was the web's number and not the property that matters.
+        // Measured the way the web's 9.5-11.1:1 figures were: over the flake's AREA.
+        val mean = spriteMeanAlpha()
+        assertTrue("the sprite falloff integrates to $mean — outside any plausible band", mean in 0.15..0.55)
+        val hot = ParticleTuning.brightnessScale(ParticleTuning.INTENSITY_MAX)
+        val brightest = SNOW_PLANES.maxOf { it.alpha }
+        // Brightest plane, mid-fall (peak of the life curve), dial pinned to maximum.
+        val worst = snowDrawAlpha(brightest, 0.5f, hot) * mean
+        // SrcOver over black: the composited level IS colour x alpha.
+        val stop = snowRampStop(SNOW_RAMP_STEPS / 2)
+        fun composite(a: Double) = luminance(
+            ((((stop shr 16) and 0xFF)) * a).roundToInt(),
+            ((((stop shr 8) and 0xFF)) * a).roundToInt(),
+            ((stop and 0xFF) * a).roundToInt(),
+        )
+        val ratio = contrast(bodyTextLuminance, composite(worst))
+        assertTrue("body text drops to $ratio:1 over a flake (AA needs 4.5)", ratio >= 4.5)
+        // …and even the single-pixel CORE, at the hard cap, never out-shines the
+        // text: a backdrop may never become the brightest thing on screen.
+        assertTrue(
+            "a flake core is brighter than the body text it sits behind",
+            composite(SNOW_ALPHA_CAP.toDouble()) < bodyTextLuminance,
+        )
     }
 
     @Test fun `a phone-shaped viewport sits on the web's viewport floor`() {
@@ -281,6 +427,12 @@ class SnowFieldTest {
             val b = lut[i] and 0xFF
             assertTrue("stop $i out of 8-bit range", r in 0..255 && gc in 0..255 && b in 0..255)
             assertTrue("stop $i is warm — snow must read cold", b >= r)
+            // The COLD ENDS were lifted toward white on 2026-07-25 (the web's
+            // rgb(150,176,210) head composited to about rgb(38,44,53) at the quarter
+            // alpha a fading-in flake carries — grey dust, not snow). No stop may
+            // fall back into that band: "the white particles could be a shade
+            // brighter or two" — Brandon, Fold 6.
+            assertTrue("stop $i (${r},${gc},${b}) is dark enough to read as dust, not snow", gc >= 190)
         }
         // Out-of-range indices clamp instead of throwing.
         assertEquals(lut[0], snowRampStop(-4))

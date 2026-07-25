@@ -33,8 +33,12 @@ package com.aiblackbox.portal.ui.components
 //
 //   1. the lean is held inside 10–15° off vertical (base 12.5 ± shear ± jitter),
 //      enough to break the parallel with the text column;
-//   2. the near plane never exceeds [RAIN_NEAR_ALPHA_CEILING] (25%) alpha, heavy
-//      drops included — `RAIN_PLANES[2].alpha × RAIN_HEAVY.alpha = 0.2185`;
+//   2. the near plane never exceeds [RAIN_NEAR_ALPHA_CEILING] (25%) alpha at the
+//      DEFAULT dial, heavy drops included — `RAIN_PLANES[2].alpha ×
+//      RAIN_HEAVY.alpha = 0.2358`. The operator's Intensity dial multiplies that
+//      at the draw site (see [rainDrawnAlpha]); asking for a brighter backdrop is
+//      an explicit, reversible choice, and it is exactly what rain.js does with
+//      its own `inten` term (`p.a = alphaMul × alphaEnvelope(u) × inten`);
 //   3. population is capped at [RAIN_MAX_DROPS] (900) whatever the viewport asks.
 //
 // SrcOver, NOT additive. Rain is not emissive; under FIELD_BLEND (Plus) every
@@ -164,11 +168,57 @@ internal class RainPlane(
     val tint: Int,
 )
 
+// ── ANDROID PRESENCE BOOST (Brandon, device-validated on the Fold 2026-07-25) ──
+// "Rainfall looks pretty good, could be a bit brighter. For the scale I have the
+// scale all the way up and I just barely can see the rain."
+//
+// Two separate faults, fixed together. The dial one is in [RainSim.render] (rain
+// draws with its OWN stroke paint, so it never saw FieldPaints.alphaScale and the
+// Intensity slider was adding drops of identical faintness). This table is the
+// other: STROKE WIDTH IN DEVICE PIXELS.
+//
+// A web width of 0.55 CSS px lands on Android at 0.55 × 0.5 (apparentScale on a
+// phone-shaped box) × 3.1 (density) = 0.85 DEVICE px. Antialiasing spreads a
+// sub-pixel stroke across two pixel columns at roughly a third coverage each, and
+// THEN the alpha below multiplies that — so the far plane, 52% of the population,
+// was rendering at an effective ~0.03 alpha per pixel. Below roughly 1.5 device
+// px a stroke stops reading as a line and starts reading as noise (the identical
+// failure just fixed in SlipstreamField.kt). The widths are therefore lifted so
+// every plane clears [RAIN_MIN_STROKE_DEVICE_PX], and the alphas by a smaller
+// step on top:
+//
+//   plane   width web→device px      alpha
+//   far     0.55→1.00   0.85→1.55    0.085→0.105
+//   mid     0.90→1.30   1.40→2.02    0.140→0.165
+//   near    1.45→1.90   2.25→2.95    0.190→0.205   (×1.15 heavy = 0.2358 < 0.25)
+//
+// This DIVERGES from rain.js and that is correct: the cross-surface contract is
+// the same APPARENT RESULT, and the same numbers demonstrably do not survive the
+// density difference. Do not "restore parity" — parity here means matching the
+// web's measured ink coverage (0.059% of the viewport, at 9.5–11.1:1 against
+// #C9C9C9 body text where AA needs 4.5:1), which the numbers above do: they land
+// Android at ~0.05%, still just UNDER the web field the contrast was measured on.
+// The width RATIO is deliberately compressed (1:1.64:2.64 → 1:1.30:1.90) rather
+// than shifted wholesale — depth is carried by SPEED→length here, width only
+// reinforces it, and shifting the whole table would have put the heavy near drops
+// over 5 device px, which reads as a bar rather than a streak.
 internal val RAIN_PLANES = arrayOf(
-    RainPlane(130, 130f, 190f, 0.55f, 0.085f, 0.55f, 0.00f, 0),   // far   — haze
-    RainPlane(80, 300f, 390f, 0.90f, 0.140f, 0.85f, 0.05f, 1),    // mid
-    RainPlane(42, 560f, 700f, 1.45f, 0.190f, 1.15f, 0.09f, 2),    // near  — the only bright plane
+    RainPlane(130, 130f, 190f, 1.00f, 0.105f, 0.55f, 0.00f, 0),   // far   — haze
+    RainPlane(80, 300f, 390f, 1.30f, 0.165f, 0.85f, 0.05f, 1),    // mid
+    RainPlane(42, 560f, 700f, 1.90f, 0.205f, 1.15f, 0.09f, 2),    // near  — the only bright plane
 )
+
+/**
+ * Presence floor for a stroke, in DEVICE px at [FIELD_REFERENCE_DENSITY]. Below
+ * this a stroke antialiases into noise instead of reading as a line — see the
+ * ANDROID PRESENCE BOOST note above. Every plane's `width × RAIN_WEB_TO_REF_PX`
+ * must clear it; asserted in RainFieldTest.
+ */
+internal const val RAIN_MIN_STROKE_DEVICE_PX = 1.45f
+
+/** …and the ceiling that keeps it a streak rather than a bar: the widest stroke
+ *  the config can produce (near plane × a heavy drop) must stay under this. */
+internal const val RAIN_MAX_STROKE_DEVICE_PX = 5.0f
 
 /**
  * SUB-POPULATION 4 — the occasional fat drop, in the two closer planes only.
@@ -489,8 +539,8 @@ class RainSim(
         // the width by a continuous per-drop (0.85 + rand × 0.3) jitter. Width is
         // a PAINT property, and on Android a distinct paint property costs a
         // distinct draw call — a continuous width jitter would put every drop in
-        // its own batch and undo the whole point of drawLines. It is worth ±0.3
-        // device px on a sub-2px line, while the per-drop LENGTH envelope
+        // its own batch and undo the whole point of drawLines. It is worth ±15%
+        // of a 1.6–3.0 device px line, while the per-drop LENGTH envelope
         // (lenMul, continuous, and free because it lives in the vertex data)
         // already carries the "no two drops identical" premium rule. Dropping it
         // leaves the mean width and therefore the ink budget unchanged.
@@ -590,6 +640,12 @@ class RainSim(
      *    width are still moving. They are a minority and they get a plain
      *    drawLine apiece, at their exact values: the anti-pop fade at the
      *    viewport edges is the one thing that must not be quantized.
+     *
+     * BOTH tiers multiply through [rainDrawnAlpha]. This field bakes its own
+     * stroke paint instead of borrowing FieldPaints.sprite, so it does NOT go
+     * through drawSpriteF and would otherwise never see the Intensity dial's
+     * brightness multiplier — which is exactly the bug Brandon hit on the Fold
+     * ("I have the scale all the way up and I just barely can see the rain").
      */
     override fun DrawScope.render(res: FieldResources, paints: FieldPaints, nowMs: Double) {
         if (pool.isEmpty() || seg.isEmpty()) return
@@ -599,6 +655,10 @@ class RainSim(
         val paint = res.bake(RAIN_PAINT_KEY) { _ -> rainStrokePaint() }
         val nc = drawContext.canvas.nativeCanvas
         val gg = g
+        // The Intensity dial's BRIGHTNESS multiplier. Read once per frame, never
+        // per drop; FieldPaints is per-overlay mutable scratch and the dial can
+        // move while the field is live.
+        val ab = paints.alphaScale
 
         // pass 1 — count
         for (b in bucketCount.indices) bucketCount[b] = 0
@@ -629,7 +689,7 @@ class RainSim(
             val plane = RAIN_PLANES[b / (2 * RAIN_RAMP_N)]
             val heavy = (b / RAIN_RAMP_N) % 2 == 1
             paint.color = rainArgb(
-                plane.alpha * (if (heavy) RAIN_HEAVY.alpha else 1f),
+                rainDrawnAlpha(plane.alpha * (if (heavy) RAIN_HEAVY.alpha else 1f), ab),
                 b % RAIN_RAMP_N,
             )
             paint.strokeWidth = plane.width * (if (heavy) RAIN_HEAVY.width else 1f) * gg
@@ -638,7 +698,7 @@ class RainSim(
         // pass 4 — the fade bands, exact, per drop
         for (p in pool) {
             if (p.dead || p.flat || p.a <= RAIN_MIN_ALPHA) continue
-            paint.color = rainArgb(p.a, p.ramp)
+            paint.color = rainArgb(rainDrawnAlpha(p.a, ab), p.ramp)
             paint.strokeWidth = p.wid * gg
             nc.drawLine(p.tx, p.ty, p.x, p.y, paint)
         }
@@ -658,14 +718,35 @@ private const val RAIN_PAINT_KEY = "rain.stroke"
 private fun rainBucketOf(p: RainDrop): Int =
     ((p.plane shl 1) or (if (p.heavy) 1 else 0)) * RAIN_RAMP_N + p.ramp
 
+/**
+ * The alpha a streak is actually STROKED at: the drop's life-envelope alpha [a]
+ * times the Intensity dial's brightness multiplier [alphaScale]
+ * (FieldPaints.alphaScale, from ParticleTuning.brightnessScale).
+ *
+ * The ONE seam where the dial reaches this effect, because rain is a line field:
+ * it bakes its own stroke paint and never calls drawSpriteF, which is where every
+ * sprite-based field picks the multiplier up for free. Both render tiers go
+ * through here so the batched and the exact path can never drift apart, and so
+ * RainFieldTest can assert the dial actually moves the drawn alpha without
+ * needing a Canvas.
+ *
+ * At the default dial `alphaScale` is exactly 1, so this is byte-for-byte the old
+ * behaviour — and it is the same term rain.js applies as `inten`.
+ */
+internal fun rainDrawnAlpha(a: Float, alphaScale: Float): Float {
+    if (!alphaScale.isFinite()) return a.coerceIn(0f, 1f)
+    return (a * alphaScale).coerceIn(0f, 1f)
+}
+
 private fun rainArgb(a: Float, ramp: Int): Int =
     ((a.coerceIn(0f, 1f) * 255f).roundToInt() shl 24) or RAIN_RGB[ramp]
 
 /**
  * The stroke paint. SrcOver on purpose — NOT FIELD_BLEND: rain is not emissive,
  * and under Plus every crossing streak would sum toward white behind the chat
- * text. Round caps mirror the web's `ctx.lineCap = 'round'`, which is what stops
- * a 0.5 px far-plane streak from disappearing into the sub-pixel grid.
+ * text. Round caps mirror the web's `ctx.lineCap = 'round'`, which is what keeps
+ * a streak tapering INTO the sub-pixel grid at the ends of the fade bands (where
+ * the width envelope dips to ~0.8x) instead of ending on a hard square.
  */
 private fun rainStrokePaint(): android.graphics.Paint =
     android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {

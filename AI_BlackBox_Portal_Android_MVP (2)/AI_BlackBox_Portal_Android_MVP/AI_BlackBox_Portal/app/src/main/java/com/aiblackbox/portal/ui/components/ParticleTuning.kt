@@ -114,6 +114,26 @@ object ParticleTuning {
     }
 
     /**
+     * BRIGHTNESS multiplier for the Intensity dial.
+     *
+     * Intensity used to drive particle COUNT only, so turning it to maximum added
+     * more particles of identical faintness — which on a dark backdrop reads as
+     * barely any change at all (Brandon, Fold, 2026-07-25: "I have the scale all
+     * the way up and I just barely can see the rain"). It now drives brightness
+     * as well, applied to each draw call's alpha via FieldPaints.alphaScale.
+     *
+     * Deliberately a GENTLER curve than the count scale: alpha compounds visually
+     * where count does not (overlapping additive sprites multiply), and blowing
+     * past the measured contrast budget would make body text hard to read. The
+     * square root keeps the low end usable (a dim setting stays dim rather than
+     * vanishing) while capping the top at 1.6x rather than the count's full range.
+     */
+    fun brightnessScale(intensity: Float?): Float {
+        val i = parseIntensity(intensity)
+        return kotlin.math.sqrt(sanitizeScale(i)).coerceIn(0.55f, 1.6f)
+    }
+
+    /**
      * Apply a count scale to a baseline particle budget.
      * Guarantees ≥ 1 for any positive baseline — never 0, never negative.
      */
