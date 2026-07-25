@@ -247,12 +247,25 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
 
         new_items = s.conversation_log[s.last_mint_index:]
 
+        # M1 location ride-along: same mechanism as `model` — the recording route
+        # stashes it on last_context_meta; an empty string (the default, and what
+        # a locationless turn writes) renders NOTHING anywhere.
+        location_gauge = s.last_context_meta.get("location", "") or ""
+
+        # Brandon 2026-07-25: "It should just be right before the operator. It
+        # should be location, then operator, and then the user prompt right
+        # there." So the turn's location is a FIELD ON THE LOG LINE, not only a
+        # gauge in the header — that is the line anyone actually reads when they
+        # open a snapshot. Absent location renders nothing at all, so a
+        # locationless turn is byte-identical to before.
+        loc_field = f"location={location_gauge} " if location_gauge else ""
+
         def _render_log_line(it: dict) -> str:
             if it.get("role") == "user":
                 t = it.get("text", "")
             else:
                 t = it.get("snap_text") or it.get("text", "")
-            return f"{it['utc']} operator={operator} {it['role']}: {t}"
+            return f"{it['utc']} {loc_field}operator={operator} {it['role']}: {t}"
 
         log_lines = [_render_log_line(it) for it in new_items]
 
@@ -261,10 +274,6 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         c = usage_last.get("completion_tokens", 0)
         t = usage_last.get("total_tokens", p + c)
         model_name = s.last_context_meta.get("model", "")
-        # M1 location ride-along: same mechanism as `model` — the recording route
-        # stamps last_context_meta, the mint hands it to the renderer. "" (the
-        # default, and what a locationless turn writes) renders NO gauge line.
-        location_gauge = s.last_context_meta.get("location", "") or ""
         drift = drift_state_for(s)
 
         gm_flag = s.last_context_meta.get("gm_excerpt", True)
