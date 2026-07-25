@@ -87,6 +87,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.navigation.Routes
+import com.aiblackbox.portal.ui.components.SuppressParticleField
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -151,6 +152,10 @@ fun SettingsSheet(
         containerColor = Neutral100,
         contentColor = BbxWhite
     ) {
+        // The sheet + its scrim cover the particle backdrop: park the field's
+        // frame loop for as long as this sheet is on screen (battery only — it
+        // resumes on dismiss). See SuppressParticleField in EmberParticles.kt.
+        SuppressParticleField()
         Column(
             modifier = Modifier
                 .fillMaxWidth()

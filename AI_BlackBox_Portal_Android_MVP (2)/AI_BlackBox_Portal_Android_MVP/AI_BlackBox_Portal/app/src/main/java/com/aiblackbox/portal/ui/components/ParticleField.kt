@@ -52,12 +52,11 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -107,9 +106,10 @@ internal const val DRAIN_MAX_MS = 650.0
 internal const val FIELD_REFERENCE_DENSITY = 3.1f
 
 /** Additive blend — mirrors the web's globalCompositeOperation='lighter'.
- *  BlendMode.Plus is unreliable on the HW canvas before API 28 (and we wrap the
- *  Canvas in an alpha graphicsLayer → offscreen buffer), so fall back to SrcOver
- *  there; over pure black it degrades gracefully with no rebuild. */
+ *  BlendMode.Plus is unreliable on the HW canvas before API 28, so fall back to
+ *  SrcOver there; over pure black it degrades gracefully with no rebuild.
+ *  (The fade layer uses CompositingStrategy.ModulateAlpha — see EmberOverlay — so
+ *  alpha multiplies per draw op and additive survives the fade.) */
 internal val FIELD_BLEND =
     if (android.os.Build.VERSION.SDK_INT < 28) BlendMode.SrcOver else BlendMode.Plus
 
@@ -153,7 +153,72 @@ private val RAMP = arrayOf(
 )
 private const val SPRITE_PX = 64
 
-class FieldSprites(val ember: List<ImageBitmap>, val star: ImageBitmap)
+class FieldSprites(val ember: List<ImageBitmap>, val star: ImageBitmap) {
+    // The SAME baked sprites as platform Bitmaps. The sub-pixel draw path
+    // (nativeCanvas.drawBitmap with a float RectF destination — see drawSpriteF)
+    // needs the platform type; converting once here keeps the hot loop free of
+    // per-draw casts. asAndroidBitmap() is a cast on an AndroidImageBitmap, not a copy.
+    internal val emberNative: List<android.graphics.Bitmap> = ember.map { it.asAndroidBitmap() }
+    internal val starNative: android.graphics.Bitmap = star.asAndroidBitmap()
+}
+
+/**
+ * Per-overlay scratch objects for the draw phase. Allocated ONCE (remembered by
+ * EmberOverlay) and reused every frame so the hot loop allocates nothing:
+ *   • [sprite]  additive bitmap paint — blend + bitmap filtering set once here so
+ *               it matches what DrawScope.drawImage would have configured
+ *               (FilterQuality.Low → FILTER_BITMAP, FIELD_BLEND → PLUS/ADD).
+ *   • [matrix]  the monospace glyph paint (text size set per draw).
+ *   • [dst]     the destination rect handed to every sprite draw.
+ */
+class FieldPaints {
+    val sprite: android.graphics.Paint =
+        android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply {
+            isAntiAlias = true
+            // Single source of truth: FIELD_BLEND (Plus ≥ 28, SrcOver below) — the
+            // platform spellings of Plus are BlendMode.PLUS (API 29+) and the
+            // equivalent PorterDuff ADD xfermode on 28. SrcOver is the paint default.
+            if (FIELD_BLEND == BlendMode.Plus) {
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    blendMode = android.graphics.BlendMode.PLUS
+                } else {
+                    xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.ADD)
+                }
+            }
+        }
+    val matrix: android.graphics.Paint =
+        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = android.graphics.Typeface.MONOSPACE
+        }
+    val dst: android.graphics.RectF = android.graphics.RectF()
+}
+
+/**
+ * Draw a pre-baked sprite centred on ([cx],[cy]) with a **float** destination.
+ *
+ * Compose's `DrawScope.drawImage` only offers an IntOffset/IntSize destination,
+ * which snaps every sprite to whole pixels — that quantization is what makes the
+ * slow far-layer stars visibly STEP on a 120 Hz panel (they move well under one
+ * pixel per frame, so several frames round to the same integer and then it jumps).
+ * `nativeCanvas.drawBitmap(bitmap, src, RectF, paint)` keeps the sub-pixel
+ * position, which is the whole point. Apparent size is unchanged (the diameter is
+ * the same, just no longer rounded); a floor of 1 px keeps the tiniest trail
+ * sprites from thinning out.
+ */
+private fun DrawScope.drawSpriteF(
+    bmp: android.graphics.Bitmap,
+    cx: Float,
+    cy: Float,
+    rad: Float,
+    a: Float,
+    paints: FieldPaints,
+) {
+    if (a <= 0.003f || rad <= 0.1f) return   // same cull thresholds as the Int path
+    val half = rad.coerceAtLeast(0.5f)       // ≥ 1 px wide, as dstSize.coerceAtLeast(1) was
+    paints.dst.set(cx - half, cy - half, cx + half, cy + half)
+    paints.sprite.alpha = (a.coerceIn(0f, 1f) * 255f).roundToInt()
+    drawContext.canvas.nativeCanvas.drawBitmap(bmp, null, paints.dst, paints.sprite)
+}
 
 private fun buildRadialSprite(r: Int, g: Int, b: Int, density: Density): ImageBitmap {
     val bitmap = ImageBitmap(SPRITE_PX, SPRITE_PX)
@@ -279,8 +344,23 @@ class StarSim : FieldSim {
     override fun resize(width: Float, height: Float, scale: Float, density: Float) {
         if (width <= 0f || height <= 0f) return
         if (width == this.width && height == this.height && parts.isNotEmpty()) return
+        val prevWidth = this.width
         this.width = width; this.height = height; this.scale = scale
-        if (parts.isEmpty()) spawnAll()
+        if (parts.isEmpty()) { spawnAll(); return }
+        // A real WIDTH GROWTH (unfolding a Fold, rotating to landscape) reveals a
+        // strip the live field has no particles in: every star was seeded across
+        // the OLD width and only rises, so the new area stays empty until each
+        // star exits the top and respawns — minutes at the 0.3–0.8 layer speeds.
+        // Resample x across the new width instead: a uniform distribution stays
+        // uniform, so the field fills instantly with no visible re-scatter.
+        // (Height changes self-heal: stars respawn at the CURRENT bottom edge.)
+        if (prevWidth > 0f && width > prevWidth + 1f) {
+            val k = width / prevWidth
+            for (p in parts) {
+                p.x *= k
+                for (i in 0 until p.trailLen) p.trailX[i] *= k
+            }
+        }
     }
     private fun spawnAll() {
         parts.clear()
@@ -300,27 +380,18 @@ class StarSim : FieldSim {
     }
 }
 
-private fun DrawScope.drawStarSprite(spr: ImageBitmap, cx: Float, cy: Float, rad: Float, a: Float) {
-    if (a <= 0.003f || rad <= 0.1f) return
-    val d = (rad * 2f).roundToInt().coerceAtLeast(1)
-    drawImage(
-        image = spr, srcOffset = IntOffset.Zero, srcSize = IntSize(SPRITE_PX, SPRITE_PX),
-        dstOffset = IntOffset((cx - rad).roundToInt(), (cy - rad).roundToInt()),
-        dstSize = IntSize(d, d), alpha = a.coerceIn(0f, 1f), blendMode = FIELD_BLEND,
-    )
-}
-private fun DrawScope.drawStars(sim: StarSim, sprites: FieldSprites, nowMs: Double) {
-    val emberN = sprites.ember.size
+private fun DrawScope.drawStars(sim: StarSim, sprites: FieldSprites, paints: FieldPaints, nowMs: Double) {
+    val emberN = sprites.emberNative.size
     for (p in sim.particles) {
         if (p.dead || p.opacity <= 0.003f) continue
-        val spr = sprites.ember[(4 - p.colorIndex).coerceIn(0, emberN - 1)] // warm: red↔deep-ember
+        val spr = sprites.emberNative[(4 - p.colorIndex).coerceIn(0, emberN - 1)] // warm: red↔deep-ember
         for (i in 0 until p.trailLen) {
             val fade = 1f - i / STAR_TRAIL_LEN.toFloat()
-            drawStarSprite(spr, p.trailX[i], p.trailY[i], p.trailSize[i] * fade, p.trailOpacity[i] * fade * 0.5f)
+            drawSpriteF(spr, p.trailX[i], p.trailY[i], p.trailSize[i] * fade, p.trailOpacity[i] * fade * 0.5f, paints)
         }
-        drawStarSprite(spr, p.x, p.y, p.size * STAR_GLOW, p.opacity * 0.45f)    // soft glow
-        drawStarSprite(spr, p.x, p.y, p.size * 1.7f, p.opacity)                 // bright core
-        drawStarSprite(sprites.star, p.x, p.y, p.size * 0.9f, p.opacity * 0.9f) // white-hot center
+        drawSpriteF(spr, p.x, p.y, p.size * STAR_GLOW, p.opacity * 0.45f, paints)    // soft glow
+        drawSpriteF(spr, p.x, p.y, p.size * 1.7f, p.opacity, paints)                 // bright core
+        drawSpriteF(sprites.starNative, p.x, p.y, p.size * 0.9f, p.opacity * 0.9f, paints) // white-hot center
     }
 }
 
@@ -340,6 +411,12 @@ class EmberSim : FieldSim {
     private var scale = 1f
     private var pool = emptyArray<Emb>()
     private var spawnAcc = 0f
+    // Dead-slot FREE LIST (the pooling the header comment promises). Spawn used to
+    // linear-scan the pool for the first !alive slot; with the pool ~85% full and
+    // ~340 spawns/sec that burns ~1,100 wasted probes per frame. An IntArray stack
+    // of dead indices makes spawn O(1): pop on spawn, push on death.
+    private var freeIdx = IntArray(0)
+    private var freeCount = 0
 
     val alivePool: List<Emb> get() = pool.asList()
 
@@ -353,12 +430,19 @@ class EmberSim : FieldSim {
         if (width <= 0f || height <= 0f) return
         this.width = width; this.height = height; this.scale = scale
         val want = targetMax(density)
-        if (pool.size != want) { pool = Array(want) { Emb() }; seedFull() } // seed full → whole screen at rest
+        if (pool.size != want) {
+            pool = Array(want) { Emb() }
+            freeIdx = IntArray(want)
+            for (i in 0 until want) freeIdx[i] = i   // every slot dead → every slot free
+            freeCount = want
+            seedFull()                                // seed full → whole screen at rest
+        }
     }
 
     /** Spawn one ember ANYWHERE on screen (full-screen floating), gentle drift. */
     private fun spawnOne() {
-        val p = pool.firstOrNull { !it.alive } ?: return
+        if (freeCount == 0) return                    // pool saturated (was: linear scan)
+        val p = pool[freeIdx[--freeCount]]
         val spark = Math.random() < 0.08
         val ml = 2.6 + Math.random() * 3.6                       // long life → floats across
         p.x = (Math.random() * width).toFloat()
@@ -393,10 +477,11 @@ class EmberSim : FieldSim {
             spawnAcc += perSec * dtSec
             while (spawnAcc >= 1f) { spawnOne(); spawnAcc -= 1f }
         }
-        for (p in pool) {
+        for (i in pool.indices) {
+            val p = pool[i]
             if (!p.alive) continue
             p.life -= p.decay * dtSec
-            if (p.life <= 0f) { p.alive = false; continue }
+            if (p.life <= 0f) { kill(p, i); continue }
             // curl(ψ) via central differences → swirl velocity (px, so ×scale).
             val cvx = pot(p.x, p.y + eps, ts) - pot(p.x, p.y - eps, ts)
             val cvy = -(pot(p.x + eps, p.y, ts) - pot(p.x - eps, p.y, ts))
@@ -409,8 +494,16 @@ class EmberSim : FieldSim {
             // wrap horizontally so the field stays full across the whole width
             if (p.x < -20f * scale) p.x = width + 20f * scale
             else if (p.x > width + 20f * scale) p.x = -20f * scale
-            if (p.y < -30f * scale) p.alive = false         // floated off the top → recycle
+            if (p.y < -30f * scale) kill(p, i)              // floated off the top → recycle
         }
+    }
+
+    /** Retire slot [i] and return it to the free list. Only ever called on a live
+     *  slot (both call sites are inside `if (!p.alive) continue`), so an index can
+     *  never be pushed twice. */
+    private fun kill(p: Emb, i: Int) {
+        p.alive = false
+        freeIdx[freeCount++] = i
     }
 
     override fun rearm() {
@@ -419,7 +512,12 @@ class EmberSim : FieldSim {
     }
 }
 
-private fun DrawScope.drawEmbers(sim: EmberSim, sprites: List<ImageBitmap>, nowMs: Double) {
+private fun DrawScope.drawEmbers(
+    sim: EmberSim,
+    sprites: List<android.graphics.Bitmap>,
+    paints: FieldPaints,
+    nowMs: Double,
+) {
     val w = sim.width; val h = sim.height
     if (w <= 0f || h <= 0f) return
     // NO ground heat-glow — real embers float across the WHOLE screen, not a
@@ -433,25 +531,9 @@ private fun DrawScope.drawEmbers(sim: EmberSim, sprites: List<ImageBitmap>, nowM
         val breathe = (0.6 + 0.4 * sin(ts + p.fade)).toFloat()   // soft per-ember flicker
         val al = ((if (p.spark) 0.85f else 0.55f) * minOf(1f, p.life * 1.4f) * breathe).coerceIn(0f, 1f)
         // Faint big glow (cheap bloom) …
-        val grr = p.r * (if (p.spark) 4f else 4.2f)
-        if (grr > 0f) {
-            val d = (grr * 2f).roundToInt()
-            drawImage(
-                image = spr, srcOffset = IntOffset.Zero, srcSize = IntSize(SPRITE_PX, SPRITE_PX),
-                dstOffset = IntOffset((p.x - grr).roundToInt(), (p.y - grr).roundToInt()),
-                dstSize = IntSize(d, d), alpha = al * 0.22f, blendMode = FIELD_BLEND,
-            )
-        }
+        drawSpriteF(spr, p.x, p.y, p.r * (if (p.spark) 4f else 4.2f), al * 0.22f, paints)
         // … + bright core.
-        val cr = p.r * (if (p.spark) 1.6f else 1.9f)
-        if (cr > 0f) {
-            val d = (cr * 2f).roundToInt()
-            drawImage(
-                image = spr, srcOffset = IntOffset.Zero, srcSize = IntSize(SPRITE_PX, SPRITE_PX),
-                dstOffset = IntOffset((p.x - cr).roundToInt(), (p.y - cr).roundToInt()),
-                dstSize = IntSize(d, d), alpha = al, blendMode = FIELD_BLEND,
-            )
-        }
+        drawSpriteF(spr, p.x, p.y, p.r * (if (p.spark) 1.6f else 1.9f), al, paints)
     }
 }
 
@@ -552,12 +634,12 @@ private fun DrawScope.drawMatrix(sim: MatrixSim, paint: android.graphics.Paint, 
 internal fun DrawScope.drawParticleField(
     sim: FieldSim,
     sprites: FieldSprites,
-    matrixPaint: android.graphics.Paint,
+    paints: FieldPaints,
     nowMs: Double,
 ) {
     when (sim) {
-        is StarSim -> drawStars(sim, sprites, nowMs)
-        is EmberSim -> drawEmbers(sim, sprites.ember, nowMs)
-        is MatrixSim -> drawMatrix(sim, matrixPaint, nowMs)
+        is StarSim -> drawStars(sim, sprites, paints, nowMs)
+        is EmberSim -> drawEmbers(sim, sprites.emberNative, paints, nowMs)
+        is MatrixSim -> drawMatrix(sim, paints.matrix, nowMs)
     }
 }

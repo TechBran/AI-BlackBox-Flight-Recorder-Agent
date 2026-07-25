@@ -18,23 +18,32 @@ package com.aiblackbox.portal.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.aiblackbox.portal.ui.theme.DurationSlow
 
 // =============================================================================
@@ -50,6 +59,44 @@ object EmberMode { const val OFF = "off"; const val GENERATING = "generating"; c
 
 // Provided once at the activity root from the persisted setting; read by EmberOverlay.
 val LocalEmberMode = androidx.compose.runtime.staticCompositionLocalOf { EmberMode.ALWAYS }
+
+// =============================================================================
+// Field suppression — "something opaque is covering the field, stop drawing it".
+//
+// The particle field is a BACKDROP: when a full-bleed opaque surface (the system
+// settings sheet, a dialog) is on top of it, every frame it renders is invisible
+// AND costs GPU + battery. The overlay can't see those surfaces (they compose in
+// a different subtree), so they raise a hand here instead: a shared counter any
+// covering surface increments while it is on screen, which EmberOverlay reads to
+// park its frame loop. A COUNT, not a flag, so overlapping surfaces (sheet →
+// dialog) can't un-suppress each other on the way out.
+// =============================================================================
+@Stable
+class FieldSuppression {
+    var count by mutableIntStateOf(0)
+        private set
+    val suppressed: Boolean get() = count > 0
+    fun acquire() { count++ }
+    fun release() { if (count > 0) count-- }
+}
+
+/** One process-wide instance by default, so a covering surface never has to be a
+ *  descendant of a provider to be heard (they aren't — sheets compose elsewhere). */
+private val GlobalFieldSuppression = FieldSuppression()
+val LocalFieldSuppressed = staticCompositionLocalOf { GlobalFieldSuppression }
+
+/**
+ * Call from any composable that fully covers the backdrop (sheets, dialogs): the
+ * field's frame loop parks while it is composed and resumes on dispose.
+ */
+@Composable
+fun SuppressParticleField() {
+    val suppression = LocalFieldSuppressed.current
+    DisposableEffect(suppression) {
+        suppression.acquire()
+        onDispose { suppression.release() }
+    }
+}
 
 /** True when the OS "remove animations" / animator-scale-0 accessibility path is
  *  on — the particle field IS motion, so it is fully disabled under reduced
@@ -87,12 +134,8 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
     val scale = density.density / FIELD_REFERENCE_DENSITY
     // Pre-bake the sprite atlas ONCE per density (never in the hot loop).
     val sprites = remember(density) { buildFieldSprites(density) }
-    // One reusable monospace paint for the Matrix field (text size set per draw).
-    val matrixPaint = remember {
-        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = android.graphics.Typeface.MONOSPACE
-        }
-    }
+    // Reusable draw-phase scratch (sprite paint + matrix glyph paint + dst rect).
+    val paints = remember { FieldPaints() }
     // Fresh sim per FIELD mode → switching modes re-inits cleanly (no residue).
     val sim = remember(particleMode) { newFieldSim(particleMode) }
 
@@ -110,25 +153,38 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
     LaunchedEffect(effectiveActive, sim) {
         if (effectiveActive) { sim.rearm(); lastNanos[0] = 0L; drainStart[0] = 0L; running = true }
     }
-    LaunchedEffect(running, sim) {
-        while (running) {
-            var stop = false
-            withFrameNanos { t ->
-                val dt = if (lastNanos[0] == 0L) 0f
-                    else ((t - lastNanos[0]).toDouble() / 1_000_000_000.0).coerceAtMost(0.05).toFloat()
-                lastNanos[0] = t
-                // Bound the drain: once inactive, keep animating through the fade,
-                // then force-stop at the deadline so the loop can't idle-spin.
-                if (!currentActive) {
-                    if (drainStart[0] == 0L) drainStart[0] = t
-                    else if ((t - drainStart[0]) / 1_000_000.0 > DRAIN_MAX_MS) stop = true
-                } else {
-                    drainStart[0] = 0L
+    // Park the loop when the field cannot be SEEN. Two independent gates, both
+    // pure battery (neither changes the look):
+    //   • repeatOnLifecycle(STARTED) — withFrameNanos is Choreographer-driven and
+    //     keeps firing while the activity is stopped/backgrounded.
+    //   • LocalFieldSuppressed — an opaque sheet/dialog is covering the field.
+    // On resume the loop picks up where it left off (lastNanos reset → dt 0, so
+    // no accumulated-time jump).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val suppressed = LocalFieldSuppressed.current.suppressed
+    LaunchedEffect(running, sim, suppressed, lifecycleOwner) {
+        if (suppressed) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            lastNanos[0] = 0L
+            while (running) {
+                var stop = false
+                withFrameNanos { t ->
+                    val dt = if (lastNanos[0] == 0L) 0f
+                        else ((t - lastNanos[0]).toDouble() / 1_000_000_000.0).coerceAtMost(0.05).toFloat()
+                    lastNanos[0] = t
+                    // Bound the drain: once inactive, keep animating through the fade,
+                    // then force-stop at the deadline so the loop can't idle-spin.
+                    if (!currentActive) {
+                        if (drainStart[0] == 0L) drainStart[0] = t
+                        else if ((t - drainStart[0]) / 1_000_000.0 > DRAIN_MAX_MS) stop = true
+                    } else {
+                        drainStart[0] = 0L
+                    }
+                    sim.update(t / 1_000_000.0, dt, currentActive)
+                    frame.longValue = t
                 }
-                sim.update(t / 1_000_000.0, dt, currentActive)
-                frame.longValue = t
+                if (stop) running = false
             }
-            if (stop) running = false
         }
     }
 
@@ -139,18 +195,33 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
         label = "fieldAlpha",
     )
 
-    Canvas(
+    // Spacer + drawWithCache is exactly what foundation's Canvas() is, minus the
+    // trap: size-derived SETUP (sim.resize) belongs in the cache block, which runs
+    // only when the size actually changes, so onDrawBehind stays a pure
+    // read-and-draw instead of mutating sim state on every one of 120 frames/sec.
+    Spacer(
         modifier = modifier
             .fillMaxSize()
-            .graphicsLayer { this.alpha = alpha },
-    ) {
-        // Keep the sim sized to the canvas (spawns once; cheap no-op after).
-        sim.resize(size.width, size.height, scale, density.density)
-        // Reading the frame clock HERE invalidates only the DRAW phase (never
-        // recomposition) each animation frame.
-        val nowMs = frame.longValue / 1_000_000.0
-        drawParticleField(sim, sprites, matrixPaint, nowMs)
-    }
+            .graphicsLayer {
+                this.alpha = alpha
+                // The default (Auto) strategy promotes alpha < 1 to a full-screen
+                // OFFSCREEN BUFFER, and additive blending against a transparent
+                // buffer is a no-op — i.e. the field silently lost its additive
+                // bloom for the whole fade. ModulateAlpha sets
+                // hasOverlappingRendering=false so alpha multiplies per draw op.
+                compositingStrategy = CompositingStrategy.ModulateAlpha
+            }
+            .drawWithCache {
+                // Keep the sim sized to the canvas (spawns once; re-runs on size change).
+                sim.resize(size.width, size.height, scale, density.density)
+                onDrawBehind {
+                    // Reading the frame clock HERE invalidates only the DRAW phase
+                    // (never recomposition) each animation frame.
+                    val nowMs = frame.longValue / 1_000_000.0
+                    drawParticleField(sim, sprites, paints, nowMs)
+                }
+            },
+    )
 }
 
 // =============================================================================

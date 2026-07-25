@@ -73,6 +73,23 @@ class ParticleFieldTest {
         assertEquals(firstX, sim.particles.first().x, 0f)
     }
 
+    @Test fun `a width growth resamples stars across the newly revealed strip`() {
+        val sim = StarSim()
+        sim.resize(width, height, scale, density)
+        val count = sim.particles.size
+        val wide = width * 1.8f                          // unfolding a Fold
+        sim.resize(wide, height, scale, density)
+        assertEquals("resample, never a rebuild", count, sim.particles.size)
+        assertTrue(
+            "stars reach the newly revealed strip (x > $width)",
+            sim.particles.any { it.x > width },
+        )
+        assertTrue(
+            "no star is pushed past the new width",
+            sim.particles.none { it.x > wide + 1f },
+        )
+    }
+
     // ── Embers (full-screen floating) ──
     @Test fun `embers seed full on resize and drain when inactive`() {
         val sim = EmberSim()
@@ -85,6 +102,31 @@ class ParticleFieldTest {
         var t = 0.0
         repeat(700) { t += 16.0; sim.update(t, 0.05f, active = false) }
         assertTrue("field drains when inactive", sim.alivePool.none { it.alive })
+    }
+
+    // The dead-slot free list: a slot must be handed back exactly once when it
+    // dies. A missed push starves spawning; a double push overflows the IntArray
+    // (AIOOBE) and hands the same Emb out twice.
+    @Test fun `ember free list hands every slot back exactly once`() {
+        val sim = EmberSim()
+        sim.resize(width, height, scale, density)
+        val cap = sim.alivePool.size
+        assertEquals("resize seeds every slot", cap, sim.alivePool.count { it.alive })
+        var t = 0.0
+        repeat(700) { t += 16.0; sim.update(t, 0.05f, active = false) }   // drain
+        assertTrue("precondition: drained", sim.alivePool.none { it.alive })
+        sim.rearm()
+        assertEquals("every slot came back", cap, sim.alivePool.count { it.alive })
+    }
+
+    @Test fun `sustained ember activity keeps spawn and death balanced`() {
+        val sim = EmberSim()
+        sim.resize(width, height, scale, density)
+        var t = 0.0
+        repeat(2000) { t += 16.0; sim.update(t, 0.016f, active = true) }
+        val alive = sim.alivePool.count { it.alive }
+        assertTrue("pool stays populated while active, was $alive", alive > 0)
+        assertTrue("never exceeds the pool", alive <= sim.alivePool.size)
     }
 
     @Test fun `rearm refills the ember pool for a full screen`() {
