@@ -37,7 +37,7 @@
       },
       "location": {
         "type": "string",
-        "description": "Optional. Free-text location."
+        "description": "Optional. Where the event is, as FREE TEXT — a street address ('1247 Main St W, Hamilton, ON'), a place or business name, a room, or a meeting URL. Store it exactly as the user says it; do not geocode it or convert it to coordinates. This is the same field list_events reads back and the same form navigate_device(destination=...) takes, so an address saved here can later be pushed straight to the user's phone."
       },
       "attendees": {
         "type": "array",
@@ -58,7 +58,7 @@
       "end"
     ]
   },
-  "returns": "JSON {id, htmlLink, status, summary, start, end} for the created event (or an error string).",
+  "returns": "JSON of the created event — {id, htmlLink, status, summary, start, end} plus location and description when they were set (or an error string).",
   "example": "create_event(summary=\"Lunch\", start=\"2026-06-20T12:00:00-07:00\", end=\"2026-06-20T13:00:00-07:00\", attendees=[\"a@x.com\"])",
-  "notes": "Requires Google Workspace connected for the operator (Calendar scope granted by the Google sign-in in onboarding). For a timed event include 'T' and a timezone offset (or 'Z') in start/end; for an all-day event pass dates with no 'T' (the end date is exclusive). Use list_calendars to target a calendar other than 'primary'."
+  "notes": "Requires Google Workspace connected for the operator (Calendar scope granted by the Google sign-in in onboarding). For a timed event include 'T' and a timezone offset (or 'Z') in start/end; for an all-day event pass dates with no 'T' (the end date is exclusive). Use list_calendars to target a calendar other than 'primary'. Set 'location' whenever the user mentions WHERE — it is the field list_events surfaces and the one navigate_device consumes verbatim, so an address stored here is what makes 'send me to my first job' work later."
 }

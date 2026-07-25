@@ -32,6 +32,7 @@ class BlackBoxStore(private val context: Context) {
         val KEY_PARTICLE_QUALITY = stringPreferencesKey("particle_quality")
         val KEY_LOCATION_ATTACH = booleanPreferencesKey("location_attach")
         val KEY_LOCATION_ASKED = booleanPreferencesKey("location_permission_asked")
+        val KEY_NOTIFICATION_ASKED = booleanPreferencesKey("notification_permission_asked")
     }
 
     // Origin (server URL)
@@ -91,6 +92,19 @@ class BlackBoxStore(private val context: Context) {
         context.dataStore.data.map { it[KEY_LOCATION_ASKED] ?: false }
     suspend fun setLocationPermissionAsked(value: Boolean) {
         context.dataStore.edit { it[KEY_LOCATION_ASKED] = value }
+    }
+
+    // M4 — the SAME ask-once latch for POST_NOTIFICATIONS. Separate key from the location
+    // one on purpose: two independent permissions, two independent one-shot asks, so a
+    // denial of either can never consume the other's single chance. Latched the moment the
+    // rationale is shown and never reset — a denial is silent and permanent, and the only
+    // way back is the operator's own trip to system settings (deep-linked from Settings).
+    // There is no notification-equivalent of locationAttachEnabled: an operator who wants
+    // no notifications turns them off in the OS, which the Settings caption reports.
+    val notificationPermissionAsked: Flow<Boolean> =
+        context.dataStore.data.map { it[KEY_NOTIFICATION_ASKED] ?: false }
+    suspend fun setNotificationPermissionAsked(value: Boolean) {
+        context.dataStore.edit { it[KEY_NOTIFICATION_ASKED] = value }
     }
 
     // CLI Agent Provider

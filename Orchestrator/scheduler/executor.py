@@ -285,6 +285,30 @@ async def _execute_cu_job(
 # Prompt building — delivery context baked into the message
 # ---------------------------------------------------------------------------
 
+# M4: the one fact only THIS layer knows — that the run is unattended.
+#
+# Layering, deliberately: a tool schema can say what to do ABOUT an unattended run
+# (navigate_device's `delivery` param already spells out "scheduled/unattended ->
+# notify, because Android silently discards a background launch"), but it cannot
+# tell the model that THIS run is one. That is a property of the run, and the cron
+# executor is the only thing that knows it. "[Scheduled Task: name]" alone leaves
+# the model to infer "scheduled" => "nobody is holding the phone", which is exactly
+# the inference that produced the measured 07:30 failure (a "navigation started"
+# report while the Fold sat locked in a pocket).
+#
+# Kept SITUATIONAL, not tool-specific: it states the conditions, never names a tool
+# or a parameter, so every device/notification tool benefits and the cron path does
+# not acquire a dependency on any one tool's vocabulary.
+_UNATTENDED_NOTICE = (
+    "This is an UNATTENDED scheduled run — nobody typed this just now and nobody is "
+    "watching a screen. The user may be asleep, driving, or have the phone locked in "
+    "a pocket, so anything you send to a device must be something that WAITS for "
+    "them (a notification they tap later), not something that assumes it can take "
+    "over the screen right now. Report what you actually achieved, not what you "
+    "intended: something queued for a tap has not happened yet."
+)
+
+
 def _build_prompt(
     job_name: str,
     prompt: str,
@@ -296,8 +320,11 @@ def _build_prompt(
 
     For snapshot delivery, no extra instructions are needed — auto-mint
     handles it.  For SMS/voice, we tell the LLM to use its tools.
+
+    The header also states that the run is UNATTENDED (see _UNATTENDED_NOTICE) —
+    the one piece of context no tool schema can supply for itself.
     """
-    header = f"[Scheduled Task: {job_name}]\n\n"
+    header = f"[Scheduled Task: {job_name}]\n{_UNATTENDED_NOTICE}\n\n"
 
     if delivery == "voice_call" and delivery_target:
         return (

@@ -32,6 +32,26 @@ class LocationPermissionUxTest {
         )
     }
 
+    @Test fun defers_instead_of_stacking_on_another_permission_prompt() {
+        // M4 added a second one-shot ask (POST_NOTIFICATIONS). Two modal rationales must
+        // never be on screen together — and critically, DEFERRING must not burn this ask's
+        // latch, so the very next send still asks.
+        assertFalse(
+            "must not stack on the notification rationale",
+            LocationPermissionUx.shouldAsk(
+                attachEnabled = true, hasPermission = false, alreadyAsked = false,
+                anotherPromptVisible = true,
+            )
+        )
+        assertTrue(
+            "the deferred ask survives — it happens on the next send",
+            LocationPermissionUx.shouldAsk(
+                attachEnabled = true, hasPermission = false, alreadyAsked = false,
+                anotherPromptVisible = false,
+            )
+        )
+    }
+
     @Test fun never_asks_when_already_granted() {
         assertFalse(
             LocationPermissionUx.shouldAsk(attachEnabled = true, hasPermission = true, alreadyAsked = false)

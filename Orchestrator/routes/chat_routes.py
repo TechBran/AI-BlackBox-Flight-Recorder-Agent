@@ -8025,6 +8025,13 @@ async def chat_async(request: Request):
         active_operator = (inp.operator or current_default()).strip()
         set_current_operator(active_operator)
 
+        # M4 origin-aware device routing: do NOT call _set_origin_device_id here.
+        # This route only QUEUES — the turn (and every tool call in it) runs later on
+        # a worker thread, in a different context, so a contextvar stamped on this
+        # request would be gone by then. inp_dict carries origin_device_id into
+        # result_data and tasks.stamp_origin_device() stamps it on the worker,
+        # unconditionally, right before the provider dispatch that reads it.
+
         # Create async task
         task = create_task(
             TaskType.CHAT,

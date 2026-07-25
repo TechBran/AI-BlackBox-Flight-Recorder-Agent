@@ -163,6 +163,14 @@ fun SettingsSheet(
         com.aiblackbox.portal.data.location.LocationProvider(context).hasPermission()
     }
 
+    // M4 — the TRUE end-to-end notification state (permission + app-level switch + the
+    // navigation channel), not just the permission bit. Read-only; opening Settings never
+    // re-prompts, because the ask is once-ever. Keyed on the sheet's own recomposition so a
+    // grant made in system settings shows up on the next open without a restart.
+    val notificationState = remember {
+        com.aiblackbox.portal.data.notifications.readNotificationDeliveryState(context)
+    }
+
     val perProviderModel by viewModel.store.getString("model_$provider", "")
         .collectAsState(initial = "")
     val selectedModel = perProviderModel.ifBlank { currentModel }
@@ -925,6 +933,44 @@ fun SettingsSheet(
                 style = MaterialTheme.typography.bodyMedium,
                 color = BbxDim,
             )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // M4 — Notifications (2026-07-25)
+            //
+            // STATUS ONLY, no toggle: notifications are the OS's switch, and duplicating
+            // it in-app would invent a second source of truth. What this row exists for is
+            // the DEAD END — a scheduled navigation push (or any task alert) that silently
+            // never arrives because the permission was denied, the app is muted, or the
+            // navigation channel is at IMPORTANCE_NONE. All three were live possibilities
+            // on the real Fold. The caption names the true effective state in the
+            // operator's terms and, when it is broken, offers the one-tap deep link to fix
+            // it. That link is the ONLY recovery path we offer: passive, in Settings,
+            // behind a caption they came looking for. We never re-prompt — asked once, ever.
+            // ══════════════════════════════════════════════════════════════
+            SectionHeader("Notifications", BbxAccent)
+            Text(
+                com.aiblackbox.portal.data.notifications.NotificationPermissionUx
+                    .caption(notificationState),
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
+            )
+            if (com.aiblackbox.portal.data.notifications.NotificationPermissionUx
+                    .needsAttention(notificationState)
+            ) {
+                TextButton(onClick = {
+                    feedback()
+                    com.aiblackbox.portal.data.notifications.openNotificationSettings(context)
+                }) {
+                    Text(
+                        com.aiblackbox.portal.data.notifications.NotificationPermissionUx
+                            .OPEN_SETTINGS_LABEL,
+                        color = BbxAccent,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
 
             Spacer(Modifier.height(8.dp))
 

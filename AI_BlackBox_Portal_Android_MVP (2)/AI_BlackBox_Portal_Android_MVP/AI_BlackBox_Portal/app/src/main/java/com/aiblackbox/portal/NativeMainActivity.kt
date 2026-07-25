@@ -60,6 +60,7 @@ import com.aiblackbox.portal.data.repository.TtsQueueUnavailableException
 import com.aiblackbox.portal.data.repository.TtsRepository
 import com.aiblackbox.portal.data.location.LocationPermissionUx
 import com.aiblackbox.portal.data.location.LocationProvider
+import com.aiblackbox.portal.data.notifications.NotificationPermissionUx
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.voice.AudioRecorderManager
 import com.aiblackbox.portal.data.voice.SttEvent
@@ -330,6 +331,10 @@ class NativeMainActivity : ComponentActivity() {
                 // dismissing it counts as the one ask we get — silent forever after.
                 // ─────────────────────────────────────────────────────────────
                 var showLocationRationale by remember { mutableStateOf(false) }
+                // (M4) True from the moment the NOTIFICATION rationale appears until its
+                // system dialog has been answered. The location ask reads this and DEFERS
+                // rather than stacking a second modal on top — see the ordering note below.
+                var notificationAskInFlight by remember { mutableStateOf(false) }
                 val locationPermLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) { /* Silent either way. Granted → next turn carries location. Denied → never asked again. */ }
@@ -339,7 +344,7 @@ class NativeMainActivity : ComponentActivity() {
                             val attach = store.locationAttachEnabled.first()
                             val asked = store.locationPermissionAsked.first()
                             val granted = LocationProvider(applicationContext).hasPermission()
-                            if (LocationPermissionUx.shouldAsk(attach, granted, asked)) {
+                            if (LocationPermissionUx.shouldAsk(attach, granted, asked, notificationAskInFlight)) {
                                 store.setLocationPermissionAsked(true)
                                 showLocationRationale = true
                             } else if (granted && !asked) {
@@ -366,6 +371,93 @@ class NativeMainActivity : ComponentActivity() {
                             TextButton(onClick = { showLocationRationale = false }) {
                                 Text(LocationPermissionUx.RATIONALE_DISMISS)
                             }
+                        },
+                    )
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // M4 (2026-07-25) — POST_NOTIFICATIONS, asked ONCE, ever.
+                //
+                // The manifest has declared this permission for a long time and the native
+                // app never REQUESTED it, so on Android 13+ it was simply denied: on a fresh
+                // install the entire M3 delivery path (the 07:30 lock-screen navigation
+                // prompt, every task alert) posted into nothing. Confirmed on the Fold during
+                // M3 validation — granted=false — where it was only granted over adb.
+                // PortalActivity asks, but PairingActivity routes to THIS activity in native
+                // mode, so that ask was never reached.
+                //
+                // ORDERING against the M1 location ask — deliberate, not incidental:
+                //  1. NOTIFICATIONS ask first, once, at first composition. There is no
+                //     in-context moment for it: what it unlocks arrives while the app is
+                //     CLOSED, so foreground-at-startup is the only time we can ask at all.
+                //  2. LOCATION asks second, on the first send (M1, untouched).
+                // They cannot stack: the rationale is modal (the composer is unreachable
+                // behind it) AND `notificationAskInFlight` makes the location ask DEFER
+                // rather than race. A deferred location ask leaves its latch alone, so it
+                // simply asks on the next send — deferring never costs it its one chance.
+                // The LaunchedEffect keys on showLocationRationale so the reverse deferral
+                // (a location dialog somehow up first) re-evaluates when that closes,
+                // instead of the notification ask being lost forever.
+                //
+                // Denial is silent and permanent, exactly like location: no second prompt,
+                // no banner, nothing blocked. Settings states the true effective state and
+                // deep-links to system settings; the box reports PERMISSION_MISSING over the
+                // wire so a push is never falsely claimed as delivered.
+                // ─────────────────────────────────────────────────────────────
+                var showNotificationRationale by remember { mutableStateOf(false) }
+                val notificationPermLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { /* Silent either way. Granted → pushes land. Denied → never asked again. */
+                    notificationAskInFlight = false
+                }
+                LaunchedEffect(showLocationRationale) {
+                    runCatching {
+                        val asked = store.notificationPermissionAsked.first()
+                        val granted = ContextCompat.checkSelfPermission(
+                            applicationContext,
+                            NotificationPermissionUx.PERMISSION,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        val ask = NotificationPermissionUx.shouldAsk(
+                            sdkInt = android.os.Build.VERSION.SDK_INT,
+                            hasPermission = granted,
+                            alreadyAsked = asked,
+                            anotherPromptVisible = showLocationRationale,
+                        )
+                        if (ask) {
+                            store.setNotificationPermissionAsked(true)
+                            notificationAskInFlight = true
+                            showNotificationRationale = true
+                        } else if (granted && !asked) {
+                            // Granted by some other route (PortalActivity, or an upgrade
+                            // from a pre-13 install) — burn the latch anyway.
+                            store.setNotificationPermissionAsked(true)
+                        }
+                    }
+                }
+                if (showNotificationRationale) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            showNotificationRationale = false
+                            notificationAskInFlight = false
+                        },
+                        title = { Text(NotificationPermissionUx.RATIONALE_TITLE) },
+                        text = { Text(NotificationPermissionUx.RATIONALE_BODY) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showNotificationRationale = false
+                                // Stays in-flight until the SYSTEM dialog is answered, so a
+                                // send underneath it still cannot trigger the location ask.
+                                val launched = runCatching {
+                                    notificationPermLauncher.launch(NotificationPermissionUx.PERMISSION)
+                                }.isSuccess
+                                if (!launched) notificationAskInFlight = false
+                            }) { Text(NotificationPermissionUx.RATIONALE_CONFIRM) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                showNotificationRationale = false
+                                notificationAskInFlight = false
+                            }) { Text(NotificationPermissionUx.RATIONALE_DISMISS) }
                         },
                     )
                 }

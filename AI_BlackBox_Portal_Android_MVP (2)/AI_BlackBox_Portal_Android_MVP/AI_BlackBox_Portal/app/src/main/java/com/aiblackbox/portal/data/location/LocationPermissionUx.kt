@@ -42,9 +42,18 @@ object LocationPermissionUx {
      *  - already asked → the ask-once latch. Covers both "granted" and "denied" — this
      *    is the clause that makes a denial permanent.
      *  - already granted → nothing to ask for.
+     *  - another permission prompt visible (M4) → DEFER. Two modal rationales must never
+     *    stack, and a deferral must never cost this ask its one chance, so the latch is
+     *    left UNTOUCHED: the next send re-evaluates and asks then. Defaults to `false`,
+     *    so every pre-M4 call site keeps its exact behaviour.
      */
-    fun shouldAsk(attachEnabled: Boolean, hasPermission: Boolean, alreadyAsked: Boolean): Boolean =
-        attachEnabled && !hasPermission && !alreadyAsked
+    fun shouldAsk(
+        attachEnabled: Boolean,
+        hasPermission: Boolean,
+        alreadyAsked: Boolean,
+        anotherPromptVisible: Boolean = false,
+    ): Boolean =
+        attachEnabled && !hasPermission && !alreadyAsked && !anotherPromptVisible
 
     /**
      * Whether a location will actually be attached to an outgoing turn. Both switches

@@ -873,11 +873,19 @@ app.add_middleware(StaticCacheMiddleware)
 app.mount("/ui", StaticFiles(directory="Portal", html=True), name="ui")
 
 class ChatIn(BaseModel):
-    messages: Optional[list] = None 
+    messages: Optional[list] = None
     operator: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
-    
+    # M4: the tailnet identity of the device that ORIGINATED this turn, the
+    # non-stream twin of the field both /chat/stream routes already accept. A
+    # device-control tool called during the turn (navigate_device, control_phone,
+    # control_device) defaults its target to this device instead of the operator's
+    # PRIMARY. Absent is the NORMAL case and is not a fallback failure: cron, the
+    # Portal and MCP genuinely have no originating phone, so they leave it unset
+    # and correctly resolve to the operator's PRIMARY device.
+    origin_device_id: Optional[str] = None
+
 class ImageData(BaseModel):
     data: str  # Base64 encoded image
     mime_type: str

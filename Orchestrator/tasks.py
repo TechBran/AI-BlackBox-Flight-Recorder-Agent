@@ -2015,6 +2015,32 @@ def build_sms_prompt_prefix(
     )
 
 
+def stamp_origin_device(inp) -> Optional[str]:
+    """M4: stamp this task's ORIGINATING device onto the request-scoped contextvar
+    that every ``call_*`` tool catch-all reads when it builds a BlackBoxToolExecutor.
+
+    ``_set_origin_device_id`` was only ever called from the two /chat/stream routes,
+    so on the non-stream ``POST /chat`` path the contextvar was structurally dead:
+    a device tool invoked from a /chat turn could never see its caller's phone.
+
+    Two things this must do, in this order of importance:
+
+    1. HONOUR a supplied origin — a caller that names its originating device gets
+       that device targeted (mesh.resolve_device precedence step 2).
+    2. CLEAR it when absent. Chat tasks run on a reused ThreadPoolExecutor worker
+       (``pool.submit(process_task, ...)`` does not copy a fresh context), so a
+       contextvar left set by the previous task on that thread would leak into this
+       one and silently retarget somebody else's phone. Setting unconditionally —
+       including to None — is what makes "no origin" mean the operator's PRIMARY
+       device every single time. No origin is the NORMAL, CORRECT case for cron,
+       the Portal and MCP: none of them is a request from a phone.
+    """
+    from Orchestrator.routes.chat_routes import _set_origin_device_id  # lazy: import cycle
+    origin = getattr(inp, "origin_device_id", None)
+    _set_origin_device_id(origin)          # unconditional — see (2) above
+    return (origin or "").strip() or None
+
+
 def process_chat_task(task: Task):
     """Process a chat request asynchronously"""
     try:
@@ -2023,6 +2049,13 @@ def process_chat_task(task: Task):
         # Get chat input from task.result_data
         inp_dict = task.result_data or {}
         inp = ChatIn(**inp_dict)
+
+        # M4: origin-aware device routing on the non-stream path. Must run BEFORE
+        # any provider dispatch (the call_* tool loops read the contextvar) and
+        # unconditionally (pooled worker threads are reused — see the docstring).
+        _origin = stamp_origin_device(inp)
+        if _origin:
+            print(f"[CHAT] Origin device for this turn: {_origin}")
 
         if not inp.messages:
             raise Exception("The 'messages' field is required and cannot be empty.")

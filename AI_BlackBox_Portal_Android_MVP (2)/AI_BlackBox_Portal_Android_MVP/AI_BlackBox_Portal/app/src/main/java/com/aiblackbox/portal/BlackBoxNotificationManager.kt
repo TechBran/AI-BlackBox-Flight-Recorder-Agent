@@ -11,6 +11,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
+import com.aiblackbox.portal.data.notifications.NotificationDeliveryState
+import com.aiblackbox.portal.data.notifications.readNotificationDeliveryState
 import com.aiblackbox.portal.overlay.NAVIGATION_ACTION_LABEL
 import com.aiblackbox.portal.overlay.NavigationNotifier
 import com.aiblackbox.portal.overlay.NavigationNotifyOutcome
@@ -27,8 +29,10 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
         private const val CHANNEL_ID_DOWNLOADS = "blackbox_downloads"
 
         /** (M3) The navigation-prompt channel. HIGH importance + a NAVIGATION category so
-         *  it heads-up and surfaces on a LOCKED screen — that is the cron case. */
-        private const val CHANNEL_ID_NAVIGATION = "blackbox_navigation"
+         *  it heads-up and surfaces on a LOCKED screen — that is the cron case.
+         *  Public since M4 so `readNotificationDeliveryState` inspects the SAME channel
+         *  this class posts to, by construction rather than by a duplicated string. */
+        const val CHANNEL_ID_NAVIGATION = "blackbox_navigation"
         private const val TAG = "BlackBoxBridge"
         private const val DOWNLOAD_NOTIFICATION_ID = 9999
     }
@@ -297,8 +301,10 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
      *    re-enter our own process to `startActivity`, which would land back under BAL.
      *
      * ## Honest outcomes
-     * Returns [NavigationNotifyOutcome.PERMISSION_MISSING] when POST_NOTIFICATIONS was never
-     * granted (Android 13+) — the caller reports that instead of claiming delivery — and
+     * Returns [NavigationNotifyOutcome.PERMISSION_MISSING] when the phone cannot show a
+     * BlackBox notification at all — POST_NOTIFICATIONS never granted (Android 13+), app
+     * notifications switched off, or this channel at IMPORTANCE_NONE — so the caller
+     * reports that instead of claiming a delivery that silently went nowhere. Returns
      * [NavigationNotifyOutcome.FAILED] when the platform refuses the post. Never throws.
      *
      * ## Dedup
@@ -310,8 +316,16 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
      * first one's extras.
      */
     override fun postNavigation(push: NavigationPush): NavigationNotifyOutcome {
-        if (!hasNotificationPermission()) {
-            Log.w(TAG, "navigation prompt NOT delivered: POST_NOTIFICATIONS not granted")
+        // (M4) The permission bit alone is not the truth. `NotificationManagerCompat.notify`
+        // is a SILENT no-op when the app's notifications are switched off, or when this
+        // channel is at IMPORTANCE_NONE — both of which the Fold was in during M3
+        // validation. Reporting POSTED in those states is precisely the lie M3 exists to
+        // prevent, so all three mute switches map to PERMISSION_MISSING (one wire kind,
+        // one fix: turn BlackBox notifications back on). The DELIVERS path is byte-for-byte
+        // the device-proven M3 behaviour.
+        val delivery = readNotificationDeliveryState(context)
+        if (delivery != NotificationDeliveryState.DELIVERS) {
+            Log.w(TAG, "navigation prompt NOT delivered: notifications unavailable ($delivery)")
             return NavigationNotifyOutcome.PERMISSION_MISSING
         }
         return try {

@@ -1,6 +1,6 @@
 {
   "name": "update_event",
-  "description": "Update fields of an existing event on the operator's Google Calendar (a partial patch \u2014 only the fields you supply are changed). Identify the event by event_id. start/end accept an RFC3339 datetime OR an all-day date, same as create_event. Returns the updated event.",
+  "description": "Update fields of an existing event on the operator's Google Calendar (a partial patch — only the fields you supply are changed). Identify the event by event_id. start/end accept an RFC3339 datetime OR an all-day date, same as create_event. Returns the updated event.",
   "category": "google_workspace",
   "groups": [
     "chat",
@@ -37,7 +37,7 @@
       },
       "location": {
         "type": "string",
-        "description": "Optional. New free-text location."
+        "description": "Optional. New location, as FREE TEXT — a street address, place or business name, room, or meeting URL. Replaces the old value (pass it only when it changed). Same field list_events reads back and the same form navigate_device(destination=...) takes, so keep it a real address rather than coordinates."
       },
       "attendees": {
         "type": "array",
@@ -62,5 +62,5 @@
   },
   "returns": "JSON of the updated event (or an error string).",
   "example": "update_event(event_id=\"abc123\", summary=\"Renamed\", start=\"2026-06-21T10:00:00Z\", end=\"2026-06-21T11:00:00Z\")",
-  "notes": "Requires Google Workspace connected for the operator. This is a partial patch: only the fields you pass are changed; omitted fields are left as-is. start/end follow the same datetime-vs-all-day-date rule as create_event. Supplying attendees REPLACES the attendee list. Get the event_id from list_events."
+  "notes": "Requires Google Workspace connected for the operator. This is a partial patch: only the fields you pass are changed; omitted fields are left as-is. start/end follow the same datetime-vs-all-day-date rule as create_event. Supplying attendees REPLACES the attendee list. Get the event_id from list_events. 'location' is the same free-text address field list_events returns and navigate_device consumes verbatim — keep it a real address, never coordinates."
 }
