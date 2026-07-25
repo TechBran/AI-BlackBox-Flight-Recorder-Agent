@@ -121,6 +121,14 @@ private fun fieldReduceMotion(context: android.content.Context): Boolean = try {
 fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
     val visibility = LocalEmberMode.current
     val particleMode = ParticleMode.parse(LocalParticleMode.current)
+    // How MUCH field: the intensity slider × the quality tier, as one quantized
+    // count multiplier. Defaults (1.0 × High) resolve to exactly 1.0 → today's
+    // counts. Quantized in ParticleTuning so a slider drag can't re-key the sim
+    // on float noise; a real change rebuilds the sim (counts are baked at spawn).
+    val countScale = ParticleTuning.countScale(
+        LocalParticleIntensity.current,
+        LocalParticleQuality.current,
+    )
     val context = LocalContext.current
     // Reduced motion fully disables the field (all visibility modes).
     val reduceMotion = remember { fieldReduceMotion(context) }
@@ -136,8 +144,9 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
     val sprites = remember(density) { buildFieldSprites(density) }
     // Reusable draw-phase scratch (sprite paint + matrix glyph paint + dst rect).
     val paints = remember { FieldPaints() }
-    // Fresh sim per FIELD mode → switching modes re-inits cleanly (no residue).
-    val sim = remember(particleMode) { newFieldSim(particleMode) }
+    // Fresh sim per FIELD mode (and per count multiplier) → switching either
+    // re-inits cleanly with no residue.
+    val sim = remember(particleMode, countScale) { newFieldSim(particleMode, countScale) }
 
     // Battery-safe frame loop. effectiveActive is read via rememberUpdatedState so
     // the loop (keyed on `running`/`sim`, not the flag) sees the CURRENT value —

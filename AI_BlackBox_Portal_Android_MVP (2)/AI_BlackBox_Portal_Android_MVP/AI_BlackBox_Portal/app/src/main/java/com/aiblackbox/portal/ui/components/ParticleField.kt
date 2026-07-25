@@ -131,11 +131,19 @@ sealed interface FieldSim {
     fun rearm()
 }
 
-/** Build the sim for a mode. Unknown modes resolve to STARS via ParticleMode.parse. */
-fun newFieldSim(mode: String): FieldSim = when (ParticleMode.parse(mode)) {
-    ParticleMode.EMBERS -> EmberSim()
-    ParticleMode.MATRIX -> MatrixSim()
-    else -> StarSim()
+/**
+ * Build the sim for a mode. Unknown modes resolve to STARS via ParticleMode.parse.
+ *
+ * [countScale] is the combined intensity × quality particle-count multiplier
+ * (see ParticleTuning). It is a CONSTRUCTOR parameter, not mutable state: the
+ * budget is baked into pool sizes at spawn, so EmberOverlay keys `remember` on it
+ * and a change builds a fresh sim — the same clean re-init a mode switch gets.
+ * Defaults to 1.0 (today's counts) so every existing call site is unchanged.
+ */
+fun newFieldSim(mode: String, countScale: Float = 1f): FieldSim = when (ParticleMode.parse(mode)) {
+    ParticleMode.EMBERS -> EmberSim(countScale)
+    ParticleMode.MATRIX -> MatrixSim(countScale)
+    else -> StarSim(countScale)
 }
 
 // =============================================================================
@@ -336,8 +344,10 @@ class StarParticle(val layerIndex: Int) {
     }
 }
 
-class StarSim : FieldSim {
+class StarSim(countScale: Float = 1f) : FieldSim {
     private var width = 0f; private var height = 0f; private var scale = 1f
+    /** intensity × quality; 1.0 = the original 80/100/60 layer counts. */
+    private val countScale = ParticleTuning.sanitizeScale(countScale)
     private val parts = ArrayList<StarParticle>(240)
     val particles: List<StarParticle> get() = parts
 
@@ -364,7 +374,7 @@ class StarSim : FieldSim {
     }
     private fun spawnAll() {
         parts.clear()
-        for (layer in STAR_LAYER_COUNT.indices) repeat(STAR_LAYER_COUNT[layer]) {
+        for (layer in STAR_LAYER_COUNT.indices) repeat(ParticleTuning.scaleCount(STAR_LAYER_COUNT[layer], countScale)) {
             val p = StarParticle(layer); p.reset(width, height, scale)
             p.y = (Math.random() * height * 1.5).toFloat(); parts.add(p)
         }
@@ -405,10 +415,12 @@ class Emb {
     var hue0 = 0; var fade = 0f
 }
 
-class EmberSim : FieldSim {
+class EmberSim(countScale: Float = 1f) : FieldSim {
     var width = 0f; private set
     var height = 0f; private set
     private var scale = 1f
+    /** intensity × quality; 1.0 = the original area-derived 200–400 cap. */
+    private val countScale = ParticleTuning.sanitizeScale(countScale)
     private var pool = emptyArray<Emb>()
     private var spawnAcc = 0f
     // Dead-slot FREE LIST (the pooling the header comment promises). Spawn used to
@@ -420,10 +432,12 @@ class EmberSim : FieldSim {
 
     val alivePool: List<Emb> get() = pool.asList()
 
-    /** Concurrent-ember cap from logical (dp) area, clamped to Embers 200–400. */
+    /** Concurrent-ember cap from logical (dp) area, clamped to Embers 200–400,
+     *  then scaled by the user's intensity × quality dial (≥ 1, never empty). */
     private fun targetMax(density: Float): Int {
         val areaDp = (width / density) * (height / density)
-        return (areaDp / 900f).roundToInt().coerceIn(200, 400)
+        val base = (areaDp / 900f).roundToInt().coerceIn(200, 400)
+        return ParticleTuning.scaleCount(base, countScale)
     }
 
     override fun resize(width: Float, height: Float, scale: Float, density: Float) {
@@ -553,10 +567,12 @@ class MCol {
     var y = 0f; var sp = 0f; var glyph = MATRIX_GLYPHS[0]; var last = 0.0
 }
 
-class MatrixSim : FieldSim {
+class MatrixSim(countScale: Float = 1f) : FieldSim {
     var width = 0f; private set
     var height = 0f; private set
     var fontSizePx = 0f; private set
+    /** intensity × quality; 1.0 = the original 40–80 columns. */
+    private val countScale = ParticleTuning.sanitizeScale(countScale)
     private var cols = emptyArray<MCol>()
     val columns: List<MCol> get() = cols.asList()
 
@@ -570,7 +586,11 @@ class MatrixSim : FieldSim {
         // columns from logical width, clamped to the Matrix 40–80 cap; the glyph
         // size then tiles the width exactly.
         val widthDp = width / density
-        val n = (widthDp / 10f).roundToInt().coerceIn(40, 80)
+        val base = (widthDp / 10f).roundToInt().coerceIn(40, 80)
+        // For rain, COUNT is columns — fewer/wider at Low, more/narrower at Ultra.
+        // The hard 8..200 bound keeps a corrupt dial from producing either a single
+        // screen-wide glyph or sub-pixel text; glyphs still tile the width exactly.
+        val n = ParticleTuning.scaleCount(base, countScale).coerceIn(8, 200)
         fontSizePx = width / n
         cols = Array(n) { MCol() }
         for (c in cols) {

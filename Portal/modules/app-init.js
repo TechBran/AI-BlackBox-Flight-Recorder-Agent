@@ -103,7 +103,7 @@ import { initChatSend, send, createBubbleWithThinking, checkCUBackgroundStatus }
 import { initCUDrawer } from './cu-drawer.js';
 
 // Generation ember backdrop (fades embers in while the AI is generating)
-import { initEmberFX, initEmberModeControl, initParticleModeControl } from './ember-fx.js';
+import { initEmberFX, initEmberModeControl, initParticleModeControl, initParticleTuningControls } from './ember-fx.js';
 
 // Phase 6: GPT-4o Realtime
 import { initRealtimeUI, connect as realtimeConnect, disconnect as realtimeDisconnect, checkRealtimeAvailable } from './gpt-realtime.js';
@@ -746,8 +746,9 @@ async function initApp() {
     // the AI is generating (text or media), then drains them on completion.
     // Reads generation state from existing DOM markers; no edits to send paths.
     initEmberFX();
-    initEmberModeControl();     // wire the Off / While generating / Always-on visibility control
-    initParticleModeControl();  // wire the Rising Stars / Embers / Matrix particle-style picker
+    initEmberModeControl();        // wire the Off / While generating / Always-on visibility control
+    initParticleModeControl();     // build the field picker FROM THE EFFECT REGISTRY (never a hard-coded list)
+    initParticleTuningControls();  // wire the Intensity slider + Quality tier (persisted, fx/tuning.js)
 
     // Check for existing agent session
     await checkExistingAgentSession();

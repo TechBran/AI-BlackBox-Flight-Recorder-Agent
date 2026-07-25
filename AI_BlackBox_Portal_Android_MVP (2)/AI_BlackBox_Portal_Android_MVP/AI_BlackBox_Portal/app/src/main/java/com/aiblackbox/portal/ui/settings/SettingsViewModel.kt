@@ -209,6 +209,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setParticleMode(value: String) { viewModelScope.launch { store.setParticleMode(value) } }
 
+    fun setParticleIntensity(value: Float) { viewModelScope.launch { store.setParticleIntensity(value) } }
+
+    fun setParticleQuality(value: String) { viewModelScope.launch { store.setParticleQuality(value) } }
+
     fun setOperatorVoice(operator: String, voiceValue: String) {
         viewModelScope.launch { store.setOperatorVoice(operator, voiceValue) }
     }

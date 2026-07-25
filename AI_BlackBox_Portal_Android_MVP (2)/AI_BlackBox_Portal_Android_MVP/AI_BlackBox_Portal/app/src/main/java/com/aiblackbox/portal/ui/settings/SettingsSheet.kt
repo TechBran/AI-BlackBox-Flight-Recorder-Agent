@@ -37,6 +37,8 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -68,6 +70,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -137,6 +140,14 @@ fun SettingsSheet(
     val streaming by viewModel.store.streamingEnabled.collectAsState(initial = true)
     val emberMode by viewModel.store.emberMode.collectAsState(initial = "always")
     val particleMode by viewModel.store.particleMode.collectAsState(initial = "stars")
+    // Particle COUNT dials — how much field, orthogonal to when (emberMode) and
+    // what (particleMode). Defaults are exactly today's look. See ParticleTuning.
+    val particleIntensity by viewModel.store.particleIntensity.collectAsState(
+        initial = com.aiblackbox.portal.ui.components.ParticleTuning.INTENSITY_DEFAULT,
+    )
+    val particleQuality by viewModel.store.particleQuality.collectAsState(
+        initial = com.aiblackbox.portal.ui.components.ParticleQuality.DEFAULT,
+    )
 
     val perProviderModel by viewModel.store.getString("model_$provider", "")
         .collectAsState(initial = "")
@@ -934,6 +945,87 @@ fun SettingsSheet(
             Spacer(Modifier.height(6.dp))
             Text(
                 "Rising Stars drift, Embers glow, Matrix rains.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // Particle intensity — how MANY particles, 25%…200% (default 100%).
+            // Drag is local (draft) and persists on release, so DataStore isn't
+            // written on every touch-move frame; `remember(persisted)` re-syncs
+            // the draft whenever the committed value changes (incl. elsewhere).
+            // ══════════════════════════════════════════════════════════════
+            SectionHeader("Particle intensity", BbxAccent)
+            var intensityDraft by remember(particleIntensity) { mutableFloatStateOf(particleIntensity) }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    com.aiblackbox.portal.ui.components.ParticleTuning.intensityLabel(intensityDraft),
+                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                    color = BbxWhite,
+                )
+                Text(
+                    "Default 100%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = SolidGreen,
+                )
+            }
+            Slider(
+                value = intensityDraft,
+                onValueChange = { intensityDraft = it },
+                onValueChangeFinished = { viewModel.setParticleIntensity(intensityDraft) },
+                valueRange = com.aiblackbox.portal.ui.components.ParticleTuning.INTENSITY_MIN..
+                    com.aiblackbox.portal.ui.components.ParticleTuning.INTENSITY_MAX,
+                steps = 6,   // 0.25 increments across 0.25–2.0 (8 stops, 6 interior)
+                modifier = Modifier.fillMaxWidth(),
+                colors = SliderDefaults.colors(
+                    thumbColor = BbxAccent,
+                    activeTrackColor = BbxAccent,
+                    inactiveTrackColor = Neutral300,
+                ),
+            )
+            Text(
+                "Thins out or thickens the field. Lower it to save battery.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // Particle quality — device tier, multiplies the count on top of
+            // intensity (Low 0.5× / High 1.0× / Ultra 1.6×). Generic over
+            // ParticleQuality.ALL, so new tiers need no settings-UI change.
+            // ══════════════════════════════════════════════════════════════
+            SectionHeader("Particle quality", BbxAccent)
+            val qualityOptions = com.aiblackbox.portal.ui.components.ParticleQuality.ALL.map { tier ->
+                tier to com.aiblackbox.portal.ui.components.ParticleQuality.label(tier)
+            }
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                qualityOptions.forEachIndexed { index, (value, label) ->
+                    SegmentedButton(
+                        selected = particleQuality == value,
+                        onClick = { viewModel.setParticleQuality(value) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = qualityOptions.size),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = BbxAccent.copy(alpha = 0.15f),
+                            activeContentColor = BbxAccent,
+                            activeBorderColor = BbxAccent.copy(alpha = 0.4f),
+                            inactiveContainerColor = Neutral100,
+                            inactiveContentColor = Neutral700,
+                            inactiveBorderColor = Neutral300,
+                        ),
+                        label = { Text(label, style = MaterialTheme.typography.bodyMedium) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Low drops the particle count on weaker devices; Ultra pushes it.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = BbxDim,
             )

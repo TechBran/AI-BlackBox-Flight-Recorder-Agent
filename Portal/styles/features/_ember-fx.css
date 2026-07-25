@@ -111,10 +111,93 @@
     color: var(--muted);
     line-height: 1.4;
 }
-/* Sub-label above the particle-style picker (shares .ember-mode-row/.ember-mode-opt) */
+/* Sub-label above the particle-style picker */
 .particle-style-label {
+    display: block;
     margin: 14px 0 6px;
     font-size: 12px;
     font-weight: 600;
     color: var(--text);
+}
+
+/* ── Settings: particle FIELD picker + tuning dials (M5) ─────────────────────
+   The field picker is a <select> rather than the old three radios: the registry
+   ships thirteen effects and is meant to keep growing, and a select holds a
+   growing catalogue in fixed vertical space while staying keyboard- and
+   screen-reader-native. Styled to match the menu's other selects. */
+.particle-select {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--neutral-150);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: border-color .15s ease, box-shadow .15s ease;
+}
+.particle-select:hover { border-color: var(--accent); }
+.particle-select:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(255, 74, 74, 0.35);
+}
+
+.particle-tuning {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.particle-tune-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.particle-tune-label {
+    flex: 0 0 62px;
+    font-size: 12px;
+    color: var(--muted);
+}
+.particle-tune-select { flex: 1; width: auto; }
+/* The numeric readout is fixed-width so the row doesn't reflow while dragging. */
+.particle-tune-value {
+    flex: 0 0 42px;
+    text-align: right;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+}
+
+.particle-range {
+    flex: 1;
+    min-width: 0;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+}
+.particle-range:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(255, 74, 74, 0.35);
+}
+.particle-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: none;
+    cursor: pointer;
+}
+.particle-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: none;
+    cursor: pointer;
 }

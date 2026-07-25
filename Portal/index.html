@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui331"/> <!-- v331: composer CLI-terminal shortcut (left-action triangle) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui333"/> <!-- v333: particle settings — registry-driven field picker + intensity/quality dials -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui330"></script> <!-- v330: composer Computer Use shortcut button -->
+  <script type="module" src="/ui/app-modular.js?v=genui333"></script> <!-- v333: particle settings — registry-driven field picker + intensity/quality dials -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -634,13 +634,34 @@
             <label class="ember-mode-opt"><input type="radio" name="emberMode" value="always" checked> Always on</label>
           </div>
           <p class="ember-mode-hint">Warm ember particles drift in the background. "Always on" keeps them going; "While generating" shows them only while the AI is responding.</p>
-          <div class="particle-style-label" id="particleStyleLabel">Particle style</div>
-          <div class="ember-mode-row" role="radiogroup" aria-labelledby="particleStyleLabel">
-            <label class="ember-mode-opt"><input type="radio" name="particleMode" value="stars" checked> Rising Stars</label>
-            <label class="ember-mode-opt"><input type="radio" name="particleMode" value="embers"> Embers</label>
-            <label class="ember-mode-opt"><input type="radio" name="particleMode" value="matrix"> Matrix</label>
+          <!-- Particle FIELD picker. Deliberately EMPTY: the options are built at
+               runtime from the effect registry (window.EmberFX.listParticleModes(),
+               wired by initParticleModeControl in modules/ember-fx.js). Hard-coding
+               them here would be a second list to forget — the whole point of
+               fx/registry.js is that registering an effect is the only step. -->
+          <label class="particle-style-label" id="particleStyleLabel" for="particleModeSelect">Particle style</label>
+          <select id="particleModeSelect" class="particle-select" aria-describedby="particleStyleHint"></select>
+          <p class="ember-mode-hint" id="particleStyleHint">Choose the look of the background field. New effects appear here automatically.</p>
+
+          <!-- Tuning dials. Both persist to localStorage and go through
+               window.EmberFX.setTuning(); defaults (100% / High) are exactly the
+               shipped field. See modules/fx/tuning.js. -->
+          <div class="particle-tuning">
+            <div class="particle-tune-row">
+              <label class="particle-tune-label" for="particleDensity">Intensity</label>
+              <input type="range" id="particleDensity" class="particle-range"
+                     min="0.3" max="2" step="0.05" value="1"
+                     aria-describedby="particleTuneHint">
+              <output class="particle-tune-value" id="particleDensityValue" for="particleDensity">100%</output>
+            </div>
+            <div class="particle-tune-row">
+              <label class="particle-tune-label" for="particleQuality">Quality</label>
+              <!-- Options built from window.EmberFX.listQualityTiers() — one list, in fx/tuning.js. -->
+              <select id="particleQuality" class="particle-select particle-tune-select"
+                      aria-describedby="particleTuneHint"></select>
+            </div>
           </div>
-          <p class="ember-mode-hint">Choose the look of the background field: rising stars, warm embers, or a code-rain matrix.</p>
+          <p class="ember-mode-hint" id="particleTuneHint">Intensity sets how busy the field is. Lower the quality tier if the backdrop makes this device drop frames.</p>
         </div>
 
         <!-- Updates Section (T8) -->

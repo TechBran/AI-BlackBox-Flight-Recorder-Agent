@@ -5,8 +5,11 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.aiblackbox.portal.ui.components.ParticleQuality
+import com.aiblackbox.portal.ui.components.ParticleTuning
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -25,6 +28,8 @@ class BlackBoxStore(private val context: Context) {
         val KEY_ORIGIN = stringPreferencesKey("origin")
         val KEY_EMBER_MODE = stringPreferencesKey("ember_mode")
         val KEY_PARTICLE_MODE = stringPreferencesKey("particle_mode")
+        val KEY_PARTICLE_INTENSITY = floatPreferencesKey("particle_intensity")
+        val KEY_PARTICLE_QUALITY = stringPreferencesKey("particle_quality")
     }
 
     // Origin (server URL)
@@ -47,6 +52,23 @@ class BlackBoxStore(private val context: Context) {
     // Orthogonal to emberMode (which governs OFF/GENERATING/ALWAYS visibility).
     val particleMode: Flow<String> = context.dataStore.data.map { it[KEY_PARTICLE_MODE] ?: "stars" }
     suspend fun setParticleMode(value: String) { context.dataStore.edit { it[KEY_PARTICLE_MODE] = value } }
+
+    // Particle INTENSITY — 0.25×…2.0× count multiplier (default 1.0 = today's field).
+    // Read and write both go through ParticleTuning.parseIntensity, so an absent key
+    // or a corrupt stored value (NaN/∞/out-of-range) resolves to the default and can
+    // never reach a sim as zero particles.
+    val particleIntensity: Flow<Float> =
+        context.dataStore.data.map { ParticleTuning.parseIntensity(it[KEY_PARTICLE_INTENSITY]) }
+    suspend fun setParticleIntensity(value: Float) {
+        context.dataStore.edit { it[KEY_PARTICLE_INTENSITY] = ParticleTuning.parseIntensity(value) }
+    }
+
+    // Particle QUALITY tier — "low" / "high" / "ultra" (default "high" = today's field).
+    val particleQuality: Flow<String> =
+        context.dataStore.data.map { ParticleQuality.parse(it[KEY_PARTICLE_QUALITY]) }
+    suspend fun setParticleQuality(value: String) {
+        context.dataStore.edit { it[KEY_PARTICLE_QUALITY] = ParticleQuality.parse(value) }
+    }
 
     // CLI Agent Provider
     val cliAgentProviderFlow: Flow<String> =

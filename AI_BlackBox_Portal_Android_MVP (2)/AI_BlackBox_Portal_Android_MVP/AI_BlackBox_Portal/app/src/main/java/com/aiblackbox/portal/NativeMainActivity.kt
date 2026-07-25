@@ -268,6 +268,16 @@ class NativeMainActivity : ComponentActivity() {
                 // Particle FIELD style (stars / embers / matrix) — provided to the
                 // tree below via LocalParticleMode so EmberOverlay picks the look.
                 val particleMode by store.particleMode.collectAsState(initial = "stars")
+                // How MUCH field: intensity slider (0.25–2.0, default 1.0) and the
+                // quality tier (low/high/ultra, default high). Both default to
+                // exactly today's counts; EmberOverlay combines them into one
+                // particle-count multiplier. See ParticleTuning.
+                val particleIntensity by store.particleIntensity.collectAsState(
+                    initial = com.aiblackbox.portal.ui.components.ParticleTuning.INTENSITY_DEFAULT,
+                )
+                val particleQuality by store.particleQuality.collectAsState(
+                    initial = com.aiblackbox.portal.ui.components.ParticleQuality.DEFAULT,
+                )
 
                 // Legacy audio recorder — still used by onRecordAudio (Gemini) and
                 // the CLI CliMicButton. onWhisper no longer drives it.
@@ -524,6 +534,8 @@ class NativeMainActivity : ComponentActivity() {
                 androidx.compose.runtime.CompositionLocalProvider(
                     com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode,
                     com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode,
+                    com.aiblackbox.portal.ui.components.LocalParticleIntensity provides particleIntensity,
+                    com.aiblackbox.portal.ui.components.LocalParticleQuality provides particleQuality,
                     com.aiblackbox.portal.ui.chat.LocalReturnToLiveHost provides returnToLiveHost,
                 ) {
                 val density = LocalDensity.current
