@@ -454,7 +454,36 @@ fun isHighConsequenceIntent(name: String): Boolean =
  *
  * Compared case-insensitively against the trimmed name.
  */
-private val REMOTE_GATED_INTENTS: Set<String> = setOf("navigate")
+private val REMOTE_GATED_INTENTS: Set<String> = emptySet()
+
+// WHY `navigate` IS NOT HERE (2026-07-25, reverted the day it shipped).
+//
+// It was, for exactly the reasoning above, and on a real device that reasoning
+// was wrong in a way only the device could show. The confirm is drawn as a
+// SYSTEM overlay (OverlayConfirmUi), which needs SYSTEM_ALERT_WINDOW — and when
+// the overlay cannot be shown the gate fail-safes to DENY. On a phone without
+// that permission granted (the default), EVERY remote navigate silently became
+// `declined`. Brandon: "it seems like it's getting declined... because of
+// accessibility, but I thought we didn't need that because we have the intent
+// layer." He was right: the intent path needs neither the overlay nor the a11y
+// service, and gating it re-introduced a dependency on both.
+//
+// The gate was also solving a problem that is already solved elsewhere. Enumerate
+// who can actually fire a remote navigate:
+//   1. The operator, from their own chat, having just asked for it — the request
+//      IS the consent. A second confirm is pure friction ("one shot", his words).
+//   2. Another operator — already impossible: the phone's /action authorize() is
+//      operator-scoped, and mesh.resolve_device raises origin_mismatch rather than
+//      ever retargeting a foreign-owned device.
+//   3. UNATTENDED (a cron job, a scheduled agent) — the real risk, and the ONLY
+//      one that wanted a consent step. That case is M3 by design: it is delivered
+//      as a NOTIFICATION the owner taps, which is both the consent and the only
+//      thing Android permits from the background anyway.
+//
+// So the mechanism stays (ActionOrigin is plumbed, tested, and M3 wants it), the
+// membership does not. If you add an intent here, first check it degrades sanely
+// when SYSTEM_ALERT_WINDOW is absent — fail-closed is right for send_sms and
+// wrong for anything the user just explicitly asked for.
 
 /**
  * PURE: does intent [name] need confirmation ONLY because it arrived from the cloud?

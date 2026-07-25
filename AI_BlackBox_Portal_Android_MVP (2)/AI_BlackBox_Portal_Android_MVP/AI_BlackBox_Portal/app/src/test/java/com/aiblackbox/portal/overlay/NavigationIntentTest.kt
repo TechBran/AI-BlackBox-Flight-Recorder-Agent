@@ -302,22 +302,27 @@ class NavigationIntentTest {
         }
     }
 
-    @Test fun `REMOTE navigate CONFIRMS and a decline launches nothing`() {
-        val confirm = RecordingConfirm(answer = false)
-        assertFalse(
-            "a cloud-pushed navigate must not fire when declined",
-            navWouldFire(AutonomyMode.PERMISSION, ActionOrigin.REMOTE, confirm),
-        )
-        assertEquals(1, confirm.asked.size)
-        // The prompt must say WHERE it is about to send you — a confirm that hides the
-        // destination is not consent.
-        assertEquals("Start navigation to \"1600 Amphitheatre Pkwy\"", confirm.asked[0])
-    }
-
-    @Test fun `REMOTE navigate fires once the user approves`() {
-        val confirm = RecordingConfirm(answer = true)
-        assertTrue(navWouldFire(AutonomyMode.PERMISSION, ActionOrigin.REMOTE, confirm))
-        assertEquals(1, confirm.asked.size)
+    @Test fun `REMOTE navigate fires WITHOUT any prompt — the gate was reverted`() {
+        // Shipped remote-gated and reverted the same day, on device evidence.
+        // The confirm is a SYSTEM overlay needing SYSTEM_ALERT_WINDOW; when it
+        // cannot be shown the gate fail-safes to DENY, so on a phone without that
+        // permission (the default, and Brandon's) EVERY remote navigate came back
+        // `declined` — while the intent path itself needs neither the overlay nor
+        // the a11y service. Gating it re-introduced a dependency on both.
+        //
+        // It also guarded a case already covered: a foreign operator cannot reach
+        // the device at all (operator-scoped /action authorize + origin_mismatch),
+        // and the operator's OWN request IS the consent. The genuinely unattended
+        // case (cron) is M3's notification, which is both the consent step and the
+        // only thing Android permits from the background.
+        for (answer in listOf(true, false)) {
+            val confirm = RecordingConfirm(answer = answer)
+            assertTrue(
+                "a remote navigate must fire regardless of a confirm that never runs",
+                navWouldFire(AutonomyMode.PERMISSION, ActionOrigin.REMOTE, confirm),
+            )
+            assertTrue("no prompt may be raised for navigate", confirm.asked.isEmpty())
+        }
     }
 
     @Test fun `the default origin is LOCAL, so every pre-existing call-site is unchanged`() {
@@ -332,8 +337,8 @@ class NavigationIntentTest {
         // Adding it to HIGH_CONSEQUENCE_INTENTS would gate the on-device path too — the
         // exact regression the origin gate exists to avoid.
         assertFalse(isHighConsequenceIntent("navigate"))
-        assertTrue(isRemoteGatedIntent("navigate"))
-        assertTrue(isRemoteGatedIntent("  Navigate  "))
+        assertFalse(isRemoteGatedIntent("navigate"))
+        assertFalse(isRemoteGatedIntent("  Navigate  "))
     }
 
     @Test fun `REMOTE does not newly gate any other benign intent`() {

@@ -64,9 +64,9 @@ class IntentGateTest {
     // interaction with the EXISTING assertions in this file.
 
     @Test
-    fun `navigate is remote-gated, never high-consequence wholesale`() {
+    fun `navigate is never high-consequence wholesale`() {
         assertFalse(isHighConsequenceIntent("navigate"))
-        assertTrue(isRemoteGatedIntent("navigate"))
+        assertFalse(isRemoteGatedIntent("navigate"))   // reverted — see `navigate confirms from NEITHER origin`
     }
 
     @Test
@@ -78,9 +78,29 @@ class IntentGateTest {
     }
 
     @Test
-    fun `a REMOTE navigate confirms while a LOCAL one does not`() {
-        assertTrue(shouldConfirmIntent(AutonomyMode.PERMISSION, "navigate", ActionOrigin.REMOTE))
+    fun `navigate confirms from NEITHER origin`() {
+        // Reverted the day it shipped. `navigate` WAS remote-gated; on a real
+        // device every remote navigate came back `declined`, because the confirm
+        // is a SYSTEM overlay needing SYSTEM_ALERT_WINDOW and the gate fail-safes
+        // to DENY when it cannot be shown. The intent path itself needs neither
+        // the overlay nor the a11y service — gating it re-introduced a dependency
+        // on both. The unattended case (cron/scheduled) is M3's notification,
+        // which is the consent step AND the only thing Android allows from the
+        // background. See the rationale block on REMOTE_GATED_INTENTS.
+        assertFalse(shouldConfirmIntent(AutonomyMode.PERMISSION, "navigate", ActionOrigin.REMOTE))
         assertFalse(shouldConfirmIntent(AutonomyMode.PERMISSION, "navigate", ActionOrigin.LOCAL))
+        assertFalse(isRemoteGatedIntent("navigate"))
+    }
+
+    @Test
+    fun `the remote-origin gate MECHANISM still works for a future member`() {
+        // The membership is empty, not the mechanism — M3 wants this seam. Proven
+        // through the pure predicate so emptying the set cannot silently rot the
+        // origin plumbing that PhoneActionDispatcher threads through.
+        assertFalse(shouldConfirmIntent(AutonomyMode.PERMISSION, "navigate", ActionOrigin.REMOTE))
+        assertTrue(shouldConfirmIntent(AutonomyMode.PERMISSION, "send_sms", ActionOrigin.REMOTE))
+        assertTrue(shouldConfirmIntent(AutonomyMode.PERMISSION, "send_sms", ActionOrigin.LOCAL))
+        assertFalse(shouldConfirmIntent(AutonomyMode.YOLO, "send_sms", ActionOrigin.REMOTE))
     }
 
     @Test

@@ -17,8 +17,8 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 26
-        versionName "1.7.1-navigate-device"
+        versionCode 27
+        versionName "1.7.2-navigate-ungated"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }
