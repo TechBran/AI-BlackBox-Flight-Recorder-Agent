@@ -55,6 +55,42 @@ class IntentGateTest {
         }
     }
 
+    // ---- the ORIGIN axis (navigate) ----------------------------------------
+    //
+    // `navigate` is benign when the owner asks for it ON the phone and consequential
+    // when pushed in from the cloud (it seizes the foreground into turn-by-turn,
+    // possibly mid-drive). So it is gated by ORIGIN, never wholesale. Full
+    // both-directions coverage lives in NavigationIntentTest; these pin the
+    // interaction with the EXISTING assertions in this file.
+
+    @Test
+    fun `navigate is remote-gated, never high-consequence wholesale`() {
+        assertFalse(isHighConsequenceIntent("navigate"))
+        assertTrue(isRemoteGatedIntent("navigate"))
+    }
+
+    @Test
+    fun `origin defaults to LOCAL so the pre-existing 2-arg gate is unchanged`() {
+        // Every call-site that predates the origin axis keeps its exact behaviour.
+        assertFalse(shouldConfirmIntent(AutonomyMode.PERMISSION, "navigate"))
+        assertTrue(shouldConfirmIntent(AutonomyMode.PERMISSION, "send_email"))
+        assertFalse(shouldConfirmIntent(AutonomyMode.YOLO, "send_email"))
+    }
+
+    @Test
+    fun `a REMOTE navigate confirms while a LOCAL one does not`() {
+        assertTrue(shouldConfirmIntent(AutonomyMode.PERMISSION, "navigate", ActionOrigin.REMOTE))
+        assertFalse(shouldConfirmIntent(AutonomyMode.PERMISSION, "navigate", ActionOrigin.LOCAL))
+    }
+
+    @Test
+    fun `no other intent becomes gated just because it is REMOTE`() {
+        for (name in listOf("show_map", "open_url", "dial", "flashlight_on", "set_alarm")) {
+            assertFalse(isRemoteGatedIntent(name))
+            assertFalse(shouldConfirmIntent(AutonomyMode.PERMISSION, name, ActionOrigin.REMOTE))
+        }
+    }
+
     // ---- shouldConfirmIntent ----------------------------------------------
 
     @Test

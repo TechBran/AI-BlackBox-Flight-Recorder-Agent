@@ -106,7 +106,19 @@ class AndroidPhoneController(
      */
     private val cachedCapability: DeviceCapabilities? by lazy { capability() }
 
-    override suspend fun dispatch(name: String, args: JsonObject): ToolResult {
+    /** On-device entry point: an owner-driven call is [ActionOrigin.LOCAL] by definition. */
+    override suspend fun dispatch(name: String, args: JsonObject): ToolResult =
+        dispatch(name, args, ActionOrigin.LOCAL)
+
+    /**
+     * Dispatch [name], carrying [origin] through to the intent layer.
+     *
+     * [origin] is consumed ONLY by [IntentActuator.perform]'s consent decision (today:
+     * `navigate` confirms when pushed in remotely, never when driven on-device). It does
+     * not affect routing, capability gating, or any gesture actuator — a REMOTE tap is
+     * still exactly a tap.
+     */
+    override suspend fun dispatch(name: String, args: JsonObject, origin: ActionOrigin): ToolResult {
         return try {
             // (M8.1) a11y-revocation → intent fallback. If the AccessibilityService is disabled or
             // OS-revoked (e.g. Android Advanced Protection), the SCREEN actuators can't run — return
@@ -236,7 +248,7 @@ class AndroidPhoneController(
                 // IntentActuator, which builds + fires the stock Android intent and
                 // applies the send_* autonomy gate internally. Anything else is unknown.
                 else -> if (name in ResidentTools.INTENT_ACTIONS) {
-                    intentActuator.perform(name, args).toToolResult()
+                    intentActuator.perform(name, args, origin).toToolResult()
                 } else {
                     ToolResult(false, JsonPrimitive("unknown phone action: $name"))
                 }

@@ -577,7 +577,24 @@ object ResidentTools {
                 putJsonObject("properties") {
                     putJsonObject("destination") {
                         put("type", JsonPrimitive("string"))
-                        put("description", JsonPrimitive("Place or address to navigate to."))
+                        // Free text is handed to the maps app AS-IS (it geocodes it), so a raw
+                        // address off a calendar event works verbatim — no geocoder anywhere.
+                        put("description", JsonPrimitive("Place, address, or 'lat,lng' to navigate to."))
+                    }
+                    // Optional, STRICT-whitelisted (IntentActions.NAVIGATION_MODES): anything else
+                    // is rejected with a message naming the valid set, never passed through.
+                    putJsonObject("mode") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional travel mode: d=driving (default), b=bicycling, l=two-wheeler, w=walking."))
+                    }
+                    // Optional, STRICT-whitelisted (IntentActions.NAVIGATION_AVOID_FLAGS).
+                    putJsonObject("avoid") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional route avoidance, any combination of t=tolls, h=highways, f=ferries (e.g. 'tf')."))
+                    }
+                    putJsonObject("package") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional maps app package (default Google Maps; 'any' = let the phone choose)."))
                     }
                 }
                 put("required", buildJsonArray { add(JsonPrimitive("destination")) })

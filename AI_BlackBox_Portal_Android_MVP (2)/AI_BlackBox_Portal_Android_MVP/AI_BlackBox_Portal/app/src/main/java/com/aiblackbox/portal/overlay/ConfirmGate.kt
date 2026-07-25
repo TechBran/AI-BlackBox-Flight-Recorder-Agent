@@ -44,6 +44,33 @@ enum class AutonomyMode {
 }
 
 /**
+ * WHERE a phone action came from — an orthogonal axis to [AutonomyMode], for the
+ * actions whose consequence depends on WHO ASKED rather than on what they do.
+ *
+ * [LOCAL] is the on-device path: the owner is holding the phone and drove the action
+ * from the app itself (the resident Gemma loop / the in-app chat). [REMOTE] is an
+ * action pushed in over the `/action` wire from the box/cloud — nobody is necessarily
+ * looking at the screen, and the phone may be in a pocket, or in a car.
+ *
+ * `navigate` is the motivating case: opening turn-by-turn because the owner just
+ * asked their phone to is exactly what they wanted, but the SAME intent arriving
+ * unannounced from the cloud seizes the foreground — potentially mid-drive — so it
+ * confirms first. See [REMOTE_GATED_INTENTS].
+ *
+ * DEFAULT IS [LOCAL] everywhere (parameter defaults), so every existing call-site
+ * and the shipped, device-proven on-device behaviour is byte-for-byte unchanged;
+ * only [com.aiblackbox.portal.data.remote.PhoneActionDispatcher] (the `/action`
+ * wire) marks [REMOTE].
+ */
+enum class ActionOrigin {
+    /** Driven ON the device by its owner (resident agent / in-app chat). */
+    LOCAL,
+
+    /** Pushed in over the remote-control wire from the box/cloud. */
+    REMOTE,
+}
+
+/**
  * The seam the gate uses to ask the user to confirm a high-consequence action.
  *
  * [confirm] shows [description] and suspends until the user answers, returning
@@ -413,14 +440,51 @@ fun isHighConsequenceIntent(name: String): Boolean =
     name.trim().lowercase() in HIGH_CONSEQUENCE_INTENTS
 
 /**
- * PURE: should the actuator ask the user before firing intent [name]?
+ * The named intents that are benign WHEN THE OWNER ASKS FOR THEM ON THE DEVICE, but
+ * high-consequence when PUSHED IN from the cloud ([ActionOrigin.REMOTE]).
  *
- * Only when the device is in [AutonomyMode.PERMISSION] AND the intent is
- * high-consequence. In [AutonomyMode.YOLO] nothing gates; a benign intent never
- * gates regardless of mode. Mirrors [shouldConfirm] for the intent surface.
+ * `navigate` is the whole set today. Locally it is a direct answer to "take me
+ * there" — the owner is holding the phone and gating it would be exactly the
+ * redundant over-gating this file warns about. Remotely it is an unannounced,
+ * fire-and-forget SEIZURE OF THE FOREGROUND: turn-by-turn launches full-screen, on a
+ * phone that may be in a pocket or already navigating somewhere else, at a moment the
+ * owner did not choose. That asymmetry is a property of the ORIGIN, not of the intent
+ * — which is why `navigate` is NOT in [HIGH_CONSEQUENCE_INTENTS] (that would gate the
+ * shipped, device-proven on-device path and regress it).
+ *
+ * Compared case-insensitively against the trimmed name.
  */
-fun shouldConfirmIntent(mode: AutonomyMode, name: String): Boolean =
-    mode == AutonomyMode.PERMISSION && isHighConsequenceIntent(name)
+private val REMOTE_GATED_INTENTS: Set<String> = setOf("navigate")
+
+/**
+ * PURE: does intent [name] need confirmation ONLY because it arrived from the cloud?
+ * True for [REMOTE_GATED_INTENTS], matched on the trimmed, lower-cased name.
+ */
+fun isRemoteGatedIntent(name: String): Boolean =
+    name.trim().lowercase() in REMOTE_GATED_INTENTS
+
+/**
+ * PURE: should the actuator ask the user before firing intent [name] from [origin]?
+ *
+ * Only in [AutonomyMode.PERMISSION] (the production default), and only when the
+ * intent is either:
+ *  - [isHighConsequenceIntent] — high-consequence regardless of who asked; or
+ *  - [isRemoteGatedIntent] AND [origin] is [ActionOrigin.REMOTE] — benign on-device,
+ *    consequential when pushed in from the cloud.
+ *
+ * [origin] DEFAULTS to [ActionOrigin.LOCAL], so every pre-existing 2-argument
+ * call-site keeps its exact previous behaviour. In [AutonomyMode.YOLO] nothing gates
+ * — the owner opted into unattended actions and that posture is unchanged here. A
+ * benign intent never gates regardless of mode or origin. Mirrors [shouldConfirm]
+ * for the intent surface.
+ */
+fun shouldConfirmIntent(
+    mode: AutonomyMode,
+    name: String,
+    origin: ActionOrigin = ActionOrigin.LOCAL,
+): Boolean =
+    mode == AutonomyMode.PERMISSION &&
+        (isHighConsequenceIntent(name) || (origin == ActionOrigin.REMOTE && isRemoteGatedIntent(name)))
 
 /**
  * PURE: the human-readable confirm message for an intent action.
@@ -431,6 +495,10 @@ fun shouldConfirmIntent(mode: AutonomyMode, name: String): Boolean =
  *   `Send a text to "<number>"`, or `Send a text message` if null/blank.
  * - `send_intent` → [primaryArg] is the (non-sensitive) intent ACTION string:
  *   `Run the app action "<action>"`, or `Run a custom app action` if null/blank.
+ * - `navigate` → [primaryArg] is the DESTINATION (the remote-origin gate, see
+ *   [isRemoteGatedIntent]): `Start navigation to "<destination>"`, or `Start
+ *   navigation` if null/blank. The destination MUST be shown — a confirm that hides
+ *   where the phone is about to send you is not consent.
  * - any other [name] → a generic `Run <name>`.
  *
  * SECURITY: [primaryArg] is ONLY ever the recipient / number / action constant —
@@ -445,6 +513,7 @@ fun describeIntent(name: String, primaryArg: String?): String {
         "send_email" -> if (arg != null) "Send an email to \"$arg\"" else "Send an email"
         "send_sms" -> if (arg != null) "Send a text to \"$arg\"" else "Send a text message"
         "send_intent" -> if (arg != null) "Run the app action \"$arg\"" else "Run a custom app action"
+        "navigate" -> if (arg != null) "Start navigation to \"$arg\"" else "Start navigation"
         else -> "Run $name"
     }
 }

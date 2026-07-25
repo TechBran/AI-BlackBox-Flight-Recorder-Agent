@@ -3,6 +3,7 @@ package com.aiblackbox.portal.data.remote
 import com.aiblackbox.portal.data.local.PhoneController
 import com.aiblackbox.portal.data.local.ResidentTools
 import com.aiblackbox.portal.data.model.ToolResult
+import com.aiblackbox.portal.overlay.ActionOrigin
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import kotlinx.serialization.json.Json
@@ -267,7 +268,13 @@ fun classifyActuatorError(detail: String): String? {
         // a missing required arg ("<key> required"), an unsafe/invalid URI ("invalid url" /
         // "invalid uri" / "unsafe or invalid uri"), and a bad cardinal direction ("unknown
         // swipe/scroll direction: <d>"). These are caller-input errors, not dispatch failures.
-        d.contains("required") ||
+        // navigate: a mode/avoid value outside the strict whitelist ("invalid navigation …")
+        // and a caller-named navigation app that isn't installed are both caller-input errors
+        // — same precedent as open_app's "not launchable" above. NOTE the device-has-none case
+        // ("no navigation app installed") deliberately does NOT match here: nothing is wrong
+        // with the request, the device simply cannot do it → dispatch_failed.
+        d.contains("invalid navigation") || d.contains("navigation app not installed") ||
+            d.contains("required") ||
             d.contains("invalid url") || d.contains("invalid uri") || d.contains("unsafe or invalid") ||
             d.contains("unknown swipe direction") || d.contains("unknown scroll direction") -> "invalid_argument"
         // Everything else that failed is a dispatch/launch failure (gesture rejected,
@@ -413,8 +420,14 @@ class PhoneActionDispatcher(
                 }
 
                 // Dispatch through the real actuators (AndroidPhoneController never throws).
+                // ORIGIN: this is THE remote wire — every frame that reaches here was pushed in
+                // from the box/cloud, so it is tagged REMOTE. The intent layer uses that (and
+                // only that) for the origin-gated consent decisions: a cloud-pushed `navigate`
+                // seizes the foreground into turn-by-turn on a phone nobody may be looking at,
+                // so in Permission mode the user confirms first. The identical call driven ON
+                // the device stays LOCAL and ungated (see ActionOrigin / shouldConfirmIntent).
                 val t0 = clockMs()
-                val tr = controller.dispatch(parsed.dispatchName, parsed.args)
+                val tr = controller.dispatch(parsed.dispatchName, parsed.args, ActionOrigin.REMOTE)
                 val latencyMs = clockMs() - t0
                 val detail = toolDetail(tr)
                 val obs = observationProvider?.invoke()

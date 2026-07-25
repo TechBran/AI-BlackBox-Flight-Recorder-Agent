@@ -67,6 +67,14 @@ import kotlinx.serialization.json.jsonPrimitive
  * (the dialer's Call button, the calendar editor), so a separate confirm would be
  * redundant over-gating.
  *
+ * ## Origin gate — `navigate` (the ONE intent whose consequence depends on WHO ASKED)
+ * [perform] takes an [ActionOrigin] (default [ActionOrigin.LOCAL]; only the `/action`
+ * wire marks [ActionOrigin.REMOTE]). `navigate` is deliberately NOT high-consequence
+ * — gating it wholesale would regress the shipped, device-proven on-device path where
+ * the owner is holding the phone. But the SAME intent pushed in from the cloud seizes
+ * the foreground into full-screen turn-by-turn on a phone nobody is looking at,
+ * possibly mid-drive, so in Permission mode it asks first. See [isRemoteGatedIntent].
+ *
  * ## Leak discipline (HARD — shared with [Actuators]/[ConfirmGate])
  * NOTHING sensitive is ever logged or placed into an [ActuatorResult.detail]: not
  * an email body/subject/recipient, sms body, contact phone/email, url, search
@@ -105,7 +113,11 @@ class IntentActuator(
      * (`send_email`/`send_sms`/`send_intent`) consult the autonomy gate
      * ([shouldConfirmIntent]) BEFORE firing and abort with `"user declined"` if denied.
      */
-    suspend fun perform(name: String, args: JsonObject): ActuatorResult {
+    suspend fun perform(
+        name: String,
+        args: JsonObject,
+        origin: ActionOrigin = ActionOrigin.LOCAL,
+    ): ActuatorResult {
         val ctx = context()?.applicationContext ?: return ActuatorResult(false, "app context unavailable")
         return try {
             when (name) {
@@ -342,16 +354,11 @@ class IntentActuator(
                     fire(ctx, name, intent, "opened file creator")
                 }
 
-                // 22. navigate — start turn-by-turn navigation to a destination
-                // (navigationUri form-encodes it into a google.navigation: deep link).
-                "navigate" -> {
-                    val destination = str(args, "destination")
-                        ?: return ActuatorResult(false, "destination required")
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        data = Uri.parse(navigationUri(destination))
-                    }
-                    fire(ctx, name, intent, "started navigation")
-                }
+                // 22. navigate — start turn-by-turn navigation to a destination. THE
+                // one-shot "take me there" primitive: strict-whitelisted mode/avoid,
+                // a resolveActivity preflight, and the REMOTE-ORIGIN consent gate.
+                // [GATE when origin == REMOTE]
+                "navigate" -> navigate(ctx, args, origin)
 
                 // 23. play_media — play-from-search (music app resolves the query).
                 "play_media" -> {
@@ -532,6 +539,92 @@ class IntentActuator(
         }
         // (c) [fire] sets ONLY FLAG_ACTIVITY_NEW_TASK.
         return fire(ctx, "send_intent", intent, "action dispatched")
+    }
+
+    /**
+     * Build + fire `navigate` — the ONE-SHOT turn-by-turn primitive. A model says
+     * "navigate me to X" and the phone opens navigation: no ReAct loop, no
+     * screenshots, no accessibility, one deterministic intent.
+     *
+     * Four layers, in order, every decision of which is a PURE, host-JVM-tested
+     * function in [IntentActions] (this method only assembles + launches):
+     *
+     *  1. **Argument envelope** — [navigationRejectionReason]: `destination` required;
+     *     `mode`/`avoid` must be in the STRICT whitelists ([NAVIGATION_MODES] /
+     *     [NAVIGATION_AVOID_FLAGS]) or the request is REJECTED with a reason naming
+     *     the valid set. Nothing outside the whitelist can reach the URI even if this
+     *     check were skipped ([navigationUri] drops what it cannot whitelist).
+     *  2. **URI** — [navigationUri]: free text is form-encoded (so a raw calendar
+     *     address passes straight through and Maps geocodes it — no geocoder needed
+     *     anywhere), while a `lat,lng` destination keeps its LITERAL comma, which is
+     *     the documented `google.navigation:q=lat,lng` form.
+     *  3. **Preflight** — `resolveActivity` on the pinned package (default Google
+     *     Maps, overridable via `package`, omittable with `package="any"`), decided by
+     *     [navigationLaunchPlan]: a specific app that isn't installed fails BY NAME and
+     *     is never silently retargeted; a missing DEFAULT falls back to the implicit
+     *     intent so a Waze-only phone still navigates; only when nothing resolves do we
+     *     return a clear "no navigation app installed" instead of the opaque
+     *     ActivityNotFoundException today's unpinned intent produces.
+     *  4. **Consent BY ORIGIN** — [shouldConfirmIntent] with [origin]. A cloud-pushed
+     *     navigate seizes the foreground on a phone nobody is looking at (possibly
+     *     mid-drive), so in Permission mode it asks first, showing the destination
+     *     ([describeIntent]); a decline returns "user declined" and launches NOTHING.
+     *     An on-device request ([ActionOrigin.LOCAL], the default) is UNCHANGED — the
+     *     shipped, device-proven Gemma path never gates.
+     *
+     * The preflight runs BEFORE the prompt so we never ask the user to approve a
+     * navigation that could not have launched anyway. Nothing is fired before the
+     * gate. Leak discipline holds: details are fixed phrases or a package name (a dev
+     * identifier), never the destination.
+     */
+    private suspend fun navigate(ctx: Context, args: JsonObject, origin: ActionOrigin): ActuatorResult {
+        val destination = str(args, "destination")
+        val travelMode = str(args, "mode")
+        val avoid = str(args, "avoid")
+        // (1) pure argument envelope — strict whitelists, reject rather than pass through.
+        navigationRejectionReason(destination, travelMode, avoid)?.let { return ActuatorResult(false, it) }
+        // Safe !! — navigationRejectionReason returned non-null for a null/blank destination.
+        val uri = Uri.parse(navigationUri(destination!!, travelMode, avoid))
+
+        // (3) preflight: probe the pinned target, and (only if that misses) the implicit form.
+        val requestedPkg = str(args, "package")
+        val target = navigationTargetPackage(requestedPkg)
+        val resolvesTarget = resolvesNavigation(ctx, uri, target)
+        val resolvesImplicit = if (!resolvesTarget && target != null) resolvesNavigation(ctx, uri, null) else false
+        val plan = navigationLaunchPlan(requestedPkg, resolvesTarget, resolvesImplicit)
+        if (plan is NavigationLaunch.Fail) {
+            logFired("navigate", false)
+            return ActuatorResult(false, plan.detail)
+        }
+
+        // (4) ORIGIN GATE — a REMOTE push confirms; the on-device path does not.
+        if (shouldConfirmIntent(mode(), "navigate", origin)) {
+            if (!confirm.confirm(describeIntent("navigate", destination))) {
+                return ActuatorResult(false, "user declined")
+            }
+        }
+
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            (plan as NavigationLaunch.Launch).pkg?.let { setPackage(it) }
+        }
+        return fire(ctx, "navigate", intent, "started navigation")
+    }
+
+    /**
+     * Can an activity handle the navigation [uri], pinned to [pkg] (`null` = implicit)?
+     *
+     * Package VISIBILITY for this probe is already granted by the
+     * `<queries><intent><action VIEW/><data scheme="google.navigation"/>` entry in
+     * AndroidManifest.xml (plus the broad MAIN/LAUNCHER query), so a `false` here
+     * genuinely means "no such handler", not "hidden by Android 11 filtering". Wrapped
+     * so a PackageManager failure degrades to `false` (→ a clear "no navigation app
+     * installed") rather than throwing.
+     */
+    private fun resolvesNavigation(ctx: Context, uri: Uri, pkg: String?): Boolean = try {
+        Intent(Intent.ACTION_VIEW, uri).apply { if (pkg != null) setPackage(pkg) }
+            .resolveActivity(ctx.packageManager) != null
+    } catch (e: Exception) {
+        false
     }
 
     /**

@@ -41,4 +41,25 @@ interface PhoneController {
      * object. Returns a [ToolResult] (never throws).
      */
     suspend fun dispatch(name: String, args: JsonObject): ToolResult
+
+    /**
+     * Dispatch [name] tagging WHERE the call came from
+     * ([com.aiblackbox.portal.overlay.ActionOrigin]).
+     *
+     * A few actions are benign when the owner drives them ON the device but
+     * consequential when pushed in over the remote-control wire — `navigate` seizes
+     * the foreground into turn-by-turn on a phone nobody may be looking at. The
+     * origin is the axis those consent decisions turn on; it changes nothing else.
+     *
+     * DEFAULTS to delegating to the 2-argument [dispatch] (i.e. LOCAL semantics), so
+     * every existing implementation — including the test doubles — keeps compiling and
+     * behaving EXACTLY as before. Only [com.aiblackbox.portal.overlay.AndroidPhoneController]
+     * overrides it, and only [com.aiblackbox.portal.data.remote.PhoneActionDispatcher]
+     * ever passes [com.aiblackbox.portal.overlay.ActionOrigin.REMOTE].
+     */
+    suspend fun dispatch(
+        name: String,
+        args: JsonObject,
+        origin: com.aiblackbox.portal.overlay.ActionOrigin,
+    ): ToolResult = dispatch(name, args)
 }

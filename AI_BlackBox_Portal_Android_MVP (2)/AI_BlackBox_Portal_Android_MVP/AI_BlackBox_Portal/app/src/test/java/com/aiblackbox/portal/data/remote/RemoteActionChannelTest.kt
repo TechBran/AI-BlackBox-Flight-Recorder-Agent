@@ -1,7 +1,9 @@
 package com.aiblackbox.portal.data.remote
 
 import com.aiblackbox.portal.data.local.FakePhoneController
+import com.aiblackbox.portal.data.local.PhoneController
 import com.aiblackbox.portal.data.model.ToolResult
+import com.aiblackbox.portal.overlay.ActionOrigin
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.FormFactor
 import kotlinx.coroutines.runBlocking
@@ -248,6 +250,46 @@ class RemoteActionChannelTest {
         assertEquals(1, c.dispatched.size)
         assertEquals("tap", c.dispatched[0].first)
         assertEquals("foo", c.dispatched[0].second["resource_id"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    // ======================= (M2) action ORIGIN =======================
+
+    /** A controller that records the ORIGIN (and name/args) of every dispatch. */
+    private class OriginRecordingController : PhoneController {
+        val calls = mutableListOf<Triple<String, JsonObject, ActionOrigin>>()
+
+        /** The 2-arg entry point is the on-device one: LOCAL by definition. */
+        override suspend fun dispatch(name: String, args: JsonObject): ToolResult =
+            dispatch(name, args, ActionOrigin.LOCAL)
+
+        override suspend fun dispatch(name: String, args: JsonObject, origin: ActionOrigin): ToolResult {
+            calls.add(Triple(name, args, origin))
+            return ToolResult(true, JsonPrimitive("started navigation"))
+        }
+    }
+
+    @Test fun `the remote wire tags every dispatched frame REMOTE`() = runBlocking {
+        // This is what makes the origin consent gate real: an action that arrived over
+        // /action can never be mistaken for one the owner drove on the device.
+        val c = OriginRecordingController()
+        PhoneActionDispatcher(c, capability = { phoneCap }, sessionBus = FakeSession())
+            .dispatch(body("""{"type":"intent","name":"navigate","params":{"destination":"1600 Amphitheatre Pkwy","mode":"d"}}"""), "t1", "Brandon")
+        assertEquals(1, c.calls.size)
+        assertEquals(ActionOrigin.REMOTE, c.calls[0].third)
+    }
+
+    @Test fun `a navigate intent frame reaches the controller with its params verbatim`() = runBlocking {
+        // The server-side one-shot tool POSTs exactly this frame; params must pass through
+        // untouched (the intent layer owns validation, not the wire).
+        val c = OriginRecordingController()
+        PhoneActionDispatcher(c, capability = { phoneCap }, sessionBus = FakeSession())
+            .dispatch(body("""{"type":"intent","name":"navigate","params":{"destination":"742 Evergreen Terrace","mode":"w","avoid":"tf"}}"""), "t1", "Brandon")
+        val (name, args, origin) = c.calls[0]
+        assertEquals("navigate", name)
+        assertEquals("742 Evergreen Terrace", args["destination"]?.jsonPrimitive?.contentOrNull)
+        assertEquals("w", args["mode"]?.jsonPrimitive?.contentOrNull)
+        assertEquals("tf", args["avoid"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(ActionOrigin.REMOTE, origin)
     }
 
     // ======================= (M8.3) telemetry recording ========================

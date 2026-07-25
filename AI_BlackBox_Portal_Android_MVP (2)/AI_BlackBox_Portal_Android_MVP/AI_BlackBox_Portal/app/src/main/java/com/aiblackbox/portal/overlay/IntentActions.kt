@@ -283,16 +283,217 @@ fun isSafeViewUri(uri: String): Boolean {
     return u.substringAfter(":", "").isNotBlank()
 }
 
+// ---- navigation (google.navigation:) ------------------------------------------
+//
+// The ONE deterministic "take me there" primitive. A model says where; the phone
+// opens turn-by-turn. Everything risky about that (what may appear in the URI, which
+// app receives it) is decided by the PURE functions below so it is exhaustively
+// host-JVM testable; the IntentActuator only assembles + launches what they return.
+
 /**
- * PURE: the `google.navigation:` turn-by-turn URI for a free-text [destination].
+ * The ONLY travel modes that may reach `google.navigation:…&mode=` — the documented
+ * single-letter set: `d` driving, `b` bicycling, `l` two-wheeler, `w` walking.
  *
- * `google.navigation:q=<url-encoded destination>` is the canonical "start
- * turn-by-turn navigation to this place" deep link (Google Maps consumes it). The
- * destination is form-encoded via [URLEncoder] exactly like [geoQueryUri], so it
- * can never break out of the query string.
+ * STRICT WHITELIST, not a sanitizer: anything else is REJECTED
+ * ([navigationRejectionReason]) and can never be passed through into the URI
+ * ([navigationUri] drops what it cannot whitelist). A model that invents
+ * `mode=transit` / `mode=driving` / `mode=d&foo=bar` gets a clear error it can
+ * correct, never a silently mangled or attacker-shaped deep link.
  */
-fun navigationUri(destination: String): String =
-    "google.navigation:q=" + URLEncoder.encode(destination, StandardCharsets.UTF_8.toString())
+val NAVIGATION_MODES: Set<String> = setOf("d", "b", "l", "w")
+
+/**
+ * The ONLY route-avoidance flags that may reach `google.navigation:…&avoid=` —
+ * `t` tolls, `h` highways, `f` ferries. The wire value is a COMBINATION of these
+ * letters (e.g. `tf` = avoid tolls + ferries), so the whitelist is a per-character
+ * SUBSET test plus a no-duplicates rule. Same strictness as [NAVIGATION_MODES].
+ */
+val NAVIGATION_AVOID_FLAGS: Set<String> = setOf("t", "h", "f")
+
+/**
+ * The default navigation app. Google Maps is the only app guaranteed to honour the
+ * full `google.navigation:` contract (mode/avoid), so it is the default TARGET —
+ * but never a lock-in: see [navigationTargetPackage] (a Waze/OsmAnd user passes
+ * their own package, or `any` to let the phone choose).
+ */
+const val DEFAULT_NAVIGATION_PACKAGE: String = "com.google.android.apps.maps"
+
+/**
+ * The `package` argument values that mean "DON'T pin an app — fire the implicit
+ * intent and let the phone's default navigation handler take it". Case-insensitive.
+ */
+private val NAVIGATION_ANY_PACKAGE: Set<String> = setOf("any", "none", "*", "default")
+
+/**
+ * A bare `lat,lng` destination — the documented `google.navigation:q=lat,lng` form.
+ * Note there is NO whitespace in the documented form; [isLatLngDestination] strips
+ * spaces before matching so `"37.4224, -122.0841"` (what a model actually emits) is
+ * still recognized as coordinates rather than falling into the free-text branch.
+ */
+private val LAT_LNG_RE = Regex("""^-?\d+(\.\d+)?,-?\d+(\.\d+)?$""")
+
+/** PURE: [destination] with surrounding + interior spaces removed (lat/lng matching only). */
+private fun compactCoords(destination: String): String = destination.trim().replace(" ", "")
+
+/**
+ * PURE: is [destination] a bare `lat,lng` coordinate pair (ignoring spaces)?
+ *
+ * Matters because the two forms are ENCODED DIFFERENTLY: coordinates must keep a
+ * LITERAL comma (`q=37.4224,-122.0841`), while free text is form-encoded.
+ */
+fun isLatLngDestination(destination: String): Boolean = LAT_LNG_RE.matches(compactCoords(destination))
+
+/**
+ * PURE: the whitelisted travel mode letter for [mode], or null when it is
+ * absent/blank (= "not specified") OR not in [NAVIGATION_MODES].
+ *
+ * Null therefore means "emit no `&mode=`" — the builder never has a way to emit a
+ * non-whitelisted value. Trimmed + lower-cased (a model varies casing).
+ */
+fun normalizedNavigationMode(mode: String?): String? =
+    mode?.trim()?.lowercase()?.takeIf { it in NAVIGATION_MODES }
+
+/**
+ * PURE: the whitelisted avoid-flag string for [avoid], or null when it is
+ * absent/blank OR contains any character outside [NAVIGATION_AVOID_FLAGS] OR
+ * repeats a flag. Trimmed + lower-cased; character order is preserved.
+ */
+fun normalizedNavigationAvoid(avoid: String?): String? {
+    val a = avoid?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+    if (a.length > NAVIGATION_AVOID_FLAGS.size) return null
+    if (a.any { it.toString() !in NAVIGATION_AVOID_FLAGS }) return null
+    if (a.toSet().size != a.length) return null
+    return a
+}
+
+/**
+ * PURE: the SAFETY ENVELOPE for `navigate(destination, mode?, avoid?)`. Returns a
+ * graceful rejection reason, or `null` when the arguments are allowed through.
+ *
+ * Mirrors [sendIntentRejectionReason]: the argument decision is made HERE (pure,
+ * exhaustively testable) and the actuator only enforces it. Rules:
+ *  1. [destination] must be present and non-blank.
+ *  2. A PRESENT [mode] must be in [NAVIGATION_MODES] — an unrecognized mode is an
+ *     ERROR, never silently dropped, so the model learns the contract.
+ *  3. A PRESENT [avoid] must be a duplicate-free subset of [NAVIGATION_AVOID_FLAGS].
+ *
+ * The reasons name the VALID SET (so the model can self-correct) and never echo the
+ * rejected value — no argument content is reflected back into a detail string.
+ * Each starts with `invalid navigation` so the remote `/action` error classifier
+ * reports `invalid_argument` rather than a dispatch failure.
+ */
+fun navigationRejectionReason(destination: String?, mode: String?, avoid: String?): String? {
+    if (destination.isNullOrBlank()) return "destination required"
+    if (!mode.isNullOrBlank() && normalizedNavigationMode(mode) == null) {
+        return "invalid navigation mode — use one of: d (driving), b (bicycling), l (two-wheeler), w (walking)"
+    }
+    if (!avoid.isNullOrBlank() && normalizedNavigationAvoid(avoid) == null) {
+        return "invalid navigation avoid — use a combination of: t (tolls), h (highways), f (ferries)"
+    }
+    return null
+}
+
+/**
+ * PURE: the `google.navigation:` turn-by-turn URI for [destination], optionally
+ * constrained by a travel [mode] and route [avoid] flags.
+ *
+ * `google.navigation:q=<destination>[&mode=<d|b|l|w>][&avoid=<t/h/f combo>]` is the
+ * canonical "start turn-by-turn navigation" deep link (Google Maps consumes it).
+ *
+ * TWO destination forms, deliberately encoded differently:
+ *  - **Coordinates** (`^-?\d+(\.\d+)?,-?\d+(\.\d+)?$`, spaces ignored) are emitted
+ *    with a LITERAL comma — `q=37.4224,-122.0841` — because that is the documented
+ *    form. Form-encoding them (`q=37.4224%2C-122.0841`, which is what this builder
+ *    used to do unconditionally) is NOT the documented form and Maps may not honour it.
+ *  - **Free text** ("1600 Amphitheatre Pkwy", a raw calendar-event address) is
+ *    form-encoded via [URLEncoder] exactly like [geoQueryUri], so it can never break
+ *    out of the query string. Free text is also why no geocoder is needed anywhere:
+ *    Maps resolves the address itself.
+ *
+ * [mode]/[avoid] are passed through [normalizedNavigationMode]/[normalizedNavigationAvoid],
+ * so a value outside the whitelist is DROPPED here and can never reach the URI. The
+ * actuator rejects it outright first ([navigationRejectionReason]); this is the
+ * second layer, so even a caller that skips validation cannot emit junk.
+ */
+fun navigationUri(destination: String, mode: String? = null, avoid: String? = null): String {
+    val q = if (isLatLngDestination(destination)) {
+        compactCoords(destination)
+    } else {
+        URLEncoder.encode(destination, StandardCharsets.UTF_8.toString())
+    }
+    val sb = StringBuilder("google.navigation:q=").append(q)
+    normalizedNavigationMode(mode)?.let { sb.append("&mode=").append(it) }
+    normalizedNavigationAvoid(avoid)?.let { sb.append("&avoid=").append(it) }
+    return sb.toString()
+}
+
+/**
+ * PURE: the app package a navigate request TARGETS, or `null` for "no package —
+ * fire the implicit intent and let the phone's default handler take it".
+ *
+ * - absent/blank → [DEFAULT_NAVIGATION_PACKAGE] (Google Maps).
+ * - `any` / `none` / `*` / `default` (case-insensitive) → `null` (implicit).
+ * - anything else → that package verbatim (a Waze/OsmAnd user is never locked out).
+ */
+fun navigationTargetPackage(requestedPackage: String?): String? {
+    val p = requestedPackage?.trim()?.takeIf { it.isNotEmpty() } ?: return DEFAULT_NAVIGATION_PACKAGE
+    if (p.lowercase() in NAVIGATION_ANY_PACKAGE) return null
+    return p
+}
+
+/** PURE: did the caller name a SPECIFIC app (vs. taking the default / asking for any)? */
+private fun isExplicitNavigationPackage(requestedPackage: String?): Boolean {
+    val p = requestedPackage?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+    return p.lowercase() !in NAVIGATION_ANY_PACKAGE
+}
+
+/**
+ * PURE: the outcome of the navigate PREFLIGHT — either launch (optionally pinned to
+ * a package) or fail with a clear, non-leaking reason.
+ */
+sealed class NavigationLaunch {
+    /** Fire the navigation intent, pinned to [pkg] (`null` = implicit, no package). */
+    data class Launch(val pkg: String?) : NavigationLaunch()
+
+    /** Do NOT fire: [detail] is the customer-facing reason (package names only — never user data). */
+    data class Fail(val detail: String) : NavigationLaunch()
+}
+
+/**
+ * PURE: decide what a navigate request should actually launch, given the requested
+ * package and the framework's `resolveActivity` probes.
+ *
+ * The actuator supplies the probes ([resolvesTarget] = "an activity resolves for the
+ * intent pinned to [navigationTargetPackage]"; [resolvesImplicit] = "…with no package
+ * pinned"), so the whole DECISION — including every failure message — is host-JVM
+ * testable while the framework calls stay in the actuator.
+ *
+ * Rules, in order:
+ *  1. Target resolves → launch it. (The overwhelmingly common path.)
+ *  2. Target is already implicit and did not resolve → `Fail`: the device has NO
+ *     navigation app at all. A clear error beats today's opaque behaviour, where an
+ *     unpinned intent on a Maps-less device just throws ActivityNotFoundException
+ *     and reports `navigate failed (ActivityNotFoundException)`.
+ *  3. The caller named a SPECIFIC app that is not installed → `Fail` naming it. We
+ *     never silently retarget: "navigate with Waze" must not open Maps instead.
+ *  4. Otherwise the DEFAULT (Maps) is missing → fall back to the implicit intent when
+ *     something else can handle it, so a Waze-only phone still navigates. Only when
+ *     nothing at all resolves do we fail. This is what makes pinning Maps a
+ *     zero-regression change on any device that works today.
+ */
+fun navigationLaunchPlan(
+    requestedPackage: String?,
+    resolvesTarget: Boolean,
+    resolvesImplicit: Boolean,
+): NavigationLaunch {
+    val target = navigationTargetPackage(requestedPackage)
+    if (resolvesTarget) return NavigationLaunch.Launch(target)
+    if (target == null) return NavigationLaunch.Fail("no navigation app installed")
+    if (isExplicitNavigationPackage(requestedPackage)) {
+        return NavigationLaunch.Fail("navigation app not installed: $target")
+    }
+    return if (resolvesImplicit) NavigationLaunch.Launch(null) else NavigationLaunch.Fail("no navigation app installed")
+}
 
 /**
  * Intent ACTIONS that must NEVER be reachable through the guarded generic

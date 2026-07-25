@@ -1,0 +1,37 @@
+{
+  "name": "navigate_device",
+  "description": "Start turn-by-turn NAVIGATION on the user's own phone (or tablet/XR device) in ONE shot. Use this for 'navigate me to X', 'take me to X', 'give me directions to X', 'send this address to my phone', 'start navigation to the job site' — including an address you just read out of a calendar event or an email. It fires ONE deterministic Android navigation intent over Tailscale, so Google Maps opens directly in turn-by-turn mode on the device: no screen watching, no tapping, no on-device model, sub-second. Prefer this over control_device whenever the goal is simply to START navigating somewhere — control_device drives the whole UI with a slow multi-step loop and is only needed when the task is more than 'navigate there'. The destination is free text (a street address, a place name, a business, or 'lat,lon') and the maps app geocodes it itself, so pass the address through verbatim — do NOT try to look up coordinates first.",
+  "category": "computer_control",
+  "groups": ["chat", "chat_cu", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "destination": {
+        "type": "string",
+        "description": "Where to navigate to, as free text — a full street address ('1600 Amphitheatre Parkway, Mountain View, CA'), a place or business name ('CN Tower', 'Home Depot Ancaster'), or coordinates as 'lat,lon' ('37.4224,-122.0841'). Passed to the maps app verbatim; it does the geocoding. Do not invent coordinates for a named place."
+      },
+      "device": {
+        "type": "string",
+        "description": "Optional target device name (tailnet hostname or MagicDNS name) — targets ANY device on the tailnet. Omit for origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget — it must be an explicit target here."
+      },
+      "mode": {
+        "type": "string",
+        "enum": ["driving", "walking", "bicycling", "two_wheeler"],
+        "description": "Optional travel mode. Omit to let the maps app use the user's default (usually driving). Turn-by-turn navigation has NO transit mode — if the user asks for transit/public-transport directions, say so rather than substituting another mode."
+      },
+      "avoid": {
+        "type": "string",
+        "description": "Optional route restrictions — a comma-separated subset of 'tolls', 'highways', 'ferries' (e.g. 'tolls,ferries'). Omit for no restrictions."
+      },
+      "app": {
+        "type": "string",
+        "description": "Optional navigation app: 'google maps' (default), 'waze', 'osmand', 'organic maps', 'here', an explicit Android package id, or 'any' to let the phone's default handler take it. Only set this when the user names an app — omit otherwise."
+      }
+    },
+    "required": ["destination"]
+  },
+  "returns": "A confirmation that navigation started on the named device, or a structured error (data.error_kind: invalid_argument / no_device / no_primary_device / invalid_target / origin_mismatch / lost_contact / not_authorized / bad_response / maps_missing / unsupported_device / invalid_destination / declined / device_error), plus data.device, data.destination, data.mode, data.avoid, data.app and data.task_id.",
+  "example": "navigate_device(destination=\"1247 Main St W, Hamilton, ON\", mode=\"driving\", avoid=\"tolls\")",
+  "notes": "One-shot, not a loop: the executor resolves the target with the same origin-aware rule as control_device (mesh.resolve_device — explicit device -> the originating device, which must belong to this operator -> the operator's PRIMARY device) and POSTs a SINGLE {msg:'action', type:'intent', name:'navigate', params:{destination, mode?, avoid?, package?}} frame to that device's Tailscale listener (:8765 /action). No screenshot, no ReAct loop, no control session, no on-device model. The device fires a google.navigation: deep link, which is real turn-by-turn — it starts guidance immediately rather than just showing a map (use control_device or the show_map intent if the user only wants to LOOK at a place). Wire contract mirrors IntentActions.kt exactly: mode is the google.navigation letter (d driving / b bicycling / l two-wheeler / w walking — there is NO transit letter) and avoid is a duplicate-free subset of 'thf'; the friendly words here are mapped in _MODE_CODES/_AVOID_CODES/_APP_PACKAGES. A cloud-originated push is confirm-gated ON THE DEVICE (ActionOrigin) — a declined prompt comes back as error_kind 'declined'. If the device's screen is locked the OS may block a background launch; that is the notification-delivered path (M3 of docs/plans/2026-07-24-location-context-and-navigation.md), not this tool. See that plan's M2."
+}
