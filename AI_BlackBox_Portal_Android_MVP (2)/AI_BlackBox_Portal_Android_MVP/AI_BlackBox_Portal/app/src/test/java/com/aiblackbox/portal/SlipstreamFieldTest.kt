@@ -123,9 +123,18 @@ class SlipstreamFieldTest {
         for (w in SLIPSTREAM_WIDTHS) {
             assertTrue("quantised width $w exceeds the cap", w <= SLIPSTREAM_MAX_LINE_PX)
         }
-        assertTrue("the budget is 1.5 CSS px — this is the whole point of the effect",
-            SLIPSTREAM_MAX_LINE_PX <= 1.5f)
-        assertTrue("alpha ceiling moved", SLIPSTREAM_MAX_ALPHA <= 0.30f)
+        // These two ceilings DELIBERATELY exceed slipstream.js (1.05 px / 0.30).
+        // Brandon on the Fold: "really hard to see... really dim". The web numbers
+        // do not survive the density difference — 0.45 web CSS px lands at 0.70
+        // DEVICE px, which antialiases into noise before the alpha is even
+        // applied. The cross-surface contract is the same APPARENT RESULT, not
+        // the same constants. What must still hold is the LEGIBILITY property,
+        // asserted below in device px and against a contrast-safe alpha: on web
+        // slipstream measured 10.5:1 against #C9C9C9 body text (AA needs 4.5:1)
+        // and was the quietest field in the catalogue, so this has real headroom.
+        assertTrue("the width budget has drifted past hair-thin: $SLIPSTREAM_MAX_LINE_PX",
+            SLIPSTREAM_MAX_LINE_PX <= 1.8f)
+        assertTrue("alpha ceiling is into contrast-risk territory", SLIPSTREAM_MAX_ALPHA <= 0.60f)
         // The brightest level the renderer can ever set (level midpoints).
         val brightest = (0 until SLIP_BUCKETS).maxOf { bucketAlpha(it) }
         assertTrue("a quantised level busts the 0.30 alpha budget: $brightest",
@@ -150,9 +159,12 @@ class SlipstreamFieldTest {
         assertTrue("field looks dead: only $segments segments in 1000 frames", segments > 100_000)
         assertTrue("stroke width ${maxWidth}px busts the ${s.maxStrokeWidthPx}px budget",
             maxWidth <= s.maxStrokeWidthPx)
-        assertTrue("stroke alpha $maxAlpha busts the 0.30 budget", maxAlpha <= SLIPSTREAM_MAX_ALPHA)
-        // Hair-thin in absolute terms too: ~0.5 dp at the reference density.
-        assertTrue("threads are not hair-thin any more: ${maxWidth}px", maxWidth <= 1.7f)
+        assertTrue("stroke alpha $maxAlpha busts the declared ceiling", maxAlpha <= SLIPSTREAM_MAX_ALPHA)
+        // Still hair-thin AS RENDERED — this is the assertion that actually
+        // protects text, and it is in DEVICE px, not web CSS px. 2.5 device px on
+        // a 3.1-density screen is ~0.8 dp: a fine line, nothing that can sit
+        // behind a glyph stem as a mass.
+        assertTrue("threads are not hair-thin any more: ${maxWidth}px", maxWidth <= 2.5f)
     }
 
     @Test fun `no thread ever strokes a streak across the viewport`() {

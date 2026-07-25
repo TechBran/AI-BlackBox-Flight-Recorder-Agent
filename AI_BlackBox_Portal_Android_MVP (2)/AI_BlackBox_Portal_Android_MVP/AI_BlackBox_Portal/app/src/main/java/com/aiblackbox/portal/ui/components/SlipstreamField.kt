@@ -102,10 +102,29 @@ internal const val SLIPSTREAM_MARGIN = 24f
 
 /** THE legibility cap on stroke width, in web CSS px, applied POST geometry
  *  scale. Every quantised width below is inside it by construction. */
-internal const val SLIPSTREAM_MAX_LINE_PX = 1.05f
+// ── ANDROID PRESENCE BOOST (Brandon, device-validated on the Fold 2026-07-25) ──
+// "the slipstream is really hard to see... really dim, or I can't see them."
+// Quality was right; presence was not. THREE factors compounded on device, none
+// of which exist on the web:
+//   1. WIDTH IN DEVICE PIXELS. A web thread of 0.45 CSS px becomes 0.45 × 0.5
+//      (SLIP_APPARENT) × 3.1 (density) = 0.70 DEVICE px. Antialiasing spreads a
+//      sub-pixel line over two pixels at ~35% each — then the alpha below
+//      multiplies THAT. Below roughly 1.5 device px a stroke stops reading as a
+//      line and starts reading as noise.
+//   2. WEAKER TRAIL. The explicit 12-frame redraw accumulates 6.53× a single
+//      frame vs the web canvas smear's steady-state 8.33× — 78% of the light.
+//   3. The web widths had ALREADY been thinned on Brandon's FX-Lab feedback,
+//      where a card renders at a much higher apparent scale than a phone does.
+// So the constants below deliberately DIVERGE from slipstream.js. That is
+// correct: the contract between the surfaces is the same APPARENT RESULT, not
+// the same numbers, and the same numbers demonstrably do not survive the
+// density difference. Legibility headroom is ample — slipstream measured 10.5:1
+// against #C9C9C9 body text on web where AA needs 4.5:1, and it was the QUIETEST
+// field in the catalogue.
+internal const val SLIPSTREAM_MAX_LINE_PX = 1.65f
 
 /** THE other one: no stroke is ever issued at more than this alpha. */
-internal const val SLIPSTREAM_MAX_ALPHA = 0.30f
+internal const val SLIPSTREAM_MAX_ALPHA = 0.54f
 
 /** Below this a thread is skipped, not drawn at 0. */
 internal const val SLIPSTREAM_MIN_ALPHA = 0.015f
@@ -120,7 +139,7 @@ internal const val SLIPSTREAM_MIN_ALPHA = 0.015f
  *  edge (1.2). That is true of slipstream.js too — the cap was tightened from
  *  1.5 and the edges were not followed down. Kept byte-identical rather than
  *  "fixed" so the two surfaces stay diffable; the field uses 0.45 and 0.7. */
-internal val SLIPSTREAM_WIDTHS = floatArrayOf(0.45f, 0.7f, 1.0f)
+internal val SLIPSTREAM_WIDTHS = floatArrayOf(0.75f, 1.1f, 1.55f)
 internal val SLIPSTREAM_WIDTH_EDGES = floatArrayOf(0.82f, 1.2f)
 
 /** Alpha quantisation levels. */
