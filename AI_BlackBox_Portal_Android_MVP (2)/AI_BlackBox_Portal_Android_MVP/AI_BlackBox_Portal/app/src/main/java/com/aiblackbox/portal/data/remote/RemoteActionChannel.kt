@@ -254,6 +254,22 @@ fun classifyActuatorError(detail: String): String? {
         // — its detail mentions "accessibility" and would otherwise be misread as not_enabled. This
         // is NOT a hard terminal: the frontier loop keys on it to know the device is intent-only.
         d.contains("intent_only_mode") -> "intent_only_mode"
+        // (M3) The NAVIGATION DELIVERY kinds. Token-prefixed details, lifted verbatim like
+        // intent_only_mode above and checked FIRST so their human sentences (which mention
+        // "not ... foreground", "not granted", "could not be posted") cannot be swallowed by
+        // a later substring branch.
+        //
+        // background_launch_blocked is the fix for the WORST failure this system had: Android
+        // silently DISCARDS an activity launch from a backgrounded process and startActivity
+        // does NOT throw, so `navigate` used to answer success:true / "started navigation"
+        // while Maps never opened. An unattended cron would then report "I have started
+        // navigation to your job site" to an operator whose phone did nothing.
+        d.contains(com.aiblackbox.portal.overlay.BACKGROUND_LAUNCH_BLOCKED) ->
+            com.aiblackbox.portal.overlay.BACKGROUND_LAUNCH_BLOCKED
+        d.contains(com.aiblackbox.portal.overlay.NOTIFICATION_PERMISSION_MISSING) ->
+            com.aiblackbox.portal.overlay.NOTIFICATION_PERMISSION_MISSING
+        d.contains(com.aiblackbox.portal.overlay.NOTIFICATION_DELIVERY_FAILED) ->
+            com.aiblackbox.portal.overlay.NOTIFICATION_DELIVERY_FAILED
         // User-initiated (decline / handoff) — benign, not an error.
         d.contains("declined") -> null
         d.contains("not enabled") -> "not_enabled"

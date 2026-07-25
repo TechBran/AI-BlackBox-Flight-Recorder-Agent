@@ -596,6 +596,14 @@ object ResidentTools {
                         put("type", JsonPrimitive("string"))
                         put("description", JsonPrimitive("Optional maps app package (default Google Maps; 'any' = let the phone choose)."))
                     }
+                    // (M3) Optional, STRICT-whitelisted (NAVIGATION_DELIVERY_MODES). Android
+                    // DISCARDS an activity launch from a backgrounded app, so 'auto' falls back
+                    // to a tappable notification (a tap is the documented exemption) instead of
+                    // reporting a success that never happened. An unknown value is REJECTED.
+                    putJsonObject("delivery") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional: auto (default — open now if the app is in front, else send a tappable notification), direct, notify."))
+                    }
                 }
                 put("required", buildJsonArray { add(JsonPrimitive("destination")) })
             },

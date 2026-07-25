@@ -93,11 +93,21 @@ import kotlinx.serialization.json.jsonPrimitive
  *   SAFE PERMISSION default is supplied by the production wiring).
  * @param confirm the user-confirmation seam for the gated `send_*` intents in
  *   Permission mode (prod: [OverlayConfirmUi]; default auto-approve no-op).
+ * @param foreground (M3) reads whether THIS process currently has a visible window —
+ *   the only honest input to "can a `startActivity` actually reach the screen?" (prod:
+ *   [AppForegroundState.isForeground]). Defaults to `{ true }` ONLY so an un-wired
+ *   call-site keeps the pre-M3 behaviour; the production factory supplies the real read.
+ * @param navNotifier (M3) the seam that posts a tappable navigation prompt when a direct
+ *   launch is not permitted (prod: [com.aiblackbox.portal.BlackBoxNotificationManager]).
+ *   `null` → the notify delivery reports [NOTIFICATION_DELIVERY_FAILED_DETAIL] rather
+ *   than silently dropping the request.
  */
 class IntentActuator(
     private val context: () -> android.content.Context?,
     private val mode: () -> AutonomyMode = { AutonomyMode.YOLO },
     private val confirm: ConfirmUi = AutoApproveConfirmUi,
+    private val foreground: () -> Boolean = { true },
+    private val navNotifier: NavigationNotifier? = null,
 ) {
 
     /**
@@ -546,8 +556,13 @@ class IntentActuator(
      * "navigate me to X" and the phone opens navigation: no ReAct loop, no
      * screenshots, no accessibility, one deterministic intent.
      *
-     * Four layers, in order, every decision of which is a PURE, host-JVM-tested
-     * function in [IntentActions] (this method only assembles + launches):
+     * FIVE layers, in order, every decision of which is a PURE, host-JVM-tested function in
+     * [IntentActions] / [NavigationDelivery] (this method only assembles + launches). Layer
+     * 3b — DELIVERY — is the M3 addition and the one that stops the actuator lying: a direct
+     * launch from a process with no visible window is DISCARDED by Android without
+     * `startActivity` throwing, so `auto` routes to a tappable notification and an explicit
+     * `direct` REFUSES, where M2 reported `success:true, "started navigation"` and nothing
+     * opened (measured on a Galaxy Z Fold 6):
      *
      *  1. **Argument envelope** — [navigationRejectionReason]: `destination` required;
      *     `mode`/`avoid` must be in the STRICT whitelists ([NAVIGATION_MODES] /
@@ -583,10 +598,19 @@ class IntentActuator(
         val avoid = str(args, "avoid")
         // (1) pure argument envelope — strict whitelists, reject rather than pass through.
         navigationRejectionReason(destination, travelMode, avoid)?.let { return ActuatorResult(false, it) }
+        // (1b, M3) the delivery mechanism — same strictness: an unknown value FAILS LOUDLY
+        // rather than silently picking one. Its phrase starts with "invalid navigation" so
+        // the existing classifier already maps it to invalid_argument.
+        val deliveryArg = str(args, "delivery")
+        deliveryRejectionReason(deliveryArg)?.let { return ActuatorResult(false, it) }
+        // Safe !! — deliveryRejectionReason returned non-null for anything unparseable.
+        val deliveryMode = parsedDeliveryMode(deliveryArg)!!
         // Safe !! — navigationRejectionReason returned non-null for a null/blank destination.
         val uri = Uri.parse(navigationUri(destination!!, travelMode, avoid))
 
         // (3) preflight: probe the pinned target, and (only if that misses) the implicit form.
+        // Runs for BOTH deliveries — we never post a prompt for a navigation that could not
+        // have launched anyway, any more than we would ask the user to approve one.
         val requestedPkg = str(args, "package")
         val target = navigationTargetPackage(requestedPkg)
         val resolvesTarget = resolvesNavigation(ctx, uri, target)
@@ -595,6 +619,29 @@ class IntentActuator(
         if (plan is NavigationLaunch.Fail) {
             logFired("navigate", false)
             return ActuatorResult(false, plan.detail)
+        }
+        val launchPackage = (plan as NavigationLaunch.Launch).pkg
+
+        // (3b, M3) DELIVERY — the pure, unit-tested decision ([navigationAction]). Read the
+        // foreground flag ONCE so the choice and the refusal can never disagree.
+        //
+        //  - NOTIFY: `auto` with no visible window, or an explicit `notify`. The notification
+        //    IS the consent surface (it names the destination and waits for a tap), so it
+        //    does not also re-prompt through the origin gate.
+        //  - REFUSE: THE HONEST FAILURE. `Context.startActivity` does NOT throw when Android's
+        //    Background Activity Launch restriction discards the launch — it returns normally
+        //    and nothing opens. M2 therefore answered success:true "started navigation" from a
+        //    backgrounded process while Maps never opened (measured on a Galaxy Z Fold 6). We
+        //    refuse instead of launching-and-lying, and we do it BEFORE the confirm prompt so
+        //    the user is never asked to approve something that cannot happen.
+        when (val action = navigationAction(deliveryMode, foreground())) {
+            is NavigationAction.Notify ->
+                return notifyNavigation(destination, travelMode, avoid, launchPackage, str(args, "dedup_key"))
+            is NavigationAction.Refuse -> {
+                logFired("navigate", false)
+                return ActuatorResult(false, action.detail)
+            }
+            is NavigationAction.Launch -> Unit // fall through to the gate + the real launch
         }
 
         // (4) ORIGIN GATE — a REMOTE push confirms; the on-device path does not.
@@ -605,9 +652,60 @@ class IntentActuator(
         }
 
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-            (plan as NavigationLaunch.Launch).pkg?.let { setPackage(it) }
+            launchPackage?.let { setPackage(it) }
         }
         return fire(ctx, "navigate", intent, "started navigation")
+    }
+
+    /**
+     * (M3) The NOTIFY delivery: hand the destination to the system shade with a "Navigate"
+     * action, and report exactly what happened.
+     *
+     * Success here is deliberately NOT "started navigation" — nothing has started. It is
+     * [NAVIGATION_NOTIFY_POSTED_DETAIL] ("waiting for the user to tap Navigate"), so a model
+     * relaying the result to the operator cannot claim the phone is already navigating.
+     *
+     * A missing POST_NOTIFICATIONS grant (Android 13+) and a platform refusal are both
+     * reported as distinct failures rather than being swallowed — an undelivered prompt is
+     * the same class of lie as an undelivered launch.
+     */
+    private fun notifyNavigation(
+        destination: String,
+        travelMode: String?,
+        avoid: String?,
+        launchPackage: String?,
+        dedupKeyArg: String?,
+    ): ActuatorResult {
+        val notifier = navNotifier ?: run {
+            logFired("navigate", false)
+            return ActuatorResult(false, NOTIFICATION_DELIVERY_FAILED_DETAIL)
+        }
+        val push = NavigationPush(
+            destination = destination,
+            travelMode = travelMode,
+            avoid = avoid,
+            packageName = launchPackage,
+            dedupKey = navigationDedupKey(dedupKeyArg, destination),
+        )
+        val outcome = try {
+            notifier.postNavigation(push)
+        } catch (e: Exception) {
+            NavigationNotifyOutcome.FAILED
+        }
+        return when (outcome) {
+            NavigationNotifyOutcome.POSTED -> {
+                logFired("navigate", true)
+                ActuatorResult(true, NAVIGATION_NOTIFY_POSTED_DETAIL)
+            }
+            NavigationNotifyOutcome.PERMISSION_MISSING -> {
+                logFired("navigate", false)
+                ActuatorResult(false, NOTIFICATION_PERMISSION_MISSING_DETAIL)
+            }
+            NavigationNotifyOutcome.FAILED -> {
+                logFired("navigate", false)
+                ActuatorResult(false, NOTIFICATION_DELIVERY_FAILED_DETAIL)
+            }
+        }
     }
 
     /**
@@ -700,7 +798,17 @@ class IntentActuator(
             appContext: android.content.Context,
             mode: () -> AutonomyMode = { AutonomyMode.YOLO },
             confirm: ConfirmUi = AutoApproveConfirmUi,
-        ): IntentActuator = IntentActuator({ appContext.applicationContext }, mode, confirm)
+            // (M3) The REAL foreground read + the REAL notification poster. Every production
+            // path builds the actuator through here, so both arrive with no per-call-site
+            // wiring. The notifier is constructed lazily INSIDE the lambda so merely creating
+            // an actuator never touches NotificationManager / creates channels.
+            foreground: () -> Boolean = { AppForegroundState.isForeground() },
+            navNotifier: NavigationNotifier = NavigationNotifier { push ->
+                com.aiblackbox.portal.BlackBoxNotificationManager(appContext.applicationContext)
+                    .postNavigation(push)
+            },
+        ): IntentActuator =
+            IntentActuator({ appContext.applicationContext }, mode, confirm, foreground, navNotifier)
     }
 }
 

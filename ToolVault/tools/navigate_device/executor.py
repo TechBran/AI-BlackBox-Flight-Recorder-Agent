@@ -21,11 +21,31 @@ else the operator's PRIMARY device; else an error. The wire client is the fronti
 existing ``/action`` plumbing (frontier_agent_loop._wire_frame + _post_action) rather than a
 second HTTP client.
 
+DELIVERY (M3) — the honesty milestone. On targetSdk 36 Android SILENTLY DISCARDS an
+activity launch made from the background: ``startActivity`` does not throw, so an M2-style
+direct push to a pocketed phone came back ``success:true`` with Maps never opening. A
+7:30am cron would then tell the operator "I've started navigation to your job site" while
+the phone did nothing. The one launch Android still permits is one the USER TAPS, so a
+notification is the only honest delivery for anything unattended. Hence ``delivery``:
+
+  auto   (default) — the DEVICE decides: direct while it's foreground, notification otherwise
+  direct           — open Maps now; only meaningful with the phone awake and in hand
+  notify           — post a tappable notification; the right choice for scheduled/unattended
+
+A direct launch and a queued notification are DIFFERENT OUTCOMES, so this executor reports
+the delivery that ACTUALLY happened (``data["delivery"]``, never the one requested) plus
+``data["navigating"]`` / ``data["awaiting_user_tap"]`` — a notification result can never be
+read as a completed navigation. The device states the outcome in its success ``detail``
+phrase (docs/schema/action_result.json pins ``additionalProperties:false`` and a CLOSED
+error enum, so that phrase is the only channel it has today); an explicit ``delivery`` field
+is honoured too if that schema is later widened.
+
 Structured errors (data["error_kind"]) — each with a user-facing string the model can read
 aloud verbatim:
   resolution : invalid_argument / no_device / no_primary_device / invalid_target / origin_mismatch
-  delivery   : lost_contact / not_authorized / bad_response
-  device     : maps_missing / unsupported_device / invalid_destination / declined / device_error
+  delivery   : lost_contact / not_authorized / bad_response / unsupported_delivery
+  device     : maps_missing / unsupported_device / invalid_destination / declined /
+               background_blocked / notifications_blocked / device_error
 """
 import re
 import uuid
@@ -74,6 +94,38 @@ _APP_PACKAGES = {
     "here wego": "com.here.app.maps", "sygic": "com.sygic.aura",
 }
 _APP_ANY = {"any", "none", "default", "*", "whatever", "system default"}
+
+# ── delivery (M3) ────────────────────────────────────────────────────────────────────
+# How the navigation reaches the screen. "auto" is resolved ON THE DEVICE (only it knows
+# whether it is foreground), so it goes on the wire verbatim rather than being decided here.
+_DELIVERY_MODES = ("auto", "direct", "notify")
+_DELIVERY_ALIASES = {"notification": "notify", "notifications": "notify", "push": "notify",
+                     "background": "notify", "locked": "notify", "scheduled": "notify",
+                     "now": "direct", "immediate": "direct", "immediately": "direct",
+                     "foreground": "direct", "launch": "direct", "open": "direct",
+                     "default": "auto", "any": "auto"}
+
+# Phrases in a SUCCESS `detail` that tell us which delivery actually happened. The device
+# has no structured field for this today (closed action_result schema), so the fixed phrase
+# is the contract. Notify is tested first: a notification detail must never read as a launch.
+_NOTIFY_DETAIL_WORDS = ("notif", "queued", "awaiting tap", "tap to")
+_DIRECT_DETAIL_WORDS = ("started navigation", "launched", "opened", "foreground")
+
+# The device's own wire tokens for the M3 refusals (NavigationDelivery.kt consts, lifted
+# verbatim into action_result.error by classifyActuatorError, and also the leading token of
+# the detail sentence). Matched FIRST and exactly, so classification never depends on prose.
+_BACKGROUND_TOKENS = ("background_launch_blocked", "background_blocked")
+_NOTIF_BLOCKED_TOKENS = ("notification_permission_missing", "notifications_blocked")
+# "could not post the notification at all" is a delivery that did not happen, not a
+# permission the operator can go and grant — its own detail explains itself.
+_DELIVERY_TOKENS = ("notification_delivery_failed", "unsupported_delivery")
+
+# Loose phrase fallbacks, for a device build that reports prose without a token.
+_NOTIF_DENIED_WORDS = ("permission", "denied", "not permitted", "not allowed", "disabled",
+                       "blocked", "turned off", "not enabled")
+_BACKGROUND_WORDS = ("block", "launch", "restrict", "discard")
+_DELIVERY_REJECT_WORDS = ("unsupported", "not supported", "unknown", "invalid",
+                          "unrecognized", "reject")
 
 # Resolution failures get a navigation-specific sentence; mesh's own (more technical) message
 # is preserved in data["resolution_detail"] so nothing is lost.
@@ -174,6 +226,57 @@ def normalize_app(raw) -> str:
     return None
 
 
+def normalize_delivery(raw) -> str:
+    """A delivery request -> 'auto' | 'direct' | 'notify'. None when unusable.
+
+    PURE (unit-tested). Absent/blank is "auto" — the default has to be the SAFE one, because
+    an unattended caller that never thought about delivery is exactly the case that broke.
+    """
+    if raw is None:
+        return "auto"
+    word = " ".join(str(raw).split()).lower()
+    if not word:
+        return "auto"
+    if word in _DELIVERY_MODES:
+        return word
+    return _DELIVERY_ALIASES.get(word)
+
+
+def resolve_delivery(result: dict) -> tuple:
+    """(what the device ACTUALLY did, whether it said so KNOWINGLY).
+
+    PURE (unit-tested). First element is 'direct' / 'notify' / "" (it never said). Second is
+    the part that keeps us honest: True only when the answer came from a device that
+    demonstrably understands ``delivery``.
+
+      explicit result["delivery"]        -> stated. The device says the outcome outright.
+      a notification/queued detail       -> stated. Only an M3 build can post a notification.
+      a detail naming the foreground     -> stated. An M3 build explaining WHY it went direct.
+      the legacy 'started navigation'    -> NOT stated. Indistinguishable between an M3 build
+                                            launching from the foreground and a pre-M3 build
+                                            that ignored `delivery` entirely — and the
+                                            pre-M3 launch is the one Android drops in silence.
+      nothing at all                     -> NOT stated.
+
+    docs/schema/action_result.json pins additionalProperties:false with a CLOSED error enum,
+    so the detail phrase is the only channel the device has today; the explicit field is
+    honoured for when that schema is widened.
+    """
+    if not isinstance(result, dict):
+        return "", False
+    explicit = str(result.get("delivery") or "").strip().lower()
+    if explicit in ("direct", "notify"):
+        return explicit, True
+    detail = str(result.get("detail") or "").lower()
+    if any(w in detail for w in _NOTIFY_DETAIL_WORDS):
+        return "notify", True
+    if "foreground" in detail:
+        return "direct", True
+    if any(w in detail for w in _DIRECT_DETAIL_WORDS):
+        return "direct", False
+    return "", False
+
+
 async def _post_intent(base_url: str, frame: dict) -> dict:
     """POST the one action frame to the device. Test seam — monkeypatched in unit tests so no
     socket is touched. Delegates to the frontier loop's existing /action client (httpx)."""
@@ -196,6 +299,49 @@ def _device_failure(result: dict, device_name: str, destination: str) -> ToolRes
     detail = str(result.get("detail") or "").strip()
     low = detail.lower()
     data = {"device": device_name, "destination": destination, "device_detail": detail}
+
+    # ── M3 delivery refusals — CHECKED FIRST ──────────────────────────────────────────
+    # A background-blocked launch is ALSO error='dispatch_failed', so if these ran after the
+    # branch below we would tell the operator "Google Maps isn't installed" when Maps is
+    # installed and fine. Each matches the device's own wire token exactly, falling back to
+    # a prose phrase for a build that doesn't send one.
+    #
+    # ORDER MATTERS: background BEFORE notifications. The device's background-blocked detail
+    # names the notification as the WAY OUT ("or use delivery=notify …") and contains the
+    # word "blocked", so a loose notification test would swallow it and send the operator to
+    # go and enable a permission that was never the problem.
+    if error in _BACKGROUND_TOKENS or any(t in low for t in _BACKGROUND_TOKENS) or (
+            "background" in low and any(w in low for w in _BACKGROUND_WORDS)):
+        data["error_kind"] = "background_blocked"
+        return ToolResult(
+            False,
+            f"Android blocked the navigation launch on {device_name} — it won't let an app "
+            "open Maps on its own while the phone is locked or the BlackBox app is in the "
+            "background. Nothing is navigating. Unlock the phone and ask me again, or have "
+            "me send it as a notification you can tap.",
+            data=data)
+
+    if error in _NOTIF_BLOCKED_TOKENS or any(t in low for t in _NOTIF_BLOCKED_TOKENS) or (
+            "notif" in low and any(w in low for w in _NOTIF_DENIED_WORDS)):
+        data["error_kind"] = "notifications_blocked"
+        return ToolResult(
+            False,
+            f"I couldn't put the navigation on {device_name} as a notification — "
+            "notifications aren't permitted for the BlackBox app on that device, so there "
+            "is nothing there to tap. Enable notifications for it in the phone's settings "
+            "and ask me again.",
+            data=data)
+
+    if error in _DELIVERY_TOKENS or any(t in low for t in _DELIVERY_TOKENS) or (
+            "delivery" in low and any(w in low for w in _DELIVERY_REJECT_WORDS)):
+        data["error_kind"] = "unsupported_delivery"
+        return ToolResult(
+            False,
+            f"{device_name} wouldn't deliver the navigation that way"
+            f"{' (' + detail + ')' if detail else ''} — nothing is navigating there. Its "
+            "BlackBox app may be an older build; update it, or ask me again with the phone "
+            "unlocked in front of you.",
+            data=data)
 
     # An intent that could not be launched = nothing on the device handled
     # google.navigation: — i.e. Google Maps is missing/disabled (the resolveActivity preflight).
@@ -296,6 +442,15 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             "phone's default.",
             data={"error_kind": "invalid_argument", "field": "app"})
 
+    delivery = normalize_delivery(params.get("delivery"))
+    if delivery is None:
+        return ToolResult(
+            False,
+            f"'{_clip(params.get('delivery'), 60)}' isn't a delivery mode I can use. Pick "
+            "'auto' (let the phone decide), 'direct' (open Maps right now — only works with "
+            "the phone awake), or 'notify' (put a tappable notification on the phone).",
+            data={"error_kind": "invalid_argument", "field": "delivery"})
+
     # ── 2. Resolve the target device (same rule as control_device) ────────────────────
     device = str(params.get("device") or "").strip()
     try:
@@ -321,6 +476,10 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     if app_package:
         # "any" is the device's own sentinel for "no package — implicit intent".
         intent_params["package"] = app_package
+    # ALWAYS on the wire, "auto" included — unlike mode/avoid/package this is never omitted.
+    # An absent key would leave a device build free to read it as "legacy caller, launch
+    # directly", and that guess is precisely the silent-false-success this milestone kills.
+    intent_params["delivery"] = delivery
     task_id = uuid.uuid4().hex
     frame = frontier_agent_loop._wire_frame(
         task_id, ctx.operator,
@@ -328,7 +487,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     base_data = {"device": device_name, "destination": destination, "task_id": task_id,
                  "mode": mode_word or None, "avoid": avoid_code or None,
-                 "app": app_package or None}
+                 "app": app_package or None, "delivery_requested": delivery}
 
     try:
         result = await _post_intent(base_url, frame)
@@ -362,7 +521,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         failure.data.update({k: v for k, v in base_data.items() if k not in failure.data})
         return failure
 
-    # ── 4. Fired. ────────────────────────────────────────────────────────────────────
+    # ── 4. Fired — report the delivery that ACTUALLY happened, not the one requested ──
     extras = []
     if mode_word:
         extras.append(mode_word)
@@ -370,8 +529,50 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         extras.append("avoiding " + ", ".join(
             w for w, c in _AVOID_CODES.items() if c in avoid_code))
     suffix = f" ({', '.join(extras)})" if extras else ""
+    device_detail = str(result.get("detail") or "")
+
+    actual, stated = resolve_delivery(result)
+    if delivery == "notify" and not stated:
+        # We asked for the notification BECAUSE a direct launch is unreliable here, and the
+        # device gave us nothing that proves it honoured that. Its success:true is exactly
+        # the M2 false success — a launch Android may have discarded without a word. There
+        # is no outcome we can claim: not a notification (it may not exist) and not a
+        # navigation (it may never have opened). Refuse rather than invent one.
+        return ToolResult(
+            False,
+            f"I can't confirm the navigation actually reached {device_name}. Its BlackBox "
+            "app looks like an older build that only opens Maps directly, and Android "
+            "throws that away without a word when the phone is locked or in a pocket — so "
+            "there may be nothing on the phone at all. Update the app on that device, or "
+            "ask me again with the phone unlocked in front of you.",
+            data={**base_data, "error_kind": "unsupported_delivery", "delivery": None,
+                  "delivery_confirmed": False, "navigating": False,
+                  "awaiting_user_tap": False, "device_detail": device_detail})
+    if not actual:
+        # Nothing said, and 'auto'/'direct' asked for the direct launch an older build
+        # performs anyway — the device-proven M2 outcome stands, flagged unconfirmed rather
+        # than silently assumed.
+        actual = "direct"
+
+    delivered = {**base_data, "delivery": actual,
+                 "delivery_confirmed": stated,
+                 "navigating": actual == "direct",
+                 "awaiting_user_tap": actual == "notify",
+                 "device_detail": device_detail}
+
+    if actual == "notify":
+        # NOT a started navigation. Nothing moves until a human taps, and the model must
+        # have no way to read this as "Maps is open and navigating".
+        return ToolResult(
+            True,
+            f"I've sent the navigation to {destination} to {device_name}{suffix} — it's "
+            "waiting there as a notification. Tap it on the phone to start turn-by-turn. "
+            "Nothing is navigating yet: Android only lets Maps open from your tap while the "
+            "phone is locked or the app is in the background.",
+            data=delivered)
+
     return ToolResult(
         True,
         f"Turn-by-turn navigation to {destination} is starting on {device_name}{suffix} — "
         "Google Maps is opening there now.",
-        data={**base_data, "device_detail": str(result.get("detail") or "")})
+        data=delivered)

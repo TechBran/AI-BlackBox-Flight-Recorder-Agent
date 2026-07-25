@@ -11,13 +11,24 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
+import com.aiblackbox.portal.overlay.NAVIGATION_ACTION_LABEL
+import com.aiblackbox.portal.overlay.NavigationNotifier
+import com.aiblackbox.portal.overlay.NavigationNotifyOutcome
+import com.aiblackbox.portal.overlay.NavigationPush
+import com.aiblackbox.portal.overlay.navigationNotificationText
+import com.aiblackbox.portal.overlay.navigationNotificationTitle
+import com.aiblackbox.portal.overlay.navigationUri
 
-class BlackBoxNotificationManager(private val context: Context) {
+class BlackBoxNotificationManager(private val context: Context) : NavigationNotifier {
 
     companion object {
         private const val CHANNEL_ID_TASKS = "blackbox_tasks"
         private const val CHANNEL_ID_SYSTEM = "blackbox_system"
         private const val CHANNEL_ID_DOWNLOADS = "blackbox_downloads"
+
+        /** (M3) The navigation-prompt channel. HIGH importance + a NAVIGATION category so
+         *  it heads-up and surfaces on a LOCKED screen — that is the cron case. */
+        private const val CHANNEL_ID_NAVIGATION = "blackbox_navigation"
         private const val TAG = "BlackBoxBridge"
         private const val DOWNLOAD_NOTIFICATION_ID = 9999
     }
@@ -59,12 +70,28 @@ class BlackBoxNotificationManager(private val context: Context) {
                 vibrationPattern = longArrayOf(0, 100, 50, 100)
             }
 
+            // (M3) Navigation prompts. HIGH importance so the prompt heads-up rather than
+            // sitting silently in the shade — a 07:30 cron push is worthless if it is not
+            // seen. lockscreenVisibility PUBLIC so the DESTINATION is legible without
+            // unlocking: a prompt that hides where it is about to send you is not consent.
+            val navigationChannel = NotificationChannel(
+                CHANNEL_ID_NAVIGATION,
+                "Navigation",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Navigation destinations pushed from the BlackBox — tap Navigate to start"
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 250, 150, 250)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            }
+
             val notificationManager = context.getSystemService(NotificationManager::class.java)
             if (notificationManager != null) {
                 notificationManager.createNotificationChannel(taskChannel)
                 notificationManager.createNotificationChannel(systemChannel)
                 notificationManager.createNotificationChannel(downloadChannel)
-                Log.d(TAG, "Notification channels created: $CHANNEL_ID_TASKS, $CHANNEL_ID_SYSTEM, $CHANNEL_ID_DOWNLOADS")
+                notificationManager.createNotificationChannel(navigationChannel)
+                Log.d(TAG, "Notification channels created: $CHANNEL_ID_TASKS, $CHANNEL_ID_SYSTEM, $CHANNEL_ID_DOWNLOADS, $CHANNEL_ID_NAVIGATION")
             } else {
                 Log.e(TAG, "Failed to get NotificationManager service")
             }
@@ -245,6 +272,100 @@ class BlackBoxNotificationManager(private val context: Context) {
             Log.e(TAG, "SecurityException showing remote notification", e)
         } catch (e: Exception) {
             Log.e(TAG, "Error showing remote notification", e)
+        }
+    }
+
+    /**
+     * (M3) Post the NAVIGATION prompt — the only delivery Android permits when the app is
+     * not in the foreground.
+     *
+     * ## Why a notification at all
+     * A remote `navigate` push with the app backgrounded is silently DISCARDED by the
+     * Background Activity Launch restriction, and `startActivity` does not throw, so the
+     * actuator cannot tell. The documented exemption is a **user tap**: the activity launch
+     * that follows a tap on a notification action is allowed. So the box does not open Maps
+     * — it asks, and the owner's tap opens Maps.
+     *
+     * ## What makes it work from a LOCKED screen (the cron case)
+     *  - `CHANNEL_ID_NAVIGATION` is IMPORTANCE_HIGH → heads-up rather than a silent shade entry.
+     *  - [NotificationCompat.CATEGORY_NAVIGATION] + PRIORITY_HIGH → correct ranking/ducking
+     *    under Do-Not-Disturb-adjacent policies on pre-O and OEM skins.
+     *  - VISIBILITY_PUBLIC (on the notification AND the channel) → the DESTINATION is readable
+     *    on the lock screen. Consent requires seeing where you are being sent.
+     *  - The action's [PendingIntent] is `getActivity`, so the system itself performs the
+     *    launch on tap (inserting the keyguard unlock challenge when locked). We never
+     *    re-enter our own process to `startActivity`, which would land back under BAL.
+     *
+     * ## Honest outcomes
+     * Returns [NavigationNotifyOutcome.PERMISSION_MISSING] when POST_NOTIFICATIONS was never
+     * granted (Android 13+) — the caller reports that instead of claiming delivery — and
+     * [NavigationNotifyOutcome.FAILED] when the platform refuses the post. Never throws.
+     *
+     * ## Dedup
+     * [NavigationPush.dedupKey] maps to a STABLE (tag, id) via [stableNotificationId], the
+     * same mechanism [showRemoteNotification] uses: a retrying cron COLLAPSES onto the one
+     * prompt instead of stacking a pile of "Navigate to the job site" cards. The
+     * PendingIntent uses the same id as its requestCode with FLAG_UPDATE_CURRENT, so a
+     * re-post with a changed destination updates the target rather than resurrecting the
+     * first one's extras.
+     */
+    override fun postNavigation(push: NavigationPush): NavigationNotifyOutcome {
+        if (!hasNotificationPermission()) {
+            Log.w(TAG, "navigation prompt NOT delivered: POST_NOTIFICATIONS not granted")
+            return NavigationNotifyOutcome.PERMISSION_MISSING
+        }
+        return try {
+            // The EXACT intent a direct launch would have fired — same pure URI builder,
+            // same whitelisted mode/avoid, same resolved package. The tap reproduces it.
+            val navIntent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse(navigationUri(push.destination, push.travelMode, push.avoid)),
+            ).apply {
+                push.packageName?.let { setPackage(it) }
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            val tag = push.dedupKey
+            val id = stableNotificationId(tag)
+            val navPending = PendingIntent.getActivity(
+                context,
+                id,
+                navIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+
+            val title = navigationNotificationTitle(push.destination)
+            val text = navigationNotificationText(push.destination, push.travelMode)
+
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID_NAVIGATION)
+                .setSmallIcon(android.R.drawable.ic_menu_directions)
+                .setContentTitle(title)
+                .setContentText(text)
+                // Long free-text addresses must be fully readable when expanded.
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setCategory(NotificationCompat.CATEGORY_NAVIGATION)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                // Tapping the body OR the action button both navigate — either is a user
+                // gesture, which is what makes the launch legal.
+                .setContentIntent(navPending)
+                .addAction(android.R.drawable.ic_menu_directions, NAVIGATION_ACTION_LABEL, navPending)
+                .setAutoCancel(true)
+                // A collapsed retry must not re-buzz the phone every time the cron retries.
+                .setOnlyAlertOnce(true)
+                .setVibrate(longArrayOf(0, 250, 150, 250))
+                .build()
+
+            NotificationManagerCompat.from(context).notify(tag, id, notification)
+            // NEVER log the destination (leak discipline) — only the dedup id.
+            Log.d(TAG, "navigation prompt POSTED (tag=$tag, id=$id)")
+            NavigationNotifyOutcome.POSTED
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException posting navigation prompt", e)
+            NavigationNotifyOutcome.FAILED
+        } catch (e: Exception) {
+            Log.e(TAG, "Error posting navigation prompt (${e.javaClass.simpleName})", e)
+            NavigationNotifyOutcome.FAILED
         }
     }
 

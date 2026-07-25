@@ -2,6 +2,14 @@ package com.aiblackbox.portal.data.remote
 
 import android.content.Context
 import android.util.Log
+import com.aiblackbox.portal.overlay.NOTIFICATION_DELIVERY_FAILED_DETAIL
+import com.aiblackbox.portal.overlay.NOTIFICATION_PERMISSION_MISSING_DETAIL
+import com.aiblackbox.portal.overlay.NavigationNotifier
+import com.aiblackbox.portal.overlay.NavigationNotifyOutcome
+import com.aiblackbox.portal.overlay.NavigationPush
+import com.aiblackbox.portal.overlay.navigationDedupKey
+import com.aiblackbox.portal.overlay.navigationRejectionReason
+import com.aiblackbox.portal.overlay.navigationTargetPackage
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -195,14 +203,143 @@ private val WIRE_JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true; 
 
 /** Inbound `/notify` payload from the backend notification bus. `body` may be EMPTY
  *  for a metadata-only cross-operator push (title + category only). `notif_id` is the
- *  bus's idempotency key — retries reuse it so the notification COLLAPSES. */
+ *  bus's idempotency key — retries reuse it so the notification COLLAPSES.
+ *
+ *  (M3) A NAVIGATION push additionally carries `destination` (+ the optional
+ *  `nav_mode`/`nav_avoid`/`nav_package` passthroughs). It renders as a notification with
+ *  a "Navigate" ACTION BUTTON — the ONLY way a backgrounded/locked phone can be sent to a
+ *  destination at all, because Android discards a background activity launch. All new
+ *  fields default to "" so an existing bus payload is byte-for-byte unaffected. */
 @Serializable private data class NotifyRequest(
     val title: String = "",
     val body: String = "",
     val category: String = "",
     val operator: String = "",
     @SerialName("notif_id") val notifId: String = "",
+    val destination: String = "",
+    @SerialName("nav_mode") val navMode: String = "",
+    @SerialName("nav_avoid") val navAvoid: String = "",
+    @SerialName("nav_package") val navPackage: String = "",
 )
+
+/**
+ * (M3) The notification `category` that marks a payload as a navigation push. A payload
+ * carrying a `destination` is a navigation push regardless of category; this constant lets
+ * the bus mark one explicitly (and lets a destination-less "navigation" payload be
+ * recognised as malformed rather than silently rendered as a plain note).
+ */
+const val NOTIFY_CATEGORY_NAVIGATION: String = "navigation"
+
+/**
+ * (M3) PURE: may this device render a navigation push — destination text plus a one-tap
+ * "Navigate" button — for [requestOperator]?
+ *
+ * ONLY for its OWN bound operator. A device may legitimately SUBSCRIBE to another
+ * operator's notifications (that is what the metadata-only cross-operator rule in the
+ * backend bus exists for), but "another operator's cron may put a one-tap button on your
+ * lock screen that drives you somewhere" is a different thing entirely. Fail-closed: a
+ * blank bound operator or a blank request operator refuses, matching [authorize].
+ */
+fun navigationPayloadAllowed(requestOperator: String, boundOperator: String): Boolean {
+    val r = requestOperator.trim()
+    val b = boundOperator.trim()
+    return r.isNotEmpty() && b.isNotEmpty() && r.equals(b, ignoreCase = true)
+}
+
+/**
+ * (M3) PURE: what a `/notify` payload should actually become. Split out of [routeRequest]
+ * so the cross-operator degrade, the navigation envelope validation and the dedup key are
+ * host-JVM testable without a socket or a notification manager.
+ */
+sealed class NotifyPlan {
+    /** Render the navigation prompt (destination + "Navigate" action button). */
+    data class Navigate(val push: NavigationPush) : NotifyPlan()
+
+    /** Render an ordinary notification. [body] is already degraded where required. */
+    data class Plain(
+        val title: String,
+        val body: String,
+        val category: String,
+        val operator: String,
+        val notifId: String,
+    ) : NotifyPlan()
+
+    /** Refuse with [status] + [error]. */
+    data class Reject(val status: Int, val error: String) : NotifyPlan()
+}
+
+/**
+ * (M3) PURE planner for `POST /notify`.
+ *
+ * Order of decisions:
+ *  1. A payload is a NAVIGATION payload if it carries a `destination` or is explicitly
+ *     categorized [NOTIFY_CATEGORY_NAVIGATION].
+ *  2. CROSS-OPERATOR DEGRADE (the existing bus rule, enforced again here as defense in
+ *     depth): a navigation payload that is not for this device's bound operator is
+ *     rendered METADATA-ONLY — the destination is dropped, the body is dropped (it may
+ *     restate the destination), and NO "Navigate" action button is offered. Another
+ *     operator's schedule can tell this device that *something* happened; it can never
+ *     put a one-tap "drive here" button on this operator's lock screen.
+ *  3. A navigation payload for the bound operator with a BLANK destination is malformed
+ *     (400) — a navigation prompt that cannot name where it is sending you is not consent.
+ *  4. The navigation envelope reuses the SAME strict whitelists as the `/action` path
+ *     ([navigationRejectionReason]): an out-of-whitelist `nav_mode`/`nav_avoid` is a 400,
+ *     never a passthrough.
+ *  5. Otherwise: the existing plain path, unchanged (400 when there is nothing to show).
+ *
+ * The DEDUP key is [NotifyRequest.notifId] when the bus supplied one, else derived from
+ * the destination ([navigationDedupKey]) — so a retrying cron collapses onto one prompt
+ * either way instead of stacking a pile of identical navigation cards.
+ */
+internal fun planNotify(
+    title: String,
+    body: String,
+    category: String,
+    operator: String,
+    notifId: String,
+    destination: String,
+    navMode: String,
+    navAvoid: String,
+    navPackage: String,
+    boundOperator: String,
+): NotifyPlan {
+    val t = title.trim()
+    val b = body.trim()
+    val c = category.trim()
+    val op = operator.trim()
+    val nid = notifId.trim()
+    val dest = destination.trim()
+
+    val isNavPayload = dest.isNotEmpty() || c.equals(NOTIFY_CATEGORY_NAVIGATION, ignoreCase = true)
+
+    if (isNavPayload && !navigationPayloadAllowed(op, boundOperator)) {
+        // Metadata-only: title + category survive; destination and body do NOT.
+        return if (t.isBlank() && c.isBlank())
+            NotifyPlan.Reject(400, "title or body required")
+        else
+            NotifyPlan.Plain(title = t, body = "", category = c, operator = op, notifId = nid)
+    }
+
+    if (isNavPayload) {
+        if (dest.isEmpty())
+            return NotifyPlan.Reject(400, "destination required for a navigation notification")
+        navigationRejectionReason(dest, navMode.trim().ifEmpty { null }, navAvoid.trim().ifEmpty { null })
+            ?.let { return NotifyPlan.Reject(400, it) }
+        return NotifyPlan.Navigate(
+            NavigationPush(
+                destination = dest,
+                travelMode = navMode.trim().ifEmpty { null },
+                avoid = navAvoid.trim().ifEmpty { null },
+                packageName = navigationTargetPackage(navPackage.trim().ifEmpty { null }),
+                dedupKey = navigationDedupKey(nid, dest),
+            ),
+        )
+    }
+
+    if (t.isBlank() && b.isBlank())
+        return NotifyPlan.Reject(400, "title or body required")
+    return NotifyPlan.Plain(title = t, body = b, category = c, operator = op, notifId = nid)
+}
 
 /**
  * PURE request router: (method, path, body) + handler -> [RemoteResponse]. No
@@ -223,10 +360,18 @@ private val WIRE_JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true; 
  * the existing 4-arg callers/tests are unaffected; a null notifier makes `/notify`
  * return 503 (the listener was constructed without a poster — should not happen in
  * production, where [NotificationListenerFgs] always supplies one).
+ *
+ * (M3) [navNotifier] posts the NAVIGATION prompt (destination + a "Navigate" action
+ * button) and [boundOperator] is this device's operator, used for the cross-operator
+ * metadata-only rule in [planNotify]. Both are appended with defaults so every existing
+ * positional caller/test is unaffected; a blank [boundOperator] fail-closes every
+ * navigation payload to metadata-only.
  */
 fun routeRequest(method: String, path: String, body: String,
                  handler: RemoteTaskHandler, notifier: Notifier? = null,
-                 killSwitch: RemoteKillSwitch? = null): RemoteResponse {
+                 killSwitch: RemoteKillSwitch? = null,
+                 navNotifier: NavigationNotifier? = null,
+                 boundOperator: String = ""): RemoteResponse {
     val m = method.uppercase()
     return when {
         path == "/healthz" && m == "GET" ->
@@ -277,21 +422,54 @@ fun routeRequest(method: String, path: String, body: String,
             } catch (e: Exception) {
                 return RemoteResponse(400, JSON.encodeToString(ErrorBody("invalid JSON body")))
             }
-            // Need at least a title OR a body to show something useful. (A metadata-only
-            // push carries title + category with an EMPTY body — that is valid and the
-            // notifier renders title/category only.)
-            if (req.title.isBlank() && req.body.isBlank())
-                return RemoteResponse(400, JSON.encodeToString(ErrorBody("title or body required")))
-            if (notifier == null)
-                return RemoteResponse(503, JSON.encodeToString(ErrorBody("notifier unavailable")))
-            notifier.postNotification(
-                title = req.title.trim(),
-                body = req.body.trim(),
-                category = req.category.trim(),
-                operator = req.operator.trim(),
-                notifId = req.notifId.trim(),
-            )
-            RemoteResponse(200, JSON.encodeToString(OkBody(ok = true)))
+            // (M3) One PURE decision: navigation vs plain, the cross-operator metadata-only
+            // degrade, the strict nav envelope, and "nothing to show" (the old title/body
+            // check, now aware that a destination is also something to show).
+            when (
+                val plan = planNotify(
+                    title = req.title, body = req.body, category = req.category,
+                    operator = req.operator, notifId = req.notifId,
+                    destination = req.destination, navMode = req.navMode,
+                    navAvoid = req.navAvoid, navPackage = req.navPackage,
+                    boundOperator = boundOperator,
+                )
+            ) {
+                is NotifyPlan.Reject ->
+                    RemoteResponse(plan.status, JSON.encodeToString(ErrorBody(plan.error)))
+
+                is NotifyPlan.Navigate -> {
+                    if (navNotifier == null)
+                        return RemoteResponse(503, JSON.encodeToString(
+                            ErrorBody("navigation notifier unavailable")))
+                    // HONEST about delivery: a notification that was never posted (no
+                    // POST_NOTIFICATIONS grant on Android 13+, or a platform refusal) must not
+                    // answer {"ok": true}. A cron told "delivered" when nothing reached the
+                    // phone is the same lie as a launch that never happened.
+                    when (navNotifier.postNavigation(plan.push)) {
+                        NavigationNotifyOutcome.POSTED ->
+                            RemoteResponse(200, JSON.encodeToString(OkBody(ok = true)))
+                        NavigationNotifyOutcome.PERMISSION_MISSING ->
+                            RemoteResponse(503, JSON.encodeToString(
+                                ErrorBody(NOTIFICATION_PERMISSION_MISSING_DETAIL)))
+                        NavigationNotifyOutcome.FAILED ->
+                            RemoteResponse(503, JSON.encodeToString(
+                                ErrorBody(NOTIFICATION_DELIVERY_FAILED_DETAIL)))
+                    }
+                }
+
+                is NotifyPlan.Plain -> {
+                    if (notifier == null)
+                        return RemoteResponse(503, JSON.encodeToString(ErrorBody("notifier unavailable")))
+                    notifier.postNotification(
+                        title = plan.title,
+                        body = plan.body,
+                        category = plan.category,
+                        operator = plan.operator,
+                        notifId = plan.notifId,
+                    )
+                    RemoteResponse(200, JSON.encodeToString(OkBody(ok = true)))
+                }
+            }
         }
 
         path.startsWith("/status/") && m == "GET" -> {
@@ -591,6 +769,10 @@ class RemoteControlServer(
     port: Int,
     private val handlerProvider: () -> RemoteTaskHandler = { NoopRemoteTaskHandler },
     private val notifier: Notifier? = null,
+    // (M3) The NAVIGATION prompt poster for a `/notify` payload carrying a destination.
+    // Null → such a payload returns 503 rather than being silently rendered as a plain,
+    // un-actionable note (which would leave the operator with no way to actually navigate).
+    private val navNotifier: NavigationNotifier? = null,
     private val operatorProvider: () -> String = { "" },
     private val subscriptionPredicate: (operator: String) -> Boolean = { true },
     private val actionDispatcherProvider: () -> RemoteActionDispatcher? = { null },
@@ -649,7 +831,13 @@ class RemoteControlServer(
             }
             return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
         }
-        val routed = routeRequest(method, path, body, handlerProvider(), notifier, killSwitchProvider())
+        // (M3) boundOperator is passed so /notify can enforce the cross-operator
+        // metadata-only rule on navigation payloads (a foreign operator never gets a
+        // one-tap "drive here" button on this device's lock screen).
+        val routed = routeRequest(
+            method, path, body, handlerProvider(), notifier, killSwitchProvider(),
+            navNotifier, operatorProvider(),
+        )
         return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
     }
 

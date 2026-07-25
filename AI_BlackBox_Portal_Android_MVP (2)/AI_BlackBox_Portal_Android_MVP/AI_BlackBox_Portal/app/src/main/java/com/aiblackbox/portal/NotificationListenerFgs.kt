@@ -27,6 +27,7 @@ import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.NotificationSubscriptionStore
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.DeviceCapabilities
+import com.aiblackbox.portal.overlay.NavigationNotifier
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
 import kotlinx.coroutines.flow.first
@@ -186,6 +187,12 @@ class NotificationListenerFgs : Service() {
                 port = REMOTE_CONTROL_PORT,
                 handlerProvider = { RemoteTaskHandlerHolder.current() },
                 notifier = notifier,
+                // (M3) The NAVIGATION prompt poster. Same model-free path as `notifier`:
+                // a plain NotificationManagerCompat.notify with a "Navigate" action button,
+                // which is the ONLY delivery Android permits while the app is backgrounded
+                // or the phone is locked (a user tap is the BAL exemption). Its return value
+                // is honest — a missing POST_NOTIFICATIONS grant answers 503, never ok:true.
+                navNotifier = NavigationNotifier { push -> notificationManager.postNavigation(push) },
                 operatorProvider = { boundOperator(appContext) },
                 subscriptionPredicate = { op -> subscriptionStore.isSubscribed(op) },
                 // (M1.3) POST /action → the live actuators; (M1.2) GET /stream emits one
