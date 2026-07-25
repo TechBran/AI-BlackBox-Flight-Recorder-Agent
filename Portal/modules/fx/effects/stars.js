@@ -61,7 +61,17 @@ class StarParticle {
         this.flickerOffset = rand() * Math.PI * 2;
         this.flickerSpeed = STAR_CONFIG.flickerSpeed * (0.8 + rand() * 0.4);
         this.opacity = this.layer.opacity; this.baseOpacity = this.layer.opacity;
-        this.trail = []; this.life = 1; this.dead = false;
+        // Fixed-capacity trail slots, allocated ONCE per particle and reused.
+        // The original pushed a fresh {x,y,size,opacity} literal every frame and
+        // unshift()ed it (O(n) plus one object per particle per frame). With the
+        // default field running continuously in 'always' mode that was ~120
+        // objects/frame of pure garbage, ~7,200/s at 60Hz. Same pixels, no churn.
+        if (!this.trail) {
+            this.trail = new Array(STAR_CONFIG.trailLength);
+            for (let i = 0; i < STAR_CONFIG.trailLength; i++) this.trail[i] = { x: 0, y: 0, size: 0, opacity: 0 };
+        }
+        this.trailLen = 0;   // how many slots hold real samples yet
+        this.life = 1; this.dead = false;
         if (initial) this.y = rand() * h * 1.5; // stagger the first fill
     }
     // dt60 = elapsed frames at the 60 Hz reference (1.0 at 60 fps, 0.5 at 120 Hz).
@@ -80,8 +90,15 @@ class StarParticle {
         this.vy = this.baseVy + turbY * 0.005;
         this.x += this.vx * dt60; this.y += this.vy * dt60;
         if (STAR_CONFIG.trailLength > 0) {
-            this.trail.unshift({ x: this.x, y: this.y, size: this.size, opacity: this.opacity });
-            if (this.trail.length > STAR_CONFIG.trailLength) this.trail.pop();
+            // Shift newest-first WITHOUT reallocating: rotate the last slot to the
+            // front and overwrite it. trailLength is 2, so this is one swap.
+            const t = this.trail;
+            const recycled = t[t.length - 1];
+            for (let i = t.length - 1; i > 0; i--) t[i] = t[i - 1];
+            recycled.x = this.x; recycled.y = this.y;
+            recycled.size = this.size; recycled.opacity = this.opacity;
+            t[0] = recycled;
+            if (this.trailLen < t.length) this.trailLen++;
         }
         const f1 = Math.sin(time * this.flickerSpeed + this.flickerOffset);
         const f2 = Math.sin(time * this.flickerSpeed * 0.7 + this.flickerOffset * 1.3);
@@ -101,12 +118,19 @@ class StarParticle {
 class StarField {
     constructor() { this.width = 0; this.height = 0; this.particles = []; this._spawned = false; this._rand = Math.random; }
     resize(w, h) { this.width = w; this.height = h; this.particles.forEach(p => { p.layer._w = w; p.layer._h = h; }); }
-    spawn(rand) {
+    // `tuning` is the operator's Intensity x Quality multiplier (env.tuning), and
+    // deliberately NOT env.scale: these layer counts are an approved constant, not
+    // a viewport density, so the field must look the same on a laptop and a 4K
+    // monitor. At the default dials tuning === 1 and this spawns 40/50/30 = 120,
+    // exactly as it always has.
+    spawn(rand, tuning = 1) {
         if (rand) this._rand = rand;
+        const k = (Number.isFinite(tuning) && tuning > 0) ? tuning : 1;
         this.particles = [];
         STAR_CONFIG.layers.forEach(base => {
             const layer = Object.assign({}, base, { _w: this.width, _h: this.height, _rand: this._rand });
-            for (let i = 0; i < base.count; i++) this.particles.push(new StarParticle(layer));
+            const count = Math.max(1, Math.round(base.count * k));
+            for (let i = 0; i < count; i++) this.particles.push(new StarParticle(layer));
         });
         this._spawned = true;
     }
@@ -119,7 +143,11 @@ class StarField {
 
 function drawStarParticle(c, p) {
     if (STAR_CONFIG.trailLength > 0) {
-        for (let i = 0; i < p.trail.length; i++) {
+        // trailLen, not trail.length: the slots are preallocated, so before a
+        // particle has lived trailLength frames the tail slots are still zeroed
+        // and must not be drawn (the old code grew the array, so length WAS the
+        // sample count).
+        for (let i = 0; i < p.trailLen; i++) {
             const t = p.trail[i];
             const trailOpacity = t.opacity * (1 - i / STAR_CONFIG.trailLength) * 0.5;
             const trailSize = t.size * (1 - i / STAR_CONFIG.trailLength);
@@ -144,7 +172,7 @@ function init(env) {
     const st = env.state;
     if (!st.sim) st.sim = new StarField();
     st.sim.resize(env.width, env.height);
-    st.sim.spawn(env.rand);
+    st.sim.spawn(env.rand, env.tuning);
 }
 
 export const descriptor = {

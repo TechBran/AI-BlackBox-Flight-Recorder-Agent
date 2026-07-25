@@ -50,16 +50,29 @@ import {
     DEFAULT_EFFECT_ID, createEnv, hasEffect, resolveEffectId, loadEffect, effectList,
     applyClearPolicy, applyBlend, resetBlend,
 } from './fx/registry.js';
+// The two USER dials (Intensity + Quality) with their bounds, defaults, storage
+// keys and total-function coercion. See fx/tuning.js for why the coercion is
+// not four lines inline: a NaN multiplier renders an EMPTY field, which is
+// indistinguishable from a broken feature.
+import {
+    loadTuning, saveTuning, normalizeTuning, countMultiplier, qualityList,
+    DENSITY_MIN, DENSITY_MAX, DENSITY_STEP, formatDensity,
+} from './fx/tuning.js';
 // Catalogue only — stubs with a lazy loader. Importing this costs nothing but
 // the id/label table; no simulation code is fetched until a field is selected.
 import './fx/effects/index.js';
 
 // ---- Field tuning -----------------------------------------------------------
-// density/intensity are the two prototype tuning knobs; fixed to 1.0 here (no
-// tuning panel in the Portal). DRAIN_MAX_MS bounds the post-generation drain so
-// the rAF loop can never idle-spin (it must outlast the CSS opacity fade).
+// FIELD is the engine's own baseline; `tuning` is the operator's two dials on
+// top of it (defaults 1.0 x High = exactly this baseline). DRAIN_MAX_MS bounds
+// the post-generation drain so the rAF loop can never idle-spin (it must
+// outlast the CSS opacity fade).
 const FIELD = { density: 1.0, intensity: 1.0 };
 const DRAIN_MAX_MS = 650;
+// Combined scale is clamped so no dial combination hands an effect a viewport
+// scale it was never tuned against (fog veil counts, matrix column counts…).
+const SCALE_FLOOR = 0.12;
+const SCALE_CEIL = 4.0;
 
 // =============================================================================
 // Module state
@@ -67,6 +80,7 @@ const DRAIN_MAX_MS = 650;
 const REASONS = new Set();   // active generation reasons (dom, media, manual…)
 let mode = 'always';         // VISIBILITY: 'off'|'generating'|'always' (bb_ember_mode)
 let particleMode = DEFAULT_EFFECT_ID;   // FIELD: an id from the registry (bb_particle_mode)
+let tuning = normalizeTuning(null);     // DIALS: {density, quality} (bb_particle_density/_quality)
 let effect = null;           // the loaded descriptor for particleMode (null while importing)
 let wantedEffectId = null;   // the id whose import is in flight (guards a fast double switch)
 let pendingField = null;     // 'init' | 'rearm' — deferred until the module + canvas exist
@@ -108,8 +122,15 @@ function baseCount() {
     return Math.max(60, Math.min(n, 1200));
 }
 // Viewport-area × density multiplier. Effects read it as env.scale rather than
-// recomputing it, so there is one definition of "how busy is this viewport".
-const fieldScale = () => Math.max(0.4, Math.min(2.4, (width * height) / (1440 * 900))) * FIELD.density;
+// recomputing it, so there is one definition of "how busy is this viewport" —
+// and therefore ONE place the operator's Intensity/Quality dials have to be
+// folded in (countMultiplier), instead of thirteen effects each growing their
+// own idea of what the sliders mean.
+function fieldScale() {
+    const viewport = Math.max(0.4, Math.min(2.4, (width * height) / (1440 * 900)));
+    const scaled = viewport * FIELD.density * countMultiplier(tuning);
+    return Math.max(SCALE_FLOOR, Math.min(SCALE_CEIL, scaled));
+}
 
 // =============================================================================
 // Effect selection + lifecycle (the only dispatch in this file)
@@ -120,6 +141,15 @@ function refreshEnv(now, dt) {
     env.active = active;
     env.scale = fieldScale();
     env.intensity = FIELD.intensity;
+    // The operator's dials WITHOUT the viewport term. For the fields whose counts
+    // are viewport-INDEPENDENT by design (Rising Stars' 40/50/30 layers are an
+    // approved constant, not a density), env.scale is the wrong knob but the
+    // Intensity slider must still do something. Such a field multiplies by
+    // env.tuning INSTEAD of env.scale — never by both, or the dials apply twice.
+    env.tuning = countMultiplier(tuning);
+    // Advisory: the tier id, for effects that later want a sprite LOD as well as
+    // a count. The COUNT half is already in env.scale/env.tuning above.
+    env.quality = tuning.quality;
     env.surge = surge;
 }
 
@@ -150,6 +180,23 @@ function useEffect(id) {
         return d;
     }).catch((err) => {
         console.warn('[EmberFX] failed to load field "' + wanted + '"', err);
+        if (wantedEffectId !== wanted) return null;   // superseded; the newer load owns recovery
+        // A dynamic import can fail for reasons that have nothing to do with the
+        // effect: the box is mid-`/restart` (60-90s of 5xx) or mid-deploy. Leaving
+        // `effect` null forever means a permanently blank backdrop that re-picking
+        // the SAME field cannot fix (the id-equality early return above would
+        // short-circuit). So: clear the in-flight marker so a retry is possible,
+        // and fall back to the default field without persisting it — the
+        // operator's real choice stays in localStorage for the next load.
+        wantedEffectId = null;
+        if (wanted !== DEFAULT_EFFECT_ID) {
+            return loadEffect(DEFAULT_EFFECT_ID).then((d) => {
+                if (wantedEffectId !== null) return null;   // a real selection won the race
+                effect = d;
+                applyPendingField();
+                return d;
+            }).catch(() => null);
+        }
         return null;
     });
 }
@@ -225,15 +272,33 @@ function loop(now) {
     let dt = (now - lastT) / 1000; lastT = now;
     dt = Math.min(dt, 0.05);                      // clamp so motion is frame-rate independent
     if (effect) {
-        refreshEnv(now, dt);
-        effect.update(dt, env);
-        // The engine owns compositing: dispose of the last frame per the field's
-        // declared policy, select its blend, draw, then hand the context back
-        // neutral. No effect ever sets globalCompositeOperation itself.
-        applyClearPolicy(ctx, effect, env);
-        applyBlend(ctx, effect);
-        effect.draw(ctx, env);
-        resetBlend(ctx);
+        // An effect throwing must never kill the backdrop. Without this guard the
+        // exception escapes the rAF callback BEFORE the re-schedule below, so no
+        // next frame is ever requested — while `running` stays true, which makes
+        // startLoop() a no-op. One bad frame in any of the thirteen fields = a
+        // dead backdrop until the operator reloads the page.
+        try {
+            refreshEnv(now, dt);
+            effect.update(dt, env);
+            // The engine owns compositing: dispose of the last frame per the field's
+            // declared policy, select its blend, draw, then hand the context back
+            // neutral. No effect ever sets globalCompositeOperation itself.
+            applyClearPolicy(ctx, effect, env);
+            applyBlend(ctx, effect);
+            effect.draw(ctx, env);
+            resetBlend(ctx);
+        } catch (e) {
+            console.warn('[fx] effect', effect && effect.id, 'threw; falling back', e);
+            resetBlend(ctx);
+            const failedId = effect && effect.id;
+            effect = null;
+            clearCanvas();
+            // Fall back to the default field — but never to the one that just
+            // threw, or we would spin between the same two frames forever.
+            // Not persisted: the operator's real choice stays selected for the
+            // next page load, when the effect may well work again.
+            if (failedId !== DEFAULT_EFFECT_ID) useEffect(DEFAULT_EFFECT_ID);
+        }
     }
     surge *= Math.exp(-2.8 * dt);                 // decay load-reactivity toward calm
     // Bound the drain: once generation ends, keep animating through the CSS opacity
@@ -329,6 +394,24 @@ function setParticleMode(m) {
 }
 function getParticleMode() { return particleMode; }
 
+// ---- TUNING dials: intensity/density + quality tier (persisted) --------------
+// The settings UI calls setTuning({density, quality}) and never touches module
+// state: this function is the whole contract. Partial patches are supported so
+// each control can send only its own key.
+function setTuning(patch) {
+    const next = normalizeTuning({ ...tuning, ...(patch && typeof patch === 'object' ? patch : {}) });
+    if (next.density === tuning.density && next.quality === tuning.quality) return tuning;
+    tuning = saveTuning(next);
+    // Effects that derive counts per frame (rain, cinders, fireflies) follow
+    // env.scale immediately; the ones that size their arrays in init() need a
+    // rebuild to notice. Re-init is the same path a field switch takes, so
+    // there is exactly one "rebuild the field" code path in this engine.
+    pendingField = 'init';
+    if (effect && canvas) { applyPendingField(); clearCanvas(); }
+    return tuning;
+}
+function getTuning() { return { ...tuning }; }
+
 // ---- Generation detection from the DOM --------------------------------------
 const GEN_SELECTOR = '.streaming-bubble, .bubble.thinking, .generating-image, .generating-video, .generating-music';
 function isGeneratingNow() {
@@ -362,6 +445,7 @@ export function initEmberFX() {
     inited = true;
     loadMode();
     loadParticleMode();
+    tuning = loadTuning();
     if (prefersReduced) {
         // Still expose the setters so the settings controls persist the choices.
         window.EmberFX = {
@@ -371,6 +455,9 @@ export function initEmberFX() {
             setParticleMode: (m) => { if (hasEffect(m)) { particleMode = m; persistParticleMode(m); } },
             getParticleMode,
             listParticleModes: effectList,
+            setTuning: (patch) => { tuning = saveTuning({ ...tuning, ...(patch || {}) }); return getTuning(); },
+            getTuning,
+            listQualityTiers: qualityList,
             isActive: () => false,
             _reduced: true
         };
@@ -400,12 +487,16 @@ export function initEmberFX() {
         setParticleMode,
         getParticleMode,
         listParticleModes: effectList,   // [{id,label}] for a registry-driven picker
+        setTuning,                       // {density?, quality?} — the ONLY way in
+        getTuning,
+        listQualityTiers: qualityList,   // [{id,label}] for the quality picker
         isActive: () => active
     };
     // Apply the persisted VISIBILITY mode: 'always' forces-on; 'off'/'generating' sync from the DOM.
     if (mode === 'always') markGenerating('always', true);
     else recompute();
-    console.log('[EmberFX] Particle field initialized (visibility=' + mode + ', field=' + particleMode + ')');
+    console.log('[EmberFX] Particle field initialized (visibility=' + mode + ', field=' + particleMode
+        + ', density=' + tuning.density + ', quality=' + tuning.quality + ')');
 }
 
 // Reflect the persisted VISIBILITY mode into the settings radio group + drive setMode on change.
@@ -427,29 +518,82 @@ export function initEmberModeControl() {
     sync(); // reflect the initial selection (works even without :has() support)
 }
 
-// Reflect the persisted PARTICLE field into the settings radio group + drive
-// setParticleMode on change. Sibling of initEmberModeControl (same markup/idiom):
-// the ember-mode control governs VISIBILITY, this one governs the FIELD look.
-// (M5 replaces the hand-written radios with options generated from
-// window.EmberFX.listParticleModes(); this still works either way.)
+// ---- Settings: the FIELD picker (registry-driven) ---------------------------
+// Sibling of initEmberModeControl: that one governs VISIBILITY, this one the
+// FIELD look. It was three hand-written radios (stars/embers/matrix); there are
+// thirteen fields now and a catalogue that is meant to keep growing, so the
+// options are BUILT from window.EmberFX.listParticleModes() — i.e. from the
+// registry. Registering an effect is the only step needed to appear here; there
+// is deliberately no second list in the markup to forget to update.
+// A <select> (not radios) because it scales to 30 entries in fixed vertical
+// space and is keyboard/screen-reader native.
+function optionsFrom(select, entries, current) {
+    select.textContent = '';
+    for (const { id, label } of entries) {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = label;
+        select.appendChild(opt);
+    }
+    if (entries.some(e => e.id === current)) select.value = current;
+    else if (select.options.length) select.selectedIndex = 0;
+}
+
 export function initParticleModeControl() {
-    const radios = document.querySelectorAll('input[name="particleMode"]');
-    if (!radios.length) return;
-    const cur = (window.EmberFX && window.EmberFX.getParticleMode) ? window.EmberFX.getParticleMode() : particleMode;
-    const sync = () => radios.forEach((r) => {
-        const label = r.closest('.ember-mode-opt');
-        if (label) label.classList.toggle('selected', r.checked);
+    const select = document.getElementById('particleModeSelect');
+    if (!select || select.dataset.fxWired === '1') return;
+    const fx = window.EmberFX || {};
+    const entries = (typeof fx.listParticleModes === 'function') ? fx.listParticleModes() : effectList();
+    const cur = (typeof fx.getParticleMode === 'function') ? fx.getParticleMode() : particleMode;
+    optionsFrom(select, entries, cur);
+    select.addEventListener('change', () => {
+        const api = window.EmberFX;
+        if (api && typeof api.setParticleMode === 'function') api.setParticleMode(select.value);
     });
-    radios.forEach((r) => {
-        r.checked = (r.value === cur);
-        r.addEventListener('change', () => {
-            sync();
-            if (r.checked && window.EmberFX && window.EmberFX.setParticleMode) window.EmberFX.setParticleMode(r.value);
+    select.dataset.fxWired = '1';
+}
+
+// ---- Settings: the TUNING dials (intensity + quality) ------------------------
+// Both go through window.EmberFX.setTuning({...}) — the UI never reaches into
+// module state, and persistence/clamping live in fx/tuning.js (tested there).
+// The range fires on `input` for a live readout but only COMMITS on `change`
+// (pointer release / arrow key), because committing rebuilds the field and
+// doing that 60x during a drag is visible jank.
+export function initParticleTuningControls() {
+    const fx = window.EmberFX || {};
+    const cur = (typeof fx.getTuning === 'function') ? fx.getTuning() : tuning;
+    const commit = (patch) => {
+        const api = window.EmberFX;
+        if (api && typeof api.setTuning === 'function') api.setTuning(patch);
+    };
+
+    const range = document.getElementById('particleDensity');
+    const readout = document.getElementById('particleDensityValue');
+    if (range && range.dataset.fxWired !== '1') {
+        range.min = String(DENSITY_MIN);
+        range.max = String(DENSITY_MAX);
+        range.step = String(DENSITY_STEP);
+        range.value = String(cur.density);
+        if (readout) readout.textContent = formatDensity(cur.density);
+        range.addEventListener('input', () => {
+            if (readout) readout.textContent = formatDensity(range.value);   // live, cheap
         });
-    });
-    sync(); // reflect the initial selection (works even without :has() support)
+        range.addEventListener('change', () => commit({ density: range.value }));
+        range.dataset.fxWired = '1';
+    }
+
+    const quality = document.getElementById('particleQuality');
+    if (quality && quality.dataset.fxWired !== '1') {
+        const tiers = (typeof fx.listQualityTiers === 'function') ? fx.listQualityTiers() : qualityList();
+        optionsFrom(quality, tiers, cur.quality);
+        quality.addEventListener('change', () => commit({ quality: quality.value }));
+        quality.dataset.fxWired = '1';
+    }
 }
 
 // Exposed for the settings UI / external drivers.
-export { setParticleMode, getParticleMode };
-export default { initEmberFX, initEmberModeControl, initParticleModeControl, setParticleMode, getParticleMode };
+export { setParticleMode, getParticleMode, setTuning, getTuning };
+export default {
+    initEmberFX, initEmberModeControl, initParticleModeControl, initParticleTuningControls,
+    setParticleMode, getParticleMode, setTuning, getTuning,
+};
