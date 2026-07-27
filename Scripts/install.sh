@@ -26,6 +26,31 @@ if ! [[ "$REAL_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     exit 1
 fi
 
+# Audit (customer, 2026-07-27 — stale helper after commit 5eabbe45): $BLACKBOX_ROOT
+# is templated into the root-owned dispatch helpers AND the sudoers file. Validate
+# it once, loudly, before it can reach either. This is a safety gate, NOT a naming
+# policy: install paths may legitimately contain spaces, `&`, `.`, parentheses and
+# `+` (the sed-substitution sites escape those), so those are permitted — what is
+# rejected is a control character, newline, quote, `$`, backtick or `;` that could
+# break the sudoers file or a sed program. A bad root baked into the apt helper is
+# precisely the incident (an unreadable allowlist path → rc=4 forever).
+_root_ok_re='^/[A-Za-z0-9 ._/+@%:,()~&-]+$'
+if [[ ! "$BLACKBOX_ROOT" =~ $_root_ok_re ]]; then
+    echo "[install] ERROR: BLACKBOX_ROOT='$BLACKBOX_ROOT' contains characters unsafe to template into" >&2
+    echo "[install] the sudoers file and the /usr/local/sbin dispatch helpers. Reinstall to a path" >&2
+    echo "[install] matching ${_root_ok_re}." >&2
+    exit 1
+fi
+
+# Escape sed replacement metacharacters ONCE for every `s|PLACEHOLDER|$ROOT|`
+# substitution site (Step 0b helpers, Step 4e sudoers). In a sed replacement `&`
+# means "the whole match", `|` is our delimiter and `\` escapes — a raw path with
+# any of them bakes a CORRUPTED value (the exact rc=4 incident, silently). Order
+# matters: backslash first so we don't double-escape the escapes we add.
+BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT//\\/\\\\}"
+BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT_SED_ESC//&/\\&}"
+BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT_SED_ESC//|/\\|}"
+
 # ── Step 0a: git-clone bootstrap (audit E23 / T3) ──
 # Update pipeline requires $BLACKBOX_ROOT to be a git checkout so the wizard's
 # Updates panel can `git fetch + reset --hard origin/main` against it. Two
@@ -64,6 +89,87 @@ fi
 
 # ── Pre-flight (Phase 4.0) ──
 "$BLACKBOX_ROOT/Scripts/install-preflight.sh"
+
+# ── Step 0b: root-owned dispatch helpers for the update pipeline (T2 / T3) ──
+# Two bounded helper scripts that the update flow's sudoers grants point at
+# (Step 4e below lands the grants). They exist so the update pipeline never
+# needs wildcard sudo for `apt-get install` or `tee /etc/sudoers.d`, which would
+# be priv-esc primitives via any MCP-tool prompt injection.
+#
+# THIS RUNS FIRST ON PURPOSE (customer, 2026-07-27). It used to be Step 4f1,
+# ~780 lines down — after Step 1's `xargs sudo apt install -y` and after the
+# Tailscale hard `exit 1`. Under `set -e` either of those aborts the installer
+# before the helpers are reinstalled, and that is exactly the case the update
+# runner re-runs this script to repair: a box whose apt phase dies on a stale
+# helper cannot get a fixed helper out of a script that dies at the same apt
+# step. This block needs nothing but $BLACKBOX_ROOT and the tracked templates,
+# so nothing has to come before it.
+#
+# Customer, 2026-07-27 (root cause): the helpers used to be installed VERBATIM,
+# so blackbox-apt-install shipped with whatever install root was hardcoded in
+# the template. That customer's copy predated the 5eabbe45 rename, and since the
+# installed file is root-owned under /usr/local/sbin, `git reset --hard` could
+# never repair it — the apt phase of every subsequent update died at exit 4
+# looking for an allowlist under a path that had never existed on that box. Two
+# fixes here: substitute the REAL $BLACKBOX_ROOT (line 19, derived from this
+# script's own location) exactly the way Step 4e already does for sudoers, and
+# write a root-owned pointer file so a repo that MOVES is repaired by re-running
+# install.sh rather than by hand-editing /usr/local/sbin.
+install_update_helpers() {
+    # Destinations are overridable ONLY so the bash tests
+    # (scripts/tests/test_install_update_helpers.sh,
+    #  scripts/tests/test_apt_helper_root_resolution.sh) can redirect an entire
+    # install into an unprivileged mktemp sandbox.
+    local SBIN_DIR="${SBIN_DIR:-/usr/local/sbin}"
+    local ETC_BLACKBOX_DIR="${ETC_BLACKBOX_DIR:-/etc/blackbox}"
+    local OWNER GROUP SUDO
+    if [[ "$SBIN_DIR" == "/usr/local/sbin" || "$ETC_BLACKBOX_DIR" == "/etc/blackbox" ]]; then
+        # Step 0 is explicit that this script is meant to run UNPRIVILEGED, so
+        # the caller's environment reaches this function intact. Ownership of a
+        # root-executed sudo helper is therefore not negotiable via env: an
+        # exported INSTALL_OWNER would hand the service user write access to the
+        # very file the perimeter exists to contain (root runs it through the
+        # `NOPASSWD: /usr/local/sbin/blackbox-apt-install *` grant). Pin owner,
+        # group and escalation whenever a production destination is in play.
+        OWNER=root; GROUP=root; SUDO=sudo
+    else
+        OWNER="${INSTALL_OWNER:-root}"; GROUP="${INSTALL_GROUP:-root}"
+        # Unset → "sudo"; explicitly empty → run direct (sandbox tests only).
+        SUDO="${INSTALL_SUDO-sudo}"
+    fi
+    local HELPER
+
+    # sed replacement metacharacters have to be escaped before they reach the
+    # substitution: `&` means "the whole match" and `|` is our delimiter.
+    # MEASURED: an install root of /home/r&d/repo otherwise bakes
+    # /home/rBLACKBOX_ROOT_PLACEHOLDERd/repo into the helper — silently
+    # reintroducing this very incident, and the pointer cannot rescue it either.
+    local ROOT_ESC="${BLACKBOX_ROOT//\\/\\\\}"
+    ROOT_ESC="${ROOT_ESC//&/\\&}"
+    ROOT_ESC="${ROOT_ESC//|/\\|}"
+
+    # Pointer first, so any helper installed below already has a live pointer to
+    # fall back on. /etc is read-only inside the service's mount namespace
+    # (ProtectSystem=strict), which is precisely why this is written HERE, by
+    # root, at install time — the running service must never write it, and
+    # $ETC_BLACKBOX_DIR must never appear in the unit's ReadWritePaths (see the
+    # invariant note at the Step 4 unit heredoc).
+    $SUDO mkdir -p "$ETC_BLACKBOX_DIR"
+    printf '%s\n' "$BLACKBOX_ROOT" \
+        | $SUDO install -m 0644 -o "$OWNER" -g "$GROUP" /dev/stdin "$ETC_BLACKBOX_DIR/root"
+    echo "[install] Wrote install-root pointer: $ETC_BLACKBOX_DIR/root -> $BLACKBOX_ROOT"
+
+    for HELPER in blackbox-apt-install blackbox-write-systemd; do
+        # The substitution is a no-op for blackbox-write-systemd (it takes its
+        # source as an argument and hardcodes every destination). One loop means
+        # a future helper that DOES need the root gets it for free.
+        sed -e "s|BLACKBOX_ROOT_PLACEHOLDER|$ROOT_ESC|g" \
+            "$BLACKBOX_ROOT/installer/templates/${HELPER}.sh" \
+            | $SUDO install -m 0755 -o "$OWNER" -g "$GROUP" /dev/stdin "$SBIN_DIR/${HELPER}"
+        echo "[install] Installed helper: $SBIN_DIR/${HELPER}"
+    done
+}
+install_update_helpers
 
 # ── Step 1: apt deps (audit C1 — corrected pipeline) ──
 # E16 fix: install MUST_HAVE + SHOULD_HAVE buckets. SHOULD_HAVE packages
@@ -625,6 +731,18 @@ MemoryHigh=70%
 # which prevents sudo from running as root"). The bounded NOPASSWD sudoers
 # entry remains the security boundary — only specific tailscale subcommands
 # with literal-arg matching are permitted.
+#
+# PERIMETER INVARIANT (customer, 2026-07-27): /etc/blackbox must NEVER appear in
+# any ReadWritePaths of this unit or its drop-ins. It holds
+# /etc/blackbox/root — the pointer blackbox-apt-install trusts ahead of its
+# templated default. A service that could write it could point the allowlist
+# lookup at a tree it fully controls and turn the bounded
+# `NOPASSWD: /usr/local/sbin/blackbox-apt-install *` grant into
+# `apt-get install -y <anything>` as root. The directory already holds
+# service-user-owned files (zellij cert/key), so a future "let the service
+# rotate its own certs" change is the plausible way this gets breached — add a
+# narrower ReadWritePaths (e.g. /etc/blackbox/zellij) if that ever lands, never
+# the parent. Pinned by scripts/tests/test_install_perimeter_invariants.sh.
 NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
@@ -751,6 +869,9 @@ sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/
 # all of \$HOME writable, so it needs NO entry here today. If ProtectHome is
 # EVER re-hardened to read-only, add \$REAL_HOME/agent-workspaces to this list
 # (else every default-cwd CLI-agent task fails creating its workspace).
+#
+# Never add /etc/blackbox here either — see the perimeter invariant at the main
+# unit heredoc above (it holds the apt-helper root pointer).
 ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.claude.json $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij $REAL_HOME/.local/share/blackbox /tmp
 # Disable PrivateTmp so tmux's socket lives in real /tmp and survives
 # service restarts (combined with KillMode=process below).
@@ -834,8 +955,12 @@ if [[ -f /etc/sudoers.d/blackbox-tailscale ]]; then
     sudo rm -f /etc/sudoers.d/blackbox-tailscale
     echo "[install] Removed legacy /etc/sudoers.d/blackbox-tailscale (renamed to -system)"
 fi
+# $BLACKBOX_ROOT_SED_ESC (not the raw root) — a `&`/`|`/`\` in the path would
+# otherwise corrupt this grant exactly as it corrupted the apt helper's baked
+# default (customer, 2026-07-27). REAL_USER is charset-validated above so it
+# needs no escaping.
 sed -e "s|REAL_USER_PLACEHOLDER|$REAL_USER|g" \
-    -e "s|BLACKBOX_ROOT_PLACEHOLDER|$BLACKBOX_ROOT|g" \
+    -e "s|BLACKBOX_ROOT_PLACEHOLDER|$BLACKBOX_ROOT_SED_ESC|g" \
     "$BLACKBOX_ROOT/installer/templates/sudoers-blackbox-system" \
     | sudo install -m 0440 -o root -g root /dev/stdin /etc/sudoers.d/blackbox-system
 if ! sudo visudo -c -f /etc/sudoers.d/blackbox-system > /dev/null; then
@@ -845,17 +970,13 @@ if ! sudo visudo -c -f /etc/sudoers.d/blackbox-system > /dev/null; then
 fi
 echo "[install] Sudoers grant written for $REAL_USER (tailscale + service + update helpers)"
 
-# ── Step 4f1: install root-owned dispatch helpers for update pipeline (T2 / T3) ──
-# Two bounded helper scripts that the update flow's sudoers grants will point at.
-# Replaces wildcard sudo grants for apt-get install + tee /etc/sudoers.d that
-# would otherwise be priv-esc primitives via any MCP-tool prompt injection.
-# T5 lands the actual sudoers grants that point at these.
-for HELPER in blackbox-apt-install blackbox-write-systemd; do
-    sudo install -m 0755 -o root -g root \
-        "$BLACKBOX_ROOT/installer/templates/${HELPER}.sh" \
-        "/usr/local/sbin/${HELPER}"
-    echo "[install] Installed helper: /usr/local/sbin/${HELPER}"
-done
+# ── Step 4f1: dispatch helpers — MOVED to Step 0b (customer, 2026-07-27) ──
+# install_update_helpers() used to run here, ~780 lines after Step 1's apt run.
+# Any earlier failure (a package apt cannot locate, the Tailscale `exit 1`) then
+# aborted the installer before the helpers were refreshed — i.e. the repair
+# never reached the box that needed it most. It has no dependencies beyond
+# $BLACKBOX_ROOT, so it now runs at Step 0b. The Step 4e grants above point at
+# the helpers it installed.
 
 # ── Step 4g: Asterisk blackbox.d include + ReadWritePaths + scoped reload sudoers (T5.1) ──
 # The telephony production pass auto-configures OUR local Asterisk at runtime by
@@ -1185,7 +1306,25 @@ sudo -u "$REAL_USER" update-desktop-database "$REAL_HOME/.local/share/applicatio
 # ── Step 7: enable + restart (audit M5 — restart works whether running or stopped) ──
 sudo systemctl daemon-reload
 sudo systemctl enable blackbox.service
-sudo systemctl restart blackbox.service
+
+# Customer, 2026-07-27: the update runner re-runs this script from INSIDE the
+# update (helper refresh, which now has to precede the apt phase). The unit sets
+# KillMode=process, so an unconditional restart here SIGTERMs the very uvicorn
+# process iterating the update generator — the update dies with new code on disk
+# and old dependencies, no `complete` event, and update_state.json frozen
+# mid-phase. The runner holds an exclusive flock on Manifest/update.lock for the
+# whole update (Orchestrator/update/manager.py acquire_or_raise), so failing to
+# take that lock is an exact "an update is driving me" test. It fires its own
+# restart when it finishes (_fire_detached_restart), so skipping loses nothing.
+# `git reset --hard` runs before the regen, so this guard lands on the very
+# update that ships it.
+UPDATE_LOCK="$BLACKBOX_ROOT/Manifest/update.lock"
+if [[ -e "$UPDATE_LOCK" ]] && ! flock -n "$UPDATE_LOCK" true 2>/dev/null; then
+    echo "[install] Update in progress (Manifest/update.lock is held) — NOT restarting"
+    echo "[install] blackbox.service; the update pipeline restarts it when it completes."
+else
+    sudo systemctl restart blackbox.service
+fi
 
 # ── Step 8: Final user message (audit C3 — /usr/bin not /usr/local/bin) ──
 echo

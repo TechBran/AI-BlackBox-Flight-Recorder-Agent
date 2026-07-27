@@ -490,6 +490,83 @@ def startup_assert_sudoers_current():
 
 
 @app.on_event("startup")
+def startup_assert_helpers_current():
+    """Re-template the root-owned apt dispatch helper onto an EXISTING box on
+    every service start, so a helper whose baked-in install root went stale
+    self-heals without a manual install.sh run (customer, 2026-07-27 — stale
+    helper after commit 5eabbe45: a pre-rename root baked into
+    /usr/local/sbin/blackbox-apt-install made every update's apt phase die at
+    `rc=4, allowlist file not readable`).
+
+    Mirrors startup_assert_sudoers_current exactly: render the git-tracked
+    template with THIS box's real root, byte-compare against the deployed copy,
+    and reinstall via the already-granted `blackbox-write-systemd
+    apt-install-helper` target ONLY when they differ. Idempotent, non-fatal.
+
+    HONEST SCOPE: this only reaches a box that already has the NEW
+    blackbox-write-systemd (the one carrying the apt-install-helper
+    target_kind). A box on an older write-systemd gets `unknown target_kind`
+    (rc=4) here — harmless — and is healed instead by the install.sh re-run in
+    the update runner's systemd_regen phase (F4 keeps the SHOULD_HAVE-only apt
+    failure from aborting first) on its next update that touches the
+    helpers/systemd/sudoers buckets. No overclaim: neither path is a guarantee
+    on the very first fix delivery, which the SELF-UPDATE CEILING still bounds.
+    """
+    import subprocess
+    import tempfile
+
+    root = Path(__file__).resolve().parents[1]
+    # Only the apt helper bakes in a root, so only it can go stale in the
+    # incident sense. The destination is chosen by target_kind, never by us.
+    template = root / "installer" / "templates" / "blackbox-apt-install.sh"
+    deployed = "/usr/local/sbin/blackbox-apt-install"
+    if not template.is_file():
+        return
+    try:
+        rendered = template.read_text(encoding="utf-8").replace(
+            "BLACKBOX_ROOT_PLACEHOLDER", str(root))
+    except OSError as e:
+        logger.warning("[helpers] could not read apt-install template: %r", e)
+        return
+    # If the deployed helper already matches the rendered template, nothing to
+    # do. A missing/unreadable deployed file falls through to a write attempt.
+    try:
+        with open(deployed, "r", encoding="utf-8", errors="replace") as f:
+            if f.read() == rendered:
+                logger.info("[helpers] %s already current", deployed)
+                return
+    except (OSError, PermissionError):
+        pass
+
+    helper = "/usr/local/sbin/blackbox-write-systemd"
+    if not os.path.isfile(helper):
+        logger.warning("[helpers] %s missing; can't auto-update apt helper", helper)
+        return
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".apt-helper",
+                                          delete=False, encoding="utf-8") as tmp:
+            tmp.write(rendered)
+            tmp_path = tmp.name
+        result = subprocess.run(
+            ["sudo", "-n", helper, "apt-install-helper", tmp_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        os.unlink(tmp_path)
+        if result.returncode == 0:
+            logger.info("[helpers] re-templated %s with real root %s",
+                        deployed, root)
+        else:
+            # rc=4 here == this box's write-systemd predates the
+            # apt-install-helper target_kind (see HONEST SCOPE above).
+            logger.warning("[helpers] apt-helper auto-update helper failed "
+                           "rc=%d stderr=%r", result.returncode,
+                           result.stderr[:200])
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("[helpers] apt-helper auto-update errored: %r", e)
+
+
+@app.on_event("startup")
 def startup_assert_url_handlers():
     """Re-assert chromium-browser as the default URL handler for HTTP(S)
     and text/html every time the service starts. Brandon's MSO2 hit a
