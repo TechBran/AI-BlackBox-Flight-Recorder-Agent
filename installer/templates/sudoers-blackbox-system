@@ -58,11 +58,17 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl stop blackbox-mcp.
 #     - verifies <pkg> is in Scripts/onboarding/system-packages.txt allowlist
 #     - then: apt-get install -y --no-install-recommends <pkg>
 #
-#   blackbox-write-systemd <target_kind> <source_file>
-#     - target_kind whitelisted to: unit | override | cli-agent-overrides | sudoers-system
+#   blackbox-write-systemd <target_kind>
+#     - takes NO caller-supplied source (install.sh-grant removal, 2026-07-27):
+#       copies the RENDERED, root-owned /etc/blackbox/templates/<target_kind>
+#       to the kind's hardcoded destination. Caller controls neither the
+#       destination NOR the content of any privileged write.
+#     - target_kind whitelisted (unit | override | cli-agent-overrides |
+#       zellij-web-unit | …-helper | sudoers-system | asterisk-* | …)
 #     - destination is HARDCODED per target_kind (caller cannot pick path)
 #     - sudoers-* targets validated by `visudo -c` BEFORE copy
 #     - systemd targets trigger daemon-reload after write
+#     - a legacy second argument is accepted-and-ignored (never read)
 #
 # A prompt-injection RCE cannot abuse these to install arbitrary packages,
 # write arbitrary sudoers rules, or escalate beyond the dispatcher's
@@ -70,16 +76,16 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl stop blackbox-mcp.
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-apt-install *
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd *
 
-# ── Update-pipeline install.sh re-run (Brandon 2026-05-24) ──────────────
-# Bounded to the exact BLACKBOX_ROOT path so an attacker who can write
-# another bash script can't use this grant against arbitrary targets.
-# install.sh itself is git-tracked and changes only on update; an attacker
-# with write access to install.sh could already trigger root via this on
-# the next Portal update regardless, so the grant doesn't widen the actual
-# threat model. Avoids the "scary FAILED message" UX (cecc3c1) by letting
-# the runner's `sudo -n bash install.sh` actually succeed for the systemd
-# regen phase.
-REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/bash BLACKBOX_ROOT_PLACEHOLDER/Scripts/install.sh
+# ── Update-pipeline systemd regen (install.sh-grant removal, 2026-07-27) ─
+# The former `NOPASSWD: /usr/bin/bash <root>/Scripts/install.sh` grant lived
+# here. It was the ONE in-service→arbitrary-root escalation: any prompt-
+# injection RCE in the service could `sudo -n bash install.sh` and run the
+# whole installer as root. It is DELETED. The update pipeline's system-level
+# regen (Orchestrator/update/runner.py::_privileged_regen) now dispatches the
+# individual bounded blackbox-write-systemd target_kinds below for each CHANGED
+# git-tracked template instead of re-running install.sh. New system packages
+# and genuinely new always-on units remain a one-time operator `sudo bash
+# install.sh` step — see docs/runbooks/2026-07-27-remove-install-sh-grant.md.
 
 # ── Zellij CLI Agent (Track A T4, audit C5) ─────────────────────────────
 # Grants required by the Zellij rewrite of the CLI Agent terminal stack.

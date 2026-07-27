@@ -110,11 +110,16 @@ fi
 # the template. That customer's copy predated the 5eabbe45 rename, and since the
 # installed file is root-owned under /usr/local/sbin, `git reset --hard` could
 # never repair it — the apt phase of every subsequent update died at exit 4
-# looking for an allowlist under a path that had never existed on that box. Two
-# fixes here: substitute the REAL $BLACKBOX_ROOT (line 19, derived from this
-# script's own location) exactly the way Step 4e already does for sudoers, and
-# write a root-owned pointer file so a repo that MOVES is repaired by re-running
-# install.sh rather than by hand-editing /usr/local/sbin.
+# looking for an allowlist under a path that had never existed on that box.
+#
+# install.sh-grant removal, 2026-07-27: that whole moved-repo failure mode is
+# now designed out. blackbox-apt-install no longer resolves an in-tree allowlist
+# at all — it reads ONLY the root-owned /etc/blackbox/system-packages.txt this
+# function writes below, at a FIXED /etc path independent of where the repo
+# lives. A moved repo is repaired simply by re-running install.sh (it rewrites
+# the /etc copy from the new location); nothing under /usr/local/sbin carries an
+# install root anymore, so the former /etc/blackbox/root pointer is deleted. The
+# template substitution stays generic for any future helper that needs the root.
 install_update_helpers() {
     # Destinations are overridable ONLY so the bash tests
     # (scripts/tests/test_install_update_helpers.sh,
@@ -148,21 +153,33 @@ install_update_helpers() {
     ROOT_ESC="${ROOT_ESC//&/\\&}"
     ROOT_ESC="${ROOT_ESC//|/\\|}"
 
-    # Pointer first, so any helper installed below already has a live pointer to
-    # fall back on. /etc is read-only inside the service's mount namespace
-    # (ProtectSystem=strict), which is precisely why this is written HERE, by
-    # root, at install time — the running service must never write it, and
+    # Root-owned apt allowlist FIRST, so blackbox-apt-install has its only
+    # trusted source in place before it (or the update runner) is ever invoked.
+    # install.sh-grant removal, 2026-07-27: this /etc copy REPLACES the former
+    # /etc/blackbox/root pointer. blackbox-apt-install used to resolve the
+    # in-tree $BLACKBOX_ROOT/Scripts/onboarding/system-packages.txt (via that
+    # pointer) — a file the running service CAN write, which was the standing
+    # RCE gap. The helper now reads ONLY /etc/blackbox/system-packages.txt, and
+    # THIS is its sole writer: a human running install.sh as root. /etc is
+    # read-only inside the service's mount namespace (ProtectSystem=strict) and
     # $ETC_BLACKBOX_DIR must never appear in the unit's ReadWritePaths (see the
-    # invariant note at the Step 4 unit heredoc).
+    # invariant note at the Step 4 unit heredoc) — so the service has no DIRECT
+    # write path to the allowlist and no service-invokable refresh of it. A new
+    # system package is therefore an operator step (re-run this script), by
+    # design. (This is not an absolute: the pre-existing blackbox-write-systemd
+    # `unit`/`override` targets copy a caller source into a PID-1 unit and could
+    # grant ReadWritePaths=/etc/blackbox on restart — a residual outside M2's
+    # scope, tracked in the plan's M5 trust-anchor walk.)
     $SUDO mkdir -p "$ETC_BLACKBOX_DIR"
-    printf '%s\n' "$BLACKBOX_ROOT" \
-        | $SUDO install -m 0644 -o "$OWNER" -g "$GROUP" /dev/stdin "$ETC_BLACKBOX_DIR/root"
-    echo "[install] Wrote install-root pointer: $ETC_BLACKBOX_DIR/root -> $BLACKBOX_ROOT"
+    $SUDO install -m 0644 -o "$OWNER" -g "$GROUP" \
+        "$BLACKBOX_ROOT/Scripts/onboarding/system-packages.txt" \
+        "$ETC_BLACKBOX_DIR/system-packages.txt"
+    echo "[install] Wrote root-owned apt allowlist: $ETC_BLACKBOX_DIR/system-packages.txt"
 
     for HELPER in blackbox-apt-install blackbox-write-systemd; do
-        # The substitution is a no-op for blackbox-write-systemd (it takes its
-        # source as an argument and hardcodes every destination). One loop means
-        # a future helper that DOES need the root gets it for free.
+        # The substitution is a no-op for both helpers today (each hardcodes its
+        # destinations and, since this change, its allowlist source). One loop
+        # means a future helper that DOES need $BLACKBOX_ROOT gets it for free.
         sed -e "s|BLACKBOX_ROOT_PLACEHOLDER|$ROOT_ESC|g" \
             "$BLACKBOX_ROOT/installer/templates/${HELPER}.sh" \
             | $SUDO install -m 0755 -o "$OWNER" -g "$GROUP" /dev/stdin "$SBIN_DIR/${HELPER}"
@@ -170,6 +187,85 @@ install_update_helpers() {
     done
 }
 install_update_helpers
+
+# ── Step 0c: publish the trusted root-owned template store (install.sh-grant ──
+#             removal, 2026-07-27) ──────────────────────────────────────────────
+# The security fix at the heart of the install.sh-grant removal. blackbox-write-
+# systemd no longer takes a caller-supplied <source_file> — it copies a RENDERED,
+# root-owned template from /etc/blackbox/templates/<kind> to that kind's
+# hardcoded destination. This function is the SOLE writer of that store: it
+# renders every git-tracked privileged template that maps to a write-systemd
+# target_kind with THIS box's real root/user and installs each entry root-owned.
+#
+# WHY this closes the escalation: the service user controls neither the
+# destination (hardcoded in the helper) NOR the content (root-owned store it
+# cannot write — /etc/blackbox is outside the unit's ReadWritePaths, enforced by
+# scripts/tests/test_install_perimeter_invariants.sh). The only path that
+# populates the store from the service-writable repo is THIS human-run script,
+# whose former `NOPASSWD: bash install.sh` grant is removed — so a prompt-
+# injection RCE in the service can no longer bridge repo→store.
+#
+# Store contents = the four kinds backed by a git-tracked template. The inline-
+# heredoc units in this script (blackbox.service, override, cli-agent-overrides,
+# mcp, ydotoold, time-sync, logrotate) and the asterisk-* files are written
+# DIRECTLY by install.sh (below, as root) and are NOT part of the store — the
+# runner documents them as the operator-step residual, and write-systemd fails
+# closed (exit 6) if ever asked for one. The apt allowlist
+# /etc/blackbox/system-packages.txt is the store's sibling (written above by
+# install_update_helpers), same root-owned rules.
+#
+# ETC_BLACKBOX_DIR / INSTALL_{OWNER,GROUP,SUDO} are overridable ONLY so the bash
+# test (scripts/tests/test_publish_template_store.sh) can redirect the whole
+# publish into an unprivileged mktemp sandbox — identical model to
+# install_update_helpers above. Production always pins root:root + sudo.
+publish_template_store() {
+    local ETC_BLACKBOX_DIR="${ETC_BLACKBOX_DIR:-/etc/blackbox}"
+    local STORE_DIR="$ETC_BLACKBOX_DIR/templates"
+    local OWNER GROUP SUDO
+    if [[ "$ETC_BLACKBOX_DIR" == "/etc/blackbox" ]]; then
+        # Same non-negotiable pin as install_update_helpers: a root-executed
+        # store entry (write-systemd copies it under the NOPASSWD grant) must
+        # never be owned by the service user, so an exported INSTALL_OWNER can
+        # only take effect against a sandbox destination, never the real /etc.
+        OWNER=root; GROUP=root; SUDO=sudo
+    else
+        OWNER="${INSTALL_OWNER:-root}"; GROUP="${INSTALL_GROUP:-root}"
+        SUDO="${INSTALL_SUDO-sudo}"
+    fi
+
+    # sed replacement metacharacters escaped exactly as at every other
+    # substitution site (Step 0b, Step 4e): `&` = whole match, `|` = delimiter,
+    # `\` = escape. REAL_USER is charset-validated at Step 0, so it needs none.
+    local ROOT_ESC="${BLACKBOX_ROOT//\\/\\\\}"
+    ROOT_ESC="${ROOT_ESC//&/\\&}"
+    ROOT_ESC="${ROOT_ESC//|/\\|}"
+
+    $SUDO mkdir -p "$STORE_DIR"
+
+    # <kind> <repo-relative template> <store mode>
+    # Both placeholders are always substituted; substituting one a template lacks
+    # is a harmless no-op (same reasoning as runner.py::_render_template), and it
+    # yields bytes identical to install.sh's own per-file deploy — which is what
+    # makes the runner's / startup hooks' byte-compare-against-store meaningful.
+    # Store modes are 0440 for sudoers kinds, 0644 otherwise; write-systemd sets
+    # the FINAL deployed mode per kind (0755 for the sbin helpers).
+    local _pub_kind _pub_tmpl _pub_mode
+    while read -r _pub_kind _pub_tmpl _pub_mode; do
+        [[ -z "$_pub_kind" ]] && continue
+        sed -e "s|BLACKBOX_ROOT_PLACEHOLDER|$ROOT_ESC|g" \
+            -e "s|REAL_USER_PLACEHOLDER|$REAL_USER|g" \
+            "$BLACKBOX_ROOT/$_pub_tmpl" \
+          | $SUDO install -m "$_pub_mode" -o "$OWNER" -g "$GROUP" /dev/stdin \
+                "$STORE_DIR/$_pub_kind"
+        echo "[install] Published template store entry: $STORE_DIR/$_pub_kind"
+    done <<'STORE_MANIFEST'
+sudoers-system        installer/templates/sudoers-blackbox-system  0440
+apt-install-helper    installer/templates/blackbox-apt-install.sh  0644
+write-systemd-helper  installer/templates/blackbox-write-systemd.sh 0644
+zellij-web-unit       installer/templates/zellij-web.service       0644
+STORE_MANIFEST
+}
+publish_template_store
 
 # ── Step 1: apt deps (audit C1 — corrected pipeline) ──
 # E16 fix: install MUST_HAVE + SHOULD_HAVE buckets. SHOULD_HAVE packages
@@ -732,11 +828,11 @@ MemoryHigh=70%
 # entry remains the security boundary — only specific tailscale subcommands
 # with literal-arg matching are permitted.
 #
-# PERIMETER INVARIANT (customer, 2026-07-27): /etc/blackbox must NEVER appear in
-# any ReadWritePaths of this unit or its drop-ins. It holds
-# /etc/blackbox/root — the pointer blackbox-apt-install trusts ahead of its
-# templated default. A service that could write it could point the allowlist
-# lookup at a tree it fully controls and turn the bounded
+# PERIMETER INVARIANT (customer, 2026-07-27; re-anchored install.sh-grant
+# removal, 2026-07-27): /etc/blackbox must NEVER appear in any ReadWritePaths of
+# this unit or its drop-ins. It holds /etc/blackbox/system-packages.txt — the
+# root-owned apt allowlist that blackbox-apt-install trusts as its SOLE source.
+# A service that could write it could append any package and turn the bounded
 # `NOPASSWD: /usr/local/sbin/blackbox-apt-install *` grant into
 # `apt-get install -y <anything>` as root. The directory already holds
 # service-user-owned files (zellij cert/key), so a future "let the service

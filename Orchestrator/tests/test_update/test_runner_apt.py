@@ -30,8 +30,18 @@ from Orchestrator.update.manager import UpdateManager
 from Orchestrator.update.runner import (
     APT_HELPER, APT_PREFLIGHT_PROBE_PKG,
     APT_HELPER_RC_ALLOWLIST_UNREADABLE, APT_HELPER_RC_NOT_ALLOWLISTED,
+    WRITE_SYSTEMD_HELPER, _REGEN_TARGETS,
     UpdateRunner, _extract_allowlist_path, _parse_pkg_buckets, _parse_pkg_list,
 )
+
+
+# Repo-relative template paths + write-systemd kinds the decomposed regen
+# dispatches (install.sh-grant removal, 2026-07-27), looked up from the runner's
+# own dispatch table so these tests track it rather than restating it.
+_KIND_BY_TEMPLATE = {t.template: t.kind for t in _REGEN_TARGETS}
+SUDOERS_TEMPLATE = "installer/templates/sudoers-blackbox-system"
+APT_HELPER_TEMPLATE = "installer/templates/blackbox-apt-install.sh"
+ZELLIJ_UNIT_TEMPLATE = "installer/templates/zellij-web.service"
 
 
 FROM_SHA = "a" * 40
@@ -83,6 +93,29 @@ def resets(monkeypatch, root):
     return recorded
 
 
+@pytest.fixture(autouse=True)
+def store_sandbox(monkeypatch, tmp_path):
+    """Rebase the root-owned trusted template store under a hermetic tmp dir so
+    _privileged_regen's repo-render-vs-store compare (install.sh-grant removal,
+    2026-07-27 / M3) never reads the real /etc/blackbox/templates. Mirrors
+    blackbox-write-systemd's BLACKBOX_WRITE_SYSTEMD_DEST_ROOT sandbox rebase.
+
+    Autouse so EVERY test in this module is isolated from /etc; returns a
+    `publish(kind, body)` so a test can stage what the human `install.sh` would
+    have published. A test that does NOT publish a kind leaves it 'unpublished'
+    (store entry absent) — the store-staleness case the runner must NOT dispatch.
+    """
+    store_root = tmp_path / "store-root"
+    store_dir = store_root / "etc" / "blackbox" / "templates"
+    store_dir.mkdir(parents=True)
+    monkeypatch.setenv("BLACKBOX_WRITE_SYSTEMD_DEST_ROOT", str(store_root))
+
+    def publish(kind, body="# regen template fixture\n"):
+        (store_dir / kind).write_text(body)
+
+    return publish
+
+
 def set_changed(monkeypatch, files):
     monkeypatch.setattr(runner_mod.git_ops, "diff_files",
                         lambda p, a, b: list(files))
@@ -91,6 +124,14 @@ def set_changed(monkeypatch, files):
 def write_allowlist(root, body):
     (root / "Scripts" / "onboarding" / "system-packages.txt").write_text(
         ALLOWLIST_HEADER + body)
+
+
+def write_template(root, relpath, body="# regen template fixture\n"):
+    """Materialize a git-tracked regen template under the fake root so
+    _render_template can read it (the runner reads self.root / template)."""
+    dst = root / relpath
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(body)
 
 
 # ── harness ─────────────────────────────────────────────────────────────
@@ -112,6 +153,9 @@ class FakeRunner(UpdateRunner):
 
 
 def is_install_sh(cmd):
+    """A `sudo -n bash <root>/Scripts/install.sh` re-run. install.sh-grant
+    removal, 2026-07-27: the runner must NEVER emit this anymore — kept as the
+    regression guard the phase tests assert against."""
     return cmd[:3] == ["sudo", "-n", "bash"] and cmd[-1].endswith("Scripts/install.sh")
 
 
@@ -123,14 +167,46 @@ def is_pkg_install(cmd):
     return APT_HELPER in cmd and cmd[-1] != APT_PREFLIGHT_PROBE_PKG
 
 
+def is_write_systemd(cmd):
+    """A bounded blackbox-write-systemd dispatch. install.sh-grant removal,
+    2026-07-27 (M3): NO source arg — cmd is exactly
+    ['sudo','-n',WRITE_SYSTEMD_HELPER,<kind>]. The helper copies the root-owned
+    store entry to its hardcoded dest; the caller passes only the kind."""
+    return WRITE_SYSTEMD_HELPER in cmd
+
+
+def write_systemd_kind(cmd):
+    """The target_kind arg of a write-systemd dispatch (positional: right after
+    the helper path — and, since M3, the LAST arg: there is no source)."""
+    i = cmd.index(WRITE_SYSTEMD_HELPER)
+    return cmd[i + 1]
+
+
+def no_source_in_dispatch(cmd):
+    """True iff a write-systemd dispatch carries ONLY the kind (no source path).
+    The M3 security invariant: the caller never hands the helper any content."""
+    i = cmd.index(WRITE_SYSTEMD_HELPER)
+    return cmd[i:] == [WRITE_SYSTEMD_HELPER, write_systemd_kind(cmd)]
+
+
+def is_systemctl_restart(cmd, service=None):
+    hit = cmd[:4] == ["sudo", "-n", "systemctl", "restart"]
+    return hit and (service is None or cmd[4] == service)
+
+
 def healthy(_runner, cmd):
-    """Everything works: sudo available, helper reads its allowlist, apt OK."""
+    """Everything works: sudo available, helper reads its allowlist, apt OK,
+    bounded write-systemd dispatch + aux restart succeed."""
     if cmd[:3] == ["sudo", "-n", "true"]:
         return 0, ""
     if is_probe(cmd):
         return APT_HELPER_RC_NOT_ALLOWLISTED, "package not in allowlist"
     if is_pkg_install(cmd):
         return 0, f"{cmd[-1]} installed."
+    if is_write_systemd(cmd):
+        return 0, f"[blackbox-write-systemd] Wrote ({write_systemd_kind(cmd)})"
+    if is_systemctl_restart(cmd):
+        return 0, ""
     if is_install_sh(cmd):
         return 0, "[install] done"
     return 0, ""
@@ -155,33 +231,48 @@ def make(root, responder=healthy):
     return FakeRunner(root, UpdateManager(root), responder)
 
 
-# ── D2: the privileged install.sh re-run stays AFTER the apt phase ──────
+# ── D2: system-level regen dispatches bounded helpers, never install.sh ──
 
-def test_privileged_regen_runs_after_apt_phase(monkeypatch, root, resets):
-    """B1 revert (customer, 2026-07-27, stale helper after commit 5eabbe45):
-    an early helper refresh BEFORE apt was tried and is dangerous — install.sh's
-    Step 7 restart (KillMode=process) would kill the update mid-flight. Phase
-    order must be monotonic: the single install.sh re-run happens in
-    systemd_regen, after every apt call (probe + installs)."""
+def test_regen_dispatch_runs_after_apt_phase(monkeypatch, root, resets, store_sandbox):
+    """install.sh-grant removal, 2026-07-27: the regen no longer re-runs
+    install.sh — it dispatches the changed template through blackbox-write-systemd.
+    Phase order must stay monotonic: that dispatch happens in systemd_regen,
+    AFTER every apt call (probe + installs). An earlier privileged step was tried
+    and reverted (a blackbox.service restart mid-update, KillMode=process, would
+    SIGTERM the uvicorn process iterating the update).
+
+    M3: the change must be PUBLISHED to the trusted store (store == repo render)
+    for the dispatch to fire — so this stages the store as the human install.sh
+    would have."""
     write_allowlist(root, "novnc  # SHOULD_HAVE # CU live-view browser client\n")
-    set_changed(monkeypatch, ["installer/templates/blackbox-apt-install.sh",
+    write_template(root, APT_HELPER_TEMPLATE)
+    store_sandbox(_KIND_BY_TEMPLATE[APT_HELPER_TEMPLATE])  # human published it
+    set_changed(monkeypatch, [APT_HELPER_TEMPLATE,
                               "Scripts/onboarding/system-packages.txt"])
     r = make(root)
     drive(r)
 
-    regen_at = [i for i, c in enumerate(r.calls) if is_install_sh(c)]
+    assert not any(is_install_sh(c) for c in r.calls), \
+        "the install.sh re-run must be gone (its sudo grant was removed)"
+    regen_at = [i for i, c in enumerate(r.calls) if is_write_systemd(c)]
     apt_at = [i for i, c in enumerate(r.calls) if APT_HELPER in c]
-    assert regen_at, "helpers bucket did not trigger the privileged re-run"
+    assert regen_at, "helpers bucket did not trigger a write-systemd dispatch"
     assert apt_at, "apt phase never ran"
     assert apt_at[-1] < regen_at[0], (
-        f"install.sh re-ran at call {regen_at[0]} but apt was still active at "
-        f"{apt_at[-1]} — the privileged re-run must stay AFTER the apt phase")
+        f"write-systemd dispatched at call {regen_at[0]} but apt was still "
+        f"active at {apt_at[-1]} — regen must stay AFTER the apt phase")
+    # The changed template is the apt helper → its matching bounded kind.
+    assert write_systemd_kind(r.calls[regen_at[0]]) == \
+        _KIND_BY_TEMPLATE[APT_HELPER_TEMPLATE]
+    # M3 security invariant: the dispatch carries ONLY the kind, no source path.
+    assert no_source_in_dispatch(r.calls[regen_at[0]]), \
+        "write-systemd dispatch leaked a source argument (M0/M3 forbids it)"
 
 
-def test_apt_phase_never_reruns_install_sh_early(monkeypatch, root, resets):
+def test_apt_phase_never_dispatches_regen_early(monkeypatch, root, resets):
     """No mid-apt self-repair: a stale helper blocking a MUST_HAVE package must
-    fail + report, NOT trigger an early install.sh re-run inside the apt phase
-    (that was the reverted hazard). The one re-run, if any, is systemd_regen."""
+    fail + report, NOT trigger an early write-systemd dispatch (or install.sh
+    re-run) inside the apt phase. Any regen is systemd_regen, after apt."""
     write_allowlist(root, "xvfb  # MUST_HAVE # CU virtual displays\n")
     # apt bucket only — systemd_regen must not fire at all here.
     set_changed(monkeypatch, ["Scripts/onboarding/system-packages.txt"])
@@ -195,30 +286,175 @@ def test_apt_phase_never_reruns_install_sh_early(monkeypatch, root, resets):
     events = drive(r)
     assert final(events)["succeeded"] is False
     assert not any(is_install_sh(c) for c in r.calls), \
-        "apt phase re-ran install.sh early — the reverted self-repair is back"
+        "apt phase re-ran install.sh — the removed grant must never be used"
+    assert not any(is_write_systemd(c) for c in r.calls), \
+        "apt phase dispatched regen early — the reverted self-repair is back"
 
 
-def test_privileged_regen_runs_exactly_once_per_update(monkeypatch, root, resets):
-    """helpers + systemd both lit → still ONE install.sh re-run. Running the
-    600s-timeout step twice buys nothing (it is idempotent)."""
+def test_changed_template_dispatches_once(monkeypatch, root, resets, store_sandbox):
+    """helpers + systemd buckets both lit → the ONE changed (and PUBLISHED)
+    template dispatches exactly once. install.sh-grant removal, 2026-07-27: no
+    install.sh re-run at all, and no duplicate dispatch of the same bounded kind."""
     write_allowlist(root, "novnc  # SHOULD_HAVE # CU live-view browser client\n")
-    set_changed(monkeypatch, ["installer/templates/blackbox-apt-install.sh",
+    write_template(root, APT_HELPER_TEMPLATE)
+    store_sandbox(_KIND_BY_TEMPLATE[APT_HELPER_TEMPLATE])  # human published it
+    set_changed(monkeypatch, [APT_HELPER_TEMPLATE,
                               "Scripts/install.sh",
                               "Scripts/onboarding/system-packages.txt"])
     r = make(root)
     drive(r)
-    assert sum(1 for c in r.calls if is_install_sh(c)) == 1
+    assert not any(is_install_sh(c) for c in r.calls)
+    dispatched = [write_systemd_kind(c) for c in r.calls if is_write_systemd(c)]
+    assert dispatched == [_KIND_BY_TEMPLATE[APT_HELPER_TEMPLATE]], \
+        f"expected one apt-install-helper dispatch, got {dispatched}"
 
 
-def test_no_helper_refresh_when_helpers_bucket_is_clear(monkeypatch, root, resets):
-    """A pure apt update must not gain a privileged install.sh re-run it
-    never used to do."""
+def test_no_regen_dispatch_when_only_allowlist_changed(monkeypatch, root, resets):
+    """A pure apt update (only the allowlist moved) must not gain a privileged
+    dispatch it never used to do — no write-systemd, no install.sh."""
     write_allowlist(root, "xvfb  # MUST_HAVE # CU virtual displays\n")
     set_changed(monkeypatch, ["Scripts/onboarding/system-packages.txt"])
     r = make(root)
     events = drive(r)
     assert not any(is_install_sh(c) for c in r.calls)
+    assert not any(is_write_systemd(c) for c in r.calls)
     assert final(events)["succeeded"] is True
+
+
+# ── M3: decomposed regen — per-template dispatch precision + new-pkg policy ──
+
+def test_changed_unit_template_dispatches_matching_kind_only(monkeypatch, root, resets, store_sandbox):
+    """A changed systemd-unit template dispatches EXACTLY its matching bounded
+    kind (nothing else), and restarts only that aux service — never
+    blackbox.service, whose restart is the detached one after `complete`. This
+    is the 'only rewrite what moved' guarantee: no blanket regen."""
+    # Materialize EVERY regen template on disk so the changed-filter — not a
+    # missing-file skip — is what's under test: a blanket regen would now
+    # dispatch all four kinds, exposing the mutation (install.sh-grant removal,
+    # 2026-07-27).
+    for t in _REGEN_TARGETS:
+        write_template(root, t.template)
+    # Publish ONLY the zellij store entry (as the human install.sh would). M3:
+    # only a change PUBLISHED to the store may dispatch — this also proves the
+    # other three kinds don't dispatch even though their templates exist on disk.
+    store_sandbox(_KIND_BY_TEMPLATE[ZELLIJ_UNIT_TEMPLATE])
+    # zellij-web.service is not in any changes.py bucket; the regen phase still
+    # enters because a dispatchable template moved. Only ONE template changed.
+    set_changed(monkeypatch, [ZELLIJ_UNIT_TEMPLATE])
+    r = make(root)
+    events = drive(r)
+
+    assert final(events)["succeeded"] is True
+    dispatched = [write_systemd_kind(c) for c in r.calls if is_write_systemd(c)]
+    assert dispatched == [_KIND_BY_TEMPLATE[ZELLIJ_UNIT_TEMPLATE]], \
+        f"expected exactly the zellij-web-unit kind, got {dispatched}"
+    # Restarts the aux unit via its own grant …
+    assert any(is_systemctl_restart(c, "zellij-web.service") for c in r.calls)
+    # … and never the service iterating this update.
+    assert not any(is_systemctl_restart(c, "blackbox.service") for c in r.calls), \
+        "regen restarted blackbox.service — that SIGTERMs the running update"
+    assert not any(is_install_sh(c) for c in r.calls)
+
+
+# ── M3: store-staleness — a changed-but-unpublished template must NOT falsely
+#        claim success (the exact gap the M0 review flagged) ──────────────────
+
+def test_changed_but_unpublished_template_surfaces_remedy_not_dispatch(
+        monkeypatch, root, resets, store_sandbox):
+    """The store is human-`install.sh`-only. If a commit CHANGES a privileged
+    template but the human has not re-published the store, the runner must NOT
+    dispatch write-systemd (which would copy the STALE store back and log a false
+    "Regenerated" success — the store-staleness bug). It must surface the
+    `sudo bash install.sh` remedy and let the rest of the update complete."""
+    write_allowlist(root, "novnc  # SHOULD_HAVE # CU live-view browser client\n")
+    write_template(root, APT_HELPER_TEMPLATE)
+    # Deliberately do NOT publish the store entry for this kind.
+    set_changed(monkeypatch, [APT_HELPER_TEMPLATE,
+                              "Scripts/onboarding/system-packages.txt"])
+    r = make(root)
+    events = drive(r)
+
+    # No dispatch, no install.sh re-run: the stale store was never applied.
+    assert not any(is_write_systemd(c) for c in r.calls), \
+        "dispatched a STALE store back — the store-staleness false-success bug"
+    assert not any(is_install_sh(c) for c in r.calls)
+    # The privileged change did not silently vanish: the operator remedy is named.
+    remedy = [t for t in logs(events)
+              if "NOT" in t and f"sudo bash {root}/Scripts/install.sh" in t]
+    assert remedy, "no actionable 'run sudo bash install.sh' remedy was surfaced"
+    # The rest of the update (code, pip) still completes — this is not a rollback.
+    assert final(events)["succeeded"] is True
+    assert r.pre_update_tag not in resets, \
+        "an unpublished privileged change must not roll the whole update back"
+
+
+def test_stale_store_differing_from_repo_render_surfaces_remedy(
+        monkeypatch, root, resets, store_sandbox):
+    """Store entry PRESENT but byte-differing from the repo render (the human ran
+    an OLDER install.sh): still unpublished for THIS commit. Must not dispatch,
+    must surface the remedy — dispatching would re-assert the old store."""
+    write_allowlist(root, "novnc  # SHOULD_HAVE # CU live-view browser client\n")
+    write_template(root, APT_HELPER_TEMPLATE)  # rendered == fixture body
+    store_sandbox(_KIND_BY_TEMPLATE[APT_HELPER_TEMPLATE],
+                  body="# a DIFFERENT, older published version\n")
+    set_changed(monkeypatch, [APT_HELPER_TEMPLATE,
+                              "Scripts/onboarding/system-packages.txt"])
+    r = make(root)
+    events = drive(r)
+
+    assert not any(is_write_systemd(c) for c in r.calls), \
+        "dispatched despite repo != store — would re-assert the stale store"
+    remedy = [t for t in logs(events) if "NOT" in t and "install.sh" in t]
+    assert remedy, "stale store did not surface the operator remedy"
+    assert final(events)["succeeded"] is True
+
+
+def test_published_store_matching_repo_render_dispatches_and_heals(
+        monkeypatch, root, resets, store_sandbox):
+    """Positive control: store == repo render (human published this commit) →
+    dispatch the matching kind exactly once, with NO source, and no remedy noise."""
+    write_template(root, ZELLIJ_UNIT_TEMPLATE)
+    store_sandbox(_KIND_BY_TEMPLATE[ZELLIJ_UNIT_TEMPLATE])  # published, == render
+    set_changed(monkeypatch, [ZELLIJ_UNIT_TEMPLATE])
+    r = make(root)
+    events = drive(r)
+
+    dispatched = [c for c in r.calls if is_write_systemd(c)]
+    assert [write_systemd_kind(c) for c in dispatched] == \
+        [_KIND_BY_TEMPLATE[ZELLIJ_UNIT_TEMPLATE]]
+    assert all(no_source_in_dispatch(c) for c in dispatched)
+    assert not any("NOT applied" in t for t in logs(events)), \
+        "a PUBLISHED change wrongly surfaced the unpublished-store remedy"
+    assert final(events)["succeeded"] is True
+
+
+def test_new_must_have_not_in_allowlist_reports_remedy_and_rolls_back(
+        monkeypatch, root, resets):
+    """install.sh-grant removal, 2026-07-27: the apt helper now trusts only the
+    root-owned /etc allowlist. A commit adding a NEW MUST_HAVE package therefore
+    reaches the helper as rc=5 (not allowlisted) until an operator refreshes /etc.
+    That must fail the phase with the actionable 'run sudo bash install.sh once'
+    remedy AND roll the code back — not a bare rc, not a silent continue."""
+    write_allowlist(root, "brand-new-pkg  # MUST_HAVE # newly required dep\n")
+    set_changed(monkeypatch, ["Scripts/onboarding/system-packages.txt"])
+
+    def not_allowlisted(_r, cmd):
+        if is_pkg_install(cmd):
+            return APT_HELPER_RC_NOT_ALLOWLISTED, "package not in allowlist"
+        return healthy(_r, cmd)
+
+    r = make(root, not_allowlisted)
+    events = drive(r)
+    err = final(events)["error"]
+
+    assert final(events)["succeeded"] is False
+    assert final(events)["failed_phase"] == "apt_install"
+    assert r.pre_update_tag in resets, "new MUST_HAVE failure did not roll back"
+    assert f"sudo bash {root}/Scripts/install.sh" in err, \
+        "remedy did not name the one operator command"
+    assert "/etc/blackbox/system-packages.txt" in err, \
+        "remedy did not name the root-owned allowlist"
+    assert "brand-new-pkg" in err, "remedy did not name the blocked package"
 
 
 # ── D3: optional package failures must not discard the update ───────────

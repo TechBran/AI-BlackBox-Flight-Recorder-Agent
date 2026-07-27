@@ -412,158 +412,161 @@ async def startup_live_session_reaper():
         logger.error("[LIVE-REAPER] failed to start reaper (non-fatal): %s", e)
 
 
-@app.on_event("startup")
-def startup_assert_sudoers_current():
-    """Auto-update /etc/sudoers.d/blackbox-system if the template in this
-    git checkout adds grants that aren't already present. Uses the
-    `blackbox-write-systemd sudoers-system` helper (NOPASSWD-granted by
-    the EXISTING sudoers file, so no password needed) which runs
-    `visudo -c` before installing.
+def _store_entry_path(kind: str) -> str:
+    """Path to the ROOT-OWNED trusted template store entry for `kind`.
 
-    Why this exists (Brandon 2026-05-24): the update pipeline's
-    systemd_regen phase tries `sudo -n bash install.sh`. The original
-    sudoers file didn't grant that, so the call would fail with a
-    scary 'password required' message. cecc3c1 made the runner tolerate
-    the failure but the message still alarmed customers. Adding the
-    grant to the template fixes new installs; this startup hook ports
-    the grant to EXISTING installs without requiring them to manually
-    re-run install.sh.
+    install.sh-grant removal, 2026-07-27 (M3b): mirrors blackbox-write-systemd's
+    STORE_FILE, including the TEST-ONLY $BLACKBOX_WRITE_SYSTEMD_DEST_ROOT sandbox
+    rebase (empty in production, where sudo's env_reset scrubs it)."""
+    root_prefix = os.environ.get("BLACKBOX_WRITE_SYSTEMD_DEST_ROOT", "")
+    return f"{root_prefix}/etc/blackbox/templates/{kind}"
 
-    Idempotent: rendered template is compared byte-for-byte against the
-    deployed file; helper only invoked when they differ. Failure is
-    non-fatal — the worst case is the customer's old sudoers stays in
-    place (same as today).
+
+def _drift_heal_from_store(kind: str, deployed: str, log_tag: str) -> None:
+    """Drift-heal a deployed root-owned file FROM the trusted store on startup.
+
+    install.sh-grant removal, 2026-07-27 (M3b): these hooks NO LONGER render the
+    repo template and port repo→deployed — that auto-port was the content-
+    laundering vector the trusted-store design removes. The repo→store bridge is
+    now the human `sudo bash install.sh` publish step ALONE. This hook only re-
+    asserts an ALREADY-published store entry onto its deployed copy (store→dest)
+    when they drift, via `blackbox-write-systemd <kind>` with NO source — the
+    helper copies /etc/blackbox/templates/<kind> to the kind's hardcoded dest.
+
+    Byte-compare deployed vs store only when BOTH are readable, to stay silent
+    when already current. A root-only file (the 0440 sudoers neither side of
+    which the service user can read) or an absent file on either side falls
+    through to an idempotent dispatch: write-systemd ONLY ever copies the trusted
+    store, so re-asserting is safe; if the store entry is absent (a fresh/legacy
+    box that has not run the new install.sh) it fails closed (exit 6) and we log
+    the install.sh remedy non-fatally. Idempotent, never raises.
     """
     import subprocess
-    import tempfile
 
-    root = Path(__file__).resolve().parents[1]
-    template = root / "installer" / "templates" / "sudoers-blackbox-system"
-    deployed = "/etc/sudoers.d/blackbox-system"
-    if not template.is_file():
-        return
-    real_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "bbx"
+    store_path = _store_entry_path(kind)
     try:
-        rendered = (
-            template.read_text(encoding="utf-8")
-            .replace("REAL_USER_PLACEHOLDER", real_user)
-            .replace("BLACKBOX_ROOT_PLACEHOLDER", str(root))
-        )
-    except OSError as e:
-        logger.warning("[sudoers] could not read template: %r", e)
-        return
-    # If the deployed file already matches, no action needed.
-    try:
-        with open(deployed, "r", encoding="utf-8", errors="replace") as f:
-            current = f.read()
-        if current == rendered:
-            logger.info("[sudoers] /etc/sudoers.d/blackbox-system already current")
-            return
+        with open(store_path, "r", encoding="utf-8", errors="replace") as sf:
+            store_content = sf.read()
+        with open(deployed, "r", encoding="utf-8", errors="replace") as df:
+            if df.read() == store_content:
+                logger.info("[%s] %s already matches the trusted store",
+                            log_tag, deployed)
+                return
     except (OSError, PermissionError):
-        # File doesn't exist or we can't read it — fall through and try
-        # to write (helper will fail gracefully if not permitted).
+        # Can't compare (root-only 0440 file, or either side absent) — fall
+        # through to an idempotent store→dest dispatch. Safe: the only content
+        # write-systemd can write is the root-owned store entry.
         pass
 
     helper = "/usr/local/sbin/blackbox-write-systemd"
     if not os.path.isfile(helper):
-        logger.warning("[sudoers] helper %s missing; can't auto-update", helper)
+        logger.warning("[%s] helper %s missing; can't drift-heal %s",
+                       log_tag, helper, deployed)
         return
 
     try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".sudoers",
-                                          delete=False, encoding="utf-8") as tmp:
-            tmp.write(rendered)
-            tmp_path = tmp.name
         result = subprocess.run(
-            ["sudo", "-n", helper, "sudoers-system", tmp_path],
+            ["sudo", "-n", helper, kind],
             capture_output=True, text=True, timeout=10,
         )
-        os.unlink(tmp_path)
         if result.returncode == 0:
-            logger.info("[sudoers] auto-updated /etc/sudoers.d/blackbox-system "
-                        "(new grants from template now active)")
+            logger.info("[%s] drift-healed %s from the trusted store",
+                        log_tag, deployed)
+        elif result.returncode == 6:
+            # Store entry not yet published: a fresh/legacy box that has not run
+            # the new `sudo bash install.sh` (which populates the store). Adopting
+            # the trusted-store lockdown is a one-time operator step, by design.
+            logger.warning("[%s] %s is not in the trusted store yet — run "
+                           "`sudo bash install.sh` once to publish it (rc=6)",
+                           log_tag, deployed)
         else:
-            logger.warning("[sudoers] helper failed rc=%d stderr=%r",
-                           result.returncode, result.stderr[:200])
+            logger.warning("[%s] drift-heal helper failed rc=%d stderr=%r",
+                           log_tag, result.returncode, result.stderr[:200])
     except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning("[sudoers] auto-update errored: %r", e)
+        logger.warning("[%s] drift-heal errored: %r", log_tag, e)
+
+
+@app.on_event("startup")
+def startup_assert_sudoers_current():
+    """Drift-heal /etc/sudoers.d/blackbox-system FROM the root-owned trusted
+    store on every service start (install.sh-grant removal, 2026-07-27 / M3b).
+
+    Why this exists (Brandon 2026-05-24): the update pipeline's regen needs the
+    deployed sudoers to match what the human published; a drifted deployed copy
+    would deny the bounded grants the runner relies on. This hook re-asserts the
+    published `sudoers-system` store entry onto the deployed file when they
+    drift, via `blackbox-write-systemd sudoers-system` (NOPASSWD-granted by the
+    EXISTING sudoers file; runs `visudo -c` on the store entry before installing).
+
+    CHANGED from the pre-store model: it no longer renders the REPO template and
+    ports repo→deployed. The grant-removal / any sudoers change reaches an
+    existing box only after a human `sudo bash install.sh` publishes it to the
+    store; thereafter this hook keeps the deployed copy in sync. That is the
+    accepted one-time operator step of the trusted-store design (auto-porting an
+    unpublished repo template was the laundering vector it removes). Idempotent,
+    non-fatal — worst case the old deployed sudoers stays in place.
+    """
+    _drift_heal_from_store(
+        "sudoers-system", "/etc/sudoers.d/blackbox-system", "sudoers")
 
 
 @app.on_event("startup")
 def startup_assert_helpers_current():
-    """Re-template the root-owned apt dispatch helper onto an EXISTING box on
-    every service start, so a helper whose baked-in install root went stale
-    self-heals without a manual install.sh run (customer, 2026-07-27 — stale
-    helper after commit 5eabbe45: a pre-rename root baked into
+    """Drift-heal the root-owned apt dispatch helper FROM the trusted store on
+    every service start, so a deployed helper that drifts from the last human-
+    published store entry self-heals without a manual install.sh run (customer,
+    2026-07-27 — stale helper after commit 5eabbe45: a pre-rename root baked into
     /usr/local/sbin/blackbox-apt-install made every update's apt phase die at
     `rc=4, allowlist file not readable`).
 
-    Mirrors startup_assert_sudoers_current exactly: render the git-tracked
-    template with THIS box's real root, byte-compare against the deployed copy,
-    and reinstall via the already-granted `blackbox-write-systemd
-    apt-install-helper` target ONLY when they differ. Idempotent, non-fatal.
+    install.sh-grant removal, 2026-07-27 (M3b): CHANGED from the pre-store model
+    — it no longer renders the git-tracked template and ports repo→deployed. It
+    re-asserts the published `apt-install-helper` store entry onto the deployed
+    copy (store→dest) via the already-granted `blackbox-write-systemd
+    apt-install-helper` target when they drift. Idempotent, non-fatal.
 
-    HONEST SCOPE: this only reaches a box that already has the NEW
-    blackbox-write-systemd (the one carrying the apt-install-helper
-    target_kind). A box on an older write-systemd gets `unknown target_kind`
-    (rc=4) here — harmless — and is healed instead by the install.sh re-run in
-    the update runner's systemd_regen phase (F4 keeps the SHOULD_HAVE-only apt
-    failure from aborting first) on its next update that touches the
-    helpers/systemd/sudoers buckets. No overclaim: neither path is a guarantee
-    on the very first fix delivery, which the SELF-UPDATE CEILING still bounds.
+    HONEST SCOPE: this heals only a box that already has the NEW
+    blackbox-write-systemd (the one carrying the apt-install-helper target_kind)
+    AND a published store entry. A box on an older write-systemd gets `unknown
+    target_kind` (rc=4) here — harmless — and both the helper and the store are
+    (re)written by the next human `sudo bash install.sh`. No overclaim: the very
+    first fix delivery is still bounded by the SELF-UPDATE CEILING.
     """
-    import subprocess
-    import tempfile
+    _drift_heal_from_store(
+        "apt-install-helper", "/usr/local/sbin/blackbox-apt-install", "helpers")
 
-    root = Path(__file__).resolve().parents[1]
-    # Only the apt helper bakes in a root, so only it can go stale in the
-    # incident sense. The destination is chosen by target_kind, never by us.
-    template = root / "installer" / "templates" / "blackbox-apt-install.sh"
-    deployed = "/usr/local/sbin/blackbox-apt-install"
-    if not template.is_file():
-        return
-    try:
-        rendered = template.read_text(encoding="utf-8").replace(
-            "BLACKBOX_ROOT_PLACEHOLDER", str(root))
-    except OSError as e:
-        logger.warning("[helpers] could not read apt-install template: %r", e)
-        return
-    # If the deployed helper already matches the rendered template, nothing to
-    # do. A missing/unreadable deployed file falls through to a write attempt.
-    try:
-        with open(deployed, "r", encoding="utf-8", errors="replace") as f:
-            if f.read() == rendered:
-                logger.info("[helpers] %s already current", deployed)
-                return
-    except (OSError, PermissionError):
-        pass
 
-    helper = "/usr/local/sbin/blackbox-write-systemd"
-    if not os.path.isfile(helper):
-        logger.warning("[helpers] %s missing; can't auto-update apt helper", helper)
-        return
-
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".apt-helper",
-                                          delete=False, encoding="utf-8") as tmp:
-            tmp.write(rendered)
-            tmp_path = tmp.name
-        result = subprocess.run(
-            ["sudo", "-n", helper, "apt-install-helper", tmp_path],
-            capture_output=True, text=True, timeout=10,
-        )
-        os.unlink(tmp_path)
-        if result.returncode == 0:
-            logger.info("[helpers] re-templated %s with real root %s",
-                        deployed, root)
-        else:
-            # rc=4 here == this box's write-systemd predates the
-            # apt-install-helper target_kind (see HONEST SCOPE above).
-            logger.warning("[helpers] apt-helper auto-update helper failed "
-                           "rc=%d stderr=%r", result.returncode,
-                           result.stderr[:200])
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning("[helpers] apt-helper auto-update errored: %r", e)
+# ── DECISION: no startup_assert_units_current hook (install.sh-grant removal,
+#    2026-07-27) ──────────────────────────────────────────────────────────────
+# The plan (M4.3) asked to pick ONE: a restart-time unit self-heal hook mirroring
+# the two above, OR unit regen solely in the update runner. We keep unit regen
+# SOLELY in the runner (_privileged_regen / _REGEN_TARGETS), and deliberately do
+# NOT add a units hook, for two reasons:
+#
+#   1. The two hooks above self-heal only the BOOTSTRAP-CRITICAL artifacts — the
+#      sudoers grant and the apt dispatch helper — and now ONLY store→deployed
+#      (M3b): they re-assert an already-PUBLISHED store entry onto its deployed
+#      copy, never repo→deployed. Their deployed-vs-store drift is special: it
+#      breaks the update pipeline's OWN ability to reach root (a drifted sudoers /
+#      apt helper makes every subsequent update's regen die), so it must heal
+#      out-of-band on plain restart. A drifted systemd unit has no such bootstrap
+#      property — the runner drift-heals a bounded `blackbox-write-systemd <unit>`
+#      from the store on the next update that touches it.
+#
+#   2. The only standalone unit template that renders from (BLACKBOX_ROOT,
+#      REAL_USER) alone is zellij-web.service, and it is ALREADY a _REGEN_TARGET.
+#      The remaining units (blackbox.service + its drop-ins, mcp, ydotoold,
+#      time-sync, logrotate) are inline heredocs in install.sh that need
+#      REAL_HOME / LOCALSTACK_* substitutions the startup context does not have;
+#      a units hook rendering them would either duplicate the runner's zellij
+#      case or emit placeholder-laden units. Building it would be the "both"
+#      the plan forbids and the speculative machinery the plan's non-goals reject.
+#
+# Net: the sudoers grant removal (and any sudoers/helper change) reaches an
+# existing box only after a human `sudo bash install.sh` PUBLISHES it to the
+# store — the trusted-store design's accepted one-time operator step — after
+# which startup_assert_sudoers_current / _helpers_current keep the deployed
+# copies in sync on restart; unit drift-heals via the runner. No third hook.
 
 
 @app.on_event("startup")
