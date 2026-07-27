@@ -6,6 +6,8 @@ import android.media.MediaRecorder
 import android.util.Base64
 import com.aiblackbox.portal.data.api.WebSocketClient
 import com.aiblackbox.portal.data.api.WsMessage
+import com.aiblackbox.portal.ui.components.aurora.AURORA_SILENT_BANDS
+import com.aiblackbox.portal.ui.components.aurora.AuroraAnalyser
 import com.aiblackbox.portal.ui.voice.rmsAmplitude
 import com.aiblackbox.portal.util.Constants
 import kotlinx.coroutines.CompletableDeferred
@@ -80,6 +82,28 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     private val _amplitude = MutableStateFlow(0f)
     val amplitude: StateFlow<Float> = _amplitude.asStateFlow()
 
+    /**
+     * Aurora band energies for the composer's ribbon, from THIS client's own analyser.
+     *
+     * Its own, not a shared one: the app can have this mic and the voice screen's AI playback live
+     * at the same moment, and a shared auto-gain reference would let one stream rescale the other's
+     * ribbon.
+     */
+    private val _bands = MutableStateFlow(AURORA_SILENT_BANDS)
+    val bands: StateFlow<FloatArray> = _bands.asStateFlow()
+
+    /**
+     * Replaced (not reset()) per start(), and read ONCE per socket leg into a capture-loop local.
+     *
+     * An analyser belongs to one thread. start() runs on the caller's while the previous session's
+     * capture loop may still be draining an in-flight AudioRecord.read(), so resetting in place
+     * would let that straggler chunk interleave with the reset and leave the new session's warm-up
+     * mid-write. Handing the new session a NEW object means the straggler scribbles harmlessly on
+     * an orphan instead. The reconnect legs of ONE session deliberately share it — same speaker,
+     * same room, so the gain reference should survive the drop rather than re-seed on every leg.
+     */
+    @Volatile private var analyser = AuroraAnalyser(SAMPLE_RATE)
+
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
@@ -144,7 +168,10 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         }
         val epoch = ++sessionEpoch
         _isStreaming.value = true
-        _amplitude.value = 0f
+        silenceRibbon()
+        // A new press is a new speaker, a new distance and a new room: a fresh analyser re-seeds
+        // the gain and re-runs the warm-up rather than inheriting the last press's.
+        analyser = AuroraAnalyser(SAMPLE_RATE)
         userStopped = false
         reconnectAttempts = 0
         lastInterim = ""
@@ -225,7 +252,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
             }
             // Logical session over — flip to idle ONCE (do not cancel our own job here).
             releaseAudioRecord()
-            _amplitude.value = 0f
+            silenceRibbon()
             if (epoch == sessionEpoch) {
                 // Socket + reconnect loop are done: nothing further can arrive, so
                 // a stop() waiting on stt_done must not park until its backstop.
@@ -255,7 +282,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
 
         // Stop + release the mic immediately (signals capture loop to exit too).
         releaseAudioRecord()
-        _amplitude.value = 0f
+        silenceRibbon()
 
         val s = scope
         val sWs = wsClient
@@ -308,6 +335,9 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     // -------------------------------------------------------------------------
     private fun startCapture(s: CoroutineScope, ws: WebSocketClient) {
         captureJob?.cancel()
+        // Read the analyser ONCE, here, so the loop below owns one instance for its whole life and
+        // a start() racing it can only swap what the NEXT leg picks up.
+        val sessionAnalyser = analyser
         val bufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         ) * 2
@@ -361,6 +391,10 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                             bytes[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
                             bytes[i * 2 + 1] = (buffer[i].toInt() shr 8 and 0xFF).toByte()
                         }
+                        // Analysed BEFORE the send, on the same bytes the server gets: the ribbon
+                        // reports the microphone, so it keeps moving through a transport drop
+                        // while the reconnect loop resumes underneath it.
+                        _bands.value = sessionAnalyser.analyze(bytes, bytes.size)
                         val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
                         val audioMsg = buildJsonObject {
                             put("type", "stt_audio")
@@ -376,7 +410,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                 android.util.Log.e(TAG, "Capture loop error: ${e.message}", e)
             } finally {
                 releaseAudioRecord()
-                _amplitude.value = 0f
+                silenceRibbon()
             }
         }
     }
@@ -415,6 +449,16 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         }
     }
 
+    /**
+     * The ribbon inputs for "nothing is being captured", in one place because the two must always
+     * fall together — a teardown that zeroed the amplitude but left the bands at their last value
+     * would park a frozen ribbon on the composer for as long as the screen stayed open.
+     */
+    private fun silenceRibbon() {
+        _amplitude.value = 0f
+        _bands.value = AURORA_SILENT_BANDS
+    }
+
     /** Stop + release the mic in a single guarded path used everywhere. */
     private fun releaseAudioRecord() {
         val rec = audioRecord ?: return
@@ -431,7 +475,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         connectionJob = null
         wsClient.close()
         releaseAudioRecord()
-        _amplitude.value = 0f
+        silenceRibbon()
         _isStreaming.value = false
         scope?.cancel()
         scope = null
@@ -464,7 +508,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
             if (scope === sScope) {
                 scope = null
                 _isStreaming.value = false
-                _amplitude.value = 0f
+                silenceRibbon()
             }
         }
     }
@@ -473,7 +517,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     private fun cleanup() {
         _isStreaming.value = false
         releaseAudioRecord()
-        _amplitude.value = 0f
+        silenceRibbon()
         captureJob?.cancel()
         captureJob = null
     }

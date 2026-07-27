@@ -297,10 +297,10 @@ class NativeMainActivity : ComponentActivity() {
                     SttStreamClient(BlackBoxApi(origin).getClient(), wsUrl)
                 }
                 val isWhisperStreaming by sttClient.isStreaming.collectAsState()
-                // Collect amplitude as Compose state so the waveform recomposes as
-                // it changes. Reading sttClient.amplitude.value directly does NOT
+                // Collect the analyser's bands as Compose state so the waveform recomposes as
+                // they change. Reading sttClient.bands.value directly does NOT
                 // subscribe → the ribbon would freeze at one value (caught 2026-06-05).
-                val sttAmp by sttClient.amplitude.collectAsState()
+                val sttBands by sttClient.bands.collectAsState()
                 // Cumulative-delta applier holders: captured at stream start from the caret.
                 var sttBaseBefore by remember { mutableStateOf("") }
                 var sttBaseAfter by remember { mutableStateOf("") }
@@ -1282,9 +1282,13 @@ class NativeMainActivity : ComponentActivity() {
                                 && !(provider == "robotics" && erMissionActive),
                             isRecording = isWhisperStreaming,
                             isRecordingAudio = isRawAudioRecording,
-                            recordingAmplitude = {
-                                if (isWhisperStreaming) sttAmp
-                                else rawAudioRecorder.getMaxAmplitude() / 32767f
+                            recordingBands = {
+                                // The STT mic is analysed per chunk at its real 24 kHz. The
+                                // raw-audio recorder is a MediaRecorder — there is no PCM to probe,
+                                // only its peak level, so it hands over the one value it has and
+                                // every sheet follows it.
+                                if (isWhisperStreaming) sttBands
+                                else floatArrayOf(rawAudioRecorder.getMaxAmplitude() / 32767f)
                             },
                             provider = provider,
                             model = currentModel,

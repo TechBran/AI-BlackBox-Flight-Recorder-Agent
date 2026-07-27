@@ -72,6 +72,14 @@ val GlowBlue   = Color(0x404A9EFF)  // --shadow-glow-blue @ 25% alpha
 val GlowGreen  = Color(0x4027D980)  // --shadow-glow-green @ 25% alpha
 val SolidGreen  = Color(0xFF27D980)
 
+// Full-alpha sibling of GlowBlue (0x404A9EFF) — the brand's only blue, opened up
+// from its 25% glow alpha so it can be painted as an IDENTITY rather than a halo.
+// Added 2026-07-26 for the Aurora waveform, where blue means "the AI is speaking"
+// opposite BbxAccent's red for the human (Brandon's call: solid colour per speaker,
+// no gradient). Alpha there comes from the per-sheet ladder, so the token itself
+// must stay opaque — do not "fix" it back to the 0x40 glow value.
+val WaveBlue   = Color(0xFF4A9EFF)
+
 // Ember palette — the 5 cinematic-particle colors from the website ember system
 // (Apps/landing-page/app.js initCinematicParticles('embers')). RGB → hex:
 //   255,74,74 / 255,120,50 / 255,180,50 / 255,220,100 / 255,250,200

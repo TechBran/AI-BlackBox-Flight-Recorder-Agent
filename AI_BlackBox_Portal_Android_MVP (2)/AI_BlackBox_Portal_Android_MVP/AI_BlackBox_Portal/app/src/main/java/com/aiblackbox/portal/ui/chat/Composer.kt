@@ -59,8 +59,8 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import com.aiblackbox.portal.ui.components.SpeakerIcon
-import com.aiblackbox.portal.ui.voice.VoiceWaveform
-import com.aiblackbox.portal.ui.voice.WaveSpeaker
+import com.aiblackbox.portal.ui.components.aurora.AuroraWaveform
+import com.aiblackbox.portal.ui.components.aurora.auroraVoices
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.GlassBorder
@@ -113,7 +113,11 @@ fun Composer(
     isStreaming: Boolean = false,
     isRecording: Boolean = false,
     isRecordingAudio: Boolean = false,
-    recordingAmplitude: () -> Float = { 0f },
+    // Band energies for the recording ribbon, deferred so a 30 Hz mic feed invalidates only the
+    // ribbon's own read and not everything above it. Four values from the live STT analyser; the
+    // raw-audio recorder has no PCM tap and passes its single peak level, which AuroraVoice.band
+    // spreads across all four sheets.
+    recordingBands: () -> FloatArray = { FloatArray(0) },
     provider: String = "gemini",
     model: String = "",
     onProviderChange: (String) -> Unit = {},
@@ -202,17 +206,22 @@ fun Composer(
             // Waveform ribbon — full-width row DIRECTLY ABOVE the input row,
             // only composed while recording/streaming (Whisper or raw audio).
             if (isRecording || isRecordingAudio) {
-                VoiceWaveform(
-                    amplitude = recordingAmplitude(),
-                    speaker = WaveSpeaker.USER,
-                    height = 52.dp,
-                    // Lift speech-level RMS into the short composer ribbon so it
-                    // reads clearly. Tunable — raise for more swing, lower if it
-                    // pins at full on normal speech.
-                    sensitivity = 3.0f,
+                // The operator's own voice, so the ribbon is RED. No sensitivity multiplier any
+                // more: the analyser's per-band auto-gain normalises each speaker's own dynamics to
+                // the full 0..1 range, which is what the old 3.0x lift was compensating for by hand
+                // (and what made it pin at full on a loud device).
+                AuroraWaveform(
+                    voices = auroraVoices(human = recordingBands()),
+                    // pauseWhenIdle is OFF, unlike the player bar's: this ribbon is composed only
+                    // while recording, so there is no idle to save, and a mic that goes quiet
+                    // between words must keep flowing rather than freeze mid-wave.
+                    pauseWhenIdle = false,
+                    // Padding BEFORE height, so the ribbon is 52dp inside a 56dp row — the same
+                    // total footprint the old renderer produced by taking its height internally.
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 2.dp)
+                        .height(52.dp)
                 )
             }
 

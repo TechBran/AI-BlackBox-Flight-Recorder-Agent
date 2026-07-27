@@ -17,8 +17,8 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 29
-        versionName "1.8.1-calendar-nav"
+        versionCode 31
+        versionName "1.9.1-aurora-mountains"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }

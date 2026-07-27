@@ -53,16 +53,17 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.aiblackbox.portal.ui.components.aurora.AURORA_SILENT_BANDS
+import com.aiblackbox.portal.ui.components.aurora.AuroraWaveform
+import com.aiblackbox.portal.ui.components.aurora.auroraVoices
 import com.aiblackbox.portal.ui.theme.RadiusMd
-import com.aiblackbox.portal.ui.voice.VoiceWaveform
-import com.aiblackbox.portal.ui.voice.WaveSpeaker
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 // =============================================================================
 // AudioPlayerBar — production-grade audio player
 //
-//   - Flowing red "ribbon" waveform (VoiceWaveform) that pulses while playing
+//   - Flowing Aurora "ribbon" waveform that pulses while playing
 //   - Thin progress track + playhead beneath the ribbon (visible + scrubbable)
 //   - Play/pause + tap-to-seek + horizontal-drag-to-seek
 //   - Red accent on black background
@@ -71,8 +72,9 @@ import kotlinx.coroutines.isActive
 private const val POLL_MS = 33L // ~30fps for smooth animation
 
 // Red accent palette on pure black
+// WaveRed still paints the progress track + playhead. Its gradient partner went with the ribbon:
+// the Aurora renderer takes no colour override — the speaker owns the colour (this bar is the AI).
 private val WaveRed = Color(0xFFEF4444)
-private val WaveRedDim = Color(0xFFDC2626)
 private val WaveRedGlow = Color(0x40EF4444)
 private val WaveUnplayed = Color(0xFF2A2A2A)
 private val TimeColor = Color(0xCCEF4444)
@@ -92,7 +94,7 @@ fun AudioPlayerBar(
     val duration by mgr.duration.collectAsState()
     val position by mgr.position.collectAsState()
     val hasError by mgr.hasError.collectAsState()
-    val outputAmplitude by mgr.amplitude.collectAsState()
+    val outputBands by mgr.bands.collectAsState()
     val amplitudeReady by mgr.amplitudeReady.collectAsState()
     var isSeeking by remember { mutableStateOf(false) }
     var seekPosition by remember { mutableFloatStateOf(0f) }
@@ -170,15 +172,24 @@ fun AudioPlayerBar(
         // ── Waveform (flowing red ribbon) + thin seek/progress track ──
         var canvasWidth by remember { mutableFloatStateOf(1f) }
 
-        // Drive the ribbon from the REAL audio output (Visualizer RMS) while
-        // playing, so it dances with the actual speech. If the Visualizer could
-        // not attach on this device, fall back to a gentle synthetic pulse so
-        // the ribbon still shows life. The ribbon also flows via VoiceWaveform's
-        // own continuous phase animation.
-        val ribbonAmplitude = when {
-            !thisPlaying -> 0f
-            amplitudeReady -> outputAmplitude.coerceIn(0f, 1f)
-            else -> 0.12f + breathe * 0.18f
+        // Drive the ribbon from the REAL audio output — AudioPlaybackManager samples the decoded
+        // envelopes at the live playback position, so it dances with the actual speech. Until that
+        // decode lands there is nothing to sample, so a gentle synthetic pulse stands in (one value
+        // drives all four sheets) rather than showing a dead ribbon over audible audio.
+        //
+        // NEVER absent. This bar's voice is always PRESENT — all-zero bands when the clip is
+        // silent for a moment AND when nothing is playing at all — so the ribbon rests FLAT
+        // (`restLevel = 0f` below) instead of retiring off the surface. Absence is what the
+        // renderer culls, and culling here would be a regression, not a saving: VoiceWaveform
+        // painted its line at amplitude 0 whether or not the clip was playing, so every
+        // not-playing bar in a message list would go from a flat ribbon to an empty 40dp box and
+        // a silent passage mid-clip would blink the ribbon out and back. It costs nothing either
+        // — a present, silent, settled voice stops asking for frames exactly as an absent one does
+        // (see AuroraEngine.needsFrames), which is what `pauseWhenIdle` below is for.
+        val ribbonBands: FloatArray = when {
+            !thisPlaying -> AURORA_SILENT_BANDS
+            amplitudeReady -> outputBands
+            else -> floatArrayOf(0.12f + breathe * 0.18f)
         }
 
         Box(
@@ -213,21 +224,27 @@ fun AudioPlayerBar(
                     )
                 }
         ) {
-            // Same renderer as the mic ribbon (which looks great): a global
-            // amplitude drives the sine ribbon up/down. The smooth VU-meter feel
-            // comes from AudioPlaybackManager's attack/decay envelope on the
-            // Visualizer RMS; sensitivity de-gains the hot playback signal and
-            // idleLevel=0 lets it rest flat on silence.
-            VoiceWaveform(
-                amplitude = ribbonAmplitude,
-                speaker = WaveSpeaker.USER,
+            // Same renderer as the mic and voice-screen ribbons. This is the AI talking, so the
+            // ribbon is BLUE here where the mic's is red — the identity is the speaker's, not the
+            // surface's, which is why the old overrideColors pair is gone.
+            //
+            // No sensitivity knob either: the offline analyser normalises each band against that
+            // band's own peak over the whole clip, so a quiet TTS reply and a loud one both use the
+            // full ribbon without a per-call-site gain to keep in sync with the audio pipeline.
+            AuroraWaveform(
+                voices = auroraVoices(ai = ribbonBands),
                 modifier = Modifier.fillMaxSize(),
-                height = 40.dp,
-                sensitivity = 0.55f,
-                idleLevel = 0f,
-                riseFallMs = 70,
-                overrideColors = WaveRed to WaveRedDim,
+                // A message list can hold dozens of these; every one that is not playing must stop
+                // asking for frames. The bar is the one surface where this genuinely idles.
                 pauseWhenIdle = true,
+                // FLAT on silence, not Aurora's breathing baseline — this is what VoiceWaveform's
+                // `idleLevel = 0f` bought here and it has to survive the renderer swap. It matters
+                // on THIS surface specifically: a silent passage mid-clip is the file's own silence
+                // (the decoded envelope gates it to exactly 0), the bar is only 40dp tall so a
+                // 0.06 floor is a visible ~1.1dp of permanent swing, and it sits directly on the
+                // progress track the user scrubs. A live mic wants the opposite and keeps the
+                // default. Pinned by a test — see AuroraWaveformTest.
+                restLevel = 0f,
             )
 
             // Thin progress track + playhead beneath the ribbon so position is
