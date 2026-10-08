@@ -81,15 +81,19 @@ object Constants {
             "o4-mini" to "o4-mini (Reasoning)",
             "gpt-4o" to "GPT-4o"
         ),
+        // SettingsSheet + the SMS model picker read this list directly, so every
+        // id must be live on /v1/models (2026-10-07): claude-opus-4-1 and
+        // claude-sonnet-4 are retired (404) — replaced by the server default
+        // Opus (claude-opus-4-8) and the current Sonnet (claude-sonnet-5-5).
         "anthropic" to listOf(
             "" to "Auto - Latest",
+            "claude-sonnet-5-5" to "Claude Sonnet 5.5",
+            "claude-opus-4-8" to "Claude Opus 4.8",
             "claude-opus-4-7" to "Claude Opus 4.7 (1M ctx, adaptive thinking)",
             "claude-opus-4-6" to "Claude Opus 4.6",
             "claude-sonnet-4-6" to "Claude Sonnet 4.6",
             "claude-sonnet-4-5" to "Claude Sonnet 4.5",
-            "claude-haiku-4-5" to "Claude Haiku 4.5",
-            "claude-opus-4-1" to "Claude Opus 4.1",
-            "claude-sonnet-4" to "Claude Sonnet 4"
+            "claude-haiku-4-5" to "Claude Haiku 4.5"
         ),
         // T3 (2026-05-18): xai entries were MALFORMED — "grok-4", "grok-4.1-fast",
         // "grok-3-mini" don't exist in the xAI API and would silently fail at

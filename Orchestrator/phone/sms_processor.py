@@ -13,7 +13,8 @@ from typing import Optional
 
 async def process_incoming_sms(sender: str, body: str, operator: str) -> str:
     """
-    Process an incoming SMS message through Claude Sonnet with tool support.
+    Process an incoming SMS message through the configured default Claude
+    model (ANTHROPIC_MODEL_DEFAULT) with tool support.
 
     Args:
         sender: Phone number of the sender (E.164 format)
@@ -23,7 +24,7 @@ async def process_incoming_sms(sender: str, body: str, operator: str) -> str:
     Returns:
         AI response text (truncated to 1500 chars for SMS)
     """
-    from Orchestrator.config import ANTHROPIC_API_KEY
+    from Orchestrator.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL_DEFAULT
     from Orchestrator.tools.blackbox_tools import BlackBoxToolExecutor
 
     if not body.strip():
@@ -71,7 +72,7 @@ If they want to text someone, use send_sms."""
                     "content-type": "application/json"
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": ANTHROPIC_MODEL_DEFAULT,
                     "max_tokens": 500,
                     "system": system_prompt,
                     "tools": BLACKBOX_TOOLS_ANTHROPIC,
@@ -124,7 +125,7 @@ If they want to text someone, use send_sms."""
                             "content-type": "application/json"
                         },
                         json={
-                            "model": "claude-sonnet-4-20250514",
+                            "model": ANTHROPIC_MODEL_DEFAULT,
                             "max_tokens": 500,
                             "system": system_prompt,
                             "tools": BLACKBOX_TOOLS_ANTHROPIC,

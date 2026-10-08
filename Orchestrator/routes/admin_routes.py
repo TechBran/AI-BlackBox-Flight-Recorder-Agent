@@ -613,18 +613,24 @@ _FALLBACK_MODELS = {
         {"id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro (Legacy)"},
         {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash (Legacy)"},
     ],
+    # Mirrors the live /v1/models catalog as of 2026-10-07 (same ids, same
+    # newest-first order). Claude 4.0/4.1 and 3.x ids are retired and 404 —
+    # never list an id here that /v1/models doesn't return.
     "anthropic": [
-        {"id": "claude-opus-4-8", "name": "Claude Opus 4.8 (May 2026, newest)"},
+        {"id": "claude-haiku-5-5", "name": "Claude Haiku 5.5 (Oct 2026)"},
+        {"id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5 (Sep 2026)"},
+        {"id": "claude-opus-5-5", "name": "Claude Opus 5.5 (Sep 2026)"},
+        {"id": "claude-fable-5-1", "name": "Claude Fable 5.1 (Aug 2026)"},
+        {"id": "claude-opus-5", "name": "Claude Opus 5 (Jul 2026)"},
+        {"id": "claude-sonnet-5", "name": "Claude Sonnet 5 (Jun 2026)"},
+        {"id": "claude-fable-5", "name": "Claude Fable 5 (Jun 2026)"},
+        {"id": "claude-opus-4-8", "name": "Claude Opus 4.8 (May 2026)"},
         {"id": "claude-opus-4-7", "name": "Claude Opus 4.7 (Apr 2026, 1M ctx, adaptive thinking)"},
+        {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (Feb 2026)"},
         {"id": "claude-opus-4-6", "name": "Claude Opus 4.6 (Feb 2026)"},
-        {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (Mar 2026)"},
         {"id": "claude-opus-4-5-20251101", "name": "Claude Opus 4.5 (Nov 2025)"},
-        {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5 (Sep 2025)"},
         {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5 (Oct 2025)"},
-        {"id": "claude-opus-4-1-20250805", "name": "Claude Opus 4.1 (Aug 2025)"},
-        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4 (May 2025)"},
-        {"id": "claude-3-7-sonnet-20250219", "name": "Claude 3.7 Sonnet (Feb 2025)"},
-        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku (Oct 2024)"},
+        {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5 (Sep 2025)"},
     ],
     "openai": [
         {"id": "gpt-5.1", "name": "GPT-5.1"},

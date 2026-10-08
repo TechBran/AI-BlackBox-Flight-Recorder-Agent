@@ -531,7 +531,8 @@ async def twilio_sms_webhook(
     """
     Twilio incoming SMS webhook.
 
-    Receives SMS messages and responds using Claude Sonnet 4.5 via REST API.
+    Receives SMS messages and responds using the configured default Claude
+    model (ANTHROPIC_MODEL_DEFAULT) via REST API.
     Supports tools like making phone calls and searching BlackBox memory.
     Messages are logged to BlackBox as snapshots.
 
@@ -541,7 +542,7 @@ async def twilio_sms_webhook(
     </Response>
     """
     import aiohttp
-    from Orchestrator.config import ANTHROPIC_API_KEY
+    from Orchestrator.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL_DEFAULT
 
     print(f"[TWILIO-SMS] Incoming: {From} -> {To}")
     print(f"[TWILIO-SMS] Message: {Body[:100]}..." if len(Body) > 100 else f"[TWILIO-SMS] Message: {Body}")
@@ -595,7 +596,7 @@ If they want to text someone, use send_sms."""
                         "content-type": "application/json"
                     },
                     json={
-                        "model": "claude-sonnet-4-20250514",
+                        "model": ANTHROPIC_MODEL_DEFAULT,
                         "max_tokens": 500,
                         "system": system_prompt,
                         "tools": BLACKBOX_TOOLS_ANTHROPIC,
@@ -650,7 +651,7 @@ If they want to text someone, use send_sms."""
                                     "content-type": "application/json"
                                 },
                                 json={
-                                    "model": "claude-sonnet-4-20250514",
+                                    "model": ANTHROPIC_MODEL_DEFAULT,
                                     "max_tokens": 500,
                                     "system": system_prompt,
                                     "tools": BLACKBOX_TOOLS_ANTHROPIC,
