@@ -60,7 +60,7 @@ from Orchestrator.tools.tool_registry import (
     get_gemini_rest_tools,
 )
 from Orchestrator.config import TOOLVAULT_ENABLED
-from Orchestrator.config import ANTHROPIC_THINKING_MODELS, ANTHROPIC_EFFORT_MAP, ANTHROPIC_NO_SAMPLING_MODELS, ANTHROPIC_THINKING_DISPLAY_MODELS
+from Orchestrator.config import ANTHROPIC_THINKING_MODELS, ANTHROPIC_EFFORT_MAP, ANTHROPIC_THINKING_DISPLAY_MODELS, anthropic_accepts_sampling
 
 # -----------------------------------------------------------------------------
 # M3 origin-aware routing (frontier device control).
@@ -667,9 +667,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
         "messages": amsgs,
         "tools": _get_tools("anthropic", _last_user_msg(messages))
     }
-    # temperature removed on Opus 4.7 (returns 400). Keep on older models.
-    if model not in ANTHROPIC_NO_SAMPLING_MODELS:
-        payload["temperature"] = 0.2
     # Adaptive thinking + effort for Claude 4.X models that support it.
     # display="summarized" is gated to Opus 4.7 — older thinking models stream text as-is.
     if model in ANTHROPIC_THINKING_MODELS:
@@ -680,6 +677,11 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
         effort = ANTHROPIC_EFFORT_MAP.get(model)
         if effort:
             payload["output_config"] = {"effort": effort}
+    # temperature: removed on Opus 4.7+ (400 "deprecated"), and on the models that
+    # still accept it, it must stay at the default 1 whenever thinking is on (400
+    # "may only be set to 1 when thinking is enabled"). So: thinking-off legacy only.
+    elif anthropic_accepts_sampling(model):
+        payload["temperature"] = 0.2
     if system_text:
         payload["system"] = system_text
 
@@ -3095,9 +3097,6 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
         "messages": amsgs,
         "tools": _get_tools("anthropic", _last_user_msg(messages))
     }
-    # temperature removed on Opus 4.7 (returns 400). Keep on models that still accept it.
-    if model not in ANTHROPIC_NO_SAMPLING_MODELS:
-        payload["temperature"] = 0.7
     # Adaptive thinking + effort for Claude models that support it (Opus 4.7, Sonnet 4.6).
     # display="summarized" is required on Opus 4.7 — default "omitted" streams empty thinking blocks.
     if model in ANTHROPIC_THINKING_MODELS:
@@ -3105,6 +3104,11 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
         effort = ANTHROPIC_EFFORT_MAP.get(model)
         if effort:
             payload["output_config"] = {"effort": effort}
+    # temperature: removed on Opus 4.7+ (400 "deprecated"), and on the models that
+    # still accept it, it must stay at the default 1 whenever thinking is on (400
+    # "may only be set to 1 when thinking is enabled"). So: thinking-off legacy only.
+    elif anthropic_accepts_sampling(model):
+        payload["temperature"] = 0.7
 
     if system_text:
         payload["system"] = system_text

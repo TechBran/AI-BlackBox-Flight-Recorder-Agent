@@ -900,32 +900,65 @@ ANTHROPIC_MODEL_DEFAULT = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
 # display="summarized" streams readable thinking text (default "omitted" = empty blocks — would silently break thinking UI).
 # effort="xhigh" is Opus 4.7's recommended level for agentic/coding work; Sonnet 4.6 maxes at "high".
 # Haiku 4.5 is deliberately omitted — it doesn't support effort or adaptive thinking.
+# Claude 5.x (added 2026-10-07): Opus 5.5/5, Sonnet 5.5/5, Haiku 5.5, Fable/Mythos 5.1
+# all accept {type: "adaptive", display: "summarized"} and every effort level.
 ANTHROPIC_THINKING_MODELS = {
+    "claude-fable-5-1", "claude-mythos-5-1",
     "claude-fable-5",   # Mythos-class: thinking always on; explicit {type: "adaptive"} accepted
     "claude-mythos-5",
+    "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5", "claude-sonnet-5",
+    "claude-haiku-5-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
 }
 ANTHROPIC_EFFORT_MAP = {
+    "claude-fable-5-1": "xhigh",
+    "claude-mythos-5-1": "xhigh",
     "claude-fable-5": "xhigh",    # recommended for agentic/coding on the Claude 5 tier
     "claude-mythos-5": "xhigh",
+    "claude-opus-5-5": "xhigh",   # API default is "medium" on Opus 5.5 — pin the Opus-tier level
+    "claude-opus-5": "xhigh",
+    "claude-sonnet-5-5": "high",
+    "claude-sonnet-5": "high",
+    # claude-haiku-5-5 deliberately unmapped: API default ("medium") keeps the cheap tier cheap.
     "claude-opus-4-8": "xhigh",   # mirror 4.7 — newest Opus tier
     "claude-opus-4-7": "xhigh",   # Opus 4.7-only tier between "high" and "max"
     "claude-opus-4-6": "high",
     "claude-sonnet-4-6": "high",  # Sonnet caps at "high" — xhigh/max are Opus-tier only
 }
-# Opus 4.7 removed `temperature`, `top_p`, `top_k` — sending any returns 400.
-# Opus 4.8 and the Claude 5 tier (Fable/Mythos) carry the same constraint.
-ANTHROPIC_NO_SAMPLING_MODELS = {
-    "claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7",
-}
+# Sampling params (`temperature`, `top_p`, `top_k`) are an ALLOW-list of the legacy
+# families that still accept them. Opus 4.7 removed them and every model since
+# returns 400 "`temperature` is deprecated for this model" on any non-default
+# value. This used to be a deny-list (ANTHROPIC_NO_SAMPLING_MODELS) and it rotted
+# twice — claude-fable-5 on 2026-06-11, then the whole 5.x tier (Opus 5.5,
+# Sonnet 5.5, ...) on 2026-10-07 — because the Portal lists models live from
+# /v1/models, so every new release 400'd until someone appended it. Unknown and
+# future models now get no sampling params at all. Prefix match so dated
+# snapshot IDs (claude-haiku-4-5-20251001) are covered.
+ANTHROPIC_SAMPLING_MODEL_PREFIXES = (
+    "claude-opus-4-6", "claude-sonnet-4-6",
+    "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
+    "claude-opus-4-1", "claude-opus-4-0", "claude-sonnet-4-0",
+    "claude-opus-4-2025", "claude-sonnet-4-2025",   # claude-{opus,sonnet}-4-20250514
+    "claude-3",
+)
+
+
+def anthropic_accepts_sampling(model: str) -> bool:
+    """True only for legacy Claude models that still accept temperature/top_p/top_k."""
+    return (model or "").startswith(ANTHROPIC_SAMPLING_MODEL_PREFIXES)
+
+
 # Opus 4.7+ omit thinking text by default — set display="summarized" to get visible thinking.
-# Fable/Mythos 5 likewise default to "omitted" (summaries only; raw CoT never returned).
+# Fable/Mythos 5 and the whole 5.x tier likewise default to "omitted" (summaries only; raw CoT never returned).
 # Other models stream thinking text as-is without the flag.
 ANTHROPIC_THINKING_DISPLAY_MODELS = {
-    "claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7",
+    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-sonnet-5",
+    "claude-haiku-5-5", "claude-opus-4-8", "claude-opus-4-7",
 }
 GEMINI_MODEL_DEFAULT    = os.getenv("GOOGLE_GEMINI_MODEL", "gemini-3.1-pro-preview")
 XAI_MODEL_DEFAULT       = os.getenv("XAI_MODEL", "grok-4.3")  # Bumped 2026-05-18: prior default grok-4-1-fast-reasoning is on xAI's May 2026 deprecation list (auto-redirected to grok-4.3 server-side)
