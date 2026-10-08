@@ -259,6 +259,77 @@ COMPUTER_TOOL_TYPE = "computer_20251124"
 CU_MODEL = CU_MODEL_DEFAULT
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
+# The computer-use tool version is per model (verified 2026-10-07 against the
+# Claude API docs' compatibility table + live 400s). One constant for every model
+# broke the 5.5 tier: "'claude-opus-5-5' does not support tool types:
+# computer_20251124". On the Claude API:
+#   - Claude 5.5+ (Opus 5.5, Sonnet 5.5, Haiku 5.5) accept ONLY the GA toolset:
+#     {"type": "computer_toolset_20260801"} — no beta header, no name/display size.
+#     Each action is its own tool_use block whose `name` is the member
+#     (left_click, screenshot, ...) with `toolset_name: "computer"` and no
+#     input.action; several can arrive per turn; every tool_result must echo
+#     `toolset_name`.
+#   - Sonnet 4.5 / Haiku 4.5 (and retired 4.0/4.1) accept only computer_20250124.
+#   - Everything in between keeps the beta computer_20251124 path it already ran on.
+# Unknown/future models get the toolset (5.5+ is toolset-only), mirroring
+# config.anthropic_accepts_sampling's fail-closed allow-list.
+COMPUTER_TOOLSET_TYPE = "computer_toolset_20260801"
+COMPUTER_TOOLSET_NAME = "computer"
+COMPUTER_TOOL_TYPE_20250124 = "computer_20250124"
+ANTHROPIC_BETA_HEADER_20250124 = "computer-use-2025-01-24"
+_CU_20251124_MODELS = (
+    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+    "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7",
+    "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5",
+)
+_CU_20250124_PREFIXES = (
+    "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1",
+    "claude-opus-4-0", "claude-sonnet-4-0", "claude-opus-4-2025", "claude-sonnet-4-2025",
+    "claude-3-7-sonnet",
+)
+# Pre-4.6 models cap output at 64K (/v1/models max_tokens); 4.6+ and the 5.x tier allow 128K.
+_CU_64K_OUTPUT_PREFIXES = _CU_20250124_PREFIXES + ("claude-opus-4-5",)
+
+
+def _matches_model(model: str, ids) -> bool:
+    """Exact id, or that id plus a date suffix (claude-opus-4-5-20251101)."""
+    return any(model == i or model.startswith(i + "-20") for i in ids)
+
+
+def anthropic_cu_tool_version(model: str) -> str:
+    """Which computer-use tool this Claude model accepts on the Claude API."""
+    model = model or ""
+    if model.startswith(_CU_20250124_PREFIXES):
+        return COMPUTER_TOOL_TYPE_20250124
+    if _matches_model(model, _CU_20251124_MODELS):
+        return COMPUTER_TOOL_TYPE
+    return COMPUTER_TOOLSET_TYPE
+
+
+def anthropic_cu_uses_toolset(model: str) -> bool:
+    return anthropic_cu_tool_version(model) == COMPUTER_TOOLSET_TYPE
+
+
+def anthropic_cu_tool(model: str, display_width: int, display_height: int):
+    """(tools entry, anthropic-beta header value or None) for this model.
+
+    The toolset entry disables zoom to keep parity with the legacy entries,
+    which never set enable_zoom (zoom off by default there, on by default in
+    the toolset).
+    """
+    version = anthropic_cu_tool_version(model)
+    if version == COMPUTER_TOOLSET_TYPE:
+        return {"type": COMPUTER_TOOLSET_TYPE, "configs": {"zoom": {"enabled": False}}}, None
+    entry = {"type": version, "name": "computer",
+             "display_width_px": int(display_width), "display_height_px": int(display_height)}
+    beta = ANTHROPIC_BETA_HEADER_20250124 if version == COMPUTER_TOOL_TYPE_20250124 else ANTHROPIC_BETA_HEADER
+    return entry, beta
+
+
+def anthropic_cu_max_tokens(model: str) -> int:
+    """Largest max_tokens this model accepts (64K pre-4.6, 128K otherwise)."""
+    return 64000 if (model or "").startswith(_CU_64K_OUTPUT_PREFIXES) else 128000
+
 # Domain security
 # Always block dangerous domains. In native mode, allow localhost but block cloud metadata.
 _COMMON_BLOCKLIST = [

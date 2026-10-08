@@ -2353,11 +2353,16 @@ def process_chat_task(task: Task):
             print(f"[AUTO-ROUTE] Switched from openai to google (PDF document detected)")
 
         # Computer Use is streaming-only; fall back to Anthropic for non-streaming path
-        if provider == "computer-use":
+        cu_fallback = provider == "computer-use"
+        if cu_fallback:
             provider = "anthropic"
             print("[AUTO-ROUTE] Switched from computer-use to anthropic (non-streaming fallback)")
 
-        if provider == "anthropic": selected_model = inp.model or ANTHROPIC_MODEL_DEFAULT
+        if provider == "anthropic":
+            selected_model = inp.model or ANTHROPIC_MODEL_DEFAULT
+            # A CU model id may be Gemini/OpenAI (gemini-2.5-computer-use-..., gpt-5.5) — Anthropic 404s it.
+            if cu_fallback and not selected_model.startswith("claude-"):
+                selected_model = ANTHROPIC_MODEL_DEFAULT
         elif provider == "google": selected_model = inp.model or GEMINI_MODEL_DEFAULT
         elif provider == "openai": selected_model = inp.model or OPENAI_MODEL_DEFAULT
         elif provider == "xai": selected_model = inp.model or XAI_MODEL_DEFAULT

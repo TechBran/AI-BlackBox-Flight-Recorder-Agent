@@ -16,12 +16,11 @@ scheduler path). This replaced the legacy browser/agent_loop.BrowserSession.
 import asyncio
 import contextlib
 
-from Orchestrator.browser.config import (
-    ANTHROPIC_BETA_HEADER, COMPUTER_TOOL_TYPE,
-    DISPLAY_WIDTH, DISPLAY_HEIGHT, NATIVE_MODE, is_domain_allowed,
-)
+from Orchestrator.browser.config import NATIVE_MODE, is_domain_allowed
 from Orchestrator.browser.dispatch import resolve_backend
-from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop
+from Orchestrator.browser.driver_anthropic import (
+    build_anthropic_cu_request, run_anthropic_cu_loop,
+)
 # The Gemini/OpenAI CU drivers + the Gemini task-session factory. Imported at
 # module level (not lazily) so tests can monkeypatch `headless.run_gemini_cu_loop`
 # / `headless.run_openai_cu_loop` / `headless.gemini_create_task_session` the same
@@ -754,25 +753,15 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
         except Exception as e:
             print(f"[CU-HEADLESS] ToolVault injection failed (non-fatal): {e}")
             vault_tools = []
-        tools = [
-            {"type": COMPUTER_TOOL_TYPE, "name": "computer",
-             "display_width_px": DISPLAY_WIDTH, "display_height_px": DISPLAY_HEIGHT},
-            {"type": "bash_20250124", "name": "bash"},
-            {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
-        ] + vault_tools
-
-        headers = {
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": ANTHROPIC_BETA_HEADER,
-            "content-type": "application/json",
-        }
+        # The computer tool entry + beta header are per model (5.5+ = toolset).
+        cu_model = model or CU_MODEL_DEFAULT
+        tools, headers = build_anthropic_cu_request(cu_model, ANTHROPIC_API_KEY, vault_tools)
 
         # ── Launch the driver and drain its event queue ──
         session.agent_task = asyncio.create_task(
             run_anthropic_cu_loop(
                 session, history, sys_prompt, tools, headers,
-                model or CU_MODEL_DEFAULT, operator, prompt,
+                cu_model, operator, prompt,
             )
         )
         print(f"[CU-HEADLESS] Driver launched for task {task_id} ({operator})")

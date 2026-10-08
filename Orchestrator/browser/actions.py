@@ -10,7 +10,9 @@ $WAYLAND_DISPLAY (or wayland-0 socket under $XDG_RUNTIME_DIR); X11 falls
 through to the existing xdotool path so nothing regresses on plain-X11
 hosts.
 
-Supports all 18 actions from the computer_20251124 tool type.
+Supports all 18 actions from the computer_20251124 tool type (the 5.5-tier
+computer_toolset_20260801 members arrive here under the same action names —
+driver_anthropic translates them).
 """
 import os
 import subprocess
@@ -137,6 +139,14 @@ _XDOTOOL_TO_LINUX_KEYCODE = {
 def _jitter(base_ms: float = 0) -> float:
     """Add slight random delay for human-like behavior."""
     return (base_ms + random.uniform(20, 80)) / 1000.0
+
+
+def _clamp_repeat(repeat) -> int:
+    """The CU `key` action's repeat count: 1-100, default 1."""
+    try:
+        return max(1, min(100, int(repeat)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _run_xdotool(*args, display_number: int = ACTIVE_DISPLAY,
@@ -417,11 +427,17 @@ class ActionExecutor:
         self._type_text(text)
         return {"success": True, "message": f"Typed {len(text)} chars"}
 
-    def _action_key(self, text="", **kw) -> dict:
-        # Anthropic sends combos like "ctrl+a" or "Return"
+    def _action_key(self, text="", repeat=1, **kw) -> dict:
+        # Anthropic sends combos like "ctrl+a" or "Return"; `repeat` (1-100)
+        # presses it N times — ignoring it would press once.
+        repeat = _clamp_repeat(repeat)
         time.sleep(_jitter())
-        self._key_combo(text)
-        return {"success": True, "message": f"Key press: {text}"}
+        for i in range(repeat):
+            if i:
+                time.sleep(_jitter())
+            self._key_combo(text)
+        suffix = f" x{repeat}" if repeat > 1 else ""
+        return {"success": True, "message": f"Key press: {text}{suffix}"}
 
     # --- Mouse movement ---
 
@@ -433,7 +449,13 @@ class ActionExecutor:
 
     # --- Scroll ---
 
-    def _action_scroll(self, coordinate=None, direction="down", amount=3, **kw) -> dict:
+    def _action_scroll(self, coordinate=None, direction=None, amount=None,
+                       scroll_direction=None, scroll_amount=None, **kw) -> dict:
+        # Claude names these scroll_direction/scroll_amount; the Gemini/OpenAI
+        # loops pass direction/amount. Without the aliases every Claude scroll
+        # fell back to "down x3".
+        direction = direction or scroll_direction or "down"
+        amount = amount if amount is not None else (scroll_amount if scroll_amount is not None else 3)
         if coordinate:
             x, y = self._scale_coord(coordinate)
             self._move(x, y)
@@ -545,7 +567,8 @@ async def execute_remote_action(device_id: str, action: str, **params) -> dict:
         elif action == "type":
             await client.type_text(params.get("text", ""))
         elif action == "key":
-            await client.key(params.get("text", ""))
+            for _ in range(_clamp_repeat(params.get("repeat", 1))):
+                await client.key(params.get("text", ""))
         elif action == "mouse_move":
             coord = params.get("coordinate", [0, 0])
             await client.move(coord[0], coord[1])
@@ -563,8 +586,8 @@ async def execute_remote_action(device_id: str, action: str, **params) -> dict:
             await client.click(coord[0], coord[1], button=2)
         elif action == "scroll":
             coord = params.get("coordinate", [0, 0])
-            direction = params.get("direction", "down")
-            amount = params.get("amount", 3)
+            direction = params.get("direction") or params.get("scroll_direction") or "down"
+            amount = params.get("amount", params.get("scroll_amount", 3))
             if coord:
                 await client.move(coord[0], coord[1])
             # VNC scroll: button 4=up, 5=down

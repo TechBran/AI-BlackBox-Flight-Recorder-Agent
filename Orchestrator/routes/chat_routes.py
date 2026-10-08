@@ -4165,10 +4165,9 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
     """
     import asyncio
     from Orchestrator.browser.config import (
-        ANTHROPIC_API_KEY as CU_API_KEY, ANTHROPIC_API_URL,
-        ANTHROPIC_BETA_HEADER, COMPUTER_TOOL_TYPE,
-        DISPLAY_WIDTH, DISPLAY_HEIGHT, MAX_ITERATIONS
+        ANTHROPIC_API_KEY as CU_API_KEY, ANTHROPIC_API_URL, MAX_ITERATIONS
     )
+    from Orchestrator.browser.driver_anthropic import build_anthropic_cu_request
     from Orchestrator.browser.screenshot import (
         capture_screenshot, capture_remote_screenshot,
         screenshot_to_base64, save_screenshot_to_uploads
@@ -4362,20 +4361,10 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
         history = strip_screenshots_from_history(list(session.conversation_history))
         history.append({"role": "user", "content": user_content})
 
-        # ── Tool array ──
-        tools = [
-            {"type": COMPUTER_TOOL_TYPE, "name": "computer",
-             "display_width_px": DISPLAY_WIDTH, "display_height_px": DISPLAY_HEIGHT},
-            {"type": "bash_20250124", "name": "bash"},
-            {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
-        ] + _get_tools("anthropic", _last_user_msg(history), group="chat_cu")
-
-        headers = {
-            "x-api-key": CU_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": ANTHROPIC_BETA_HEADER,
-            "content-type": "application/json"
-        }
+        # ── Tool array + headers: the computer tool entry and beta header are
+        #    per model (5.5+ = toolset, no beta) ──
+        tools, headers = build_anthropic_cu_request(
+            model, CU_API_KEY, _get_tools("anthropic", _last_user_msg(history), group="chat_cu"))
 
         # ── Claim the shared physical display ONLY for a NATIVE launch (M9). A
         #    virtual launch drives its own per-session display and never contends,

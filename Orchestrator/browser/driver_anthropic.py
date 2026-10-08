@@ -8,6 +8,81 @@ instead of yielding, so the loop survives client disconnection.
 import asyncio
 import json
 
+from Orchestrator.browser.config import (
+    COMPUTER_TOOLSET_NAME, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+    anthropic_cu_tool, anthropic_cu_uses_toolset,
+)
+
+# The exact text the toolset contract requires for every member call that
+# follows a failed one in the same turn.
+TOOLSET_NOT_EXECUTED = "Not executed: an earlier computer action in this turn failed."
+
+
+def build_anthropic_cu_request(model, api_key, extra_tools):
+    """(tools, headers) for an Anthropic CU run on `model` — the ONE builder
+    shared by stream_computer_use and the headless runner.
+
+    The computer tool entry and anthropic-beta header are per model
+    (browser/config.anthropic_cu_tool): 5.5+ take the GA toolset with no beta
+    header; older models keep their versioned computer_* tool + beta.
+    """
+    computer_tool, beta = anthropic_cu_tool(model, DISPLAY_WIDTH, DISPLAY_HEIGHT)
+    if anthropic_cu_uses_toolset(model):
+        # The toolset owns the name "computer"; a same-named tool 400s the request.
+        extra_tools = [t for t in extra_tools if t.get("name") != COMPUTER_TOOLSET_NAME]
+    tools = [
+        computer_tool,
+        {"type": "bash_20250124", "name": "bash"},
+        {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
+    ] + list(extra_tools)
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    if beta:
+        headers["anthropic-beta"] = beta
+    return tools, headers
+
+
+def toolset_history_to_legacy(history):
+    """Rewrite replayed toolset member calls as legacy computer calls.
+
+    A CU session can move from a 5.5 (toolset) model to an older one mid
+    conversation, and the legacy request 400s on any block carrying
+    toolset_name ("not the family of a declared toolset entry"; live
+    2026-10-07). Non-mutating; returns `history` itself when nothing changes.
+    """
+    out, changed = [], False
+    for msg in history:
+        content = msg.get("content")
+        if not isinstance(content, list) or not any(
+                isinstance(b, dict) and b.get("toolset_name") == COMPUTER_TOOLSET_NAME for b in content):
+            out.append(msg)
+            continue
+        new_content = []
+        for b in content:
+            if isinstance(b, dict) and b.get("toolset_name") == COMPUTER_TOOLSET_NAME:
+                b = {k: v for k, v in b.items() if k != "toolset_name"}
+                if b.get("type") == "tool_use":
+                    b["input"] = {"action": b.get("name", ""), **(b.get("input") or {})}
+                    b["name"] = "computer"
+            new_content.append(b)
+        out.append({**msg, "content": new_content})
+        changed = True
+    return out if changed else history
+
+
+def _computer_result(tool_id, content, is_member, is_error=False):
+    """tool_result answering a computer call. A toolset member's result must
+    echo toolset_name or the API rejects the request."""
+    result = {"type": "tool_result", "tool_use_id": tool_id, "content": content}
+    if is_member:
+        result["toolset_name"] = COMPUTER_TOOLSET_NAME
+    if is_error:
+        result["is_error"] = True
+    return result
+
 
 async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers, model, operator, user_text):
     """Background agent loop for Computer Use.  Pushes events to
@@ -15,7 +90,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
     client disconnection.
     """
     import httpx
-    from Orchestrator.browser.config import MAX_ITERATIONS
+    from Orchestrator.browser.config import MAX_ITERATIONS, anthropic_cu_max_tokens
     from Orchestrator.browser.screenshot import (
         capture_remote_screenshot,
         screenshot_to_base64, save_screenshot_to_uploads
@@ -64,6 +139,10 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
         _cu_wall_clock_start = _time.monotonic()
         _CU_MAX_WALL_CLOCK = 1800  # 30 minutes max
 
+        # History written under the toolset (5.5) replayed to a legacy model.
+        if not anthropic_cu_uses_toolset(model):
+            history = toolset_history_to_legacy(history)
+
         for iteration in range(cu_max_steps):
             step = iteration + 1
             session.current_step = step
@@ -94,7 +173,8 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
             # ── Stream API call ──
             payload = {
                 "model": model,
-                "max_tokens": 128000,
+                # Per model: pre-4.6 400s above 64K.
+                "max_tokens": anthropic_cu_max_tokens(model),
                 "system": system_prompt,
                 "tools": tools,
                 "messages": history,
@@ -158,6 +238,11 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                                                     "input": {},
                                                     "_input_json": ""
                                                 }
+                                                # Toolset member: replay must keep the
+                                                # marker or its name reads as an
+                                                # undefined tool.
+                                                if block.get("toolset_name"):
+                                                    current_tool_use["toolset_name"] = block["toolset_name"]
 
                                         elif event_type == "content_block_delta":
                                             delta = event.get("delta", {})
@@ -286,10 +371,26 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
 
             # ── Execute tool calls ──
             tool_results = []
+            # Toolset (5.5+) batches: member calls run in order, stop at the first
+            # failure, and only the batch's last member carries the screenshot.
+            toolset_failed = False
+            last_member_id = next((tu.get("id") for tu in reversed(tool_uses_this_turn)
+                                   if tu.get("toolset_name") == COMPUTER_TOOLSET_NAME), None)
             for tu in tool_uses_this_turn:
                 tool_name = tu.get("name", "")
                 tool_id = tu.get("id", "")
                 tool_input = tu.get("input", {})
+
+                # Toolset member: the action is the block name. Translate to the
+                # legacy {"action": name, **input} dict so the computer branch
+                # below serves both protocols.
+                is_member = tu.get("toolset_name") == COMPUTER_TOOLSET_NAME
+                if is_member:
+                    if toolset_failed:
+                        tool_results.append(_computer_result(tool_id, TOOLSET_NOT_EXECUTED, True, is_error=True))
+                        continue
+                    tool_input = {"action": tool_name, **tool_input}
+                    tool_name = "computer"
 
                 # ─── Anthropic system tools ───
                 if tool_name == "computer":
@@ -300,12 +401,23 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     await emit({"type": "cu_action", "data": {"action": action, "params": _cu_safe_params(tool_input), "step": step}})
 
                     if session.device_id != "blackbox":
-                        await execute_remote_action(session.device_id, action, **action_params)
+                        action_result = await execute_remote_action(session.device_id, action, **action_params)
                     else:
-                        session.actions.execute(action, **action_params)
+                        action_result = session.actions.execute(action, **action_params)
+
+                    if is_member and isinstance(action_result, dict) and action_result.get("success") is False:
+                        toolset_failed = True
+                        err = action_result.get("message") or action_result.get("error") or f"{action} failed"
+                        tool_results.append(_computer_result(tool_id, f"Error: {err}", True, is_error=True))
+                        continue
 
                     if action not in ("screenshot", "wait", "zoom"):
                         await asyncio.sleep(0.5)
+
+                    if is_member and tool_id != last_member_id and action not in ("screenshot", "zoom"):
+                        msg = (action_result.get("message") if isinstance(action_result, dict) else "") or "OK"
+                        tool_results.append(_computer_result(tool_id, [{"type": "text", "text": msg}], True))
+                        continue
 
                     try:
                         png_bytes = await _capture_ss()
@@ -327,24 +439,19 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                         ss_url = save_screenshot_to_uploads(png_bytes, f"cu_{operator}", session.screenshot_count)
                         await emit({"type": "cu_screenshot", "data": {"url": ss_url, "step": step}})
 
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_id,
-                            "content": [{"type": "image", "source": {
-                                "type": "base64", "media_type": "image/png", "data": png_b64
-                            }}]
-                        })
+                        tool_results.append(_computer_result(tool_id, [{"type": "image", "source": {
+                            "type": "base64", "media_type": "image/png", "data": png_b64
+                        }}], is_member))
                     except Exception as ss_err:
                         consecutive_screenshot_failures += 1
                         print(f"[CU-BG]   Screenshot failed ({consecutive_screenshot_failures} consecutive): {ss_err}")
                         await emit({"type": "cu_screenshot_error", "data": {"error": str(ss_err), "step": step,
                                     "consecutive_failures": consecutive_screenshot_failures}})
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_id,
-                            "content": [{"type": "text", "text": f"Screenshot failed: {ss_err}"}],
-                            "is_error": True
-                        })
+                        tool_results.append(_computer_result(
+                            tool_id, [{"type": "text", "text": f"Screenshot failed: {ss_err}"}],
+                            is_member, is_error=True))
+                        if is_member:
+                            toolset_failed = True
                         if consecutive_screenshot_failures >= 3:
                             await emit({"type": "error", "data": "Display appears non-functional (3 consecutive screenshot failures). Ending task."})
                             session.status = "error"
@@ -510,6 +617,15 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                         "tool_use_id": tool_id,
                         "content": tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     })
+
+            # Never leave a tool_use unanswered (the 3-screenshot-failure break above
+            # can skip later blocks) — the next request would be rejected.
+            answered = {r.get("tool_use_id") for r in tool_results}
+            for tu in tool_uses_this_turn:
+                if tu.get("id") not in answered:
+                    tool_results.append(_computer_result(
+                        tu.get("id", ""), TOOLSET_NOT_EXECUTED,
+                        tu.get("toolset_name") == COMPUTER_TOOLSET_NAME, is_error=True))
 
             # Add tool results to history
             if tool_results:

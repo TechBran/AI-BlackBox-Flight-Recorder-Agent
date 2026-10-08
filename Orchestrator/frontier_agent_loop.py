@@ -1093,6 +1093,23 @@ def _anthropic_cu_beta() -> str:
         return "computer-use-2025-11-24"
 
 
+def _anthropic_cu_tool(model: str, dw: int, dh: int) -> Tuple[Dict, Optional[str]]:
+    """(computer tools entry, anthropic-beta value or None) for ``model``, from the shared
+    per-model helper in browser.config: Claude 5.5+ → the GA ``computer_toolset_20260801``
+    (no beta, no display size); Sonnet/Haiku 4.5 → ``computer_20250124``; everything else →
+    ``computer_20251124``, whose beta keeps the [computer_use] anthropic_cu_beta override."""
+    from Orchestrator.browser.config import ANTHROPIC_BETA_HEADER, anthropic_cu_tool
+    entry, beta = anthropic_cu_tool(model, dw, dh)
+    if beta == ANTHROPIC_BETA_HEADER:
+        beta = _anthropic_cu_beta()
+    return entry, beta
+
+
+def _anthropic_toolset_type() -> str:
+    from Orchestrator.browser.config import COMPUTER_TOOLSET_TYPE
+    return COMPUTER_TOOLSET_TYPE
+
+
 def _abs_px_coord_note(dw: int, dh: int) -> str:
     """Tree-text coordinate note for the absolute-px (Anthropic/OpenAI) providers."""
     return (f"node bounds are in device pixels; the screenshot you see is {dw}x{dh} — give "
@@ -1169,6 +1186,14 @@ def _anthropic_key_to_op(text) -> Dict:
     return {"op": "press_key", "key": key}
 
 
+def _key_repeat(inp: Dict) -> int:
+    """The toolset `key` member's ``repeat`` count (1-100, default 1)."""
+    try:
+        return int((inp or {}).get("repeat") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _anthropic_action_to_op(inp: Dict, last_click) -> Dict:
     """Map one Anthropic `computer` action → a provider-neutral op. Coordinates are absolute px
     in the DOWNSCALED image the model saw (the adapter rescales them at grounding). Anthropic's
@@ -1213,7 +1238,14 @@ class AnthropicDriver(FrontierDriver):
     """Claude computer-use driver, DIY-on-Android (M7). Sends the downscaled screenshot + a11y
     tree; parses Claude's `computer` tool actions (absolute px) + the Android-nav custom tools.
     Holds the Anthropic multi-turn ``messages``. ``client=None`` builds a real AsyncAnthropic
-    (lazy import); tests inject a fake with the same ``beta.messages.create`` surface."""
+    (lazy import); tests inject a fake with the same ``beta.messages.create`` surface.
+
+    The computer tool version is per model (``_anthropic_cu_tool``). On the Claude 5.5+
+    ``computer_toolset_20260801`` each action is its own tool_use block named after the member
+    (left_click, type, …) with ``toolset_name: "computer"`` and no ``input.action``, and every
+    tool_result answering one must echo ``toolset_name``. This loop grounds ONE action per
+    step, so toolset requests set ``disable_parallel_tool_use`` (auto choice — forced choices
+    400 on 5.5) rather than executing batches; any extra tool_use is still answered."""
 
     provider = "anthropic"
 
@@ -1225,7 +1257,8 @@ class AnthropicDriver(FrontierDriver):
         self.adapter = get_coordinate_adapter("anthropic", model)
         self._system = _mobile_system_prompt_abs(self.capability, "Anthropic Claude")
         self._messages: list = []
-        self._pending: List[Tuple[str, bool]] = []      # (tool_use_id, is_computer)
+        # (tool_use_id, is_computer, toolset_name or None)
+        self._pending: List[Tuple[str, bool, Optional[str]]] = []
         self._last_click: Optional[Tuple[int, int]] = None
         if client is not None:
             self._client = client
@@ -1234,9 +1267,8 @@ class AnthropicDriver(FrontierDriver):
             from Orchestrator.config import ANTHROPIC_API_KEY
             self._client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-    def _tools(self, dw: int, dh: int) -> list:
-        tools = [{"type": "computer_20251124", "name": "computer",
-                  "display_width_px": int(dw), "display_height_px": int(dh)}]
+    def _tools(self, cu_tool: Dict) -> list:
+        tools = [cu_tool]
         for name, desc, schema in _nav_tool_specs():
             tools.append({"name": name, "description": desc, "input_schema": schema})
         return tools
@@ -1272,19 +1304,25 @@ class AnthropicDriver(FrontierDriver):
                 result_content.append(self._image_block(shot))
             user_blocks: list = []
             provided_screen = False
-            for i, (cid, is_computer) in enumerate(self._pending):
+            for i, (cid, is_computer, toolset) in enumerate(self._pending):
                 if i == 0 and is_computer:
-                    user_blocks.append({"type": "tool_result", "tool_use_id": cid,
-                                        "content": result_content})
+                    block = {"type": "tool_result", "tool_use_id": cid, "content": result_content}
                     provided_screen = True
                 elif i == 0:
-                    user_blocks.append({"type": "tool_result", "tool_use_id": cid,
-                                        "content": [{"type": "text",
-                                                     "text": _summarize_result(last_result)}]})
+                    block = {"type": "tool_result", "tool_use_id": cid,
+                             "content": [{"type": "text", "text": _summarize_result(last_result)}]}
+                elif toolset:
+                    # Only reachable if Claude ignores disable_parallel_tool_use: never leave a
+                    # toolset call unanswered, and say plainly that it did not run.
+                    block = {"type": "tool_result", "tool_use_id": cid, "is_error": True,
+                             "content": "Not executed: one action at a time — re-plan from the screen."}
                 else:
-                    user_blocks.append({"type": "tool_result", "tool_use_id": cid,
-                                        "content": [{"type": "text",
-                                        "text": "skipped: one action at a time — re-plan from the screen"}]})
+                    block = {"type": "tool_result", "tool_use_id": cid,
+                             "content": [{"type": "text",
+                             "text": "skipped: one action at a time — re-plan from the screen"}]}
+                if toolset:
+                    block["toolset_name"] = toolset
+                user_blocks.append(block)
             if not provided_screen:
                 user_blocks.append({"type": "text", "text": tree_txt})
                 if shot:
@@ -1292,9 +1330,15 @@ class AnthropicDriver(FrontierDriver):
             self._messages.append({"role": "user", "content": user_blocks})
 
         self._pending = []
+        cu_tool, beta = _anthropic_cu_tool(self.model, dw, dh)
+        extra: Dict = {}
+        if beta:
+            extra["betas"] = [beta]
+        if cu_tool.get("type") == _anthropic_toolset_type():   # one grounded action per turn
+            extra["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         resp = await self._client.beta.messages.create(
             model=self.model, max_tokens=4096, system=self._system,
-            tools=self._tools(dw, dh), messages=self._messages, betas=[_anthropic_cu_beta()])
+            tools=self._tools(cu_tool), messages=self._messages, **extra)
 
         blocks = list(getattr(resp, "content", None) or [])
         assistant, texts, tool_uses = [], [], []
@@ -1305,18 +1349,34 @@ class AnthropicDriver(FrontierDriver):
                 if t:
                     texts.append(t)
                 assistant.append({"type": "text", "text": t})
+            elif bt == "thinking":
+                # Always-on thinking (Claude 5.x): pass the block back unchanged.
+                assistant.append({"type": "thinking", "thinking": getattr(b, "thinking", "") or "",
+                                  "signature": getattr(b, "signature", "") or ""})
+            elif bt == "redacted_thinking":
+                assistant.append({"type": "redacted_thinking", "data": getattr(b, "data", "") or ""})
             elif bt == "tool_use":
-                assistant.append({"type": "tool_use", "id": getattr(b, "id", ""),
-                                  "name": getattr(b, "name", ""),
-                                  "input": dict(getattr(b, "input", None) or {})})
+                block = {"type": "tool_use", "id": getattr(b, "id", ""),
+                         "name": getattr(b, "name", ""),
+                         "input": dict(getattr(b, "input", None) or {})}
+                if getattr(b, "toolset_name", None):
+                    block["toolset_name"] = b.toolset_name
+                assistant.append(block)
                 tool_uses.append(b)
         if assistant:
             self._messages.append({"role": "assistant", "content": assistant})
 
         if not tool_uses:
+            if getattr(resp, "stop_reason", None) in ("max_tokens", "refusal"):
+                # Truncated (thinking can eat the budget) or declined — not a finished task.
+                raise RuntimeError(f"Claude stopped without an action (stop_reason="
+                                   f"{resp.stop_reason}): {_clip(' '.join(texts).strip())}")
             return Decision(kind="done", text=" ".join(texts).strip() or "Task complete.")
 
-        self._pending = [(getattr(tu, "id", ""), getattr(tu, "name", "") == "computer")
+        self._pending = [(getattr(tu, "id", ""),
+                          getattr(tu, "name", "") == "computer"
+                          or getattr(tu, "toolset_name", None) == "computer",
+                          getattr(tu, "toolset_name", None) or None)
                          for tu in tool_uses]
         model_action = self._to_op(tool_uses[0])
         return Decision(kind="action", model_action=model_action, text=" ".join(texts).strip())
@@ -1324,6 +1384,15 @@ class AnthropicDriver(FrontierDriver):
     def _to_op(self, tool_use) -> Dict:
         name = getattr(tool_use, "name", "")
         inp = dict(getattr(tool_use, "input", None) or {})
+        if getattr(tool_use, "toolset_name", None) == "computer":
+            # Toolset member block: the action IS the block name, the input only its params —
+            # i.e. the legacy {"action": name, **input}.
+            if name == "key" and _key_repeat(inp) > 1:
+                # `repeat` must be honored and one step is one key press, so refuse it outright
+                # (the model sees the failure) rather than silently pressing once.
+                return {"op": "unsupported", "name": f"key:{inp.get('text', '')}x{_key_repeat(inp)}"}
+            inp = dict(inp, action=name)
+            name = "computer"
         if name == "computer":
             op = _anthropic_action_to_op(inp, self._last_click)
             if op.get("op") in ("tap", "type") and "x" in op:
