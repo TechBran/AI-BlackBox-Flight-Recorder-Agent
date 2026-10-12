@@ -42,6 +42,11 @@ models:
     concurrencyLimit: 4
 
   "rerank-qwen3-8b":
+    # -b/-ub MUST match the embedder: RANK pooling is non-causal, so a whole
+    # (query, document) pair must fit in ONE physical batch. Without them
+    # llama-server defaults to 512 and every realistic passage 500s with
+    # "input (N tokens) is too large to process", while /rerank/status still
+    # reports healthy because preflight_passage_n=1 stays under 512.
     # SELF-CONVERTED GGUF (Qwen3-Reranker-8B @ Q8_0) from a llama.cpp build
     # post-dating the convert_hf_to_gguf.py fix (extracts cls.output.weight,
     # pooling_type=RANK). G2 gates score validity before this member can be
@@ -52,7 +57,8 @@ models:
       --model ${models-dir}/Qwen3-Reranker-8B-Q8_0.gguf
       --host 127.0.0.1 --port ${PORT}
       --reranking --pooling rank
-      -c 8192 -ngl 99 --no-warmup
+      -c 8192 -b 8192 -ub 8192 -fa on
+      -ngl 99 --no-warmup
     proxy: "http://127.0.0.1:${PORT}"
     checkEndpoint: "/health"
     healthCheckTimeout: 300      # ~8GB Q8_0 weights load — long startup gate (D13)

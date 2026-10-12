@@ -194,18 +194,20 @@ def _resolve_rerank_floor() -> float:
 
 
 # ── optional cross-encoder rerank stage (M11/WI-4, audit A9) ──────────────────
-
-# Fall-through is logged ONCE per process (a dead reranker on a hot path must
-# not spam the journal on every retrieve).
-_rerank_fallthrough_logged = False
-
-
-def _log_rerank_fallthrough(reason: str) -> None:
-    global _rerank_fallthrough_logged
-    if not _rerank_fallthrough_logged:
-        print(f"[RERANK] {reason}; falling through to the un-reranked "
-              "ranking (logged once per process)")
-        _rerank_fallthrough_logged = True
+# Every un-reranked fall-through is recorded through rerank._note_fallthrough, so
+# it is logged AND counted on GET /rerank/status (fallthrough_state). A
+# once-per-process log here used to hide days of skipped reranks on MS02.
+def _note_rerank_fallthrough(reason: str) -> None:
+    """Count + log a fall-through decided HERE (before or around scoring). These
+    say nothing about reranker HEALTH (a drifted snapshot offset, an envelope
+    parse error), so they never become FAILED capability evidence. Never raises."""
+    try:
+        from Orchestrator import rerank as _rerank
+        _rerank._note_fallthrough(reason, _rerank.get_settings(),
+                                  health_signal=False)
+    except Exception as e:  # noqa: BLE001 - observability must never break retrieval
+        print(f"[RERANK] {reason}; falling through to the un-reranked ranking "
+              f"(fallthrough record unavailable: {e})")
 
 
 def _decode_snapshot_text(meta) -> "str | None":
@@ -321,7 +323,7 @@ def _apply_rerank(query, ranked, index, rrf_c,
             meta = index.get(sid)
             text = _decode_snapshot_text(meta) if meta else None
             if not text:
-                _log_rerank_fallthrough(f"passage decode failed for {sid}")
+                _note_rerank_fallthrough(f"passage decode failed for {sid}")
                 return None
             # M14.2: body-only passage — strip the bookkeeping envelope, then
             # head-cut to passage_chars. The chunk ordinal (ord_by_id) and the
@@ -333,8 +335,7 @@ def _apply_rerank(query, ranked, index, rrf_c,
                             if passage_mode == "window" else body[:passage_chars])
         scores = _rerank.score(query, passages)
         if scores is None or len(scores) != len(passages):
-            _log_rerank_fallthrough("scorer returned no usable scores")
-            return None
+            return None   # score() already recorded + logged this fall-through
         order = sorted(range(pool_n), key=lambda i: scores[i], reverse=True)
         # rerank_floor: the reranker becomes a BOUNCER — sub-floor pool members
         # are dropped from the ranking entirely (they never reach delivery), so
@@ -373,7 +374,7 @@ def _apply_rerank(query, ranked, index, rrf_c,
         new_order = [pool[i] for i in kept] + keep_tail
         return {sid: 1.0 / (rrf_c + r) for r, sid in enumerate(new_order)}
     except Exception as e:  # noqa: BLE001 - rerank must never break retrieval
-        _log_rerank_fallthrough(f"rerank stage error ({e})")
+        _note_rerank_fallthrough(f"rerank stage error ({e})")
         return None
 
 

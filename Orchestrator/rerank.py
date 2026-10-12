@@ -26,11 +26,33 @@ vllm-reranker.service binds (M13) — so a fresh GPU box needs ZERO url/port
 config once the service is up; `provider = vllm` stays the single deliberate
 switch. An EXPLICITLY EMPTY base_url in config still disables (escape hatch).
 
-Latency preflight (audit A9 gating leg 3): retrieve()-time probing is too hot,
-so preflight() runs ONCE per process on first use — it scores a 1-passage dummy
-and requires wall latency under [rerank] preflight_ceiling_ms (fallback 500).
-A failed probe (error OR over-ceiling) disables rerank for the PROCESS LIFETIME
-(cached; logged once). GET /rerank/status surfaces the result.
+Capability gating (audit A9 gating leg 3) — TWO regimes, because a probe is not
+free everywhere:
+  * On-box batch providers (_EVIDENCE_PROVIDERS: localstack/vllm) are gated on
+    EVIDENCE FROM REAL TRAFFIC, not on a synthetic probe. A probe honest enough
+    to catch their real failure mode has to be production-shaped
+    (rerank_candidate_n x passage_chars) — MEASURED on MS02 that is a real ~16s
+    rerank (21.3s cold) on the first search after every restart, held under
+    _preflight_lock while concurrent searches queue behind it, to learn exactly
+    what the next real search reports for free. So score() records every real
+    outcome and preflight() reports three honest states:
+      ok      — a real rerank succeeded within _EVIDENCE_OK_TTL_S;
+      failed  — a real rerank failed (the reason + batch shape
+                _note_fallthrough recorded); the gate closes for
+                _PREFLIGHT_FAIL_TTL_S, then decays to unknown and retries;
+      unknown — no recent evidence (cold start / aged out). TRUTHFUL, never
+                reported as ok, and the gate stays OPEN: the first real search
+                IS the probe. If it fails the user gets un-reranked results
+                once, loudly logged, and the state flips to failed.
+  * cpu / cloud / llm keep the cheap once-per-process probe of
+    `preflight_passage_n` dummy passages under [rerank] preflight_ceiling_ms
+    (fallback 500): their failure mode is auth/quota/deps, not our batch size,
+    and a 1-passage probe there is not a 16s tax. A failed probe disables
+    rerank for the process lifetime (cloud: for _PREFLIGHT_FAIL_TTL_S).
+LIVENESS is a SEPARATE concern from capability and stays cheap: reachable() /
+scoring_reachable() / service_reachable() answer "can I reach the front door",
+never "does reranking work". GET /rerank/status surfaces both, plus the running
+un-reranked `fallthrough` record and the base_url scoring ACTUALLY uses.
 
 ── Post-GPU activation checklist (RTX 2000 Ada 16GB — for the operator) ──────
 1. Serve the reranker. On GPU boxes the installer provisions this (M13:
@@ -56,8 +78,9 @@ A failed probe (error OR over-ceiling) disables rerank for the PROCESS LIFETIME
    (base_url and model already default in code to http://localhost:8091 and
    qwen3-reranker-0.6b — set them only to override)
    and flip [retrieval] rerank_enabled = true.
-3. Restart; GET /rerank/status must show preflight state "ok" with latency
-   comfortably under the 500 ms ceiling.
+3. Restart; GET /rerank/status shows state "unknown" until the first real
+   search (vllm is evidence-gated — nothing is probed synthetically), then "ok"
+   with the real scoring latency once a search has actually reranked.
 4. Validate scores once against the in-process transformers reference (the
    audit's vLLM-fidelity check), then run the WI-6 Phase B eval
    ({quant-8B, FP16-8B} x {rerank on/off} — audit A10) BEFORE shipping
@@ -95,6 +118,36 @@ from Orchestrator.config import (
 # a fresh GPU box works with zero url/port config edits once the service is
 # up; an explicit [rerank] base_url overrides, an explicitly EMPTY one disables.
 DEFAULT_BASE_URL = "http://localhost:8091"
+
+# ── on-box (llama-swap) transport deadlines ───────────────────────────────────
+# llama-swap HOLDS a /v1/rerank request while it evicts a group and cold-loads
+# the reranker member: a slow READ is the stack working, not a hung connection.
+# Same value and same reasoning as Orchestrator/embeddings/providers.py's
+# LOCALSTACK_READ_TIMEOUT_S (the other on-box client of the same front door —
+# kept as its own named constant here so rerank.py's minimal import surface
+# stands, and so the two can be compared rather than silently drifting).
+# MEASURED on MS02 2026-08-11: a production-sized rerank (rerank_candidate_n 40
+# x passage_chars 4096, ~25K tokens at ~0.67ms/token) runs ~16s warm and ~19s
+# including an intra-group swap (21.3s cold worst case) — the old flat 15s
+# [rerank] timeout_s aborted work llama-swap was still correctly doing.
+# BOUNDED at 90s (~4x the cold worst case), not the embeddings client's 600s:
+# score() runs inline on the caller's thread — on /chat/stream that is the
+# event loop — so a member that accepts the connection and never answers holds
+# every caller for the whole cap, and a skipped rerank only costs ranking
+# quality (score() falls through to the un-reranked order, it never fails the
+# search). Its own knob, [rerank] localstack_timeout_s; [rerank] timeout_s is
+# the cloud deadline and no longer leaks into this one. Connect stays short so
+# a genuinely dead :9098 front door fails fast instead of hanging for the cap.
+LOCALSTACK_READ_TIMEOUT_S = 90.0
+LOCALSTACK_CONNECT_TIMEOUT_S = 5.0
+
+# Scoring endpoints, named once so status()' scoring_base_url() can report the
+# URL the scorer really posts to instead of a second hand-copied literal.
+VOYAGE_RERANK_URL = "https://api.voyageai.com/v1/rerank"
+COHERE_RERANK_URL = "https://api.cohere.ai/v2/rerank"
+VERTEX_RANK_URL = ("https://discoveryengine.googleapis.com/v1/projects/"
+                   "{project}/locations/global/rankingConfigs/"
+                   "default_ranking_config:rank")
 
 # Reranker model registry — the ONLY home for reranker model literals.
 # Same conventions as EMBEDDING_MODELS (slug-keyed, kebab-case, provider +
@@ -171,7 +224,14 @@ RERANK_MODELS = {
         "cost_note": "On-box GPU/CPU — free, private, unlimited (runs on your box via llama-swap; nothing leaves it)",
         "privacy": "local",
         "tiers": ["MID", "HIGH"],
-        "preflight_ceiling_ms": 500,  # D13: per-scoring-call target ONCE LOADED (40-passage rerank inside ceiling); G2 measures the ~6–12s per-search intra-group swap separately
+        # INERT for this provider (schema uniformity only): localstack is
+        # evidence-gated (_EVIDENCE_PROVIDERS) and never probed synthetically,
+        # so no latency ceiling is applied to it. Kept as the historical D13
+        # per-scoring-call target (~76-106ms once loaded) — it was never a
+        # full-batch budget (MEASURED 2026-08-11: a real 40 x 4096-char rerank
+        # is ~16s warm), and gating on it is what let a reranker that 500s every
+        # real search still report preflight ok.
+        "preflight_ceiling_ms": 500,
         "preflight_passage_n": 1,     # llama.cpp /v1/rerank batches all docs in one call
     },
     # MID-tier opt-in (M5): the SAME Qwen 0.6B weights served IN-PROCESS on CPU
@@ -345,34 +405,34 @@ KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm",
 # the local vllm/cpu providers keep the process-lifetime failure cache.
 CLOUD_PROVIDERS = {"voyage", "cohere", "vertex", "llm"}
 
-# Providers whose FAILED preflight recovers after a TTL rather than sticking for
-# the process lifetime (M3.2). localstack (Milestone 4) joins here: under
-# llama-swap a cross-group swap can leave the retrieval group transiently cold
-# (a first probe queues behind a ~6–10s group load → over-ceiling), and that
-# transient must NOT disable rerank until a restart. NB this is ONLY the cache
-# policy — localstack reachability stays is_healthy()-based (loopback, keyless),
-# never the CLOUD_PROVIDERS key-present path.
-_PREFLIGHT_TTL_RECOVERABLE = CLOUD_PROVIDERS | {"localstack"}
+# ── capability from REAL traffic vs. a synthetic probe ────────────────────────
+# The on-box batch providers are gated on evidence, never probed. History, so
+# nobody re-adds the probe: the shipped 1-short-passage probe was structurally
+# blind (MS02, 2026-08-11 — the on-box reranker returned HTTP 500 for EVERY real
+# search, a llama.cpp batch limit below 40x4096 chars, while /rerank/status
+# reported available:true off a 25-character passage that stayed under it). The
+# fix that saw it was a PRODUCTION-SHAPED probe — and that probe is a real ~16s
+# rerank (21.3s cold) on the first search after every restart, taken under
+# _preflight_lock so concurrent searches serialize behind it. It buys exactly
+# what the next real search reports for free, so the probe is gone: score()
+# records real outcomes (_record_evidence) and preflight() reads them.
+# Metered/cpu providers are NOT in here — their probe is one short passage
+# (cheap, and their failure mode is auth/quota/deps, not our batch size), and a
+# full-size batch every TTL would bill the operator.
+_EVIDENCE_PROVIDERS = {"localstack", "vllm"}
 
-# Swappable / cold-loading LOCAL providers whose FIRST scoring call pays a
-# one-time MODEL-LOAD cost that is NOT per-scoring-call latency and must be
-# EXCLUDED from preflight()'s timed probe (bug: a fully-working reranker showed
-# available=False right after a restart / on a cold box because that cold load
-# was timed against the per-scoring-call ceiling — MS02, 2026-07-22):
-#   localstack — llama-swap loads the reranker member on the first /v1/rerank,
-#                evicting the embedder (the D13 sequential intra-group swap,
-#                ~2-6s). The registry comment on qwen3-reranker-8b-local is
-#                explicit that its 500ms ceiling is "per-scoring-call ONCE
-#                LOADED"; G5 measures that swap separately.
-#   vllm       — the engine's first inference after a cold start (graph
-#                warm/compile) can dwarf steady-state scoring.
-# For these, preflight() fires ONE UNTIMED throwaway score to trigger the load,
-# THEN times the now-warm probe (measured_ms reflects warm scoring, ~106ms live,
-# not the multi-second load). Cloud (batched, already-resident) and cpu
-# (in-process; its own _load_cpu_model owns first-call load, and the CPU probe's
-# extrapolation model deliberately measures the first call) are NOT warmed —
-# their timing is unchanged.
-_PREFLIGHT_WARM_PROVIDERS = {"localstack", "vllm"}
+# How long a real SUCCESS keeps being reported as "ok". This is an HONESTY
+# window, not a gate: `unknown` attempts a rerank exactly like `ok` does, so a
+# decayed record costs nothing — it only stops status() claiming a healthy
+# reranker off hours-old evidence in a service that runs for weeks.
+_EVIDENCE_OK_TTL_S = 600.0
+# A real FAILURE closes the gate for _PREFLIGHT_FAIL_TTL_S (the same 60s a
+# failed cloud probe closes it), then decays to unknown and the next real search
+# retries — a wedged reranker costs un-reranked results once a minute, never a
+# restart to recover.
+
+# The short filler the probing providers have always used.
+_PROBE_PASSAGE = "preflight probe passage"
 
 
 def _key_present_for(auth_kind: "str | None", key_env: "str | None") -> bool:
@@ -405,6 +465,139 @@ _PREFLIGHT_FAIL_TTL_S = 60.0
 _REACH_TTL_S = 5.0
 _reach_lock = threading.Lock()
 _reach_cache: "tuple[float, bool] | None" = None
+
+
+# ── un-reranked fallthrough record (observability) ────────────────────────────
+# Falling through to the un-reranked ranking is a real degradation of search
+# quality, not a curiosity: on MS02 every search silently lost the rerank stage
+# for days because the one log line was emitted ONCE PER PROCESS and the service
+# runs for weeks. Every occurrence is logged and counted here, and the latest
+# reason rides on GET /rerank/status. The journal cannot flood: a scoring
+# failure closes the gate until it clears — as failed capability evidence for
+# the on-box providers (one line per _PREFLIGHT_FAIL_TTL_S at worst), and by
+# reopening the cached probe (below) for the probing ones.
+_fallthrough_lock = threading.Lock()
+_fallthrough: dict = {"count": 0, "reason": None, "provider": None,
+                      "model": None, "at": None}
+
+# Per-thread scoring bookkeeping: `in_preflight` suppresses recording while
+# preflight() runs its own probe (that failure is already reported as the
+# preflight state), `noted` lets an inner helper record a more specific reason
+# than the dispatcher could.
+_score_ctx = threading.local()
+
+
+def _reopen_preflight_after_fallthrough() -> None:
+    """Drop a cached OK preflight after a real scoring failure so the next gate
+    check re-probes. Without this, status() keeps reporting available:true off a
+    probe that passed once while every live search falls through. Non-blocking:
+    if a probe already holds the lock it is about to publish fresh state
+    anyway (and score() runs INSIDE that probe — never block on it)."""
+    global _preflight_result, _preflight_expiry
+    if not _preflight_lock.acquire(blocking=False):
+        return
+    try:
+        if _preflight_result is not None and _preflight_result.get("state") == "ok":
+            _preflight_result = None
+            _preflight_expiry = None
+    finally:
+        _preflight_lock.release()
+
+
+def _note_fallthrough(reason: str, settings: "dict | None" = None,
+                      health_signal: bool = True) -> None:
+    """Record + log ONE un-reranked fallthrough. `health_signal=False` for a
+    degradation that says nothing about reranker health (the D12 voice gate
+    deliberately yields the retrieval group) — it is still counted and logged,
+    it just must not become FAILED capability evidence (nor cost a cloud
+    re-probe) on every voice-heavy search."""
+    _score_ctx.noted = True
+    if getattr(_score_ctx, "in_preflight", False):
+        return
+    s = settings or {}
+    with _fallthrough_lock:
+        _fallthrough["count"] += 1
+        _fallthrough["reason"] = str(reason)[:200]
+        _fallthrough["provider"] = s.get("provider")
+        _fallthrough["model"] = s.get("model")
+        _fallthrough["at"] = time.time()
+        snapshot = dict(_fallthrough)
+    print(f"[RERANK] {snapshot['reason']}; falling through to the un-reranked "
+          f"ranking (provider={snapshot['provider']} "
+          f"model={snapshot['model']}, {snapshot['count']} this process)")
+    if health_signal:
+        _record_evidence("failed", s, reason=snapshot["reason"])
+        _reopen_preflight_after_fallthrough()
+
+
+def fallthrough_state() -> dict:
+    """The running un-reranked-fallthrough record for GET /rerank/status:
+    {count, reason, provider, model, at} (`at` = epoch seconds). Never raises."""
+    with _fallthrough_lock:
+        return dict(_fallthrough)
+
+
+# ── capability evidence from real scoring calls ───────────────────────────────
+# What the synthetic probe used to assert, recorded from the searches that
+# actually ran. Written by score() (ok) and _note_fallthrough (failed); read by
+# preflight() for the _EVIDENCE_PROVIDERS and reported verbatim on
+# /rerank/status. `state` here is the LAST RECORDED outcome; evidence_state()
+# decays it to "unknown" once its TTL passes, so nothing can claim ok off a
+# stale record. Probe traffic is excluded (in_preflight) — a probe is not
+# evidence about production.
+_evidence_lock = threading.Lock()
+_evidence: dict = {"state": "unknown", "at": None, "reason": None,
+                   "provider": None, "model": None, "passage_n": None,
+                   "passage_chars": None, "latency_ms": None}
+_evidence_deadline: "float | None" = None    # monotonic; None = no record
+
+
+def _record_evidence(state: str, settings: "dict | None" = None,
+                     reason: "str | None" = None,
+                     latency_ms: "float | None" = None) -> None:
+    """Record the outcome of a REAL scoring call. The batch shape rides on
+    _score_ctx (set by score()) so an inner helper's more specific reason keeps
+    its numbers. Never raises."""
+    global _evidence_deadline
+    if getattr(_score_ctx, "in_preflight", False):
+        return
+    s = settings or {}
+    passage_n, passage_chars = getattr(_score_ctx, "batch", (None, None))
+    with _evidence_lock:
+        _evidence.update(
+            state=state, at=time.time(), reason=reason,
+            provider=s.get("provider"), model=s.get("model"),
+            passage_n=passage_n, passage_chars=passage_chars,
+            latency_ms=(round(latency_ms, 1) if latency_ms is not None
+                        else None))
+        _evidence_deadline = time.monotonic() + (
+            _EVIDENCE_OK_TTL_S if state == "ok" else _PREFLIGHT_FAIL_TTL_S)
+
+
+def _evidence_ttl_s(state: str) -> "float | None":
+    if state == "ok":
+        return _EVIDENCE_OK_TTL_S
+    if state == "failed":
+        return _PREFLIGHT_FAIL_TTL_S
+    return None
+
+
+def evidence_state() -> dict:
+    """The three honest capability states, from real traffic only:
+      ok      — a real rerank succeeded within _EVIDENCE_OK_TTL_S;
+      failed  — a real rerank failed (reason + batch shape carried);
+      unknown — no record yet, or the last one aged out (`stale` True, and the
+                record's `at`/`reason` are kept for ops).
+    `at` is epoch seconds. Never raises, never probes anything."""
+    with _evidence_lock:
+        ev = dict(_evidence)
+        deadline = _evidence_deadline
+    fresh = deadline is not None and time.monotonic() < deadline
+    ev["ttl_s"] = _evidence_ttl_s(ev["state"])
+    ev["stale"] = bool(ev["state"] != "unknown" and not fresh)
+    if not fresh:
+        ev["state"] = "unknown"
+    return ev
 
 
 _cpu_importable: "bool | None" = None
@@ -554,6 +747,30 @@ def _vllm_reranker_running(timeout_s: float = 1.0) -> bool:
         return False
 
 
+# The §5.2 co-run check is a LIVENESS read (is the legacy service up?), and it
+# now runs on the capability path of every search — there is no once-per-process
+# probe left to hide behind — so it gets its own short TTL. The answer only
+# changes when an operator starts/stops a service, and a 30s-stale read still
+# resolves it live (no restart), which is the property the rule needs.
+_CORUN_TTL_S = 30.0
+_corun_lock = threading.Lock()
+_corun_cache: "tuple[float, bool] | None" = None
+
+
+def _vllm_corun_conflict() -> bool:
+    """TTL-cached §5.2 co-run check: is the legacy vLLM reranker holding VRAM
+    that the on-box retrieval group would OOM against? Never raises."""
+    global _corun_cache
+    now = time.monotonic()
+    with _corun_lock:
+        if _corun_cache is not None and (now - _corun_cache[0]) < _CORUN_TTL_S:
+            return _corun_cache[1]
+    up = _vllm_reranker_running()
+    with _corun_lock:
+        _corun_cache = (now, up)
+    return up
+
+
 # Malformed-config resilience (M3.1 fold-in from the M2 review). M2 moved
 # get_settings() outside score()'s try, so a non-numeric [rerank] value would
 # now propagate out of score()/status() as a ValueError. Fix at the source:
@@ -665,10 +882,20 @@ def get_settings() -> dict:
             fallback=(entry.get("query_instruction", "") if entry else ""),
         ),
         "timeout_s": _cfg_float("rerank", "timeout_s", 15.0),
-        # Config override wins over the model entry's registry ceiling.
+        # The on-box (llama-swap) READ deadline: its OWN knob, defaulting to the
+        # bounded swap-tolerant cap (see LOCALSTACK_READ_TIMEOUT_S). Deliberately
+        # NOT [rerank] timeout_s (the cloud deadline): setting that to 15 used
+        # to drop the on-box read back to the 15s swap abort. Connect stays short.
+        "localstack_read_timeout_s": _cfg_float(
+            "rerank", "localstack_timeout_s", LOCALSTACK_READ_TIMEOUT_S),
+        # Config override wins over the model entry's registry ceiling. Gates
+        # the PROBING providers only (cpu/cloud/llm) — the evidence providers
+        # are not timed against a ceiling at all (_EVIDENCE_PROVIDERS).
         "preflight_ceiling_ms": _cfg_float(
             "rerank", "preflight_ceiling_ms", ceiling_fallback),
         "preflight_passage_n": passage_n,
+        # Head-cut retrieval.py applies to every passage.
+        "passage_chars": _cfg_int("rerank", "passage_chars", 4096),
         # Candidate count the reranker sees at retrieve()-time; feeds the CPU
         # preflight extrapolation. Lives in [retrieval]; resilient read.
         "rerank_candidate_n": _cfg_int("retrieval", "rerank_candidate_n", 40),
@@ -863,7 +1090,7 @@ def _score_voyage(query: str, passages: list[str],
     if not api_key:
         return None
     resp = requests.post(
-        "https://api.voyageai.com/v1/rerank",
+        VOYAGE_RERANK_URL,
         headers={"Authorization": f"Bearer {api_key}",
                  "content-type": "application/json"},
         json={"query": query, "documents": list(passages),
@@ -889,7 +1116,7 @@ def _score_cohere(query: str, passages: list[str],
     if not api_key:
         return None
     resp = requests.post(
-        "https://api.cohere.ai/v2/rerank",
+        COHERE_RERANK_URL,
         headers={"Authorization": f"Bearer {api_key}",
                  "content-type": "application/json"},
         json={"model": settings["model_id"], "query": query,
@@ -930,9 +1157,19 @@ def _do_localstack_rerank(query: str, passages: list[str],
         json={"model": settings["model_id"],
               "query": settings.get("query_instruction", "") + query,
               "documents": list(passages)},
-        timeout=settings["timeout_s"],
+        # (connect, read): a swap is a long READ, never a long connect.
+        timeout=(LOCALSTACK_CONNECT_TIMEOUT_S,
+                 settings.get("localstack_read_timeout_s",
+                              LOCALSTACK_READ_TIMEOUT_S)),
     )
     if resp.status_code != 200:
+        # The batch shape is in the reason on purpose: an oversized batch (the
+        # llama.cpp -b/-ub class of failure) 500s while a small one succeeds, so
+        # "HTTP 500 for 40 passages / 163840 chars" is the actionable fact.
+        _note_fallthrough(
+            f"on-box reranker returned HTTP {resp.status_code} for "
+            f"{len(passages)} passages / "
+            f"{sum(len(p or '') for p in passages)} chars", settings)
         return None
     return _scatter_relevance_scores(resp.json(), len(passages))
 
@@ -955,6 +1192,8 @@ async def _score_localstack(query: str, passages: list[str],
                 settings = get_settings()
             return _do_localstack_rerank(query, passages, settings)
     except asyncio.TimeoutError:
+        _note_fallthrough("voice session held the on-box retrieval group",
+                          settings, health_signal=False)
         return None
     except Exception:  # noqa: BLE001 - never-raise backstop (audit A9): a
         # transport error from _do_localstack_rerank on an unreachable :9098
@@ -980,6 +1219,11 @@ def _score_localstack_sync(query: str, passages: list[str],
                 timeout=local_stack.RETRIEVAL_GATE_TIMEOUT_S):
             return _do_localstack_rerank(query, passages, settings)
     except asyncio.TimeoutError:
+        # Counted and logged like any other fallthrough, but health_signal=
+        # False: a gate yield is the D12 design working, not a sick reranker —
+        # it must never become FAILED capability evidence.
+        _note_fallthrough("voice session held the on-box retrieval group",
+                          settings, health_signal=False)
         return None
 
 
@@ -1061,8 +1305,7 @@ def _score_vertex(query: str, passages: list[str],
     records = [{"id": str(i), "content": (p or "")[:_VERTEX_CONTENT_CHARS]}
                for i, p in enumerate(passages)]
     resp = requests.post(
-        f"https://discoveryengine.googleapis.com/v1/projects/{project}"
-        f"/locations/global/rankingConfigs/default_ranking_config:rank",
+        VERTEX_RANK_URL.format(project=project),
         headers={"Authorization": f"Bearer {token}",
                  "X-Goog-User-Project": project,
                  "content-type": "application/json"},
@@ -1292,6 +1535,14 @@ def score(query: str, passages: list[str]) -> list[float] | None:
     exception is swallowed to None so a dead reranker only costs latency (the
     retriever falls through to its un-reranked ranking). The returned list is
     positionally aligned with `passages`.
+
+    Every real call is EVIDENCE (the capability signal the on-box providers are
+    gated on, replacing a synthetic probe): a success records state ok with its
+    measured latency and batch shape, and every None from a SELECTED provider is
+    recorded and logged as a fallthrough (_note_fallthrough), which records state
+    failed with the reason. The degradation is never silent, and a scoring
+    failure also reopens a cached OK probe (cpu/cloud) rather than keeping the
+    reranker nominally "available".
     """
     if not passages:
         return None
@@ -1299,34 +1550,121 @@ def score(query: str, passages: list[str]) -> list[float] | None:
     p = s["provider"]
     if p == "null":
         return None
+    # Batch shape for whichever evidence this call produces — an inner helper's
+    # more specific reason (llama.cpp's oversized-batch 500) keeps its numbers.
+    _score_ctx.batch = (len(passages), sum(len(x or "") for x in passages))
     fn = {"vllm": _score_vllm, "cpu": _score_cpu, "voyage": _score_voyage,
           "cohere": _score_cohere, "vertex": _score_vertex,
           "llm": _score_llm, "localstack": _score_localstack_sync}.get(p)
     if fn is None:
+        _note_fallthrough(f"no scorer for provider {p!r}", s)
         return None
+    _score_ctx.noted = False
+    t0 = time.monotonic()
     try:
-        return fn(query, passages, s)
-    except Exception:  # noqa: BLE001 - never-raise contract (audit A9)
+        out = fn(query, passages, s)
+    except Exception as exc:  # noqa: BLE001 - never-raise contract (audit A9)
+        _note_fallthrough(f"{type(exc).__name__} from the {p} scorer", s)
         return None
+    if out is None or len(out) != len(passages):
+        if not getattr(_score_ctx, "noted", False):
+            _note_fallthrough("scorer returned no usable scores", s)
+        return None
+    _record_evidence("ok", s, latency_ms=(time.monotonic() - t0) * 1000.0)
+    return out
 
 
-def preflight() -> dict:
-    """One-time-per-process latency probe; result cached for process lifetime.
+def _skipped_state(s: dict) -> dict:
+    """The unconfigured result — NOT cached anywhere: config can change."""
+    return {"state": "skipped", "latency_ms": None, "measured_ms": None,
+            "ceiling_ms": s["preflight_ceiling_ms"],
+            "passage_n": s["preflight_passage_n"],
+            "passage_chars": s["passage_chars"], "at": None,
+            "source": "config", "reason": "no reranker provider configured"}
 
-    Scores `preflight_passage_n` dummy passages (M3.1: a realistic batch, not
-    1) against the configured provider and requires wall latency under the
-    resolved ceiling. For the `cpu` provider the measured latency is
-    EXTRAPOLATED to the real candidate count
-    (measured_ms × rerank_candidate_n / preflight_passage_n) before the
-    compare — a CPU cross-encoder scales ~linearly with passage count, so an
-    8-passage probe under-represents a 40-candidate rerank. vLLM/cloud batch,
-    so their passage_n stays 1 and no extrapolation applies. States:
-      skipped — no provider configured (NOT cached: config can change);
-      ok      — probe scored under the ceiling (cached);
-      failed  — provider error or over-ceiling (cached: rerank disabled for
-                the process lifetime; a restart re-probes).
+
+def _evidence_capability(s: dict) -> dict:
+    """Capability for an _EVIDENCE_PROVIDERS provider, in preflight()'s shape,
+    read from real traffic — no probe, no I/O, no lock contention (§5.2 aside).
+
+    `unknown` keeps the gate OPEN on purpose: the first real search is the probe,
+    and its outcome lands here. ceiling_ms is None because nothing is timed
+    against a ceiling on this path; latency_ms is the LAST REAL rerank's wall
+    time, dropped once the evidence goes stale so the wizard can't show a
+    number for a state it no longer stands behind.
+
+    Evidence earned by a DIFFERENT provider/model reads as unknown: a selector
+    change calls reset_preflight(), but a hand-edited config.ini does not, and
+    the old selection's outcome says nothing about the new one."""
+    ev = evidence_state()
+    mismatch = (ev["state"] != "unknown"
+                and (ev["provider"] != s.get("provider")
+                     or ev["model"] != s.get("model")))
+    state = "unknown" if mismatch else ev["state"]
+    fresh = state != "unknown"
+    if mismatch:
+        reason = ("evidence belongs to a different reranker selection — the "
+                  "next search re-proves this one")
+    elif state == "failed":
+        reason = ev["reason"]
+    elif state == "ok":
+        reason = None
+    elif ev["at"] is None:
+        reason = "no real scoring evidence yet — the next search is the probe"
+    else:
+        reason = ("last real scoring evidence aged out — the next search "
+                  "re-proves it")
+    return {"state": state,
+            "latency_ms": ev["latency_ms"] if fresh else None,
+            "measured_ms": ev["latency_ms"] if fresh else None,
+            "ceiling_ms": None,
+            "passage_n": ev["passage_n"] if fresh else None,
+            "passage_chars": ev["passage_chars"] if fresh else None,
+            "at": None if mismatch else ev["at"],
+            "source": "real-traffic", "reason": reason}
+
+
+def preflight(settings: "dict | None" = None) -> dict:
+    """Capability state for the configured provider — TWO regimes (module doc).
+
+    _EVIDENCE_PROVIDERS (localstack/vllm): NO probe. The state is the record of
+    real scoring outcomes (_evidence_capability): ok / failed / unknown, where
+    unknown is honest and still attempts. Nothing here scores a synthetic batch,
+    so a restart no longer costs a ~16s rerank and polling /rerank/status is
+    free.
+
+    cpu / cloud / llm: the cheap once-per-process probe, unchanged — scores
+    `preflight_passage_n` short dummy passages and requires wall latency under
+    the resolved ceiling. For `cpu` the measured latency is EXTRAPOLATED to the
+    real candidate count (measured_ms × rerank_candidate_n / preflight_passage_n)
+    before the compare — a CPU cross-encoder scales ~linearly with passage
+    count. Cloud providers batch, so passage_n stays 1 and no extrapolation
+    applies. States: skipped (no provider configured; NOT cached), ok (cached),
+    failed (cached: process lifetime, or _PREFLIGHT_FAIL_TTL_S for cloud).
+
+    `settings` lets a caller that already resolved config (available(), status())
+    pass it in rather than paying a second sidecar+config read per search.
     """
     global _preflight_result, _preflight_expiry
+    s = settings or get_settings()
+    provider = s["provider"]
+    if provider in _EVIDENCE_PROVIDERS:
+        if not _configured(s):
+            return _skipped_state(s)
+        # §5.2 hard rule (Milestone 4): the legacy vLLM reranker (:8091) and the
+        # on-box localstack retrieval group CANNOT co-run — vLLM pre-allocates
+        # ~90% of VRAM via gpu_memory_utilization and is invisible to llama-swap's
+        # budgeting, so both resident → guaranteed OOM. Refuse to activate while
+        # it answers (a LIVENESS read, TTL-cached — stopping the service resolves
+        # it live, no restart).
+        if provider == "localstack" and _vllm_corun_conflict():
+            return {"state": "failed", "latency_ms": None, "measured_ms": None,
+                    "ceiling_ms": None, "passage_n": None,
+                    "passage_chars": None, "at": None, "source": "co-run-check",
+                    "reason": ("vLLM reranker still answering on :8091 — stop "
+                               "vllm-reranker.service before enabling the on-box "
+                               "retrieval group (both pre-allocate VRAM → OOM)")}
+        return _evidence_capability(s)
     res = _preflight_result
     if res is not None and (
             _preflight_expiry is None or time.monotonic() < _preflight_expiry):
@@ -1337,42 +1675,23 @@ def preflight() -> dict:
                 _preflight_expiry is None
                 or time.monotonic() < _preflight_expiry):
             return res
-        s = get_settings()
-        ceiling = s["preflight_ceiling_ms"]
-        provider = s["provider"]
         passage_n = s["preflight_passage_n"]
+        passage_chars = len(_PROBE_PASSAGE)
+        ceiling = s["preflight_ceiling_ms"]
         if not _configured(s):
             # Not a probe failure — do not burn the process-lifetime cache.
-            return {"state": "skipped", "latency_ms": None,
-                    "measured_ms": None, "ceiling_ms": ceiling,
-                    "passage_n": passage_n,
-                    "reason": "no reranker provider configured"}
-        # §5.2 hard rule (Milestone 4): the legacy vLLM reranker (:8091) and the
-        # on-box localstack retrieval group CANNOT co-run — vLLM pre-allocates
-        # ~90% of VRAM via gpu_memory_utilization and is invisible to llama-swap's
-        # budgeting, so both resident → guaranteed OOM. Refuse to activate while
-        # it answers. NOT cached (stopping vllm-reranker.service resolves it live,
-        # no restart) — same non-cached posture as "skipped".
-        if provider == "localstack" and _vllm_reranker_running():
-            return {"state": "failed", "latency_ms": None, "measured_ms": None,
-                    "ceiling_ms": ceiling, "passage_n": passage_n,
-                    "reason": ("vLLM reranker still answering on :8091 — stop "
-                               "vllm-reranker.service before enabling the on-box "
-                               "retrieval group (both pre-allocate VRAM → OOM)")}
-        passages = ["preflight probe passage"] * max(1, passage_n)
-        # Warm swappable local members BEFORE timing (MS02 cold-load bug): the
-        # first score() call on localstack/vllm pays a one-time model load (the
-        # D13 llama-swap cross-group swap / a vLLM cold start), which is NOT the
-        # per-scoring-call latency the ceiling gates. Fire one UNTIMED throwaway
-        # score to trigger the load; its result is discarded (score() is
-        # never-raise, so this can only cost latency). The timed probe below then
-        # measures the now-warm scoring path. Cloud/cpu are not warmed (see
-        # _PREFLIGHT_WARM_PROVIDERS) so their timing is unchanged.
-        if provider in _PREFLIGHT_WARM_PROVIDERS:
-            score("preflight warmup", passages)
-        t0 = time.monotonic()
-        got = score("preflight probe", passages)
-        measured_ms = (time.monotonic() - t0) * 1000.0
+            return _skipped_state(s)
+        passages = [_PROBE_PASSAGE] * max(1, passage_n)
+        # Probe failures are the preflight's own result, not retrieve()-time
+        # degradations — in_preflight keeps them out of the fallthrough record
+        # AND out of the capability evidence (a probe is not real traffic).
+        _score_ctx.in_preflight = True
+        try:
+            t0 = time.monotonic()
+            got = score("preflight probe", passages)
+            measured_ms = (time.monotonic() - t0) * 1000.0
+        finally:
+            _score_ctx.in_preflight = False
         # CPU scales ~linearly with candidate count; extrapolate the probe to
         # the real rerank_candidate_n. Batched providers compare the raw wall.
         if provider == "cpu" and passage_n > 0:
@@ -1381,7 +1700,9 @@ def preflight() -> dict:
             estimated_ms = measured_ms
         base = {"latency_ms": round(estimated_ms, 1),
                 "measured_ms": round(measured_ms, 1),
-                "ceiling_ms": ceiling, "passage_n": passage_n}
+                "ceiling_ms": ceiling, "passage_n": passage_n,
+                "passage_chars": passage_chars, "at": time.time(),
+                "source": "probe"}
         if got is None:
             result = {**base, "state": "failed",
                       "reason": "provider scoring failed"}
@@ -1396,17 +1717,14 @@ def preflight() -> dict:
             result = {**base, "state": "failed", "reason": reason}
         else:
             result = {**base, "state": "ok", "reason": None}
-        # Cache policy (M3.2): a TTL-recoverable FAILED preflight recovers after a
-        # TTL rather than sticking for the process lifetime (a transient blip must
-        # not disable rerank until restart — the documented deviation from audit
-        # A9's local-only assumption). This covers the cloud providers AND
-        # localstack (Milestone 4): a cross-group llama-swap cold-load makes the
-        # first probe queue behind a ~6-10s group load → over-ceiling, and that
-        # transient must NOT disable rerank for the process lifetime. Gate on
-        # _PREFLIGHT_TTL_RECOVERABLE (= CLOUD_PROVIDERS | {"localstack"}), NOT
-        # CLOUD_PROVIDERS. Genuinely-local (vllm/cpu) failures and every OK stick
-        # for the process lifetime.
-        if result["state"] == "failed" and provider in _PREFLIGHT_TTL_RECOVERABLE:
+        # Cache policy (M3.2): a CLOUD provider's FAILED probe recovers after a
+        # TTL rather than sticking for the process lifetime (a transient blip
+        # must not disable rerank until restart — the documented deviation from
+        # audit A9's local-only assumption). The on-box providers used to share
+        # this policy; they are evidence-gated now, and their recovery is the
+        # evidence TTL instead. The in-process cpu provider keeps the sticky
+        # process-lifetime failure (a missing dep does not heal itself).
+        if result["state"] == "failed" and provider in CLOUD_PROVIDERS:
             _preflight_expiry = time.monotonic() + _PREFLIGHT_FAIL_TTL_S
             disabled = (f" — rerank disabled for {int(_PREFLIGHT_FAIL_TTL_S)}s"
                         f" (TTL, then re-probes)")
@@ -1422,30 +1740,103 @@ def preflight() -> dict:
 
 
 def reset_preflight() -> None:
-    """Clear the probe caches — preflight (result + TTL deadline), reachability,
-    AND the in-process CPU CrossEncoder cache (M5). The M8 selector calls this on
-    a provider change so the next preflight() re-probes the new provider (and a
-    model switch re-loads the CPU model); tests use it for isolation."""
+    """Clear every cached judgement about the reranker — the probe cache
+    (result + TTL deadline), the CAPABILITY EVIDENCE, the reachability + §5.2
+    co-run caches, the in-process CPU CrossEncoder cache (M5), AND the
+    un-reranked fallthrough record. The M8 selector calls this on a provider
+    change: the previous provider's evidence and failures say NOTHING about the
+    new one, so the new selection starts at `unknown` and the next real search
+    proves it. Tests use it for isolation."""
     global _preflight_result, _preflight_expiry, _reach_cache
+    global _evidence_deadline, _corun_cache
     with _preflight_lock:
         _preflight_result = None
         _preflight_expiry = None
+    with _evidence_lock:
+        _evidence.update(state="unknown", at=None, reason=None, provider=None,
+                         model=None, passage_n=None, passage_chars=None,
+                         latency_ms=None)
+        _evidence_deadline = None
     with _reach_lock:
         _reach_cache = None
+    with _corun_lock:
+        _corun_cache = None
     with _cpu_model_lock:
         _cpu_model_cache.clear()
+    with _fallthrough_lock:
+        _fallthrough.update(count=0, reason=None, provider=None, model=None,
+                            at=None)
 
 
 def available() -> bool:
-    """Provider configured AND the one-time latency preflight passed.
+    """The retrieve()-time gate: is a rerank worth ATTEMPTING right now?
 
-    This is the retrieve()-time gate (with [retrieval] rerank_enabled checked
-    by the caller first, so the null-provider default costs one config read
-    and never probes anything).
+    Provider configured AND the capability state is not `failed`. `unknown` is
+    deliberately open — on the evidence path a cold start has nothing to go on
+    and the first real search IS the probe (a failure then closes this gate for
+    _PREFLIGHT_FAIL_TTL_S, loudly logged, so the user pays it once). For the
+    probing providers `unknown` never occurs, so this stays their old
+    probe-passed gate. [retrieval] rerank_enabled is checked by the caller
+    first, so the null-provider default costs one config read and probes
+    nothing.
     """
-    if not _configured():
+    s = get_settings()
+    if not _configured(s):
         return False
-    return preflight().get("state") == "ok"
+    return preflight(s).get("state") in ("ok", "unknown")
+
+
+# key_env → the frontier endpoint the LLM-as-reranker path actually posts to.
+_LLM_SCORING_URLS = {
+    "GOOGLE_API_KEY": GEMINI_BASE_URL,
+    "GEMINI_API_KEY": GEMINI_BASE_URL,
+    "OPENAI_API_KEY": OPENAI_URL,
+    "ANTHROPIC_API_KEY": ANTHROPIC_URL,
+    "XAI_API_KEY": XAI_URL,
+}
+
+
+def scoring_base_url(settings: "dict | None" = None) -> "str | None":
+    """The URL the SELECTED provider's scorer actually posts to — None when
+    there is no URL (cpu is in-process; null/unknown score nothing).
+
+    status()'s `base_url` is the [rerank] seam (default: the legacy vLLM :8091
+    port) and is NOT where the on-box provider scores: localstack resolves the
+    llama-swap front door via local_stack.base_url(). Reporting only the seam
+    made /rerank/status describe a service the scorer never touches. Never
+    raises."""
+    s = settings or get_settings()
+    p = s.get("provider")
+    if p == "localstack":
+        base = _localstack_base_url()
+        return base.rstrip("/") + "/rerank" if base else None
+    if p == "vllm":
+        base = s.get("base_url")
+        return base.rstrip("/") + "/score" if base else None
+    if p == "voyage":
+        return VOYAGE_RERANK_URL
+    if p == "cohere":
+        return COHERE_RERANK_URL
+    if p == "vertex":
+        return VERTEX_RANK_URL
+    if p == "llm":
+        return _LLM_SCORING_URLS.get(s.get("key_env"))
+    return None
+
+
+def scoring_reachable(settings: "dict | None" = None) -> bool:
+    """LIVENESS of the path scoring_base_url() names — "can I reach it", NEVER
+    "does reranking work" (that is capability: preflight()/evidence_state()).
+    Deliberately kept cheap and separate: provider-aware, never a paid poll —
+    the same resolution score() uses, so status cannot report a dead reranker
+    that scores fine (or a live one that 500s every search) the way the
+    [rerank]-seam `service_reachable` did. False for null/unknown: nothing
+    scores."""
+    s = settings or get_settings()
+    p = s.get("provider")
+    if p == "null" or p not in KNOWN_PROVIDERS:
+        return False
+    return reachable(s)
 
 
 def model_catalog() -> list[dict]:
@@ -1511,9 +1902,16 @@ def _tier_guidance(tier: "str | None") -> str:
 
 def status() -> dict:
     """/rerank/status payload (ADDITIVE ops contract, /embeddings/status
-    style). Triggers the one-time preflight only when a provider is
-    configured — with the null provider the rest is config reads plus the
-    TTL-cached ~1s-capped reachability probe; safe to poll.
+    style). Safe to poll, and CHEAP for the on-box providers: their capability
+    is read from real traffic, so a status poll can no longer trigger a ~16s
+    synthetic rerank. Only the probing providers (cpu/cloud/llm) still run the
+    one-time probe here, and only when a provider is configured.
+
+    `preflight.state` is the honest capability state — ok / failed / unknown /
+    skipped — and `evidence` carries the real-traffic record behind it,
+    including WHEN it was earned (`at`). `available` is the GATE (will a rerank
+    be attempted), which is deliberately open on `unknown`: never read it as
+    "proven healthy" — read the state for that.
 
     M13 additive keys for the wizard's Memory & Search reranker block:
       gpu               — host has a usable NVIDIA GPU (hardware.probe(),
@@ -1535,14 +1933,9 @@ def status() -> dict:
     s = get_settings()
     configured = _configured(s)
     if configured:
-        pf = preflight()
+        pf = preflight(s)
     else:
-        pf = _preflight_result or {
-            "state": "skipped", "latency_ms": None, "measured_ms": None,
-            "ceiling_ms": s["preflight_ceiling_ms"],
-            "passage_n": s["preflight_passage_n"],
-            "reason": "no reranker provider configured",
-        }
+        pf = _preflight_result or _skipped_state(s)
     hw = hardware.probe()
     return {
         # Track the ACTUAL retrieve() gate (M8): is_enabled() resolves
@@ -1559,12 +1952,30 @@ def status() -> dict:
         "model": s["model"],
         "model_id": s["model_id"],
         "base_url": s["base_url"] or None,
+        # The URL scoring ACTUALLY posts to + a reachability read off THAT same
+        # path, so the payload can no longer contradict what score() does (the
+        # legacy `base_url`/`service_reachable` pair still describes the
+        # [rerank] :8091 seam and stays for the wizard's GPU-box detection).
+        "scoring_base_url": scoring_base_url(s),
+        "scoring_reachable": scoring_reachable(s),
         "configured": configured,
+        # The honest capability state (ok/failed/unknown/skipped). Key name kept
+        # for the wizard/Portal bind; for the on-box providers it is no longer a
+        # probe result but the real-traffic record (`source`: real-traffic).
         "preflight": pf,
-        "available": configured and pf.get("state") == "ok",
+        # The GATE, not a health claim: `unknown` (no recent evidence) is
+        # deliberately attempted, so available:true + state:unknown means "we
+        # will try", NOT "proven working".
+        "available": configured and pf.get("state") in ("ok", "unknown"),
+        # The real-traffic capability record itself: state + when it was earned
+        # (`at`) + the batch/latency it was earned on + staleness.
+        "evidence": evidence_state(),
+        # Running un-reranked degradation record (count/reason/provider/at) —
+        # the retrieve()-time truth a once-per-process log line used to hide.
+        "fallthrough": fallthrough_state(),
         # candidate_n resolves via get_settings' resilient read.
         "candidate_n": s["rerank_candidate_n"],
-        "passage_chars": _cfg_int("rerank", "passage_chars", 4096),
+        "passage_chars": s["passage_chars"],
         "models": sorted(RERANK_MODELS.keys()),
         # M10.1 additive: per-model selector metadata (provider/tiers/key_present/
         # notes) the wizard/Portal reranker selector needs — `models` stays the

@@ -135,8 +135,7 @@ def world(monkeypatch, tmp_path):
         retrieval, "_decode_snapshot_text", lambda meta: meta.get("text"))
     monkeypatch.setattr(
         retrieval, "_age_days", lambda ts, now: AGE_BY_TS.get(ts, 3650.0))
-    monkeypatch.setattr(retrieval, "_rerank_fallthrough_logged", False)
-    rerank_mod.reset_preflight()
+    rerank_mod.reset_preflight()   # also clears the fallthrough record
     yield
     rerank_mod.reset_preflight()
 
@@ -339,20 +338,31 @@ def test_legacy_store_without_ordinal_support_still_reranks(world, monkeypatch):
     assert [sid for sid, _ in results] == ["B", "KW1", "A", "C"]
 
 
-# ── 4. failure fall-throughs: identical to flag-off, logged once ─────────────
+# ── 4. failure fall-throughs: identical to flag-off, EVERY one counted ───────
+# These used to log once per process and then go silent, which is how days of
+# un-reranked searches on MS02 stayed invisible. Each fall-through now lands in
+# rerank.fallthrough_state() (GET /rerank/status) and in the journal.
+
+def _real_score_with_a_scorer_returning_none(monkeypatch):
+    """Drive the REAL rerank.score(): the provider's scorer returns None, so
+    score() itself records the fall-through (retrieval must not log it twice)."""
+    settings = {"provider": "vllm", "model": "test-reranker"}
+    monkeypatch.setattr(rerank_mod, "available", lambda: True)
+    monkeypatch.setattr(rerank_mod, "get_settings", lambda: dict(settings))
+    monkeypatch.setattr(rerank_mod, "_score_vllm", lambda q, ps, s: None)
+
 
 def test_scorer_none_falls_through_identical_to_flag_off(world, monkeypatch,
                                                          capsys):
-    monkeypatch.setattr(rerank_mod, "available", lambda: True)
-    monkeypatch.setattr(rerank_mod, "score", lambda q, ps: None)
+    _real_score_with_a_scorer_returning_none(monkeypatch)
     with pin_retrieval(rerank_enabled="true"):
         first = retrieval.retrieve("q", "system", k=10, store=make_store())
         second = retrieval.retrieve("q", "system", k=10, store=make_store())
     assert first == expected_flag_off()
     assert second == expected_flag_off()
     out = capsys.readouterr().out
-    assert out.count("[RERANK]") == 1              # logged ONCE per process
-    assert "falling through" in out
+    assert out.count("falling through") == 2       # logged EVERY time, once each
+    assert rerank_mod.fallthrough_state()["count"] == 2
 
 
 def test_passage_decode_failure_falls_through(world, monkeypatch, capsys):
@@ -361,16 +371,48 @@ def test_passage_decode_failure_falls_through(world, monkeypatch, capsys):
     monkeypatch.setattr(retrieval, "_decode_snapshot_text", lambda meta: None)
     with pin_retrieval(rerank_enabled="true"):
         results = retrieval.retrieve("q", "system", k=10, store=make_store())
+        again = retrieval.retrieve("q", "system", k=10, store=make_store())
     assert results == expected_flag_off()
-    assert "passage decode failed" in capsys.readouterr().out
+    assert again == expected_flag_off()
+    assert capsys.readouterr().out.count("passage decode failed") == 2
+    state = rerank_mod.fallthrough_state()
+    assert state["count"] == 2
+    assert "passage decode failed" in state["reason"]
+    # A drifted snapshot says nothing about reranker HEALTH: counted, but it
+    # must not flip the capability evidence to failed.
+    assert rerank_mod.evidence_state()["state"] != "failed"
+
+
+def test_rerank_stage_error_falls_through_and_is_counted(world, monkeypatch,
+                                                         capsys):
+    monkeypatch.setattr(rerank_mod, "available", lambda: True)
+    monkeypatch.setattr(rerank_mod, "score", _boom)  # must never be reached
+
+    def _explode(text):
+        raise RuntimeError("envelope parser blew up")
+
+    monkeypatch.setattr(retrieval, "extract_snapshot_content", _explode)
+    with pin_retrieval(rerank_enabled="true"):
+        results = retrieval.retrieve("q", "system", k=10, store=make_store())
+    assert results == expected_flag_off()
+    assert "rerank stage error" in capsys.readouterr().out
+    state = rerank_mod.fallthrough_state()
+    assert state["count"] == 1
+    assert "envelope parser blew up" in state["reason"]
+    assert rerank_mod.evidence_state()["state"] != "failed"
 
 
 def test_preflight_failure_disables_rerank_and_probes_exactly_once(
         world, monkeypatch):
-    """End-to-end gating through the REAL available()/preflight(): a
-    configured provider whose probe misses the ceiling disables rerank for
-    the process — ranking is flag-off-identical and preflight runs (and caches)
-    exactly once across retrieves, so the SECOND retrieve adds no score calls."""
+    """End-to-end gating through the REAL available()/preflight(): a PROBING
+    provider (cpu) whose probe misses the ceiling disables rerank for the
+    process — ranking is flag-off-identical and preflight runs (and caches)
+    exactly once across retrieves, so the SECOND retrieve adds no score calls.
+
+    Retargeted 2026-08-11 from vllm: the on-box batch providers are gated on
+    evidence from real traffic and never probe, so a probe-gating test cannot
+    be written against them (their end-to-end contract lives in
+    test_rerank_swap_resilience.py)."""
     probes = {"n": 0}
 
     def counting_score(q, ps):
@@ -378,17 +420,17 @@ def test_preflight_failure_disables_rerank_and_probes_exactly_once(
         return [1.0] * len(ps)
 
     monkeypatch.setattr(rerank_mod, "score", counting_score)
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1",
                  preflight_ceiling_ms="-1"):   # any latency is over-ceiling
         with pin_retrieval(rerank_enabled="true"):
             first = retrieval.retrieve("q", "system", k=10, store=make_store())
             second = retrieval.retrieve("q", "system", k=10, store=make_store())
     assert first == expected_flag_off()
     assert second == expected_flag_off()
-    # vllm is a swappable/cold-loading provider: preflight fires one UNTIMED
-    # warm-up score then one TIMED probe (2 score calls) on its single cached
-    # run — the 2nd retrieve re-probes zero times (the caching invariant).
-    assert probes["n"] == 2
+    # ONE probe call, cached for the process lifetime: the 2nd retrieve
+    # re-probes zero times (the caching invariant this test exists for).
+    assert probes["n"] == 1
 
 
 # ── provenance mode coexists with rerank ──────────────────────────────────────

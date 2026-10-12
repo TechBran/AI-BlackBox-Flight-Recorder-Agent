@@ -140,11 +140,10 @@ def make_scorer(clock, elapse_s, result):
 
 
 def make_cold_then_warm_scorer(clock, cold_s, warm_s, result):
-    """A fake rerank.score whose FIRST call 'takes' cold_s of clock time (the
-    swappable member's one-time load — the llama-swap cross-group swap / vLLM
-    cold start) and EVERY subsequent call warm_s (steady-state scoring once the
-    member is resident). Records the call count so a test can prove preflight
-    warmed first (2 calls) and timed only the warm one."""
+    """A fake rerank.score whose FIRST call 'takes' cold_s of clock time (a
+    one-time model load) and EVERY subsequent call warm_s (steady-state scoring
+    once resident). Records the call count so a test can prove how many scoring
+    calls a preflight actually paid for."""
     def _score(query, passages):
         _score.calls += 1
         _score.passages = list(passages)
@@ -486,7 +485,12 @@ def test_score_cpu_model_cached(monkeypatch):
     assert fake.constructed == ["Qwen/Qwen3-Reranker-0.6B"]
 
 
-# ── one-time latency preflight ────────────────────────────────────────────────
+# ── one-time latency preflight (the PROBING providers: cpu / cloud / llm) ─────
+# The on-box batch providers (localstack/vllm) no longer probe at all — their
+# capability is evidence from real traffic (_EVIDENCE_PROVIDERS; contract pinned
+# in test_rerank_swap_resilience.py). These tests therefore drive the probe
+# through `cpu`, the local provider that still pays a probe, so the probe-cache
+# policy they exist for stays covered.
 
 def test_preflight_unconfigured_is_skipped_and_not_cached(monkeypatch):
     with pin_cfg("rerank", provider="null", base_url=None):
@@ -495,15 +499,15 @@ def test_preflight_unconfigured_is_skipped_and_not_cached(monkeypatch):
     assert rerank.available() is False
     # NOT cached: configuring a provider afterwards must still probe.
     monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
-                 preflight_ceiling_ms="5000"):
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1", preflight_ceiling_ms="5000"):
         assert rerank.preflight()["state"] == "ok"
 
 
 def test_preflight_ok_caches_and_enables(monkeypatch):
     monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
-                 preflight_ceiling_ms="5000"):
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1", preflight_ceiling_ms="5000"):
         assert rerank.preflight()["state"] == "ok"
         assert rerank.available() is True
         # cached: a now-broken scorer must NOT be re-probed this process.
@@ -516,8 +520,8 @@ def test_preflight_ok_caches_and_enables(monkeypatch):
 
 def test_preflight_scoring_failure_disables_for_process(monkeypatch):
     monkeypatch.setattr(rerank, "score", lambda q, p: None)
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
-                 preflight_ceiling_ms="5000"):
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1", preflight_ceiling_ms="5000"):
         pf = rerank.preflight()
         assert pf["state"] == "failed"
         assert pf["reason"] == "provider scoring failed"
@@ -530,8 +534,8 @@ def test_preflight_scoring_failure_disables_for_process(monkeypatch):
 def test_preflight_over_ceiling_disables_for_process(monkeypatch, capsys):
     monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
     # ceiling -1ms: any successful probe is over-ceiling -> latency failure.
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
-                 preflight_ceiling_ms="-1"):
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1", preflight_ceiling_ms="-1"):
         pf = rerank.preflight()
         assert pf["state"] == "failed"
         assert "over the" in pf["reason"]
@@ -632,100 +636,31 @@ def test_cloud_failed_preflight_recovers_after_ttl(monkeypatch):
 
 
 def test_local_failed_preflight_stays_process_lifetime(monkeypatch):
-    """The TTL is CLOUD-only: a vllm failure still sticks for the process
-    lifetime even after the same elapsed time (deterministic local provider)."""
+    """The probe TTL is CLOUD-only: the in-process cpu provider's failure still
+    sticks for the process lifetime even after the same elapsed time (a missing
+    dep does not heal itself). The on-box providers are evidence-gated instead —
+    their failure recovers on the evidence TTL (swap-resilience suite)."""
     clock = Clock(1000.0)
     monkeypatch.setattr(rerank.time, "monotonic", clock)
     monkeypatch.setattr(rerank, "score", lambda q, p: None)
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
-                 preflight_ceiling_ms="5000"):
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1", preflight_ceiling_ms="5000"):
         assert rerank.preflight()["state"] == "failed"
         clock.t += rerank._PREFLIGHT_FAIL_TTL_S + 100
         monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])  # would pass
         assert rerank.preflight()["state"] == "failed"            # still sticky
 
 
-def test_localstack_failed_preflight_recovers_after_ttl(monkeypatch):
-    """Milestone 4 / Task 4.1 code-quality guard: localstack is NOT a cloud
-    provider, but its FAILED preflight must still recover after _PREFLIGHT_FAIL_
-    TTL_S — a cross-group llama-swap cold-load makes the first probe read
-    over-ceiling, and that transient must NOT disable rerank for the whole
-    process lifetime. This is gated by _PREFLIGHT_TTL_RECOVERABLE (=
-    CLOUD_PROVIDERS | {"localstack"}), NOT CLOUD_PROVIDERS; localstack is
-    deliberately absent from CLOUD_PROVIDERS (its reachability stays keyless/
-    is_healthy()-based). Regression guard for the mis-gate that would sink
-    localstack into the process-lifetime cache."""
-    assert "localstack" not in rerank.CLOUD_PROVIDERS          # keyless, not cloud
-    assert "localstack" in rerank._PREFLIGHT_TTL_RECOVERABLE   # but TTL-recoverable
-    clock = Clock(1000.0)
-    monkeypatch.setattr(rerank.time, "monotonic", clock)
-    monkeypatch.setattr(rerank, "score", lambda q, p: None)    # group cold → fails
-    with pin_cfg("rerank", provider="localstack",
-                 model="qwen3-reranker-8b-local"):
-        assert rerank.preflight()["state"] == "failed"
-        # within the TTL window the failure is cached — NOT re-probed
-        def reprobed(q, p):
-            raise AssertionError("localstack preflight re-probed within its TTL")
-        monkeypatch.setattr(rerank, "score", reprobed)
-        assert rerank.preflight()["state"] == "failed"
-        # past the TTL, the group finished loading → re-probe → ok (NOT stuck for
-        # the process lifetime the way a genuinely-dead vllm/cpu reranker is)
-        clock.t += rerank._PREFLIGHT_FAIL_TTL_S + 1
-        monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
-        assert rerank.preflight()["state"] == "ok"
+# ── the probing providers probe EXACTLY ONCE (no warm-up round) ───────────────
+# The warm-up round (an untimed throwaway score to swallow a cold model load)
+# existed only for the swappable on-box members, which are evidence-gated now
+# and never probed. What survives is the invariant it was measured against: the
+# providers that DO probe pay exactly one scoring call for it.
 
-
-# ── swappable-member warm-up before the timed probe (MS02 cold-load bug) ───────
-
-def test_localstack_preflight_warms_member_before_timing(monkeypatch):
-    """Live MS02 bug: the on-box localstack reranker (Qwen3-Reranker-8B via
-    llama-swap) loads the member on the FIRST /v1/rerank call — the D13
-    cross-group swap (evict the embedder, load the 8B), ~2-6s. Timing THAT cold
-    load against the 500ms per-scoring-call ceiling reported state=failed /
-    available=False for a reranker that actually scores at ~106ms once resident.
-
-    preflight() must fire ONE untimed throwaway score to trigger the load, THEN
-    time the now-warm probe: measured_ms must reflect the WARM latency (106ms),
-    NOT the cold load (2349ms), and the ceiling stays the registry's 500ms
-    (per-scoring-call ONCE LOADED) — we do NOT weaken it."""
-    clock = Clock(1000.0)
-    monkeypatch.setattr(rerank.time, "monotonic", clock)
-    # First call = cold member load (2349ms, the live MS02 measurement);
-    # subsequent calls = warm scoring (106ms, the live once-loaded number).
-    scorer = make_cold_then_warm_scorer(clock, cold_s=2.349, warm_s=0.106,
-                                        result=[1.0])
-    monkeypatch.setattr(rerank, "score", scorer)
-    with pin_cfg("rerank", provider="localstack",
-                 model="qwen3-reranker-8b-local", preflight_ceiling_ms=None):
-        pf = rerank.preflight()
-        assert scorer.calls == 2             # warm-up THEN timed probe
-        assert pf["ceiling_ms"] == 500.0     # registry per-call ceiling, NOT weakened
-        assert pf["measured_ms"] == 106.0    # the WARM latency, not 2349 (cold load)
-        assert pf["state"] == "ok"           # 106 < 500 → available (was failing live)
-        assert rerank.available() is True    # cached ok → gate opens
-
-
-def test_vllm_preflight_warms_before_timing(monkeypatch):
-    """vLLM shares the cold-load issue (first inference after a cold start pays
-    graph warm/compile). preflight() warms it too, so the timed probe measures
-    steady-state scoring, not the cold first call."""
-    clock = Clock(1000.0)
-    monkeypatch.setattr(rerank.time, "monotonic", clock)
-    scorer = make_cold_then_warm_scorer(clock, cold_s=3.0, warm_s=0.05,
-                                        result=[1.0])
-    monkeypatch.setattr(rerank, "score", scorer)
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
-                 model="qwen3-reranker-0.6b", preflight_ceiling_ms=None):
-        pf = rerank.preflight()
-    assert scorer.calls == 2                 # warm-up THEN timed probe
-    assert pf["measured_ms"] == 50.0         # warm, not 3000ms cold
-    assert pf["state"] == "ok"               # 50 < 500
-
-
-def test_cpu_and_cloud_preflight_are_not_warmed(monkeypatch):
-    """The warm-up is ONLY for swappable local members (localstack/vllm). cpu
-    (in-process, its own load path) and cloud (batched, already-resident) keep
-    their existing single-probe timing — the FIRST call IS the measured one."""
+def test_cpu_and_cloud_preflight_probe_exactly_once(monkeypatch):
+    """cpu (in-process, its own load path) and cloud (batched, already-resident)
+    each pay ONE probe call — the FIRST call IS the measured one, and nothing
+    fires a second warm-up batch at them."""
     # cpu: a single probe call, its measured cold-load time is what gets
     # extrapolated (unchanged behavior — no warm-up swallows the first call).
     monkeypatch.setitem(rerank.RERANK_MODELS, "fake-cpu",
@@ -909,6 +844,13 @@ STATUS_KEYS = LEGACY_STATUS_KEYS | {
     "preflight_ceiling_ms", "model_catalog",
     # Tier-aware "which should I pick?" guidance (Brandon 2026-07-05).
     "tier_guidance",
+    # 2026-08-11 additive: the URL scoring ACTUALLY uses + reachability read off
+    # that same path (the legacy base_url/service_reachable pair describes the
+    # [rerank] :8091 seam, which the on-box provider never touches), the running
+    # un-reranked fallthrough record, and the real-traffic capability evidence
+    # (ok/failed/unknown + when it was earned) that replaced the synthetic probe
+    # for the on-box batch providers.
+    "scoring_base_url", "scoring_reachable", "fallthrough", "evidence",
 }
 
 
@@ -1011,8 +953,10 @@ def test_service_reachable_false_on_refused_or_explicit_empty(monkeypatch):
 
 
 def test_status_reports_failed_preflight(client, monkeypatch):
+    """A probing provider whose probe fails reports failed + available:false."""
     monkeypatch.setattr(rerank, "score", lambda q, p: None)
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1"), \
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1"), \
          pin_cfg("retrieval", rerank_enabled="true"):
         body = client.get("/rerank/status").json()
     assert body["enabled"] is True
@@ -1023,12 +967,35 @@ def test_status_reports_failed_preflight(client, monkeypatch):
 
 def test_status_reports_ok_preflight_and_available(client, monkeypatch):
     monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
-    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
-                 preflight_ceiling_ms="5000", model="qwen3-reranker-0.6b"), \
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu",
+                 base_url="http://h:1", preflight_ceiling_ms="5000"), \
          pin_cfg("retrieval", rerank_enabled="true"):
         body = client.get("/rerank/status").json()
     assert body["preflight"]["state"] == "ok"
     assert body["available"] is True
+    assert body["model_id"] == "Qwen/Qwen3-Reranker-0.6B"
+
+
+def test_status_on_an_evidence_provider_is_unknown_until_a_real_search(
+        client, monkeypatch):
+    """The on-box providers report the honest cold-start state and are still
+    gated open — and asking costs no scoring call (that is the whole point of
+    dropping the synthetic probe)."""
+    _pin_hardware(monkeypatch, gpu=True)
+
+    def boom(q, p):
+        raise AssertionError("status scored a synthetic probe")
+
+    monkeypatch.setattr(rerank, "score", boom)
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+                 model="qwen3-reranker-0.6b"), \
+         pin_cfg("retrieval", rerank_enabled="true"):
+        body = client.get("/rerank/status").json()
+    assert body["preflight"]["state"] == "unknown"
+    assert body["preflight"]["source"] == "real-traffic"
+    assert body["evidence"]["state"] == "unknown"
+    assert body["evidence"]["at"] is None
+    assert body["available"] is True             # optimistic gate, honest state
     assert body["model_id"] == "Qwen/Qwen3-Reranker-0.6B"
 
 
@@ -2098,7 +2065,7 @@ def test_score_localstack_posts_rerank_shape_and_parses_results(monkeypatch):
     monkeypatch.setattr(rerank.requests, "post", fake_post)
     _pin_localstack_base(monkeypatch)
     with pin_cfg("rerank", provider="localstack",
-                 model="qwen3-reranker-8b-local", timeout_s="9"):
+                 model="qwen3-reranker-8b-local", localstack_timeout_s="9"):
         got = rerank.score("the query", ["pass A", "pass B"])
     assert got == [0.1, 0.9]                       # scattered back by index
     assert calls["url"] == "http://127.0.0.1:9098/v1/rerank"
@@ -2107,7 +2074,11 @@ def test_score_localstack_posts_rerank_shape_and_parses_results(monkeypatch):
     # the query carries the mandatory Qwen3-Reranker instruct prefix
     assert calls["json"]["query"].startswith("Instruct:")
     assert calls["json"]["query"].endswith("\nQuery: the query")
-    assert calls["timeout"] == 9.0
+    # UPDATED 2026-08-11: the wire deadline is a (connect, read) pair, not one
+    # scalar. A single value made [rerank] timeout_s govern BOTH legs, so the
+    # read cap the llama-swap hold needs would also have become a 10-minute
+    # connect wait on a dead :9098. localstack_timeout_s tunes the READ leg.
+    assert calls["timeout"] == (rerank.LOCALSTACK_CONNECT_TIMEOUT_S, 9.0)
 
 
 def test_score_localstack_stack_absent_returns_none(monkeypatch):
@@ -2171,13 +2142,16 @@ def test_reachable_localstack_uses_is_healthy(monkeypatch):
         assert rerank.reachable() is False
 
 
-# ── Milestone 4: §5.2 hard rule + TTL-recoverable localstack preflight ────────
+# ── Milestone 4: §5.2 hard rule (the on-box vs legacy-vLLM co-run refusal) ────
 
 def test_localstack_preflight_refuses_when_vllm_reranker_up(monkeypatch):
     """The vLLM reranker (:8091) and the on-box retrieval group cannot co-run
-    (both pre-allocate VRAM → OOM). preflight() REFUSES localstack while :8091
-    answers — and does NOT cache the refusal, so stopping the service resolves
-    it live on the next probe (no restart)."""
+    (both pre-allocate VRAM → OOM). The capability check REFUSES localstack
+    while :8091 answers, and the refusal is not sticky: stopping the service
+    resolves it live (no restart). It IS TTL-cached now — the check runs on the
+    capability path of every search since the once-per-process probe is gone —
+    so this drives it with the TTL collapsed."""
+    monkeypatch.setattr(rerank, "_CORUN_TTL_S", 0.0)
     # something answering on :8091 = vllm-reranker.service still up
     monkeypatch.setattr(rerank.requests, "get",
                         lambda url, timeout=None: FakeResp(200, {"data": []}))
@@ -2185,12 +2159,34 @@ def test_localstack_preflight_refuses_when_vllm_reranker_up(monkeypatch):
     # a WORKING scorer — proves the refusal is the conflict, not a scoring fail
     monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
     with pin_cfg("rerank", provider="localstack",
-                 model="qwen3-reranker-8b-local", preflight_ceiling_ms="5000"):
+                 model="qwen3-reranker-8b-local"):
         pf = rerank.preflight()
         assert pf["state"] == "failed"
         assert ":8091" in pf["reason"] and "vllm" in pf["reason"].lower()
-        # NOT cached: stop the service (get now refuses) → next preflight re-checks
+        assert rerank.available() is False
+        # stop the service (get now refuses) → the refusal lifts, back to the
+        # honest cold-start state (never "ok": nothing has actually reranked)
         def refused(*a, **k):
             raise ConnectionError("service stopped")
         monkeypatch.setattr(rerank.requests, "get", refused)
-        assert rerank.preflight()["state"] == "ok"
+        assert rerank.preflight()["state"] == "unknown"
+        assert rerank.available() is True
+
+
+def test_corun_refusal_is_ttl_cached_not_polled_per_search(monkeypatch):
+    """That liveness read must not become a 1s-capped GET on every search now
+    that the capability path runs per search."""
+    monkeypatch.setattr(rerank.time, "monotonic", Clock(1000.0))
+    gets = []
+
+    def counting_get(*a, **k):
+        gets.append(1)
+        raise ConnectionError("nothing on :8091")
+
+    monkeypatch.setattr(rerank.requests, "get", counting_get)
+    _pin_localstack_base(monkeypatch)
+    with pin_cfg("rerank", provider="localstack",
+                 model="qwen3-reranker-8b-local"):
+        for _ in range(20):
+            assert rerank.available() is True
+    assert len(gets) == 1

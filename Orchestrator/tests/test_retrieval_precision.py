@@ -99,8 +99,7 @@ def world(monkeypatch, tmp_path):
                         lambda vol, q, n, op: ["KW1", "A"])
     monkeypatch.setattr(retrieval, "_decode_snapshot_text", lambda meta: meta.get("text"))
     monkeypatch.setattr(retrieval, "_age_days", lambda ts, now: 0.0)
-    monkeypatch.setattr(retrieval, "_rerank_fallthrough_logged", False)
-    rerank_mod.reset_preflight()
+    rerank_mod.reset_preflight()   # also clears the fallthrough record
     yield
     rerank_mod.reset_preflight()
 
