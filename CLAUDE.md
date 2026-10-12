@@ -11,13 +11,14 @@ blackbox_poc/
     venv/             # Python virtual environment
  Portal/               # Web frontend
     index.html        # Main HTML
-    app.js           # JavaScript application
-    style.css        # Styles
+    app-modular.js   # JavaScript entry point (loads modules/)
+    modules/         # Feature modules (chat, voice, CU, cron, ...)
+    styles/          # CSS (main.css + components/, features/)
  Apps/                 # User-created web applications
     grocery-store/   # Example test app
- Volume/              # Immutable conversation ledger
+ Volumes/             # Immutable conversation ledger (SNAPSHOT_VOLUME.txt)
  Manifest/            # Snapshot index and metadata
- Fossils/             # Archived snapshots
+ Archive/             # Archived ledger copies (Volume_<utc>.txt)
  .claude/commands/    # Claude Code slash commands
 ```
 
@@ -83,7 +84,7 @@ You have access to BlackBox capabilities via MCP tools. These give you memory, s
 
 | When you're unsure about... | Search for... |
 |----------------------------|---------------|
-| How the Portal UI works | "Portal frontend app.js" |
+| How the Portal UI works | "Portal frontend app-modular.js modules" |
 | MCP tool implementation | "MCP blackbox tools" |
 | Past bug fixes | "bug fix [component]" |
 | Operator preferences | "Brandon preferences" or search by operator |
