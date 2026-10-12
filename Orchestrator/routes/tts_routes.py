@@ -122,6 +122,40 @@ def _elevenlabs_stream_chunked(text: str, voice: str, model_id: str | None,
         yield from el_tts.synthesize_stream(piece, voice, model_id=model_id, voice_settings=voice_settings)
 
 
+def _log_tts_upstream_failure(provider: str, voice: str, status, body_text: str) -> None:
+    """A failed synthesis is rendered as an HTTP-200 {"status":"fallback"} envelope
+    (a contract Portal + Android depend on), so journald is the ONLY place the failure
+    can ever be seen. Never downgrade this to silence."""
+    snippet = " ".join((body_text or "")[:400].split())
+    print(f"[TTS] WARNING synthesis failed upstream: voice={voice or '(default)'} "
+          f"provider={provider} http={status} body={snippet}")
+
+
+def _is_unprefixed_local_voice(voice: str) -> bool:
+    """True when a bare (unprefixed) voice id belongs to the registered local TTS
+    server. Voice lists come from the catalog helpers -- config.build_tts_catalog()
+    for cloud, list_local_tts_voices() for local -- never a literal list here. A cloud
+    catalog id wins any collision, and any error fails open onto the existing path."""
+    if not voice or ":" in voice:
+        return False
+    try:
+        from Orchestrator.config import build_tts_catalog
+        for group in build_tts_catalog():
+            for entry in group.get("voices") or []:
+                vid = entry.get("id") or ""
+                if voice == vid or voice == vid.split(":", 1)[-1]:
+                    return False
+        from Orchestrator.onboarding.custom_servers import (
+            list_local_tts_voices, resolve_audio)
+        resolved = resolve_audio("tts")
+        if not resolved:
+            return False
+        return voice in list_local_tts_voices(resolved[0])
+    except Exception as e:
+        print(f"[TTS] local voice resolution skipped for '{voice}': {e}")
+        return False
+
+
 @app.post("/tts")
 def tts_openai(body: dict = Body(...)):
     """Text-to-speech using OpenAI TTS API (default) or ElevenLabs.
@@ -138,6 +172,16 @@ def tts_openai(body: dict = Body(...)):
     # up front so every provider branch below inherits speech-clean text.
     if isinstance(body, dict) and body.get("text"):
         body["text"] = sanitize_for_speech(body["text"])
+    # A bare voice id owned by the LOCAL server used to fall through to the cloud,
+    # which rejects an unknown voice with a 400 that this route then rendered as an
+    # HTTP-200 "fallback" envelope (measured: voice="am_onyx"). An EXPLICIT provider is
+    # never overridden -- silent substitution in either direction is the defect.
+    if isinstance(body, dict) and not (body.get("provider") or "").strip():
+        _bare_voice = (body.get("voice") or "").strip()
+        if _is_unprefixed_local_voice(_bare_voice):
+            print(f"[TTS] voice '{_bare_voice}' matched the local voice catalog -- "
+                  f"routing to the local provider instead of the cloud")
+            body["provider"] = "local"
     # --- ElevenLabs branch (checked before OpenAI so the OpenAI path is intact) ---
     if (body.get("voice") or "").startswith("elevenlabs:") or body.get("provider") == "elevenlabs":
         text = (body.get("text") or "").strip()
@@ -222,8 +266,10 @@ def tts_openai(body: dict = Body(...)):
             _r = requests.post(f"{_srv['base_url']}/audio/speech", json=_req, headers=_hdr,
                                timeout=TTS_TIMEOUT / 1000.0)
         except Exception as e:
+            _log_tts_upstream_failure("local", _voice, "unreachable", str(e))
             return {"status": "fallback", "detail": str(e)}
         if _r.status_code != 200:
+            _log_tts_upstream_failure("local", _voice, _r.status_code, _r.text)
             return {"status": "fallback", "api_status": _r.status_code, "api_body": _r.text[:400]}
         _mime = {"mp3": "audio/mpeg", "opus": "audio/ogg", "wav": "audio/wav",
                  "flac": "audio/flac", "pcm": "audio/wav"}.get(_fmt, "audio/mpeg")
@@ -262,8 +308,10 @@ def tts_openai(body: dict = Body(...)):
             _r = _ttsq.run_locked_sync(
                 lambda: qwen_tts.synthesize(_bare, _text, response_format=_fmt))
         except Exception as e:
+            _log_tts_upstream_failure("qwen", _voice, "unreachable", str(e))
             return {"status": "fallback", "detail": str(e)}
         if _r.status_code != 200:
+            _log_tts_upstream_failure("qwen", _voice, _r.status_code, _r.text)
             return {"status": "fallback", "api_status": _r.status_code,
                     "api_body": _r.text[:400]}
         _mime = "audio/wav"
@@ -292,9 +340,11 @@ def tts_openai(body: dict = Body(...)):
     try:
         r = requests.post(OPENAI_TTS_URL, json=req, headers={"Authorization": f"Bearer {api_key}"}, timeout=TTS_TIMEOUT/1000.0)
     except Exception as e:
+        _log_tts_upstream_failure("openai", req["voice"], "unreachable", str(e))
         return {"status":"fallback","detail":str(e)}
 
     if r.status_code != 200:
+        _log_tts_upstream_failure("openai", req["voice"], r.status_code, r.text)
         return {"status":"fallback","api_status":r.status_code,"api_body":r.text}
 
     mime = "audio/mpeg" if audio_format=="mp3" else ("audio/ogg" if audio_format=="opus" else "audio/wav")
@@ -440,7 +490,8 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
     if not text:
         raise HTTPException(400, "No text provided")
 
-    provider = (body.get("provider") or "openai").strip().lower()
+    explicit_provider = (body.get("provider") or "").strip().lower()
+    provider = explicit_provider or "openai"
     voice = (body.get("voice") or TTS_VOICE).strip()
     # A local:-prefixed voice forces the local provider (parity with POST /tts), so a
     # caller that passes the voice but omits provider still routes to Kokoro, not OpenAI.
@@ -450,6 +501,15 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
     # caller that passes the prefixed voice but omits provider still routes on-box.
     if voice.startswith("qwen:"):
         provider = "qwen"
+    # A BARE voice id owned by the local server routes local too (parity with POST
+    # /tts, D-5): otherwise the "openai" default sent e.g. "am_onyx" to the cloud,
+    # which rejects it. An EXPLICIT provider is never overridden. The lookup may
+    # probe the local server's voice list over HTTP, so it runs off the event loop.
+    if not explicit_provider and provider == "openai" and \
+            await asyncio.to_thread(_is_unprefixed_local_voice, voice):
+        print(f"[TTS Batch] voice '{voice}' matched the local voice catalog -- "
+              f"routing to the local provider instead of the cloud")
+        provider = "local"
     model = (body.get("model") or "").strip()
     audio_format = (body.get("format") or TTS_FORMAT).strip()
     operator = (body.get("operator") or "unknown").strip()
@@ -1417,13 +1477,28 @@ async def qwen_voices_delete(slug: str):
 @app.get("/stt/catalog")
 async def stt_catalog():
     """STT provider/capability catalog -- single source of truth for the STT
-    provider picker (onboarding + Portal + Android). See Orchestrator/stt/catalog."""
+    provider picker (onboarding + Portal + Android). See Orchestrator/stt/catalog.
+
+    "resolved"/"default" are the FILE resolution and stay exactly as they were, for
+    clients built before the split. resolved_streaming is what the MICROPHONE will
+    actually use, and it can legitimately differ: a local server with no /v1/realtime
+    transcribes files locally while /ws/stt streams to the cloud. The single
+    "resolved" reported the file answer for both, so the picker told the operator
+    'local' while the mic was on OpenAI -- these fields are how a client can see
+    that, together with the pin each path had to drop."""
     from Orchestrator import config as _cfg
-    from Orchestrator.stt.catalog import build_stt_catalog
+    from Orchestrator.stt.catalog import build_stt_catalog, build_stt_resolution
     from Orchestrator.stt.resolve import resolve_stt_provider
     resolved = resolve_stt_provider()
+    resolution = build_stt_resolution()
     return {"providers": build_stt_catalog(), "resolved": resolved,
-            "default": _cfg.STT_PROVIDER or resolved}
+            "default": _cfg.STT_PROVIDER or resolved,
+            # Copied in by name, not spread: a later key added to the resolution
+            # must never be able to overwrite the two legacy fields above.
+            "resolved_file": resolution["resolved_file"],
+            "resolved_streaming": resolution["resolved_streaming"],
+            "overridden_from_file": resolution["overridden_from_file"],
+            "overridden_from_streaming": resolution["overridden_from_streaming"]}
 
 @app.get("/api/last-response")
 async def get_last_response(operator: str):

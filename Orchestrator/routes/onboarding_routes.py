@@ -531,8 +531,21 @@ def validate(req: ValidateRequest) -> ValidateResponse:
                     # user's wizard-set model ids, default the ids when a
                     # capability exists but no id is set yet.
                     probed_audio = (result.detail or {}).get("audio") or {}
+                    # A None probe value means "could not tell" (timeout/reset),
+                    # NOT "absent": persisting it as False silently disables a
+                    # working capability, and update_server's type check would
+                    # reject the non-bool and lose this whole stamp.
+                    inconclusive = sorted(k for k, v in probed_audio.items() if v is None)
                     merged_audio = dict(existing.get("audio") or {})
-                    merged_audio.update(probed_audio)
+                    merged_audio.update(
+                        {k: v for k, v in probed_audio.items() if v is not None}
+                    )
+                    if inconclusive:
+                        logger.warning(
+                            "validate custom: audio probe inconclusive for %s on "
+                            "server_id=%r — keeping stored value(s), not writing false",
+                            inconclusive, server_id,
+                        )
                     if merged_audio.get("stt") and not merged_audio.get("stt_model"):
                         merged_audio["stt_model"] = custom_servers.SPEACHES_STT_DEFAULT
                     if merged_audio.get("tts") and not merged_audio.get("tts_model"):

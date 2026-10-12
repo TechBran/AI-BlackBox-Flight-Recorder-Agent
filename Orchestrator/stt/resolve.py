@@ -79,8 +79,21 @@ def _fresh_stt_provider():
         return (config.STT_PROVIDER or "").strip().lower()
 
 
-def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, elevenlabs_ok=None, local_ok=None, onbox_ok=None):
-    """Return 'openai' | 'google' | 'elevenlabs' | 'local' | None.
+def resolve_stt_provider_detailed(provided=None, *, openai_ok=None, google_ok=None, elevenlabs_ok=None, local_ok=None, onbox_ok=None):
+    """Return (resolved, overridden_from) — the resolution AND the pick it dropped.
+
+    `resolved` is 'openai' | 'google' | 'elevenlabs' | 'onbox' | 'local' | None,
+    exactly as resolve_stt_provider() returns it. `overridden_from` names the
+    provider that WAS asked for — the caller's argument, or on the runtime path
+    the saved STT_PROVIDER pin fresh-read from .env — and was NOT honored, because
+    it is unavailable or is not a provider this box knows. It is None when the pick
+    was honored, when no pick was made, and when nothing resolved at all (that path
+    fails loudly on the None instead of substituting anything).
+
+    Every substitution is printed here, at the layer that decides it, naming both
+    providers: a swap the operator cannot see is the defect this function exists to
+    kill. Callers that must also REPORT the swap take it from this tuple (or from
+    resolve_stt_provider's override_out) rather than re-deriving it.
 
     Explicit choice wins if its credential is available; otherwise the single
     available provider; otherwise None. When multiple are available and no explicit
@@ -109,6 +122,30 @@ def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, eleve
     avail = {"openai": openai_ok, "google": google_ok,
              "elevenlabs": bool(elevenlabs_ok), "onbox": bool(onbox_ok), "local": bool(local_ok)}
     if provided in avail and avail[provided]:
-        return provided
+        return provided, None
     live = [p for p, ok in avail.items() if ok]
-    return live[0] if live else None
+    resolved = live[0] if live else None
+    if not provided or resolved is None:
+        return resolved, None
+    reason = "unavailable" if provided in avail else "not a provider this box knows"
+    print(f"[STT] provider OVERRIDE: requested '{provided}' ({reason}) -> resolved "
+          f"'{resolved}'; available={live}")
+    return resolved, provided
+
+
+def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, elevenlabs_ok=None, local_ok=None, onbox_ok=None, override_out=None):
+    """Return 'openai' | 'google' | 'elevenlabs' | 'onbox' | 'local' | None.
+
+    Thin wrapper over resolve_stt_provider_detailed() — see that docstring for the
+    resolution rules. `override_out`, when a dict is passed, receives the dropped
+    pick under "overridden_from" (None when the pick was honored). It exists so a
+    caller that must announce the swap can read it off the call it ALREADY makes
+    through this name: the test suite monkeypatches this function at its import
+    sites, and a stub fills nothing, so a reporter can never announce a swap that
+    the resolution it is reporting on did not make."""
+    resolved, overridden_from = resolve_stt_provider_detailed(
+        provided, openai_ok=openai_ok, google_ok=google_ok,
+        elevenlabs_ok=elevenlabs_ok, local_ok=local_ok, onbox_ok=onbox_ok)
+    if override_out is not None:
+        override_out["overridden_from"] = overridden_from
+    return resolved

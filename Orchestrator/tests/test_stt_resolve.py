@@ -81,3 +81,70 @@ def test_onbox_availability_keys_on_local_stack(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "Orchestrator.local_stack", _LS)
     assert r.onbox_stt_available() is True
     assert calls == {"healthy": True, "cap": "stt"}
+
+
+# ── D-1: a substitution is NAMED, not silent ────────────────────────────────
+
+def test_detailed_reports_no_override_when_the_pick_is_honoured():
+    assert stt_resolve.resolve_stt_provider_detailed(
+        "google", openai_ok=True, google_ok=True) == ("google", None)
+
+
+def test_detailed_names_the_pick_it_dropped():
+    assert stt_resolve.resolve_stt_provider_detailed(
+        "google", openai_ok=True, google_ok=False) == ("openai", "google")
+
+
+def test_detailed_names_the_dropped_env_pin(monkeypatch):
+    # THE live bug: .env STT_PROVIDER=local, the STREAMING path passes
+    # local_ok=False, and the pin quietly became openai.
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (True, False, False))
+    monkeypatch.setattr(stt_resolve, "onbox_stt_available", lambda: False)
+    monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: "local")
+    assert stt_resolve.resolve_stt_provider_detailed("", local_ok=False) == ("openai", "local")
+
+
+def test_detailed_reports_no_override_when_nothing_resolves():
+    # Nothing was substituted — the caller fails loudly on the None instead.
+    assert stt_resolve.resolve_stt_provider_detailed(
+        "local", openai_ok=False, google_ok=False, elevenlabs_ok=False,
+        local_ok=False) == (None, None)
+
+
+def test_detailed_reports_no_override_when_no_pick_was_made():
+    assert stt_resolve.resolve_stt_provider_detailed(
+        "", openai_ok=True, google_ok=True) == ("openai", None)
+
+
+def test_detailed_names_an_unknown_pick_it_dropped():
+    assert stt_resolve.resolve_stt_provider_detailed(
+        "whisper.cpp", openai_ok=True, google_ok=False) == ("openai", "whisper.cpp")
+
+
+def test_wrapper_still_returns_a_bare_string():
+    out = resolve_stt_provider("google", openai_ok=True, google_ok=False)
+    assert out == "openai"
+    assert type(out) is str
+
+
+def test_override_out_hands_the_substitution_to_the_reporter():
+    out = {}
+    assert resolve_stt_provider("google", openai_ok=True, google_ok=False,
+                                override_out=out) == "openai"
+    assert out["overridden_from"] == "google"
+    honoured = {}
+    assert resolve_stt_provider("google", openai_ok=True, google_ok=True,
+                                override_out=honoured) == "google"
+    assert honoured["overridden_from"] is None
+
+
+def test_substitution_is_logged_naming_both_providers(capsys):
+    resolve_stt_provider("local", openai_ok=True, google_ok=False, local_ok=False)
+    log = capsys.readouterr().out
+    assert "OVERRIDE" in log
+    assert "local" in log and "openai" in log
+
+
+def test_honoured_pick_logs_nothing(capsys):
+    resolve_stt_provider("google", openai_ok=True, google_ok=True)
+    assert "OVERRIDE" not in capsys.readouterr().out

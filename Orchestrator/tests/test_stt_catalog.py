@@ -60,3 +60,118 @@ def test_catalog_route_ok(monkeypatch):
     body = r.json()
     assert [p["id"] for p in body["providers"]] == ["openai", "google", "elevenlabs"]
     assert "resolved" in body and "default" in body
+
+
+# ── D-3: the file path and the mic path do not share an answer ──────────────
+
+def _pin(monkeypatch, pin, availability=(True, False, False)):
+    """Pin .env STT_PROVIDER + cloud availability inside the RESOLVER module
+    (build_stt_resolution resolves live, so patching the catalog module's own
+    re-exports is not enough)."""
+    from Orchestrator.stt import resolve as stt_resolve
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: availability)
+    monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: pin)
+
+
+def test_resolution_reports_file_and_streaming_separately(monkeypatch):
+    _pin(monkeypatch, "local")
+    r = stt_catalog.build_stt_resolution(local_ok=True, streaming_local_ok=False,
+                                         onbox_ok=False)
+    assert r["resolved_file"] == "local"
+    assert r["resolved_streaming"] == "openai"
+    assert r["overridden_from_file"] is None
+    assert r["overridden_from_streaming"] == "local"
+
+
+def test_resolution_agrees_when_local_speaks_realtime(monkeypatch):
+    _pin(monkeypatch, "local")
+    r = stt_catalog.build_stt_resolution(local_ok=True, streaming_local_ok=True,
+                                         onbox_ok=False)
+    assert r["resolved_file"] == "local" and r["resolved_streaming"] == "local"
+    assert r["overridden_from_file"] is None and r["overridden_from_streaming"] is None
+
+
+def test_catalog_marks_which_path_each_provider_actually_serves(monkeypatch):
+    _pin(monkeypatch, "local")
+    monkeypatch.setattr(stt_catalog, "stt_availability", lambda: (True, False, False))
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: True)
+    monkeypatch.setattr(stt_catalog, "local_streaming_stt_available", lambda: False)
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: False)
+    g = {p["id"]: p for p in build_stt_catalog()}
+    assert g["local"]["resolves_file"] is True
+    assert g["local"]["resolves_streaming"] is False
+    assert g["openai"]["resolves_file"] is False
+    assert g["openai"]["resolves_streaming"] is True
+
+
+def test_catalog_route_carries_the_per_path_resolution(monkeypatch):
+    # The route builds {"providers", "resolved", "default"}; the split lives on the
+    # provider entries so it reaches clients without changing the existing fields.
+    _pin(monkeypatch, "local")
+    monkeypatch.setattr(stt_catalog, "stt_availability", lambda: (True, False, False))
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: True)
+    monkeypatch.setattr(stt_catalog, "local_streaming_stt_available", lambda: False)
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: False)
+    import Orchestrator.app  # noqa: F401  -- side-effect: registers routes onto the shared app
+    from fastapi.testclient import TestClient
+    from Orchestrator.checkpoint import app
+    body = TestClient(app).get("/stt/catalog").json()
+    assert "resolved" in body and "default" in body          # untouched
+    g = {p["id"]: p for p in body["providers"]}
+    assert g["local"]["resolves_file"] is True
+    assert g["local"]["resolves_streaming"] is False
+    assert g["openai"]["resolves_streaming"] is True
+
+
+# ── D-3: the mic's provider must be readable off the RESPONSE, not inferred ──
+
+def _pin_everywhere(monkeypatch, pin, *, file_local, streaming_local,
+                    availability=(True, False, False)):
+    """Pin every input the route resolves from. Two modules, because the route
+    resolves twice: the legacy "resolved" through Orchestrator.stt.resolve, the
+    per-path split through Orchestrator.stt.catalog's own re-exported gates."""
+    from Orchestrator.stt import resolve as stt_resolve
+    _pin(monkeypatch, pin, availability)
+    for mod in (stt_resolve, stt_catalog):
+        monkeypatch.setattr(mod, "local_stt_available", lambda: file_local)
+        monkeypatch.setattr(mod, "local_streaming_stt_available", lambda: streaming_local)
+        monkeypatch.setattr(mod, "onbox_stt_available", lambda: False)
+    monkeypatch.setattr(stt_catalog, "stt_availability", lambda: availability)
+
+
+def _catalog_body():
+    import Orchestrator.app  # noqa: F401  -- side-effect: registers routes onto the shared app
+    from fastapi.testclient import TestClient
+    from Orchestrator.checkpoint import app
+    return TestClient(app).get("/stt/catalog").json()
+
+
+def test_route_reports_the_streaming_resolution_not_only_the_file_one(monkeypatch):
+    """The defect: the body said resolved='local' while the mic streamed to OpenAI.
+    Both answers, and the pin the mic dropped, must be in the response itself."""
+    _pin_everywhere(monkeypatch, "local", file_local=True, streaming_local=False)
+    body = _catalog_body()
+    assert body["resolved_file"] == "local"
+    assert body["resolved_streaming"] == "openai"
+    assert body["overridden_from_file"] is None
+    assert body["overridden_from_streaming"] == "local"
+
+
+def test_route_resolutions_agree_when_local_speaks_realtime(monkeypatch):
+    _pin_everywhere(monkeypatch, "local", file_local=True, streaming_local=True)
+    body = _catalog_body()
+    assert body["resolved_file"] == "local"
+    assert body["resolved_streaming"] == "local"
+    assert body["overridden_from_file"] is None
+    assert body["overridden_from_streaming"] is None
+
+
+def test_route_legacy_keys_unchanged(monkeypatch):
+    """Additive only: "resolved" stays the FILE resolution and "default" stays the
+    saved pin, so a client built before the split reads exactly what it read before."""
+    from Orchestrator import config as cfg
+    _pin_everywhere(monkeypatch, "local", file_local=True, streaming_local=False)
+    body = _catalog_body()
+    assert body["resolved"] == "local"
+    assert body["default"] == (cfg.STT_PROVIDER or "local")
+    assert [p["id"] for p in body["providers"]] == ["openai", "google", "elevenlabs", "local"]

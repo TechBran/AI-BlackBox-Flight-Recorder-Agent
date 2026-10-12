@@ -253,3 +253,138 @@ def test_validate_custom_success_clears_learned_model_context(tmp_registry, monk
 
     assert resp.ok is True
     assert cs.get_server(sid)["model_context"] == {}   # learned windows reset
+
+
+# ------------------------------------ audio capability persistence (tri-state)
+
+def _fake_ok_audio(audio, models=("m1",)):
+    """Validator stub whose detail carries a probed (tri-state) audio dict."""
+    def _fn(base_url, api_key=""):
+        return ValidationResult(
+            ok=True, latency_ms=5,
+            detail={"model_count": len(models), "models": list(models),
+                    "audio": dict(audio)})
+    return _fn
+
+
+def _validate(sid):
+    return ob.validate(ob.ValidateRequest(provider="custom",
+                                          credentials={"server_id": sid}))
+
+
+def test_inconclusive_audio_probe_preserves_stored_capability(tmp_registry, monkeypatch):
+    """None = 'the probe could not tell'. The stored capability stands, and the
+    rest of the stamp still persists (a None reaching update_server would raise
+    ValueError and lose the whole stamp)."""
+    sid = cs.add_server(alias="gemma-box", base_url="http://h/v1", api_key="k",
+                        audio={"stt": True, "tts": True, "streaming": True,
+                               "stt_model": "user-whisper"})["id"]
+    monkeypatch.setattr(ob.validators, "validate_custom",
+                        _fake_ok_audio({"stt": None, "tts": None, "streaming": None}))
+    monkeypatch.setattr(ob._state, "record_validation", lambda p: None)
+
+    assert _validate(sid).ok is True
+
+    stored = cs.get_server(sid)
+    assert stored["audio"] == {"stt": True, "tts": True, "streaming": True,
+                               "stt_model": "user-whisper",
+                               "tts_model": cs.SPEACHES_TTS_DEFAULT}
+    assert stored["validated_at"]
+    assert stored["last_models"] == ["m1"]
+
+
+def test_definite_absence_probe_still_writes_false(tmp_registry, monkeypatch):
+    """A definite 404 IS authoritative — capabilities must still be retractable."""
+    sid = cs.add_server(alias="box", base_url="http://h/v1", api_key="k",
+                        audio={"stt": True, "tts": True, "streaming": True})["id"]
+    monkeypatch.setattr(ob.validators, "validate_custom",
+                        _fake_ok_audio({"stt": False, "tts": False, "streaming": False}))
+    monkeypatch.setattr(ob._state, "record_validation", lambda p: None)
+
+    assert _validate(sid).ok is True
+
+    audio = cs.get_server(sid)["audio"]
+    assert audio["stt"] is False and audio["tts"] is False and audio["streaming"] is False
+
+
+def test_definite_presence_probe_writes_true_and_defaults_model_ids(tmp_registry, monkeypatch):
+    sid = cs.add_server(alias="box", base_url="http://h/v1", api_key="k",
+                        audio={"stt": False, "tts": False, "streaming": False})["id"]
+    monkeypatch.setattr(ob.validators, "validate_custom",
+                        _fake_ok_audio({"stt": True, "tts": True, "streaming": True}))
+    monkeypatch.setattr(ob._state, "record_validation", lambda p: None)
+
+    assert _validate(sid).ok is True
+
+    assert cs.get_server(sid)["audio"] == {
+        "stt": True, "tts": True, "streaming": True,
+        "stt_model": cs.SPEACHES_STT_DEFAULT, "tts_model": cs.SPEACHES_TTS_DEFAULT}
+
+
+def test_none_never_reaches_update_server(tmp_registry, monkeypatch):
+    """_validate_field_types rejects a non-bool stt/tts/streaming, and the route
+    swallows that ValueError as a warning — so None must be filtered out BEFORE
+    the call, not caught after it."""
+    sid = cs.add_server(alias="box", base_url="http://h/v1", api_key="k",
+                        audio={"streaming": True})["id"]
+    real_update = cs.update_server
+    seen = []
+
+    def _spy(server_id, patch):
+        seen.append(dict(patch))
+        return real_update(server_id, patch)
+
+    monkeypatch.setattr(ob.custom_servers, "update_server", _spy)
+    monkeypatch.setattr(ob.validators, "validate_custom",
+                        _fake_ok_audio({"stt": None, "tts": None, "streaming": None}))
+    monkeypatch.setattr(ob._state, "record_validation", lambda p: None)
+
+    assert _validate(sid).ok is True
+
+    assert seen, "update_server was never called"
+    assert None not in seen[0].get("audio", {}).values()
+
+
+def test_realtime_probe_timeout_does_not_disable_stored_streaming(tmp_registry, monkeypatch):
+    """End-to-end through the REAL validator: a /realtime probe that times out
+    must not persist streaming=false onto a server whose /realtime answers 307.
+    That silent overwrite disabled live-mic local STT for 8 days."""
+    import httpx
+    import openai
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        class models:
+            @staticmethod
+            def list():
+                class _Page:
+                    data = [type("_M", (), {"id": "gemma-31b"})()]
+                return _Page()
+
+    def _timeout_get(url, **kwargs):
+        raise httpx.ReadTimeout("probe timed out")
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeClient)
+    monkeypatch.setattr(httpx, "get", _timeout_get)
+    monkeypatch.setattr(ob._state, "record_validation", lambda p: None)
+
+    sid = cs.add_server(alias="gemma-box", base_url="http://192.168.1.153:8080/v1",
+                        api_key="k",
+                        audio={"stt": True, "tts": True, "streaming": True,
+                               "stt_model": "faster-whisper", "tts_model": "kokoro"})["id"]
+
+    assert _validate(sid).ok is True
+
+    stored = cs.get_server(sid)
+    assert stored["audio"]["streaming"] is True
+    assert stored["audio"]["stt"] is True and stored["audio"]["tts"] is True
+    assert stored["audio"]["stt_model"] == "faster-whisper"
+    assert cs.has_audio("streaming") is True

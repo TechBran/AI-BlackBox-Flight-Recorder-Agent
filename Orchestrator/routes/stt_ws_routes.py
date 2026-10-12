@@ -16,6 +16,10 @@ clients. The client contract is provider-agnostic:
           {"type":"stt_status","state":"loading_models"}   (onbox warm affordance, additive)
           {"type":"stt_status","state":"listening"|"speech"|"processing"}
               (onbox VAD loop lifecycle, additive — cloud bridges never send them)
+          {"type":"stt_status","state":"provider_override","provider":...,
+           "overridden_from":...}
+              (session start only, and ONLY when the requested provider could not
+               serve live streaming and another one was substituted — additive)
 
 stt_delta.text is the CUMULATIVE interim transcript so far (client replaces the
 interim region); stt_final.text is the full final (client commits).
@@ -128,14 +132,27 @@ async def ws_stt(websocket: WebSocket):
         # Local streaming resolves ONLY when a registered server advertises the
         # realtime (/v1/realtime) capability; otherwise local stays file-only and
         # must not win STREAMING resolution.
+        override = {}
         provider = resolve_stt_provider(start.get("provider"),
                                         local_ok=local_streaming_stt_available(),
-                                        onbox_ok=onbox_stt_available())
+                                        onbox_ok=onbox_stt_available(),
+                                        override_out=override)
+        overridden_from = override.get("overridden_from")
         if not provider:
             await websocket.send_json({"type": "stt_error", "message": "no STT provider configured"})
             return
         print(f"[STT/WS] start provider={provider} sample_rate={start.get('sample_rate')} "
               f"lang={start.get('lang')} target={start.get('target')}")
+        if overridden_from:
+            # The guards below ("NEVER a silent provider switch") sit downstream of
+            # this resolution and can only see the provider it already picked; this
+            # is the layer where the switch is decided, so it is announced here.
+            print(f"[STT/WS] provider OVERRIDE: requested '{overridden_from}' cannot "
+                  f"serve live streaming on this box — streaming with '{provider}'")
+            await websocket.send_json({
+                "type": "stt_status", "state": "provider_override",
+                "provider": provider, "overridden_from": overridden_from,
+            })
         try:
             await run_stt_bridge(websocket, provider, start)
         except WebSocketDisconnect:

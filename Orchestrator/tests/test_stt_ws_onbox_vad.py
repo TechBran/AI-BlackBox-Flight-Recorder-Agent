@@ -689,3 +689,40 @@ def test_silence_wav_is_valid_16k_mono():
         assert w.getsampwidth() == 2
         assert w.getframerate() == 16000
         assert w.getnframes() == int(16000 * 0.2)
+
+
+# ── D-2: a provider substitution is announced at session start ──────────────
+
+def _hermetic_resolution(monkeypatch, resolver):
+    monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider", resolver)
+    monkeypatch.setattr(stt_ws_routes, "local_streaming_stt_available", lambda: False)
+    monkeypatch.setattr(stt_ws_routes, "onbox_stt_available", lambda: False)
+
+    async def _bridge(ws, provider, start):
+        await ws.send_json({"type": "stt_final", "text": "hi", "target": "prompt"})
+    monkeypatch.setattr(stt_ws_routes, "run_stt_bridge", _bridge)
+
+
+def test_ws_start_announces_the_provider_substitution(monkeypatch):
+    def _resolver(p=None, override_out=None, **kw):
+        if override_out is not None:
+            override_out["overridden_from"] = "local"
+        return "openai"
+    _hermetic_resolution(monkeypatch, _resolver)
+    client = _FakeClientWS([{"type": "stt_start", "target": "prompt", "provider": ""}])
+    asyncio.run(stt_ws_routes.ws_stt(client))
+    notices = [m for m in client.sent if m.get("state") == "provider_override"]
+    assert notices, "a substituted provider must be announced, never silent"
+    assert notices[0]["provider"] == "openai"
+    assert notices[0]["overridden_from"] == "local"
+    assert notices[0]["type"] == "stt_status"          # additive on the existing event
+    assert client.sent.index(notices[0]) == 0          # before any transcript
+
+
+def test_ws_start_says_nothing_when_the_pick_is_honoured(monkeypatch):
+    _hermetic_resolution(monkeypatch, lambda p=None, **kw: "openai")
+    client = _FakeClientWS([{"type": "stt_start", "target": "prompt",
+                             "provider": "openai"}])
+    asyncio.run(stt_ws_routes.ws_stt(client))
+    assert not any(m.get("state") == "provider_override" for m in client.sent)
+    assert client.sent[0] == {"type": "stt_final", "text": "hi", "target": "prompt"}

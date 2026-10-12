@@ -165,3 +165,80 @@ def test_validate_custom_never_raises_on_other_error(monkeypatch):
     assert res.ok is False
     assert res.error is not None
     assert "unexpected payload shape" in res.error
+
+
+# --- audio capability probe: tri-state ----------------------------------------
+# validate_custom does `import httpx` inside its body, so patching the module
+# attribute intercepts the probe at call time (same seam as test_local_audio).
+
+
+class _StubResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+
+def _probe_stub(outcomes: dict):
+    """httpx.get stub: {path fragment: status code | Exception to raise}; 404 default."""
+    def _get(url, **kwargs):
+        for frag, outcome in outcomes.items():
+            if frag in url:
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return _StubResponse(outcome)
+        return _StubResponse(404)
+    return _get
+
+
+def test_audio_probe_definite_404_is_false(monkeypatch):
+    """A real 404 is real evidence of absence -> False."""
+    monkeypatch.setattr("openai.OpenAI", _fake_client_factory(ids=["m"]))
+    monkeypatch.setattr(httpx, "get", _probe_stub({}))
+
+    res = validators.validate_custom(base_url="http://x/v1", api_key="k")
+    assert res.ok is True
+    assert res.detail["audio"] == {"stt": False, "tts": False, "streaming": False}
+
+
+def test_audio_probe_definite_response_is_true(monkeypatch):
+    """Any non-404 response (200/405/307) proves the path exists -> True."""
+    monkeypatch.setattr("openai.OpenAI", _fake_client_factory(ids=["m"]))
+    monkeypatch.setattr(httpx, "get", _probe_stub({
+        "/audio/transcriptions": 200,
+        "/audio/speech": 405,
+        "/realtime": 307,
+    }))
+
+    res = validators.validate_custom(base_url="http://x/v1", api_key="k")
+    assert res.ok is True
+    assert res.detail["audio"] == {"stt": True, "tts": True, "streaming": True}
+
+
+def test_audio_probe_exception_is_none_not_false(monkeypatch):
+    """A timeout / connection reset is NOT evidence of absence -> None.
+
+    Returning False here is what wrote audio.streaming=false for a server whose
+    /realtime answers 307, silently disabling live-mic local STT.
+    """
+    monkeypatch.setattr("openai.OpenAI", _fake_client_factory(ids=["m"]))
+    monkeypatch.setattr(httpx, "get", _probe_stub({
+        "/audio/transcriptions": httpx.ConnectTimeout("timed out"),
+        "/audio/speech": httpx.ReadTimeout("timed out"),
+        "/realtime": httpx.ConnectError("connection reset by peer"),
+    }))
+
+    res = validators.validate_custom(base_url="http://x/v1", api_key="k")
+    assert res.ok is True
+    assert res.detail["audio"] == {"stt": None, "tts": None, "streaming": None}
+
+
+def test_audio_probe_states_are_per_path_independent(monkeypatch):
+    """One inconclusive probe must not contaminate the paths that DID answer."""
+    monkeypatch.setattr("openai.OpenAI", _fake_client_factory(ids=["m"]))
+    monkeypatch.setattr(httpx, "get", _probe_stub({
+        "/audio/transcriptions": 405,
+        "/audio/speech": 404,
+        "/realtime": httpx.ReadTimeout("timed out"),
+    }))
+
+    res = validators.validate_custom(base_url="http://x/v1", api_key="k")
+    assert res.detail["audio"] == {"stt": True, "tts": False, "streaming": None}

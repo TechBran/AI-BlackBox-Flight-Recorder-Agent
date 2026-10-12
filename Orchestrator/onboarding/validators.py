@@ -165,7 +165,10 @@ def validate_custom(base_url: str, api_key: str = "") -> ValidationResult:
                 # Audio capability probe -- Speaches behind Caddy serves audio at
                 # /v1/audio/* + /v1/realtime, but those models are NOT in /v1/models.
                 # A GET returns 405/307 when the path exists, 404 when it doesn't.
-                # Best-effort + fail-soft: a probe failure just means "not detected".
+                # Best-effort + fail-soft, TRI-STATE: True = definitely there,
+                # False = definite 404, None = the probe could not tell (timeout,
+                # reset, DNS). None is NOT evidence of absence -- callers must
+                # leave the stored capability alone rather than persist a False.
                 import httpx
                 _hdr = {"Authorization": f"Bearer {api_key}"} if api_key else {}
                 def _has(path):
@@ -174,7 +177,7 @@ def validate_custom(base_url: str, api_key: str = "") -> ValidationResult:
                                       timeout=5.0, follow_redirects=False)
                         return r.status_code != 404
                     except Exception:
-                        return False
+                        return None
                 audio = {"stt": _has("/audio/transcriptions"),
                          "tts": _has("/audio/speech"),
                          "streaming": _has("/realtime")}
