@@ -2458,3 +2458,315 @@ section {
 .firefly.steady {
     animation: firefly-float linear infinite;
 }
+
+/* ============================================================
+   REVAMP 2026-06-27 — new sections & two-tier pricing
+   Reuses tokens: --color-primary #ff4a4a, --shadow-glow, radii.
+   ============================================================ */
+
+/* Shared section rhythm (alternating backgrounds) */
+.cellular,
+.connect { padding: 120px 24px; background: rgba(10, 10, 10, 0.85); }
+.workspace,
+.specs { padding: 120px 24px; }
+
+/* Shared small pill badge (matches .memory-badge vibe) */
+.cellular-badge,
+.connect-badge {
+    display: inline-block;
+    padding: 6px 16px;
+    margin-bottom: 20px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-primary);
+    background: rgba(255, 74, 74, 0.1);
+    border: 1px solid rgba(255, 74, 74, 0.35);
+    border-radius: 999px;
+}
+
+/* Shared round red-tinted icon for new sections */
+.cellular-icon,
+.connect-icon,
+.workspace-icon {
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-md);
+    background: rgba(255, 74, 74, 0.12);
+    border: 1px solid rgba(255, 74, 74, 0.25);
+    color: var(--color-primary);
+    margin-bottom: 20px;
+}
+.cellular-icon svg,
+.connect-icon svg { width: 28px; height: 28px; }
+.workspace-icon { width: 48px; height: 48px; margin-bottom: 14px; }
+.workspace-icon svg { width: 24px; height: 24px; }
+
+/* ---------- Cellular (TG200) ---------- */
+.cellular-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    margin-bottom: 48px;
+}
+.cellular-feature {
+    background: rgba(10, 10, 10, 0.6);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: 32px;
+}
+.cellular-feature h3 { margin-bottom: 12px; }
+.cellular-feature p { color: var(--color-text-secondary); }
+
+.cellular-cta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 20px;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 28px 36px;
+    background: rgba(255, 74, 74, 0.06);
+    border: 1px solid rgba(255, 74, 74, 0.3);
+    border-radius: var(--radius-lg);
+}
+.cellular-cta-text { display: flex; flex-direction: column; }
+.cellular-price { font-size: 2rem; font-weight: 800; color: var(--color-primary); }
+.cellular-price-label { color: var(--color-text-secondary); font-size: 0.95rem; }
+.cellular-note {
+    text-align: center;
+    margin-top: 20px;
+    color: var(--color-text-secondary);
+    font-size: 0.9rem;
+    opacity: 0.85;
+}
+
+/* ---------- Google Workspace ---------- */
+.workspace-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    max-width: 960px;
+    margin: 0 auto;
+}
+.workspace-app {
+    background: rgba(10, 10, 10, 0.75);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: 28px;
+    transition: transform 0.2s, border-color 0.2s;
+}
+.workspace-app:hover { transform: translateY(-4px); border-color: rgba(255, 74, 74, 0.4); }
+.workspace-app h4 { margin-bottom: 6px; }
+.workspace-app p { color: var(--color-text-secondary); font-size: 0.92rem; }
+
+/* ---------- Connect / MCP ---------- */
+.connect-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 24px;
+    margin-bottom: 48px;
+}
+.connect-point {
+    background: rgba(10, 10, 10, 0.6);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: 32px;
+}
+.connect-point h3 { margin-bottom: 12px; }
+.connect-point p { color: var(--color-text-secondary); }
+
+.connect-apps { text-align: center; }
+.connect-apps-label {
+    display: block;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.8rem;
+    color: var(--color-text-secondary);
+    margin-bottom: 18px;
+}
+.connect-app-badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+.connect-app {
+    padding: 10px 20px;
+    background: rgba(20, 20, 20, 0.9);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    color: var(--color-text);
+}
+.connect-secure {
+    color: var(--color-text-secondary);
+    font-size: 0.9rem;
+    max-width: 560px;
+    margin: 0 auto;
+}
+
+/* ---------- Hardware & Specs ---------- */
+.specs-table {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 24px;
+    max-width: 920px;
+    margin: 0 auto;
+    align-items: start;
+}
+.spec-col {
+    position: relative;
+    background: rgba(10, 10, 10, 0.75);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    padding: 36px;
+}
+.spec-col.featured {
+    border: 2px solid var(--color-primary);
+    box-shadow: var(--shadow-glow);
+}
+.spec-flag,
+.pricing-flag {
+    position: absolute;
+    top: -14px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 18px;
+    background: var(--gradient-primary);
+    color: #fff;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.spec-col-head { text-align: center; margin-bottom: 24px; }
+.spec-col-head h3 { font-size: 1.6rem; }
+.spec-machine { display: block; color: var(--color-text-secondary); font-size: 0.9rem; margin: 4px 0 10px; }
+.spec-price { display: block; font-size: 2rem; font-weight: 800; color: var(--color-primary); }
+.spec-list { list-style: none; margin-bottom: 28px; }
+.spec-list li {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 0.95rem;
+}
+.spec-key { color: var(--color-text-secondary); flex-shrink: 0; }
+.spec-val { text-align: right; }
+.spec-col .btn { width: 100%; }
+
+/* ---------- Two-tier Pricing ---------- */
+.pricing-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 28px;
+    max-width: 920px;
+    margin: 0 auto 40px;
+    align-items: start;
+}
+/* override the legacy single-card centering inside the grid */
+.pricing-grid .pricing-card {
+    position: relative;
+    max-width: none;
+    margin: 0;
+    border: 1px solid var(--color-border);
+    padding: 40px;
+}
+.pricing-grid .pricing-card.featured {
+    border: 2px solid var(--color-primary);
+    box-shadow: var(--shadow-glow);
+}
+.pricing-grid .pricing-card .btn { width: 100%; }
+
+/* ---------- TG200 add-on strip ---------- */
+.addon-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 20px;
+    max-width: 920px;
+    margin: 0 auto 28px;
+    padding: 24px 32px;
+    background: rgba(10, 10, 10, 0.75);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+}
+.addon-content { display: flex; align-items: center; gap: 18px; }
+.addon-icon {
+    width: 48px; height: 48px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-md);
+    background: rgba(255, 74, 74, 0.12);
+    border: 1px solid rgba(255, 74, 74, 0.25);
+    color: var(--color-primary);
+}
+.addon-icon svg { width: 24px; height: 24px; }
+.addon-text h4 { margin-bottom: 4px; }
+.addon-text p { color: var(--color-text-secondary); font-size: 0.9rem; }
+.addon-action { display: flex; align-items: center; gap: 16px; }
+.addon-price { font-size: 1.5rem; font-weight: 800; color: var(--color-primary); }
+
+/* ---------- Software-only teaser ---------- */
+.software-teaser {
+    max-width: 920px;
+    margin: 0 auto 28px;
+    padding: 22px 28px;
+    background: rgba(20, 20, 20, 0.5);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-lg);
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+}
+.software-badge {
+    padding: 5px 14px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    flex-shrink: 0;
+}
+.software-teaser p { color: var(--color-text-secondary); font-size: 0.95rem; }
+.software-teaser a, .cellular-feature a, .feature-card a { color: var(--color-primary); text-decoration: none; }
+.software-teaser a:hover, .feature-card a:hover { text-decoration: underline; }
+
+/* ---------- Demo video-ready slot ---------- */
+.video-ready .video-placeholder { gap: 10px; }
+.video-ready-title { font-size: 1.3rem; font-weight: 700; color: var(--color-text); margin-top: 8px; }
+.video-ready-sub { color: var(--color-text-secondary); font-size: 0.95rem; }
+
+/* ---------- Footer "coming soon" ---------- */
+.footer-soon { color: var(--color-text-secondary); font-size: 0.85rem; opacity: 0.8; margin-top: 6px; }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 860px) {
+    .cellular, .connect, .workspace, .specs { padding: 80px 20px; }
+    .cellular-grid,
+    .connect-grid,
+    .specs-table,
+    .pricing-grid { grid-template-columns: 1fr; }
+    .workspace-grid { grid-template-columns: repeat(2, 1fr); }
+    .spec-col.featured, .pricing-grid .pricing-card.featured { order: -1; }
+    .addon-strip, .cellular-cta { flex-direction: column; align-items: flex-start; }
+    .addon-action { width: 100%; justify-content: space-between; }
+}
+@media (max-width: 480px) {
+    .workspace-grid { grid-template-columns: 1fr; }
+}

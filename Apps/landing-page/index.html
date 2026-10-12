@@ -3,20 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI BlackBox Flight Recorder - Own Your Intelligence</title>
-    <meta name="description" content="The $2,000 sovereign intelligence appliance that replaces $5,000/year in AI subscriptions. Stop renting. Start owning.">
+    <title>AI BlackBox — Your AI. Your Box. Your Rules.</title>
+    <meta name="description" content="A little machine that runs every AI worth using — chat, images, video, music, voice — and actually remembers you. Buy it once from $2,000. No subscriptions, no cloud landlord.">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="AI BlackBox Flight Recorder">
-    <meta property="og:description" content="Stop Renting Your Intelligence. Own It.">
+    <meta property="og:title" content="AI BlackBox — Your AI. Your Box. Your Rules.">
+    <meta property="og:description" content="Buy it once. Own it forever. The AI appliance that remembers everything and answers to nobody but you.">
     <meta property="og:type" content="website">
+
+    <!-- Favicon (inline SVG — the red core) -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23000'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23ff4a4a'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23ff4a4a' stroke-opacity='0.5' stroke-width='1.5'/%3E%3C/svg%3E">
 
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=revamp1">
 </head>
 <body>
     <!-- Navigation -->
@@ -32,13 +35,13 @@
             <div class="nav-links">
                 <a href="#features">Features</a>
                 <a href="#memory">Memory</a>
-                <a href="#how-it-works">How It Works</a>
-                <a href="#apps">Apps</a>
-                <a href="#about">About</a>
+                <a href="#cellular">Cellular</a>
+                <a href="#connect">Connect</a>
+                <a href="#specs">Specs</a>
                 <a href="#pricing">Pricing</a>
                 <a href="#faq">FAQ</a>
             </div>
-            <a href="https://buy.stripe.com/aFa3cufqIdLAgVk8Ib4ow00" class="nav-cta">Pre-Order Now</a>
+            <a href="#pricing" class="nav-cta">From $2,000</a>
         </div>
     </nav>
 
@@ -59,24 +62,24 @@
                 <span class="title-line-1">AI BlackBox</span>
                 <span class="title-line-2 gradient-text">Flight Recorder</span>
             </h1>
-            <p class="hero-tagline">Stop Renting Your Intelligence. Own It.</p>
-            <p class="hero-subtitle">The $2,000 appliance that replaces $5,000/year in AI subscriptions. One purchase. Complete ownership. Perfect memory.</p>
+            <p class="hero-tagline">Your AI. Your box. Your rules.</p>
+            <p class="hero-subtitle">One little machine that runs every AI worth using — chat, images, video, music, and voice — and <em>actually remembers you</em>. Buy it once, own it forever. No subscriptions. No cloud landlord looking over your shoulder.</p>
             <div class="hero-cta">
-                <a href="https://buy.stripe.com/aFa3cufqIdLAgVk8Ib4ow00" class="btn btn-primary">Pre-Order for $2,000</a>
-                <a href="#demo" class="btn btn-secondary">Watch Demo</a>
+                <a href="#pricing" class="btn btn-primary">Grab one — from $2,000</a>
+                <a href="#demo" class="btn btn-secondary">Watch it work</a>
             </div>
             <div class="hero-stats">
                 <div class="stat">
                     <span class="stat-value">9</span>
-                    <span class="stat-label">AI Providers</span>
+                    <span class="stat-label">AI providers, one box</span>
                 </div>
                 <div class="stat">
-                    <span class="stat-value">$5,940</span>
-                    <span class="stat-label">3-Year Savings</span>
+                    <span class="stat-value">$4,372</span>
+                    <span class="stat-label">saved over 3 years</span>
                 </div>
                 <div class="stat">
                     <span class="stat-value">100%</span>
-                    <span class="stat-label">Data Ownership</span>
+                    <span class="stat-label">yours to keep</span>
                 </div>
             </div>
         </div>
@@ -89,9 +92,9 @@
                         <span class="dot green"></span>
                     </div>
                     <div class="mockup-content">
-                        <div class="chat-bubble ai">What would you like to create today?</div>
-                        <div class="chat-bubble user">Generate a cinematic video of a dragon flying over mountains</div>
-                        <div class="chat-bubble ai">Creating your video with Veo 3.1... Done. Here's your dragon scene.</div>
+                        <div class="chat-bubble ai">Hey — what are we making today?</div>
+                        <div class="chat-bubble user">A cinematic video of a dragon flying over the mountains</div>
+                        <div class="chat-bubble ai">On it. Rendering with Veo 3.1… done. Want some epic music under it?</div>
                     </div>
                 </div>
             </div>
@@ -102,19 +105,19 @@
     <section class="problem" id="problem">
         <div class="container">
             <div class="problem-header">
-                <h2>The Subscription Trap</h2>
-                <p>You're bleeding money on AI tools you'll never own</p>
+                <h2>The subscription treadmill</h2>
+                <p>You're paying every month for tools you'll never actually own</p>
             </div>
             <div class="comparison-table">
                 <div class="comparison-col trap">
                     <div class="col-header">
-                        <h3>The SaaS Trap</h3>
-                        <span class="col-tag bad">Renting</span>
+                        <h3>Renting (the usual way)</h3>
+                        <span class="col-tag bad">Forever</span>
                     </div>
                     <ul class="cost-list">
                         <li><span class="service">ChatGPT Plus</span><span class="cost">$20/mo</span></li>
                         <li><span class="service">Midjourney</span><span class="cost">$30/mo</span></li>
-                        <li><span class="service">Runway/Video AI</span><span class="cost">$95/mo</span></li>
+                        <li><span class="service">Runway / Video AI</span><span class="cost">$95/mo</span></li>
                         <li><span class="service">ElevenLabs</span><span class="cost">$22/mo</span></li>
                         <li><span class="service">Claude Pro</span><span class="cost">$20/mo</span></li>
                     </ul>
@@ -123,33 +126,33 @@
                         <span class="total-bad">$6,732</span>
                     </div>
                     <div class="ownership-row">
-                        <span>Ownership</span>
-                        <span class="ownership-bad">0%</span>
+                        <span>What you own after</span>
+                        <span class="ownership-bad">Nothing</span>
                     </div>
                 </div>
                 <div class="comparison-col freedom">
                     <div class="col-header">
-                        <h3>AI BlackBox</h3>
-                        <span class="col-tag good">Owning</span>
+                        <h3>Owning (the BlackBox)</h3>
+                        <span class="col-tag good">Once</span>
                     </div>
                     <ul class="cost-list">
-                        <li><span class="service">Hardware (one-time)</span><span class="cost">$2,000</span></li>
-                        <li><span class="service">BYOK API costs (est.)</span><span class="cost">~$10/mo</span></li>
-                        <li><span class="service">Text, Image, Video</span><span class="cost included">Included</span></li>
-                        <li><span class="service">Music, Voice, Analysis</span><span class="cost included">Included</span></li>
-                        <li><span class="service">Perfect Memory</span><span class="cost included">Included</span></li>
+                        <li><span class="service">The box (one-time)</span><span class="cost">$2,000</span></li>
+                        <li><span class="service">Your own API keys</span><span class="cost">~$10/mo</span></li>
+                        <li><span class="service">Text, image, video</span><span class="cost included">Included</span></li>
+                        <li><span class="service">Music, voice, analysis</span><span class="cost included">Included</span></li>
+                        <li><span class="service">A memory that never forgets</span><span class="cost included">Included</span></li>
                     </ul>
                     <div class="total-row">
                         <span>3-Year Total</span>
                         <span class="total-good">$2,360</span>
                     </div>
                     <div class="ownership-row">
-                        <span>Ownership</span>
-                        <span class="ownership-good">100%</span>
+                        <span>What you own after</span>
+                        <span class="ownership-good">All of it</span>
                     </div>
                 </div>
             </div>
-            <p class="savings-callout">Save <strong>$4,372</strong> over 3 years. The BlackBox pays for itself in <strong>14 months</strong>.</p>
+            <p class="savings-callout">That's <strong>$4,372</strong> back in your pocket over 3 years — and the box pays for itself in <strong>about a year</strong>.</p>
         </div>
     </section>
 
@@ -157,8 +160,8 @@
     <section class="features" id="features">
         <div class="container">
             <div class="section-header">
-                <h2>Everything You Need. One Appliance.</h2>
-                <p>Nine AI providers. Full multimodal capabilities. Perfect memory.</p>
+                <h2>Everything in one box</h2>
+                <p>Nine AI providers, every kind of media, and a memory that sticks. No tab-juggling, no logins, no monthly bills.</p>
             </div>
 
             <div class="feature-grid">
@@ -170,8 +173,8 @@
                             <path d="M12 6v6l4 2"/>
                         </svg>
                     </div>
-                    <h3>9 AI Providers</h3>
-                    <p>Switch between the best models instantly. Google Gemini, OpenAI GPT-4, Anthropic Claude, xAI Grok, and more.</p>
+                    <h3>9 AI providers</h3>
+                    <p>Hop between the best models whenever you want — Google Gemini, OpenAI, Anthropic Claude, xAI Grok, and five more. One box, all of them.</p>
                     <div class="provider-logos">
                         <span class="provider-badge">Google</span>
                         <span class="provider-badge">OpenAI</span>
@@ -190,8 +193,8 @@
                             <path d="M21 15l-5-5L5 21"/>
                         </svg>
                     </div>
-                    <h3>Image Generation</h3>
-                    <p>Create stunning visuals with Google Imagen. Just describe what you want.</p>
+                    <h3>Make images</h3>
+                    <p>Describe what's in your head and watch it show up. Real image generation with Google Imagen, built right in.</p>
                 </div>
 
                 <!-- Video Generation -->
@@ -202,8 +205,8 @@
                             <rect x="1" y="5" width="15" height="14" rx="2"/>
                         </svg>
                     </div>
-                    <h3>Video Generation</h3>
-                    <p>Cinematic AI video with Veo 3.1. From text to Hollywood-quality scenes.</p>
+                    <h3>Make videos</h3>
+                    <p>Go from a sentence to a cinematic scene with Veo 3.1. Yes, it's as fun as it sounds.</p>
                 </div>
 
                 <!-- Music Generation -->
@@ -215,8 +218,8 @@
                             <circle cx="18" cy="16" r="3"/>
                         </svg>
                     </div>
-                    <h3>Music Generation</h3>
-                    <p>Original soundtracks with Google Lyria. Epic orchestral to ambient electronic.</p>
+                    <h3>Make music</h3>
+                    <p>Original tracks on demand with Google Lyria and full songs with ElevenLabs — epic orchestral to chill electronic.</p>
                 </div>
 
                 <!-- Voice & TTS -->
@@ -229,8 +232,8 @@
                             <line x1="8" y1="23" x2="16" y2="23"/>
                         </svg>
                     </div>
-                    <h3>30+ Premium Voices</h3>
-                    <p>Text-to-speech with OpenAI and Gemini Pro voices. Narration, characters, podcasts.</p>
+                    <h3>Just talk to it</h3>
+                    <p>Speak instead of type, and it talks back in any of 70+ premium voices. Great for narration, characters, or hands-free.</p>
                 </div>
 
                 <!-- Perfect Memory -->
@@ -242,12 +245,36 @@
                             <line x1="12" y1="22.08" x2="12" y2="12"/>
                         </svg>
                     </div>
-                    <h3>Perfect Memory</h3>
-                    <p>Every conversation saved. Semantic search across months of context. Your AI remembers everything.</p>
+                    <h3>A memory that sticks</h3>
+                    <p>Every conversation is saved and searchable. Your AI remembers your projects, your preferences, and what you said three months ago.</p>
                     <div class="memory-stat">
-                        <span class="memory-number">2,300+</span>
-                        <span class="memory-label">Snapshots indexed</span>
+                        <span class="memory-number">2,000+</span>
+                        <span class="memory-label">snapshots and counting</span>
                     </div>
+                </div>
+
+                <!-- Cellular teaser -->
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="5" y="2" width="14" height="20" rx="2"/>
+                            <line x1="12" y1="18" x2="12" y2="18"/>
+                        </svg>
+                    </div>
+                    <h3>Text &amp; call it</h3>
+                    <p>Add the cellular gateway and your AI gets a real phone number — it answers your texts and picks up calls. <a href="#cellular">See how →</a></p>
+                </div>
+
+                <!-- Workspace teaser -->
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                        </svg>
+                    </div>
+                    <h3>Lives in your Google</h3>
+                    <p>It reads and writes your Docs, Sheets, Slides, Drive, Gmail, and Calendar. <a href="#workspace">See how →</a></p>
                 </div>
             </div>
         </div>
@@ -258,15 +285,15 @@
         <div class="container">
             <!-- Section Header -->
             <div class="memory-header">
-                <span class="memory-badge">The Core Innovation</span>
-                <h2>Memory That <span class="gradient-text">Compounds</span></h2>
-                <p class="memory-subtitle">Traditional AI forgets everything the moment your session ends. The BlackBox creates a cryptographic flight recorder that makes your AI smarter over time.</p>
+                <span class="memory-badge">The thing nobody else has</span>
+                <h2>A memory that <span class="gradient-text">compounds</span></h2>
+                <p class="memory-subtitle">Most AI forgets you the second you close the tab. The BlackBox keeps an immutable flight recorder of everything — so your AI actually gets smarter the longer you use it.</p>
             </div>
 
             <!-- Philosophy Quote -->
             <div class="memory-philosophy">
                 <blockquote>
-                    "Competitors are building text buffers. We are building a time machine."
+                    "Everyone else is building a text buffer. We're building a time machine."
                 </blockquote>
             </div>
 
@@ -283,15 +310,15 @@
                             </svg>
                         </div>
                         <h4>Immutable Flight Recorder</h4>
-                        <p>Append-only ledger with cryptographic verification</p>
+                        <p>An append-only ledger you can't accidentally lose or quietly rewrite</p>
                         <div class="volume-stats">
                             <div class="vol-stat">
-                                <span class="vol-num">2,370+</span>
+                                <span class="vol-num">2,000+</span>
                                 <span class="vol-label">Snapshots</span>
                             </div>
                             <div class="vol-stat">
-                                <span class="vol-num">768</span>
-                                <span class="vol-label">Dimensions</span>
+                                <span class="vol-num">100%</span>
+                                <span class="vol-label">Yours</span>
                             </div>
                         </div>
                     </div>
@@ -306,7 +333,7 @@
                                 </svg>
                             </div>
                             <span>Semantic Search</span>
-                            <div class="orbit-tooltip">768-dimensional embeddings for meaning-based retrieval</div>
+                            <div class="orbit-tooltip">Find anything by what you meant, not the exact words you used</div>
                         </div>
                         <div class="orbit-item orbit-2">
                             <div class="orbit-icon">
@@ -315,7 +342,7 @@
                                 </svg>
                             </div>
                             <span>Checkpoints</span>
-                            <div class="orbit-tooltip">Compressed summaries every 25 turns</div>
+                            <div class="orbit-tooltip">Tidy summaries roll up automatically so long histories stay fast</div>
                         </div>
                         <div class="orbit-item orbit-3">
                             <div class="orbit-icon">
@@ -327,7 +354,7 @@
                                 </svg>
                             </div>
                             <span>Multi-Agent</span>
-                            <div class="orbit-tooltip">All agents share the same memory substrate</div>
+                            <div class="orbit-tooltip">Every tool and model shares the same brain</div>
                         </div>
                         <div class="orbit-item orbit-4">
                             <div class="orbit-icon">
@@ -337,8 +364,8 @@
                                     <path d="M9 21V9"/>
                                 </svg>
                             </div>
-                            <span>Byte Manifest</span>
-                            <div class="orbit-tooltip">O(1) snapshot retrieval via byte offsets</div>
+                            <span>Instant Recall</span>
+                            <div class="orbit-tooltip">Pulls the right memory back in a blink</div>
                         </div>
                     </div>
                 </div>
@@ -346,7 +373,7 @@
 
             <!-- RAG Comparison -->
             <div class="rag-comparison">
-                <h3>Why This Beats Traditional RAG</h3>
+                <h3>Why it beats the usual "AI memory"</h3>
                 <div class="comparison-grid">
                     <div class="compare-col rag-col">
                         <div class="compare-header bad">
@@ -355,15 +382,15 @@
                                 <line x1="15" y1="9" x2="9" y2="15"/>
                                 <line x1="9" y1="9" x2="15" y2="15"/>
                             </svg>
-                            <h4>Traditional RAG</h4>
+                            <h4>The usual approach</h4>
                         </div>
                         <ul class="compare-list">
-                            <li><span class="x-mark">✕</span> Memory as disposable buffer</li>
-                            <li><span class="x-mark">✕</span> Chunks in vector database</li>
-                            <li><span class="x-mark">✕</span> No temporal awareness</li>
-                            <li><span class="x-mark">✕</span> Loses causality chain</li>
-                            <li><span class="x-mark">✕</span> Vendor-controlled</li>
-                            <li><span class="x-mark">✕</span> Static retrieval only</li>
+                            <li><span class="x-mark">✕</span> Memory is a throwaway buffer</li>
+                            <li><span class="x-mark">✕</span> Loose chunks in a database</li>
+                            <li><span class="x-mark">✕</span> No sense of when things happened</li>
+                            <li><span class="x-mark">✕</span> Forgets how you got there</li>
+                            <li><span class="x-mark">✕</span> Lives on someone else's server</li>
+                            <li><span class="x-mark">✕</span> Same answers, no growth</li>
                         </ul>
                     </div>
                     <div class="compare-col blackbox-col">
@@ -372,15 +399,15 @@
                                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                                 <polyline points="22 4 12 14.01 9 11.01"/>
                             </svg>
-                            <h4>BlackBox Flight Recorder</h4>
+                            <h4>The BlackBox way</h4>
                         </div>
                         <ul class="compare-list">
-                            <li><span class="check-mark">✓</span> Memory as cryptographic audit trail</li>
-                            <li><span class="check-mark">✓</span> Timestamped snapshots in immutable ledger</li>
-                            <li><span class="check-mark">✓</span> Full causal chain preservation</li>
-                            <li><span class="check-mark">✓</span> Tracks error → fix evolution</li>
-                            <li><span class="check-mark">✓</span> User-owned, hardware-anchored</li>
-                            <li><span class="check-mark">✓</span> Compounding intelligence</li>
+                            <li><span class="check-mark">✓</span> Memory is a permanent, tamper-proof record</li>
+                            <li><span class="check-mark">✓</span> Timestamped snapshots in an immutable ledger</li>
+                            <li><span class="check-mark">✓</span> Keeps the full story, in order</li>
+                            <li><span class="check-mark">✓</span> Remembers the problem <em>and</em> the fix</li>
+                            <li><span class="check-mark">✓</span> Lives on your hardware, full stop</li>
+                            <li><span class="check-mark">✓</span> Gets smarter the more you use it</li>
                         </ul>
                     </div>
                 </div>
@@ -394,8 +421,8 @@
                             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                         </svg>
                     </div>
-                    <h4>Immutable Ledger</h4>
-                    <p>Every snapshot is append-only with SHA-256 verification. Nothing is ever deleted or modified. Your AI's history is a permanent, auditable record.</p>
+                    <h4>Nothing gets lost</h4>
+                    <p>Every snapshot is append-only and verified. Nothing is ever quietly deleted or changed — your AI's history is a permanent record you can trust.</p>
                 </div>
 
                 <div class="mem-feature">
@@ -407,8 +434,8 @@
                             <path d="M8 11h6"/>
                         </svg>
                     </div>
-                    <h4>Semantic Search</h4>
-                    <p>Find any memory by meaning, not just keywords. 768-dimensional embeddings enable "What did we discuss about APIs?" to find relevant context instantly.</p>
+                    <h4>Search by meaning</h4>
+                    <p>Ask "what did we figure out about the API?" and it finds the right moment — even if you never used those exact words.</p>
                 </div>
 
                 <div class="mem-feature">
@@ -420,8 +447,8 @@
                             <line x1="3" y1="10" x2="21" y2="10"/>
                         </svg>
                     </div>
-                    <h4>Checkpoint Synthesis</h4>
-                    <p>Every 25 turns, conversations compress into coherent summaries. Long-term memory without the bloat. Like a senior engineer writing an incident report.</p>
+                    <h4>Stays fast over time</h4>
+                    <p>Long conversations roll up into clean summaries automatically — so months of history never slow it down.</p>
                 </div>
 
                 <div class="mem-feature">
@@ -433,8 +460,8 @@
                             <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
                         </svg>
                     </div>
-                    <h4>Multi-Agent Sharing</h4>
-                    <p>Portal, Claude Code, and external tools all access the same brain. Different AI providers, same memory substrate. The pilot changes, the memory persists.</p>
+                    <h4>One shared brain</h4>
+                    <p>The web Portal, your phone, and every AI model all tap the same memory. Switch models all you want — the memory stays put.</p>
                 </div>
 
                 <div class="mem-feature">
@@ -443,8 +470,8 @@
                             <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
                         </svg>
                     </div>
-                    <h4>Hybrid Retrieval</h4>
-                    <p>60% semantic + 40% keyword search with recency weighting. The system balances "what's relevant" with "what's recent" automatically.</p>
+                    <h4>Right answer, right time</h4>
+                    <p>It balances what's most relevant with what's most recent, so you get the answer that actually fits the moment.</p>
                 </div>
 
                 <div class="mem-feature">
@@ -455,53 +482,221 @@
                             <path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/>
                         </svg>
                     </div>
-                    <h4>Hardware Sovereignty</h4>
-                    <p>Your memory lives on YOUR device. No vendor clouds. No institutional amnesia. No data mining. Complete ownership of your AI's intelligence.</p>
-                </div>
-            </div>
-
-            <!-- The Exosuit Concept -->
-            <div class="exosuit-section">
-                <div class="exosuit-content">
-                    <h3>The Exosuit Metaphor</h3>
-                    <p class="exosuit-intro">The BlackBox isn't just storage. It's an exosuit that augments any AI model with persistent capabilities.</p>
-
-                    <div class="exosuit-capabilities">
-                        <div class="exo-cap">
-                            <div class="exo-icon memory-icon"></div>
-                            <span class="exo-label">Memory</span>
-                            <span class="exo-desc">2,370+ searchable snapshots</span>
-                        </div>
-                        <div class="exo-cap">
-                            <div class="exo-icon vision-icon"></div>
-                            <span class="exo-label">Vision</span>
-                            <span class="exo-desc">Image generation & analysis</span>
-                        </div>
-                        <div class="exo-cap">
-                            <div class="exo-icon hearing-icon"></div>
-                            <span class="exo-label">Hearing</span>
-                            <span class="exo-desc">Audio analysis & transcription</span>
-                        </div>
-                        <div class="exo-cap">
-                            <div class="exo-icon voice-icon"></div>
-                            <span class="exo-label">Voice</span>
-                            <span class="exo-desc">30+ premium TTS voices</span>
-                        </div>
-                        <div class="exo-cap">
-                            <div class="exo-icon agency-icon"></div>
-                            <span class="exo-label">Agency</span>
-                            <span class="exo-desc">Create, search, analyze, act</span>
-                        </div>
-                    </div>
-
-                    <p class="exosuit-tagline">The pilot changes. The memory persists. <span class="gradient-text">The intelligence compounds.</span></p>
+                    <h4>It's on your hardware</h4>
+                    <p>Your memory lives on your device, not in someone's cloud. No data mining, no surprise lockouts. It's yours.</p>
                 </div>
             </div>
 
             <!-- Bottom CTA -->
             <div class="memory-cta">
-                <p>After a month, your AI knows your projects. After a year, it's irreplaceable.</p>
-                <a href="#pricing" class="btn btn-primary">Own Your Intelligence</a>
+                <p>After a month, it knows your projects. After a year, you won't want to work without it.</p>
+                <a href="#pricing" class="btn btn-primary">Make it yours</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Cellular Add-On Section (NEW) -->
+    <section class="cellular" id="cellular">
+        <div class="container">
+            <div class="section-header">
+                <span class="cellular-badge">Optional add-on</span>
+                <h2>Give your AI a <span class="gradient-text">phone number</span></h2>
+                <p>Snap on the TG200 cellular gateway, drop in a SIM, and your BlackBox can text and talk over a real cellular line — reachable from any phone on Earth, no app required.</p>
+            </div>
+
+            <div class="cellular-grid">
+                <div class="cellular-feature">
+                    <div class="cellular-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                        </svg>
+                    </div>
+                    <h3>Reads &amp; answers your texts</h3>
+                    <p>Text your BlackBox like a friend. It reads your message, thinks it through with the full memory behind it, and texts you back.</p>
+                </div>
+                <div class="cellular-feature">
+                    <div class="cellular-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
+                        </svg>
+                    </div>
+                    <h3>Picks up the phone</h3>
+                    <p>Call your own number and your AI answers — in its own voice. Ask a question, get a real answer, hang up. Hands-free, anywhere.</p>
+                </div>
+                <div class="cellular-feature">
+                    <div class="cellular-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                        </svg>
+                    </div>
+                    <h3>Remembers every word</h3>
+                    <p>Texts and calls land in the same memory as everything else. Your AI picks up a phone thread right where you left off.</p>
+                </div>
+            </div>
+
+            <div class="cellular-cta">
+                <div class="cellular-cta-text">
+                    <span class="cellular-price">+$750</span>
+                    <span class="cellular-price-label">TG200 LTE gateway, set up and ready to go</span>
+                </div>
+                <a href="#pricing" class="btn btn-primary">Add cellular</a>
+            </div>
+            <p class="cellular-note">Heads up: cellular handles text and voice calls. It's SMS + phone — not picture/MMS messaging.</p>
+        </div>
+    </section>
+
+    <!-- Google Workspace Section (NEW) -->
+    <section class="workspace" id="workspace">
+        <div class="container">
+            <div class="section-header">
+                <h2>It lives in your <span class="gradient-text">Google</span>, too</h2>
+                <p>Connect your Google account once and your AI can actually do the work — read, write, and edit across Workspace, not just talk about it.</p>
+            </div>
+
+            <div class="workspace-grid">
+                <div class="workspace-app">
+                    <div class="workspace-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+                    </div>
+                    <h4>Docs</h4>
+                    <p>Draft, rewrite, and format documents</p>
+                </div>
+                <div class="workspace-app">
+                    <div class="workspace-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                    </div>
+                    <h4>Sheets</h4>
+                    <p>Build, fill, and crunch spreadsheets</p>
+                </div>
+                <div class="workspace-app">
+                    <div class="workspace-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                    </div>
+                    <h4>Slides</h4>
+                    <p>Spin up whole decks from a prompt</p>
+                </div>
+                <div class="workspace-app">
+                    <div class="workspace-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    </div>
+                    <h4>Drive</h4>
+                    <p>Find, create, and organize files</p>
+                </div>
+                <div class="workspace-app">
+                    <div class="workspace-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                    </div>
+                    <h4>Gmail</h4>
+                    <p>Read, search, draft, and send mail</p>
+                </div>
+                <div class="workspace-app">
+                    <div class="workspace-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    </div>
+                    <h4>Calendar</h4>
+                    <p>Check your schedule and book events</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- MCP / Connect Section (NEW) -->
+    <section class="connect" id="connect">
+        <div class="container">
+            <div class="section-header">
+                <span class="connect-badge">New — MCP tool server</span>
+                <h2>Plug it into the apps you <span class="gradient-text">already use</span></h2>
+                <p>The BlackBox speaks MCP, the open standard for AI tools. So the apps you already pay for can borrow its memory, its tools, and its whole creative studio. Keep the plan you love — let the BlackBox be the brain and the workshop behind it.</p>
+            </div>
+
+            <div class="connect-grid">
+                <div class="connect-point">
+                    <div class="connect-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/></svg>
+                    </div>
+                    <h3>Your memory, everywhere</h3>
+                    <p>Every app you connect shares the same immutable memory. Search months of context from right inside your AI tool — and everything you do flows back into it.</p>
+                </div>
+                <div class="connect-point">
+                    <div class="connect-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                    </div>
+                    <h3>One creative studio</h3>
+                    <p>Generate images, video, music, and voice from whatever app you're in. The BlackBox does the heavy lifting and the result lands in your memory automatically.</p>
+                </div>
+                <div class="connect-point">
+                    <div class="connect-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                    </div>
+                    <h3>74 tools on tap</h3>
+                    <p>Memory search, Google Workspace, web search, media analysis, and dozens more show up as native tools your AI can just use — no copy-paste, no context-switching.</p>
+                </div>
+                <div class="connect-point">
+                    <div class="connect-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"/><path d="M2 12h20"/><circle cx="12" cy="12" r="4"/></svg>
+                    </div>
+                    <h3>Bring your own subscription</h3>
+                    <p>Use the plan you already pay for. The BlackBox plugs in as your memory and orchestration server — not another monthly bill — and it answers only to you.</p>
+                </div>
+            </div>
+
+            <div class="connect-apps">
+                <span class="connect-apps-label">Works natively with</span>
+                <div class="connect-app-badges">
+                    <span class="connect-app">Claude Code</span>
+                    <span class="connect-app">Claude Desktop</span>
+                    <span class="connect-app">OpenAI Codex</span>
+                    <span class="connect-app">Google Antigravity</span>
+                    <span class="connect-app">+ more</span>
+                </div>
+                <p class="connect-secure">Connects privately over your own network with a key only you hold. Your memory never touches anyone else's cloud.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Hardware & Specs Section (NEW) -->
+    <section class="specs" id="specs">
+        <div class="container">
+            <div class="section-header">
+                <h2>Pick your <span class="gradient-text">power</span></h2>
+                <p>Two builds, same great software. Both ship with a 1TB NVMe drive and 32GB of RAM — the Ultra is the one you can grow into.</p>
+            </div>
+
+            <div class="specs-table">
+                <div class="spec-col">
+                    <div class="spec-col-head">
+                        <h3>Standard</h3>
+                        <span class="spec-machine">Minisforum MS-01</span>
+                        <span class="spec-price">$2,000</span>
+                    </div>
+                    <ul class="spec-list">
+                        <li><span class="spec-key">CPU</span><span class="spec-val">Intel Core i9-13900H · 14-core</span></li>
+                        <li><span class="spec-key">Ships with</span><span class="spec-val">1TB NVMe · 32GB DDR5</span></li>
+                        <li><span class="spec-key">RAM ceiling</span><span class="spec-val">Up to 64GB</span></li>
+                        <li><span class="spec-key">Networking</span><span class="spec-val">Dual 10GbE + dual 2.5GbE</span></li>
+                        <li><span class="spec-key">Expansion</span><span class="spec-val">3× M.2, PCIe x16 slot</span></li>
+                        <li><span class="spec-key">Best for</span><span class="spec-val">Everyone — fast, quiet, plenty</span></li>
+                    </ul>
+                    <a href="#pricing" class="btn btn-secondary">Choose Standard</a>
+                </div>
+                <div class="spec-col featured">
+                    <span class="spec-flag">Most power</span>
+                    <div class="spec-col-head">
+                        <h3>Ultra</h3>
+                        <span class="spec-machine">Minisforum MS-02 Ultra</span>
+                        <span class="spec-price">$2,500</span>
+                    </div>
+                    <ul class="spec-list">
+                        <li><span class="spec-key">CPU</span><span class="spec-val">Intel Core Ultra 9 285HX · 24-core + NPU</span></li>
+                        <li><span class="spec-key">Ships with</span><span class="spec-val">1TB NVMe · 32GB DDR5</span></li>
+                        <li><span class="spec-key">RAM ceiling</span><span class="spec-val">Up to <strong>256GB</strong></span></li>
+                        <li><span class="spec-key">Networking</span><span class="spec-val">Dual <strong>25GbE</strong></span></li>
+                        <li><span class="spec-key">Expansion</span><span class="spec-val">4× M.2, <strong>PCIe 5.0, full GPU slot</strong></span></li>
+                        <li><span class="spec-key">Best for</span><span class="spec-val">Power users who want GPU + local-model headroom</span></li>
+                    </ul>
+                    <a href="#pricing" class="btn btn-primary">Choose Ultra</a>
+                </div>
             </div>
         </div>
     </section>
@@ -510,56 +705,57 @@
     <section class="how-it-works" id="how-it-works">
         <div class="container">
             <div class="section-header">
-                <h2>How It Works</h2>
-                <p>Plug in. Power on. Start creating.</p>
+                <h2>How it works</h2>
+                <p>Plug in. Power on. Start talking.</p>
             </div>
 
             <div class="steps">
                 <div class="step">
                     <div class="step-number">1</div>
                     <div class="step-content">
-                        <h3>Unbox Your Appliance</h3>
-                        <p>A premium Mini-ITX PC arrives pre-configured. Small form factor, powerful hardware, beautiful design. Includes encrypted Apricorn USB with your Golden Image backup.</p>
+                        <h3>Unbox it</h3>
+                        <p>A pre-configured Minisforum mini-PC (MS-01 or MS-02 Ultra) shows up ready to run. In the box: your machine, the power cable, a quick-start guide, and an encrypted Apricorn USB for one-click backups of your whole memory and keys.</p>
                     </div>
                 </div>
                 <div class="step">
                     <div class="step-number">2</div>
                     <div class="step-content">
-                        <h3>Add Your API Keys</h3>
-                        <p>Bring Your Own Keys (BYOK). Add your Google, OpenAI, or Anthropic API keys. You control the billing. No middleman markup.</p>
+                        <h3>Add your keys</h3>
+                        <p>Bring your own API keys from Google, OpenAI, Anthropic, and friends. You pay the providers directly at their normal rates — no middleman, no markup.</p>
                     </div>
                 </div>
                 <div class="step">
                     <div class="step-number">3</div>
                     <div class="step-content">
-                        <h3>Start Talking</h3>
-                        <p>Open the Portal in your browser. Just talk. Need an image? Ask. Need a video? Ask. Need music? Ask. Features reveal themselves through conversation.</p>
+                        <h3>Start talking</h3>
+                        <p>Open the Portal in any browser and just ask. Need an image? Ask. A video? Ask. Music? Ask. The features show up as you need them — no manual required.</p>
                     </div>
                 </div>
                 <div class="step">
                     <div class="step-number">4</div>
                     <div class="step-content">
-                        <h3>Build Your Memory</h3>
-                        <p>Every conversation becomes a searchable snapshot. After a month, your AI knows your projects, preferences, and history. After a year, it's irreplaceable.</p>
+                        <h3>Build your memory</h3>
+                        <p>Every conversation becomes a searchable snapshot. After a month it knows your projects. After a year, it's the most useful tool on your desk.</p>
                     </div>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- Demo Section -->
+    <!-- Demo Section (video-ready slot) -->
     <section class="demo" id="demo">
         <div class="container">
             <div class="section-header">
-                <h2>See It In Action</h2>
-                <p>Real productions created entirely with the AI BlackBox</p>
+                <h2>See it in action</h2>
+                <p>A full walkthrough — real productions, made start to finish on the BlackBox</p>
             </div>
-            <div class="demo-placeholder">
+            <div class="demo-placeholder video-ready">
                 <div class="video-placeholder">
                     <svg viewBox="0 0 24 24" fill="currentColor" width="64" height="64">
                         <polygon points="5 3 19 12 5 21 5 3"/>
                     </svg>
-                    <p>Demo Video Coming Soon</p>
+                    <p class="video-ready-title">Overview video dropping soon</p>
+                    <p class="video-ready-sub">We're putting the finishing touches on a full walkthrough. Check back shortly.</p>
                 </div>
             </div>
         </div>
@@ -569,8 +765,8 @@
     <section class="apps-showcase" id="apps">
         <div class="container">
             <div class="section-header">
-                <h2>Apps Built on the BlackBox</h2>
-                <p>Real applications powered by AI BlackBox technology</p>
+                <h2>Apps built on the BlackBox</h2>
+                <p>Real products running on the same tech that's inside your box</p>
             </div>
 
             <div class="apps-grid">
@@ -585,24 +781,24 @@
                     </div>
                     <div class="app-content">
                         <h3>Whisper Everywhere</h3>
-                        <p class="app-tagline">Universal Audio Layer for Android</p>
-                        <p class="app-description">A floating overlay bubble that works in any app. Dictate directly into text fields, or capture system audio from videos, podcasts, and Zoom calls. Perfect transcription, everywhere.</p>
+                        <p class="app-tagline">A universal audio layer for Android</p>
+                        <p class="app-description">A floating bubble that works in any app. Dictate straight into any text field, or capture audio from videos, podcasts, and calls. Perfect transcription, everywhere.</p>
                         <ul class="app-features">
                             <li>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                                Floating bubble - always accessible
+                                Floating bubble, always within reach
                             </li>
                             <li>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                                System audio capture (unique!)
+                                Captures system audio (the neat trick)
                             </li>
                             <li>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                                Direct text injection into any app
+                                Drops text right into any app
                             </li>
                             <li>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                                BYOK model - no subscriptions
+                                Bring your own key — no subscription
                             </li>
                         </ul>
                         <div class="app-badge">
@@ -629,8 +825,8 @@
                     </div>
                     <div class="app-content">
                         <h3>Storybox</h3>
-                        <p class="app-tagline">AI-Powered Bedtime Stories</p>
-                        <p class="app-description">Create magical, personalized bedtime stories for your children. AI-generated tales with custom characters, professional narration, and age-appropriate content in multiple languages.</p>
+                        <p class="app-tagline">AI bedtime stories for your kids</p>
+                        <p class="app-description">Magical, personalized bedtime stories with custom characters, real narration, and age-appropriate content in lots of languages.</p>
                         <ul class="app-features">
                             <li>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
@@ -638,7 +834,7 @@
                             </li>
                             <li>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                                14+ languages supported
+                                14+ languages
                             </li>
                             <li>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
@@ -666,17 +862,17 @@
     <section class="about-section" id="about">
         <div class="container">
             <div class="section-header">
-                <span class="about-badge">About Us</span>
-                <h2>About AI Blackbox FC</h2>
-                <p>Independent AI development studio building sovereign intelligence tools</p>
+                <span class="about-badge">About us</span>
+                <h2>About AI BlackBox FC</h2>
+                <p>A small, independent studio building AI tools you actually own</p>
             </div>
 
             <!-- Mission & Company Info -->
             <div class="about-mission">
                 <div class="mission-card">
-                    <h3>Our Mission</h3>
-                    <p class="mission-statement">AI Blackbox FC is an independent, bootstrapped AI development studio founded in 2025. We build sovereign AI tools that put users in complete control of their data, models, and intelligence.</p>
-                    <p class="mission-philosophy">We believe AI should compound over time &mdash; not reset every session. Personal AI memory shouldn't live in someone else's cloud. The tools you use daily should belong to you, not to a subscription model you'll never own.</p>
+                    <h3>Why we build this</h3>
+                    <p class="mission-statement">AI BlackBox FC is an independent, bootstrapped studio started in 2025. We build AI tools that put you in charge of your data, your models, and your memory.</p>
+                    <p class="mission-philosophy">We think your AI should get smarter over time — not reset every time you close the tab. Your personal AI memory shouldn't live in someone else's cloud. And the tools you use every day should belong to you, not to a subscription you'll never own.</p>
                     <div class="mission-details">
                         <div class="mission-detail">
                             <span class="detail-label">Founded</span>
@@ -700,7 +896,7 @@
 
             <!-- Founding Team -->
             <div class="about-team">
-                <h3>Founding Team</h3>
+                <h3>Who's behind it</h3>
                 <div class="team-card">
                     <div class="team-member">
                         <div class="member-avatar">
@@ -712,8 +908,8 @@
                         <div class="member-info">
                             <h4>Brandon Slacum</h4>
                             <span class="member-title">Founder &amp; CEO</span>
-                            <p class="member-bio">20-year veteran of fire alarm systems integration, specializing in programming the most complex life-safety installations in the industry &mdash; FM-200 suppression, pre-action systems, voice evacuation, high-rise, and mass notification systems for mission-critical environments including enterprise data centers and hospitals.</p>
-                            <p class="member-bio">This background in programming deterministic, failure-is-not-an-option systems directly informs the engineering philosophy behind the AI BlackBox: rigorous testing, reliable architecture, and systems that work every time. Self-taught software developer who saw the opportunity to apply two decades of systems integration expertise to the emerging AI infrastructure space.</p>
+                            <p class="member-bio">A 20-year veteran of fire alarm systems integration, specializing in programming the most complex life-safety installations in the industry — FM-200 suppression, pre-action systems, voice evacuation, high-rise, and mass-notification for places where failure isn't an option, like data centers and hospitals.</p>
+                            <p class="member-bio">That background — building deterministic, failure-is-not-an-option systems — is exactly the engineering philosophy behind the BlackBox: rigorous testing, reliable architecture, and tools that just work every time. Self-taught developer who saw a chance to point two decades of systems experience at AI infrastructure.</p>
                             <div class="member-links">
                                 <a href="https://www.linkedin.com/in/brandon-slacum-27476993" class="linkedin-link" target="_blank" rel="noopener">
                                     <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
@@ -729,8 +925,8 @@
 
             <!-- Technology Stack -->
             <div class="about-tech">
-                <h3>Technology Stack</h3>
-                <p class="tech-intro">Built on Google Cloud infrastructure with integrations across 9 AI providers. Real engineering, real APIs, real production workloads.</p>
+                <h3>What's under the hood</h3>
+                <p class="tech-intro">Built on Google Cloud with integrations across 9 AI providers. Real engineering, real APIs, real production workloads.</p>
                 <div class="tech-grid">
                     <div class="tech-category">
                         <h4>
@@ -742,22 +938,22 @@
                             <li><span class="tech-name">Imagen</span><span class="tech-desc">Image generation</span></li>
                             <li><span class="tech-name">Veo 3.1</span><span class="tech-desc">Video generation</span></li>
                             <li><span class="tech-name">Lyria</span><span class="tech-desc">Music generation</span></li>
-                            <li><span class="tech-name">Cloud TTS</span><span class="tech-desc">Text-to-speech (1000+ voices)</span></li>
+                            <li><span class="tech-name">Cloud TTS</span><span class="tech-desc">Text-to-speech</span></li>
                             <li><span class="tech-name">Vertex AI</span><span class="tech-desc">ML infrastructure &amp; embeddings</span></li>
                         </ul>
                     </div>
                     <div class="tech-category">
                         <h4>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                            Additional AI Providers
+                            More AI Providers
                         </h4>
                         <ul class="tech-list">
-                            <li><span class="tech-name">OpenAI</span><span class="tech-desc">GPT-4o, TTS, Whisper</span></li>
+                            <li><span class="tech-name">OpenAI</span><span class="tech-desc">GPT, TTS, Whisper</span></li>
                             <li><span class="tech-name">Anthropic</span><span class="tech-desc">Claude Opus &amp; Sonnet</span></li>
                             <li><span class="tech-name">xAI</span><span class="tech-desc">Grok models</span></li>
+                            <li><span class="tech-name">ElevenLabs</span><span class="tech-desc">Music, voices, cloning</span></li>
                             <li><span class="tech-name">DeepSeek</span><span class="tech-desc">Reasoning models</span></li>
-                            <li><span class="tech-name">Meta</span><span class="tech-desc">Llama open models</span></li>
-                            <li><span class="tech-name">+3 more</span><span class="tech-desc">Mistral, Cohere, Perplexity</span></li>
+                            <li><span class="tech-name">+ more</span><span class="tech-desc">Mistral, Cohere, Perplexity</span></li>
                         </ul>
                     </div>
                     <div class="tech-category">
@@ -766,10 +962,10 @@
                             Core Architecture
                         </h4>
                         <ul class="tech-list">
-                            <li><span class="tech-name">Immutable Ledger</span><span class="tech-desc">Append-only with SHA-256 verification</span></li>
-                            <li><span class="tech-name">Semantic Search</span><span class="tech-desc">3072-dimensional embeddings</span></li>
+                            <li><span class="tech-name">Immutable Ledger</span><span class="tech-desc">Append-only, verified snapshots</span></li>
+                            <li><span class="tech-name">Semantic Search</span><span class="tech-desc">Meaning-based retrieval</span></li>
                             <li><span class="tech-name">FastAPI</span><span class="tech-desc">Python async backend</span></li>
-                            <li><span class="tech-name">Byte Manifest</span><span class="tech-desc">O(1) snapshot retrieval</span></li>
+                            <li><span class="tech-name">Byte Manifest</span><span class="tech-desc">Instant snapshot retrieval</span></li>
                             <li><span class="tech-name">Multi-Agent</span><span class="tech-desc">Shared memory substrate</span></li>
                             <li><span class="tech-name">MCP Protocol</span><span class="tech-desc">Tool integration standard</span></li>
                         </ul>
@@ -783,53 +979,81 @@
     <section class="pricing" id="pricing">
         <div class="container">
             <div class="section-header">
-                <h2>One Price. Complete Ownership.</h2>
-                <p>No subscriptions. No recurring fees. Own it forever.</p>
+                <h2>Pick your box</h2>
+                <p>Buy it once. Own it forever. No subscriptions, no recurring fees — ever.</p>
             </div>
 
-            <div class="pricing-card">
-                <div class="pricing-header">
-                    <h3>AI BlackBox Flight Recorder</h3>
-                    <p class="pricing-tagline">Sovereign Intelligence Appliance</p>
+            <div class="pricing-grid">
+                <!-- Standard -->
+                <div class="pricing-card">
+                    <div class="pricing-header">
+                        <h3>Standard</h3>
+                        <p class="pricing-tagline">Minisforum MS-01</p>
+                    </div>
+                    <div class="pricing-amount">
+                        <span class="currency">$</span>
+                        <span class="price">2,000</span>
+                        <span class="period">one-time</span>
+                    </div>
+                    <ul class="pricing-features">
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> MS-01 mini-PC, 1TB NVMe + 32GB RAM</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Encrypted Apricorn USB — one-click backup</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> 9 AI providers (bring your own keys)</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Image, video, music &amp; voice</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Unlimited snapshots &amp; perfect memory</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> 100% data ownership + free updates</li>
+                    </ul>
+                    <a href="https://buy.stripe.com/aFa3cufqIdLAgVk8Ib4ow00" class="btn btn-secondary btn-large">Order Standard</a>
                 </div>
-                <div class="pricing-amount">
-                    <span class="currency">$</span>
-                    <span class="price">2,000</span>
-                    <span class="period">one-time</span>
+
+                <!-- Ultra (featured) -->
+                <div class="pricing-card featured">
+                    <span class="pricing-flag">Most power</span>
+                    <div class="pricing-header">
+                        <h3>Ultra</h3>
+                        <p class="pricing-tagline">Minisforum MS-02 Ultra</p>
+                    </div>
+                    <div class="pricing-amount">
+                        <span class="currency">$</span>
+                        <span class="price">2,500</span>
+                        <span class="period">one-time</span>
+                    </div>
+                    <ul class="pricing-features">
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Everything in Standard, plus:</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Core Ultra 9 285HX (24-core) + NPU</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Grows to 256GB RAM</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Dual 25GbE networking</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> PCIe 5.0 + full-size GPU slot</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg> Room for local models &amp; heavy lifting</li>
+                    </ul>
+                    <a href="https://buy.stripe.com/cNi00idiAazo48y7E74ow01" class="btn btn-primary btn-large" id="checkout-btn">Order Ultra</a>
                 </div>
-                <ul class="pricing-features">
-                    <li>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                        Mini-ITX PC with pre-installed system
-                    </li>
-                    <li>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                        Encrypted Apricorn USB backup drive
-                    </li>
-                    <li>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                        9 AI providers (BYOK)
-                    </li>
-                    <li>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                        Image, Video, Music, Voice generation
-                    </li>
-                    <li>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                        Unlimited snapshots & perfect memory
-                    </li>
-                    <li>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                        100% data ownership
-                    </li>
-                    <li>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                        Free software updates
-                    </li>
-                </ul>
-                <a href="https://buy.stripe.com/aFa3cufqIdLAgVk8Ib4ow00" class="btn btn-primary btn-large" id="checkout-btn">Pre-Order Now</a>
-                <p class="pricing-note">Secure checkout powered by Stripe</p>
             </div>
+
+            <!-- TG200 add-on strip -->
+            <div class="addon-strip">
+                <div class="addon-content">
+                    <div class="addon-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
+                    </div>
+                    <div class="addon-text">
+                        <h4>Add cellular — TG200 LTE Gateway</h4>
+                        <p>Give your box a real phone number. SMS + voice calls over a cellular SIM. Optional on any tier.</p>
+                    </div>
+                </div>
+                <div class="addon-action">
+                    <span class="addon-price">+$750</span>
+                    <a href="https://buy.stripe.com/28E14m7YgcHw9sS3nR4ow02" class="btn btn-secondary">Add to order</a>
+                </div>
+            </div>
+
+            <!-- Software-only teaser -->
+            <div class="software-teaser">
+                <span class="software-badge">Coming soon</span>
+                <p><strong>Software-only license.</strong> Want to run the BlackBox on hardware you already own? We're working on a bring-your-own-box option. <a href="mailto:brandon@aiblackboxfc.com?subject=Software-only%20waitlist">Get on the waitlist →</a></p>
+            </div>
+
+            <p class="pricing-note">Secure checkout powered by Stripe. Questions before you buy? <a href="mailto:brandon@aiblackboxfc.com">brandon@aiblackboxfc.com</a></p>
         </div>
     </section>
 
@@ -837,57 +1061,67 @@
     <section class="faq" id="faq">
         <div class="container">
             <div class="section-header">
-                <h2>Frequently Asked Questions</h2>
+                <h2>Questions, answered</h2>
             </div>
 
             <div class="faq-list">
                 <div class="faq-item">
                     <button class="faq-question">
-                        <span>What's included in the box?</span>
+                        <span>What's the difference between Standard and Ultra?</span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <div class="faq-answer">
-                        <p>You receive a fully configured Mini-ITX PC with the AI BlackBox system pre-installed, an encrypted Apricorn USB drive containing your Golden Image backup, power cable, and quick start guide. Just plug in, add your API keys, and start creating.</p>
+                        <p>Same software, same great experience — both ship with a 1TB NVMe drive and 32GB of RAM. The Ultra (MS-02 Ultra) is the one you can grow into: a faster 24-core CPU with an NPU, room for up to 256GB of RAM, 25GbE networking, and a full-size GPU slot for running bigger local models. If you're not sure, Standard is plenty for almost everyone.</p>
                     </div>
                 </div>
 
                 <div class="faq-item">
                     <button class="faq-question">
-                        <span>What are the ongoing costs?</span>
+                        <span>What's in the box?</span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <div class="faq-answer">
-                        <p>The BlackBox uses a BYOK (Bring Your Own Keys) model. You add your own API keys from Google, OpenAI, Anthropic, etc. Typical usage costs $5-15/month depending on how much you generate. No subscriptions, no markup - you pay providers directly at their published rates.</p>
+                        <p>A fully configured Minisforum mini-PC with the BlackBox pre-installed, an encrypted Apricorn USB drive for one-click backups of your memory and keys, the power cable, and a quick-start guide. Plug in, add your API keys, and you're off.</p>
                     </div>
                 </div>
 
                 <div class="faq-item">
                     <button class="faq-question">
-                        <span>Do I need technical skills to use it?</span>
+                        <span>What's the cellular add-on?</span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <div class="faq-answer">
-                        <p>No coding required. The Portal is a web interface you access from any browser on your network. Just talk to it naturally - "create an image of a sunset", "make a video about dragons", "generate background music". The AI understands your intent and uses the right tools automatically.</p>
+                        <p>The TG200 LTE gateway ($750) gives your BlackBox a real phone number. Drop in a SIM and it can read and reply to texts and pick up phone calls in your AI's voice — all saved to the same memory as everything else. It handles SMS and voice calls (not picture/MMS messaging). It's optional and works on either tier.</p>
                     </div>
                 </div>
 
                 <div class="faq-item">
                     <button class="faq-question">
-                        <span>What if I need help or have issues?</span>
+                        <span>What does it cost to run?</span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <div class="faq-answer">
-                        <p>You get email support and access to our documentation. The encrypted Apricorn USB drive means you can always restore to a working state if anything goes wrong. Software updates are provided free.</p>
+                        <p>You bring your own API keys from Google, OpenAI, Anthropic, and others, so you pay the providers directly at their normal rates — usually $5–15/month depending on how much you generate. No subscription to us, no markup. The box itself is a one-time purchase.</p>
                     </div>
                 </div>
 
                 <div class="faq-item">
                     <button class="faq-question">
-                        <span>Is my data private?</span>
+                        <span>Do I need to be technical?</span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <div class="faq-answer">
-                        <p>100%. The BlackBox runs on your local network. Your conversations, creations, and snapshots never leave your hardware. When you use cloud AI providers, only the specific requests go to them - your memory and history stay local. You own your data completely.</p>
+                        <p>Nope. The Portal is a web page you open in any browser on your network. Just talk to it — "make an image of a sunset," "build me a spreadsheet," "write that email." It figures out which tools to use on its own. No coding required.</p>
+                    </div>
+                </div>
+
+                <div class="faq-item">
+                    <button class="faq-question">
+                        <span>Is my data actually private?</span>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div class="faq-answer">
+                        <p>Yes. The BlackBox runs on your own network. Your conversations, creations, and memory stay on your hardware. When you use a cloud AI provider, only that specific request goes out — your history and memory stay home. And the encrypted Apricorn backup means you can always restore to a working state.</p>
                     </div>
                 </div>
             </div>
@@ -903,22 +1137,24 @@
                         <span class="logo-icon">&#9632;</span>
                         <span class="logo-text">AI BlackBox</span>
                     </div>
-                    <p>Sovereign Intelligence Appliance</p>
+                    <p>Your AI. Your box. Your rules.</p>
                 </div>
                 <div class="footer-links">
                     <a href="#features">Features</a>
-                    <a href="#how-it-works">How It Works</a>
-                    <a href="#about">About</a>
+                    <a href="#cellular">Cellular</a>
+                    <a href="#specs">Specs</a>
                     <a href="#pricing">Pricing</a>
                     <a href="#faq">FAQ</a>
+                    <a href="mailto:brandon@aiblackboxfc.com">Contact</a>
                 </div>
             </div>
             <div class="footer-bottom">
-                <p>&copy; 2026 AI BlackBox. All rights reserved.</p>
+                <p>&copy; 2026 AI BlackBox FC. All rights reserved.</p>
+                <p class="footer-soon">Overview video &amp; YouTube channel — coming soon</p>
             </div>
         </div>
     </footer>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=revamp1"></script>
 </body>
 </html>
