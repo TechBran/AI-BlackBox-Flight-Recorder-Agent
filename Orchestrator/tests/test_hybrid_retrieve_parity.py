@@ -21,6 +21,8 @@ preserved here — see git history of this file for the old pinned baseline.
 import gc
 import tracemalloc
 
+import pytest
+
 from Orchestrator.fossils import (
     hybrid_retrieve,
     extract_snap_ids,
@@ -74,6 +76,23 @@ def test_hybrid_retrieve_surfaces_recent_work():
     )
 
 
+HYBRID_PEAK_FACTOR = 1.5
+HYBRID_PEAK_SLACK_BYTES = 16 * 1024 * 1024
+MIN_MEANINGFUL_VOLUME_BYTES = 1024 * 1024
+
+
+def _hybrid_peak_ceiling_bytes(volume_bytes: int) -> int:
+    return int(volume_bytes * HYBRID_PEAK_FACTOR) + HYBRID_PEAK_SLACK_BYTES
+
+
+def test_hybrid_peak_ceiling_still_catches_a_full_volume_decode():
+    """The relative ceiling must stay well below a reintroduced full-volume
+    read_text_safe decode (~7x the volume), at any volume size."""
+    for vol_mb in (35, 56, 120, 400):
+        vol_bytes = vol_mb * 1024 * 1024
+        assert _hybrid_peak_ceiling_bytes(vol_bytes) < 7 * vol_bytes
+
+
 def test_hybrid_retrieve_peak_is_bounded():
     """hybrid_retrieve's per-call peak stays BOUNDED (no unbounded / O(n^2) blowup).
 
@@ -95,6 +114,9 @@ def test_hybrid_retrieve_peak_is_bounded():
     that a reintroduced full-volume decode (~250MB) or an unbounded/O(n^2) blowup is
     caught.
     """
+    vol_bytes = len(read_volume_bytes(VOL_PATH)) if VOL_PATH.exists() else 0
+    if vol_bytes < MIN_MEANINGFUL_VOLUME_BYTES:
+        pytest.skip(f"live volume too small to measure a peak ({vol_bytes} bytes)")
     vol = _vol()
     q = "embeddings model switch reembed"
     # warm caches (index, embeddings store) so we measure steady-state, not load
@@ -107,13 +129,18 @@ def test_hybrid_retrieve_peak_is_bounded():
     _cur, peak_hybrid = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    hybrid_mb = peak_hybrid / 1024 / 1024
-    # Honest post-fix ceiling: the steady-state peak is ~39MB (the streaming keyword
-    # scan over read_volume_bytes, floored by the ~35MB volume). Pin at 80MB (~2x
-    # headroom) so a reintroduced full-volume read_text_safe decode (~250MB) or an
-    # unbounded / O(n^2) blowup is caught while real runs pass comfortably.
-    assert hybrid_mb < 80.0, (
-        f"hybrid_retrieve peak {hybrid_mb:.1f}MB exceeded the 80MB ceiling — a new "
-        f"unbounded allocation (e.g. a reintroduced full-volume decode) may have "
-        f"been introduced"
+    mb = 1024 * 1024
+    hybrid_mb = peak_hybrid / mb
+    ceiling = _hybrid_peak_ceiling_bytes(vol_bytes)
+    # Honest post-fix ceiling: the steady-state peak is ~1.07x the volume (the
+    # streaming keyword scan over read_volume_bytes, floored by the volume itself:
+    # ~39MB at ~35MB, 59.3MB at 55.6MB on 2026-10-11). The ceiling is RELATIVE to the
+    # volume because the ledger grows with every mint (an absolute 80MB pin would go
+    # red near a 75MB volume). 1.5x + 16MB still catches a reintroduced full-volume
+    # read_text_safe decode (~7x) or an unbounded / O(n^2) blowup.
+    assert peak_hybrid <= ceiling, (
+        f"hybrid_retrieve peak {hybrid_mb:.1f}MB exceeded the {ceiling / mb:.1f}MB ceiling "
+        f"({HYBRID_PEAK_FACTOR}x the {vol_bytes / mb:.1f}MB volume + "
+        f"{HYBRID_PEAK_SLACK_BYTES // mb}MB) — a new unbounded allocation (e.g. a "
+        f"reintroduced full-volume decode) may have been introduced"
     )

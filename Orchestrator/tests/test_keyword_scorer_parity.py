@@ -53,6 +53,8 @@ PEAK measurement (test_keyword_scorer_peak_ceiling):
 import gc
 import tracemalloc
 
+import pytest
+
 import Orchestrator.fossils as fossils
 from Orchestrator.fossils import (
     _keyword_retrieve_scored,
@@ -259,22 +261,46 @@ def test_scorer_returns_text_for_topk(monkeypatch):
     assert all(isinstance(t, str) and len(t) > 0 for _sid, t in results)
 
 
-# OLD peak (commit f9dd2c8, pre-2b) measured 127.3 MB. NEW measured 38.0 MB.
-PEAK_CEILING_BYTES = 55 * 1024 * 1024
+# OLD peak (commit f9dd2c8, pre-2b) measured 127.3 MB over a ~37 MB volume (~3.4x).
+# NEW peak is floored by the volume bytes alone: 38.0 MB at ~37 MB (2026-06-21) and
+# 58.5 MB at 55.6 MB (2026-10-11), i.e. ~1.05x. The volume grows with every mint, so
+# the ceiling is RELATIVE to it (an absolute 55 MB pin went red once the ledger
+# passed 55 MiB). 1.3x + 8 MiB still catches the ~3.4x texts-materialisation regression.
+PEAK_CEILING_FACTOR = 1.3
+PEAK_CEILING_SLACK_BYTES = 8 * 1024 * 1024
+MIN_MEANINGFUL_VOLUME_BYTES = 1024 * 1024
+
+
+def _peak_ceiling_bytes(volume_bytes: int) -> int:
+    return int(volume_bytes * PEAK_CEILING_FACTOR) + PEAK_CEILING_SLACK_BYTES
+
+
+def test_peak_ceiling_still_catches_the_pre_2b_regression():
+    """The relative ceiling must stay below the pre-2b peak it exists to catch
+    (127.3 MB over a ~37 MB volume, ~3.4x), at any volume size."""
+    for vol_mb in (37, 55, 120, 400):
+        vol_bytes = vol_mb * 1024 * 1024
+        assert _peak_ceiling_bytes(vol_bytes) < 3.4 * vol_bytes
 
 
 def test_keyword_scorer_peak_ceiling():
     """Per-call tracemalloc PEAK of the operator scorer must sit below the ceiling.
 
     OLD (pre-2b): 127.3 MB because vol_bytes (~37 MB) + a fully-materialized `texts`
-    list (~89 MB) coexisted for the whole scan. NEW: 38.0 MB (streamed; floored by
-    vol_bytes alone). We pin an absolute ceiling of 55 MB since both versions cannot
-    run in one process.
+    list (~89 MB) coexisted for the whole scan. NEW: ~1.05x the volume (streamed;
+    floored by vol_bytes alone). Both versions cannot run in one process, so the
+    ceiling is a fixed multiple of the CURRENT volume size (see _peak_ceiling_bytes).
 
     This test reads the LIVE volume on purpose: the per-call high-water mark is a
     function of the real corpus SIZE, not of any (mint-sensitive) ordering, so it is
-    not fragile to new snapshots.
+    not fragile to new snapshots. On a fresh box with an empty volume the
+    measurement would be vacuous, so it skips.
     """
+    vol_bytes = len(read_volume_bytes(VOL_PATH)) if VOL_PATH.exists() else 0
+    if vol_bytes < MIN_MEANINGFUL_VOLUME_BYTES:
+        pytest.skip(f"live volume too small to measure a peak ({vol_bytes} bytes)")
+    ceiling = _peak_ceiling_bytes(vol_bytes)
+
     vol = _vol()
     q = "embeddings model switch reembed"
     # Warm caches (index, volume read) so we measure steady-state, not load.
@@ -286,10 +312,11 @@ def test_keyword_scorer_peak_ceiling():
     _cur, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    peak_mb = peak / 1024 / 1024
-    assert peak <= PEAK_CEILING_BYTES, (
-        f"keyword scorer per-call peak {peak_mb:.1f}MB exceeds ceiling "
-        f"{PEAK_CEILING_BYTES / 1024 / 1024:.0f}MB (OLD pre-2b was ~127MB)"
+    mb = 1024 * 1024
+    assert peak <= ceiling, (
+        f"keyword scorer per-call peak {peak / mb:.1f}MB exceeds ceiling "
+        f"{ceiling / mb:.1f}MB ({PEAK_CEILING_FACTOR}x the {vol_bytes / mb:.1f}MB volume "
+        f"+ {PEAK_CEILING_SLACK_BYTES // mb}MB; OLD pre-2b was ~3.4x)"
     )
 
 
