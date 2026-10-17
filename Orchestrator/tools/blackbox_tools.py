@@ -160,8 +160,12 @@ class BlackBoxToolExecutor:
         owner of a whole turn — the /chat worker, and through it the scheduler —
         can tell a turn whose tools failed from one that worked.
         """
+        # The arguments as the model sent them, copied before an executor can
+        # pop or add keys: the log keys each call by them (a retry of the same
+        # call vs other work).
+        called_with = dict(tool_input) if isinstance(tool_input, dict) else tool_input
         result = await self._dispatch(tool_name, tool_input)
-        tool_outcomes.record(tool_name, result)
+        tool_outcomes.record(tool_name, result, called_with)
         return result
 
     async def _dispatch(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:

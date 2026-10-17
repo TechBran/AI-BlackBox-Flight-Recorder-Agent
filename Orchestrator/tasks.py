@@ -2699,7 +2699,7 @@ def process_chat_task(task: Task):
             # calls /chat/save) can render native download chips. [] when none.
             "artifacts": artifacts_meta,
             "checkpoint_triggered": checkpoint_triggered,
-            # W15: every tool call of this turn as {tool, success[, error]} —
+            # W15: every tool call of this turn as {tool, success, key[, incidental][, error]} —
             # the scheduler's evidence for a failed/partial run. [] when none.
             "tool_outcomes": list(_tool_log),
         }

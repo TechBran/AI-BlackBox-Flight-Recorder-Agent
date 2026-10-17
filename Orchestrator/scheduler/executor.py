@@ -94,16 +94,25 @@ class CronToolFailure(RuntimeError):
 
 
 def _summarize_tool_failures(failures: list) -> str:
-    """'list_events (x2): <error>; gmail_search: <error>' — grouped by tool, in order."""
+    """'list_events (x2): <error>; gmail_search: <error>' — grouped by tool, in order.
+
+    A failure that a later call of the same tool with other arguments followed
+    successfully (tool_outcomes marks it ``retried``) says so: it may be the
+    model correcting itself, or a piece of the job that did not happen.
+    """
     grouped: Dict[str, list] = {}
     for f in failures:
-        slot = grouped.setdefault(f.get("tool", "?"), [0, ""])
+        slot = grouped.setdefault(f.get("tool", "?"), [0, "", False])
         slot[0] += 1
         slot[1] = f.get("error") or slot[1]
+        slot[2] = slot[2] or bool(f.get("retried"))
     parts = []
-    for tool, (count, error) in grouped.items():
+    for tool, (count, error, retried) in grouped.items():
         label = f"{tool} (x{count})" if count > 1 else tool
-        parts.append(f"{label}: {error}" if error else label)
+        text = f"{label}: {error}" if error else label
+        if retried:
+            text += f" (a later {tool} call with other arguments worked)"
+        parts.append(text)
     return "; ".join(parts)
 
 

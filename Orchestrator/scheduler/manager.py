@@ -1131,7 +1131,10 @@ class CronJobManager:
 
         W15: a completed turn whose tool calls failed is a failed run
         (last_run_result 'error', or 'partial' when some tools worked) and is
-        NOT retried — see executor.CronToolFailure.
+        NOT retried — see executor.CronToolFailure. The turn did run, so a
+        one-shot is consumed: it is paused (kept, with its history, but never
+        fired again unless resumed) instead of being left armed, and a
+        delivery='notification' job still delivers the reply the turn wrote.
         """
         job = self.get_job(job_id)
         if job is None:
@@ -1147,6 +1150,10 @@ class CronJobManager:
         # The successful attempt's reply text — captured for a
         # delivery='notification' push after stats are written (M5.1).
         success_result_text: Optional[str] = None
+        # W15: the turn ran to completion but its tool calls failed
+        # (CronToolFailure) — its reply, for the same push.
+        turn_completed = False
+        failed_turn_reply: Optional[str] = None
 
         for attempt in range(MAX_RETRIES + 1):
             (result_text, error_text, duration_ms, attempt_run_at,
@@ -1168,6 +1175,8 @@ class CronJobManager:
             final_error = error_text
             final_status = delivery_status
             if not retryable:
+                turn_completed = True
+                failed_turn_reply = result_text
                 logger.warning(
                     "Cron job %s finished with failed tool calls (%s); not retrying",
                     job_id, error_text,
@@ -1260,9 +1269,17 @@ class CronJobManager:
         # ----- One-shot cleanup (only on success) -----
         # A one-shot whose run FAILED (all retries exhausted) is left in place
         # so it is not silently destroyed; it survives for inspection (M2.6).
+        # W15: when the turn itself ran (its tool calls failed), the one-shot
+        # is consumed — any side effect that worked already happened, so it
+        # must not fire again at the next match of its expression. Pause it:
+        # it survives for inspection and can be resumed on purpose.
+        one_shot_paused = False
         if job.get("one_shot") and succeeded:
             logger.info("One-shot job %s completed successfully, deleting", job_id)
             self.delete_job(job_id)
+        elif job.get("one_shot") and turn_completed:
+            logger.info("One-shot job %s ran with failed tool calls, pausing", job_id)
+            one_shot_paused = self.pause_job(job_id) is not None
 
         # ----- Notification bus hooks (M5.1) -----
         # Run LAST, after stats are durably written above, so a notify
@@ -1272,9 +1289,10 @@ class CronJobManager:
             job,
             succeeded=succeeded,
             error_text=final_error,
-            result_text=success_result_text,
+            result_text=success_result_text if succeeded else failed_turn_reply,
             fire_ts=last_run_at.isoformat(),
             partial=last_run_result == "partial",
+            one_shot_paused=one_shot_paused,
         )
 
     async def _notify_run_outcome(
@@ -1286,6 +1304,7 @@ class CronJobManager:
         result_text: Optional[str],
         fire_ts: str,
         partial: bool = False,
+        one_shot_paused: bool = False,
     ) -> None:
         """Push the run's outcome to the notification bus (M5.1).
 
@@ -1298,11 +1317,13 @@ class CronJobManager:
             notify(category='alert') EXACTLY once. The dedup_key
             (cronfail:<job_id>:<fire_ts>) is stable for this run, so the bus
             collapses any duplicate into one logical alert.
-          * SUCCESS with delivery='notification' -> notify(category='cron')
-            with the reply text. This finally realizes the long-dead
-            'notification' delivery mode (it used to silently fall through to
-            snapshot). 'snapshot' delivery does NOT notify — auto-mint in the
-            /chat pipeline already persisted it.
+          * A reply with delivery='notification' -> notify(category='cron')
+            with the reply text: on SUCCESS, and (W15) on a turn that ran but
+            whose tool calls failed, where ``result_text`` is that turn's reply
+            and the alert above comes on top of it. This finally realizes the
+            long-dead 'notification' delivery mode (it used to silently fall
+            through to snapshot). 'snapshot' delivery does NOT notify —
+            auto-mint in the /chat pipeline already persisted it.
 
         Both cases suppress the 'system'/blank operator (we never push to
         nobody), consistent with the other notification producers.
@@ -1318,22 +1339,28 @@ class CronJobManager:
             # Terminal failure alert — idempotent per terminal failure via
             # the dedup_key. notify() itself never raises, but we still guard
             # so even an import/monkeypatch-level error stays contained.
+            body = error_text or "Unknown error"
+            if one_shot_paused:
+                body += (" — this one-shot job was paused so it does not run "
+                         "again; resume it once the cause is fixed.")
             try:
                 await notify(
                     operator=operator,
                     category="alert",
                     title=(f"Cron job partially failed: {job_name}" if partial
                            else f"Cron job failed: {job_name}"),
-                    body=error_text or "Unknown error",
+                    body=body,
                     dedup_key=f"cronfail:{job_id}:{fire_ts}",
                 )
             except Exception:
                 logger.exception(
                     "Failed to send failure alert for cron job %s", job_id
                 )
-            return
+            # A failure with no reply (the turn never ran) has nothing to deliver.
+            if not result_text:
+                return
 
-        # Success: realize delivery='notification' by actually delivering.
+        # Realize delivery='notification' by actually delivering the reply.
         if (job.get("delivery") or "snapshot") == "notification":
             try:
                 await notify(
