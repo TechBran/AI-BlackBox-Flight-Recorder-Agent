@@ -17,6 +17,8 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.net.Socket
 
 /**
  * Inbound remote-control listener for the `control_phone` feature (the BlackBox →
@@ -646,11 +648,15 @@ suspend fun handleActionRequest(
  *    tailnet-only posture (and the existing tests are unaffected). Fail-open by design:
  *    until a subscription is recorded the allow-list is empty == accept-all, so a fresh
  *    box still receives tailnet-sourced notifications.
+ *
+ * [sourceAdmitted] is the source decision; [RemoteControlServer] passes the verdict its peer
+ * policy already reached in the pre-body gate, so both checks judge the peer the same way.
  */
 fun authorize(method: String, path: String, remoteIp: String,
               requestOperator: String, boundOperator: String,
-              isSubscribed: (operator: String) -> Boolean = { true }): RemoteResponse? {
-    if (!isTailnetSource(remoteIp))
+              isSubscribed: (operator: String) -> Boolean = { true },
+              sourceAdmitted: Boolean = isTailnetSource(remoteIp)): RemoteResponse? {
+    if (!sourceAdmitted)
         return RemoteResponse(403, JSON.encodeToString(ErrorBody("source not on tailnet")))
     val m = method.uppercase()
     if (path == "/task" && m == "POST") {
@@ -750,9 +756,12 @@ fun streamKillGate(taskId: String, killed: Boolean,
  * bounded, declared body) BEFORE anything is read; [authorize] then scopes POST /task to the
  * device's bound operator and POST /notify to the device's subscription allow-list
  * (Tailscale/WireGuard encrypts the transport). Connections are served by a bounded worker
- * pool ([BoundedAsyncRunner]), not a thread per connection. The routing + auth it delegates
- * to are unit-tested via [routeRequest] / [authorize] / [gateBeforeBody]; the socket path is
- * covered by RemoteControlServerSocketTest.
+ * pool ([BoundedAsyncRunner]), not a thread per connection; a refused peer is closed when it
+ * is accepted ([createClientHandler]) and never occupies it, one peer holds at most
+ * [BoundedAsyncRunner.MAX_CONNECTIONS_PER_PEER] connections, and each request's headers must
+ * arrive within [HEADER_DEADLINE_MS]. The routing + auth it delegates to are unit-tested via
+ * [routeRequest] / [authorize] / [gateBeforeBody]; the socket path is covered by
+ * RemoteControlServerSocketTest.
  *
  * **Single owner on the control port (MN.4).** Exactly ONE of these binds
  * [REMOTE_CONTROL_PORT]; it is owned by [com.aiblackbox.portal.NotificationListenerFgs]
@@ -777,6 +786,12 @@ fun streamKillGate(taskId: String, killed: Boolean,
  *   read per request. Null (the default, or a phone that could not load one) serves nothing
  *   but `GET /healthz` — fail-closed.
  * @param ownAddressesProvider this phone's own interface addresses, refused as sources.
+ * @param peerPolicy who may connect at all: null to admit, else the refusal. Defaults to
+ *   [peerRejection] (tailnet source, not this phone). Applied when a connection is accepted,
+ *   before it takes a worker slot, and again by the pre-body gate. Injectable so a socket test
+ *   can play a tailnet peer from a loopback address.
+ * @param headerDeadlineMs how long a peer may take to deliver one request's line + headers.
+ * @param maxConnectionsPerPeer concurrent connections one peer may hold.
  */
 class RemoteControlServer(
     port: Int,
@@ -798,24 +813,77 @@ class RemoteControlServer(
     // to the process-wide [BusTelemetryReader].
     private val telemetryReaderProvider: () -> TelemetryReader = { BusTelemetryReader },
     private val pairingSecretProvider: () -> String? = { null },
-    private val ownAddressesProvider: () -> Set<String> = { OwnAddresses.current() },
+    ownAddressesProvider: () -> Set<String> = { OwnAddresses.current() },
+    private val peerPolicy: (remoteIp: String) -> String? =
+        { ip -> peerRejection(ip, ownAddressesProvider()) },
+    private val headerDeadlineMs: Long = HEADER_DEADLINE_MS,
+    maxConnectionsPerPeer: Int = BoundedAsyncRunner.MAX_CONNECTIONS_PER_PEER,
 ) : NanoHTTPD(port) {
 
     init {
-        setAsyncRunner(BoundedAsyncRunner())
+        setAsyncRunner(BoundedAsyncRunner(maxPerPeer = maxConnectionsPerPeer))
     }
 
     fun startServer() = start(SOCKET_READ_TIMEOUT, false)
     fun stopServer() = stop()
 
+    /**
+     * Judge every accepted socket's peer HERE, on the accept thread, before it takes a worker
+     * slot (audit X02/X04): [BoundedAsyncRunner] closes a refused one at once, so an
+     * off-tailnet peer or another app on this phone cannot fill the bounded pool with
+     * connections that never send a request. Its input is wrapped in the header deadline.
+     */
+    override fun createClientHandler(finalAccept: Socket, inputStream: InputStream): ClientHandler {
+        val peer = normalizeRemoteIp(finalAccept.inetAddress?.hostAddress ?: "")
+        val refusal = try {
+            peerPolicy(peer)
+        } catch (e: Exception) {
+            "peer check failed"
+        }
+        return GuardedConnection(HeaderDeadlineInputStream(inputStream, headerDeadlineMs),
+            finalAccept, peer, refusal)
+    }
+
+    /** One accepted connection: its judged peer, and the header clock [serve] stops/restarts. */
+    private inner class GuardedConnection(
+        val headerDeadline: HeaderDeadlineInputStream,
+        socket: Socket,
+        override val peer: String,
+        override val refusal: String?,
+    ) : ClientHandler(headerDeadline, socket), PeerConnection {
+        override fun run() {
+            CURRENT_CONNECTION.set(this)
+            try {
+                super.run()
+            } finally {
+                CURRENT_CONNECTION.remove()
+            }
+        }
+    }
+
     override fun serve(session: IHTTPSession): Response {
+        val connection = CURRENT_CONNECTION.get()
+        // The request line + headers are in: stop this request's header clock (the body read
+        // that follows is bounded by its declared length), and restart it for the next one.
+        connection?.headerDeadline?.disarm()
+        try {
+            return serveRequest(session, connection?.peer)
+        } finally {
+            connection?.headerDeadline?.rearm()
+        }
+    }
+
+    private fun serveRequest(session: IHTTPSession, acceptedPeer: String?): Response {
         val method = session.method?.name ?: "GET"
         val path = session.uri ?: "/"
-        val remoteIp = session.remoteIpAddress ?: ""
+        // The address the connection was accepted from, which the peer policy already judged
+        // (NanoHTTPD's own remoteIpAddress reports every loopback peer as 127.0.0.1).
+        val remoteIp = acceptedPeer ?: normalizeRemoteIp(session.remoteIpAddress ?: "")
+        val peerRefusal = peerPolicy(remoteIp)
         // Source, self, pairing secret and declared size — all from the request line and
         // headers, before a single body byte is read (audit X02/X04).
-        val gate = gateBeforeBody(method, path, remoteIp, session.headers ?: emptyMap(),
-            ownAddressesProvider(), pairingSecretProvider())
+        val gate = gateRequest(method, path, peerRefusal, session.headers ?: emptyMap(),
+            pairingSecretProvider())
         val bodyLength = when (gate) {
             is PreBodyDecision.Reject -> return rejection(gate.response, gate.headers)
             is PreBodyDecision.Accept -> gate.bodyLength
@@ -835,7 +903,8 @@ class RemoteControlServer(
                 session.parameters?.get("operator")?.firstOrNull()?.trim() ?: ""
             else -> ""
         }
-        authorize(method, path, remoteIp, requestOperator, operatorProvider(), subscriptionPredicate)?.let { denied ->
+        authorize(method, path, remoteIp, requestOperator, operatorProvider(), subscriptionPredicate,
+            sourceAdmitted = peerRefusal == null)?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
         }
         // (M8.3) The telemetry GETs return a fixed-length JSON body (operator-scoped above).
@@ -962,5 +1031,8 @@ class RemoteControlServer(
 
     companion object {
         private const val TAG = "RemoteControlServer"
+
+        /** The connection the current worker thread is serving (set for the length of its run). */
+        private val CURRENT_CONNECTION = ThreadLocal<GuardedConnection?>()
     }
 }

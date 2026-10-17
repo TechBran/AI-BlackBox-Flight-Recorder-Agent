@@ -4,10 +4,13 @@ import fi.iki.elonen.NanoHTTPD
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.FilterInputStream
 import java.io.InputStream
 import java.net.NetworkInterface
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.RejectedExecutionException
@@ -35,6 +38,13 @@ import java.util.concurrent.atomic.AtomicInteger
  *     [MAX_REQUEST_BODY_BYTES]; the server then reads exactly that many bytes
  *     ([readBoundedBody]) instead of NanoHTTPD's spool-to-temp-file-then-copy parseBody().
  *
+ * Checks 1 and 2 ([peerRejection]) also run at ACCEPT time, before the connection takes a
+ * worker slot: a refused peer is closed without a byte of its request being read, so it cannot
+ * occupy the bounded pool. An admitted peer gets at most
+ * [BoundedAsyncRunner.MAX_CONNECTIONS_PER_PEER] concurrent connections ([PeerSlots]) and
+ * [HEADER_DEADLINE_MS] to deliver each request's line + headers ([HeaderDeadlineInputStream]),
+ * so a carrier-NAT neighbour that passes check 1 cannot hold every worker either.
+ *
  * Operator scoping ([authorize]) still runs after the body is read; this gate is about who may
  * talk to the listener at all. PURE apart from [OwnAddresses] / [BoundedAsyncRunner] → JVM-tested.
  */
@@ -45,6 +55,11 @@ const val MAX_REQUEST_BODY_BYTES: Int = 256 * 1024
 
 /** The one route served without the pairing secret: liveness only, it reveals nothing. */
 const val PAIRING_EXEMPT_PATH: String = "/healthz"
+
+/** How long a peer may take to deliver one request's line + headers, from its first byte.
+ *  The box sends them in one packet; NanoHTTPD's 5 s per-read timeout alone would let a peer
+ *  that trickles a byte every few seconds hold a worker for hours. */
+const val HEADER_DEADLINE_MS: Long = 10_000L
 
 private const val BEARER_REALM = "Bearer realm=\"blackbox-remote-control\""
 
@@ -92,6 +107,18 @@ fun bearerMatches(authorization: String?, secret: String?): Boolean {
 }
 
 /**
+ * Why [remoteIp] may not talk to the listener at all (checks 1 and 2), or null when it may.
+ * PURE. [ownAddresses] are this phone's interface addresses, already normalized
+ * ([OwnAddresses.current]).
+ */
+fun peerRejection(remoteIp: String, ownAddresses: Set<String>): String? {
+    val ip = normalizeRemoteIp(remoteIp)
+    if (!isTailnetSource(ip)) return "source not on tailnet"
+    if (ip in ownAddresses) return "requests from this device itself are not accepted"
+    return null
+}
+
+/**
  * PURE pre-body decision. [headers] are NanoHTTPD's (lower-cased names); [ownAddresses] are
  * this phone's interface addresses, already normalized ([OwnAddresses.current]);
  * [pairingSecret] is the phone's listener secret, or null if it could not be loaded.
@@ -104,10 +131,22 @@ fun gateBeforeBody(
     ownAddresses: Set<String>,
     pairingSecret: String?,
     maxBodyBytes: Int = MAX_REQUEST_BODY_BYTES,
+): PreBodyDecision = gateRequest(
+    method, path, peerRejection(remoteIp, ownAddresses), headers, pairingSecret, maxBodyBytes)
+
+/**
+ * [gateBeforeBody] with the peer already judged: [peerRefusal] is [peerRejection]'s answer (or
+ * the server's injected policy), null for an admitted peer. Checks 3 and 4 follow. PURE.
+ */
+fun gateRequest(
+    method: String,
+    path: String,
+    peerRefusal: String?,
+    headers: Map<String, String>,
+    pairingSecret: String?,
+    maxBodyBytes: Int = MAX_REQUEST_BODY_BYTES,
 ): PreBodyDecision {
-    val ip = normalizeRemoteIp(remoteIp)
-    if (!isTailnetSource(ip)) return reject(403, "source not on tailnet")
-    if (ip in ownAddresses) return reject(403, "requests from this device itself are not accepted")
+    if (peerRefusal != null) return reject(403, peerRefusal)
 
     val exempt = path == PAIRING_EXEMPT_PATH && method.equals("GET", ignoreCase = true)
     if (!exempt && !bearerMatches(headers["authorization"], pairingSecret)) {
@@ -170,6 +209,87 @@ object OwnAddresses {
 }
 
 /**
+ * Bounds the time a peer may take to send one request's line + headers to [deadlineMs],
+ * measured from the request's first byte (so an idle keep-alive connection waiting for its
+ * next request is not timed — NanoHTTPD's per-read timeout already ends that). The server
+ * [disarm]s it once the headers are parsed (the body read is bounded by its declared length)
+ * and [rearm]s it for the next request on the connection. A read past the deadline throws
+ * [SocketTimeoutException], which NanoHTTPD handles by closing the connection.
+ */
+class HeaderDeadlineInputStream(
+    input: InputStream,
+    private val deadlineMs: Long = HEADER_DEADLINE_MS,
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000L },
+) : FilterInputStream(input) {
+    @Volatile private var armed = true
+    @Volatile private var firstByteAt = -1L
+
+    /** The request's headers are in: stop timing. */
+    fun disarm() {
+        armed = false
+    }
+
+    /** The next request on this connection gets a fresh clock (started by its first byte). */
+    fun rearm() {
+        firstByteAt = -1L
+        armed = true
+    }
+
+    private fun checkDeadline() {
+        if (armed && firstByteAt >= 0 && clock() - firstByteAt >= deadlineMs) {
+            throw SocketTimeoutException("request headers not received within $deadlineMs ms")
+        }
+    }
+
+    private fun noteBytes(count: Int) {
+        if (armed && count > 0 && firstByteAt < 0) firstByteAt = clock()
+    }
+
+    override fun read(): Int {
+        checkDeadline()
+        return super.read().also { if (it >= 0) noteBytes(1) }
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        checkDeadline()
+        return super.read(b, off, len).also { noteBytes(it) }
+    }
+
+    override fun skip(n: Long): Long {
+        checkDeadline()
+        return super.skip(n)
+    }
+}
+
+/** Concurrent connections per peer address, capped at [maxPerPeer]. Thread-safe. */
+class PeerSlots(private val maxPerPeer: Int) {
+    private val inUse = HashMap<String, Int>()
+
+    @Synchronized fun tryAcquire(peer: String): Boolean {
+        val n = inUse[peer] ?: 0
+        if (n >= maxPerPeer) return false
+        inUse[peer] = n + 1
+        return true
+    }
+
+    @Synchronized fun release(peer: String) {
+        val n = inUse[peer] ?: return
+        if (n <= 1) inUse.remove(peer) else inUse[peer] = n - 1
+    }
+
+    @Synchronized fun inUse(peer: String): Int = inUse[peer] ?: 0
+}
+
+/** A connection the runner can attribute to its peer, judged when it was accepted. */
+interface PeerConnection {
+    /** The peer's normalized address. */
+    val peer: String
+
+    /** Why the peer may not be served at all ([peerRejection]), or null when it may. */
+    val refusal: String?
+}
+
+/**
  * A fixed-size worker pool with a bounded queue. [tryExecute] returns false instead of growing
  * when it is saturated — NanoHTTPD's default runner spawns an unbounded thread per connection.
  * Idle workers time out, so a stopped server leaves no threads behind.
@@ -197,29 +317,53 @@ class BoundedWorkerPool(maxWorkers: Int, queueCapacity: Int) {
     }
 }
 
-/** NanoHTTPD [NanoHTTPD.AsyncRunner] over a [BoundedWorkerPool]: a connection that finds the
- *  pool saturated is closed at once rather than given a new thread. */
+/**
+ * NanoHTTPD [NanoHTTPD.AsyncRunner] over a [BoundedWorkerPool]. Runs on the accept thread, so
+ * nothing here waits on the peer:
+ *  - a [PeerConnection] whose peer was refused is closed at once and never takes a slot;
+ *  - a peer already holding [maxPerPeer] connections gets the new one closed ([PeerSlots]);
+ *  - a connection that finds the pool saturated is closed rather than given a new thread.
+ */
 class BoundedAsyncRunner(
     maxWorkers: Int = MAX_WORKERS,
     queueCapacity: Int = QUEUE_CAPACITY,
+    maxPerPeer: Int = MAX_CONNECTIONS_PER_PEER,
 ) : NanoHTTPD.AsyncRunner {
     private val pool = BoundedWorkerPool(maxWorkers, queueCapacity)
-    private val running = Collections.synchronizedList(mutableListOf<NanoHTTPD.ClientHandler>())
+    private val slots = PeerSlots(maxPerPeer)
+    // Every connection holding a worker or queue slot, with the peer it was charged to
+    // ("" for a connection that is not a [PeerConnection]: it is not charged to anyone).
+    private val running =
+        Collections.synchronizedMap(IdentityHashMap<NanoHTTPD.ClientHandler, String>())
 
     override fun exec(code: NanoHTTPD.ClientHandler) {
-        running.add(code)
+        val connection = code as? PeerConnection
+        if (connection?.refusal != null) {
+            code.close()
+            return
+        }
+        val peer = connection?.peer.orEmpty()
+        if (peer.isNotEmpty() && !slots.tryAcquire(peer)) {
+            code.close()
+            return
+        }
+        running[code] = peer
         if (!pool.tryExecute(code)) {
-            running.remove(code)
+            release(code)
             code.close()
         }
     }
 
+    private fun release(code: NanoHTTPD.ClientHandler) {
+        running.remove(code)?.takeIf { it.isNotEmpty() }?.let { slots.release(it) }
+    }
+
     override fun closed(clientHandler: NanoHTTPD.ClientHandler) {
-        running.remove(clientHandler)
+        release(clientHandler)
     }
 
     override fun closeAll() {
-        synchronized(running) { running.toList() }.forEach { it.close() }
+        synchronized(running) { running.keys.toList() }.forEach { it.close() }
     }
 
     companion object {
@@ -227,5 +371,9 @@ class BoundedAsyncRunner(
          *  /action, plus the odd /notify or /kill), so 8 is generous. */
         const val MAX_WORKERS = 8
         const val QUEUE_CAPACITY = 16
+
+        /** Connections one peer may hold at once: room for the box's few concurrent calls
+         *  (plus idle keep-alives), never the whole pool. */
+        const val MAX_CONNECTIONS_PER_PEER = 6
     }
 }

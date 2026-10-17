@@ -7,6 +7,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.net.SocketTimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -175,6 +177,108 @@ class RemoteControlGateTest {
     @Test(expected = IllegalArgumentException::class)
     fun a_read_beyond_the_cap_is_refused() {
         readBoundedBody(ByteArrayInputStream(ByteArray(0)), MAX_REQUEST_BODY_BYTES + 1)
+    }
+
+    // ── peer policy (also applied at ACCEPT time, before a worker slot is taken) ──────
+
+    @Test fun peer_rejection_admits_only_a_tailnet_peer_that_is_not_this_phone() {
+        assertNull(peerRejection(box, own))
+        assertNull(peerRejection("fd7a:115c:a1e0::53", own))
+        assertEquals("source not on tailnet", peerRejection("127.0.0.1", own))
+        assertEquals("source not on tailnet", peerRejection("::1", own))
+        assertEquals("source not on tailnet", peerRejection("192.168.1.50", own))
+        assertEquals("source not on tailnet", peerRejection("", own))
+        assertTrue(peerRejection(phone, own)!!.contains("this device"))
+        assertTrue(peerRejection("::ffff:$phone", own)!!.contains("this device"))
+    }
+
+    @Test fun the_gate_honours_a_peer_decision_made_elsewhere() {
+        // The server decides the peer once (its injectable peerPolicy) and hands it in.
+        val refused = gateRequest("GET", "/healthz", "source not on tailnet", emptyMap(), secret)
+        assertEquals(403, status(refused))
+        assertTrue(gateRequest("GET", "/healthz", null, emptyMap(), secret) is PreBodyDecision.Accept)
+        assertEquals(401, status(gateRequest("POST", "/task", null, emptyMap(), secret)))
+    }
+
+    // ── header deadline ────────────────────────────────────────────────────────────
+
+    /** Yields one byte per read, like a peer trickling its request line. */
+    private class Trickle : InputStream() {
+        override fun read(): Int = 'a'.code
+        override fun read(b: ByteArray, off: Int, len: Int): Int { b[off] = 'a'.code.toByte(); return 1 }
+    }
+
+    @Test fun headers_that_take_longer_than_the_deadline_are_cut_off() {
+        var now = 1_000L
+        val input = HeaderDeadlineInputStream(Trickle(), deadlineMs = 500, clock = { now })
+        val buf = ByteArray(8)
+        input.read(buf, 0, 8)          // first byte of the request: the clock starts
+        now += 499
+        input.read(buf, 0, 8)          // still inside the deadline
+        now += 1
+        try {
+            input.read(buf, 0, 8)
+            throw AssertionError("read past the header deadline must fail")
+        } catch (e: SocketTimeoutException) {
+            // NanoHTTPD closes the connection on a SocketTimeoutException
+        }
+        try {
+            input.read()
+            throw AssertionError("the single-byte read must fail too")
+        } catch (e: SocketTimeoutException) {
+        }
+    }
+
+    @Test fun idle_time_before_a_request_does_not_count() {
+        var now = 0L
+        val input = HeaderDeadlineInputStream(Trickle(), deadlineMs = 500, clock = { now })
+        now += 60_000                 // a keep-alive connection waiting for its next request
+        val buf = ByteArray(4)
+        input.read(buf, 0, 4)         // the request's first byte starts the clock
+        now += 400
+        assertEquals(1, input.read(buf, 0, 4))
+    }
+
+    @Test fun the_body_is_never_timed_and_the_next_request_gets_a_fresh_clock() {
+        var now = 0L
+        val input = HeaderDeadlineInputStream(Trickle(), deadlineMs = 500, clock = { now })
+        val buf = ByteArray(4)
+        input.read(buf, 0, 4)
+        input.disarm()                // headers parsed: serve() runs, the body is length-bounded
+        now += 10_000
+        assertEquals(1, input.read(buf, 0, 4))
+        input.rearm()                 // response sent: the next request on this connection
+        now += 10_000
+        input.read(buf, 0, 4)         // starts its own clock
+        now += 400
+        assertEquals(1, input.read(buf, 0, 4))
+        now += 100
+        try {
+            input.read(buf, 0, 4)
+            throw AssertionError("the re-armed deadline must apply")
+        } catch (e: SocketTimeoutException) {
+        }
+    }
+
+    // ── per-peer connection slots ──────────────────────────────────────────────────
+
+    @Test fun one_peer_gets_at_most_its_share_of_connections() {
+        val slots = PeerSlots(maxPerPeer = 2)
+        assertTrue(slots.tryAcquire("100.70.0.1"))
+        assertTrue(slots.tryAcquire("100.70.0.1"))
+        assertFalse(slots.tryAcquire("100.70.0.1"))      // a third from the same peer: refused
+        assertTrue(slots.tryAcquire(box))                // another peer is unaffected
+        slots.release("100.70.0.1")
+        assertTrue(slots.tryAcquire("100.70.0.1"))       // a freed slot can be reused
+        assertEquals(2, slots.inUse("100.70.0.1"))
+    }
+
+    @Test fun releasing_more_than_was_acquired_never_goes_negative() {
+        val slots = PeerSlots(maxPerPeer = 1)
+        slots.release(box)
+        assertEquals(0, slots.inUse(box))
+        assertTrue(slots.tryAcquire(box))
+        assertFalse(slots.tryAcquire(box))
     }
 
     // ── bounded worker pool ────────────────────────────────────────────────────────
