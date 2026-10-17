@@ -65,6 +65,15 @@ async def pair_device(body: PairRequest):
     return result
 
 
+def _refuse_invalid(result: dict) -> dict:
+    """ADBCommands refuses a hostile/malformed keycode, package or activity
+    without touching the device (audit O14-cli-agents-devices-01); surface
+    that as a 400 instead of a 200 that looks like a device-side failure."""
+    if result.get("invalid_input"):
+        raise HTTPException(status_code=400, detail=result.get("error", "invalid input"))
+    return result
+
+
 def _validate_port(port: int, field_name: str = "port"):
     """Validate port is in range 1-65535."""
     if port < 1 or port > 65535:
@@ -178,13 +187,13 @@ async def type_text(body: TypeRequest):
 @router.post("/key")
 async def key_event(body: KeyRequest):
     cmds = ADBCommands(body.device_id)
-    return await cmds.key_event(body.keycode)
+    return _refuse_invalid(await cmds.key_event(body.keycode))
 
 
 @router.post("/open-app")
 async def open_app(body: AppRequest):
     cmds = ADBCommands(body.device_id)
-    return await cmds.open_app(body.package_name, body.activity)
+    return _refuse_invalid(await cmds.open_app(body.package_name, body.activity))
 
 
 @router.post("/home/{device_id}")

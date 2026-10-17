@@ -414,8 +414,12 @@ class ADBManager:
         if not device:
             return False
         conn_str = device.connection_string()
-        rc, stdout, stderr = await self._run_adb("devices")
-        return conn_str in stdout and "device" in stdout
+        # Parse the per-serial state (audit O14-cli-agents-devices-06): a bare
+        # `"device" in stdout` always matched the "List of devices attached"
+        # header, so an offline/unauthorized serial counted as connected and
+        # ensure_connected skipped the reconnect + port rediscovery.
+        return any(d["serial"] == conn_str and d["state"] == "device"
+                   for d in await self.list_connected())
 
     async def ensure_connected(self, device_id: str) -> Dict:
         if await self.is_connected(device_id):
