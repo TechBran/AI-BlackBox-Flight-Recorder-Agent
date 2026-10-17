@@ -49,8 +49,13 @@ def build_xai_url(model: str = "") -> str:
     return f"{XAI_REALTIME_URL}?model={model}" if model else XAI_REALTIME_URL
 
 
-def build_gemini_url(api_version: str, key: str) -> str:
-    return GEMINI_LIVE_URL_TEMPLATE.format(api_version=api_version) + f"?key={key}"
+def build_gemini_url(api_version: str) -> str:
+    return GEMINI_LIVE_URL_TEMPLATE.format(api_version=api_version)
+
+
+def build_gemini_headers(key: str) -> Dict[str, str]:
+    """Handshake auth, mirroring the box (the key never goes in the URL)."""
+    return {"x-goog-api-key": key}
 
 
 def classify_first_event(provider: str, event: Dict[str, Any]) -> Tuple[bool, str]:

@@ -38,6 +38,7 @@ from Orchestrator.startup import GoogleSSMLIn, GeminiProTTSIn, LyriaMusicIn, Gen
 from Orchestrator.config import AUDIO_ENGINE, CLOUD_TTS_URL, GEMINI_BASE_URL, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_AUTH_AVAILABLE, GOOGLE_TTS_SYNTHESIZE_URL, GOOGLE_TTS_VOICES_URL, LYRIA_MUSIC_URL, OPENAI_API_KEY, OPENAI_TTS_URL, TTS_FORMAT, TTS_MODEL, TTS_TIMEOUT, TTS_VOICE, UPLOADS_DIR, USE_CLOUD_TTS, VOL_PATH
 from Orchestrator.fossils import load_snapshot_index
 from Orchestrator.tts_sanitize import sanitize_for_speech
+from Orchestrator.secret_redaction import response_error, upstream_error
 from Orchestrator.models import TaskType
 from Orchestrator.state import get_operator_preference, save_operator_preferences, set_operator_preference, OPERATOR_PREFERENCES
 from Orchestrator.tasks import create_task
@@ -969,9 +970,9 @@ def call_imagen(prompt: str, model: str, options: dict = None) -> list:
             print(f"[IMAGE GEN] Generating image {i+1}/{num_images}...")
             response = requests.post(url, headers=gemini_headers, json=payload, timeout=400)
 
-            # Log response details for debugging
+            # Log response details for debugging (status + parsed message, not the raw body)
             if response.status_code != 200:
-                print(f"[IMAGE GEN] API Error {response.status_code}: {response.text[:500]}")
+                print(f"[IMAGE GEN] API Error {response.status_code}: {response_error(response)[1]}")
 
             response.raise_for_status()
             data = response.json()
@@ -999,18 +1000,11 @@ def call_imagen(prompt: str, model: str, options: dict = None) -> list:
         print(f"[IMAGE GEN] Success! Generated {len(images)} image(s)")
         return images
 
-    except requests.exceptions.HTTPError as e:
-        # Log the actual error response from API
-        error_detail = ""
-        try:
-            error_detail = e.response.text[:1000] if e.response else str(e)
-        except:
-            error_detail = str(e)
-        print(f"[IMAGE GEN] HTTP Error: {error_detail}")
-        raise HTTPException(status_code=502, detail=f"Gemini Image API request failed: {error_detail}")
     except requests.exceptions.RequestException as e:
-        print(f"[IMAGE GEN] Request error: {e}")
-        raise HTTPException(status_code=502, detail=f"Gemini Image API request failed: {e}")
+        # Status + parsed upstream message only; str(e) carries the request URL.
+        status, error_detail = upstream_error(e)
+        print(f"[IMAGE GEN] Request error ({status}): {error_detail}")
+        raise HTTPException(status_code=502, detail=f"Gemini Image API request failed: {error_detail}")
 
 @app.post("/generate/image")
 async def generate_image(inp: GenIn):
@@ -1204,22 +1198,25 @@ def call_google_tts_voices() -> Dict[str, Any]:
     """Calls Google TTS API to get the list of voices."""
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=400, detail="GOOGLE_API_KEY not configured.")
-    url = f"{GOOGLE_TTS_VOICES_URL}?key={GOOGLE_API_KEY}"
+    # Key in the x-goog-api-key header, never the URL (requests puts the URL in
+    # its exception text). Same for every Google call below.
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(GOOGLE_TTS_VOICES_URL, headers={"x-goog-api-key": GOOGLE_API_KEY}, timeout=30)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"ERROR: Failed to fetch Google voices: {e}")
-        # Pass the error message to the client
-        raise HTTPException(status_code=e.response.status_code if e.response else 502, detail=str(e))
+        status, message = upstream_error(e)
+        print(f"ERROR: Failed to fetch Google voices ({status}): {message}")
+        # Pass the upstream status and parsed message to the client
+        raise HTTPException(status_code=status, detail=f"Google TTS voices error: {message}")
 
 def call_google_tts_synthesize(inp: GoogleSSMLIn) -> bytes:
     """Calls Google TTS API to synthesize speech."""
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=400, detail="GOOGLE_API_KEY not configured.")
 
-    url = f"{GOOGLE_TTS_SYNTHESIZE_URL}?key={GOOGLE_API_KEY}"
+    url = GOOGLE_TTS_SYNTHESIZE_URL
+    google_headers = {"x-goog-api-key": GOOGLE_API_KEY}
 
     # --- FIX: Add languageCode to the voice object ---
     # Extract language code from the voice name (e.g., "en-US" from "en-US-Wavenet-F")
@@ -1261,7 +1258,7 @@ def call_google_tts_synthesize(inp: GoogleSSMLIn) -> bytes:
     print(f"[GOOGLE TTS] Request payload: {json.dumps(payload, indent=2)}")
 
     try:
-        response = requests.post(url, json=payload, timeout=400)
+        response = requests.post(url, headers=google_headers, json=payload, timeout=400)
         response.raise_for_status()
         data = response.json()
         if "audioContent" in data:
@@ -1269,18 +1266,10 @@ def call_google_tts_synthesize(inp: GoogleSSMLIn) -> bytes:
             return base64.b64decode(data["audioContent"])
         raise HTTPException(status_code=500, detail=f"Invalid response from Google TTS API: {data}")
     except requests.exceptions.RequestException as e:
-        error_detail = str(e)
-        full_error = None
-        try:
-            # Try to parse the error response from Google
-            if hasattr(e, 'response') and e.response is not None:
-                full_error = e.response.json()
-                error_detail = full_error.get("error", {}).get("message", e.response.text)
-                print(f"[GOOGLE TTS ERROR] Full error response: {json.dumps(full_error, indent=2)}")
-        except Exception:
-            pass # Keep the original error string
-        print(f"[GOOGLE TTS ERROR] Failed: {error_detail}")
-        raise HTTPException(status_code=e.response.status_code if hasattr(e, 'response') and e.response else 502, detail=f"Google TTS API error: {error_detail}")
+        # Upstream status + Google's parsed message only (never str(e) or the raw body)
+        status, error_detail = upstream_error(e)
+        print(f"[GOOGLE TTS ERROR] Failed ({status}): {error_detail}")
+        raise HTTPException(status_code=status, detail=f"Google TTS API error: {error_detail}")
 
 
 @app.get("/tts/google/voices")
@@ -1866,13 +1855,9 @@ def call_gemini_tts_cloud(inp: GeminiProTTSIn) -> bytes:
         return wav_bytes
 
     except requests.exceptions.RequestException as e:
-        error_detail = str(e)
-        try:
-            error_detail = e.response.json().get("error", {}).get("message", e.response.text)
-        except Exception:
-            pass
-        print(f"ERROR: Cloud TTS API error: {error_detail}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 502, detail=f"Cloud TTS API error: {error_detail}")
+        status, error_detail = upstream_error(e)
+        print(f"ERROR: Cloud TTS API error ({status}): {error_detail}")
+        raise HTTPException(status_code=status, detail=f"Cloud TTS API error: {error_detail}")
     except Exception as e:
         print(f"ERROR: Cloud TTS audio conversion failed: {e}")
         raise HTTPException(status_code=500, detail=f"Cloud TTS audio conversion failed: {e}")
@@ -1890,8 +1875,9 @@ def call_gemini_tts_preview(inp: GeminiProTTSIn) -> bytes:
     }
     preview_model = model_mapping.get(inp.model, "gemini-2.5-pro-preview-tts")
 
-    # Use Gemini AI Studio API endpoint
-    url = f"{GEMINI_BASE_URL}/{preview_model}:generateContent?key={GOOGLE_API_KEY}"
+    # Use Gemini AI Studio API endpoint (key in the header, not the URL)
+    url = f"{GEMINI_BASE_URL}/{preview_model}:generateContent"
+    gemini_headers = {"x-goog-api-key": GOOGLE_API_KEY}
 
     # Build speech configuration based on mode
     speech_config = {}
@@ -1939,7 +1925,7 @@ def call_gemini_tts_preview(inp: GeminiProTTSIn) -> bytes:
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=400)
+        response = requests.post(url, headers=gemini_headers, json=payload, timeout=400)
         response.raise_for_status()
         data = response.json()
 
@@ -1969,13 +1955,9 @@ def call_gemini_tts_preview(inp: GeminiProTTSIn) -> bytes:
         return wav_bytes
 
     except requests.exceptions.RequestException as e:
-        error_detail = str(e)
-        try:
-            error_detail = e.response.json().get("error", {}).get("message", e.response.text)
-        except Exception:
-            pass
-        print(f"ERROR: Gemini Pro TTS API error: {error_detail}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 502, detail=f"Gemini Pro TTS API error: {error_detail}")
+        status, error_detail = upstream_error(e)
+        print(f"ERROR: Gemini Pro TTS API error ({status}): {error_detail}")
+        raise HTTPException(status_code=status, detail=f"Gemini Pro TTS API error: {error_detail}")
     except Exception as e:
         print(f"ERROR: Gemini Pro TTS audio conversion failed: {e}")
         raise HTTPException(status_code=500, detail=f"Audio conversion failed: {e}")

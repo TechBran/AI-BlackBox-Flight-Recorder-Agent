@@ -47,6 +47,7 @@ from Orchestrator.behavioral_core import PERSONA_PREF_KEY
 from Orchestrator.telemetry_events import build_retrieval_activity
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_fetch
+from Orchestrator.secret_redaction import error_message_from_body, redact, response_error
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
 from Orchestrator.browser.dispatch import resolve_backend
 from Orchestrator.onboarding import custom_servers
@@ -1344,10 +1345,14 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
     parts = []
     media_tasks = []  # 2-media: created (task_id,type,prompt) for the worker
     for iteration in range(max_tool_calls):
-        url = f"{GEMINI_BASE_URL}/{model}:generateContent?key={GOOGLE_API_KEY}"
-        r = requests.post(url, json=payload, timeout=200)
+        # Key in the x-goog-api-key header, never the URL: requests copies the URL
+        # into its exception text, which reached journald and tasks.db rows.
+        url = f"{GEMINI_BASE_URL}/{model}:generateContent"
+        r = requests.post(url, headers={"x-goog-api-key": GOOGLE_API_KEY}, json=payload, timeout=200)
 
-        if r.status_code != 200: raise HTTPException(r.status_code, r.text)
+        if r.status_code != 200:
+            status, message = response_error(r)
+            raise HTTPException(status, f"Gemini API error: {message}")
         data = r.json()
 
         if not data.get("candidates"):
@@ -5158,7 +5163,8 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
     if system_instruction["parts"]:
         payload["system_instruction"] = system_instruction
 
-    url = f"{GEMINI_BASE_URL}/{model}:streamGenerateContent?key={GOOGLE_API_KEY}&alt=sse"
+    url = f"{GEMINI_BASE_URL}/{model}:streamGenerateContent?alt=sse"
+    gemini_headers = {"x-goog-api-key": GOOGLE_API_KEY}
 
     # Tool execution loop (bounded by max_tool_iterations below)
     # Buffers persist across iterations so thinking from round 1 isn't lost
@@ -5187,13 +5193,14 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                             part_desc.append(str(pk))
                     print(f"[GEMINI-STREAM]   [{ci}] {role}: {part_desc}", flush=True)
             async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream("POST", url, json=payload) as response:
+                async with client.stream("POST", url, headers=gemini_headers, json=payload) as response:
                     print(f"[GEMINI-STREAM] Iter {iteration} response status: {response.status_code}", flush=True)
                     if response.status_code != 200:
+                        # Status + Google's parsed message only, never the raw body.
                         error_text = await response.aread()
-                        error_msg = error_text.decode()[:500]
-                        print(f"[GEMINI-STREAM] API error (iter {iteration}): {error_msg}", flush=True)
-                        yield {"type": "error", "data": f"Gemini API error: {error_msg}"}
+                        error_msg = redact(error_message_from_body(error_text) or "no error message")[:500]
+                        print(f"[GEMINI-STREAM] API error {response.status_code} (iter {iteration}): {error_msg}", flush=True)
+                        yield {"type": "error", "data": f"Gemini API error ({response.status_code}): {error_msg}"}
                         # If we have content from previous iterations, still yield done
                         if content_buffer or thinking_buffer:
                             yield {"type": "done", "data": {"thinking": thinking_buffer, "content": content_buffer}}
@@ -5767,7 +5774,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                         return
 
         except Exception as e:
-            yield {"type": "error", "data": f"Stream error: {str(e)}"}
+            yield {"type": "error", "data": f"Stream error: {redact(str(e))}"}
             return
 
     # If we exhaust iterations
@@ -7501,6 +7508,10 @@ async def chat_stream(request: Request):
                     continue
                 event_type = event.get("type", "unknown")
                 event_data = event.get("data", "")
+                if event_type == "error":
+                    # Every provider's error text funnels here: mask secrets
+                    # (exception text can embed a request URL) before the client.
+                    event_data = redact(event_data)
 
                 # Convert data to JSON if it's not a string
                 if not isinstance(event_data, str):
@@ -7649,6 +7660,8 @@ async def chat_stream_post(request: Request):
                     continue
                 event_type = event.get("type", "unknown")
                 event_data = event.get("data", "")
+                if event_type == "error":
+                    event_data = redact(event_data)   # see GET /chat/stream
 
                 # Debug logging for image_task events
                 if event_type == "image_task":

@@ -116,10 +116,10 @@ def test_gemini():
     for model in ("gemini-2.5-flash", "gemini-2.0-flash"):
         t = time.time()
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
             r = requests.post(
                 url,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "x-goog-api-key": key},
                 json={"contents": [{"parts": [{"text": QUERY}]}],
                       "tools": [{"google_search": {}}]},
                 timeout=60,

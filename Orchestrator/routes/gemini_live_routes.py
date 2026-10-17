@@ -74,6 +74,7 @@ from Orchestrator.fossils import (
 )
 from Orchestrator.context_builder import build_fossil_context
 from Orchestrator.web_tools import perform_web_fetch
+from Orchestrator.secret_redaction import redact
 from Orchestrator.tasks import create_task
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
@@ -212,19 +213,22 @@ async def connect_to_gemini(session: GeminiLiveSession) -> bool:
         return False
 
     try:
-        # Gemini Live uses API key in URL query parameter.
+        # The API key rides in the x-goog-api-key handshake header (as the
+        # google-genai SDK does), never the URL: exception text and websockets'
+        # own logging carry the URL.
         # v1alpha endpoint is REQUIRED when affective dialog / proactive audio were
         # requested for this session (flags validated + persisted by the WS handler
         # via resolve_affective_flags BEFORE this call); all other sessions stay on
         # v1beta. Reading session state (not request params) keeps the P1a
         # reconnect path on the identical endpoint.
         api_version = "v1alpha" if (session.affective_dialog or session.proactive_audio) else "v1beta"
-        url = f"{gemini_live_url(api_version)}?key={GOOGLE_API_KEY}"
+        url = gemini_live_url(api_version)
 
         print(f"[GEMINI-LIVE] Connecting to Gemini Live API ({api_version})...")
         # Add explicit ping settings to prevent connection drops
         session.gemini_ws = await websockets.connect(
             url,
+            additional_headers={"x-goog-api-key": GOOGLE_API_KEY},
             open_timeout=10,       # 10s max to establish connection (prevents indefinite hang)
             ping_interval=20,      # Send ping every 20 seconds
             ping_timeout=30,       # Wait 30 seconds for pong response
@@ -236,7 +240,7 @@ async def connect_to_gemini(session: GeminiLiveSession) -> bool:
         return True
 
     except Exception as e:
-        print(f"[GEMINI-LIVE] Connection failed: {e}")
+        print(f"[GEMINI-LIVE] Connection failed: {type(e).__name__}: {redact(str(e))}")
         session.status = "error"
         return False
 

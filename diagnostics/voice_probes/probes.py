@@ -17,6 +17,7 @@ import websockets
 from diagnostics.voice_probes.env import get_key
 from diagnostics.voice_probes.harness import (
     ProbeResult,
+    build_gemini_headers,
     build_gemini_url,
     build_openai_url,
     build_xai_url,
@@ -163,7 +164,10 @@ async def probe_gemini(
     if setup_extra:
         setup.update(setup_extra)
     try:
-        async with websockets.connect(build_gemini_url(api_version, key), **CONNECT_KW) as ws:
+        async with websockets.connect(
+            build_gemini_url(api_version),
+            additional_headers=build_gemini_headers(key), **CONNECT_KW,
+        ) as ws:
             await ws.send(json.dumps({"setup": setup}))
             first = await _recv_json(ws, timeout)
             result.add_event(first)

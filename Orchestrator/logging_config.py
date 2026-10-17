@@ -2,6 +2,8 @@
 import logging
 import sys
 
+from Orchestrator.secret_redaction import install_redaction
+
 
 def setup_logging(level=logging.INFO):
     """Configure structured logging for the Orchestrator."""
@@ -21,3 +23,7 @@ def setup_logging(level=logging.INFO):
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+    # basicConfig(force=True) just replaced the root handler: put the secret
+    # redaction filter on it (and on uvicorn's handlers, configured earlier).
+    install_redaction()

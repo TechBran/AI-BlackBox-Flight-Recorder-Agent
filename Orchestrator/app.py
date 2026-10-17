@@ -35,6 +35,11 @@ Usage:
 # Module Imports - Order matters for dependency resolution
 # =============================================================================
 
+# Secret redaction on stdout/stderr and logging (stdlib only). Installed first,
+# so nothing any module prints can carry an API key into the journal.
+from Orchestrator.secret_redaction import install_redaction
+install_redaction()
+
 # Configuration and constants (no dependencies)
 from Orchestrator.config import *
 

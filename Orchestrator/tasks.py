@@ -48,6 +48,7 @@ from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator.notifications.bridge import notify_in_background
+from Orchestrator.secret_redaction import redact, response_error
 # NOTE: call_imagen, call_google_tts_synthesize, call_gemini_tts, call_lyria_music
 # are imported lazily inside process_* functions to avoid circular imports
 # NOTE: call_openai, call_anthropic, call_gemini are imported lazily inside process_chat_task
@@ -569,6 +570,15 @@ def update_task(task_id: str, **kwargs):
         task.updated_at = now_utc_iso()
         for key, value in kwargs.items():
             if hasattr(task, key):
+                # SECRET MASK (audit rank 23): task rows are served back to the
+                # Portal/Android by /tasks polling, and a worker's str(e) or
+                # traceback can embed a request URL with a key in it. Mask the
+                # error text and live line at this single write choke point.
+                if key in _REDACTED_TASK_FIELDS and isinstance(value, str):
+                    value = redact(value)
+                elif key == "result_data" and isinstance(value, dict):
+                    value = {k: (redact(v) if k in _REDACTED_RESULT_KEYS and isinstance(v, str) else v)
+                             for k, v in value.items()}
                 # SHARED CLAMP (G3-T11): progress_text also flows through here via
                 # the whole-row save_task path (the CLI-agent flush), NOT only
                 # through update_progress_text. Bounding it at THIS choke point
@@ -583,6 +593,12 @@ def update_task(task_id: str, **kwargs):
         # every async worker (media/chat/checkpoint/CU). Fire-and-forget; isolated.
         if "status" in kwargs:
             _emit_task_notification(task, kwargs["status"])
+
+
+# Task fields / result_data keys that carry error or raw-output text, masked by
+# update_task before the row is saved (see secret_redaction.redact).
+_REDACTED_TASK_FIELDS = ("error_message", "progress_text")
+_REDACTED_RESULT_KEYS = ("error", "trace", "traceback")
 
 
 # G3-T11 (M3.1): bound for the poll-visible progress line. A CU/CLI/video step
@@ -617,6 +633,7 @@ def append_task_progress(task_id: str, line: str):
         return
     if len(text) > PROGRESS_TEXT_MAX_CHARS:
         text = text[:PROGRESS_TEXT_MAX_CHARS]
+    text = redact(text)  # raw CLI/agent stdout can carry a key
     try:
         task_db.update_progress_text(task_id, text)
     except Exception as e:  # noqa: BLE001 — UI state, never fatal to the producer
@@ -1330,10 +1347,11 @@ def process_audio_analysis(task: Task):
 
     # Check for errors with detailed logging
     if upload_url_response.status_code != 200:
-        error_body = upload_url_response.text
-        print(f"[WORKER] ERROR: Upload initiation failed with status {upload_url_response.status_code}")
-        print(f"[WORKER] ERROR: Response body: {error_body}")
-        raise Exception(f"Gemini Files API returned {upload_url_response.status_code}: {error_body}")
+        # Status + Google's parsed message only: the raw body goes into the
+        # task's error_message, which /tasks polling serves to clients.
+        status, error_msg = response_error(upload_url_response)
+        print(f"[WORKER] ERROR: Upload initiation failed with status {status}: {error_msg}")
+        raise Exception(f"Gemini Files API returned {status}: {error_msg}")
 
     upload_url_response.raise_for_status()
     upload_url = upload_url_response.headers.get("x-goog-upload-url")

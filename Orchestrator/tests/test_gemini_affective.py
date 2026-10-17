@@ -90,6 +90,7 @@ async def test_connect_url_version_selection(monkeypatch):
 
     async def fake_connect(url, **kwargs):
         captured["url"] = url
+        captured["headers"] = kwargs.get("additional_headers")
         return MagicMock()
 
     monkeypatch.setattr(glr, "websockets", SimpleNamespace(connect=fake_connect))
@@ -100,7 +101,9 @@ async def test_connect_url_version_selection(monkeypatch):
     s = GeminiLiveSession(session_id="t-beta")
     assert await glr.connect_to_gemini(s) is True
     assert ".v1beta." in captured["url"]
-    assert "key=test-key" in captured["url"]
+    # Key in the handshake header, never the URL (audit rank 23).
+    assert "key=" not in captured["url"]
+    assert captured["headers"] == {"x-goog-api-key": "test-key"}
 
     # Either flag set -> v1alpha (real dataclass: proves P1a reconnect re-derives
     # the same URL from persisted session state, not from request plumbing)

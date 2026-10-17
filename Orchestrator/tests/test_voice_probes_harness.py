@@ -9,6 +9,7 @@ import json
 from diagnostics.voice_probes.env import load_service_env
 from diagnostics.voice_probes.harness import (
     ProbeResult,
+    build_gemini_headers,
     build_gemini_url,
     build_openai_url,
     build_xai_url,
@@ -46,12 +47,13 @@ def test_url_builders():
     assert build_xai_url("grok-voice-latest") == (
         "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
     )
-    url = build_gemini_url("v1alpha", "SEKRETKEY123")
-    assert url.startswith(
+    url = build_gemini_url("v1alpha")
+    assert url == (
         "wss://generativelanguage.googleapis.com/ws/"
         "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
     )
-    assert url.endswith("?key=SEKRETKEY123")
+    # The key rides in the handshake header, never the URL (audit rank 23).
+    assert build_gemini_headers("SEKRETKEY123") == {"x-goog-api-key": "SEKRETKEY123"}
 
 
 def test_classify_first_event():
