@@ -116,14 +116,67 @@ sealed class AgentEvent {
 }
 
 // =============================================================================
+// Permission modes — mirrors Portal agent-permission-mode.js (audit P03/O06)
+//
+// Exactly two modes, each a Claude CLI flag that works in print mode (agent_routes.py):
+//   yolo — every tool approved (--dangerously-skip-permissions); the default
+//   plan — read-only (--permission-mode plan)
+// There is no "Normal" (approve each tool) mode: print mode has no approval round-trip, so
+// it hung or auto-denied behind a fake dialog. It returns only with a real approval protocol.
+// =============================================================================
+object AgentPermissionMode {
+    const val YOLO = "yolo"
+    const val PLAN = "plan"
+    val ALL: List<String> = listOf(YOLO, PLAN)
+
+    /** Blank -> the default (YOLO); the old "auto" key -> YOLO; anything else unrecognised
+     *  (a stale "normal", garbage) -> PLAN, so a bad value never escalates. */
+    fun normalize(mode: String?): String {
+        val m = mode?.trim()?.lowercase().orEmpty()
+        return when {
+            m.isEmpty() -> YOLO
+            m == YOLO || m == "auto" -> YOLO
+            else -> PLAN
+        }
+    }
+
+    fun label(mode: String): String = if (normalize(mode) == YOLO) "YOLO" else "Plan Mode"
+}
+
+/** The `prompt` frame. `skip_permissions` is true ONLY for YOLO — it keeps an older box
+ *  (which reads only that flag) in the mode the user chose. */
+internal fun buildPromptMessage(text: String, operator: String, model: String, permissionMode: String): String {
+    val mode = AgentPermissionMode.normalize(permissionMode)
+    return buildJsonObject {
+        put("type", "prompt")
+        put("text", text)
+        put("operator", operator)
+        put("model", model)
+        put("permission_mode", mode)
+        put("skip_permissions", mode == AgentPermissionMode.YOLO)
+    }.toString()
+}
+
+/** The follow-up `input` frame; a non-null [permissionMode] switches the session's mode. */
+internal fun buildInputMessage(text: String, permissionMode: String?): String = buildJsonObject {
+    put("type", "input")
+    put("text", text)
+    if (permissionMode != null) {
+        val mode = AgentPermissionMode.normalize(permissionMode)
+        put("permission_mode", mode)
+        put("skip_permissions", mode == AgentPermissionMode.YOLO)
+    }
+}.toString()
+
+// =============================================================================
 // ClaudeAgentClient — mirrors Portal AgentChatHandler
 //
 // Features aligned with Portal:
 //   - Session persistence per operator
 //   - Reconnect with exponential backoff (Portal: attemptReconnect())
-//   - Permission mode (auto/normal/plan)
+//   - Permission mode (yolo/plan — see AgentPermissionMode)
 //   - Full message type parsing
-//   - skip_permissions flag in prompt message
+//   - permission_mode (+ skip_permissions for YOLO) in prompt message
 // =============================================================================
 class ClaudeAgentClient(
     private val client: OkHttpClient,
@@ -212,16 +265,9 @@ class ClaudeAgentClient(
         text: String,
         operator: String,
         model: String = "sonnet",
-        permissionMode: String = "auto"
+        permissionMode: String = AgentPermissionMode.YOLO
     ) {
-        val skipPermissions = permissionMode == "auto"
-        val promptMsg = buildJsonObject {
-            put("type", "prompt")
-            put("text", text)
-            put("operator", operator)
-            put("model", model)
-            put("skip_permissions", skipPermissions)
-        }.toString()
+        val promptMsg = buildPromptMessage(text, operator, model, permissionMode)
 
         // Queue the prompt — it fires in the Connected handler above
         pendingPrompt = promptMsg
@@ -257,34 +303,23 @@ class ClaudeAgentClient(
 
     /**
      * Send a prompt to start a new agent task.
-     * Mirrors Portal: ws.send with type='prompt', includes skip_permissions
+     * Mirrors Portal: ws.send with type='prompt', includes permission_mode
      */
     fun sendPrompt(
         text: String,
         operator: String,
         model: String = "sonnet",
-        permissionMode: String = "auto"
+        permissionMode: String = AgentPermissionMode.YOLO
     ) {
-        val skipPermissions = permissionMode == "auto"
-        val msg = buildJsonObject {
-            put("type", "prompt")
-            put("text", text)
-            put("operator", operator)
-            put("model", model)
-            put("skip_permissions", skipPermissions)
-        }
-        wsClient.send(msg.toString())
+        wsClient.send(buildPromptMessage(text, operator, model, permissionMode))
     }
 
     /**
-     * Send follow-up input to the agent.
+     * Send follow-up input to the agent. A non-null [permissionMode] switches the session's
+     * mode for this and later turns.
      */
-    fun sendInput(text: String) {
-        val msg = buildJsonObject {
-            put("type", "input")
-            put("text", text)
-        }
-        wsClient.send(msg.toString())
+    fun sendInput(text: String, permissionMode: String? = null) {
+        wsClient.send(buildInputMessage(text, permissionMode))
     }
 
     /**

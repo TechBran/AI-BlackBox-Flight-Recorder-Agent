@@ -3002,7 +3002,7 @@ The user's speech is being transcribed and sent to you. Respond conversationally
                 continue_session=is_continuation,
                 resume_session=is_resume,
                 model="sonnet",  # Use sonnet for faster responses
-                skip_permissions=True
+                permission_mode="yolo"
             )
             self._claude_process = process
 

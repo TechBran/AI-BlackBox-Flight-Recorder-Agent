@@ -1,0 +1,180 @@
+"""Claude Code agent permission modes are real (audit P03/O06, rank 30).
+
+Before: the Portal hard-coded ``skip_permissions: true`` (so "Plan Mode (read-only)" ran a
+fully privileged ``--dangerously-skip-permissions`` agent), and the "Normal (prompts)" mode
+launched ``-p`` with an open stdin pipe and later wrote ``y``/``n`` to it — a protocol print
+mode does not have, so the run hung or auto-denied behind a fake approval dialog.
+
+Now there are exactly two modes, each mapped to a CLI flag that works in print mode:
+``yolo`` -> ``--dangerously-skip-permissions``, ``plan`` -> ``--permission-mode plan``. The
+retired "normal"/"ask" request and anything unrecognised resolve to ``plan`` — a request is
+never escalated. Hermetic: no CLI is spawned (Popen is faked), no live app.
+"""
+import json
+import subprocess
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import Orchestrator.routes.agent_routes as ar
+from Orchestrator.models import AgentSession
+
+
+YOLO_FLAG = "--dangerously-skip-permissions"
+
+
+# ── mode resolution from a client frame ───────────────────────────────────────────
+
+@pytest.mark.parametrize("frame, expected", [
+    ({"permission_mode": "plan"}, "plan"),
+    ({"permission_mode": "yolo"}, "yolo"),
+    ({"permission_mode": "auto"}, "yolo"),                 # the Portal's old key for YOLO
+    ({"permission_mode": " PLAN "}, "plan"),
+    ({"skip_permissions": True}, "yolo"),                   # legacy clients, old default
+    ({}, "yolo"),                                           # unchanged default
+    ({"skip_permissions": False}, "plan"),                  # legacy 'ask' -> safe, never 'ask'
+    ({"permission_mode": "normal"}, "plan"),                # the retired mode
+    ({"permission_mode": "ask"}, "plan"),
+    ({"permission_mode": "bypassPermissions!!"}, "plan"),   # garbage never escalates
+    ({"permission_mode": None, "skip_permissions": True}, "yolo"),
+    ({"permission_mode": "plan", "skip_permissions": True}, "plan"),  # explicit mode wins
+])
+def test_resolve_permission_mode(frame, expected):
+    assert ar.resolve_permission_mode(frame) == expected
+
+
+# ── argv per mode ─────────────────────────────────────────────────────────────────
+
+def test_plan_maps_to_permission_mode_plan_and_never_skips_permissions():
+    argv = ar.build_claude_argv("/bin/claude", "look around", permission_mode="plan")
+    assert argv[:5] == ["/bin/claude", "-p", "--output-format", "stream-json", "--verbose"]
+    i = argv.index("--permission-mode")
+    assert argv[i + 1] == "plan"
+    assert YOLO_FLAG not in argv
+    assert argv[-1] == "look around"
+
+
+def test_yolo_maps_to_skip_permissions_only():
+    argv = ar.build_claude_argv("/bin/claude", "do it", permission_mode="yolo")
+    assert YOLO_FLAG in argv
+    assert "--permission-mode" not in argv
+
+
+def test_an_unknown_mode_builds_the_read_only_argv():
+    argv = ar.build_claude_argv("/bin/claude", "x", permission_mode="normal")
+    assert YOLO_FLAG not in argv
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+
+
+def test_session_flags_and_model_are_preserved():
+    argv = ar.build_claude_argv("/bin/claude", "hi", permission_mode="plan", model="opus",
+                                claude_session_id="abc-123")
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--session-id") + 1] == "abc-123"
+    resumed = ar.build_claude_argv("/bin/claude", "hi", permission_mode="yolo",
+                                   claude_session_id="abc-123", resume_session=True)
+    assert resumed[resumed.index("--resume") + 1] == "abc-123"
+    cont = ar.build_claude_argv("/bin/claude", "hi", permission_mode="yolo",
+                                continue_session=True)
+    assert "--continue" in cont
+
+
+class _FakePopen:
+    last = None
+
+    def __init__(self, cmd, **kwargs):
+        _FakePopen.last = {"cmd": cmd, **kwargs}
+        self.pid = 4242
+
+        class _Out:
+            def fileno(self):
+                return 0
+        self.stdout = _Out()
+
+
+@pytest.mark.parametrize("mode", ["plan", "yolo"])
+def test_the_cli_never_gets_an_open_stdin_pipe(monkeypatch, mode):
+    # An open, never-closed stdin makes print mode wait for piped input (the old hang).
+    monkeypatch.setattr(ar.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(ar.fcntl, "fcntl", lambda *a, **k: 0)
+    ar.create_claude_streaming("/tmp", "hello", permission_mode=mode)
+    assert _FakePopen.last["stdin"] is subprocess.DEVNULL
+    assert (YOLO_FLAG in _FakePopen.last["cmd"]) is (mode == "yolo")
+
+
+# ── WebSocket: no stdin approval path, no fake approval dialog ────────────────────
+
+class _Stdin:
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data):
+        self.writes.append(data)
+
+    def flush(self):
+        pass
+
+
+class _RunningProc:
+    def __init__(self):
+        self.stdin = _Stdin()
+
+    def poll(self):
+        return None
+
+
+@pytest.fixture
+def ws_client():
+    app = FastAPI()
+    app.add_api_websocket_route("/ws/agent/{session_id}", ar.agent_websocket)
+    return TestClient(app)
+
+
+def test_permission_response_never_writes_y_or_n_to_the_cli(ws_client):
+    proc = _RunningProc()
+    ar.AGENT_SESSIONS["perm-test"] = AgentSession(session_id="perm-test", operator="Alice",
+                                               process=proc, status="running")
+    try:
+        with ws_client.websocket_connect("/ws/agent/perm-test") as ws:
+            ws.send_json({"type": "permission_response", "approved": True})
+            # A frame that always gets an answer, so a handler that stays silent on the
+            # permission_response cannot hang the test: its reply would arrive first.
+            ws.send_json({"type": "input", "text": ""})
+            reply = ws.receive_json()
+        assert proc.stdin.writes == []
+        assert reply["type"] == "error"
+        assert "Plan" in reply["data"] and "YOLO" in reply["data"]
+    finally:
+        ar.AGENT_SESSIONS.pop("perm-test", None)
+
+
+class _Socket:
+    application_state = ar.WebSocketState.CONNECTED
+
+    def __init__(self):
+        self.sent = []
+
+    async def send_json(self, data):
+        self.sent.append(data)
+
+
+class _FinishingProc:
+    def __init__(self):
+        self._polls = [None]
+
+    def poll(self):
+        return self._polls.pop(0) if self._polls else 0
+
+
+def test_plan_session_streams_tool_use_and_never_a_permission_request():
+    tool_event = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}}
+    session = AgentSession(session_id="stream-test", process=_FinishingProc(), status="running",
+                           output_buffer=[json.dumps(tool_event)], permission_mode="plan")
+    sock = _Socket()
+    import asyncio
+    asyncio.run(ar.streaming_reader_task(session, sock))
+    kinds = [m["type"] for m in sock.sent]
+    assert "tool_use" in kinds
+    assert "permission_request" not in kinds

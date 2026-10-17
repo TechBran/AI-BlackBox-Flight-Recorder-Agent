@@ -65,6 +65,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.agent.AgentConnectionState
 import com.aiblackbox.portal.data.agent.AgentEvent
+import com.aiblackbox.portal.data.agent.AgentPermissionMode
 import com.aiblackbox.portal.data.agent.ClaudeAgentClient
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.Provenance
@@ -147,10 +148,11 @@ internal fun reduceActiveTool(
 }
 
 // =============================================================================
-// Permission Modes — mirrors Portal cyclePermissionMode()
+// Permission Modes — mirrors Portal cyclePermissionMode() (YOLO ⇄ Plan; see
+// AgentPermissionMode for why there is no "Normal" approve-each-tool mode)
 // =============================================================================
-private val PERMISSION_MODES = listOf("Auto-Accept", "Normal", "Plan Mode")
-private val PERMISSION_MODE_KEYS = listOf("auto", "normal", "plan")
+private val PERMISSION_MODE_KEYS = AgentPermissionMode.ALL
+private val PERMISSION_MODES = PERMISSION_MODE_KEYS.map(AgentPermissionMode::label)
 
 // =============================================================================
 // Tool Icons — mirrors Portal getToolIcon()
@@ -199,7 +201,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val status: StateFlow<String> = _status.asStateFlow()
 
     // -- Permission mode — mirrors Portal cyclePermissionMode()
-    private val _permissionModeIndex = MutableStateFlow(0) // 0=auto, 1=normal, 2=plan
+    private val _permissionModeIndex = MutableStateFlow(0) // 0=yolo, 1=plan
     val permissionModeIndex: StateFlow<Int> = _permissionModeIndex.asStateFlow()
 
     // -- Permission request --
@@ -565,7 +567,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     fun triggerSnapshot() {
         val client = agentClient ?: return
         if (_connectionState.value == AgentConnectionState.CONNECTED) {
-            client.sendPrompt("/snapshot-dev", currentOperator, _currentModel.value, "auto")
+            client.sendPrompt("/snapshot-dev", currentOperator, _currentModel.value, AgentPermissionMode.YOLO)
         }
     }
 
@@ -690,7 +692,9 @@ fun AgentChatScreen(
             contextPercent = contextPercent,
             costDollars = costDollars,
             duration = duration,
-            permissionMode = PERMISSION_MODES[permissionModeIdx],
+            // The mode switch drives the Claude CLI only; the Gemini CLI agent ignores it,
+            // so it is not shown there (an indicator that changes nothing is the P03 bug).
+            permissionMode = if (isGeminiAgent) "" else PERMISSION_MODES[permissionModeIdx],
             onModelChange = {
                 viewModel.setModel(it)
             },

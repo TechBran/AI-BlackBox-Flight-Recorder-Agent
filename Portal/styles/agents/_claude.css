@@ -814,14 +814,7 @@
     transition: all var(--transition-base);
 }
 
-/* Normal mode - yellow/warning */
-.permission-mode.mode-normal {
-    background: rgba(255, 193, 7, 0.2);
-    color: #ffc107;
-    border: 1px solid rgba(255, 193, 7, 0.4);
-}
-
-/* Auto-accept mode - green */
+/* YOLO mode (every tool approved) - green */
 .permission-mode.mode-auto {
     background: rgba(39, 217, 128, 0.2);
     color: #27d980;

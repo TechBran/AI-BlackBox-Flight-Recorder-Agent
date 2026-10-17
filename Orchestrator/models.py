@@ -46,7 +46,7 @@ class AgentSession:
     claude_session_id: str = ""  # Claude Code's internal session ID for continuity
     message_count: int = 0  # Number of messages sent in this session
     model: str = "sonnet"  # Claude model to use (opus, sonnet, haiku)
-    skip_permissions: bool = True  # Whether to skip permission prompts (default: safe mode)
+    permission_mode: str = "yolo"  # "yolo" (every tool approved) or "plan" (read-only); see agent_routes
     # Background execution support
     background_reader: Optional[Any] = None  # Background thread reading process output
     websocket_clients: List[Any] = field(default_factory=list)  # Active WebSocket connections

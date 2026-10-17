@@ -86,7 +86,78 @@ async def _safe_ws_send(websocket, data: dict) -> bool:
     return False
 
 
-def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: str = None, continue_session: bool = False, resume_session: bool = False, model: str = None, skip_permissions: bool = True) -> subprocess.Popen:
+# Claude Code permission modes the agent surfaces offer (audit P03/O06). Only modes that
+# actually work in non-interactive print mode (-p):
+#   yolo — --dangerously-skip-permissions: every tool runs unattended (the long-standing default)
+#   plan — --permission-mode plan: read-only; the CLI plans and refuses edits and commands
+# There is deliberately no "ask before each tool" mode. Print mode has no stdin y/n protocol,
+# so the old "Normal (prompts)" mode hung or auto-denied behind a fake approval dialog. It can
+# come back only with a real approval round-trip (--permission-prompt-tool, or the stream-json
+# control protocol).
+PERMISSION_MODE_YOLO = "yolo"
+PERMISSION_MODE_PLAN = "plan"
+_PERMISSION_MODE_ALIASES = {
+    "yolo": PERMISSION_MODE_YOLO,
+    "auto": PERMISSION_MODE_YOLO,   # the Portal's pre-2026-10 key for the same mode
+    "plan": PERMISSION_MODE_PLAN,
+}
+UNSUPPORTED_APPROVAL_MESSAGE = (
+    "This agent has no per-tool approval prompts. Switch the mode to Plan (read-only) or "
+    "YOLO (every tool approved) and send the message again.")
+
+
+def resolve_permission_mode(data: dict) -> str:
+    """The permission mode a client frame asks for. Never escalates: the retired
+    "normal"/"ask" mode, and anything unrecognised, resolve to the read-only plan mode.
+
+    Clients send ``permission_mode``; a legacy client that sends only ``skip_permissions``
+    keeps YOLO for ``true`` (or the flag absent, the old default) and gets plan for
+    ``false`` (it asked for the approval mode that never worked)."""
+    raw = data.get("permission_mode")
+    if raw is not None:
+        mode = _PERMISSION_MODE_ALIASES.get(str(raw).strip().lower())
+        if mode is None:
+            print(f"[AGENT] Unknown permission_mode {str(raw)[:40]!r} -> plan (read-only)")
+            return PERMISSION_MODE_PLAN
+        return mode
+    return PERMISSION_MODE_YOLO if data.get("skip_permissions", True) is True else PERMISSION_MODE_PLAN
+
+
+def build_claude_argv(claude_path: str, prompt: str, *, permission_mode: str,
+                      model: str = None, claude_session_id: str = None,
+                      continue_session: bool = False, resume_session: bool = False) -> List[str]:
+    """The exact argv for a print-mode Claude Code run. Any mode other than yolo gets the
+    read-only ``--permission-mode plan`` (fail safe)."""
+    cmd = [
+        claude_path,
+        "-p",  # Print mode - skips trust dialog
+        "--output-format", "stream-json",  # Streaming JSON output
+        "--verbose",  # Required for stream-json
+    ]
+
+    if permission_mode == PERMISSION_MODE_YOLO:
+        cmd.append("--dangerously-skip-permissions")
+    else:
+        cmd.extend(["--permission-mode", PERMISSION_MODE_PLAN])
+
+    # Add model selection if specified
+    if model:
+        cmd.extend(["--model", model])
+
+    # Add session continuity flags (priority: resume > continue > session-id)
+    if resume_session and claude_session_id:
+        cmd.extend(["--resume", claude_session_id])  # Resume a specific session from disk
+    elif continue_session:
+        cmd.append("--continue")  # Continue the most recent conversation in this directory
+    elif claude_session_id:
+        cmd.extend(["--session-id", claude_session_id])
+
+    # Add the prompt
+    cmd.append(prompt)
+    return cmd
+
+
+def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: str = None, continue_session: bool = False, resume_session: bool = False, model: str = None, permission_mode: str = PERMISSION_MODE_YOLO) -> subprocess.Popen:
     """Create Claude Code process in streaming print mode.
     Uses -p (print) mode with stream-json output for programmatic use.
     This completely skips trust dialogs and interactive prompts.
@@ -97,7 +168,7 @@ def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: st
         continue_session: If True, use --continue to continue the conversation
         resume_session: If True, use --resume to restore a session from disk (requires claude_session_id)
         model: Model to use (opus, sonnet, haiku). If None, uses default.
-        skip_permissions: If True (default), bypass permission checks. If False, require permission approval.
+        permission_mode: "yolo" (default, every tool approved) or "plan" (read-only).
     Returns:
         subprocess.Popen with stdout pipe for reading JSON stream
     """
@@ -105,44 +176,21 @@ def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: st
     if not os.path.exists(claude_path):
         claude_path = "claude"
 
-    # Build command arguments
-    cmd = [
-        claude_path,
-        "-p",  # Print mode - skips trust dialog
-        "--output-format", "stream-json",  # Streaming JSON output
-        "--verbose",  # Required for stream-json
-    ]
-
-    # Conditionally skip permissions based on user preference
-    if skip_permissions:
-        cmd.append("--dangerously-skip-permissions")
-
-    # Add model selection if specified
-    if model:
-        cmd.extend(["--model", model])
-
-    # Add session continuity flags (priority: resume > continue > session-id)
+    cmd = build_claude_argv(
+        claude_path, prompt, permission_mode=permission_mode, model=model,
+        claude_session_id=claude_session_id, continue_session=continue_session,
+        resume_session=resume_session)
     if resume_session and claude_session_id:
-        cmd.extend(["--resume", claude_session_id])  # Resume a specific session from disk
         print(f"[AGENT] Resuming session from disk: {claude_session_id[:8]}...")
-    elif continue_session:
-        cmd.append("--continue")  # Continue the most recent conversation in this directory
-    elif claude_session_id:
-        cmd.extend(["--session-id", claude_session_id])
 
-    # Add the prompt
-    cmd.append(prompt)
-
-    print(f"[AGENT] Claude command: {' '.join(cmd[:8])}... (continue={continue_session}, resume={resume_session}, session_id={claude_session_id[:8] if claude_session_id else 'None'})")
+    print(f"[AGENT] Claude command: {' '.join(cmd[:8])}... (mode={permission_mode}, continue={continue_session}, resume={resume_session}, session_id={claude_session_id[:8] if claude_session_id else 'None'})")
     print(f"[AGENT] Model specified: {model}")
 
-    # Only use stdin pipe when we need to send permission responses
-    # Having stdin=PIPE when not needed can cause Claude Code to hang
-    stdin_config = subprocess.PIPE if not skip_permissions else subprocess.DEVNULL
-
+    # stdin is never a pipe: print mode reads no approvals from it, and an open,
+    # never-closed pipe makes the CLI wait for piped input (the old 'ask' hang).
     process = subprocess.Popen(
         cmd,
-        stdin=stdin_config,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=working_dir,
@@ -612,51 +660,14 @@ async def streaming_reader_task(session: AgentSession, websocket: WebSocket):
                                     print(f"[AGENT] TodoWrite: {len(todos)} todos")
                                     continue  # Don't send as generic tool_use
 
-                                # Check if we need to request permission for this tool
-                                if not session.skip_permissions:
-                                    # Determine tool type for icon/display
-                                    action_type = "bash" if tool_name.lower() == "bash" else "edit"
-
-                                    # Format prompt text for display
-                                    if tool_name.lower() == "bash":
-                                        prompt_text = f"Execute: {tool_input.get('command', str(tool_input)[:100])}"
-                                    elif tool_name.lower() in ("edit", "write"):
-                                        prompt_text = f"Modify file: {tool_input.get('file_path', 'unknown')}"
-                                    elif tool_name.lower() == "read":
-                                        prompt_text = f"Read file: {tool_input.get('file_path', 'unknown')}"
-                                    else:
-                                        prompt_text = f"Use tool: {tool_name}"
-
-                                    # Store pending permission
-                                    session.pending_permission = {
-                                        "tool": tool_name,
-                                        "input": tool_input,
-                                        "action_type": action_type,
-                                        "prompt_text": prompt_text
-                                    }
-                                    session.status = "waiting_permission"
-
-                                    # Send permission request to frontend
-                                    if not await _safe_ws_send(websocket, {
-                                        "type": "permission_request",
-                                        "data": {
-                                            "tool": tool_name,
-                                            "input": tool_input,
-                                            "action_type": action_type,
-                                            "prompt_text": prompt_text
-                                        }
-                                    }):
-                                        print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                        return
-                                    print(f"[AGENT] Permission requested for {tool_name}: {prompt_text[:50]}...")
-                                else:
-                                    # Just send tool_use event (auto-approved)
-                                    if not await _safe_ws_send(websocket, {
-                                        "type": "tool_use",
-                                        "data": {"name": tool_name, "input": tool_input}
-                                    }):
-                                        print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                        return
+                                # The CLI already decided this tool (YOLO approves it, plan
+                                # refuses anything that writes); there is no approval to ask for.
+                                if not await _safe_ws_send(websocket, {
+                                    "type": "tool_use",
+                                    "data": {"name": tool_name, "input": tool_input}
+                                }):
+                                    print(f"[AGENT] Client disconnected during stream, stopping reader")
+                                    return
                     
                     elif event_type == "content_block_delta":
                         delta = event.get("delta", {})
@@ -830,9 +841,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 working_dir = data.get("working_dir") or default_dir
                 prompt_text = data.get("text", "")
                 model = data.get("model", "sonnet")  # Default to sonnet
-                skip_permissions = data.get("skip_permissions", True)  # Default to skip (safe mode)
+                permission_mode = resolve_permission_mode(data)
                 print(f"[AGENT] RAW WebSocket data received: {data}")
-                print(f"[AGENT] Extracted skip_permissions={skip_permissions} (type={type(skip_permissions).__name__})")
+                print(f"[AGENT] Permission mode: {permission_mode}")
 
                 if not prompt_text:
                     await _safe_ws_send(websocket, {"type": "error", "data": "No prompt provided"})
@@ -886,7 +897,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     is_resume_from_disk = False
                     claude_session_id = str(uuid.uuid4())
 
-                print(f"[AGENT] Session mode: continuation={is_continuation}, resume_from_disk={is_resume_from_disk}, message_count: {session.message_count if session else (persisted_session.get('message_count', 0) if persisted_session else 0)}, model: {model}, skip_permissions: {skip_permissions}")
+                print(f"[AGENT] Session mode: continuation={is_continuation}, resume_from_disk={is_resume_from_disk}, message_count: {session.message_count if session else (persisted_session.get('message_count', 0) if persisted_session else 0)}, model: {model}, permission_mode: {permission_mode}")
 
                 # Plan Task 4: only prepend fossil context to brand-new sessions.
                 # Continuations and resume-from-disk already carry prior turns
@@ -904,7 +915,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     continue_session=is_continuation,
                     resume_session=is_resume_from_disk,
                     model=model,
-                    skip_permissions=skip_permissions
+                    permission_mode=permission_mode
                 )
 
                 if session is None:
@@ -923,7 +934,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         claude_session_id=claude_session_id,
                         message_count=restored_msg_count + 1,
                         model=model,
-                        skip_permissions=skip_permissions,
+                        permission_mode=permission_mode,
                         provenance=provenance,
                     )
                     if is_resume_from_disk:
@@ -935,7 +946,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     session.status = "running"
                     session.message_count += 1
                     session.model = model  # Update model in case user changed it
-                    session.skip_permissions = skip_permissions  # Update permission mode
+                    session.permission_mode = permission_mode  # Update permission mode
                     # Refresh provenance to reflect the latest user prompt
                     session.provenance = provenance
 
@@ -1003,6 +1014,11 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     if session.process.poll() is None:
                         session.process.terminate()
 
+                # A follow-up may switch modes (the user flipped Plan/YOLO between turns);
+                # one that names no mode keeps the session's.
+                if "permission_mode" in data or "skip_permissions" in data:
+                    session.permission_mode = resolve_permission_mode(data)
+
                 # Create continuation process with --continue flag
                 process = create_claude_streaming(
                     session.working_directory,
@@ -1010,7 +1026,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     claude_session_id=None,
                     continue_session=True,  # Use --continue for follow-up
                     model=session.model,  # Use the session's model
-                    skip_permissions=session.skip_permissions  # Use the session's permission mode
+                    permission_mode=session.permission_mode  # Use the session's permission mode
                 )
 
                 # Update session
@@ -1066,25 +1082,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 print(f"[AGENT] Session ended by user: {session_id}")
 
             elif data["type"] == "permission_response":
-                # Handle permission response from frontend
-                approved = data.get("approved", False)
-                with agent_lock:
-                    session = AGENT_SESSIONS.get(session_id)
-                if session and session.process and session.process.stdin:
-                    try:
-                        response = "y\n" if approved else "n\n"
-                        session.process.stdin.write(response.encode())
-                        session.process.stdin.flush()
-                        print(f"[AGENT] Sent permission response: {'approved' if approved else 'denied'}")
-                        # Update session status
-                        session.status = "running"
-                        session.pending_permission = None
-                    except Exception as e:
-                        print(f"[AGENT] Failed to send permission response: {e}")
-                        await _safe_ws_send(websocket, {
-                            "type": "error",
-                            "data": f"Failed to send permission response: {e}"
-                        })
+                # No approval round-trip exists (see PERMISSION_MODE_*): print mode reads no
+                # y/n from stdin, so an answer has nowhere to go. Say so instead of
+                # pretending it was delivered.
+                await _safe_ws_send(websocket, {"type": "error", "data": UNSUPPORTED_APPROVAL_MESSAGE})
 
             elif data["type"] == "reconnect":
                 # Reconnect to existing session to resume streaming

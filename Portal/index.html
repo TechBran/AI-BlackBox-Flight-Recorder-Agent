@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui334"/> <!-- v334: Google Workspace modal — Reconnect for a rejected sign-in -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui335"/> <!-- v335: agent permission modes are real (YOLO / Plan, Normal removed); v334: Google Workspace Reconnect -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui334"></script> <!-- v334: Google Workspace modal — Reconnect for a rejected sign-in -->
+  <script type="module" src="/ui/app-modular.js?v=genui335"></script> <!-- v335: agent permission modes are real (YOLO / Plan, Normal removed); v334: Google Workspace Reconnect -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -114,7 +114,7 @@
         <div class="claude-banner-row claude-banner-status-row">
           <span class="claude-banner-status" id="claudeAgentStatus">Ready</span>
           <div class="permission-mode-wrapper" title="Permission mode (Shift+Tab to cycle)">
-            <span class="permission-mode mode-auto" id="permissionModeIndicator">Auto-Accept</span>
+            <span class="permission-mode mode-auto" id="permissionModeIndicator">YOLO</span>
           </div>
         </div>
       </div>

@@ -15,6 +15,22 @@ import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-brow
 import { scrollToBottomIfNeeded, setStreamingState } from './ui-setup.js';
 import { todoTracker } from './todo-tracker.js';
 import { statusLine } from './status-line.js';
+import {
+    PERMISSION_MODE_INFO,
+    nextPermissionMode,
+    permissionPayload,
+    loadPermissionMode,
+    savePermissionMode,
+} from './agent-permission-mode.js';
+
+/** localStorage, or null where reading it throws (private window, blocked site data). */
+function permissionStorage() {
+    try {
+        return window.localStorage;
+    } catch (_) {
+        return null;
+    }
+}
 
 // =============================================================================
 // AgentChatHandler Class
@@ -68,7 +84,7 @@ export class AgentChatHandler {
         // Thinking budget tracking
         this.thinkingTokens = 0;
         this.thinkingBudget = 31999;  // Claude's max thinking budget
-        this.permissionMode = 'auto';  // 'normal', 'auto', 'plan'
+        this.permissionMode = loadPermissionMode(permissionStorage());  // 'yolo' | 'plan'
         // Reasoning animation
         this.reasoningCycleInterval = null;
         this.reasoningPhraseIndex = 0;
@@ -446,15 +462,14 @@ export class AgentChatHandler {
             // Start status line session
             statusLine.startSession(this.sessionId, selectedModel);
 
-            const skipPermissions = true;
-
             const message = {
                 type: 'prompt',
                 text: prompt,
                 operator: operator || window.__operator || 'Brandon',
                 working_dir: null,
                 model: selectedModel,
-                skip_permissions: skipPermissions
+                // The banner's mode switch: plan = read-only, yolo = every tool approved.
+                ...permissionPayload(this.permissionMode)
             };
             console.log('[Agent] Sending:', message);
             this.ws.send(JSON.stringify(message));
@@ -771,22 +786,14 @@ export class AgentChatHandler {
     }
 
     /**
-     * Cycle through permission modes (Normal → Auto → Plan → Normal)
+     * Toggle the permission mode (YOLO ⇄ Plan). It applies from the next message sent.
      */
     cyclePermissionMode() {
-        const modes = ['normal', 'auto', 'plan'];
-        const currentIndex = modes.indexOf(this.permissionMode);
-        const nextIndex = (currentIndex + 1) % modes.length;
-        this.permissionMode = modes[nextIndex];
+        this.permissionMode = nextPermissionMode(this.permissionMode);
+        savePermissionMode(permissionStorage(), this.permissionMode);
         this.updatePermissionModeIndicator();
 
-        // Show toast with new mode
-        const modeNames = {
-            'normal': 'Normal (prompts for permissions)',
-            'auto': 'Auto-Accept (all tools approved)',
-            'plan': 'Plan Mode (read-only)'
-        };
-        toast(`Permission mode: ${modeNames[this.permissionMode]}`);
+        toast(`Permission mode: ${PERMISSION_MODE_INFO[this.permissionMode].description}`);
 
         console.log(`[Agent] Permission mode changed to: ${this.permissionMode}`);
     }
@@ -798,19 +805,14 @@ export class AgentChatHandler {
         const indicator = $('permissionModeIndicator');
         if (!indicator) return;
 
-        const modes = {
-            'normal': { label: 'Normal', class: 'mode-normal' },
-            'auto': { label: 'Auto-Accept', class: 'mode-auto' },
-            'plan': { label: 'Plan Mode', class: 'mode-plan' }
-        };
-
-        const mode = modes[this.permissionMode] || modes['auto'];
+        const mode = PERMISSION_MODE_INFO[this.permissionMode] || PERMISSION_MODE_INFO.plan;
 
         // Update text
         indicator.textContent = mode.label;
+        indicator.title = mode.description;
 
         // Update classes
-        indicator.className = `permission-mode ${mode.class}`;
+        indicator.className = `permission-mode ${mode.className}`;
     }
 
     /**
@@ -1520,13 +1522,12 @@ export class AgentChatHandler {
                         // Start status line session on reconnect
                         statusLine.startSession(this.sessionId, selectedModel);
 
-                        const skipPerms = true;
                         this.ws.send(JSON.stringify({
                             type: 'prompt',
                             text: text,
                             operator: window.__operator || 'Brandon',
                             model: selectedModel,
-                            skip_permissions: skipPerms
+                            ...permissionPayload(this.permissionMode)
                         }));
                     };
                     this.ws.onmessage = (e) => {
@@ -1577,7 +1578,9 @@ export class AgentChatHandler {
 
         const message = {
             type: 'input',
-            text: text
+            text: text,
+            // A mode switched since the last message applies to this one.
+            ...permissionPayload(this.permissionMode)
         };
         console.log('[Agent] Sending input message:', message);
         this.ws.send(JSON.stringify(message));

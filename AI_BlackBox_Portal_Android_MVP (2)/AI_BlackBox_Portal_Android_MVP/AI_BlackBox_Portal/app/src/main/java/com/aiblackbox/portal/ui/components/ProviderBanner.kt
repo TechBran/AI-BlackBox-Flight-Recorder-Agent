@@ -336,12 +336,10 @@ fun ProviderBanner(
                         )
 
                         // Permission mode badge (Claude only)
-                        // Matches Portal .permission-mode.mode-auto / mode-normal / mode-plan
+                        // Matches Portal .permission-mode.mode-auto (YOLO) / mode-plan
                         if (permissionMode.isNotBlank()) {
                             val modeColor = when {
-                                permissionMode.contains("Auto", ignoreCase = true) -> SolidGreen
-                                permissionMode.contains("Confirm", ignoreCase = true) ||
-                                        permissionMode.contains("Normal", ignoreCase = true) -> Color(0xFFFFC107)
+                                permissionMode.contains("YOLO", ignoreCase = true) -> SolidGreen
                                 permissionMode.contains("Plan", ignoreCase = true) -> ClaudeAccent
                                 else -> BbxAccent
                             }
