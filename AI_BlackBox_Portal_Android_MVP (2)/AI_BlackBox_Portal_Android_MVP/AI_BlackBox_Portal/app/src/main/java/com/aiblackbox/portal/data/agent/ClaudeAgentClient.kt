@@ -120,7 +120,7 @@ sealed class AgentEvent {
 //
 // Exactly two modes, each a Claude CLI flag that works in print mode (agent_routes.py):
 //   yolo — every tool approved (--dangerously-skip-permissions); the default
-//   plan — read-only (--permission-mode plan)
+//   plan — read-only (--permission-mode plan, with only read-only tools and no MCP servers)
 // There is no "Normal" (approve each tool) mode: print mode has no approval round-trip, so
 // it hung or auto-denied behind a fake dialog. It returns only with a real approval protocol.
 // =============================================================================

@@ -89,13 +89,25 @@ async def _safe_ws_send(websocket, data: dict) -> bool:
 # Claude Code permission modes the agent surfaces offer (audit P03/O06). Only modes that
 # actually work in non-interactive print mode (-p):
 #   yolo — --dangerously-skip-permissions: every tool runs unattended (the long-standing default)
-#   plan — --permission-mode plan: read-only; the CLI plans and refuses edits and commands
+#   plan — read-only: --permission-mode plan, AND a tool set narrowed to PLAN_MODE_TOOLS
 # There is deliberately no "ask before each tool" mode. Print mode has no stdin y/n protocol,
 # so the old "Normal (prompts)" mode hung or auto-denied behind a fake approval dialog. It can
 # come back only with a real approval round-trip (--permission-prompt-tool, or the stream-json
 # control protocol).
 PERMISSION_MODE_YOLO = "yolo"
 PERMISSION_MODE_PLAN = "plan"
+
+# Plan mode's whole tool set. ``--permission-mode plan`` on its own is NOT read-only here: the
+# CLI still honours the user's and the project's settings in plan mode (this box's allow
+# hundreds of Bash rules and run the auto-mode classifier), and a probe of the plan argv ran
+# ``curl -X POST`` and ``wget --post-data`` with no denial. So plan also pins the built-in
+# tools (``--tools``: a tool left out does not exist for the session, whatever a settings file
+# allows), loads no MCP server (``--strict-mcp-config``: .mcp.json brings the BlackBox tools,
+# which send mail and drive devices), and denies the mutating built-ins outright (deny rules
+# beat allow rules). WebFetch is out too: a GET can still act on this box's own loopback API.
+# Names this CLI build does not know are ignored (TodoWrite is gone from current builds).
+PLAN_MODE_TOOLS = frozenset({"Read", "Grep", "Glob", "WebSearch", "TodoWrite"})
+_PLAN_MODE_DENIED_TOOLS = ("Bash", "Edit", "Write", "NotebookEdit", "WebFetch")
 _PERMISSION_MODE_ALIASES = {
     "yolo": PERMISSION_MODE_YOLO,
     "auto": PERMISSION_MODE_YOLO,   # the Portal's pre-2026-10 key for the same mode
@@ -127,7 +139,8 @@ def build_claude_argv(claude_path: str, prompt: str, *, permission_mode: str,
                       model: str = None, claude_session_id: str = None,
                       continue_session: bool = False, resume_session: bool = False) -> List[str]:
     """The exact argv for a print-mode Claude Code run. Any mode other than yolo gets the
-    read-only ``--permission-mode plan`` (fail safe)."""
+    read-only plan argv (fail safe): ``--permission-mode plan`` plus the pinned
+    PLAN_MODE_TOOLS, no MCP servers and the mutating built-ins denied."""
     cmd = [
         claude_path,
         "-p",  # Print mode - skips trust dialog
@@ -138,7 +151,14 @@ def build_claude_argv(claude_path: str, prompt: str, *, permission_mode: str,
     if permission_mode == PERMISSION_MODE_YOLO:
         cmd.append("--dangerously-skip-permissions")
     else:
-        cmd.extend(["--permission-mode", PERMISSION_MODE_PLAN])
+        # --tools and --disallowedTools take a variadic list, so a boolean flag must follow
+        # them: otherwise the CLI would read the prompt as one more tool name.
+        cmd.extend([
+            "--permission-mode", PERMISSION_MODE_PLAN,
+            "--tools", ",".join(sorted(PLAN_MODE_TOOLS)),
+            "--disallowedTools", ",".join(_PLAN_MODE_DENIED_TOOLS),
+            "--strict-mcp-config",
+        ])
 
     # Add model selection if specified
     if model:
@@ -660,8 +680,8 @@ async def streaming_reader_task(session: AgentSession, websocket: WebSocket):
                                     print(f"[AGENT] TodoWrite: {len(todos)} todos")
                                     continue  # Don't send as generic tool_use
 
-                                # The CLI already decided this tool (YOLO approves it, plan
-                                # refuses anything that writes); there is no approval to ask for.
+                                # The CLI already decided this tool (YOLO approves it; plan
+                                # never offers one that writes); there is no approval to ask for.
                                 if not await _safe_ws_send(websocket, {
                                     "type": "tool_use",
                                     "data": {"name": tool_name, "input": tool_input}

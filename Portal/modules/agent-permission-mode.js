@@ -5,7 +5,7 @@
  *
  * Exactly two modes, each a CLI flag that works in print mode (see agent_routes.py):
  *   yolo — every tool approved (--dangerously-skip-permissions); the default
- *   plan — read-only (--permission-mode plan)
+ *   plan — read-only (--permission-mode plan, with only read-only tools and no MCP servers)
  * There is no "Normal (prompts)" mode: print mode has no approval round-trip, so it hung or
  * auto-denied behind a fake dialog. It comes back only with a real approval protocol.
  */
