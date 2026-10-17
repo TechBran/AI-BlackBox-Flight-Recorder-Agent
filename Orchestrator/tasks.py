@@ -47,6 +47,7 @@ from Orchestrator.media_index import add_media_entry
 from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
+from Orchestrator import tool_outcomes
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.secret_redaction import redact, response_error
 # NOTE: call_imagen, call_google_tts_synthesize, call_gemini_tts, call_lyria_music
@@ -2075,6 +2076,13 @@ def process_chat_task(task: Task):
         if _origin:
             print(f"[CHAT] Origin device for this turn: {_origin}")
 
+        # W15: a fresh per-turn tool-outcome log, opened before provider dispatch
+        # (every BlackBoxToolExecutor call in the call_* loops appends to it) and
+        # published as result_data["tool_outcomes"] so the scheduler can tell a
+        # turn whose tools failed from one that worked. Fresh every task: pooled
+        # worker threads are reused (same reason as the origin stamp above).
+        _tool_log = tool_outcomes.begin()
+
         if not inp.messages:
             raise Exception("The 'messages' field is required and cannot be empty.")
 
@@ -2691,6 +2699,9 @@ def process_chat_task(task: Task):
             # calls /chat/save) can render native download chips. [] when none.
             "artifacts": artifacts_meta,
             "checkpoint_triggered": checkpoint_triggered,
+            # W15: every tool call of this turn as {tool, success[, error]} —
+            # the scheduler's evidence for a failed/partial run. [] when none.
+            "tool_outcomes": list(_tool_log),
         }
 
         update_task(task.task_id,
@@ -2711,6 +2722,8 @@ def process_chat_task(task: Task):
                    error_message=error_msg,
                    result_data={"error": error_msg, "trace": trace},
                    progress=0)
+    finally:
+        tool_outcomes.end()
 
 # -----------------------------------------------------------------------------
 # Helpers

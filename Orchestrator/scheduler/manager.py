@@ -1128,6 +1128,10 @@ class CronJobManager:
         once (not per attempt) only if the run ultimately failed; the job is
         left scheduled/active on failure. A one-shot is deleted only on final
         success (a failed one-shot survives — M2.6).
+
+        W15: a completed turn whose tool calls failed is a failed run
+        (last_run_result 'error', or 'partial' when some tools worked) and is
+        NOT retried — see executor.CronToolFailure.
         """
         job = self.get_job(job_id)
         if job is None:
@@ -1136,6 +1140,7 @@ class CronJobManager:
 
         # --- Bounded retry loop: each attempt writes its own history row. ---
         final_error: Optional[str] = None
+        final_status = "error"
         last_duration_ms = 0
         last_run_at = datetime.now(timezone.utc)
         succeeded = False
@@ -1144,9 +1149,8 @@ class CronJobManager:
         success_result_text: Optional[str] = None
 
         for attempt in range(MAX_RETRIES + 1):
-            result_text, error_text, duration_ms, attempt_run_at = (
-                await self._attempt_once(job)
-            )
+            (result_text, error_text, duration_ms, attempt_run_at,
+             delivery_status, retryable) = await self._attempt_once(job)
             last_duration_ms = duration_ms
             last_run_at = attempt_run_at
 
@@ -1162,6 +1166,13 @@ class CronJobManager:
                 break
 
             final_error = error_text
+            final_status = delivery_status
+            if not retryable:
+                logger.warning(
+                    "Cron job %s finished with failed tool calls (%s); not retrying",
+                    job_id, error_text,
+                )
+                break
             # More attempts remain → back off, then retry within the lock.
             if attempt < MAX_RETRIES:
                 backoff = self._retry_backoff_for(attempt)
@@ -1180,7 +1191,10 @@ class CronJobManager:
         except Exception:
             next_run_at = None
 
-        last_run_result = "success" if succeeded else "error"
+        if succeeded:
+            last_run_result = "success"
+        else:
+            last_run_result = "partial" if final_status == "partial" else "error"
         now_iso = datetime.now(timezone.utc).isoformat()
 
         conn = sqlite3.connect(self.db_path)
@@ -1260,6 +1274,7 @@ class CronJobManager:
             error_text=final_error,
             result_text=success_result_text,
             fire_ts=last_run_at.isoformat(),
+            partial=last_run_result == "partial",
         )
 
     async def _notify_run_outcome(
@@ -1270,6 +1285,7 @@ class CronJobManager:
         error_text: Optional[str],
         result_text: Optional[str],
         fire_ts: str,
+        partial: bool = False,
     ) -> None:
         """Push the run's outcome to the notification bus (M5.1).
 
@@ -1277,10 +1293,11 @@ class CronJobManager:
         _run_job_body (the job's status/stats are already durably written by
         the time we get here):
 
-          * TERMINAL failure (all retries exhausted) -> notify(category='alert')
-            EXACTLY once. The dedup_key (cronfail:<job_id>:<fire_ts>) is stable
-            for this run, so the bus collapses any duplicate into one logical
-            alert.
+          * TERMINAL failure (all retries exhausted, or a turn whose tool
+            calls failed — ``partial`` when some of them worked) ->
+            notify(category='alert') EXACTLY once. The dedup_key
+            (cronfail:<job_id>:<fire_ts>) is stable for this run, so the bus
+            collapses any duplicate into one logical alert.
           * SUCCESS with delivery='notification' -> notify(category='cron')
             with the reply text. This finally realizes the long-dead
             'notification' delivery mode (it used to silently fall through to
@@ -1305,7 +1322,8 @@ class CronJobManager:
                 await notify(
                     operator=operator,
                     category="alert",
-                    title=f"Cron job failed: {job_name}",
+                    title=(f"Cron job partially failed: {job_name}" if partial
+                           else f"Cron job failed: {job_name}"),
                     body=error_text or "Unknown error",
                     dedup_key=f"cronfail:{job_id}:{fire_ts}",
                 )
@@ -1344,8 +1362,15 @@ class CronJobManager:
     async def _attempt_once(self, job: Dict[str, Any]):
         """Run the executor once and write THIS attempt's history row.
 
-        Returns ``(result_text, error_text, duration_ms, run_at)``. A non-None
-        error_text means the attempt failed.
+        Returns ``(result_text, error_text, duration_ms, run_at,
+        delivery_status, retryable)``. A non-None error_text means the attempt
+        failed; delivery_status is 'delivered', 'error' or 'partial'.
+
+        W15: an executor.CronToolFailure (the turn completed but its tool calls
+        failed) is recorded with the reply AND the tool error, as 'error' or
+        'partial', and is not retryable. It is recognised by its attributes
+        rather than by class so the except clause never depends on the lazy
+        import below having succeeded.
         """
         job_id = job["id"]
         run_at = datetime.now(timezone.utc)
@@ -1353,6 +1378,7 @@ class CronJobManager:
         result_text: Optional[str] = None
         error_text: Optional[str] = None
         delivery_status: str = "pending"
+        retryable = True
 
         try:
             # Lazy import to avoid circular dependencies. executor.py always
@@ -1363,7 +1389,13 @@ class CronJobManager:
         except Exception as exc:
             error_text = str(exc)
             delivery_status = "error"
-            logger.exception("Error executing cron job %s", job_id)
+            if hasattr(exc, "delivery_status") and getattr(exc, "retryable", True) is False:
+                retryable = False
+                result_text = getattr(exc, "result_text", None) or None
+                delivery_status = getattr(exc, "delivery_status", "error")
+                logger.warning("Cron job %s: %s", job_id, error_text)
+            else:
+                logger.exception("Error executing cron job %s", job_id)
 
         end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         duration_ms = end_ms - start_ms
@@ -1392,7 +1424,7 @@ class CronJobManager:
         finally:
             conn.close()
 
-        return result_text, error_text, duration_ms, run_at
+        return result_text, error_text, duration_ms, run_at, delivery_status, retryable
 
     def _record_skipped_run(self, job_id: str) -> None:
         """Write a history row noting a run was skipped because the job was

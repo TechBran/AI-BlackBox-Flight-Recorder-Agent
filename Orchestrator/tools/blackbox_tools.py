@@ -14,6 +14,7 @@ import base64
 import json
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
+from Orchestrator import tool_outcomes
 from Orchestrator.contacts import search_contacts as _search_contacts, upsert_contact
 
 # Import from the unified registry (single source of truth)
@@ -153,7 +154,17 @@ class BlackBoxToolExecutor:
         it with a :class:`ToolContext`. Every tool — including ``toolvault`` —
         now ships an ``executor.py`` module, so there is no legacy fallback: an
         unknown tool (no module executor) is a hard error.
+
+        Every outcome (success, failure, unknown tool, crash) is also appended
+        to the turn's tool-outcome log when one is open (tool_outcomes), so the
+        owner of a whole turn — the /chat worker, and through it the scheduler —
+        can tell a turn whose tools failed from one that worked.
         """
+        result = await self._dispatch(tool_name, tool_input)
+        tool_outcomes.record(tool_name, result)
+        return result
+
+    async def _dispatch(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
         from Orchestrator.toolvault import registry
         from Orchestrator.toolvault.context import ToolContext
 

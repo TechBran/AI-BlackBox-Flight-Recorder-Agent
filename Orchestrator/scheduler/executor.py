@@ -70,6 +70,64 @@ def _get_cu_lock():
     return _CU_LOCK
 
 
+class CronToolFailure(RuntimeError):
+    """The chat turn completed, but tool calls it made failed and were not recovered.
+
+    Raised by execute_cron_job so the run is recorded honestly instead of as a
+    success because the model wrote a reply (W15). ``partial`` is True when some
+    other tool call in the turn succeeded. The manager records ``result_text``
+    (the reply) alongside the error and does NOT retry: the turn already ran and
+    was minted, and a re-run would repeat any side effects that did succeed.
+    """
+
+    retryable = False
+
+    def __init__(self, message: str, *, result_text: str, failures: list, partial: bool):
+        super().__init__(message)
+        self.result_text = result_text
+        self.failures = failures
+        self.partial = partial
+
+    @property
+    def delivery_status(self) -> str:
+        return "partial" if self.partial else "error"
+
+
+def _summarize_tool_failures(failures: list) -> str:
+    """'list_events (x2): <error>; gmail_search: <error>' — grouped by tool, in order."""
+    grouped: Dict[str, list] = {}
+    for f in failures:
+        slot = grouped.setdefault(f.get("tool", "?"), [0, ""])
+        slot[0] += 1
+        slot[1] = f.get("error") or slot[1]
+    parts = []
+    for tool, (count, error) in grouped.items():
+        label = f"{tool} (x{count})" if count > 1 else tool
+        parts.append(f"{label}: {error}" if error else label)
+    return "; ".join(parts)
+
+
+def _raise_on_tool_failures(result_data: Dict[str, Any], job_name: str, reply: str) -> None:
+    """Raise CronToolFailure when the turn's tool calls failed (see tool_outcomes.verdict).
+
+    A server without the tool-outcome log (no "tool_outcomes" key) and a turn
+    with no failing calls pass through unchanged.
+    """
+    from Orchestrator.tool_outcomes import verdict
+
+    found = verdict(result_data.get("tool_outcomes"))
+    if found is None:
+        return
+    failures = found["failures"]
+    summary = _summarize_tool_failures(failures)
+    if found["partial"]:
+        message = f"partial run: {len(failures)} of {found['total']} tool calls failed — {summary}"
+    else:
+        message = f"tool calls failed — {summary}"
+    logger.warning("Cron job '%s' %s", job_name, message)
+    raise CronToolFailure(message, result_text=reply, failures=failures, partial=found["partial"])
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -91,6 +149,8 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
     Raises:
         RuntimeError: If the chat API is unreachable, the task fails, or
             the polling timeout is exceeded.
+        CronToolFailure: If the turn completed but tool calls it made failed
+            (a RuntimeError subclass carrying the reply; not retried).
     """
     start_time = time.monotonic()
     prompt = job["prompt"]
@@ -382,6 +442,11 @@ async def _poll_task_until_done(task_id: str, job_name: str) -> str:
             status = data.get("status", "")
 
             if status == "completed":
+                # Tool failures first: a turn whose tools all failed may still
+                # carry (or lack) reply text, and the tool error is the real story.
+                result_data = data.get("result_data")
+                if isinstance(result_data, dict):
+                    _raise_on_tool_failures(result_data, job_name, _reply_text(result_data))
                 return _extract_reply(data, job_name)
 
             if status == "failed":
@@ -404,6 +469,15 @@ async def _poll_task_until_done(task_id: str, job_name: str) -> str:
     )
 
 
+def _reply_text(result_data: Dict[str, Any]) -> str:
+    """The reply text of a completed task's result_data, or "" when it has none."""
+    for key in ("ui_reply", "reply", "text"):
+        value = result_data.get(key)
+        if value and isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _extract_reply(task_data: Dict[str, Any], job_name: str) -> str:
     """Extract the LLM reply text from a completed task."""
     result_data = task_data.get("result_data")
@@ -412,10 +486,9 @@ def _extract_reply(task_data: Dict[str, Any], job_name: str) -> str:
             f"Completed task for job '{job_name}' has no result_data"
         )
 
-    for key in ("ui_reply", "reply", "text"):
-        value = result_data.get(key)
-        if value and isinstance(value, str) and value.strip():
-            return value.strip()
+    reply = _reply_text(result_data)
+    if reply:
+        return reply
 
     raise RuntimeError(
         f"Completed task for job '{job_name}' has no reply text in result_data"
