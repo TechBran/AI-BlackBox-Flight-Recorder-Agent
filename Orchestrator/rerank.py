@@ -1326,7 +1326,7 @@ def _score_vertex(query: str, passages: list[str],
 # biggest latency/cost lever. The 4 provider request-shapes are small per-key
 # helpers dispatched by key_env; each makes exactly ONE requests.post and returns
 # the completion text or None (never raises), mirroring the box's existing
-# frontier call styles (web_tools.py / sms_processor.py / config.py URLs).
+# frontier call styles (web_tools.py / config.py URLs).
 
 _LLM_SNIPPET_CHARS = 512
 

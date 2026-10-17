@@ -2,23 +2,17 @@
 
 claude-sonnet-4-20250514 sat hard-coded in the Twilio SMS handler (and its
 dead twin, phone/sms_processor.py) after Anthropic retired it, so every SMS
-reply 404'd with not_found_error. The static /models/anthropic fallback
-catalog carried four more retired ids. These tests:
+reply 404'd with not_found_error. Both have since been deleted (2026-10
+security pass: TG200 is the only SMS path). The static /models/anthropic
+fallback catalog carried four more retired ids. These tests:
 
   1. AST-scan every Python source under Orchestrator/ (excluding tests/venv)
      for a string literal that IS a retired Claude id. Legacy-detection
      tables (`*_PREFIXES`, `*RETIRED*`, `*LEGACY*`, `*DEPRECATED*`
      assignments) are exempt — they match old ids, they never send them.
-  2. Drive the Twilio SMS webhook and process_incoming_sms with aiohttp and
-     the tool executor stubbed, asserting both Messages calls (initial +
-     tool-result follow-up) take their model from config.ANTHROPIC_MODEL_DEFAULT
-     and carry nothing the current models reject.
-  3. Check the static fallback catalogs contain only live ids.
+  2. Check the static fallback catalogs contain only live ids.
 """
-import asyncio
 import ast
-import copy
-import json
 import re
 import warnings
 from pathlib import Path
@@ -26,7 +20,6 @@ from pathlib import Path
 import pytest
 
 from Orchestrator import config
-from Orchestrator.toolvault.context import ToolResult
 
 ORCH_DIR = Path(__file__).resolve().parents[1]
 _SKIP_DIRS = {"tests", "venv", ".venv", "__pycache__", "site-packages", "node_modules"}
@@ -146,118 +139,7 @@ def test_configured_default_is_not_retired():
     assert not _is_retired(config.ANTHROPIC_MODEL_DEFAULT)
 
 
-# ── 2. SMS handlers take the model from config ───────────────────────────────
-
-SENTINEL_MODEL = "claude-sentinel-from-config"
-
-
-class _FakeResp:
-    def __init__(self, body):
-        self.status = 200
-        self._body = body
-
-    async def json(self):
-        return self._body
-
-    async def text(self):
-        return json.dumps(self._body)
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-def _fake_session_factory(captured, replies):
-    class _FakeSession:
-        def __init__(self, *a, **kw):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        def post(self, url, headers=None, json=None, timeout=None):
-            # Deep-copy: the handler appends to `messages` after this call.
-            captured.append({"url": url, "payload": copy.deepcopy(json)})
-            return _FakeResp(replies.pop(0))
-    return _FakeSession
-
-
-class _FakeExecutor:
-    """Stands in for BlackBoxToolExecutor — no real tool (send_sms!) ever runs."""
-
-    def __init__(self, *a, **kw):
-        pass
-
-    async def execute(self, tool_name, tool_input):
-        return ToolResult(success=True, result="2026-10-07T12:00:00-04:00")
-
-
-_TOOL_USE_REPLY = {
-    "stop_reason": "tool_use",
-    "content": [{"type": "tool_use", "id": "toolu_test", "name": "get_current_time", "input": {}}],
-}
-_TEXT_REPLY = {"stop_reason": "end_turn", "content": [{"type": "text", "text": "It's noon."}]}
-
-
-@pytest.fixture
-def sms_env(monkeypatch):
-    import aiohttp
-    captured, replies = [], [_TOOL_USE_REPLY, _TEXT_REPLY]
-    monkeypatch.setattr(aiohttp, "ClientSession", _fake_session_factory(captured, replies))
-    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", SENTINEL_MODEL)
-    return captured
-
-
-def _assert_valid_for_current_models(calls):
-    assert len(calls) == 2, "expected initial call + tool-result follow-up"
-    for call in calls:
-        p = call["payload"]
-        assert call["url"] == "https://api.anthropic.com/v1/messages"
-        assert p["model"] == SENTINEL_MODEL, "model must come from config.ANTHROPIC_MODEL_DEFAULT"
-        # Opus 4.7+ / the 5.x tier 400 on non-default sampling params and budget_tokens.
-        for key in ("temperature", "top_p", "top_k", "thinking"):
-            assert key not in p
-        assert 0 < p["max_tokens"] <= 128000
-        assert p["messages"][-1]["role"] == "user"   # no assistant prefill
-        assert p["tools"] and all("name" in t for t in p["tools"])
-    follow_up = calls[1]["payload"]["messages"]
-    assert [m["role"] for m in follow_up] == ["user", "assistant", "user"]
-    result_block = follow_up[-1]["content"][0]
-    assert result_block["type"] == "tool_result"
-    assert result_block["tool_use_id"] == "toolu_test"
-    assert isinstance(result_block["content"], str)
-
-
-def test_twilio_sms_webhook_uses_configured_default_model(sms_env, monkeypatch):
-    from Orchestrator.routes import twilio_routes as tw
-    monkeypatch.setattr(tw, "BlackBoxToolExecutor", _FakeExecutor)
-
-    resp = asyncio.run(tw.twilio_sms_webhook(
-        None, From="+15551234567", To="+15557654321",
-        Body="what time is it?", MessageSid="SMtest"))
-
-    _assert_valid_for_current_models(sms_env)
-    assert b"It's noon." in resp.body
-
-
-def test_sms_processor_uses_configured_default_model(sms_env, monkeypatch):
-    from Orchestrator.phone import sms_processor
-    from Orchestrator.tools import blackbox_tools
-    monkeypatch.setattr(blackbox_tools, "BlackBoxToolExecutor", _FakeExecutor)
-
-    reply = asyncio.run(sms_processor.process_incoming_sms(
-        "+15551234567", "what time is it?", "SMS-4567"))
-
-    _assert_valid_for_current_models(sms_env)
-    assert reply == "It's noon."
-
-
-# ── 3. Static fallback catalogs list only live ids ───────────────────────────
+# ── 2. Static fallback catalogs list only live ids ───────────────────────────
 
 def test_anthropic_fallback_catalog_has_only_live_ids():
     from Orchestrator.routes.admin_routes import _FALLBACK_MODELS

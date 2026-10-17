@@ -49,6 +49,10 @@ class PhoneSession:
 
         ivr_selection: IVR menu selection (1-4)
         ivr_retries: Number of IVR retry attempts
+        pin_verified: Caller passed the PIN gate on this call
+        pin_attempts: PIN attempts used on this call (server-side count)
+        media_authorized: A media stream URL was issued for this call
+        media_connected: That media stream already attached
 
         ai_backend: Selected AI backend
         ai_session_id: Session ID of the bridged AI session
@@ -81,6 +85,12 @@ class PhoneSession:
     ivr_selection: int = 0  # 1=Claude, 2=Gemini, 3=OpenAI, 4=Grok
     ivr_retries: int = 0
     ivr_input_buffer: str = ""  # Buffer for DTMF input
+
+    # PIN gate + media binding (server-side; never trust caller-supplied counters)
+    pin_verified: bool = False  # Caller entered the correct PIN on this call
+    pin_attempts: int = 0  # PIN attempts used on this call (incl. timeouts)
+    media_authorized: bool = False  # A <Connect><Stream> for this call was issued
+    media_connected: bool = False  # Its media stream already attached (one per call)
 
     # AI backend connection
     ai_backend: AIBackend = AIBackend.OPENAI_REALTIME  # Default

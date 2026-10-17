@@ -4,22 +4,31 @@ twilio_routes.py - Twilio Voice Webhooks and Media Streams
 
 Handles Twilio Programmable Voice integration:
 - POST /twilio/voice - Incoming call webhook (returns TwiML)
+- POST /twilio/pin - PIN gate (attempts + verified flag kept on the session)
 - POST /twilio/gather - IVR DTMF collection webhook
+- POST /twilio/operator - Operator selection webhook
 - POST /twilio/status - Call status callback
 - WS /twilio/media/{session_id} - Media Streams WebSocket for audio
+
+Every route Twilio itself calls carries Depends(require_twilio_signature)
+(X-Twilio-Signature, 403 on failure). The other POSTs under /twilio
+(/twilio/call, /twilio/cli/*, /twilio/inject-audio) are the box's own
+server-to-server APIs and are never reached by Twilio. Inbound SMS is not
+handled here: TG200 (Orchestrator/sms/) is the only SMS path.
 
 This provides an alternative to FreeSwitch ESL for phone-AI bridging
 when using Twilio Elastic SIP Trunking with 3CX.
 """
 
 import asyncio
+import hmac
 import json
 import uuid
 import base64
 from typing import Optional, Dict, Any
 from xml.etree.ElementTree import Element, SubElement, tostring
 
-from fastapi import WebSocket, WebSocketDisconnect, Request, Form
+from fastapi import Depends, WebSocket, WebSocketDisconnect, Request, Form
 from fastapi.responses import Response, PlainTextResponse
 
 from Orchestrator.checkpoint import app
@@ -35,10 +44,9 @@ from Orchestrator.config import (
     TWILIO_AUTH_TOKEN,
     TWILIO_PHONE_NUMBER,
     USERS_LIST,
-    PHONE_PIN_ENABLED,
-    PHONE_PIN_CODE,
-    PHONE_PIN_MAX_ATTEMPTS,
 )
+from Orchestrator.phone import pin_gate
+from Orchestrator.phone.twilio_signature import require_twilio_signature
 from pydantic import BaseModel
 
 # Twilio REST client for outbound calls
@@ -81,7 +89,13 @@ from Orchestrator.phone.ivr_prompts import (
     build_operator_selection_prompt,
     build_operator_retry_prompt,
     get_operator_confirmation,
+    IVR_PIN_FAILED,
+    IVR_PIN_LOCKED,
+    IVR_PIN_UNAVAILABLE,
 )
+
+# Dependencies for every route Twilio calls: reject unsigned/forged requests.
+TWILIO_SIGNED = [Depends(require_twilio_signature)]
 
 
 # =============================================================================
@@ -93,24 +107,28 @@ def twiml_response(content: str) -> Response:
     return Response(content=content, media_type="application/xml")
 
 
-def create_twiml_pin_prompt(session_id: str, retry_count: int = 0, invalid: bool = False) -> str:
+def create_twiml_pin_prompt(session_id: str, invalid: bool = False) -> str:
     """
     Create TwiML for PIN entry prompt.
 
+    The digit count comes from the configured PIN. The attempt count lives on
+    the session (server-side), so the URLs carry no retry counter for a caller
+    to reset.
+
     Args:
         session_id: Phone session ID
-        retry_count: Number of failed attempts
         invalid: Whether the last PIN was invalid
 
     Returns:
         TwiML XML string
     """
+    pin_len = pin_gate.pin_length()
     response = Element("Response")
 
-    # Gather 4-digit PIN
+    # Gather the PIN (length derived from PHONE_PIN_CODE)
     gather = SubElement(response, "Gather", {
-        "numDigits": "4",
-        "action": f"/twilio/pin?session_id={session_id}&retry={retry_count}",
+        "numDigits": str(pin_len),
+        "action": f"/twilio/pin?session_id={session_id}",
         "timeout": "10",
         "method": "POST",
     })
@@ -118,19 +136,14 @@ def create_twiml_pin_prompt(session_id: str, retry_count: int = 0, invalid: bool
     # Say the prompt
     say = SubElement(gather, "Say", {"voice": "Polly.Matthew"})
     if invalid:
-        say.text = "Invalid PIN. Please enter your 4 digit PIN."
+        say.text = f"Invalid PIN. Please enter your {pin_len} digit PIN."
     else:
-        say.text = "Welcome to AI BlackBox. Please enter your 4 digit PIN."
+        say.text = f"Welcome to AI BlackBox. Please enter your {pin_len} digit PIN."
 
-    # If no input, redirect to try again
-    if retry_count < PHONE_PIN_MAX_ATTEMPTS - 1:
-        redirect = SubElement(response, "Redirect", {"method": "POST"})
-        redirect.text = f"/twilio/pin?session_id={session_id}&retry={retry_count + 1}&timeout=true"
-    else:
-        # Max retries - hang up
-        say_fail = SubElement(response, "Say", {"voice": "Polly.Matthew"})
-        say_fail.text = "Too many failed attempts. Goodbye."
-        SubElement(response, "Hangup")
+    # No input: fall through to /twilio/pin, which counts the attempt and
+    # decides whether to prompt again or hang up.
+    redirect = SubElement(response, "Redirect", {"method": "POST"})
+    redirect.text = f"/twilio/pin?session_id={session_id}&timeout=true"
 
     return tostring(response, encoding="unicode")
 
@@ -243,6 +256,10 @@ def create_twiml_connect(session_id: str, operator_name: str) -> str:
     # Get the session to know which backend was selected
     session = get_session(session_id)
     backend_name = get_backend_name(session.ivr_selection) if session else "GPT"
+    # Handing out the <Stream> URL is what lets this call's media socket attach
+    # (twilio_media_websocket refuses sessions without it).
+    if session:
+        session.media_authorized = True
 
     # Say personalized confirmation
     say = SubElement(response, "Say", {"voice": "Polly.Matthew"})
@@ -269,10 +286,40 @@ def create_twiml_hangup(message: str = "") -> str:
 
 
 # =============================================================================
+# Call binding + PIN state (server-side)
+# =============================================================================
+
+def _call_matches(session: PhoneSession, call_sid: str) -> bool:
+    """True when ``call_sid`` is the call this session was created for."""
+    return bool(session.call_id) and hmac.compare_digest(
+        str(call_sid or "").encode(), session.call_id.encode())
+
+
+def _pin_cleared(session: PhoneSession) -> bool:
+    """True once this call may use the IVR menus (PIN entered, or gate off on purpose)."""
+    status = pin_gate.gate_status()
+    if status == "disabled":
+        return True
+    return status == "ready" and session.pin_verified
+
+
+def _menu_session(session_id: str, call_sid: str, stage: str) -> Optional[PhoneSession]:
+    """Session for an IVR menu webhook, or None when this call may not be there."""
+    session = get_session(session_id)
+    if not session or not _call_matches(session, call_sid):
+        print(f"[TWILIO] {stage}: unknown session or CallSid mismatch: {session_id}")
+        return None
+    if not _pin_cleared(session):
+        print(f"[TWILIO] {stage}: refusing session that has not passed the PIN: {session_id}")
+        return None
+    return session
+
+
+# =============================================================================
 # Twilio Voice Webhooks
 # =============================================================================
 
-@app.post("/twilio/voice")
+@app.post("/twilio/voice", dependencies=TWILIO_SIGNED)
 async def twilio_voice_webhook(
     request: Request,
     CallSid: str = Form(default=""),
@@ -306,22 +353,31 @@ async def twilio_voice_webhook(
     )
     PHONE_SESSIONS[session_id] = session
 
-    # If PIN is enabled, require PIN before IVR menu
-    if PHONE_PIN_ENABLED:
+    # PIN gate: fails closed when no PIN is configured
+    gate = pin_gate.gate_status()
+    if gate == "unconfigured":
+        pin_gate.log_unconfigured("TWILIO")
+        session.status = PhoneStatus.FAILED
+        return twiml_response(create_twiml_hangup(IVR_PIN_UNAVAILABLE))
+    if gate == "ready":
+        locked_for = pin_gate.lockout_remaining(From)
+        if locked_for:
+            print(f"[TWILIO] Caller {pin_gate.mask_caller(From)} is locked out "
+                  f"({locked_for}s left), refusing: {session_id}")
+            session.status = PhoneStatus.FAILED
+            return twiml_response(create_twiml_hangup(IVR_PIN_LOCKED))
         print(f"[TWILIO] PIN required for inbound call: {session_id}")
-        twiml = create_twiml_pin_prompt(session_id, retry_count=0, invalid=False)
-        return twiml_response(twiml)
+        return twiml_response(create_twiml_pin_prompt(session_id))
 
-    # No PIN required - go directly to IVR menu
+    # PIN gate disabled on purpose (PHONE_PIN_ENABLED=false) - go directly to IVR menu
     twiml = create_twiml_ivr(session_id, IVR_WELCOME.strip(), 0)
     return twiml_response(twiml)
 
 
-@app.post("/twilio/pin")
+@app.post("/twilio/pin", dependencies=TWILIO_SIGNED)
 async def twilio_pin_webhook(
     request: Request,
     session_id: str = "",
-    retry: int = 0,
     timeout: bool = False,
     Digits: str = Form(default=""),
     CallSid: str = Form(default=""),
@@ -329,40 +385,53 @@ async def twilio_pin_webhook(
     """
     Twilio PIN verification webhook.
 
-    Called when user enters their 4-digit PIN to gate inbound calls.
+    Called when the caller enters the PIN that gates inbound calls. The
+    attempt count and the verified flag live on the session; nothing in the
+    URL is trusted. Never logs the PIN or the digits entered.
     """
     session = get_session(session_id)
-    if not session:
+    if not session or not _call_matches(session, CallSid):
         return twiml_response(create_twiml_hangup("Session not found."))
 
     session.last_activity = now_utc_iso()
 
+    gate = pin_gate.gate_status()
+    if session.pin_verified or gate == "disabled":
+        return twiml_response(create_twiml_ivr(session_id, IVR_WELCOME.strip(), 0))
+    if gate == "unconfigured":
+        pin_gate.log_unconfigured("TWILIO")
+        return twiml_response(create_twiml_hangup(IVR_PIN_UNAVAILABLE))
+    if pin_gate.lockout_remaining(session.caller_id):
+        return twiml_response(create_twiml_hangup(IVR_PIN_LOCKED))
+
+    max_attempts = pin_gate.max_attempts()
+    session.pin_attempts += 1
+    attempt = session.pin_attempts
+
     # Handle timeout (no input)
     if timeout or not Digits:
-        if retry >= PHONE_PIN_MAX_ATTEMPTS - 1:
-            print(f"[TWILIO] PIN timeout, max retries reached: {session_id}")
-            return twiml_response(create_twiml_hangup("Too many failed attempts. Goodbye."))
-        else:
-            # Retry prompt
-            print(f"[TWILIO] PIN timeout, retry {retry + 1}: {session_id}")
-            return twiml_response(create_twiml_pin_prompt(session_id, retry + 1, invalid=False))
+        if attempt >= max_attempts:
+            print(f"[TWILIO] PIN timeout, max attempts reached: {session_id}")
+            return twiml_response(create_twiml_hangup(IVR_PIN_FAILED))
+        print(f"[TWILIO] PIN timeout, attempt {attempt}/{max_attempts}: {session_id}")
+        return twiml_response(create_twiml_pin_prompt(session_id))
 
     # Validate PIN
-    if Digits == PHONE_PIN_CODE:
-        # PIN correct - proceed to IVR menu
-        print(f"[TWILIO] PIN verified for session: {session_id}")
+    if pin_gate.check_pin(Digits):
+        session.pin_verified = True
+        pin_gate.record_success(session.caller_id)
+        print(f"[TWILIO] PIN verified on attempt {attempt}: {session_id}")
         return twiml_response(create_twiml_ivr(session_id, IVR_WELCOME.strip(), 0))
-    else:
-        # PIN incorrect
-        if retry >= PHONE_PIN_MAX_ATTEMPTS - 1:
-            print(f"[TWILIO] PIN invalid, max retries reached: {session_id}")
-            return twiml_response(create_twiml_hangup("Too many failed attempts. Goodbye."))
-        else:
-            print(f"[TWILIO] PIN invalid, retry {retry + 1}: {session_id}")
-            return twiml_response(create_twiml_pin_prompt(session_id, retry + 1, invalid=True))
+
+    print(f"[TWILIO] PIN attempt {attempt}/{max_attempts} rejected: {session_id}")
+    if pin_gate.record_failure(session.caller_id):
+        return twiml_response(create_twiml_hangup(IVR_PIN_LOCKED))
+    if attempt >= max_attempts:
+        return twiml_response(create_twiml_hangup(IVR_PIN_FAILED))
+    return twiml_response(create_twiml_pin_prompt(session_id, invalid=True))
 
 
-@app.post("/twilio/gather")
+@app.post("/twilio/gather", dependencies=TWILIO_SIGNED)
 async def twilio_gather_webhook(
     request: Request,
     session_id: str = "",
@@ -377,7 +446,7 @@ async def twilio_gather_webhook(
     Called when user presses a digit or times out.
     After AI selection, redirects to operator selection.
     """
-    session = get_session(session_id)
+    session = _menu_session(session_id, CallSid, "gather")
     if not session:
         return twiml_response(create_twiml_hangup("Session not found."))
 
@@ -423,7 +492,7 @@ async def twilio_gather_webhook(
     return twiml_response(create_twiml_operator_selection(session_id, 0))
 
 
-@app.post("/twilio/operator")
+@app.post("/twilio/operator", dependencies=TWILIO_SIGNED)
 async def twilio_operator_webhook(
     request: Request,
     session_id: str = "",
@@ -437,7 +506,7 @@ async def twilio_operator_webhook(
 
     Called when user selects their operator identity.
     """
-    session = get_session(session_id)
+    session = _menu_session(session_id, CallSid, "operator")
     if not session:
         return twiml_response(create_twiml_hangup("Session not found."))
 
@@ -484,7 +553,7 @@ async def twilio_operator_webhook(
     return twiml_response(create_twiml_connect(session_id, operator_name))
 
 
-@app.post("/twilio/status")
+@app.post("/twilio/status", dependencies=TWILIO_SIGNED)
 async def twilio_status_webhook(
     request: Request,
     CallSid: str = Form(default=""),
@@ -513,197 +582,6 @@ async def twilio_status_webhook(
 
 
 # =============================================================================
-# Twilio SMS Webhook
-# =============================================================================
-
-# Import unified BlackBox tools
-from Orchestrator.tools import BLACKBOX_TOOLS_ANTHROPIC, BlackBoxToolExecutor
-
-
-@app.post("/twilio/sms")
-async def twilio_sms_webhook(
-    request: Request,
-    From: str = Form(default=""),
-    To: str = Form(default=""),
-    Body: str = Form(default=""),
-    MessageSid: str = Form(default=""),
-):
-    """
-    Twilio incoming SMS webhook.
-
-    Receives SMS messages and responds using the configured default Claude
-    model (ANTHROPIC_MODEL_DEFAULT) via REST API.
-    Supports tools like making phone calls and searching BlackBox memory.
-    Messages are logged to BlackBox as snapshots.
-
-    TwiML Response format:
-    <Response>
-        <Message>AI response here</Message>
-    </Response>
-    """
-    import aiohttp
-    from Orchestrator.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL_DEFAULT
-
-    print(f"[TWILIO-SMS] Incoming: {From} -> {To}")
-    print(f"[TWILIO-SMS] Message: {Body[:100]}..." if len(Body) > 100 else f"[TWILIO-SMS] Message: {Body}")
-    print(f"[TWILIO-SMS] MessageSid: {MessageSid}")
-
-    if not Body.strip():
-        # Empty message - respond with help
-        response_text = "Hello! I'm the AI BlackBox assistant. Text me anything or ask me to call you back!"
-    else:
-        # Clean up phone number for operator name
-        clean_number = From.replace("+", "").replace("-", "").replace(" ", "")
-        operator = f"SMS-{clean_number[-4:]}"
-
-        try:
-            # Create tool executor for this operator
-            tool_executor = BlackBoxToolExecutor(operator=operator)
-
-            system_prompt = f"""You are the AI BlackBox assistant responding to SMS text messages.
-Keep responses CONCISE - SMS has character limits (160 chars ideal, 320 max for multi-part).
-The user is texting from phone number: {From}
-Be helpful but brief. No markdown, no formatting - plain text only.
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present before responding.
-
-You have access to these tools:
-- send_sms: Send a text message to any phone number
-- make_voice_call: Call someone and deliver a voice message (pre-generates TTS for instant playback)
-- search_memory: Your primary memory — search FIRST for past conversations, user preferences, decisions, and context. The BlackBox has 1,600+ snapshots of every interaction.
-- search_contacts: Search the contact book for people by name, phone number, tag, or keyword
-- save_contact: Save a new contact or update an existing one (requires name, notes, and tags)
-- get_current_time: Get the current date and time
-- gemini_image / openai_image / grok_image: Generate an AI image (pick a provider)
-- create_cron_job: Schedule a recurring or one-time task (e.g., daily reminders, hourly checks)
-- edit_cron_job: Modify an existing scheduled task (change schedule, prompt, delivery, or pause/resume)
-- search_cron_jobs: List and search the user's scheduled tasks
-
-Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
-If the user asks you to call them, use make_voice_call with their number ({From}).
-If they want to text someone, use send_sms."""
-
-            messages = [{"role": "user", "content": Body}]
-
-            # First API call - may return tool use
-            async with aiohttp.ClientSession() as http_session:
-                async with http_session.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": ANTHROPIC_API_KEY,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json"
-                    },
-                    json={
-                        "model": ANTHROPIC_MODEL_DEFAULT,
-                        "max_tokens": 500,
-                        "system": system_prompt,
-                        "tools": BLACKBOX_TOOLS_ANTHROPIC,
-                        "messages": messages
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        print(f"[TWILIO-SMS] Anthropic API error: {resp.status} - {error_text[:200]}")
-                        response_text = "Sorry, I'm having trouble right now. Please try again later."
-                    else:
-                        result = await resp.json()
-                        stop_reason = result.get("stop_reason", "")
-                        content = result.get("content", [])
-
-                        # Check if Claude wants to use a tool
-                        if stop_reason == "tool_use":
-                            # Find tool use blocks and execute them
-                            tool_results = []
-                            text_parts = []
-
-                            for block in content:
-                                if block.get("type") == "tool_use":
-                                    tool_name = block.get("name")
-                                    tool_input = block.get("input", {})
-                                    tool_id = block.get("id")
-
-                                    print(f"[TWILIO-SMS] Executing tool: {tool_name} with {tool_input}")
-                                    # Use unified tool executor
-                                    result_obj = await tool_executor.execute(tool_name, tool_input)
-                                    tool_result = result_obj.result
-                                    print(f"[TWILIO-SMS] Tool result: {tool_result}")
-
-                                    tool_results.append({
-                                        "type": "tool_result",
-                                        "tool_use_id": tool_id,
-                                        "content": tool_result
-                                    })
-                                elif block.get("type") == "text":
-                                    text_parts.append(block.get("text", ""))
-
-                            # Make follow-up call with tool results
-                            messages.append({"role": "assistant", "content": content})
-                            messages.append({"role": "user", "content": tool_results})
-
-                            async with http_session.post(
-                                "https://api.anthropic.com/v1/messages",
-                                headers={
-                                    "x-api-key": ANTHROPIC_API_KEY,
-                                    "anthropic-version": "2023-06-01",
-                                    "content-type": "application/json"
-                                },
-                                json={
-                                    "model": ANTHROPIC_MODEL_DEFAULT,
-                                    "max_tokens": 500,
-                                    "system": system_prompt,
-                                    "tools": BLACKBOX_TOOLS_ANTHROPIC,
-                                    "messages": messages
-                                },
-                                timeout=aiohttp.ClientTimeout(total=30)
-                            ) as resp2:
-                                if resp2.status == 200:
-                                    result2 = await resp2.json()
-                                    content2 = result2.get("content", [])
-                                    response_text = ""
-                                    for block in content2:
-                                        if block.get("type") == "text":
-                                            response_text += block.get("text", "")
-                                    if not response_text:
-                                        response_text = "Done! " + (text_parts[0] if text_parts else "")
-                                else:
-                                    response_text = "I tried to help but encountered an error."
-                        else:
-                            # No tool use - extract text response
-                            response_text = ""
-                            for block in content:
-                                if block.get("type") == "text":
-                                    response_text += block.get("text", "")
-
-                            if not response_text:
-                                response_text = "I couldn't process that message. Please try again."
-
-                        # Truncate if too long for SMS
-                        if len(response_text) > 1500:
-                            response_text = response_text[:1497] + "..."
-
-                        print(f"[TWILIO-SMS] Response ({len(response_text)} chars): {response_text[:100]}...")
-
-        except Exception as e:
-            print(f"[TWILIO-SMS] Error processing message: {e}")
-            import traceback
-            traceback.print_exc()
-            response_text = "Sorry, I encountered an error. Please try again."
-
-    # Build TwiML response
-    root = Element("Response")
-    message = SubElement(root, "Message")
-    message.text = response_text
-
-    twiml = '<?xml version="1.0" encoding="UTF-8"?>' + tostring(root, encoding="unicode")
-    print(f"[TWILIO-SMS] TwiML Response sent")
-
-    return Response(content=twiml, media_type="application/xml")
-
-
-# =============================================================================
 # Twilio Media Streams WebSocket
 # =============================================================================
 
@@ -719,16 +597,24 @@ async def twilio_media_websocket(websocket: WebSocket, session_id: str):
     - Twilio sends: {"event": "start", "streamSid": "..."}
     - Twilio sends: {"event": "stop"}
     - We send: {"event": "media", "streamSid": "...", "media": {"payload": "<base64 mulaw>"}}
+
+    Only a session this box issued a <Stream> URL to (after the PIN gate, or
+    a call it dialed) may attach, once, and the stream's "start" callSid must
+    be that session's call. Anything else is closed without touching the
+    session.
     """
+    session = get_session(session_id)
+    if not session or not session.media_authorized or session.media_connected:
+        reason = ("unknown session" if not session else
+                  "not authorized" if not session.media_authorized else "already attached")
+        print(f"[TWILIO-WS] Refusing media stream ({reason}): {session_id}")
+        await websocket.close(code=1008)
+        return
+
     print(f"[TWILIO-WS] Media stream connecting: {session_id}")
     await websocket.accept()
 
-    session = get_session(session_id)
-    if not session:
-        print(f"[TWILIO-WS] Session not found: {session_id}")
-        await websocket.close()
-        return
-
+    bound = False  # set once the stream's callSid matched this session
     stream_sid = ""
     bridge: Optional[PhoneAIBridge] = None
 
@@ -783,6 +669,12 @@ async def twilio_media_websocket(websocket: WebSocket, session_id: str):
                 # Media stream started
                 stream_sid = message.get("streamSid", "")
                 start_info = message.get("start", {})
+                start_info = start_info if isinstance(start_info, dict) else {}
+                if session.media_connected or not _call_matches(session, start_info.get("callSid", "")):
+                    print(f"[TWILIO-WS] Refusing stream: callSid does not match this session's call: {session_id}")
+                    break
+                session.media_connected = True
+                bound = True
                 print(f"[TWILIO-WS] Stream started: {stream_sid}")
                 print(f"[TWILIO-WS] Stream info: {json.dumps(start_info)[:200]}")
 
@@ -842,13 +734,20 @@ async def twilio_media_websocket(websocket: WebSocket, session_id: str):
         if bridge:
             await bridge.stop()
 
-        session.status = PhoneStatus.COMPLETED
-        session.call_end = now_utc_iso()
+        if bound:
+            session.status = PhoneStatus.COMPLETED
+            session.call_end = now_utc_iso()
 
-        # Save to BlackBox
-        await save_session_to_blackbox(session)
+            # Save to BlackBox
+            await save_session_to_blackbox(session)
 
-        print(f"[TWILIO-WS] Session ended: {session_id}")
+            print(f"[TWILIO-WS] Session ended: {session_id}")
+        else:
+            # A socket that never bound to the call leaves the session alone.
+            try:
+                await websocket.close(code=1008)
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -1000,7 +899,7 @@ async def initiate_outbound_call(call_request: OutboundCallRequest):
         return {"error": str(e)}
 
 
-@app.post("/twilio/outbound-answer")
+@app.post("/twilio/outbound-answer", dependencies=TWILIO_SIGNED)
 async def twilio_outbound_answer_webhook(
     request: Request,
     session_id: str = "",
@@ -1011,16 +910,18 @@ async def twilio_outbound_answer_webhook(
     """
     Twilio webhook called when an outbound call is answered.
 
-    Skips IVR and connects directly to the AI backend.
+    Skips IVR and connects directly to the AI backend (this box dialed the
+    call, so there is no PIN stage).
     """
     session = get_session(session_id)
-    if not session:
+    if not session or session.direction != CallDirection.OUTBOUND:
         return twiml_response(create_twiml_hangup("Session not found."))
 
     # Update session
     session.call_id = CallSid
     session.status = PhoneStatus.BRIDGED
     session.last_activity = now_utc_iso()
+    session.media_authorized = True
 
     print(f"[TWILIO] Outbound call answered: {To} (Session: {session_id})")
 
@@ -1204,7 +1105,7 @@ async def cli_initiate_call(call_request: CLICallRequest):
         return {"error": str(e)}
 
 
-@app.post("/twilio/cli/answer")
+@app.post("/twilio/cli/answer", dependencies=TWILIO_SIGNED)
 async def cli_call_answered(
     request: Request,
     session_id: str = "",
@@ -1213,12 +1114,13 @@ async def cli_call_answered(
 ):
     """Webhook when CLI-initiated call is answered."""
     session = get_session(session_id)
-    if not session:
+    if not session or not session.is_cli_session:
         return twiml_response(create_twiml_hangup("Session not found."))
 
     session.call_id = CallSid
     session.status = PhoneStatus.BRIDGED
     session.last_activity = now_utc_iso()
+    session.media_authorized = True
 
     print(f"[TWILIO-CLI] Call answered (Session: {session_id}, CLI: {cli_session_id})")
 
@@ -1241,17 +1143,23 @@ async def cli_media_websocket(websocket: WebSocket, session_id: str, cli_session
     Instead of bridging to an AI backend, this:
     - Transcribes incoming audio and queues it for CLI polling
     - Sends audio from the CLI's audio queue to the phone
-    """
-    print(f"[TWILIO-CLI-WS] Media stream connecting: {session_id} (CLI: {cli_session_id})")
-    await websocket.accept()
 
+    Same binding as twilio_media_websocket: the phone session must have been
+    issued this stream, once, and the "start" callSid must be its call;
+    caller audio is ignored until then (it becomes CLI prompt text).
+    """
     session = get_session(session_id)
     cli_session = CLI_PHONE_SESSIONS.get(cli_session_id)
 
-    if not session or not cli_session:
-        print(f"[TWILIO-CLI-WS] Session not found")
-        await websocket.close()
+    if (not session or not cli_session or cli_session.phone_session_id != session_id
+            or not session.media_authorized or session.media_connected):
+        print(f"[TWILIO-CLI-WS] Refusing media stream: {session_id} (CLI: {cli_session_id})")
+        await websocket.close(code=1008)
         return
+
+    print(f"[TWILIO-CLI-WS] Media stream connecting: {session_id} (CLI: {cli_session_id})")
+    await websocket.accept()
+    bound = False  # set once the stream's callSid matched this session
 
     stream_sid = ""
     last_stt_time = time.time()
@@ -1343,6 +1251,13 @@ async def cli_media_websocket(websocket: WebSocket, session_id: str, cli_session
                 print(f"[TWILIO-CLI-WS] Connected")
 
             elif event == "start":
+                start_info = message.get("start", {})
+                start_info = start_info if isinstance(start_info, dict) else {}
+                if session.media_connected or not _call_matches(session, start_info.get("callSid", "")):
+                    print(f"[TWILIO-CLI-WS] Refusing stream: callSid does not match this session's call")
+                    break
+                session.media_connected = True
+                bound = True
                 stream_sid = message.get("streamSid", "")
                 print(f"[TWILIO-CLI-WS] Stream started: {stream_sid}")
 
@@ -1362,11 +1277,11 @@ async def cli_media_websocket(websocket: WebSocket, session_id: str, cli_session
                     await asyncio.sleep(0.015)
 
             elif event == "media":
-                # Incoming audio from phone
+                # Incoming audio from phone (ignored until the stream is bound)
                 media = message.get("media", {})
                 payload = media.get("payload", "")
 
-                if payload:
+                if payload and bound:
                     current_time = time.time()
 
                     # =================================================================
@@ -1481,9 +1396,16 @@ async def cli_media_websocket(websocket: WebSocket, session_id: str, cli_session
     finally:
         if sender_task:
             sender_task.cancel()
-        cli_session.is_active = False
-        session.status = PhoneStatus.COMPLETED
-        print(f"[TWILIO-CLI-WS] Session ended")
+        if bound:
+            cli_session.is_active = False
+            session.status = PhoneStatus.COMPLETED
+            print(f"[TWILIO-CLI-WS] Session ended")
+        else:
+            # A socket that never bound to the call leaves the session alone.
+            try:
+                await websocket.close(code=1008)
+            except Exception:
+                pass
 
 
 async def transcribe_and_queue(audio_bytes: bytes, cli_session: CLIPhoneSession):
@@ -1917,7 +1839,8 @@ async def twilio_info():
         "voice_webhook": f"{base_url}/twilio/voice",
         "status_callback": f"{base_url}/twilio/status",
         "call_flow": [
-            "1. Incoming call → /twilio/voice → AI Selection Menu (1=Claude, 2=Gemini, 3=GPT, 4=Grok)",
+            "1. Incoming call → /twilio/voice → PIN prompt (refused when no PHONE_PIN_CODE is set)",
+            "1b. PIN entry → /twilio/pin → AI Selection Menu (1=Claude, 2=Gemini, 3=GPT, 4=Grok)",
             "2. AI selection → /twilio/gather → Operator Selection Menu",
             "3. Operator selection → /twilio/operator → Connect to AI with context",
             "4. Media stream → /twilio/media/{session_id} → Bidirectional audio bridge",
@@ -1932,7 +1855,7 @@ async def twilio_info():
         "operators": USERS_LIST,
         "instructions": [
             "1. Go to Twilio Console > Phone Numbers > Manage > Active numbers",
-            "2. Click on your phone number (+1 716-451-2527)",
+            f"2. Click on your phone number ({TWILIO_PHONE_NUMBER or 'your Twilio number'})",
             "3. Under 'Voice Configuration':",
             "   - Set 'Configure with' to 'Webhook'",
             f"   - Set 'A call comes in' webhook to: {base_url}/twilio/voice",
@@ -1942,6 +1865,13 @@ async def twilio_info():
             "",
             "Note: For the Media Streams WebSocket to work, your server must be",
             "accessible via HTTPS with a valid SSL certificate.",
+            "",
+            "Security: every webhook is checked against X-Twilio-Signature using",
+            "TWILIO_AUTH_TOKEN, so the URL Twilio calls must reach this box unchanged.",
+            "Publish ONLY the webhook paths (/twilio/voice, /twilio/pin, /twilio/gather,",
+            "/twilio/operator, /twilio/status, /twilio/outbound-answer, /twilio/cli/answer,",
+            "/twilio/media/, /twilio/cli/media/), never the whole /twilio prefix: it also",
+            "holds this box's own unsigned call APIs (/twilio/call, /twilio/cli/*).",
         ],
         "phone_enabled": PHONE_ENABLED,
     }
