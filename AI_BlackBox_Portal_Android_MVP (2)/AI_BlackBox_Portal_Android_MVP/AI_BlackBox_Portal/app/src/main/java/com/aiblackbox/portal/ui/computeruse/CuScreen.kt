@@ -599,7 +599,12 @@ fun CuScreen(
     onModelChange: (String) -> Unit = {},
     onDeviceChange: (String) -> Unit = {},
     onStopCu: () -> Unit = {},
+    // New: ChatViewModel.requestNewCuSession asks the box whether a task is running and
+    // either resets at once or sets [newSessionQuestion]; the dialog below answers it.
     onNewSession: () -> Unit = {},
+    newSessionQuestion: String? = null,
+    onConfirmNewSession: () -> Unit = {},
+    onDismissNewSession: () -> Unit = {},
     // One-shot result of STOP / New ("Stop requested", "Stop failed: …") from
     // ChatViewModel.cuControlMessage; shown as a toast, then [onCuControlMessageShown].
     cuControlMessage: String? = null,
@@ -653,17 +658,6 @@ fun CuScreen(
 
     val isAgentActive = cuStatus == "running"
 
-    // New on a RUNNING task stops it and destroys the server session, so ask first
-    // (Portal cu-drawer parity, A13-ui-ops-05).
-    var confirmNewSession by remember { mutableStateOf(false) }
-    val requestNewSession: () -> Unit = {
-        if (isAgentActive) {
-            confirmNewSession = true
-        } else {
-            onNewSession()
-        }
-    }
-
     LaunchedEffect(cuControlMessage) {
         if (cuControlMessage != null) {
             Toast.makeText(context, cuControlMessage, Toast.LENGTH_SHORT).show()
@@ -671,19 +665,19 @@ fun CuScreen(
         }
     }
 
-    if (confirmNewSession) {
+    // New on a RUNNING task stops it and destroys the server session, so ask first
+    // (Portal cu-drawer parity, A13-ui-ops-05). Whether one runs is the server's answer
+    // as well as this screen's: a cron or Portal agent for the operator is not in cuStatus.
+    if (newSessionQuestion != null) {
         AlertDialog(
-            onDismissRequest = { confirmNewSession = false },
+            onDismissRequest = onDismissNewSession,
             title = { Text("Start a new session?") },
-            text = { Text("A task is running. Stop it and start a new session?") },
+            text = { Text(newSessionQuestion) },
             confirmButton = {
-                TextButton(onClick = {
-                    confirmNewSession = false
-                    onNewSession()
-                }) { Text("Stop and start new") }
+                TextButton(onClick = onConfirmNewSession) { Text("Stop and start new") }
             },
             dismissButton = {
-                TextButton(onClick = { confirmNewSession = false }) { Text("Cancel") }
+                TextButton(onClick = onDismissNewSession) { Text("Cancel") }
             },
         )
     }
@@ -798,7 +792,7 @@ fun CuScreen(
                 viewModel.refreshScreenshot()
             },
             onStop = onStopCu,
-            onNewSession = requestNewSession
+            onNewSession = onNewSession
         )
 
         // ── Provider + Model row REMOVED (Brandon fit pass 2026-07-23) ──

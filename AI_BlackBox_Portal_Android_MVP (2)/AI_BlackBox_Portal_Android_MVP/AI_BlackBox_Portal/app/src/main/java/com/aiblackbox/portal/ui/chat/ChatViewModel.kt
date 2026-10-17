@@ -447,6 +447,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _cuControlMessage = MutableStateFlow<String?>(null)
     val cuControlMessage: StateFlow<String?> = _cuControlMessage.asStateFlow()
 
+    // The question CuScreen asks before New ("A task is running. Stop it…"), or null
+    // when no dialog is up. Set by requestNewCuSession after it asked the server.
+    private val _cuNewSessionQuestion = MutableStateFlow<String?>(null)
+    val cuNewSessionQuestion: StateFlow<String?> = _cuNewSessionQuestion.asStateFlow()
+    private var cuNewSessionCheck: Job? = null
+
     // ── Robotics ER state ──
     // Whether an ER mission is actively running (matches Portal window.__erMissionActive)
     private val _erMissionActive = MutableStateFlow(false)
@@ -3193,12 +3199,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * The header's New button. /chat/cu-new-session stops and destroys the operator's most
+     * recent browser session and their Gemini session whoever started them — a cron job,
+     * the use_computer tool, the Portal, or this phone before an app restart — so the
+     * phone's own [cuStatus] cannot decide alone whether to ask first. Ask the server
+     * (GET /chat/cu-status) and put up [cuNewSessionQuestion] when a task may be running;
+     * reset straight away only when nothing is live anywhere. A tap while the check is in
+     * flight is ignored.
+     */
+    fun requestNewCuSession() {
+        if (cuNewSessionCheck?.isActive == true) return
+        cuNewSessionCheck = viewModelScope.launch {
+            val local = _cuStatus.value
+            val server = if (isLiveCuStatus(local)) CuRunCheck.RUNNING
+                else checkServerCuRunning(api, currentOperator,
+                    cuStatusProbeModels(currentModel, _cuModelBackends.value))
+            val question = newSessionQuestion(local, server)
+            if (question == null) resetCuSession() else _cuNewSessionQuestion.value = question
+        }
+    }
+
+    /** The New dialog was confirmed: stop whatever runs and start fresh. */
+    fun confirmNewCuSession() {
+        _cuNewSessionQuestion.value = null
+        resetCuSession()
+    }
+
+    /** The New dialog was cancelled: nothing is touched. */
+    fun dismissNewCuSession() {
+        _cuNewSessionQuestion.value = null
+    }
+
+    /**
      * Start a fresh CU session (A13-ui-ops-05). POSTs /chat/cu-new-session — which stops
      * a running task and destroys the operator's Anthropic/OpenAI and Gemini CU sessions
      * (Portal cu-drawer parity) — and clears the local state only once the server has
      * confirmed. Clearing it first hid the STOP button while the agent kept driving the
-     * desktop, and the next prompt reattached to the old server session. CuScreen asks
-     * for confirmation before calling this on a running task.
+     * desktop, and the next prompt reattached to the old server session. Reached through
+     * [requestNewCuSession], which asks first when a task may be running.
      */
     fun resetCuSession() {
         viewModelScope.launch {
@@ -3244,6 +3282,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * the status (and STOP) and says why. A session id not known yet (the cu_session
      * event still in flight) is sent empty: the server then stops the operator's most
      * recent session, as the Portal's stopCUTask does.
+     *
+     * A refusal from the server ("No running CU task") is checked against its
+     * /chat/cu-status: when the task already ended — the stream dropped before its end
+     * reached the phone — the screen takes that status instead of showing STOP forever.
      */
     fun stopCuTask() {
         val sessionId = _cuSessionId.value
@@ -3253,15 +3295,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _cuStatus.value = cuStatusAfterStop(_cuStatus.value, result)
             if (result.success) {
                 _cuControlMessage.value = "Stop requested"
-            } else {
-                Log.e(TAG, "CU stop failed: ${result.error}")
-                _cuControlMessage.value = "Stop failed: ${result.error}"
+                return@launch
             }
+            Log.e(TAG, "CU stop failed: ${result.error}")
+            if (result.refused) {
+                val server = fetchCuStatus(api, currentOperator, sessionId, currentModel)
+                val settled = cuStatusAfterRefusedStop(_cuStatus.value, server)
+                if (settled != _cuStatus.value) {
+                    _cuStatus.value = settled
+                    _cuControlMessage.value = "Nothing to stop: the task already ended"
+                    return@launch
+                }
+            }
+            _cuControlMessage.value = "Stop failed: ${result.error}"
         }
     }
 
-    /** The server's answer to a CU control request (/chat/cu-stop, /chat/cu-new-session). */
-    data class CuControlResult(val success: Boolean, val error: String?)
+    /**
+     * The server's answer to a CU control request (/chat/cu-stop, /chat/cu-new-session).
+     * [refused]: the server itself replied success:false — a statement about the session —
+     * as opposed to the request failing (no reply, an HTTP error, an unreadable body).
+     */
+    data class CuControlResult(val success: Boolean, val error: String?, val refused: Boolean = false)
+
+    /** What GET /chat/cu-status said about the operator's sessions (see [checkServerCuRunning]). */
+    enum class CuRunCheck { RUNNING, CLEAR, UNKNOWN }
 
     companion object {
         // ── Computer Use control (A13-ui-ops-05) — pure cores behind stopCuTask /
@@ -3303,11 +3361,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             return try {
                 val reply = Json.parseToJsonElement(raw).jsonObject
-                if (reply["success"]?.jsonPrimitive?.booleanOrNull == true) {
-                    CuControlResult(true, null)
-                } else {
-                    CuControlResult(false, reply["error"]?.jsonPrimitive?.contentOrNull
-                        ?: "The BlackBox did not confirm")
+                val success = reply["success"]?.jsonPrimitive?.booleanOrNull
+                when (success) {
+                    true -> CuControlResult(true, null)
+                    false -> CuControlResult(false, reply["error"]?.jsonPrimitive?.contentOrNull
+                        ?: "The BlackBox did not confirm", refused = true)
+                    null -> CuControlResult(false, "The BlackBox did not confirm")
                 }
             } catch (e: Exception) {
                 CuControlResult(false, "Unreadable reply from the BlackBox")
@@ -3318,6 +3377,91 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         @VisibleForTesting
         internal fun cuStatusAfterStop(current: String, result: CuControlResult): String =
             if (result.success) "stopped" else current
+
+        /** A server CU status that means an agent is (about to be) acting. */
+        internal fun isLiveCuStatus(status: String?): Boolean =
+            status == "running" || status == "starting"
+
+        /**
+         * The status of the operator's CU session from GET /chat/cu-status, or null when the
+         * box could not be asked or its reply not read — never mistaken for "idle". Without
+         * [sessionId] the server reports the operator's most recent session (the one
+         * /chat/cu-new-session destroys); [model] picks which manager it looks in first.
+         */
+        @VisibleForTesting
+        internal suspend fun fetchCuStatus(
+            api: BlackBoxApi?, operator: String, sessionId: String?, model: String,
+        ): String? {
+            if (api == null) return null
+            val path = buildString {
+                append("/chat/cu-status?operator=").append(java.net.URLEncoder.encode(operator, "UTF-8"))
+                append("&model=").append(java.net.URLEncoder.encode(model, "UTF-8"))
+                if (!sessionId.isNullOrBlank()) {
+                    append("&session_id=").append(java.net.URLEncoder.encode(sessionId, "UTF-8"))
+                }
+            }
+            return try {
+                Json.parseToJsonElement(api.get(path)).jsonObject["status"]?.jsonPrimitive?.contentOrNull
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        /**
+         * The models to ask /chat/cu-status with so the answers cover everything
+         * /chat/cu-new-session would destroy: "" resolves browser-first (the operator's
+         * most recent Anthropic/OpenAI session), a google-backend id from the live CU
+         * catalog resolves Gemini-first. The selected model is asked too, in case the
+         * catalog is not loaded yet.
+         */
+        @VisibleForTesting
+        internal fun cuStatusProbeModels(currentModel: String, backends: Map<String, String>): List<String> {
+            val gemini = backends.entries.firstOrNull { it.key.isNotBlank() && it.value == "google" }?.key
+            return listOfNotNull("", currentModel.ifBlank { null }, gemini).distinct()
+        }
+
+        /** RUNNING when any probe finds a live session, else UNKNOWN when one could not be read. */
+        @VisibleForTesting
+        internal suspend fun checkServerCuRunning(
+            api: BlackBoxApi?, operator: String, models: List<String>,
+        ): CuRunCheck {
+            var unknown = false
+            for (model in models) {
+                val status = fetchCuStatus(api, operator, null, model)
+                if (isLiveCuStatus(status)) return CuRunCheck.RUNNING
+                if (status == null) unknown = true
+            }
+            return if (unknown) CuRunCheck.UNKNOWN else CuRunCheck.CLEAR
+        }
+
+        /**
+         * What New asks before it stops and destroys the server session, or null to go
+         * ahead: a task running here or on the box always asks, and so does a box that
+         * could not be asked.
+         */
+        @VisibleForTesting
+        internal fun newSessionQuestion(localStatus: String, server: CuRunCheck): String? = when {
+            isLiveCuStatus(localStatus) || server == CuRunCheck.RUNNING ->
+                "A task is running. Stop it and start a new session?"
+            server == CuRunCheck.UNKNOWN ->
+                "Could not check whether a task is running. Start a new session anyway? A running task would be stopped."
+            else -> null
+        }
+
+        /**
+         * The CU status after the server refused a stop, given its /chat/cu-status reply
+         * ([serverStatus], null when it could not be read). A live or unknown session keeps
+         * [current]; an ended one settles the screen: "complete", or "stopped" for any other
+         * end (stopped, error, no session left).
+         */
+        @VisibleForTesting
+        internal fun cuStatusAfterRefusedStop(current: String, serverStatus: String?): String = when {
+            serverStatus == null || isLiveCuStatus(serverStatus) -> current
+            serverStatus == "complete" -> "complete"
+            else -> "stopped"
+        }
 
         /** Map provider IDs to the backend's expected provider key.
          *  Note: Android uses "gemini" as provider key but backend uses "google".

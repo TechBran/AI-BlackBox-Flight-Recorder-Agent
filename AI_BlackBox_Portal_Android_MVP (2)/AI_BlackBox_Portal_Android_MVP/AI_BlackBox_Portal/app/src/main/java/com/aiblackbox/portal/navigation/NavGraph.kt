@@ -197,6 +197,7 @@ fun BlackBoxNavGraph(
             val liveModels by vm.liveModels.collectAsState()
             val cuModelBackends by vm.cuModelBackends.collectAsState()
             val cuControlMessage by vm.cuControlMessage.collectAsState()
+            val cuNewSessionQuestion by vm.cuNewSessionQuestion.collectAsState()
 
             CuScreen(
                 origin = origin,
@@ -210,7 +211,10 @@ fun BlackBoxNavGraph(
                 onModelChange = onModelChange,
                 onDeviceChange = { deviceId -> vm.setCuDeviceId(deviceId) },
                 onStopCu = { vm.stopCuTask() },
-                onNewSession = { vm.resetCuSession() },
+                onNewSession = { vm.requestNewCuSession() },
+                newSessionQuestion = cuNewSessionQuestion,
+                onConfirmNewSession = { vm.confirmNewCuSession() },
+                onDismissNewSession = { vm.dismissNewCuSession() },
                 cuControlMessage = cuControlMessage,
                 onCuControlMessageShown = { vm.consumeCuControlMessage() },
                 messages = messages,
