@@ -21,6 +21,8 @@ import { taskTypeMeta, isAgentTaskType, truncateText } from './task-ui.js';
  * the document instead of an inline onclick, so it also works for results
  * restored from history (their markup goes through the sanitizer, which strips
  * handlers). Only http(s)/same-origin URLs are opened — never javascript:.
+ * The sanitizer keeps these classes, so model output can wear them: the tab is
+ * opened with noopener (no window.opener to redirect the Portal tab).
  */
 function openBrowserScreenshot(e) {
     const img = e.target && e.target.closest
@@ -32,7 +34,7 @@ function openBrowserScreenshot(e) {
     try {
         const url = new URL(src, window.location.href);
         if (url.protocol === 'http:' || url.protocol === 'https:') {
-            window.open(url.href, '_blank');
+            window.open(url.href, '_blank', 'noopener,noreferrer');
         }
     } catch (_) {
         // unparseable URL: ignore the click

@@ -13,6 +13,7 @@ import { getOperator } from './state-management.js';
 let allContacts = [];
 let _searchTimer = null;
 let _editingContact = null;  // null = new, object = editing existing
+let _editForm = null;        // the container the open edit form was built in
 
 // =============================================================================
 // Helpers
@@ -21,6 +22,19 @@ let _editingContact = null;  // null = new, object = editing existing
 function truncate(str, len = 80) {
     if (!str) return '';
     return str.length > len ? str.slice(0, len) + '\u2026' : str;
+}
+
+/**
+ * A field of the open edit form, looked up INSIDE the form's container. Never
+ * page-wide: getElementById returns the FIRST element with an id, and chat
+ * history precedes this modal in index.html, so a reply carrying an element
+ * with the same id would otherwise be filled and read instead of the field
+ * the operator sees (is_operator_self decides how SMS treats a number).
+ * @param {string} id - The field's id
+ * @returns {HTMLElement|null}
+ */
+function formField(id) {
+    return _editForm ? _editForm.querySelector(`[id="${id}"]`) : null;
 }
 
 // =============================================================================
@@ -190,6 +204,7 @@ function showEditForm(contact) {
     _editingContact = contact || null;
     const container = $('contactsEditForm');
     if (!container) return;
+    _editForm = container;
 
     // Raw values: they are assigned through the DOM (.value) after the static
     // form markup is built, never interpolated into attribute strings. This also
@@ -265,27 +280,28 @@ function showEditForm(contact) {
         contactTags: tags,
     };
     Object.entries(fieldValues).forEach(([id, value]) => {
-        const field = $(id);
+        const field = formField(id);
         if (field) field.value = value;
     });
 
     container.style.display = 'block';
 
     // Wire cancel
-    const btnCancel = $('btnContactCancel');
+    const btnCancel = formField('btnContactCancel');
     if (btnCancel) btnCancel.addEventListener('click', hideEditForm);
 
     // Wire save
-    const btnSave = $('btnContactSave');
+    const btnSave = formField('btnContactSave');
     if (btnSave) btnSave.addEventListener('click', handleSave);
 
     // Focus name field
-    const nameInput = $('contactName');
+    const nameInput = formField('contactName');
     if (nameInput) nameInput.focus();
 }
 
 function hideEditForm() {
     _editingContact = null;
+    _editForm = null;
     const container = $('contactsEditForm');
     if (container) {
         container.style.display = 'none';
@@ -294,14 +310,14 @@ function hideEditForm() {
 }
 
 function handleSave() {
-    const name = ($('contactName')?.value || '').trim();
-    const phone = ($('contactPhone')?.value || '').trim();
-    const email = ($('contactEmail')?.value || '').trim();
-    const relationship = ($('contactRelationship')?.value || '').trim();
-    const notes = ($('contactNotes')?.value || '').trim();
-    const tagsRaw = ($('contactTags')?.value || '').trim();
-    const inboundAllowed = !!$('contactInboundAllowed')?.checked;
-    const isOperatorSelf = !!$('contactIsOperatorSelf')?.checked;
+    const name = (formField('contactName')?.value || '').trim();
+    const phone = (formField('contactPhone')?.value || '').trim();
+    const email = (formField('contactEmail')?.value || '').trim();
+    const relationship = (formField('contactRelationship')?.value || '').trim();
+    const notes = (formField('contactNotes')?.value || '').trim();
+    const tagsRaw = (formField('contactTags')?.value || '').trim();
+    const inboundAllowed = !!formField('contactInboundAllowed')?.checked;
+    const isOperatorSelf = !!formField('contactIsOperatorSelf')?.checked;
 
     if (!name) {
         toastError('Name is required');

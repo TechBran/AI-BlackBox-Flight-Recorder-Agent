@@ -10,7 +10,7 @@
 import { $, toast, escapeHtml as sharedEscapeHtml } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
-import { markdownToSafeHtml } from './markdown-renderer.js';
+import { markdownToSafeHtml, markdownCodeSpan } from './markdown-renderer.js';
 import { sanitizeAssistantHtml } from './sanitize.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
@@ -909,7 +909,11 @@ export class AgentChatHandler {
         let details = `\n<details class="edit-diff-collapsible" open><summary>${summary}</summary>\n\n\`\`\`diff\n${diff}\n\`\`\`\n`;
 
         if (oldString && newString && oldString.length < 100 && newString.length < 100) {
-            details += `\n> Changed: \`${this.escapeHtml(oldString.substring(0, 50))}${oldString.length > 50 ? '...' : ''}\` \u2192 \`${this.escapeHtml(newString.substring(0, 50))}${newString.length > 50 ? '...' : ''}\`\n`;
+            // Markdown code spans: marked escapes their text, so it goes in raw
+            // (markdownCodeSpan also keeps backticks/newlines from breaking out).
+            const before = markdownCodeSpan(oldString.substring(0, 50) + (oldString.length > 50 ? '...' : ''));
+            const after = markdownCodeSpan(newString.substring(0, 50) + (newString.length > 50 ? '...' : ''));
+            details += `\n> Changed: ${before} \u2192 ${after}\n`;
         }
 
         details += '</details>\n';

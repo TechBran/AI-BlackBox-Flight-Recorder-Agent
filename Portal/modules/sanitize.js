@@ -31,42 +31,136 @@ import { escapeHtml, toastError } from './core-utils.js';
  *   data-task-id) are kept by DOMPurify's defaults.
  * - Event handlers, javascript:/vbscript: URLs, <script>, <iframe>, <object>
  *   and <embed> are removed by DOMPurify's defaults; <style> (page-wide
- *   restyling / overlay phishing) and <form> (credential-phishing posts to a
- *   foreign origin) are forbidden on top.
+ *   restyling) and <form> (credential-phishing posts to a foreign origin) are
+ *   forbidden on top, and so is <dialog>, which the browser positions above
+ *   the page.
+ * - Model output never owns a Portal id or name: SANITIZE_NAMED_PROPS rewrites
+ *   them to "user-content-<value>". The Portal looks its own fields up by id
+ *   page-wide, and #history comes before every modal in index.html, so a
+ *   planted <input id="contactIsOperatorSelf" checked> would otherwise win the
+ *   lookup (DOM clobbering). Attributes that ACT on another element by id
+ *   (label for, popovertarget, commandfor/command, list) are dropped as well.
+ * - Inline style is kept (server placeholders rely on it) but may not lift
+ *   content out of its bubble: see keepStyleInFlow below. Class names are
+ *   kept too (the renderer and stored history rely on many), so a reply can
+ *   still borrow a Portal class's look; bounding THAT needs CSS containment
+ *   on the bubble, not the sanitizer.
  */
 const PURIFY_CONFIG = Object.freeze({
     ADD_TAGS: ['audio', 'video', 'source'],
     ADD_ATTR: ['controls', 'preload', 'poster', 'playsinline', 'loop', 'muted', 'src', 'type', 'download', 'loading'],
-    FORBID_TAGS: ['style', 'form', 'iframe', 'frame', 'frameset', 'object', 'embed', 'base', 'link', 'meta', 'script'],
-    FORBID_ATTR: ['formaction', 'action', 'srcdoc', 'ping'],
+    FORBID_TAGS: ['style', 'form', 'iframe', 'frame', 'frameset', 'object', 'embed', 'base', 'link', 'meta', 'script', 'dialog'],
+    FORBID_ATTR: ['formaction', 'action', 'srcdoc', 'ping',
+        'for', 'list', 'popover', 'popovertarget', 'popovertargetaction', 'commandfor', 'command'],
+    SANITIZE_NAMED_PROPS: true,
     ALLOW_UNKNOWN_PROTOCOLS: false,
 });
 
-let _warnedUnavailable = false;
+// Declarations that would let model content draw over the Portal's own UI
+// (a fake "session expired" sheet over the composer): any non-static
+// positioning, stacking (z-index), transforms, and negative margins.
+const LIFTING_PROPERTIES = ['z-index', 'transform', 'translate', 'scale', 'rotate', 'offset-path'];
+const MARGIN_PROPERTIES = ['margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+    'margin-block-start', 'margin-block-end', 'margin-inline-start', 'margin-inline-end'];
+
+let _styleProbe = null;
+
+/**
+ * True when an inline style value would take content out of normal flow.
+ * Parsed by the browser's own CSS parser (in an inert document), so escapes,
+ * !important and var() are seen exactly as they would render; an unresolved
+ * var() counts as lifting.
+ * @param {string} value - A style attribute value
+ * @returns {boolean}
+ */
+function styleLiftsContent(value) {
+    if (!_styleProbe) {
+        _styleProbe = document.implementation.createHTMLDocument('').createElement('div');
+    }
+    _styleProbe.setAttribute('style', value);
+    const style = _styleProbe.style;
+    const position = style.getPropertyValue('position').trim().toLowerCase();
+    if (position && position !== 'static') return true;
+    if (LIFTING_PROPERTIES.some(prop => style.getPropertyValue(prop).trim() !== '')) return true;
+    return MARGIN_PROPERTIES.some(prop => style.getPropertyValue(prop).includes('-'));
+}
+
+/**
+ * DOMPurify uponSanitizeAttribute hook: drop a style attribute that would lift
+ * model content out of its bubble. Ordinary styles are kept byte-identical.
+ */
+function keepStyleInFlow(node, data) {
+    if (data.attrName !== 'style' || !data.attrValue) return;
+    try {
+        if (styleLiftsContent(data.attrValue)) data.keepAttr = false;
+    } catch (_) {
+        data.keepAttr = false;  // unparseable here: drop it rather than guess
+    }
+}
+
+// Degradation warnings already shown this page load, by component.
+const _warned = new Set();
+
+const DEGRADED = {
+    sanitizer: {
+        reason: 'DOMPurify is not loaded',
+        effect: 'rendering assistant content as plain text (fail closed)',
+        toast: 'HTML sanitizer unavailable — replies shown as plain text',
+    },
+    markdown: {
+        reason: 'marked is not loaded',
+        effect: 'rendering assistant content without markdown formatting',
+        toast: 'Markdown renderer unavailable — replies shown without formatting',
+    },
+};
+
+// One private DOMPurify instance per loaded library, carrying this module's
+// hook, so the shared global instance is never mutated.
+const _purifiers = new WeakMap();
+
+/**
+ * Build this module's DOMPurify instance from the loaded library, or null.
+ * @param {Function|object} shared - globalThis.DOMPurify
+ * @returns {object|null}
+ */
+function buildPurifier(shared) {
+    try {
+        const own = (typeof shared === 'function' && typeof window !== 'undefined') ? shared(window) : shared;
+        if (!own || typeof own.sanitize !== 'function' || own.isSupported === false) return null;
+        if (typeof own.addHook === 'function') own.addHook('uponSanitizeAttribute', keepStyleInFlow);
+        return own;
+    } catch (e) {
+        warnDegraded('sanitizer', 'DOMPurify instance could not be created', e);
+        return null;
+    }
+}
 
 /**
  * Resolve a usable DOMPurify instance, or null.
  * @returns {object|null}
  */
 function getPurifier() {
-    const purifier = globalThis.DOMPurify;
-    if (!purifier || typeof purifier.sanitize !== 'function') return null;
-    if (purifier.isSupported === false) return null;
-    return purifier;
+    const shared = globalThis.DOMPurify;
+    if (!shared || typeof shared.sanitize !== 'function') return null;
+    if (shared.isSupported === false) return null;
+    if (!_purifiers.has(shared)) _purifiers.set(shared, buildPurifier(shared));
+    return _purifiers.get(shared);
 }
 
 /**
- * Loudly report (once per page load) that rendering degraded to plain text.
- * @param {string} reason - Why the sanitizer could not be used
+ * Loudly report (once per page load per component) that rendering degraded.
+ * @param {'sanitizer'|'markdown'} component - What is missing or failing
+ * @param {string} [reason] - Why, for the console record (default: not loaded)
  * @param {*} [err] - Optional underlying error
  */
-function warnUnavailable(reason, err) {
-    if (_warnedUnavailable) return;
-    _warnedUnavailable = true;
-    console.error(`[SANITIZE] ${reason} — rendering assistant content as plain text (fail closed).`, err || '');
+export function warnDegraded(component, reason, err) {
+    const info = DEGRADED[component] || DEGRADED.sanitizer;
+    if (_warned.has(component)) return;
+    _warned.add(component);
+    console.error(`[SANITIZE] ${reason || info.reason} — ${info.effect}.`, err || '');
     try {
         if (typeof document !== 'undefined') {
-            toastError('HTML sanitizer unavailable — replies shown as plain text');
+            toastError(info.toast);
         }
     } catch (_) {
         // toast is best-effort; the console error above is the record
@@ -105,14 +199,14 @@ export function sanitizeAssistantHtml(html) {
     const dirty = (html === null || html === undefined) ? '' : String(html);
     const purifier = getPurifier();
     if (!purifier) {
-        warnUnavailable('DOMPurify is not loaded');
+        warnDegraded('sanitizer');
         return plainTextHtml(dirty);
     }
     try {
         const clean = purifier.sanitize(dirty, PURIFY_CONFIG);
         return typeof clean === 'string' ? clean : plainTextHtml(dirty);
     } catch (e) {
-        warnUnavailable('DOMPurify.sanitize threw', e);
+        warnDegraded('sanitizer', 'DOMPurify.sanitize threw', e);
         return plainTextHtml(dirty);
     }
 }

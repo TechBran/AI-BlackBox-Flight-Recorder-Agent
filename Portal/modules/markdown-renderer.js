@@ -6,39 +6,32 @@
  * Refactored: 2025-12-20
  *
  * Every function here that yields HTML for innerHTML returns SANITIZED markup
- * (via sanitize.js) and fails closed to escaped text when marked or DOMPurify
- * is missing or throws (audit P01-chat-core-web-02/03, X05-architecture-02).
+ * (via sanitize.js) and fails closed to escaped text when DOMPurify is missing
+ * or a library throws; without marked the text is still sanitized, never raw
+ * (audit P01-chat-core-web-02/03, X05-architecture-02).
  */
 
-import { sanitizeAssistantHtml, isSanitizerAvailable, plainTextHtml } from './sanitize.js';
+import { sanitizeAssistantHtml, isSanitizerAvailable, plainTextHtml, warnDegraded } from './sanitize.js';
 
 // =============================================================================
 // Markdown Configuration
 // =============================================================================
 
 /**
- * Configure marked library with custom options
- * Sets up GFM, syntax highlighting, and other rendering options
+ * Configure marked library with custom options (GFM, single newlines as <br>).
+ *
+ * Code highlighting is NOT a marked option: marked removed `highlight`,
+ * `headerIds`, `mangle` and `sanitize` in v8 and silently ignores them, so they
+ * are not passed (audit X04-security-clients-infra-08). Code blocks are
+ * highlighted after rendering, by hljs.highlightElement over `pre code` in the
+ * bubble renderers, and sanitizing is sanitize.js's job.
  */
 export function configureMarked() {
     if (typeof marked === 'undefined') return;
 
     marked.setOptions({
         breaks: true,
-        gfm: true,
-        headerIds: false,
-        mangle: false,
-        sanitize: false,
-        highlight: function(code, lang) {
-            if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
-                try {
-                    return hljs.highlight(code, { language: lang }).value;
-                } catch (e) {
-                    console.warn('Highlight error:', e);
-                }
-            }
-            return code;
-        }
+        gfm: true
     });
 }
 
@@ -284,18 +277,42 @@ function parsesAsJson(candidate) {
 }
 
 /**
+ * True when marked is loaded and usable.
+ * @returns {boolean}
+ */
+function isMarkedAvailable() {
+    return typeof marked !== 'undefined' && marked !== null && typeof marked.parse === 'function';
+}
+
+/**
+ * The no-marked rendering of model text: newlines outside tags become <br>,
+ * and the result is SANITIZED (never raw). marked is CDN-only, so an offline
+ * or LAN-only box can lose it while the vendored DOMPurify is present; server-
+ * built markup (media placeholders the pollers find by class, artifact
+ * download links) then still renders, only markdown syntax shows as typed.
+ * @param {string} text - Model text (markdown and/or HTML)
+ * @returns {string} Safe HTML string
+ */
+function renderWithoutMarked(text) {
+    warnDegraded('markdown');
+    return sanitizeAssistantHtml(text.replace(/(<[^>]*>)|\r?\n/g, (match, tag) => tag || '<br>'));
+}
+
+/**
  * Convert markdown text to SANITIZED HTML with marked (no pre-processing).
- * Used directly by the CLI-agent renderers. Fails closed: when marked or
- * DOMPurify is unavailable, or either throws, the markdown SOURCE comes back
- * escaped (never unsanitized marked output).
+ * Used directly by the CLI-agent renderers. Fails closed: when DOMPurify is
+ * unavailable, or marked throws, the markdown SOURCE comes back escaped
+ * (never unsanitized marked output); without marked it is sanitized as-is.
  * @param {string} text - Markdown text to render
  * @returns {string} Safe HTML string
  */
 export function markdownToSafeHtml(text) {
     const source = (text === null || text === undefined) ? '' : String(text);
-    if (typeof marked === 'undefined' || typeof marked.parse !== 'function' || !isSanitizerAvailable()) {
+    if (!isSanitizerAvailable()) {
+        warnDegraded('sanitizer');
         return plainTextHtml(source);
     }
+    if (!isMarkedAvailable()) return renderWithoutMarked(source);
     try {
         return sanitizeAssistantHtml(marked.parse(source));
     } catch (e) {
@@ -312,20 +329,43 @@ export function markdownToSafeHtml(text) {
  */
 export function renderMarkdown(text) {
     const source = (text === null || text === undefined) ? '' : String(text);
+    if (!isSanitizerAvailable()) {
+        warnDegraded('sanitizer');
+        return plainTextHtml(source);
+    }
     try {
         // Wrap unfenced JSON blobs in a ```json fence so they render via the
         // clean code-block path instead of being mangled by the markdown parser.
         const fenced = fenceUnfencedJson(source);
         // Then convert any media URLs to HTML elements
         const textWithMedia = convertMediaUrlsToHtml(fenced);
-        if (typeof marked === 'undefined' || typeof marked.parse !== 'function' || !isSanitizerAvailable()) {
-            return plainTextHtml(source);
-        }
+        if (!isMarkedAvailable()) return renderWithoutMarked(textWithMedia);
         return sanitizeAssistantHtml(marked.parse(textWithMedia));
     } catch (e) {
         console.warn('Markdown parse error:', e);
         return plainTextHtml(source);
     }
+}
+
+/**
+ * Wrap arbitrary text in a markdown inline-code span it cannot escape.
+ *
+ * marked HTML-escapes code-span text itself, so the text goes in RAW (escaping
+ * it first shows literal &#39; / &quot;). The fence is one backtick longer than
+ * the longest backtick run in the text, so the text can never close the span,
+ * and newlines become spaces (a code span renders them as spaces anyway) so the
+ * text cannot end the surrounding block line.
+ * @param {*} text - Any value
+ * @returns {string} Markdown source for one code span
+ */
+export function markdownCodeSpan(text) {
+    const flat = String(text ?? '').replace(/\r?\n/g, ' ');
+    const longestRun = (flat.match(/`+/g) || []).reduce((max, run) => Math.max(max, run.length), 0);
+    const fence = '`'.repeat(longestRun + 1);
+    // A span may not start or end with a backtick, and one space is stripped
+    // from both ends when both are present: pad in exactly those cases.
+    const pad = (/^`|`$/.test(flat) || /^ .* $/.test(flat)) ? ' ' : '';
+    return `${fence}${pad}${flat}${pad}${fence}`;
 }
 
 // =============================================================================

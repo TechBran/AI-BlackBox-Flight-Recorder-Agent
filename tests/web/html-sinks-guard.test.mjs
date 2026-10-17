@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve, relative } from "node:path";
 import { PORTAL, REPO_ROOT } from "./helpers/portal-dom.mjs";
-import { stripComments, innerHtmlAssignments, isSafeRhs } from "./helpers/sink-scan.mjs";
+import { stripComments, innerHtmlAssignments, isSafeRhs, rawHtmlApiUses } from "./helpers/sink-scan.mjs";
 
 // Many Portal sources are CRLF; normalize so line-based patterns behave the same.
 const readSource = (path) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
@@ -25,12 +25,19 @@ function portalJsFiles(dir = PORTAL) {
     return files;
 }
 
+/** Every place `code` writes HTML that is NOT static markup or one sanitizer call. */
+function unsafeHtmlWrites(code) {
+    const stripped = stripComments(code);
+    return [
+        ...innerHtmlAssignments(stripped).filter((a) => !isSafeRhs(a.rhs))
+            .map((a) => `line ${a.line}: innerHTML ${a.op} ${a.rhs.slice(0, 120)}`),
+        ...rawHtmlApiUses(stripped).map((u) => `line ${u.line}: ${u.api}`),
+    ];
+}
+
 for (const file of ["modules/chat-bubbles.js", "modules/markdown-renderer.js"]) {
     test(`${file}: every innerHTML assignment is static markup or sanitizer output`, () => {
-        const code = stripComments(src(file));
-        const bad = innerHtmlAssignments(code).filter((a) => !isSafeRhs(a.rhs));
-        assert.deepEqual(bad.map((a) => `line ${a.line}: innerHTML ${a.op} ${a.rhs.slice(0, 120)}`), []);
-        assert.doesNotMatch(code, /\.outerHTML\s*=|insertAdjacentHTML|document\.write/);
+        assert.deepEqual(unsafeHtmlWrites(src(file)), []);
     });
 }
 
@@ -38,7 +45,43 @@ test("the guard itself catches the old raw branches", () => {
     const old = "if (containsMedia) {\n    span.innerHTML = contentString;\n    tempDiv.innerHTML = newContentString;\n}";
     assert.equal(innerHtmlAssignments(old).filter((a) => !isSafeRhs(a.rhs)).length, 2);
     assert.equal(isSafeRhs("sanitizeAssistantHtml(contentString)"), true);
+    assert.equal(isSafeRhs("renderMarkdown(text || '')"), true);
     assert.equal(isSafeRhs("`<b>${x}</b>`"), false);
+});
+
+// Shapes that only LOOK sanitized, or reach the parser another way (bypass review of U2).
+const GUARD_BYPASSES = {
+    concatAfterCall: "span.innerHTML = sanitizeAssistantHtml(a) + contentString;",
+    concatOnNextLine: "span.innerHTML = renderMarkdown(a)\n    + mediaHtml;",
+    templateAfterCall: "span.innerHTML = plainTextHtml(a) + `${b}`;",
+    orFallback: "span.innerHTML = sanitizeAssistantHtml(a) || contentString;",
+    ternaryAfterCall: "span.innerHTML = markdownToSafeHtml(a) ? raw : '';",
+    twoCalls: "span.innerHTML = sanitizeAssistantHtml(a)(contentString);",
+    memberAfterCall: "span.innerHTML = sanitizeAssistantHtml(a).replace('x', raw);",
+    bracketInner: "span['innerHTML'] = contentString;",
+    bracketInnerDouble: 'span["innerHTML"] += contentString;',
+    bracketOuter: "span[`outerHTML`] = contentString;",
+    setHTMLUnsafe: "span.setHTMLUnsafe(contentString);",
+    contextualFragment: "span.append(document.createRange().createContextualFragment(contentString));",
+    parseHTMLUnsafe: "const d = Document.parseHTMLUnsafe(contentString);",
+    insertAdjacent: "span.insertAdjacentHTML('beforeend', contentString);",
+    outerHTML: "span.outerHTML = contentString;",
+    documentWrite: "document.writeln(contentString);",
+    srcdoc: "frame.srcdoc = contentString;",
+};
+for (const [name, code] of Object.entries(GUARD_BYPASSES)) {
+    test(`the guard flags ${name}`, () => {
+        assert.equal(unsafeHtmlWrites(code).length, 1, JSON.stringify(unsafeHtmlWrites(code)));
+    });
+}
+
+test("the guard accepts the sanctioned shapes", () => {
+    const ok = "span.innerHTML = sanitizeAssistantHtml(contentString);\n"
+        + "span.innerHTML = renderMarkdown(\n    newContentString\n);\n"
+        + "dots.innerHTML = '<span></span><span></span>';\n"
+        + "x.innerHTML = '';\n"
+        + "el.innerHTML = markdownToSafeHtml(a);\nconst y = 1;";
+    assert.deepEqual(unsafeHtmlWrites(ok), []);
 });
 
 test("DOMPurify is only ever called from Portal/modules/sanitize.js (one choke point, no fail-open fallbacks)", () => {
@@ -96,3 +139,17 @@ for (const [file, pattern] of NAMED_RAW_SINKS) {
         assert.doesNotMatch(stripComments(src(file)), pattern);
     });
 }
+
+// sanitize.js namespaces every id/name in model output as "user-content-<value>"
+// (DOMPurify SANITIZE_NAMED_PROPS). That only stops DOM clobbering while the
+// Portal never uses the prefix for its OWN elements or lookups.
+test("no Portal page or module uses the user-content- id prefix reserved for model output", () => {
+    const offenders = [];
+    for (const file of portalJsFiles()) {
+        if (/user-content-/.test(stripComments(readSource(file)))) offenders.push(relative(REPO_ROOT, file));
+    }
+    for (const page of readdirSync(PORTAL).filter((f) => f.endsWith(".html"))) {
+        if (/user-content-/.test(readSource(resolve(PORTAL, page)))) offenders.push(`Portal/${page}`);
+    }
+    assert.deepEqual(offenders, []);
+});

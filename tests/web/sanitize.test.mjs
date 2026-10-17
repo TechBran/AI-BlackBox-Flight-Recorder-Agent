@@ -14,7 +14,7 @@ loadMarked();
 
 const { sanitizeAssistantHtml, isSanitizerAvailable, plainTextHtml, htmlToText } =
     await import("../../Portal/modules/sanitize.js");
-const { renderMarkdown, markdownToSafeHtml, applySyntaxHighlighting } =
+const { renderMarkdown, markdownToSafeHtml, applySyntaxHighlighting, configureMarked } =
     await import("../../Portal/modules/markdown-renderer.js");
 
 // Model output an attacker can steer (prompt-injected web_fetch / email / SMS).
@@ -74,6 +74,90 @@ test("sanitizeAssistantHtml keeps the renderer's classes, data-highlight spans a
     assert.equal(root.querySelector("[data-highlight]").getAttribute("data-snap-id"), "SNAP-1");
     assert.equal(root.querySelector("a.media-download-btn").getAttribute("download"), "i.png");
     assert.equal(root.querySelector("img.generated-image").getAttribute("loading"), "lazy");
+});
+
+// ── DOM clobbering: model output must never own a Portal id or name ──────
+// The Portal looks its form fields up page-wide by id ($(id) / getElementById),
+// and #history comes BEFORE every modal in index.html, so an id planted in a
+// reply would win the lookup (bypass review of U2: a hidden
+// <input id="contactIsOperatorSelf" checked> flipped the next contact save).
+test("sanitizeAssistantHtml cannot plant elements under Portal ids or names (DOM clobbering)", () => {
+    const html = `<input type="checkbox" id="contactIsOperatorSelf" checked>`
+        + `<input id="contactNotes" name="contactNotes" value="x"><textarea name="smsNewPhone"></textarea>`
+        + `<a id="history" name="toast">x</a>`;
+    const host = document.createElement("div");
+    host.innerHTML = sanitizeAssistantHtml(html);
+    document.body.prepend(host); // first in document order, like #history before the modals
+    try {
+        for (const id of ["contactIsOperatorSelf", "contactNotes", "history"]) {
+            assert.equal(host.querySelector(`[id="${id}"]`), null, `planted id ${id}: ${host.innerHTML}`);
+        }
+        for (const name of ["contactNotes", "smsNewPhone", "toast"]) {
+            assert.equal(host.querySelector(`[name="${name}"]`), null, `planted name ${name}: ${host.innerHTML}`);
+        }
+        assert.notEqual(document.getElementById("history").parentElement, host);
+        // The elements still render; only their identifiers are namespaced.
+        assert.equal(host.querySelectorAll("input").length, 2);
+    } finally {
+        host.remove();
+    }
+});
+
+test("sanitizeAssistantHtml drops attributes that act on OTHER page elements by id", () => {
+    const html = `<label for="contactIsOperatorSelf">ok</label>`
+        + `<button popovertarget="m" popovertargetaction="show">p</button><div popover>x</div>`
+        + `<button commandfor="dlg" command="show-modal">c</button><input list="dl">`;
+    const root = mount(sanitizeAssistantHtml(html));
+    for (const attr of ["for", "popovertarget", "popovertargetaction", "popover", "commandfor", "command", "list"]) {
+        assert.equal(root.querySelector(`[${attr}]`), null, `${attr} kept: ${root.innerHTML}`);
+    }
+    assert.ok(root.querySelector("label"));
+    assert.equal(root.querySelectorAll("button").length, 2);
+});
+
+// ── Model content stays in the conversation flow (no page overlays) ──────
+// <style> is forbidden, but the style ATTRIBUTE is kept (server placeholders
+// rely on it), so positioning that lifts content out of its bubble is dropped.
+const OVERLAYS = {
+    fixed: `<div style="position:fixed;inset:0;z-index:2147483647;background:#fff">Session expired. <a href="https://evil.example/login">Sign in again</a></div>`,
+    absolute: `<div style="position:absolute;top:0;left:0;width:100vw;height:100vh;background:#fff">x</div>`,
+    sticky: `<div style="position: sticky; top: 0">x</div>`,
+    relativeOffset: `<div style="position: relative; top: -3000px">x</div>`,
+    important: `<div style="position: fixed !important">x</div>`,
+    viaCustomProperty: `<div style="--p: fixed; position: var(--p)">x</div>`,
+    transform: `<div style="transform: translate(-50vw, -100vh) scale(4)">x</div>`,
+    translateProperty: `<div style="translate: 0 -100vh">x</div>`,
+    zIndex: `<div style="z-index: 99999; display: flex">x</div>`,
+    negativeMargin: `<div style="margin: -2000px 0 0 0">x</div>`,
+};
+for (const [name, payload] of Object.entries(OVERLAYS)) {
+    test(`sanitizeAssistantHtml keeps model content in flow: ${name}`, () => {
+        const root = mount(sanitizeAssistantHtml(payload));
+        const div = root.querySelector("div");
+        assert.ok(div, "the element itself is kept");
+        assert.equal(div.hasAttribute("style"), false, root.innerHTML);
+    });
+}
+
+test("sanitizeAssistantHtml drops <dialog> (positioned above the page by the UA)", () => {
+    const root = mount(sanitizeAssistantHtml(`<dialog open style="width:100vw;height:100vh">Sign in</dialog>`));
+    assert.equal(root.querySelector("dialog"), null, root.innerHTML);
+    assert.equal(root.textContent, "Sign in");
+});
+
+test("sanitizeAssistantHtml keeps ordinary inline styles byte-identical (server placeholders)", () => {
+    const placeholder = `<div class="video-loading-placeholder" data-task-id="t1" style="padding: 12px; background: #000000; border-radius: 8px; margin: 8px 0;">`
+        + `Video generation in progress<span class="thinking-dots" style="display:inline-flex; gap:4px; margin-left:8px;"><span></span></span></div>`
+        + `<span style="color: #50fa7b; background: rgba(80, 250, 123, 0.1); display: inline-block; width: 100%;">+ a</span>`
+        + `<p style="position: static; text-align: center">c</p>`;
+    const root = mount(sanitizeAssistantHtml(placeholder));
+    assert.equal(root.querySelector(".video-loading-placeholder").getAttribute("style"),
+        "padding: 12px; background: #000000; border-radius: 8px; margin: 8px 0;");
+    assert.equal(root.querySelector(".video-loading-placeholder").getAttribute("data-task-id"), "t1");
+    assert.equal(root.querySelector(".thinking-dots").getAttribute("style"), "display:inline-flex; gap:4px; margin-left:8px;");
+    assert.equal(root.querySelector("span[style^='color']").getAttribute("style"),
+        "color: #50fa7b; background: rgba(80, 250, 123, 0.1); display: inline-block; width: 100%;");
+    assert.equal(root.querySelector("p").getAttribute("style"), "position: static; text-align: center");
 });
 
 test("sanitizeAssistantHtml FAILS CLOSED without DOMPurify: escaped text, never markup", () => {
@@ -173,14 +257,36 @@ test("renderMarkdown FAILS CLOSED without DOMPurify (escapes the source, not mar
     }
 });
 
-test("renderMarkdown FAILS CLOSED without marked", () => {
+test("renderMarkdown without marked still SANITIZES (never raw), keeping line breaks", () => {
+    // marked is CDN-only, so an offline box can lose it while the vendored
+    // DOMPurify is present: the text is then sanitized as HTML, not passed raw.
     unloadMarked();
+    try {
+        for (const [name, payload] of Object.entries(PAYLOADS)) {
+            const out = renderMarkdown(`before\n${payload}\nafter`);
+            assert.deepEqual(scriptVectors(mount(out)), [], `${name}: ${out}`);
+        }
+        const root = mount(renderMarkdown("line one\nline two"));
+        assert.equal(root.querySelectorAll("br").length, 1);
+        assert.equal(root.textContent, "line oneline two");
+        // Server-built markup (media placeholders the pollers look up) survives.
+        const ph = mount(renderMarkdown(`Here you go.\n<div class="video-loading-placeholder" data-task-id="t1" style="padding: 12px;">in progress</div>`));
+        assert.ok(ph.querySelector(".video-loading-placeholder[data-task-id='t1']"), ph.innerHTML);
+    } finally {
+        loadMarked();
+    }
+});
+
+test("renderMarkdown FAILS CLOSED without marked AND DOMPurify", () => {
+    unloadMarked();
+    unloadPurify();
     try {
         const root = mount(renderMarkdown(PAYLOADS.imgOnerror));
         assert.equal(root.querySelector("img"), null);
         assert.equal(root.textContent, PAYLOADS.imgOnerror);
     } finally {
         loadMarked();
+        loadPurify();
     }
 });
 
@@ -203,6 +309,29 @@ test("markdownToSafeHtml (agent renderers) sanitizes and fails closed", () => {
     } finally {
         loadPurify();
     }
+});
+
+test("markdownToSafeHtml without marked sanitizes the agent output (never raw)", () => {
+    unloadMarked();
+    try {
+        const root = mount(markdownToSafeHtml(`<details class="edit-diff-collapsible" open><summary>x</summary></details>\n${PAYLOADS.svgOnload}`));
+        assert.deepEqual(scriptVectors(root), [], root.innerHTML);
+        assert.ok(root.querySelector("details.edit-diff-collapsible"), root.innerHTML);
+    } finally {
+        loadMarked();
+    }
+});
+
+test("configureMarked passes only options marked 11 honours (X04-security-clients-infra-08)", () => {
+    configureMarked();
+    for (const dead of ["highlight", "headerIds", "mangle", "sanitize"]) {
+        assert.equal(Object.hasOwn(marked.defaults, dead), false, `${dead} is a removed marked option`);
+    }
+    assert.equal(marked.defaults.breaks, true);
+    assert.equal(marked.defaults.gfm, true);
+    const root = mount(renderMarkdown("line one\nline two\n\n```js\nconst a = 1;\n```"));
+    assert.equal(root.querySelectorAll("br").length, 1);
+    assert.ok(root.querySelector("pre code.language-js"));
 });
 
 test("renderMarkdown tolerates null/undefined", () => {
