@@ -959,6 +959,22 @@ def process_image_generation(task: Task):
                progress=100)
     print(f"[WORKER] Generated {len(urls)} image(s): {urls}")
 
+def _vet_veo_download_uri(video_uri, api_base: str) -> str:
+    """Veo's finished-video URI is downloaded WITH the API key, so it must be
+    https on the API host that key belongs to. Anything else -- the box's own
+    loopback, the LAN, another host -- is refused before the key is sent
+    (audit M3 U20: the poll response decides where the box connects)."""
+    from urllib.parse import urlsplit
+    if not isinstance(video_uri, str) or not video_uri:
+        raise ValueError("Veo returned no download URI")
+    got, want = urlsplit(video_uri), urlsplit(api_base)
+    if (got.scheme != "https" or got.username is not None or got.password is not None
+            or (got.hostname or "").lower() != (want.hostname or "").lower()
+            or got.port not in (None, 443)):
+        raise ValueError(f"Veo download URI is not on {want.hostname}; refusing to send the key there")
+    return video_uri
+
+
 def process_video_generation(task: Task):
     """Generate video using Veo 3.1 (text-to-video, image-to-video, or video extension)"""
     update_task(task.task_id, progress=20)
@@ -1216,7 +1232,8 @@ def process_video_generation(task: Task):
             except (KeyError, IndexError) as e:
                 raise Exception(f"Could not extract video URI from response: {poll_data}")
             
-            # Download the video
+            # Download the video (the key goes only to the API host)
+            video_uri = _vet_veo_download_uri(video_uri, base_url)
             print(f"[WORKER] Downloading video from: {video_uri}")
             video_response = requests.get(
                 video_uri,

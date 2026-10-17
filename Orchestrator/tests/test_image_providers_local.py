@@ -83,8 +83,12 @@ def test_local_adapter_url_fallback(monkeypatch):
         return _Resp([{"url": "http://h/img/1.png"}])
 
     class _G:
-        content = b"URLIMG"
-        def raise_for_status(self):
+        status_code = 200
+
+        def iter_content(self, chunk_size=1):
+            yield b"URLIMG"
+
+        def close(self):
             pass
 
     monkeypatch.setattr(custom_servers, "resolve_image_server",

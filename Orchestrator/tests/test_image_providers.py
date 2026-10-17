@@ -59,12 +59,13 @@ def test_xai_images_url_path(monkeypatch):
     def fake_post(url, headers=None, json=None, timeout=None):
         return _FakeResp(json_data={"data": [{"url": "http://x/y"}]})
 
-    def fake_get(url, timeout=None):
+    def fake_safe_get(url, **kw):   # the SSRF guard (test_provider_result_downloads.py)
         assert url == "http://x/y"
-        return _FakeResp(content=b"IMG")
+        from Orchestrator.utils.safe_fetch import FetchResult
+        return FetchResult(url=url, status_code=200, headers={}, content=b"IMG")
 
     monkeypatch.setattr(image_providers.requests, "post", fake_post)
-    monkeypatch.setattr(image_providers.requests, "get", fake_get)
+    monkeypatch.setattr(image_providers, "safe_get", fake_safe_get)
     out = image_providers._xai_images("a dog", {"numberOfImages": 1})
     assert out == [b"IMG"]
 

@@ -9,14 +9,76 @@ Untagged tasks fall back to ``DEFAULT_IMAGE_PROVIDER`` (gemini) for back-compat
 with legacy ``/generate/image`` callers.
 """
 import base64
+from urllib.parse import urljoin, urlsplit
+
 import requests
 
 from Orchestrator.config import OPENAI_API_KEY, XAI_API_KEY, GOOGLE_IMAGEN_MODEL
+from Orchestrator.utils.safe_fetch import FetchError, safe_get
 
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
 XAI_IMAGES_URL = "https://api.x.ai/v1/images/generations"
 OPENAI_IMAGE_MODEL = "gpt-image-1"          # quality-first gpt-image tier (spike-verified)
 XAI_IMAGE_MODEL = "grok-imagine-image-quality"
+
+# A provider may answer with a URL instead of inline bytes, and the box then
+# fetches it on its own behalf -- so the response decides where the box
+# connects. A hostile or broken one must not point it at the box's own
+# loopback services, the LAN or cloud metadata (audit M3 U20).
+IMAGE_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
+IMAGE_DOWNLOAD_TIMEOUT = 120
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _download_public_image(url):
+    """A cloud provider's temporary image URL: public internet only (the SSRF
+    guard vets every address and redirect hop and caps the body)."""
+    try:
+        r = safe_get(url, timeout=IMAGE_DOWNLOAD_TIMEOUT, max_bytes=IMAGE_DOWNLOAD_MAX_BYTES)
+    except FetchError as e:
+        raise RuntimeError(f"Image download refused or failed: {e}") from None
+    if not 200 <= r.status_code < 300:
+        raise RuntimeError(f"Image download failed: HTTP {r.status_code}")
+    return r.content
+
+
+def _origin(url):
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    port = parts.port or _DEFAULT_PORTS.get(scheme)   # ValueError on a bad port
+    return scheme, (parts.hostname or "").lower(), port
+
+
+def _download_from_server(url, base_url):
+    """A LAN image server's own result URL. The server is registered, its
+    reply is not: the URL must stay on the registered origin (relative URLs
+    resolve against it), no redirect is followed and the body is capped."""
+    try:
+        target = urljoin(base_url.rstrip("/") + "/", url)
+        parts = urlsplit(target)
+        allowed = (parts.username is None and parts.password is None
+                   and parts.scheme.lower() in _DEFAULT_PORTS
+                   and _origin(target) == _origin(base_url))
+    except (TypeError, ValueError):     # not a string; a bad port
+        allowed = False
+    if not allowed:
+        raise RuntimeError(
+            f"Local image server returned a URL outside its own origin ({base_url}); refusing to fetch it")
+    r = requests.get(target, timeout=IMAGE_DOWNLOAD_TIMEOUT, allow_redirects=False, stream=True)
+    try:
+        if 300 <= r.status_code < 400:
+            raise RuntimeError("Local image server answered the image URL with a redirect; refusing to follow it")
+        if not 200 <= r.status_code < 300:
+            raise RuntimeError(f"Image download failed: HTTP {r.status_code}")
+        body = bytearray()
+        for chunk in r.iter_content(65536):
+            body += chunk
+            if len(body) > IMAGE_DOWNLOAD_MAX_BYTES:
+                raise RuntimeError(
+                    f"Image download is larger than {IMAGE_DOWNLOAD_MAX_BYTES} bytes; refusing it")
+        return bytes(body)
+    finally:
+        r.close()
 
 
 def _openai_images(prompt, options):
@@ -52,9 +114,7 @@ def _xai_images(prompt, options):
         if d.get("b64_json"):
             out.append(base64.b64decode(d["b64_json"]))
         elif d.get("url"):
-            img = requests.get(d["url"], timeout=120)  # temp imgen.x.ai URL -- fetch immediately
-            img.raise_for_status()
-            out.append(img.content)
+            out.append(_download_public_image(d["url"]))  # temp imgen.x.ai URL -- fetch immediately
     return out
 
 
@@ -92,9 +152,7 @@ def _local_images(prompt, options):
         if d.get("b64_json"):
             out.append(base64.b64decode(d["b64_json"]))
         elif d.get("url"):
-            img = requests.get(d["url"], timeout=120)  # some sd.cpp/other builds return a URL
-            img.raise_for_status()
-            out.append(img.content)
+            out.append(_download_from_server(d["url"], srv["base_url"]))  # some sd.cpp builds return a URL
     if not out:
         # Fail LOUDLY -- a zero-image response must not save nothing and "succeed".
         raise RuntimeError("Local image server returned no decodable image data")
