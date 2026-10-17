@@ -68,6 +68,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
@@ -440,6 +441,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Latest CU action description (for activity display)
     private val _cuActionLabel = MutableStateFlow("")
     val cuActionLabel: StateFlow<String> = _cuActionLabel.asStateFlow()
+
+    // One-shot feedback for the CU header's STOP / New buttons ("Stop requested",
+    // "Stop failed: …"), shown once by CuScreen then cleared via consumeCuControlMessage.
+    private val _cuControlMessage = MutableStateFlow<String?>(null)
+    val cuControlMessage: StateFlow<String?> = _cuControlMessage.asStateFlow()
 
     // ── Robotics ER state ──
     // Whether an ER mission is actively running (matches Portal window.__erMissionActive)
@@ -3186,14 +3192,36 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _cuSessionId.value = sessionId
     }
 
-    /** Reset CU state for a new session */
+    /**
+     * Start a fresh CU session (A13-ui-ops-05). POSTs /chat/cu-new-session — which stops
+     * a running task and destroys the operator's Anthropic/OpenAI and Gemini CU sessions
+     * (Portal cu-drawer parity) — and clears the local state only once the server has
+     * confirmed. Clearing it first hid the STOP button while the agent kept driving the
+     * desktop, and the next prompt reattached to the old server session. CuScreen asks
+     * for confirmation before calling this on a running task.
+     */
     fun resetCuSession() {
-        _cuSessionId.value = null
-        _cuStep.value = 0
-        _cuStepTotal.value = 0
-        _cuStatus.value = "idle"
-        _cuActionLabel.value = ""
-        _cuScreenshotUrl.value = null
+        viewModelScope.launch {
+            val result = requestCuControl(
+                api, "/chat/cu-new-session", buildCuNewSessionBody(currentOperator, currentModel))
+            if (!result.success) {
+                Log.w(TAG, "CU new session failed: ${result.error}")
+                _cuControlMessage.value = "New session failed: ${result.error}"
+                return@launch
+            }
+            _cuSessionId.value = null
+            _cuStep.value = 0
+            _cuStepTotal.value = 0
+            _cuStatus.value = "idle"
+            _cuActionLabel.value = ""
+            _cuScreenshotUrl.value = null
+            _cuControlMessage.value = "Session cleared"
+        }
+    }
+
+    /** CuScreen showed [cuControlMessage]; clear it so it is shown once. */
+    fun consumeCuControlMessage() {
+        _cuControlMessage.value = null
     }
 
     // =========================================================================
@@ -3208,27 +3236,89 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _erStatus.value = "offline"
     }
 
-    /** Request e-stop on the current CU session */
+    /**
+     * Request e-stop on the current CU session (A13-ui-ops-05). The status flips to
+     * "stopped" only when the server answers success:true — before, the body carried no
+     * operator, so the server found no session and refused, while the UI said "stopped"
+     * and removed STOP with the agent still acting. A refusal or a failed request keeps
+     * the status (and STOP) and says why. A session id not known yet (the cu_session
+     * event still in flight) is sent empty: the server then stops the operator's most
+     * recent session, as the Portal's stopCUTask does.
+     */
     fun stopCuTask() {
-        val sessionId = _cuSessionId.value ?: return
+        val sessionId = _cuSessionId.value
         viewModelScope.launch {
-            try {
-                api?.post("/chat/cu-stop", buildCuStopBody(sessionId))
-                _cuStatus.value = "stopped"
-            } catch (e: Exception) {
-                Log.e(TAG, "CU stop failed: ${e.message}")
+            val result = requestCuControl(
+                api, "/chat/cu-stop", buildCuStopBody(currentOperator, sessionId, currentModel))
+            _cuStatus.value = cuStatusAfterStop(_cuStatus.value, result)
+            if (result.success) {
+                _cuControlMessage.value = "Stop requested"
+            } else {
+                Log.e(TAG, "CU stop failed: ${result.error}")
+                _cuControlMessage.value = "Stop failed: ${result.error}"
             }
         }
     }
 
-    private fun buildCuStopBody(sessionId: String): String {
-        return kotlinx.serialization.json.buildJsonObject {
-            put("session_id", sessionId)
-            put("model", currentModel)
-        }.toString()
-    }
+    /** The server's answer to a CU control request (/chat/cu-stop, /chat/cu-new-session). */
+    data class CuControlResult(val success: Boolean, val error: String?)
 
     companion object {
+        // ── Computer Use control (A13-ui-ops-05) — pure cores behind stopCuTask /
+        // resetCuSession, unit-tested in ChatViewModelCuControlTest. ──
+
+        /** Body for POST /chat/cu-stop. The server resolves the session from [operator]
+         *  (session_manager.get_session matches on it), so it is never optional. */
+        @VisibleForTesting
+        internal fun buildCuStopBody(operator: String, sessionId: String?, model: String): String =
+            buildJsonObject {
+                put("operator", operator)
+                put("session_id", sessionId.orEmpty())
+                put("model", model)
+            }.toString()
+
+        /** Body for POST /chat/cu-new-session (Portal chat-send.js newCUSession parity). */
+        @VisibleForTesting
+        internal fun buildCuNewSessionBody(operator: String, model: String): String =
+            buildJsonObject {
+                put("operator", operator)
+                put("model", model)
+            }.toString()
+
+        /**
+         * POST a CU control request and read the reply. Success means the server said
+         * `"success": true`; anything else — its refusal, an HTTP error, a dropped
+         * connection, an unreadable body, no api client — is a failure with a reason
+         * to show. Never throws except for cancellation.
+         */
+        @VisibleForTesting
+        internal suspend fun requestCuControl(api: BlackBoxApi?, path: String, body: String): CuControlResult {
+            if (api == null) return CuControlResult(false, "Not connected to the BlackBox")
+            val raw = try {
+                api.post(path, body)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return CuControlResult(false, e.message ?: "Request failed")
+            }
+            return try {
+                val reply = Json.parseToJsonElement(raw).jsonObject
+                if (reply["success"]?.jsonPrimitive?.booleanOrNull == true) {
+                    CuControlResult(true, null)
+                } else {
+                    CuControlResult(false, reply["error"]?.jsonPrimitive?.contentOrNull
+                        ?: "The BlackBox did not confirm")
+                }
+            } catch (e: Exception) {
+                CuControlResult(false, "Unreadable reply from the BlackBox")
+            }
+        }
+
+        /** The CU status after a stop request: "stopped" only on a confirmed stop. */
+        @VisibleForTesting
+        internal fun cuStatusAfterStop(current: String, result: CuControlResult): String =
+            if (result.success) "stopped" else current
+
         /** Map provider IDs to the backend's expected provider key.
          *  Note: Android uses "gemini" as provider key but backend uses "google".
          *  T3 (2026-05-18) added xai mapping — previously a gap that left

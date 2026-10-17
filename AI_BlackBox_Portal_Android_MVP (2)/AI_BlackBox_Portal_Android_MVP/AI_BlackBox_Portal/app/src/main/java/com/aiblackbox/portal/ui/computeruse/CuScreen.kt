@@ -3,6 +3,7 @@ package com.aiblackbox.portal.ui.computeruse
 import android.app.Application
 import android.graphics.BitmapFactory
 import android.view.HapticFeedbackConstants
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
@@ -48,6 +49,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.OutlinedTextField
@@ -55,6 +57,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -597,6 +600,10 @@ fun CuScreen(
     onDeviceChange: (String) -> Unit = {},
     onStopCu: () -> Unit = {},
     onNewSession: () -> Unit = {},
+    // One-shot result of STOP / New ("Stop requested", "Stop failed: …") from
+    // ChatViewModel.cuControlMessage; shown as a toast, then [onCuControlMessageShown].
+    cuControlMessage: String? = null,
+    onCuControlMessageShown: () -> Unit = {},
     messages: List<com.aiblackbox.portal.data.model.UiMessage> = emptyList(),
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
@@ -645,6 +652,41 @@ fun CuScreen(
     }
 
     val isAgentActive = cuStatus == "running"
+
+    // New on a RUNNING task stops it and destroys the server session, so ask first
+    // (Portal cu-drawer parity, A13-ui-ops-05).
+    var confirmNewSession by remember { mutableStateOf(false) }
+    val requestNewSession: () -> Unit = {
+        if (isAgentActive) {
+            confirmNewSession = true
+        } else {
+            onNewSession()
+        }
+    }
+
+    LaunchedEffect(cuControlMessage) {
+        if (cuControlMessage != null) {
+            Toast.makeText(context, cuControlMessage, Toast.LENGTH_SHORT).show()
+            onCuControlMessageShown()
+        }
+    }
+
+    if (confirmNewSession) {
+        AlertDialog(
+            onDismissRequest = { confirmNewSession = false },
+            title = { Text("Start a new session?") },
+            text = { Text("A task is running. Stop it and start a new session?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmNewSession = false
+                    onNewSession()
+                }) { Text("Stop and start new") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmNewSession = false }) { Text("Cancel") }
+            },
+        )
+    }
 
     LaunchedEffect(origin) {
         viewModel.initialize(origin)
@@ -756,7 +798,7 @@ fun CuScreen(
                 viewModel.refreshScreenshot()
             },
             onStop = onStopCu,
-            onNewSession = onNewSession
+            onNewSession = requestNewSession
         )
 
         // ── Provider + Model row REMOVED (Brandon fit pass 2026-07-23) ──

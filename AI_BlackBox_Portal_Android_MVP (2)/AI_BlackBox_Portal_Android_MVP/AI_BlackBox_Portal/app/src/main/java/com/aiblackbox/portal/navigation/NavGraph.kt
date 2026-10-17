@@ -196,6 +196,7 @@ fun BlackBoxNavGraph(
             // provider flips to "computer-use" (NativeMainActivity route effect).
             val liveModels by vm.liveModels.collectAsState()
             val cuModelBackends by vm.cuModelBackends.collectAsState()
+            val cuControlMessage by vm.cuControlMessage.collectAsState()
 
             CuScreen(
                 origin = origin,
@@ -210,6 +211,8 @@ fun BlackBoxNavGraph(
                 onDeviceChange = { deviceId -> vm.setCuDeviceId(deviceId) },
                 onStopCu = { vm.stopCuTask() },
                 onNewSession = { vm.resetCuSession() },
+                cuControlMessage = cuControlMessage,
+                onCuControlMessageShown = { vm.consumeCuControlMessage() },
                 messages = messages,
                 onSpeak = onSpeak,
                 onSpeakWithId = onSpeakWithId,
