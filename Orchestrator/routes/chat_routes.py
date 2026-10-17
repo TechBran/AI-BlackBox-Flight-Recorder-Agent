@@ -3842,10 +3842,10 @@ These are ALL the tools available to you. Use ONLY these exact tool names — no
 - **analyze_video** — Analyze/describe a video using multimodal AI (provide video_url + optional prompt)
 
 ### Speech & Voice
-- **text_to_speech** — Convert text to speech using OpenAI TTS HD (voices: alloy, echo, fable, onyx, nova, shimmer)
+- **text_to_speech** — Convert text to speech with any voice id from list_tts_voices (omit voice for the box default)
 - **speech_to_text** — Transcribe audio to text using OpenAI Whisper (provide audio_path)
 - **gemini_pro_tts** — High-quality speech with 30 Gemini Pro voices (returns task_id)
-- **list_tts_voices** — List all available Google Cloud TTS voices
+- **list_tts_voices** — List this box's TTS voices by provider (OpenAI, Gemini, ElevenLabs, local), with availability and the default
 
 ### Media Library
 - **get_media** — Get a specific media item by URL or task_id
@@ -3895,7 +3895,7 @@ When answering questions, prioritize sources in this order:
 - **Videos**: Only generate when explicitly requested. Veo 3.1 has strict hourly/daily quotas (3-5 max per session). On 429 rate limit, pivot to images.
 - **Music**: Only generate when explicitly requested. Avoid artist/style references (copyright filter). Retry with generic descriptions on failure.
 - **Analysis**: Use analyze_image/analyze_audio/analyze_video to examine existing media content.
-- **TTS**: Use text_to_speech for quick OpenAI voices, gemini_pro_tts for premium quality (async).
+- **TTS**: Use text_to_speech for quick speech (any voice from list_tts_voices), gemini_pro_tts for premium quality (async).
 - After generating, ALWAYS use get_task_status to poll completion before referencing the result.
 - Display media URLs on their own line so they render inline:
   /ui/uploads/sunset-mountains_abc123.png  (renders as image)

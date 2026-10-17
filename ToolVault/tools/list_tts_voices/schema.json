@@ -1,6 +1,6 @@
 {
   "name": "list_tts_voices",
-  "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
+  "description": "List every text-to-speech voice this box offers, grouped by provider (OpenAI, Gemini Flash and Pro, ElevenLabs premium and cloned voices, local and on-box voices), with each group's availability and the box's default voice. Pass a returned voice id (provider:voice, e.g. elevenlabs:<voice_id>) to text_to_speech.",
   "category": "audio",
   "groups": [
     "chat",
@@ -13,6 +13,6 @@
     "properties": {},
     "required": []
   },
-  "returns": "Returns a large list of voices with language and gender info",
+  "returns": "Voice ids grouped by provider, each group's availability, and the default voice",
   "example": "list_tts_voices()"
 }

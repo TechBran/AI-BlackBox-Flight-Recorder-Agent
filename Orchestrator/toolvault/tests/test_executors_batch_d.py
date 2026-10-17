@@ -162,22 +162,26 @@ class _FakeSession:
 
 
 def test_list_tts_voices_summarizes_voices():
-    """list_tts_voices takes no required params — mock the HTTP GET and verify
-    it summarizes the voice list."""
+    """list_tts_voices takes no required params — mock the HTTP GET of
+    /tts/catalog and verify it summarizes the grouped voice list."""
     ex = registry.get_executor("list_tts_voices")
     payload = {
-        "voices": [
-            {"name": "en-US-Wavenet-A", "languageCodes": ["en-US"]},
-            {"name": "en-GB-Wavenet-B", "languageCodes": ["en-GB"]},
-            {"name": "fr-FR-Wavenet-C", "languageCodes": ["fr-FR"]},
-        ]
+        "groups": [
+            {"id": "openai", "label": "OpenAI TTS HD", "available": True, "voices": [
+                {"id": "openai:alloy", "name": "Alloy", "description": "Neutral"},
+                {"id": "openai:onyx", "name": "Onyx", "description": "Deep"}]},
+            {"id": "gemini-pro", "label": "Gemini Pro TTS", "available": True, "voices": [
+                {"id": "gemini-pro:Charon", "name": "Charon", "description": "Calm"}]},
+        ],
+        "default": {"id": "openai:onyx", "available": True},
     }
     with patch("aiohttp.ClientSession", return_value=_FakeSession(payload)):
         result = asyncio.run(ex({}, ToolContext(operator="system")))
     assert isinstance(result, ToolResult)
     assert result.success is True
-    assert "3" in result.result
-    assert result.data == {"voice_count": 3}
+    assert "3 voices" in result.result
+    assert "openai:onyx" in result.result and "gemini-pro:Charon" in result.result
+    assert [g["id"] for g in result.data["groups"]] == ["openai", "gemini-pro"]
 
 
 def test_gemini_pro_tts_routes_to_task(monkeypatch):

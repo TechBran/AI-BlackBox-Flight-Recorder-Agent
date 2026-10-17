@@ -1349,7 +1349,7 @@
       "name": "list_recent_snapshots"
     },
     {
-      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
+      "description": "List every text-to-speech voice this box offers, grouped by provider (OpenAI, Gemini Flash and Pro, ElevenLabs premium and cloned voices, local and on-box voices), with each group's availability and the box's default voice. Pass a returned voice id (provider:voice, e.g. elevenlabs:<voice_id>) to text_to_speech.",
       "input_schema": {
         "properties": {},
         "required": [],
@@ -1921,11 +1921,11 @@
       "name": "stop_device_control"
     },
     {
-      "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
+      "description": "Convert text to speech. Returns an audio URL. Speaks with any voice this box offers -- OpenAI, Gemini, ElevenLabs premium or cloned voices, local and on-box voices -- by its voice id from list_tts_voices (e.g. elevenlabs:<voice_id>). Omit voice to speak with the box's default voice.",
       "input_schema": {
         "properties": {
           "model": {
-            "description": "Model: tts-1 or tts-1-hd (default: tts-1-hd)",
+            "description": "Optional model override for the voice's provider. Omit to use the box's model for that provider.",
             "type": "string"
           },
           "text": {
@@ -1933,7 +1933,7 @@
             "type": "string"
           },
           "voice": {
-            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
+            "description": "Voice id from list_tts_voices, written provider:voice (e.g. elevenlabs:<voice_id> for a premium or cloned voice). A bare OpenAI voice name also works. Omit to use the box's default voice.",
             "type": "string"
           }
         },
@@ -4975,7 +4975,7 @@
           }
         },
         {
-          "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
+          "description": "List every text-to-speech voice this box offers, grouped by provider (OpenAI, Gemini Flash and Pro, ElevenLabs premium and cloned voices, local and on-box voices), with each group's availability and the box's default voice. Pass a returned voice id (provider:voice, e.g. elevenlabs:<voice_id>) to text_to_speech.",
           "name": "list_tts_voices",
           "parameters": {
             "properties": {},
@@ -5536,12 +5536,12 @@
           }
         },
         {
-          "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
+          "description": "Convert text to speech. Returns an audio URL. Speaks with any voice this box offers -- OpenAI, Gemini, ElevenLabs premium or cloned voices, local and on-box voices -- by its voice id from list_tts_voices (e.g. elevenlabs:<voice_id>). Omit voice to speak with the box's default voice.",
           "name": "text_to_speech",
           "parameters": {
             "properties": {
               "model": {
-                "description": "Model: tts-1 or tts-1-hd (default: tts-1-hd)",
+                "description": "Optional model override for the voice's provider. Omit to use the box's model for that provider.",
                 "type": "string"
               },
               "text": {
@@ -5549,7 +5549,7 @@
                 "type": "string"
               },
               "voice": {
-                "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
+                "description": "Voice id from list_tts_voices, written provider:voice (e.g. elevenlabs:<voice_id> for a premium or cloned voice). A bare OpenAI voice name also works. Omit to use the box's default voice.",
                 "type": "string"
               }
             },
@@ -6961,7 +6961,7 @@
       "name": "list_recent_snapshots"
     },
     {
-      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
+      "description": "List every text-to-speech voice this box offers, grouped by provider (OpenAI, Gemini Flash and Pro, ElevenLabs premium and cloned voices, local and on-box voices), with each group's availability and the box's default voice. Pass a returned voice id (provider:voice, e.g. elevenlabs:<voice_id>) to text_to_speech.",
       "inputSchema": {
         "properties": {},
         "required": [],
@@ -7383,11 +7383,11 @@
       "name": "stop_device_control"
     },
     {
-      "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
+      "description": "Convert text to speech. Returns an audio URL. Speaks with any voice this box offers -- OpenAI, Gemini, ElevenLabs premium or cloned voices, local and on-box voices -- by its voice id from list_tts_voices (e.g. elevenlabs:<voice_id>). Omit voice to speak with the box's default voice.",
       "inputSchema": {
         "properties": {
           "model": {
-            "description": "Model: tts-1 or tts-1-hd (default: tts-1-hd)",
+            "description": "Optional model override for the voice's provider. Omit to use the box's model for that provider.",
             "type": "string"
           },
           "text": {
@@ -7395,7 +7395,7 @@
             "type": "string"
           },
           "voice": {
-            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
+            "description": "Voice id from list_tts_voices, written provider:voice (e.g. elevenlabs:<voice_id> for a premium or cloned voice). A bare OpenAI voice name also works. Omit to use the box's default voice.",
             "type": "string"
           }
         },
@@ -10694,7 +10694,7 @@
     },
     {
       "function": {
-        "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
+        "description": "List every text-to-speech voice this box offers, grouped by provider (OpenAI, Gemini Flash and Pro, ElevenLabs premium and cloned voices, local and on-box voices), with each group's availability and the box's default voice. Pass a returned voice id (provider:voice, e.g. elevenlabs:<voice_id>) to text_to_speech.",
         "name": "list_tts_voices",
         "parameters": {
           "properties": {},
@@ -11332,12 +11332,12 @@
     },
     {
       "function": {
-        "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
+        "description": "Convert text to speech. Returns an audio URL. Speaks with any voice this box offers -- OpenAI, Gemini, ElevenLabs premium or cloned voices, local and on-box voices -- by its voice id from list_tts_voices (e.g. elevenlabs:<voice_id>). Omit voice to speak with the box's default voice.",
         "name": "text_to_speech",
         "parameters": {
           "properties": {
             "model": {
-              "description": "Model: tts-1 or tts-1-hd (default: tts-1-hd)",
+              "description": "Optional model override for the voice's provider. Omit to use the box's model for that provider.",
               "type": "string"
             },
             "text": {
@@ -11345,7 +11345,7 @@
               "type": "string"
             },
             "voice": {
-              "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
+              "description": "Voice id from list_tts_voices, written provider:voice (e.g. elevenlabs:<voice_id> for a premium or cloned voice). A bare OpenAI voice name also works. Omit to use the box's default voice.",
               "type": "string"
             }
           },

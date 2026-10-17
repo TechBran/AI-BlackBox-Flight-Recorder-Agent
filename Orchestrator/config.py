@@ -163,7 +163,9 @@ DEBUG_SERVE_DEV_PAGES = CFG.getboolean("debug", "serve_dev_pages", fallback=Fals
 DEVICES_REQUIRE_PAIRING = CFG.getboolean("devices", "require_pairing", fallback=False)
 
 AUDIO_ENGINE  = CFG.get("audio","engine",fallback="auto").strip().lower()
-TTS_MODEL     = CFG.get("audio","model", fallback="tts-1").strip()
+# Quality-first fallback (matches config.ini.template): the box default for every
+# client now that the Portal and Android no longer pin their own OpenAI model.
+TTS_MODEL     = CFG.get("audio","model", fallback="tts-1-hd").strip()
 TTS_VOICE     = CFG.get("audio","voice", fallback="alloy").strip()
 TTS_FORMAT    = CFG.get("audio","format",fallback="mp3").strip()
 TTS_TIMEOUT   = CFG.getint("audio","timeout_ms",fallback=120000)
@@ -807,23 +809,134 @@ OPENAI_TTS_VOICES = [
     ("verse", "Verse", "Poetic, dramatic"),
 ]
 
+# Model each Gemini TTS group synthesises with when a caller names a voice but no
+# model. GA ids; the AI Studio path maps them to its preview ids
+# (tts_routes.call_gemini_tts_preview). /tts/catalog publishes them per group so
+# the Portal and Android stop carrying their own copies.
+GEMINI_TTS_MODELS: Dict[str, str] = {
+    "gemini-flash": "gemini-2.5-flash-tts",
+    "gemini-pro": "gemini-2.5-pro-tts",
+}
+# The Gemini voice a Gemini group speaks with when it becomes the box default and
+# [audio] voice names no Gemini voice. A choice, not a provider fact.
+GEMINI_TTS_DEFAULT_VOICE = "Charon"
+# Order resolve_tts_default() falls through when the [audio] voice's provider has
+# no credentials: cloud groups first (OpenAI is the [audio] engine), then
+# ElevenLabs, then the on-box and local stacks. Unlisted groups follow in
+# catalog order.
+TTS_DEFAULT_GROUP_ORDER = ("openai", "gemini-pro", "elevenlabs", "gemini-flash", "qwen", "local")
+
+
+def _tts_credentials() -> Dict[str, bool]:
+    """Which cloud TTS providers have credentials RIGHT NOW: {"openai", "google"}.
+    Read fresh from .env (then os.environ), the mechanism
+    stt.resolve.stt_availability uses, so a key saved in the wizard shows as
+    available with no restart. Google TTS works with GOOGLE_API_KEY (AI Studio)
+    or a service-account file (Cloud TTS) -- call_gemini_tts takes either. Never
+    raises."""
+    try:
+        from dotenv import dotenv_values
+        from Orchestrator.onboarding.secrets_writer import ENV_FILE
+        env = dotenv_values(str(ENV_FILE))
+    except Exception:
+        env = {}
+
+    def _val(key: str) -> str:
+        return (env.get(key) or os.getenv(key) or "").strip()
+
+    creds = _val("GOOGLE_APPLICATION_CREDENTIALS")
+    service_account_ok = bool(GOOGLE_AUTH_AVAILABLE and creds and os.path.exists(creds))
+    return {"openai": bool(_val("OPENAI_API_KEY")),
+            "google": bool(_val("GOOGLE_API_KEY")) or service_account_ok}
+
+
+def _tts_group_status(group: dict, available: bool, reason: str) -> dict:
+    group["available"] = available
+    if not available:
+        group["unavailable_reason"] = reason
+    return group
+
+
 def build_tts_catalog() -> list:
     """Grouped TTS voice catalog -- the single source of truth for the picker.
-    Returns [{id,label,voices:[{id,name,description}]}]. Gemini ids are
-    'gemini-flash:<Name>' / 'gemini-pro:<Name>'; OpenAI 'openai:<id>'."""
+    Returns [{id,label,voices:[{id,name,description}],available,model}]. Gemini
+    ids are 'gemini-flash:<Name>' / 'gemini-pro:<Name>'; OpenAI 'openai:<id>'.
+    `available` says whether the group's provider has credentials right now (read
+    fresh; `unavailable_reason` names what is missing) and `model` is the model the
+    box synthesises that group with when a caller names none. Both are additive:
+    every group is still listed, so a picker can show what a key would unlock."""
+    creds = _tts_credentials()
+
     def gemini_group(provider: str, label: str) -> dict:
-        return {"id": provider, "label": label, "voices": [
-            {"id": f"{provider}:{n}", "name": n, "description": GEMINI_TTS_VOICE_DESCRIPTIONS[n]}
-            for n in GEMINI_LIVE_VOICES
-        ]}
+        return _tts_group_status({
+            "id": provider, "label": label, "voices": [
+                {"id": f"{provider}:{n}", "name": n, "description": GEMINI_TTS_VOICE_DESCRIPTIONS[n]}
+                for n in GEMINI_LIVE_VOICES
+            ],
+            "model": GEMINI_TTS_MODELS[provider],
+        }, creds["google"], "Needs GOOGLE_API_KEY or a Google service-account credential")
     return [
-        {"id": "openai", "label": "OpenAI TTS HD", "voices": [
-            {"id": f"openai:{vid}", "name": nm, "description": ds}
-            for vid, nm, ds in OPENAI_TTS_VOICES
-        ]},
+        _tts_group_status({
+            "id": "openai", "label": "OpenAI TTS HD", "voices": [
+                {"id": f"openai:{vid}", "name": nm, "description": ds}
+                for vid, nm, ds in OPENAI_TTS_VOICES
+            ],
+            "model": TTS_MODEL,
+        }, creds["openai"], "Needs OPENAI_API_KEY"),
         gemini_group("gemini-flash", "Gemini Flash TTS"),
         gemini_group("gemini-pro", "Gemini Pro TTS"),
     ]
+
+
+def resolve_tts_default(groups: list) -> dict:
+    """The voice the box speaks with when a caller chooses none, over a catalog
+    `groups` list (build_tts_catalog() plus whatever dynamic groups are present):
+
+      1. the [audio] voice, when its group is listed and available (a bare name
+         is an OpenAI voice, as the /tts OpenAI path has always read it);
+      2. else the first available group in TTS_DEFAULT_GROUP_ORDER, speaking its
+         preferred voice (the [audio] voice for OpenAI, GEMINI_TTS_DEFAULT_VOICE
+         for Gemini, the first listed voice otherwise);
+      3. else the [audio] voice, marked unavailable -- no provider can speak.
+
+    Returns {id: 'provider:voice', provider, voice, model, available, source:
+    config|fallback|none}. Pure over `groups`, so GET /tts/catalog, POST /tts
+    and POST /tts/batch give one answer and every client renders the same one."""
+    configured = (TTS_VOICE or "").strip()
+    want = configured if (":" in configured or not configured) else f"openai:{configured}"
+
+    def usable(g: dict) -> bool:
+        return g.get("available", True) is not False and bool(g.get("voices"))
+
+    def has(g: dict, vid: str) -> bool:
+        return any(v.get("id") == vid for v in g.get("voices") or [])
+
+    def entry(g: dict, vid: str, source: str) -> dict:
+        return {"id": vid, "provider": g.get("id", ""), "voice": vid.split(":", 1)[-1],
+                "model": g.get("model") or "", "available": source != "none",
+                "source": source}
+
+    for g in groups:
+        if want and has(g, want):
+            if usable(g):
+                return entry(g, want, "config")
+            break
+    by_id = {g.get("id"): g for g in groups}
+    ordered = [by_id[i] for i in TTS_DEFAULT_GROUP_ORDER if i in by_id]
+    ordered += [g for g in groups if g.get("id") not in TTS_DEFAULT_GROUP_ORDER]
+    for g in ordered:
+        if not usable(g):
+            continue
+        gid = g.get("id", "")
+        preferred = []
+        if gid == "openai" and configured and ":" not in configured:
+            preferred.append(f"openai:{configured}")
+        if gid in GEMINI_TTS_MODELS:
+            preferred.append(f"{gid}:{GEMINI_TTS_DEFAULT_VOICE}")
+        vid = next((p for p in preferred if has(g, p)), g["voices"][0]["id"])
+        return entry(g, vid, "fallback")
+    provider = want.split(":", 1)[0] if want else ""
+    return entry(by_id.get(provider) or {"id": provider}, want, "none")
 
 # ElevenLabs TTS quality-first defaults (env-overridable). Brandon's directive:
 # default to the flagship model + highest output quality the plan allows; cheaper
