@@ -479,6 +479,28 @@ def _drift_heal_from_store(kind: str, deployed: str, log_tag: str) -> None:
             logger.warning("[%s] %s is not in the trusted store yet — run "
                            "`sudo bash install.sh` once to publish it (rc=6)",
                            log_tag, deployed)
+        elif result.returncode == 2:
+            # The current helper exits 2 only for a missing kind, and we always
+            # pass one. rc=2 here is the STALE pre-store helper (the May-24
+            # `<target_kind> <source_file>` version) rejecting the kind-only
+            # call as a usage error: this box pulled the template-store code
+            # but never ran the install.sh that installs the current helper and
+            # publishes /etc/blackbox/templates (2026-10 audit W07 / W08). No
+            # automated step can repair that from inside the service, so say
+            # exactly what is wrong and the one command that fixes it.
+            store_dir = os.path.dirname(_store_entry_path(kind))
+            published = ("has not been published" if not os.path.isdir(store_dir)
+                         else "is present but cannot be used by this helper")
+            install_sh = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "Scripts", "install.sh")
+            logger.error(
+                "[%s] %s is the pre-template-store helper (rc=2: it still wants "
+                "a caller-supplied source file), and the trusted template store "
+                "%s %s, so %s cannot be drift-healed. One-time operator step: "
+                "run `sudo bash %s` — it installs the current helper, publishes "
+                "the store and rewrites the sudoers file.",
+                log_tag, helper, store_dir, published, deployed, install_sh)
         else:
             logger.warning("[%s] drift-heal helper failed rc=%d stderr=%r",
                            log_tag, result.returncode, result.stderr[:200])
@@ -556,7 +578,7 @@ def startup_assert_helpers_current():
 #   2. The only standalone unit template that renders from (BLACKBOX_ROOT,
 #      REAL_USER) alone is zellij-web.service, and it is ALREADY a _REGEN_TARGET.
 #      The remaining units (blackbox.service + its drop-ins, mcp, ydotoold,
-#      time-sync, logrotate) are inline heredocs in install.sh that need
+#      time-sync) are inline heredocs in install.sh that need
 #      REAL_HOME / LOCALSTACK_* substitutions the startup context does not have;
 #      a units hook rendering them would either duplicate the runner's zellij
 #      case or emit placeholder-laden units. Building it would be the "both"
