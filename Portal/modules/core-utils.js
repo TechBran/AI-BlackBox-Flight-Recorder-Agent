@@ -18,6 +18,40 @@
 export const $ = (id) => document.getElementById(id);
 
 // =============================================================================
+// HTML Escaping (the shared helpers — use these at every innerHTML sink)
+// =============================================================================
+
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+/**
+ * Escape a value for use as HTML element content.
+ *
+ * Pure string work (no DOM), so it also escapes both quote characters — the
+ * old per-module `div.textContent = x; return div.innerHTML` copies did NOT,
+ * which made them unsafe inside attribute values. null/undefined -> ''.
+ * @param {*} value - Any value; non-strings are stringified
+ * @returns {string} Escaped text, safe between tags
+ */
+export function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+/**
+ * Escape a value for use inside a QUOTED attribute value (`attr="${...}"`).
+ *
+ * Same escaping as escapeHtml (both quotes included); the separate name marks
+ * the attribute context at the call site. Never use it for unquoted attributes
+ * or inside inline JS handlers (onclick="...") — build those with
+ * addEventListener instead.
+ * @param {*} value - Any value; non-strings are stringified
+ * @returns {string} Escaped text, safe inside "..." or '...'
+ */
+export function escapeAttr(value) {
+    return escapeHtml(value);
+}
+
+// =============================================================================
 // Toast Notifications
 // =============================================================================
 

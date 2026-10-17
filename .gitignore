@@ -149,6 +149,10 @@ media_files/
 **/node_modules/
 **/.npm/
 **/yarn.lock
+# Portal jsdom test harness (tests/web/package-lock.json IS committed; its
+# node_modules is installed with `npm ci` and never lives under Portal/, which
+# is served to browsers at /ui)
+tests/web/node_modules/
 
 # ============================================================================
 # Browser profiles + binaries (Sovereign Browser feature)

@@ -5,9 +5,11 @@
  * Mirrors the Claude Code CLI integration pattern
  */
 
-import { $, toast } from './core-utils.js';
+import { $, toast, escapeHtml as sharedEscapeHtml } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
+import { markdownToSafeHtml } from './markdown-renderer.js';
+import { sanitizeAssistantHtml } from './sanitize.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
 import { scrollToBottomIfNeeded, setStreamingState } from './ui-setup.js';
@@ -645,7 +647,8 @@ export class GeminiAgentHandler {
         }
 
         if (terminal) {
-            terminal.innerHTML = this.outputBuffer;
+            // Agent stdout is untrusted: sanitize (fails closed to escaped text).
+            terminal.innerHTML = sanitizeAssistantHtml(this.outputBuffer);
             scrollToBottomIfNeeded();
         }
     }
@@ -663,7 +666,7 @@ export class GeminiAgentHandler {
         const tool = this.lastTool;
         const icon = this.getToolIcon(tool.name);
 
-        let content = `<span class="tool-icon">${icon}</span> <strong>${tool.name}</strong>`;
+        let content = `<span class="tool-icon">${icon}</span> <strong>${this.escapeHtml(tool.name)}</strong>`;
 
         if (tool.input.command) {
             content += ` <span class="tool-detail">${this.escapeHtml(tool.input.command.substring(0, 50))}${tool.input.command.length > 50 ? '...' : ''}</span>`;
@@ -787,10 +790,9 @@ export class GeminiAgentHandler {
             html += `<details class="agent-thinking"><summary>\uD83D\uDCAD Thinking...</summary><pre>${this.escapeHtml(this.thinkingBuffer)}</pre></details>`;
         }
 
-        // Render main content as markdown
+        // Render main content as markdown (sanitized; fails closed to escaped text)
         if (this.outputBuffer) {
-            const parsed = marked.parse(this.outputBuffer);
-            html += typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(parsed) : parsed;
+            html += markdownToSafeHtml(this.outputBuffer);
         }
 
         bubbleText.innerHTML = html;
@@ -1085,14 +1087,12 @@ export class GeminiAgentHandler {
     }
 
     /**
-     * Escape HTML characters
+     * Escape HTML characters (shared core-utils helper; also escapes quotes)
      * @param {string} text - Text to escape
      * @returns {string} Escaped text
      */
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        return sharedEscapeHtml(text);
     }
 }
 

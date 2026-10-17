@@ -10,6 +10,7 @@
 import { $, toast } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks, copyToClipboard, addTimestampToBubble } from './markdown-renderer.js';
+import { sanitizeAssistantHtml } from './sanitize.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { updateHintsVisibility } from './help-hints.js';
@@ -27,15 +28,10 @@ const MAX_HISTORY_ITEMS = 100;
 // =============================================================================
 
 /**
- * Escape HTML characters
- * @param {string} text - Text to escape
- * @returns {string} Escaped text
+ * Escape HTML characters — re-export of the shared core-utils helper (kept here
+ * because chat-send.js and others import it from this module).
  */
-export function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
+export { escapeHtml } from './core-utils.js';
 
 // =============================================================================
 // Download Button
@@ -52,8 +48,9 @@ export function addDownloadButtonToImage(imgElement, parentElement) {
     const imgSrc = imgElement.getAttribute('src');
     if (!imgSrc) return;
 
-    // Check if a download button already exists
-    if (parentElement.querySelector(`.download-btn[href="${imgSrc}"]`)) {
+    // Check if a download button already exists (compared by attribute value,
+    // not by interpolating the src into a CSS selector)
+    if (Array.from(parentElement.querySelectorAll('.download-btn')).some(a => a.getAttribute('href') === imgSrc)) {
         return;
     }
 
@@ -143,13 +140,15 @@ export function appendBubble(role, content) {
     const isAlreadyHtml = contentString.includes('<pre') || contentString.includes('<code') ||
                           contentString.includes('class="hljs') || contentString.includes('bubble-text');
 
+    // The media / already-HTML sniffing only picks the FORMAT (pre-rendered HTML
+    // vs markdown). It is never a trust decision: assistant text is
+    // attacker-steerable and every branch goes through the sanitizer, which
+    // fails closed to escaped text (audit P01-chat-core-web-01).
     if (role === 'assistant' && containsMedia) {
-        span.innerHTML = contentString;
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = contentString;
-        textContentForActions = (tempDiv.textContent || tempDiv.innerText || "").trim();
+        span.innerHTML = sanitizeAssistantHtml(contentString);
+        textContentForActions = (span.textContent || "").trim();
     } else if (role === 'assistant' && isAlreadyHtml) {
-        span.innerHTML = contentString;
+        span.innerHTML = sanitizeAssistantHtml(contentString);
         textContentForActions = span.textContent || span.innerText || "";
         setTimeout(() => {
             span.querySelectorAll('pre code').forEach(block => {
@@ -446,11 +445,10 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
     const containsMedia = containsImage || containsAudio || containsVideo;
 
     if (span) {
+        // Media replies are pre-rendered HTML; still sanitized (fails closed).
         if (containsMedia) {
-            span.innerHTML = newContentString;
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = newContentString;
-            textContentForActions = (tempDiv.textContent || tempDiv.innerText || "").trim();
+            span.innerHTML = sanitizeAssistantHtml(newContentString);
+            textContentForActions = (span.textContent || "").trim();
         } else {
             span.innerHTML = renderMarkdown(newContentString);
             textContentForActions = span.textContent || span.innerText || "";

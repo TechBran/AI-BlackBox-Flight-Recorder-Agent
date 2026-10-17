@@ -7,9 +7,11 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast } from './core-utils.js';
+import { $, toast, escapeHtml as sharedEscapeHtml } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
+import { markdownToSafeHtml } from './markdown-renderer.js';
+import { sanitizeAssistantHtml } from './sanitize.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
 import { scrollToBottomIfNeeded, setStreamingState } from './ui-setup.js';
@@ -878,7 +880,7 @@ export class AgentChatHandler {
 
         // Always use collapsible for file reads
         const icon = '\uD83D\uDCC4'; // 📄
-        const summary = `${icon} <strong>${fileName}</strong> <span class="file-line-range">${lineRange}</span>`;
+        const summary = `${icon} <strong>${this.escapeHtml(fileName)}</strong> <span class="file-line-range">${this.escapeHtml(lineRange)}</span>`;
         this.outputBuffer += `\n<details class="file-result-collapsible" open><summary>${summary}</summary>\n\n\`\`\`${lang}\n${content}\n\`\`\`\n</details>\n`;
 
         this.renderOutput();
@@ -899,7 +901,7 @@ export class AgentChatHandler {
 
         // Always use collapsible for edits
         const icon = '\u270F\uFE0F'; // ✏️
-        let summary = `${icon} <strong>Edited ${fileName}</strong>`;
+        let summary = `${icon} <strong>Edited ${this.escapeHtml(fileName)}</strong>`;
         if (lineCount > 1) {
             summary += ` <span class="edit-line-count">(${lineCount} lines)</span>`;
         }
@@ -933,7 +935,9 @@ export class AgentChatHandler {
         }
 
         if (terminal) {
-            terminal.innerHTML = this.outputBuffer;
+            // Agent stdout is untrusted (ansi_to_html wraps it in spans but does
+            // not escape it): sanitize, keeping the ansi-* class spans.
+            terminal.innerHTML = sanitizeAssistantHtml(this.outputBuffer);
             this.detectAndShowQuickActions();
 
             scrollToBottomIfNeeded();
@@ -953,7 +957,7 @@ export class AgentChatHandler {
         const tool = this.lastTool;
         const icon = this.getToolIcon(tool.name);
 
-        let content = `<span class="tool-icon">${icon}</span> <strong>${tool.name}</strong>`;
+        let content = `<span class="tool-icon">${icon}</span> <strong>${this.escapeHtml(tool.name)}</strong>`;
 
         if (tool.input.command) {
             content += ` <span class="tool-detail">${this.escapeHtml(tool.input.command.substring(0, 50))}${tool.input.command.length > 50 ? '...' : ''}</span>`;
@@ -1065,10 +1069,9 @@ export class AgentChatHandler {
             </details>`;
         }
 
-        // Render main content as markdown
+        // Render main content as markdown (sanitized; fails closed to escaped text)
         if (this.outputBuffer) {
-            const parsed = marked.parse(this.outputBuffer);
-            html += typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(parsed) : parsed;
+            html += markdownToSafeHtml(this.outputBuffer);
         }
 
         bubbleText.innerHTML = html;
@@ -1653,7 +1656,7 @@ export class AgentChatHandler {
         item.dataset.port = app.port;
         item.innerHTML = `
             <span class="app-name">${this.escapeHtml(app.name)}</span>
-            <span class="app-port">:${app.port}</span>
+            <span class="app-port">:${this.escapeHtml(app.port)}</span>
             <button class="btn btn-open-app">Open</button>
         `;
 
@@ -1762,8 +1765,7 @@ export class AgentChatHandler {
         if (this.outputBuffer) {
             const bubbleText = this.currentBubble.querySelector('.bubble-text');
             if (bubbleText) {
-                const parsed = marked.parse(this.outputBuffer);
-                bubbleText.innerHTML = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(parsed) : parsed;
+                bubbleText.innerHTML = markdownToSafeHtml(this.outputBuffer);
             }
         }
 
@@ -1832,14 +1834,12 @@ export class AgentChatHandler {
     }
 
     /**
-     * Escape HTML characters
+     * Escape HTML characters (shared core-utils helper; also escapes quotes)
      * @param {string} text - Text to escape
      * @returns {string} Escaped text
      */
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        return sharedEscapeHtml(text);
     }
 }
 
@@ -1978,7 +1978,7 @@ function addAppToMenuPanel(app) {
     item.dataset.port = app.port;
     item.innerHTML = `
         <span class="app-name">${escapeHtmlSimple(app.name)}</span>
-        <span class="app-port">:${app.port}</span>
+        <span class="app-port">:${escapeHtmlSimple(app.port)}</span>
         <button class="btn btn-open-app">Open</button>
     `;
 
@@ -1995,9 +1995,7 @@ function addAppToMenuPanel(app) {
  * @returns {string} Escaped text
  */
 function escapeHtmlSimple(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return sharedEscapeHtml(text);
 }
 
 /**

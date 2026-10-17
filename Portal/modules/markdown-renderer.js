@@ -4,7 +4,13 @@
  *
  * Source: Portal/app.js lines 3507-3594, 3895-3994
  * Refactored: 2025-12-20
+ *
+ * Every function here that yields HTML for innerHTML returns SANITIZED markup
+ * (via sanitize.js) and fails closed to escaped text when marked or DOMPurify
+ * is missing or throws (audit P01-chat-core-web-02/03, X05-architecture-02).
  */
+
+import { sanitizeAssistantHtml, isSanitizerAvailable, plainTextHtml } from './sanitize.js';
 
 // =============================================================================
 // Markdown Configuration
@@ -278,24 +284,47 @@ function parsesAsJson(candidate) {
 }
 
 /**
+ * Convert markdown text to SANITIZED HTML with marked (no pre-processing).
+ * Used directly by the CLI-agent renderers. Fails closed: when marked or
+ * DOMPurify is unavailable, or either throws, the markdown SOURCE comes back
+ * escaped (never unsanitized marked output).
+ * @param {string} text - Markdown text to render
+ * @returns {string} Safe HTML string
+ */
+export function markdownToSafeHtml(text) {
+    const source = (text === null || text === undefined) ? '' : String(text);
+    if (typeof marked === 'undefined' || typeof marked.parse !== 'function' || !isSanitizerAvailable()) {
+        return plainTextHtml(source);
+    }
+    try {
+        return sanitizeAssistantHtml(marked.parse(source));
+    } catch (e) {
+        console.warn('Markdown parse error:', e);
+        return plainTextHtml(source);
+    }
+}
+
+/**
  * Convert markdown text to HTML using marked library
  * Also converts media URLs to embedded elements
  * @param {string} text - Markdown text to render
- * @returns {string} HTML string
+ * @returns {string} Safe HTML string (fails closed to escaped text)
  */
 export function renderMarkdown(text) {
-    if (typeof marked === 'undefined') return text;
+    const source = (text === null || text === undefined) ? '' : String(text);
     try {
         // Wrap unfenced JSON blobs in a ```json fence so they render via the
         // clean code-block path instead of being mangled by the markdown parser.
-        const fenced = fenceUnfencedJson(text);
+        const fenced = fenceUnfencedJson(source);
         // Then convert any media URLs to HTML elements
         const textWithMedia = convertMediaUrlsToHtml(fenced);
-        const html = marked.parse(textWithMedia);
-        return typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(html) : html;
+        if (typeof marked === 'undefined' || typeof marked.parse !== 'function' || !isSanitizerAvailable()) {
+            return plainTextHtml(source);
+        }
+        return sanitizeAssistantHtml(marked.parse(textWithMedia));
     } catch (e) {
         console.warn('Markdown parse error:', e);
-        return text;
+        return plainTextHtml(source);
     }
 }
 
@@ -439,97 +468,141 @@ export function addTimestampToBubble(bubble) {
 // =============================================================================
 
 /**
+ * Text-highlight rules, applied in order (citations, quotes, brackets,
+ * keywords, labels, numbered items, numbers — same set and precedence as the
+ * original string-replace chain). Text a rule does not match is handed to the
+ * next rule; `inner: true` means the captured content is highlighted further.
+ *
+ * Built ONLY from text nodes and createElement + textContent: the old
+ * implementation read each text node's DECODED textContent and assigned it to
+ * innerHTML, which turned text DOMPurify had correctly left inert (e.g. an
+ * escaped `&lt;img onerror=...&gt;`) back into live markup (audit
+ * P01-chat-core-web-02, X04-security-clients-infra-07).
+ */
+const HIGHLIGHT_RULES = [
+    { re: /\[(\d+)\]/g, kind: 'citation' },
+    { re: /"([^"]*)"/g, open: '"', close: '"', mark: 'quote-mark', inner: true, innerKind: 'quoted-text' },
+    { re: /\[([^\]]+)\]/g, open: '[', close: ']', mark: 'square-bracket', inner: true, innerKind: 'bracket-text',
+      skip: (m) => /^\d+$/.test(m[1]) },
+    { re: /\(([^)]+)\)/g, open: '(', close: ')', mark: 'round-bracket', inner: true, innerKind: 'bracket-text' },
+    { re: /\b(checkpoint|operator|snapshot|context|fossil|manifest|volume)\b/gi, kind: 'keyword' },
+    { re: /(\w+(?:\s+\w+)*)\s*([;:])/g, kind: 'label' },
+    { re: /(^|\n)(\s*)(\d+)\./gm, kind: 'label', numbered: true },
+    { re: /([\d,]+\.?\d*)/g, kind: 'number', skip: (m) => !/\d/.test(m[0]) },
+];
+
+/**
+ * Create a highlight span holding plain text or already-built child nodes.
+ * @param {Document} doc
+ * @param {string} kind - data-highlight value
+ * @param {string|Node[]} content
+ * @returns {HTMLSpanElement}
+ */
+function highlightSpan(doc, kind, content) {
+    const span = doc.createElement('span');
+    span.setAttribute('data-highlight', kind);
+    if (typeof content === 'string') {
+        span.textContent = content;
+    } else {
+        content.forEach(n => span.appendChild(n));
+    }
+    return span;
+}
+
+/**
+ * Split `text` (which starts at `offset` inside `full`) into text nodes and
+ * highlight spans using HIGHLIGHT_RULES[ruleIndex..].
+ * @returns {{nodes: Node[], changed: boolean}}
+ */
+function highlightSegment(doc, full, text, offset, ruleIndex) {
+    if (!text) return { nodes: [], changed: false };
+    if (ruleIndex >= HIGHLIGHT_RULES.length) {
+        return { nodes: [doc.createTextNode(text)], changed: false };
+    }
+
+    const rule = HIGHLIGHT_RULES[ruleIndex];
+    const re = new RegExp(rule.re.source, rule.re.flags);
+    const nodes = [];
+    let changed = false;
+    let last = 0;
+
+    const pushRest = (from, to) => {
+        if (to <= from) return;
+        const rest = highlightSegment(doc, full, text.slice(from, to), offset + from, ruleIndex + 1);
+        nodes.push(...rest.nodes);
+        changed = changed || rest.changed;
+    };
+
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        if (m[0] === '') { re.lastIndex++; continue; }
+        if (rule.skip && rule.skip(m)) continue;
+        const start = m.index;
+        let parts;
+        if (rule.numbered) {
+            // `^` must be a REAL line start of the original text node, not the
+            // start of a slice left over from an earlier rule.
+            const lineStart = m[1] === '\n' || offset + m.index === 0 || full[offset + m.index - 1] === '\n';
+            if (!lineStart) continue;
+            const lead = m[1] + m[2];
+            pushRest(last, start);
+            if (lead) nodes.push(doc.createTextNode(lead));
+            parts = [highlightSpan(doc, rule.kind, `${m[3]}.`)];
+        } else if (rule.inner) {
+            pushRest(last, start);
+            const innerStart = m.index + rule.open.length;
+            const inner = highlightSegment(doc, full, m[1], offset + innerStart, ruleIndex + 1);
+            parts = [
+                highlightSpan(doc, rule.mark, rule.open),
+                highlightSpan(doc, rule.innerKind, inner.nodes),
+                highlightSpan(doc, rule.mark, rule.close),
+            ];
+        } else {
+            pushRest(last, start);
+            parts = [highlightSpan(doc, rule.kind, m[0])];
+        }
+        nodes.push(...parts);
+        changed = true;
+        last = m.index + m[0].length;
+    }
+    pushRest(last, text.length);
+    return { nodes, changed };
+}
+
+/**
  * Apply syntax highlighting to special patterns in text
  * Highlights: citations, quotes, brackets, keywords, labels, numbers
+ * Text inside code/pre and inside existing highlight spans is left alone; the
+ * visible text is never changed, only wrapped in <span data-highlight=...>.
  * @param {HTMLElement} element - Element to process
  */
 export function applySyntaxHighlighting(element) {
-    console.log('[SYNTAX] applySyntaxHighlighting called on element:', element?.tagName, element?.className);
+    if (!element) return;
+    const doc = element.ownerDocument || document;
 
     // Get all text nodes
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
+    const walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
     const textNodes = [];
     let node;
 
     while (node = walker.nextNode()) {
-        // Skip code blocks and pre elements
-        let parent = node.parentElement;
-        if (parent && (parent.tagName === 'CODE' || parent.tagName === 'PRE' || parent.closest('pre'))) {
+        // Skip code blocks, pre elements and text that is already highlighted
+        const parent = node.parentElement;
+        if (parent && (parent.tagName === 'CODE' || parent.tagName === 'PRE' || parent.closest('pre') ||
+                       parent.closest('[data-highlight]'))) {
             continue;
         }
         textNodes.push(node);
     }
 
-    console.log('[SYNTAX] Found', textNodes.length, 'text nodes to process');
-
     textNodes.forEach(textNode => {
-        let text = textNode.textContent;
-        let html = text;
-        let hasHighlight = false;
-
-        // Highlight citations [1], [2], etc.
-        html = html.replace(/\[(\d+)\]/g, (match) => {
-            hasHighlight = true;
-            return `<span data-highlight="citation">${match}</span>`;
-        });
-
-        // Highlight quoted text - double quotes "text" only
-        html = html.replace(/"([^"]*)"/g, (match, content) => {
-            hasHighlight = true;
-            return `<span data-highlight="quote-mark">"</span><span data-highlight="quoted-text">${content}</span><span data-highlight="quote-mark">"</span>`;
-        });
-
-        // Highlight square brackets [] with content (but not citations)
-        html = html.replace(/\[([^\]]+)\]/g, (match, content) => {
-            if (/^\d+$/.test(content)) {
-                return match;
-            }
-            hasHighlight = true;
-            return `<span data-highlight="square-bracket">[</span><span data-highlight="bracket-text">${content}</span><span data-highlight="square-bracket">]</span>`;
-        });
-
-        // Highlight round brackets/parentheses () with content
-        html = html.replace(/\(([^)]+)\)/g, (match, content) => {
-            hasHighlight = true;
-            return `<span data-highlight="round-bracket">(</span><span data-highlight="bracket-text">${content}</span><span data-highlight="round-bracket">)</span>`;
-        });
-
-        // Highlight keywords
-        html = html.replace(/\b(checkpoint|operator|snapshot|context|fossil|manifest|volume)\b/gi, (match) => {
-            hasHighlight = true;
-            return `<span data-highlight="keyword">${match}</span>`;
-        });
-
-        // Highlight labels (text before : or ;)
-        html = html.replace(/(\w+(?:\s+\w+)*)\s*([;:])/g, (match, label, punctuation) => {
-            hasHighlight = true;
-            return `<span data-highlight="label">${label}${punctuation}</span>`;
-        });
-
-        // Highlight numbered list items
-        html = html.replace(/(^|\n)(\s*)(\d+)\./gm, (match, start, spaces, number) => {
-            hasHighlight = true;
-            return `${start}${spaces}<span data-highlight="label">${number}.</span>`;
-        });
-
-        // Highlight all numbers
-        html = html.replace(/([\d,]+\.?\d*)/g, (match) => {
-            if (html.indexOf(`>${match}<`) !== -1 && html.indexOf(`data-highlight="label">${match}`) !== -1) {
-                return match;
-            }
-            if (/\d/.test(match)) {
-                hasHighlight = true;
-                return `<span data-highlight="number">${match}</span>`;
-            }
-            return match;
-        });
-
+        const text = textNode.textContent;
+        const { nodes, changed } = highlightSegment(doc, text, text, 0, 0);
         // Only replace if we found something to highlight
-        if (hasHighlight) {
-            const wrapper = document.createElement('span');
-            wrapper.innerHTML = html;
-            textNode.parentNode.replaceChild(wrapper, textNode);
-        }
+        if (!changed || !textNode.parentNode) return;
+        const fragment = doc.createDocumentFragment();
+        nodes.forEach(n => fragment.appendChild(n));
+        textNode.parentNode.replaceChild(fragment, textNode);
     });
 }
 
@@ -544,11 +617,9 @@ export function applySyntaxHighlighting(element) {
  * @returns {string} Rendered HTML
  */
 export function processContent(text, container) {
-    const html = renderMarkdown(text);
-    if (container) {
-        container.innerHTML = html;
-        addCopyButtonsToCodeBlocks(container);
-        applySyntaxHighlighting(container);
-    }
-    return html;
+    if (!container) return renderMarkdown(text);
+    container.innerHTML = renderMarkdown(text);
+    addCopyButtonsToCodeBlocks(container);
+    applySyntaxHighlighting(container);
+    return container.innerHTML;
 }

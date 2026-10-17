@@ -7,9 +7,10 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, simpleHash } from './core-utils.js';
+import { $, toast, simpleHash, escapeAttr } from './core-utils.js';
 import { getOperator, getAudioCache, saveAudioCache } from './state-management.js';
 import { sttStream } from './stt-stream.js';
+import { htmlToText } from './sanitize.js';
 
 // =============================================================================
 // TTS Constants
@@ -1735,13 +1736,10 @@ export function extractSpeakableText(text) {
     // HTML media elements below.
     text = stripNonSpeakable(text);
 
-    const temp = document.createElement('div');
-    temp.innerHTML = text;
-
-    // Remove all media elements
-    temp.querySelectorAll('img, video, audio, .generated-image, .generated-video, .audio-result, .image-loading-placeholder, .video-loading-placeholder, .music-loading-placeholder, .bubble-audio-player').forEach(el => el.remove());
-
-    let cleanText = temp.textContent || temp.innerText || "";
+    // Parse in an INERT document (DOMParser), never via innerHTML on a live
+    // element: reply text is model output, and `<img src=x onerror=...>` set
+    // on even a detached live <div> runs (audit P02-voice-web-01).
+    let cleanText = htmlToText(text, 'img, video, audio, .generated-image, .generated-video, .audio-result, .image-loading-placeholder, .video-loading-placeholder, .music-loading-placeholder, .bubble-audio-player');
     cleanText = cleanText.replace(/\s+/g, ' ').trim();
 
     return cleanText;
@@ -1994,7 +1992,7 @@ export function attachAudioPlayer(bubbleElement, audioDataURL, autoplay = false,
     const audioContainer = document.createElement('div');
     audioContainer.className = 'bubble-audio-player';
     audioContainer.innerHTML = `
-        <audio src="${audioDataURL}" preload="metadata"></audio>
+        <audio src="${escapeAttr(audioDataURL)}" preload="metadata"></audio>
         <button class="audio-play-btn" title="Play/Pause">
             <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                 <polygon points="5 3 19 12 5 21 5 3"/>
@@ -2106,7 +2104,7 @@ export function attachGeneratedAudioPlayer(bubbleElement, audioURL, filenamePref
     const audioContainer = document.createElement('div');
     audioContainer.className = 'bubble-audio-player generated-audio-player';
     audioContainer.innerHTML = `
-        <audio src="${audioURL}" preload="metadata"></audio>
+        <audio src="${escapeAttr(audioURL)}" preload="metadata"></audio>
         <button class="audio-play-btn" title="Play/Pause">
             <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                 <polygon points="5 3 19 12 5 21 5 3"/>
@@ -2297,7 +2295,7 @@ export function attachThinkingAudioPlayer(panel, audioDataURL, btn, autoplay = f
     const audioContainer = document.createElement('div');
     audioContainer.className = 'bubble-audio-player thinking-audio-player';
     audioContainer.innerHTML = `
-        <audio src="${audioDataURL}" preload="metadata"></audio>
+        <audio src="${escapeAttr(audioDataURL)}" preload="metadata"></audio>
         <span class="audio-label-icon">🧠</span>
         <button class="audio-play-btn" title="Play/Pause">
             <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">

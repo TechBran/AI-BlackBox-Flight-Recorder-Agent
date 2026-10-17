@@ -8,17 +8,20 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui337"/> <!-- v336: telephony wizard shows the generated phone PIN; earlier: agent permission modes are real (YOLO / Plan, Normal removed); v334: Google Workspace Reconnect -->
-  <!-- Markdown and Syntax Highlighting -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui338"/> <!-- v338: M2 security: sanitized model output (vendored DOMPurify, SRI), phone PIN wizard, agent permission modes, Google Reconnect -->
+  <!-- Markdown and Syntax Highlighting. DOMPurify is VENDORED (Portal/vendor/VENDORED.md)
+       so the sanitizer is present on an offline/LAN-only box; marked and highlight.js
+       stay on their CDNs for now, pinned by SRI (a changed byte = not executed, and the
+       renderers then fail closed to escaped text). -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" integrity="sha384-oaMLBGEzBOJx3UHwac0cVndtX5fxGQIfnAeFZ35RTgqPcYlbprH9o9PUV/F8Le07" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js" integrity="sha384-zbcZAIxlvJtNE3Dp5nxLXdXtXyxwOdnILY1TDPVmKFhl4r4nSUG1r8bcFXGVa4Te" crossorigin="anonymous"></script>
+  <script src="/ui/vendor/dompurify/purify.min.js" integrity="sha384-P0JNneQf81HOl9VwNXK76cQ9VMD6Nfsnepxb0cCOg8+UzEdzgPHAPV4wVQrvYQSx"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous"></script>
   <!-- xterm.js — Track 3 fix: real VT100/xterm emulator for CLI Agents modal -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui337"></script> <!-- v336: telephony wizard shows the generated phone PIN; earlier: agent permission modes are real (YOLO / Plan, Normal removed); v334: Google Workspace Reconnect -->
+  <script type="module" src="/ui/app-modular.js?v=genui338"></script> <!-- v338: M2 security: sanitized model output (vendored DOMPurify, SRI), phone PIN wizard, agent permission modes, Google Reconnect -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so

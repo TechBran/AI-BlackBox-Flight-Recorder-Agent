@@ -1,0 +1,18 @@
+{
+    "name": "blackbox-portal-web-tests",
+    "private": true,
+    "version": "0.0.0",
+    "description": "Node test harness that loads the real Portal ES modules under jsdom. Lives OUTSIDE Portal/ so node_modules is never served to browsers at /ui.",
+    "type": "module",
+    "engines": {
+        "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+    },
+    "scripts": {
+        "test": "node --test"
+    },
+    "devDependencies": {
+        "dompurify": "3.4.17",
+        "jsdom": "29.1.1",
+        "marked": "11.1.1"
+    }
+}
