@@ -140,9 +140,12 @@ ARTIFACT_MAX_SIZE_MB = 50  # Maximum artifact size
 # StaticFiles mount of Portal/, so the old Portal/tasks.db default made every
 # operator's prompts, results and error strings downloadable at /ui/tasks.db
 # (audit NEW-core-1 / X03-security-backend-07). The ONE definition of the task
-# DB path — models, monitoring, admin_routes and the relocate CLI import it.
+# DB path — models and the relocate CLI import it; monitoring and admin_routes
+# ask models.active_tasks_db_path(), the file the task_db singleton opened.
 # migrations/tasks_db_location.py moves a legacy Portal/tasks.db (+ -wal/-shm)
-# here before the first open and keeps the dir 0700 / the files 0600.
+# here before the first open, leaves Portal/tasks.db as a compat symlink to it
+# (old code — a still-running service, a Rollback — then shares the one DB) and
+# keeps the dir 0700 / the files 0600.
 BLACKBOX_DATA_DIR = _blackbox_root() / "data"
 TASKS_DB_PATH = BLACKBOX_DATA_DIR / "tasks.db"
 LEGACY_TASKS_DB_PATH = _blackbox_root() / "Portal" / "tasks.db"  # pre-2026-10 location
