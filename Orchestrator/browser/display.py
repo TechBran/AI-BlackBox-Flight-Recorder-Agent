@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 from Orchestrator.browser.config import (
     DISPLAY_DEPTH, ACTIVE_DISPLAY, CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT,
 )
+from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
 
 # ── Slot ranges (loopback-only) ──
 DISPLAY_BASE = 100            # Xvfb :100, :101, :102
@@ -162,7 +163,10 @@ class DisplayHandle:
         return CDP_BASE_PORT + self.slot
 
     def get_env(self) -> dict:
-        env = os.environ.copy()
+        """Env for every process on this desktop. Scrubbed: the WM, panel and
+        file manager launch the desktop's Terminal (xterm), and a CU agent that
+        reads untrusted pages must not find the server's credentials in it."""
+        env = scrubbed_child_env()
         env["DISPLAY"] = self.display
         return env
 
@@ -222,17 +226,19 @@ class DisplayAllocator:
 
     def _start_quartet(self, h: DisplayHandle) -> None:
         procs: Dict[str, subprocess.Popen] = {}
+        # Every desktop process gets the handle's scrubbed env — none inherits
+        # the orchestrator's (audit O14-cli-agents-devices-02).
+        env = h.get_env()
         # 1. Xvfb at the backend's native resolution — scale 1.0, no LANCZOS.
         procs["xvfb"] = subprocess.Popen(
             ["Xvfb", h.display, "-screen", "0", f"{h.width}x{h.height}x{DISPLAY_DEPTH}",
              "-nolisten", "tcp", "-ac"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(_STARTUP_WAIT)
         if not _xvfb_ready(h.display_num):
             for p in procs.values():
                 _terminate_proc(p)
             raise RuntimeError(f"Xvfb {h.display} failed to become ready")
-        env = h.get_env()
         _assets = os.path.join(os.path.dirname(__file__), "assets")
         # Per-session XDG config seed (M2): openbox + pcmanfm read their config
         # through XDG_CONFIG_HOME, so a WRITABLE per-slot dir (never the repo
@@ -283,12 +289,12 @@ class DisplayAllocator:
         procs["x11vnc"] = subprocess.Popen(
             ["x11vnc", "-display", h.display, "-forever", "-shared", "-nopw",
              "-listen", "127.0.0.1", "-rfbport", str(h.vnc_port), "-noxdamage", "-quiet"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # 4. websockify WS bridge (only when assets present — SHOULD_HAVE).
         if _live_view_available():
             procs["websockify"] = subprocess.Popen(
                 ["websockify", f"127.0.0.1:{h.ws_port}", f"127.0.0.1:{h.vnc_port}"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             h.live_view = True
         self._procs[h.session_id] = procs
         h.pids = {role: p.pid for role, p in procs.items()}  # introspection mirror

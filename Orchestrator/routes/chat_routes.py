@@ -3895,11 +3895,14 @@ You are serving operator: {operator}
 async def execute_bash_command(command: str, timeout: int = 120) -> dict:
     """Execute a bash command and return output. Caps output at 10KB."""
     import subprocess
-    import os
     from Orchestrator.browser.config import ACTIVE_DISPLAY, NATIVE_MODE, get_native_env
+    from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
     try:
-        # Inherit current env + ensure DISPLAY is set for GUI commands
-        env = os.environ.copy()
+        # Scrubbed env + ensure DISPLAY is set for GUI commands. This is the CU
+        # driver's model-driven `bash` tool (every Anthropic CU run offers it),
+        # so it must not hand the server's credentials to a prompt-injected
+        # agent (audit O14-cli-agents-devices-02).
+        env = scrubbed_child_env()
         if NATIVE_MODE:
             env.update(get_native_env())
         else:

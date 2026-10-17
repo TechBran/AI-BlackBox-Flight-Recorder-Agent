@@ -16,6 +16,19 @@ exfiltrate them. Every spawn site now builds its child env through
   * tmux attach PTY .............. routes/cli_agent_routes + cli_agent/pty_bridge
   * legacy agent-mode CLIs ....... routes/agent_routes, routes/gemini_agent_routes
   * wizard terminals/diagnostics . routes/onboarding_routes
+  * CU desktops (Xvfb, openbox,
+    tint2, pcmanfm -> the menu's
+    xterm, the desktop's Chrome) . browser/display.DisplayHandle.get_env
+  * CU default-display Chrome .... browser/chrome._active_display_env
+  * CU driver's `bash` tool ...... routes/chat_routes.execute_bash_command
+
+What this is NOT: a boundary against a process running as the service user.
+Every pane, agent and CU shell runs as the same uid as the orchestrator, so it
+can still read .env or the orchestrator's /proc/<pid>/environ directly. The
+scrub stops inheritance — `env` in a pane, an agent dumping its environment
+into a transcript, a CLI silently billing the server's key. A real boundary
+needs a separate uid or a credential broker, and credentials that panes could
+read before this module existed still need rotating.
 
 The rule is a DENYLIST by name shape plus an explicit keep-list, not a strict
 allowlist: a coding agent legitimately needs the operator's broad shell /

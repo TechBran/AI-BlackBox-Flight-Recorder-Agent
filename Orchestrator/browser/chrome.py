@@ -6,18 +6,18 @@ import time
 import signal
 import json
 
-import os
-
 from Orchestrator.browser.config import (
     CHROME_PATH, PROFILE_BASE, DISPLAY_NUMBER, DISPLAY_WIDTH, DISPLAY_HEIGHT,
     CDP_PORT, ACTIVE_DISPLAY,
 )
+from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
 
 
 def _active_display_env() -> dict:
     """Env for the box's default/native display — the fallback when a Chrome
-    method is called without a per-session DisplayHandle (M9)."""
-    env = os.environ.copy()
+    method is called without a per-session DisplayHandle (M9). Scrubbed like
+    a desktop's: the agent's browser never holds the server's credentials."""
+    env = scrubbed_child_env()
     env["DISPLAY"] = f":{ACTIVE_DISPLAY}"
     return env
 

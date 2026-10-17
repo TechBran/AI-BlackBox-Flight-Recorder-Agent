@@ -302,3 +302,110 @@ def test_claude_doctor_runs_claude_with_a_scrubbed_env(planted, monkeypatch, tmp
     assert envs
     for env in envs:
         _assert_clean(env)
+
+
+# --- computer-use desktops and the CU bash tool (a model drives these) --------
+
+
+def _cu_handle(slot: int = 0):
+    from Orchestrator.browser import display as disp
+    return disp.DisplayHandle(
+        session_id=f"scrub-{slot}", slot=slot, backend="anthropic", operator="op",
+        width=1280, height=720, display_num=disp.DISPLAY_BASE + slot,
+        vnc_port=disp.VNC_BASE_PORT + slot, ws_port=disp.WEBSOCKIFY_BASE_PORT + slot)
+
+
+def test_cu_display_handle_env_is_scrubbed(planted):
+    """DisplayHandle.get_env() is the env of the desktop's Chrome and of the
+    openbox / tint2 / pcmanfm that launch the desktop's Terminal (xterm)."""
+    h = _cu_handle(1)
+    env = h.get_env()
+    _assert_clean(env)
+    assert env["DISPLAY"] == h.display
+
+
+def test_every_cu_desktop_process_is_scrubbed(planted, monkeypatch, tmp_path):
+    """The WM, panel and file manager are the parents of the xterm a CU agent
+    (or a live-view watcher) opens from the desktop menu, so every process the
+    allocator starts on a desktop gets the scrubbed env — none inherits."""
+    from Orchestrator.browser import display as disp
+    spawned = {}
+
+    class _Proc:
+        pid = 4343
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        spawned[cmd[0]] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.setattr(disp.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(disp.time, "sleep", lambda s: None)
+    monkeypatch.setattr(disp, "_xvfb_ready", lambda n: True)
+    monkeypatch.setattr(disp, "_live_view_available", lambda: True)
+    monkeypatch.setattr(disp.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(disp.DisplayAllocator, "_seed_xdg_config",
+                        lambda self, h, assets: str(tmp_path))
+    alloc = disp.DisplayAllocator()
+    h = alloc.allocate("scrub-desktop", backend="anthropic", operator="op")
+    try:
+        assert {"Xvfb", "openbox", "tint2", "pcmanfm", "x11vnc", "websockify"} <= set(spawned)
+        for name, env in spawned.items():
+            _assert_clean(env)
+            assert env["DISPLAY"] == h.display, name
+        assert spawned["openbox"]["XDG_CONFIG_HOME"] == str(tmp_path)
+    finally:
+        alloc.release("scrub-desktop")
+
+
+def test_cu_chrome_env_is_scrubbed(planted, monkeypatch, tmp_path):
+    """Both CU Chromes: a desktop's (through its handle) and the default-display
+    fallback (also the env of chrome.navigate's xdotool calls)."""
+    from Orchestrator.browser import chrome as chrome_mod
+    envs = []
+
+    class _Proc:
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **kwargs):
+        envs.append(kwargs.get("env"))
+        return _Proc()
+
+    monkeypatch.setattr(chrome_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(chrome_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(chrome_mod, "PROFILE_BASE", tmp_path)
+    monkeypatch.setattr(chrome_mod.ChromeInstance, "_discover_cdp_ws", lambda self: None)
+    for handle in (None, _cu_handle(0)):
+        assert chrome_mod.ChromeInstance(operator="op").start("about:blank", handle=handle)
+    assert len(envs) == 2
+    for env in envs:
+        _assert_clean(env)
+    _assert_clean(chrome_mod._active_display_env())
+
+
+@pytest.mark.asyncio
+async def test_cu_bash_tool_env_is_scrubbed(planted):
+    """The Anthropic CU driver offers `bash` on every run and hands the model's
+    commands to execute_bash_command. CU agents read untrusted web pages, so
+    this is the shell a prompt injection reaches for first."""
+    from Orchestrator.routes import chat_routes
+    # grep, not a bare `env`: the tool caps output at 10KB, which could cut the
+    # planted names off a long environment and pass on a leaking build.
+    result = await chat_routes.execute_bash_command(
+        "env | grep -E '^PATH=|planted|^ZELLIJ' ; true")
+    assert result["exit_code"] == 0
+    assert "PATH=" in result["output"]  # control: the shell printed its env
+    _assert_clean_text(result["output"])
+    assert "ZELLIJ" not in result["output"]
