@@ -168,6 +168,24 @@ def get_prompt_uri(name: str) -> str:
     return f"sound:ivr/{name}"
 
 
+def pin_prompt_text(length: int) -> str:
+    """PIN prompt wording for a ``length``-digit PIN."""
+    return f"Please enter your {length}-digit access code."
+
+
+async def ensure_pin_prompt(length: int) -> str:
+    """Return the prompt name for a ``length``-digit PIN, generating it once.
+
+    The name carries the length because the cache is keyed by name, not text
+    (a changed PIN length must never replay a stale "N-digit" recording).
+    Falls back to the length-free ``pin_entry`` prompt if TTS is unavailable.
+    """
+    name = f"pin_prompt_{length}digit"
+    if await generate_prompt(name, pin_prompt_text(length)):
+        return name
+    return "pin_entry"
+
+
 def filter_ivr_operators(operators: List[str], max_operators: int = 4) -> List[str]:
     """Filter operator list to human operators suitable for IVR menu.
 
@@ -217,10 +235,14 @@ async def generate_operator_menu(operators: List[str]) -> str:
 # ---------------------------------------------------------------------------
 STATIC_PROMPTS = {
     "greeting": "Thank you for calling AI BlackBox.",
-    "pin_prompt": "Please enter your 4-digit access code.",
+    # The digit-count prompt is generated per PIN length (ensure_pin_prompt);
+    # pin_entry is its length-free fallback.
+    "pin_entry": "Please enter your access code.",
     "pin_accepted": "Access granted.",
     "pin_retry": "That code was incorrect. Please try again.",
     "pin_failed": "Too many incorrect attempts. Goodbye.",
+    "pin_locked": "Too many incorrect attempts. Please try again later. Goodbye.",
+    "pin_unavailable": "This line is not accepting calls right now. Goodbye.",
     "backend_menu": (
         "Select your AI assistant. "
         "Press 1 for Claude. Press 2 for Gemini. "
@@ -274,6 +296,14 @@ async def ensure_all_prompts():
         f" = {cached + generated}/{total}"
         + (f" ({failed} failed)" if failed else "")
     )
+
+    # Pre-generate the PIN prompt for the configured PIN length
+    try:
+        from Orchestrator.phone import pin_gate
+        if pin_gate.pin_length():
+            await ensure_pin_prompt(pin_gate.pin_length())
+    except Exception as e:
+        print(f"[IVR-AUDIO] PIN prompt generation error: {e}")
 
     # Pre-generate dynamic operator menu so it's available before first call
     try:

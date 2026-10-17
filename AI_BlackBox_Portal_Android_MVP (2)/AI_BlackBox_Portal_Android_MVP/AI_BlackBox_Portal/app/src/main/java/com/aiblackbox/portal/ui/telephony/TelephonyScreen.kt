@@ -150,12 +150,45 @@ data class ConfigPreview(
     val tgSteps: List<String>
 )
 
-// Apply result (POST /apply)
+// Apply result (POST /apply). The backend also reports the inbound-call PIN
+// gate: `generatedPin` is present only in the response that generated it (show
+// it once); `pinMissing` means inbound calls will be refused until one is set.
 data class ApplyResult(
     val applied: Boolean,
     val reloadOk: Boolean,
-    val restartRecommended: Boolean
+    val restartRecommended: Boolean,
+    val generatedPin: String? = null,
+    val pinMissing: Boolean = false
 )
+
+/** Parse the POST /asterisk/gateways/{id}/apply body (older backends omit phone_pin). */
+internal fun parseApplyResult(root: JsonObject): ApplyResult {
+    fun JsonObject.flag(key: String): Boolean =
+        this[key]?.jsonPrimitive?.booleanOrNull
+            ?: this[key]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
+    val reload = root["reload"] as? JsonObject
+    val pin = root["phone_pin"] as? JsonObject
+    val enabled = pin != null && (pin["enabled"]?.jsonPrimitive?.booleanOrNull ?: true)
+    return ApplyResult(
+        applied = root.flag("applied"),
+        reloadOk = reload?.flag("ok") ?: false,
+        restartRecommended = root.flag("restart_recommended"),
+        generatedPin = if (pin != null && pin.flag("generated"))
+            pin["pin"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } else null,
+        pinMissing = enabled && pin?.flag("configured") == false
+    )
+}
+
+/** Wizard notice text for the PIN gate, or null when there is nothing to say. */
+internal fun phonePinNotice(result: ApplyResult?): Pair<String, Boolean>? = when {
+    result?.generatedPin != null ->
+        "Inbound calls now require this phone PIN: ${result.generatedPin}. Note it now: " +
+            "it is saved in .env as PHONE_PIN_CODE and is not shown again." to false
+    result?.pinMissing == true ->
+        "No phone PIN is set, so inbound calls will be refused. Set PHONE_PIN_CODE " +
+            "(4-12 digits) in .env and restart." to true
+    else -> null
+}
 
 // Models and GSM port counts (mirrors backend MODEL_PORTS).
 val MODEL_PORTS = linkedMapOf("TG100" to 1, "TG200" to 2, "TG400" to 4, "TG800" to 8)
@@ -452,12 +485,7 @@ class TelephonyViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val response = api.post("/asterisk/gateways/$id/apply", "{}")
                 val root = json.parseToJsonElement(response).jsonObject
-                val reload = root["reload"]?.jsonObject
-                _applyResult.value = ApplyResult(
-                    applied = root.bool("applied"),
-                    reloadOk = reload?.bool("ok") ?: false,
-                    restartRecommended = root.bool("restart_recommended")
-                )
+                _applyResult.value = parseApplyResult(root)
                 _actionMessage.value = if (root.bool("applied")) "Config applied" else "Config processed"
             } catch (e: Exception) {
                 _actionMessage.value = "Failed to apply: ${e.message}"
@@ -1224,6 +1252,10 @@ private fun WizardConfigure(
             )
         }
     }
+    phonePinNotice(applyResult)?.let { (text, warn) ->
+        Spacer(Modifier.height(10.dp))
+        NoticeBox(text, warn = warn)
+    }
 
     Spacer(Modifier.height(12.dp))
     WizardButton(if (busy) "Applying…" else "Apply our-side config", enabled = !busy, onClick = onApply)
@@ -1260,6 +1292,10 @@ private fun WizardDone(
     if (applyResult?.restartRecommended == true) {
         Spacer(Modifier.height(10.dp))
         NoticeBox("A BlackBox restart is still needed to finish.", warn = true)
+    }
+    phonePinNotice(applyResult)?.let { (text, warn) ->
+        Spacer(Modifier.height(10.dp))
+        NoticeBox(text, warn = warn)
     }
 }
 

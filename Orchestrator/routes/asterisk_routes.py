@@ -801,9 +801,14 @@ async def apply_gateway_endpoint(gateway_id: str):
 
     If the reload failed (e.g. the install-time sudoers rule isn't present yet),
     ``restart_recommended`` is True so the UI can prompt a full service restart.
+
+    This is the step that makes inbound calls reachable, so it also makes sure
+    a phone PIN exists (the gate fails closed without one): ``phone_pin``
+    carries the gate status, plus ``pin`` once, only when it was generated now.
     """
     from Orchestrator.asterisk.gateway_manager import get_gateway_decrypted
     from Orchestrator.asterisk import provisioner
+    from Orchestrator.phone import pin_gate
     from Orchestrator.sms import get_manager
 
     gw = get_gateway_decrypted(gateway_id)
@@ -816,12 +821,20 @@ async def apply_gateway_endpoint(gateway_id: str):
     if mgr:
         await mgr.reconnect(gateway_id)
 
+    try:
+        phone_pin = pin_gate.ensure_pin()
+    except (OSError, ValueError) as e:
+        print(f"[ASTERISK-ROUTE] Could not set a phone PIN: {e.__class__.__name__}")
+        phone_pin = {**pin_gate.describe(), "generated": False,
+                     "error": "Could not save a phone PIN to .env"}
+
     reload_result = result.get("reload", {})
     return {
         "applied": True,
         "config": result.get("written"),
         "reload": reload_result,
         "restart_recommended": not reload_result.get("ok", False),
+        "phone_pin": phone_pin,
     }
 
 

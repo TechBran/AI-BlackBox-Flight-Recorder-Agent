@@ -15,11 +15,17 @@ from typing import Dict
 # Initial greeting (played once at call start, before PIN)
 IVR_GREETING = "Thank you for calling AI BlackBox."
 
-# PIN prompts
-IVR_PIN_PROMPT = "Please enter your 4-digit access code."
+# PIN prompts (the entry prompt states the configured PIN's length)
 IVR_PIN_ACCEPTED = "Access granted."
 IVR_PIN_RETRY = "That code was incorrect. Please try again."
 IVR_PIN_FAILED = "Too many incorrect attempts. Goodbye."
+IVR_PIN_LOCKED = "Too many incorrect attempts. Please try again later. Goodbye."
+IVR_PIN_UNAVAILABLE = "This line is not accepting calls right now. Goodbye."
+
+
+def get_pin_prompt(length: int) -> str:
+    """PIN entry prompt for a ``length``-digit PIN."""
+    return f"Please enter your {length}-digit access code."
 
 # Backend selection: main menu
 IVR_WELCOME = (

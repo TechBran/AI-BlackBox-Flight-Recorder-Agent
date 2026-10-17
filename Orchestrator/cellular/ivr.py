@@ -30,10 +30,12 @@ from Orchestrator.phone.ivr_prompts import (
     IVR_RETRY,
     IVR_TIMEOUT,
     IVR_INVALID,
-    IVR_PIN_PROMPT,
     IVR_PIN_ACCEPTED,
     IVR_PIN_RETRY,
     IVR_PIN_FAILED,
+    IVR_PIN_LOCKED,
+    IVR_PIN_UNAVAILABLE,
+    get_pin_prompt,
     get_confirmation_prompt,
     get_backend_id,
     get_backend_name,
@@ -44,6 +46,7 @@ from Orchestrator.phone.ivr_prompts import (
     IVR_TTS_VOICE,
     IVR_TTS_MODEL,
 )
+from Orchestrator.phone import pin_gate
 
 
 class CellularIVR:
@@ -63,6 +66,7 @@ class CellularIVR:
         audio_stream=None,
         timeout_ms: int = 10000,
         max_retries: int = 3,
+        caller_id: str = "",
     ):
         """
         Args:
@@ -72,6 +76,7 @@ class CellularIVR:
             audio_stream: CellularAudioStream for direct barge-in flush control
             timeout_ms: Timeout for first DTMF digit in milliseconds
             max_retries: Max retry attempts per stage
+            caller_id: Caller number, keys the cross-call PIN lockout
         """
         self.send_audio = send_audio
         self.send_pcm16 = send_pcm16
@@ -79,6 +84,7 @@ class CellularIVR:
         self.audio_stream = audio_stream
         self.timeout_ms = timeout_ms
         self.max_retries = max_retries
+        self.caller_id = caller_id
 
         self._dtmf_buffer = ""
         self._dtmf_event = asyncio.Event()
@@ -106,14 +112,15 @@ class CellularIVR:
         # Debounce: ignore duplicate same-digit within 500ms
         if (digit == self._last_dtmf_digit
                 and (now - self._last_dtmf_time) < 0.5):
-            print(f"[CELLULAR-IVR] DTMF debounce: ignoring duplicate '{digit}' "
+            print(f"[CELLULAR-IVR] DTMF debounce: ignoring duplicate digit "
                   f"({(now - self._last_dtmf_time)*1000:.0f}ms)")
             return
 
         self._last_dtmf_digit = digit
         self._last_dtmf_time = now
 
-        print(f"[CELLULAR-IVR] DTMF received: '{digit}'"
+        # Never log the digit: during the PIN stage it is part of the PIN.
+        print(f"[CELLULAR-IVR] DTMF received"
               f"{' (during playback — barge-in)' if self._playing else ''}")
         self._dtmf_buffer += digit
         self._dtmf_event.set()
@@ -321,35 +328,53 @@ class CellularIVR:
             return None
 
     async def run_pin_verification(self) -> bool:
-        """Run PIN verification stage."""
-        from Orchestrator.config import PHONE_PIN_ENABLED, PHONE_PIN_CODE, PHONE_PIN_MAX_ATTEMPTS
-
-        if not PHONE_PIN_ENABLED:
-            print("[CELLULAR-IVR] PIN disabled, skipping")
+        """Run PIN verification stage. Fails closed; never logs the PIN or digits."""
+        status = pin_gate.gate_status()
+        if status == "disabled":
+            print("[CELLULAR-IVR] PIN disabled (PHONE_PIN_ENABLED=false), skipping")
             return True
+        if status == "unconfigured":
+            pin_gate.log_unconfigured("CELLULAR-IVR")
+            await self._play_prompt(IVR_PIN_UNAVAILABLE, allow_barge_in=False)
+            return False
 
-        pin_len = len(PHONE_PIN_CODE)
-        print(f"[CELLULAR-IVR] Starting PIN verification ({pin_len} digits, {PHONE_PIN_MAX_ATTEMPTS} attempts)")
+        locked_for = pin_gate.lockout_remaining(self.caller_id)
+        if locked_for:
+            print(f"[CELLULAR-IVR] Caller {pin_gate.mask_caller(self.caller_id)} "
+                  f"is locked out ({locked_for}s left), refusing")
+            await self._play_prompt(IVR_PIN_LOCKED, allow_barge_in=False)
+            return False
+
+        pin_len = pin_gate.pin_length()
+        attempts = pin_gate.max_attempts()
+        print(f"[CELLULAR-IVR] Starting PIN verification ({pin_len} digits, {attempts} attempts)")
 
         # Play greeting on first call
         await self._play_prompt(IVR_GREETING, allow_barge_in=False)
 
-        for attempt in range(PHONE_PIN_MAX_ATTEMPTS):
+        for attempt in range(attempts):
             if not self._check_call():
                 return False
 
             if attempt == 0:
-                await self._play_prompt(IVR_PIN_PROMPT)
+                await self._play_prompt(get_pin_prompt(pin_len))
             else:
                 await self._play_prompt(IVR_PIN_RETRY)
 
             digits = await self._wait_for_dtmf(num_digits=pin_len)
 
-            if digits and digits == PHONE_PIN_CODE:
+            if pin_gate.check_pin(digits):
+                pin_gate.record_success(self.caller_id)
                 await self._play_prompt(IVR_PIN_ACCEPTED, allow_barge_in=False)
                 return True
 
-            print(f"[CELLULAR-IVR] PIN attempt {attempt+1}: got '{digits}' (expected '{PHONE_PIN_CODE}')")
+            if not digits:
+                print(f"[CELLULAR-IVR] PIN attempt {attempt+1}/{attempts}: no input")
+                continue
+            print(f"[CELLULAR-IVR] PIN attempt {attempt+1}/{attempts} rejected")
+            if pin_gate.record_failure(self.caller_id):
+                await self._play_prompt(IVR_PIN_LOCKED, allow_barge_in=False)
+                return False
 
         await self._play_prompt(IVR_PIN_FAILED, allow_barge_in=False)
         return False
@@ -382,12 +407,12 @@ class CellularIVR:
                     return backend_id
                 else:
                     # Invalid digit (0, 5-9) — give feedback
-                    print(f"[CELLULAR-IVR] Invalid backend digit: {digit}")
+                    print("[CELLULAR-IVR] Invalid backend selection")
                     await self._play_prompt(IVR_INVALID)
                     continue
             elif digit:
                 # Non-digit character (*, #)
-                print(f"[CELLULAR-IVR] Non-digit input: {digit}")
+                print("[CELLULAR-IVR] Non-digit backend input")
                 await self._play_prompt(IVR_INVALID)
                 continue
 
@@ -424,11 +449,11 @@ class CellularIVR:
                     print(f"[CELLULAR-IVR] Operator selected: {operator}")
                     return operator
                 else:
-                    print(f"[CELLULAR-IVR] Invalid operator digit: {digit}")
+                    print("[CELLULAR-IVR] Invalid operator selection")
                     await self._play_prompt(IVR_OPERATOR_INVALID)
                     continue
             elif digit:
-                print(f"[CELLULAR-IVR] Non-digit operator input: {digit}")
+                print("[CELLULAR-IVR] Non-digit operator input")
                 await self._play_prompt(IVR_OPERATOR_INVALID)
                 continue
 

@@ -98,11 +98,11 @@ class IVRState:
         self._cancel_timeout()
 
         digit = event.digit
-        print(f"[IVR] Session {self.session.session_id}: DTMF digit '{digit}'")
+        print(f"[IVR] Session {self.session.session_id}: DTMF digit received")
 
         # Check if valid digit
         if digit not in DTMF_DIGITS:
-            print(f"[IVR] Invalid DTMF character: {digit}")
+            print("[IVR] Invalid DTMF character")
             await self._handle_invalid()
             return
 

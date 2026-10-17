@@ -9,6 +9,8 @@ Provides REST and WebSocket endpoints for phone call management:
 - POST /phone/call - Initiate outbound call
 - POST /phone/hangup/{session_id} - End a call
 - POST /phone/webhook/3cx - 3CX event webhooks
+- GET /phone/pin - Inbound-call PIN gate status (never the PIN)
+- POST /phone/pin/generate - Generate the phone PIN when none is set
 - WS /ws/phone/{session_id} - Audio bridge WebSocket
 """
 
@@ -37,6 +39,7 @@ from Orchestrator.phone.session import (
     get_active_sessions,
     cleanup_session,
 )
+from Orchestrator.phone import pin_gate
 from Orchestrator.phone.audio_converter import AudioConverter
 from Orchestrator.phone.dtmf_handler import IVRState, DTMFEvent, parse_freeswitch_dtmf
 from Orchestrator.phone.bridge import PhoneAIBridge, save_session_to_blackbox
@@ -139,6 +142,31 @@ async def phone_status() -> PhoneStatusResponse:
             "phone_audio_format": PHONE_AUDIO_FORMAT,
         }
     )
+
+
+# =============================================================================
+# Phone PIN (the inbound-call gate every IVR shares; see phone/pin_gate.py)
+# =============================================================================
+
+@app.get("/phone/pin")
+async def phone_pin_status() -> Dict[str, Any]:
+    """PIN gate status: enabled, configured, digit count. Never returns the PIN."""
+    return pin_gate.describe()
+
+
+@app.post("/phone/pin/generate")
+async def phone_pin_generate() -> Dict[str, Any]:
+    """Generate a random phone PIN into .env and make it live (no restart).
+
+    Only when none is configured: inbound calls are refused until a PIN
+    exists. The new PIN is returned once so the operator can note it. An
+    existing PIN is never replaced here (edit PHONE_PIN_CODE in .env).
+    """
+    if not pin_gate.pin_enabled():
+        raise HTTPException(status_code=409, detail="The phone PIN gate is disabled (PHONE_PIN_ENABLED=false)")
+    if pin_gate.pin_configured():
+        raise HTTPException(status_code=409, detail="A phone PIN is already set (PHONE_PIN_CODE in .env)")
+    return pin_gate.ensure_pin()
 
 
 @app.get("/phone/sessions")
@@ -658,7 +686,7 @@ async def init_phone_system():
             """Handle DTMF from FreeSwitch."""
             session = get_session_by_freeswitch_uuid(uuid)
             if session:
-                print(f"[PHONE] DTMF {digit} for session {session.session_id}")
+                print(f"[PHONE] DTMF received for session {session.session_id}")
                 # DTMF will be handled via WebSocket
 
         async def on_hangup(uuid: str):

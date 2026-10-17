@@ -763,6 +763,20 @@ async def startup_cellular_internet():
 
 
 @app.on_event("startup")
+async def startup_phone_pin_check():
+    """Say loudly at boot when inbound calls will be refused for lack of a PIN."""
+    from Orchestrator import config
+    if not (config.ASTERISK_ENABLED or config.PHONE_ENABLED or config.CELLULAR_ENABLED):
+        return
+    from Orchestrator.phone import pin_gate
+    status = pin_gate.gate_status()
+    if status == "unconfigured":
+        pin_gate.log_unconfigured("PHONE-PIN")
+    elif status == "disabled":
+        logger.warning("PHONE_PIN_ENABLED=false: inbound calls reach the AI with NO PIN")
+
+
+@app.on_event("startup")
 async def startup_asterisk():
     """Initialize Asterisk ARI connection and AudioSocket server."""
     from Orchestrator.config import ASTERISK_ENABLED

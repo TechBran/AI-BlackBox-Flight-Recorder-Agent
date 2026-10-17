@@ -406,7 +406,8 @@ class FreeSwitchClient:
         elif event_name == "DTMF":
             # DTMF digit detected
             digit = event.get("DTMF-Digit", "")
-            print(f"[FREESWITCH] DTMF: {digit} (UUID: {uuid})")
+            # Never log the digit itself (it may be part of a PIN).
+            print(f"[FREESWITCH] DTMF received (UUID: {uuid})")
 
             if self.on_dtmf:
                 await self.on_dtmf(uuid, digit)

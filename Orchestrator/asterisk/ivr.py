@@ -14,7 +14,10 @@ import asyncio
 import traceback
 from typing import Optional, Dict
 
-from Orchestrator.asterisk.ivr_audio import get_prompt_uri, generate_operator_menu, filter_ivr_operators
+from Orchestrator.asterisk.ivr_audio import (
+    get_prompt_uri, generate_operator_menu, filter_ivr_operators, ensure_pin_prompt,
+)
+from Orchestrator.phone import pin_gate
 
 
 class AsteriskIVR:
@@ -67,11 +70,9 @@ class AsteriskIVR:
         self._client.on_dtmf = self._on_dtmf
 
         try:
-            # Stage 1: PIN verification
+            # Stage 1: PIN verification (plays its own refusal on failure)
             pin_ok = await self._run_pin()
             if not pin_ok:
-                await self._play(get_prompt_uri("pin_failed"))
-                await asyncio.sleep(1.5)  # Let prompt finish
                 return None
 
             # Stage 2: Operator selection
@@ -128,7 +129,8 @@ class AsteriskIVR:
                 await self._original_on_dtmf(channel_id, digit)
             return
 
-        print(f"[ASTERISK-IVR] DTMF: '{digit}'{' (barge-in)' if self._current_playback_id else ''}")
+        # Never log the digit: during the PIN stage it is part of the PIN.
+        print(f"[ASTERISK-IVR] DTMF received{' (barge-in)' if self._current_playback_id else ''}")
         self._dtmf_buffer += digit
         self._dtmf_event.set()
 
@@ -224,41 +226,63 @@ class AsteriskIVR:
 
     # ----- IVR Stages -----
 
+    async def _refuse(self, prompt: str):
+        """Play a refusal and let it finish; the caller hangs up on None."""
+        await self._play(get_prompt_uri(prompt))
+        await asyncio.sleep(1.5)  # Let prompt finish
+
     async def _run_pin(self) -> bool:
-        """PIN verification stage."""
-        from Orchestrator.config import PHONE_PIN_ENABLED, PHONE_PIN_CODE, PHONE_PIN_MAX_ATTEMPTS
-
-        if not PHONE_PIN_ENABLED:
-            print("[ASTERISK-IVR] PIN disabled, skipping")
+        """PIN verification stage. Fails closed; never logs the PIN or digits."""
+        status = pin_gate.gate_status()
+        if status == "disabled":
+            print("[ASTERISK-IVR] PIN disabled (PHONE_PIN_ENABLED=false), skipping")
             return True
+        if status == "unconfigured":
+            pin_gate.log_unconfigured("ASTERISK-IVR")
+            await self._refuse("pin_unavailable")
+            return False
 
-        pin_len = len(PHONE_PIN_CODE)
-        print(f"[ASTERISK-IVR] PIN verification ({pin_len} digits, {PHONE_PIN_MAX_ATTEMPTS} attempts)")
+        locked_for = pin_gate.lockout_remaining(self._caller_id)
+        if locked_for:
+            print(f"[ASTERISK-IVR] Caller {pin_gate.mask_caller(self._caller_id)} "
+                  f"is locked out ({locked_for}s left), refusing")
+            await self._refuse("pin_locked")
+            return False
+
+        pin_len = pin_gate.pin_length()
+        attempts = pin_gate.max_attempts()
+        print(f"[ASTERISK-IVR] PIN verification ({pin_len} digits, {attempts} attempts)")
+        prompt = await ensure_pin_prompt(pin_len)
 
         # Play greeting first
         await self._play(get_prompt_uri("greeting"))
         await asyncio.sleep(0.5)
 
-        for attempt in range(PHONE_PIN_MAX_ATTEMPTS):
+        for attempt in range(attempts):
             self._dtmf_buffer = ""
             self._dtmf_event.clear()
 
-            if attempt == 0:
-                digits = await self._play_and_wait(get_prompt_uri("pin_prompt"),
-                                                    num_digits=pin_len, timeout_s=15.0)
-            else:
-                digits = await self._play_and_wait(get_prompt_uri("pin_retry"),
-                                                    num_digits=pin_len, timeout_s=15.0)
+            digits = await self._play_and_wait(
+                get_prompt_uri(prompt if attempt == 0 else "pin_retry"),
+                num_digits=pin_len, timeout_s=15.0)
 
-            if digits and digits == PHONE_PIN_CODE:
+            if pin_gate.check_pin(digits):
+                pin_gate.record_success(self._caller_id)
                 await self._play(get_prompt_uri("pin_accepted"))
                 await asyncio.sleep(1.0)
                 print(f"[ASTERISK-IVR] PIN accepted on attempt {attempt + 1}")
                 return True
 
-            print(f"[ASTERISK-IVR] PIN attempt {attempt + 1}: got '{digits}' (expected '{PHONE_PIN_CODE}')")
+            if not digits:
+                print(f"[ASTERISK-IVR] PIN attempt {attempt + 1}/{attempts}: no input")
+                continue
+            print(f"[ASTERISK-IVR] PIN attempt {attempt + 1}/{attempts} rejected")
+            if pin_gate.record_failure(self._caller_id):
+                await self._refuse("pin_locked")
+                return False
 
         print("[ASTERISK-IVR] PIN failed after max attempts")
+        await self._refuse("pin_failed")
         return False
 
     async def _run_operator_select(self) -> Optional[str]:
@@ -287,7 +311,7 @@ class AsteriskIVR:
                 idx = int(digit)
                 if 1 <= idx <= len(ivr_operators):
                     operator = ivr_operators[idx - 1]
-                    print(f"[ASTERISK-IVR] Operator selected: {operator} (press {digit})")
+                    print(f"[ASTERISK-IVR] Operator selected: {operator}")
                     return operator
                 else:
                     await self._play(get_prompt_uri("operator_invalid"))
@@ -323,7 +347,7 @@ class AsteriskIVR:
                 print(f"[ASTERISK-IVR] Backend selected: {backend_name} ({backend_id})")
                 return backend_id
             elif digit:
-                print(f"[ASTERISK-IVR] Invalid backend digit: {digit}")
+                print("[ASTERISK-IVR] Invalid backend selection")
                 await self._play(get_prompt_uri("backend_invalid"))
                 await asyncio.sleep(0.5)
 

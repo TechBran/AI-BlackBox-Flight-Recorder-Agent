@@ -208,7 +208,8 @@ class AsteriskARIClient:
         elif event_type == "ChannelDtmfReceived":
             channel_id = event.get("channel", {}).get("id", "")
             digit = event.get("digit", "")
-            print(f"[ARI] DTMF: channel={channel_id} digit={digit}")
+            # Never log the digit: IVR PIN entry arrives through here.
+            print(f"[ARI] DTMF received: channel={channel_id}")
             if self.on_dtmf:
                 asyncio.create_task(self.on_dtmf(channel_id, digit))
 

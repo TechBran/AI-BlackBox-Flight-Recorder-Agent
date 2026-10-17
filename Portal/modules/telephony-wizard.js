@@ -6,7 +6,8 @@
  * Backend endpoints (all JSON, on `app`):
  *   POST /asterisk/gateways/{id}/validate
  *   GET  /asterisk/gateways/{id}/config-preview
- *   POST /asterisk/gateways/{id}/apply
+ *   POST /asterisk/gateways/{id}/apply   (also returns phone_pin: the inbound-call
+ *                                         PIN gate, with `pin` once when generated)
  */
 
 import { $, toast, toastSuccess, toastError } from './core-utils.js';
@@ -43,6 +44,21 @@ async function copyToClipboard(text, label) {
         console.error('[TelephonyWizard] Copy failed:', e);
         toastError('Copy failed — select and copy manually');
     }
+}
+
+/**
+ * Notice for the inbound-call PIN reported by /apply. The PIN itself is only
+ * in the response that generated it, so it is shown once, here.
+ */
+export function renderPhonePinNotice(phonePin) {
+    if (!phonePin || phonePin.enabled === false) return '';
+    if (phonePin.generated && phonePin.pin) {
+        return `<div class="wiz-notice wiz-notice-ok">Inbound calls now require this phone PIN: <strong class="wiz-mono">${escapeHtml(phonePin.pin)}</strong>. Note it now: it is saved in .env as PHONE_PIN_CODE and is not shown again.</div>`;
+    }
+    if (!phonePin.configured) {
+        return `<div class="wiz-notice wiz-notice-warn">No phone PIN is set, so inbound calls will be refused. Set PHONE_PIN_CODE (4-12 digits) in .env and restart.</div>`;
+    }
+    return '';
 }
 
 function checkRow(label, ok) {
@@ -227,6 +243,7 @@ function renderConfigure() {
     } else if (_applyResult && _applyResult.applied) {
         restartNotice = `<div class="wiz-notice wiz-notice-ok">Configuration applied${_applyResult.reload && _applyResult.reload.ok ? ' and reloaded' : ''}.</div>`;
     }
+    const pinNotice = renderPhonePinNotice(_applyResult && _applyResult.phone_pin);
 
     return `
         <div class="wiz-panel">
@@ -241,6 +258,7 @@ function renderConfigure() {
             </div>
 
             ${restartNotice}
+            ${pinNotice}
             <div class="wiz-panel-actions">
                 <button class="btn btn-confirm" id="wizApplyBtn">Apply our-side config</button>
             </div>
@@ -264,6 +282,7 @@ function renderDone() {
                 <li>${applied ? 'Our-side config applied' : 'Our-side config not applied'}</li>
             </ul>
             ${restartNote}
+            ${renderPhonePinNotice(_applyResult && _applyResult.phone_pin)}
         </div>`;
 }
 

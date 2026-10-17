@@ -825,10 +825,13 @@ IVR_MAX_RETRIES = int(os.getenv("IVR_MAX_RETRIES", "3"))         # 3 retry attem
 IVR_DEFAULT_BACKEND = os.getenv("IVR_DEFAULT_BACKEND", "openai_realtime")  # Default on timeout
 IVR_INTER_DIGIT_TIMEOUT_MS = int(os.getenv("IVR_INTER_DIGIT_TIMEOUT_MS", "3000"))  # Between digits
 
-# PIN Security (gates inbound calls to prevent spam/token burn)
+# PIN Security (gates inbound calls to a tool-armed AI). NO default: an empty or
+# malformed PIN fails CLOSED (every IVR refuses the call). The telephony
+# wizard's Apply step / POST /phone/pin/generate writes a random one into .env.
+# Gate logic + the cross-call lockout live in Orchestrator/phone/pin_gate.py.
 PHONE_PIN_ENABLED = os.getenv("PHONE_PIN_ENABLED", "true").lower() == "true"
-PHONE_PIN_CODE = os.getenv("PHONE_PIN_CODE", "6157")              # Default PIN: 6157
-PHONE_PIN_MAX_ATTEMPTS = int(os.getenv("PHONE_PIN_MAX_ATTEMPTS", "3"))  # Max wrong attempts
+PHONE_PIN_CODE = os.getenv("PHONE_PIN_CODE", "")                  # 4-12 digits
+PHONE_PIN_MAX_ATTEMPTS = int(os.getenv("PHONE_PIN_MAX_ATTEMPTS", "3"))  # Wrong attempts per call (and per caller before lockout)
 
 # Phone Session Settings
 PHONE_SESSION_TIMEOUT_S = int(os.getenv("PHONE_SESSION_TIMEOUT_S", "3600"))  # 1 hour max call
