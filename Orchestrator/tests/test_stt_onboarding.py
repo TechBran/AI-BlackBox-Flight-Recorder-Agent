@@ -2,17 +2,25 @@
 
 Covers the contract the (later-phase) onboarding wizard relies on:
   1. POST /onboarding/save PERSISTS STT_PROVIDER (and the optional model-override
-     keys) — i.e. the key reaches the .env writer and is NOT silently dropped by
-     any allowlist.  /save is a free-write path (secrets_writer.update_env only
-     validates the env-var NAME shape), so this asserts the key isn't filtered.
+     keys) — i.e. the key reaches the .env writer and is NOT rejected by the
+     /save allowlist (Orchestrator/onboarding/providers.py registers all three).
   2. The wizard can READ the selected provider back via GET
      /onboarding/current-config — which reads .env FRESH (E8 pattern), so the
      value is visible immediately after save without a service restart.
 
 The real .env file is never mutated: the writer is patched.  current-config's
 fresh read is exercised by patching dotenv_values to return a synthetic env.
+The tool-embedding heal /save kicks is stubbed (it would embed over the network).
 """
 from unittest.mock import patch
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_embedding_heal(monkeypatch):
+    from Orchestrator.toolvault import embeddings as tv_emb
+    monkeypatch.setattr(tv_emb, "sync_tool_embeddings_bg", lambda reason="": None)
 
 
 def _client():

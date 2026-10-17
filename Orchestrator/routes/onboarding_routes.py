@@ -15,7 +15,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from Orchestrator.onboarding import custom_servers, validators
+from Orchestrator.onboarding import custom_servers, providers, validators
 from Orchestrator.onboarding.secrets_writer import update_env
 from Orchestrator.onboarding.state import (
     StepName,
@@ -28,15 +28,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
 
-ALLOWED_REVEAL_KEYS = {
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "GOOGLE_API_KEY",
-    "XAI_API_KEY",
-    "PERPLEXITY_API_KEY",
-    "GOOGLE_OAUTH_CLIENT_ID",
-    "GOOGLE_OAUTH_CLIENT_SECRET",
-}
+# The credentials GET/DELETE /config/{key} may touch (redacted read, removal).
+# Derived from the one env-key registry, like every other provider table here.
+CREDENTIAL_KEYS = providers.CREDENTIAL_KEYS
 
 
 def _redact(value: str | None, keep: int = 4) -> str | None:
@@ -77,8 +71,9 @@ class StateResponse(BaseModel):
 class CurrentConfigResponse(BaseModel):
     """Redacted snapshot of current setup state. Sensitive values shown as last-4 only.
 
-    Use GET /onboarding/config/{key}?reveal=1 (T1.4.3) to fetch full value of a single key.
-    Loopback-only via T1.3.2 first-run middleware once that lands.
+    No endpoint returns a stored key in cleartext: the wizard never needs one
+    back (stored keys re-validate server-side via POST /validate with no
+    credentials, and a replace flow writes a new value).
     """
     providers: dict[str, dict]
     operators: list[str]
@@ -115,6 +110,27 @@ def get_onboarding_state() -> StateResponse:
     return StateResponse(**_state.snapshot())
 
 
+def _providers_snapshot(env: dict, val_at: dict) -> dict:
+    """current-config's `providers` block: one redacted card per api-key
+    provider in the registry (api_keys.js / optional_integrations.js rehydrate
+    from providers[<id>]; voyage/cohere were missing), plus the gmail pair."""
+    out = {
+        prov: {
+            "present": bool(env.get(var)),
+            "last4": _redact(env.get(var)),
+            "validated_at": val_at.get(prov),
+        }
+        for prov, var in providers.API_KEY_ENV.items()
+    }
+    out["gmail"] = {
+        "present": bool(env.get("GOOGLE_OAUTH_CLIENT_ID") and env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
+        "client_id": env.get("GOOGLE_OAUTH_CLIENT_ID") or None,  # public per Google OAuth docs
+        "secret_last4": _redact(env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
+        "validated_at": val_at.get("gmail"),
+    }
+    return out
+
+
 @router.get("/current-config", response_model=CurrentConfigResponse)
 def current_config() -> CurrentConfigResponse:
     """Return a redacted snapshot of what's configured today. Manage-mode UI reads this.
@@ -133,44 +149,7 @@ def current_config() -> CurrentConfigResponse:
     env = dotenv_values(str(ENV_FILE))
 
     val_at = _state.validated_at()
-    providers = {
-        "openai": {
-            "present": bool(env.get("OPENAI_API_KEY")),
-            "last4": _redact(env.get("OPENAI_API_KEY")),
-            "validated_at": val_at.get("openai"),
-        },
-        "anthropic": {
-            "present": bool(env.get("ANTHROPIC_API_KEY")),
-            "last4": _redact(env.get("ANTHROPIC_API_KEY")),
-            "validated_at": val_at.get("anthropic"),
-        },
-        "google": {
-            "present": bool(env.get("GOOGLE_API_KEY")),
-            "last4": _redact(env.get("GOOGLE_API_KEY")),
-            "validated_at": val_at.get("google"),
-        },
-        "xai": {
-            "present": bool(env.get("XAI_API_KEY")),
-            "last4": _redact(env.get("XAI_API_KEY")),
-            "validated_at": val_at.get("xai"),
-        },
-        "perplexity": {
-            "present": bool(env.get("PERPLEXITY_API_KEY")),
-            "last4": _redact(env.get("PERPLEXITY_API_KEY")),
-            "validated_at": val_at.get("perplexity"),
-        },
-        "elevenlabs": {
-            "present": bool(env.get("ELEVENLABS_API_KEY")),
-            "last4": _redact(env.get("ELEVENLABS_API_KEY")),
-            "validated_at": val_at.get("elevenlabs"),
-        },
-        "gmail": {
-            "present": bool(env.get("GOOGLE_OAUTH_CLIENT_ID") and env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
-            "client_id": env.get("GOOGLE_OAUTH_CLIENT_ID") or None,  # public per Google OAuth docs
-            "secret_last4": _redact(env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
-            "validated_at": val_at.get("gmail"),
-        },
-    }
+    provider_status = _providers_snapshot(env, val_at)
     # Tailscale status — live probe (~10-30ms via subprocess)
     try:
         # Tailscale live probe: subprocess to `tailscale status --json` with 5s ceiling
@@ -205,7 +184,7 @@ def current_config() -> CurrentConfigResponse:
     # STT preference — read fresh from .env (E8 pattern) so the wizard sees the
     # provider it just saved WITHOUT a service restart. STT_PROVIDER is a
     # preference, not a secret, so it's surfaced here in current-config rather
-    # than gated behind the reveal allowlist. "" / absent == auto (resolver
+    # than gated behind the credential allowlist. "" / absent == auto (resolver
     # picks whichever credential is present). The optional model-override keys
     # are echoed too so the wizard can show non-default model choices.
     stt = {
@@ -248,7 +227,7 @@ def current_config() -> CurrentConfigResponse:
         "default": (env.get("IMAGE_DEFAULT") or "").strip(),
     }
     return CurrentConfigResponse(
-        providers=providers,
+        providers=provider_status,
         operators=operators,
         paired_devices=paired_devices,
         tailscale=tailscale,
@@ -260,53 +239,48 @@ def current_config() -> CurrentConfigResponse:
 
 
 @router.get("/config/{key}")
-def get_config_value(key: str, request: Request, reveal: bool = False) -> dict:
-    """Return a single config value. With ?reveal=true, returns full cleartext.
+def get_config_value(key: str, request: Request) -> dict:
+    """Return one credential REDACTED (the ••••XXXX shape /current-config uses)
+    plus whether it is set. The key must be in CREDENTIAL_KEYS.
 
-    Loopback-only when revealing — refuses if request not from 127.0.0.1 / ::1.
-    Without reveal, returns the same redacted ••••XXXX shape as /current-config.
-    Both modes require the key to be in ALLOWED_REVEAL_KEYS.
+    There is no cleartext mode. ?reveal=true used to return the full key to a
+    loopback peer, but loopback proves nothing here: tailscale serve delivers
+    every tailnet request from 127.0.0.1, and so does every fetch the box makes
+    for a model, an MCP caller or an on-box browser (audit
+    X03-security-backend-04/-12, O20-mcp-server-01). No wizard surface reads a
+    key back, so the capability is gone; a request that still asks for it gets
+    410 instead of a mask it could mistake for the key and save back.
 
-    Caveats:
-    - E8 (2026-05-17): NOW reads .env file fresh via dotenv_values() each call,
-      so /save mutations are immediately visible without service restart. Old
-      behavior (os.getenv stale-since-import) was the root cause of API keys
-      appearing empty on wizard re-entry.
-    - The loopback gate inspects request.client.host (immediate ASGI peer). DO
-      NOT enable uvicorn's --proxy-headers without first reworking this check
-      to consult X-Forwarded-For; otherwise any forwarded request would bypass
-      the gate.
+    Reads .env fresh via dotenv_values() each call (E8), so /save mutations are
+    visible without a service restart.
     """
-    if key not in ALLOWED_REVEAL_KEYS:
+    if "reveal" in request.query_params:
+        raise HTTPException(
+            status_code=410,
+            detail="plaintext reveal was removed; this endpoint returns only the redacted value",
+        )
+    if key not in CREDENTIAL_KEYS:
         raise HTTPException(
             status_code=403,
-            detail=f"key {key!r} not in reveal allowlist",
+            detail=f"key {key!r} not in credential allowlist",
         )
     from dotenv import dotenv_values
     from Orchestrator.onboarding.secrets_writer import ENV_FILE
     value = dotenv_values(str(ENV_FILE)).get(key, "") or ""
-    if reveal:
-        client_host = request.client.host if request.client else ""
-        if client_host not in ("127.0.0.1", "::1", "localhost"):
-            raise HTTPException(
-                status_code=403,
-                detail="reveal only permitted from loopback",
-            )
-        logger.info("config reveal: key=%s client=%s", key, client_host)
-        return {"key": key, "value": value, "present": bool(value)}
     return {"key": key, "value": _redact(value), "present": bool(value)}
 
 
 @router.delete("/config/{key}")
 def delete_config_value(key: str) -> dict:
-    """Delete a single allowlisted env-var from .env.
+    """Delete a single allowlisted credential from .env.
 
     Atomic + backup via secrets_writer.remove_env_keys. Same allowlist as
-    GET /config/{key}?reveal=true. The deletion takes effect on disk
-    immediately, but Orchestrator.config still holds the old value in memory
-    until BlackBox restart.
+    GET /config/{key} (credentials only; preferences such as DEFAULT_OPERATOR
+    are not removable here). The deletion takes effect on disk immediately,
+    but Orchestrator.config still holds the old value in memory until
+    BlackBox restart.
     """
-    if key not in ALLOWED_REVEAL_KEYS:
+    if key not in CREDENTIAL_KEYS:
         raise HTTPException(
             status_code=403,
             detail=f"key {key!r} not in allowlist",
@@ -407,13 +381,9 @@ def delete_custom_server(server_id: str) -> dict:
 # be re-validated (a troubleshooting affordance) WITHOUT the client re-sending
 # it: POST /validate {provider} with no credentials reads the stored value
 # here. The client never has to hold the raw secret to validate it.
-_VALIDATE_KEY_ENV = {
-    "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GOOGLE_API_KEY", "xai": "XAI_API_KEY",
-    "perplexity": "PERPLEXITY_API_KEY", "elevenlabs": "ELEVENLABS_API_KEY",
-    # M10 reranker upgrade keys — re-validate a stored key without re-sending it.
-    "voyage": "VOYAGE_API_KEY", "cohere": "COHERE_API_KEY",
-}
+# Every single-api_key provider in the registry (the LLM keys, the M10
+# reranker keys, ElevenLabs); each dispatches to validators.validate_<id>.
+_VALIDATE_KEY_ENV = dict(providers.API_KEY_ENV)
 
 
 def _resolve_stored_creds(provider: str, creds: dict) -> dict:
@@ -442,26 +412,14 @@ def _resolve_stored_creds(provider: str, creds: dict) -> dict:
 def validate(req: ValidateRequest) -> ValidateResponse:
     creds = _resolve_stored_creds(req.provider, req.credentials)
     try:
-        if req.provider == "openai":
-            result = validators.validate_openai(creds["api_key"])
-        elif req.provider == "anthropic":
-            result = validators.validate_anthropic(creds["api_key"])
-        elif req.provider == "google":
-            result = validators.validate_google(creds["api_key"])
-        elif req.provider == "xai":
-            result = validators.validate_xai(creds["api_key"])
-        elif req.provider == "perplexity":
-            result = validators.validate_perplexity(creds["api_key"])
-        elif req.provider == "voyage":
-            result = validators.validate_voyage(creds["api_key"])
-        elif req.provider == "cohere":
-            result = validators.validate_cohere(creds["api_key"])
+        if req.provider in _VALIDATE_KEY_ENV:
+            # Registry-driven: validate_<provider>(api_key), looked up at call
+            # time (so a monkeypatched validator is the one dispatched).
+            result = getattr(validators, f"validate_{req.provider}")(creds["api_key"])
         elif req.provider == "tailscale":
             result = validators.validate_tailscale()
         elif req.provider == "gmail":
             result = validators.validate_gmail_oauth(creds["client_id"], creds["client_secret"])
-        elif req.provider == "elevenlabs":
-            result = validators.validate_elevenlabs(creds["api_key"])
         elif req.provider == "custom":
             # Custom OpenAI-compatible server probe. LAN-trust stance: probing
             # a user-supplied base_url is SSRF-shaped BY DESIGN — Tailscale/LAN
@@ -566,8 +524,22 @@ def validate(req: ValidateRequest) -> ValidateResponse:
 
 @router.post("/save")
 def save_secrets(req: SaveRequest) -> dict:
-    """Write secrets to .env (atomic + backup). Trusted-client endpoint —
-    must remain loopback-only after T1.3.2 first-run middleware lands."""
+    """Write wizard settings to .env (atomic + backup).
+
+    Only keys in the onboarding registry (Orchestrator/onboarding/providers.py)
+    are accepted; any other name is a 400 and NOTHING is written. .env is
+    blackbox.service's EnvironmentFile, so a free write of PATH, LD_PRELOAD,
+    PYTHONPATH, NODE_OPTIONS or a provider *_BASE_URL would be code execution
+    or key exfiltration at the next restart (audit O16-onboarding-update-03,
+    X03-security-backend-13). Tailscale + LAN stays the perimeter; this limits
+    what a request that is already inside it can write."""
+    rejected = providers.unsaveable(req.secrets)
+    if rejected:
+        logger.warning("onboarding /save: refused keys=%s", rejected)
+        raise HTTPException(
+            status_code=400,
+            detail=f"not an onboarding setting: {', '.join(rejected)}",
+        )
     logger.info("onboarding /save: keys=%s", list(req.secrets.keys()))
     try:
         result = update_env(req.secrets)
@@ -755,21 +727,12 @@ def restart_status() -> RestartStatusResponse:
     from Orchestrator import config as cfg
 
     env = dotenv_values(str(ENV_FILE))
-    # Keys whose stale-constant-vs-fresh-disk-value mismatch is customer-visible.
-    # E11 followup (Brandon's MSO2 Ultra 2026-05-17): expanded to cover ALL
-    # onboarding-writable env vars — JSON service account + Gmail OAuth in
-    # addition to the original 5 API keys + Tailscale hostname.
-    checks = {
-        "OPENAI_API_KEY": cfg.OPENAI_API_KEY,
-        "ANTHROPIC_API_KEY": cfg.ANTHROPIC_API_KEY,
-        "GOOGLE_API_KEY": cfg.GOOGLE_API_KEY,
-        "XAI_API_KEY": cfg.XAI_API_KEY,
-        "PERPLEXITY_API_KEY": cfg.PERPLEXITY_API_KEY,
-        "BLACKBOX_TAILNET_HOSTNAME": cfg.BLACKBOX_TAILNET_HOSTNAME,
-        "GOOGLE_APPLICATION_CREDENTIALS": getattr(cfg, "GOOGLE_APPLICATION_CREDENTIALS", "") or "",
-        "GOOGLE_OAUTH_CLIENT_ID": getattr(cfg, "GOOGLE_OAUTH_CLIENT_ID", "") or "",
-        "GOOGLE_OAUTH_CLIENT_SECRET": getattr(cfg, "GOOGLE_OAUTH_CLIENT_SECRET", "") or "",
-    }
+    # Keys whose stale-constant-vs-fresh-disk-value mismatch is customer-visible:
+    # the registry's drift_tracked set (the onboarding-writable keys config.py
+    # snapshots at import: the 5 LLM keys, the tailnet hostname, the Google
+    # service-account path and the Gmail OAuth pair). Keys read fresh at use
+    # (reranker, ElevenLabs, STT/web-search/image prefs) need no restart.
+    checks = {name: getattr(cfg, name, "") or "" for name in providers.DRIFT_TRACKED}
     drifted = []
     for key, running_val in checks.items():
         disk_val = env.get(key, "") or ""

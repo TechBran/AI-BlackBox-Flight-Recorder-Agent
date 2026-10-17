@@ -47,7 +47,7 @@ def test_failed_save_does_not_trigger_heal(monkeypatch):
                         lambda reason="": fired.append(reason))
 
     with pytest.raises(HTTPException) as ei:
-        ob.save_secrets(ob.SaveRequest(secrets={"X": "y"}))
+        ob.save_secrets(ob.SaveRequest(secrets={"GOOGLE_API_KEY": "y"}))
     assert ei.value.status_code == 400
     assert fired == []
 
@@ -61,7 +61,7 @@ def test_heal_trigger_never_breaks_save(monkeypatch):
         raise RuntimeError("heal import exploded")
     monkeypatch.setattr(tv_emb, "sync_tool_embeddings_bg", boom)
 
-    out = ob.save_secrets(ob.SaveRequest(secrets={"X": "y"}))
+    out = ob.save_secrets(ob.SaveRequest(secrets={"GOOGLE_API_KEY": "y"}))
     assert out == {"ok": True}
 
 

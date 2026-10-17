@@ -16,6 +16,8 @@ the live probes on top.
 """
 from __future__ import annotations
 
+from Orchestrator.onboarding import providers as _registry
+
 # State vocabulary — the ONLY four legal section states.
 READY = "ready"
 ATTENTION = "attention"
@@ -51,25 +53,18 @@ for _s in SECTIONS:
 SECTION_BY_KEY = {s["key"]: s for s in SECTIONS}
 
 
+# Both tables derive from the onboarding env-key registry (providers.py), the
+# same source as onboarding_routes' current-config / validator / drift tables.
 # Provider key env-vars that satisfy the api_keys section (the LLM provider set;
-# matches onboarding_routes.current_config's provider list, minus gmail/elevenlabs
-# which are surfaced under their own capability sections).
-_LLM_KEY_ENV = [
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
-    "XAI_API_KEY", "PERPLEXITY_API_KEY",
-]
-# provider id (validated_at key) -> its env var, for the present-but-unvalidated check.
-# Voyage/Cohere are the M10 reranker upgrade keys — they live in the API-Keys
-# step alongside the LLM keys, so the rollup tracks them the same way (a
-# present-but-unvalidated key nudges the operator to click Validate). They are
-# NOT in _LLM_KEY_ENV: a reranker key alone does not satisfy the "have an LLM
-# key" requirement, so their absence never trips the "No API keys" attention.
-_PROVIDER_KEY = {
-    "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GOOGLE_API_KEY", "xai": "XAI_API_KEY",
-    "perplexity": "PERPLEXITY_API_KEY",
-    "voyage": "VOYAGE_API_KEY", "cohere": "COHERE_API_KEY",
-}
+# gmail/elevenlabs are surfaced under their own capability sections).
+_LLM_KEY_ENV = list(_registry.LLM_KEY_ENV)
+# provider id (validated_at key) -> its env var, for the present-but-unvalidated
+# check: every api-key card in the API-Keys step. That includes the M10
+# reranker keys (Voyage/Cohere), tracked the same way (a present-but-unvalidated
+# key nudges the operator to click Validate). They are NOT in _LLM_KEY_ENV: a
+# reranker key alone does not satisfy the "have an LLM key" requirement, so
+# their absence never trips the "No API keys" attention.
+_PROVIDER_KEY = dict(_registry.API_KEYS_SECTION_ENV)
 
 
 def _present_keys(env: dict) -> list[str]:
