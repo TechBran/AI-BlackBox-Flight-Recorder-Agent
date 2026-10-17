@@ -48,7 +48,7 @@ def hermetic(monkeypatch):
     monkeypatch.setattr(sf, "_local_addresses", lambda: frozenset())
     calls = []
 
-    def _no_transport(vetted, ip, headers, timeout):
+    def _no_transport(vetted, ip, headers, timeout, watchdog=None):
         calls.append((vetted.url, ip))
         raise AssertionError(f"unexpected connection to {ip} for {vetted.url}")
     monkeypatch.setattr(sf, "_open_pinned", _no_transport)
@@ -66,7 +66,7 @@ def _install(monkeypatch, dns: dict, *responses):
     def _resolve(host, port):
         return list(dns[host])
 
-    def _open(vetted, ip, headers, timeout):
+    def _open(vetted, ip, headers, timeout, watchdog=None):
         seen.append((vetted.url, ip, dict(headers)))
         return script.pop(0)
 

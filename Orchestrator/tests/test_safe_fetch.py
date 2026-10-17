@@ -9,18 +9,29 @@ perimeter. These tests pin the guard in Orchestrator/utils/safe_fetch.py:
 - hostile literals and names are refused BEFORE any connection;
 - DNS is resolved once, every address is vetted, and the connection is pinned
   to the vetted address (no second lookup a rebinding name could swap);
-- redirects are never followed blindly: each hop is re-vetted, at most 3;
-- response size and total time are capped.
+- redirects are never followed blindly: each hop is re-vetted, at most 3,
+  carrying the cookies a hop set (like requests did) and repairing raw UTF-8
+  Location headers;
+- response size and total time are capped. The time cap is enforced at the
+  SOCKET (a watchdog shuts the connection down at the deadline), so a server
+  that trickles its TLS handshake, headers or body cannot hold a fetch open;
+- stacked Content-Encodings (a decompression bomb) are refused.
 
 Hermetic: DNS (`_resolve`), the box's interface list (`_local_addresses`) and
-the transport (`_open_pinned`) are monkeypatched. The one real-socket test runs
-a throwaway HTTP server on 127.0.0.1 and talks to it through the LOW-level
-pinned connector only (vetting is exercised separately).
+the transport (`_open_pinned`) are monkeypatched. The real-socket tests run
+throwaway servers on 127.0.0.1: either through the LOW-level pinned connector,
+or end to end with `is_public_address` patched so the loopback server can play
+a public host (vetting itself is exercised separately).
 """
 from __future__ import annotations
 
+import http.client
 import http.server
+import io
+import os
+import socket
 import threading
+import time
 
 import pytest
 
@@ -36,11 +47,18 @@ PUBLIC_IP_2 = "93.184.215.15"
 class FakeResponse:
     """The slice of urllib3's response the guard uses."""
 
-    def __init__(self, status=200, headers=None, chunks=(b"<html>ok</html>",)):
+    def __init__(self, status=200, headers=None, chunks=(b"<html>ok</html>",),
+                 set_cookie=None):
         self.status = status
         self.headers = dict(headers or {})
         self._chunks = list(chunks)
         self.closed = False
+        if set_cookie:
+            # urllib3 keeps the http.client response here; cookies are read
+            # from its .msg, exactly as requests' cookie extraction does.
+            raw = "".join(f"Set-Cookie: {c}\r\n" for c in set_cookie) + "\r\n"
+            msg = http.client.parse_headers(io.BytesIO(raw.encode("latin-1")))
+            self._original_response = type("Orig", (), {"msg": msg})()
 
     def stream(self, amt=None, decode_content=True):
         yield from self._chunks
@@ -59,7 +77,7 @@ class FakeTransport:
         self.responses = list(responses)
         self.calls = []
 
-    def __call__(self, vetted, ip, headers, timeout):
+    def __call__(self, vetted, ip, headers, timeout, watchdog=None):
         self.calls.append({"vetted": vetted, "ip": ip, "headers": dict(headers),
                            "timeout": timeout})
         nxt = self.responses.pop(0) if self.responses else FakeResponse()
@@ -472,3 +490,333 @@ def test_a_rebinding_name_cannot_reach_a_live_loopback_server(local_server, dns)
     with pytest.raises(sf.UnsafeURLError):
         sf.safe_get(f"http://rebind.example:{port}/x")
     assert _Recorder.seen == []
+
+
+# ------------------------------------------------- redirect cookies + Location
+
+def test_a_cookie_set_on_a_redirect_is_sent_on_the_next_hop_to_that_host(dns, transport):
+    """Sites that set a cookie and redirect back to themselves (consent and
+    session probes) worked through requests' redirect handling; they must not
+    loop into TooManyRedirects now."""
+    dns.table["consent.example"] = [PUBLIC_IP]
+    t = transport(
+        FakeResponse(302, {"Location": "/page"}, set_cookie=["seen=1; Path=/"]),
+        FakeResponse(200, {}, [b"ok"]),
+    )
+    res = sf.safe_get("https://consent.example/start")
+    assert res.content == b"ok"
+    assert "Cookie" not in t.calls[0]["headers"]
+    assert t.calls[1]["headers"].get("Cookie") == "seen=1"
+
+
+def test_a_redirect_cookie_never_follows_the_fetch_to_another_host(dns, transport):
+    dns.table["a.example"] = [PUBLIC_IP]
+    dns.table["b.example"] = [PUBLIC_IP_2]
+    t = transport(
+        FakeResponse(302, {"Location": "https://b.example/x"}, set_cookie=["sid=abc; Path=/"]),
+        FakeResponse(200, {}, [b"ok"]),
+    )
+    sf.safe_get("https://a.example/")
+    assert "Cookie" not in t.calls[1]["headers"]
+
+
+def test_a_raw_utf8_location_is_repaired_like_requests_does(dns, transport):
+    """http.client decodes header bytes as latin-1; a raw UTF-8 Location
+    (`/z\\xc3\\xbcrich`) must land on /z%C3%BCrich, not the mojibake path."""
+    dns.table["utf8.example"] = [PUBLIC_IP]
+    mojibake = b"/z\xc3\xbcrich".decode("latin-1")
+    t = transport(FakeResponse(302, {"Location": mojibake}), FakeResponse(200))
+    res = sf.safe_get("http://utf8.example/start")
+    assert t.calls[1]["vetted"].target == "/z%C3%BCrich"
+    assert res.url == "http://utf8.example/z%C3%BCrich"
+
+
+def test_a_latin1_location_that_is_not_utf8_is_kept_as_is(dns, transport):
+    dns.table["latin.example"] = [PUBLIC_IP]
+    t = transport(FakeResponse(302, {"Location": "/caf\xe9"}), FakeResponse(200))
+    sf.safe_get("http://latin.example/")
+    assert t.calls[1]["vetted"].target == "/caf%C3%A9"
+
+
+# ---------------------------------------------------------- stacked encodings
+
+class _Unreadable(FakeResponse):
+    def stream(self, amt=None, decode_content=True):
+        raise AssertionError("a refused body must not be decoded")
+
+
+@pytest.mark.parametrize("encoding", ["gzip, gzip", "gzip,deflate", "deflate, gzip, gzip"])
+def test_stacked_content_encodings_are_refused_before_decoding(dns, transport, encoding):
+    """The urllib3 2.5 in the Orchestrator lock decodes stacked codings with no
+    bound: a few hundred bytes become hundreds of MB before the size cap fires."""
+    dns.table["bomb.example"] = [PUBLIC_IP]
+    transport(_Unreadable(200, {"Content-Encoding": encoding}))
+    with pytest.raises(sf.FetchError):
+        sf.safe_get("http://bomb.example/")
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "identity", "gzip, identity", ""])
+def test_a_single_content_encoding_is_fine(dns, transport, encoding):
+    dns.table["ok.example"] = [PUBLIC_IP]
+    transport(FakeResponse(200, {"Content-Encoding": encoding}, [b"fine"]))
+    assert sf.safe_get("http://ok.example/").content == b"fine"
+
+
+# ------------------------------------------- the total deadline, real sockets
+
+BUDGET = 1.5          # seconds handed to safe_get
+SLACK = 1.0           # scheduling slack on a loaded CI box
+DRIP = 0.2            # seconds between trickled bytes (well under BUDGET, so
+                      # no single recv ever hits the per-read timeout)
+
+
+@pytest.fixture
+def raw_server():
+    """A raw TCP listener on 127.0.0.1 running `handler(conn)` per connection."""
+    listeners = []
+
+    def _start(handler):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        listeners.append(srv)
+
+        def _serve_one(conn):
+            try:
+                conn.settimeout(15)
+                handler(conn)
+            except OSError:
+                pass            # the client hung up (the point of most tests)
+            finally:
+                conn.close()
+
+        def _accept():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                threading.Thread(target=_serve_one, args=(conn,), daemon=True).start()
+
+        threading.Thread(target=_accept, daemon=True).start()
+        return srv.getsockname()[1]
+
+    yield _start
+    for srv in listeners:
+        srv.close()
+
+
+@pytest.fixture
+def loopback_plays_public(monkeypatch, dns):
+    """End to end through safe_get, with the policy told that 127.0.0.1 is a
+    public address so a local server can stand in for a hostile public host."""
+    monkeypatch.setattr(sf, "is_public_address", lambda ip: True)
+    dns.table["slow.example"] = ["127.0.0.1"]
+    return dns
+
+
+def _read_request(conn):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def _drip(conn, data: bytes):
+    for i in range(len(data)):
+        time.sleep(DRIP)
+        conn.sendall(data[i:i + 1])
+
+
+def _assert_cut_at_the_deadline(url):
+    t0 = time.monotonic()
+    with pytest.raises(sf.FetchTimeout):
+        sf.safe_get(url, timeout=BUDGET)
+    elapsed = time.monotonic() - t0
+    assert elapsed < BUDGET + SLACK, f"fetch ran {elapsed:.1f}s on a {BUDGET}s budget"
+
+
+def test_a_trickled_body_cannot_outlast_the_total_budget(raw_server, loopback_plays_public):
+    """One byte every 0.2 s never trips a per-read timeout; only a deadline
+    enforced at the socket stops it (the old per-chunk check waited for 8 KB)."""
+    def handler(conn):
+        _read_request(conn)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\nConnection: close\r\n\r\n")
+        _drip(conn, b"x" * 40)
+    port = raw_server(handler)
+    _assert_cut_at_the_deadline(f"http://slow.example:{port}/")
+
+
+def test_trickled_headers_cannot_outlast_the_total_budget(raw_server, loopback_plays_public):
+    def handler(conn):
+        _read_request(conn)
+        _drip(conn, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    port = raw_server(handler)
+    _assert_cut_at_the_deadline(f"http://slow.example:{port}/")
+
+
+def test_a_trickled_tls_handshake_cannot_outlast_the_total_budget(raw_server, loopback_plays_public):
+    """A TLS record header announcing 16 KB, then one byte at a time. Python
+    already bounds a handshake by the socket timeout as a TOTAL (3.5+); this
+    keeps that true now that the watchdog's connection class wraps connect."""
+    def handler(conn):
+        conn.recv(4096)                                  # the ClientHello
+        conn.sendall(b"\x16\x03\x03\x40\x00")            # handshake record, 16384 bytes
+        _drip(conn, b"\x00" * 40)
+    port = raw_server(handler)
+    _assert_cut_at_the_deadline(f"https://slow.example:{port}/")
+
+
+@pytest.fixture
+def tls_identity(tmp_path, monkeypatch):
+    """A throwaway self-signed certificate for slow.example, trusted by the
+    guard for this test only (so the HTTPS path is exercised offline)."""
+    import shutil
+    import subprocess
+    if not shutil.which("openssl"):
+        pytest.skip("needs the openssl CLI")
+    key, cert = tmp_path / "key.pem", tmp_path / "cert.pem"
+    proc = subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-keyout", str(key), "-out", str(cert), "-subj", "/CN=slow.example",
+         "-addext", "subjectAltName=DNS:slow.example"],
+        capture_output=True, timeout=60)
+    if proc.returncode != 0:
+        pytest.skip(f"openssl could not make a test certificate: {proc.stderr[:200]!r}")
+    monkeypatch.setattr(sf, "_ca_bundle", lambda: str(cert))
+    return key, cert
+
+
+def test_a_trickled_https_body_cannot_outlast_the_total_budget(
+        raw_server, loopback_plays_public, tls_identity):
+    """The same drip over TLS: the watchdog is handed the socket before the
+    TLS wrap, so it covers HTTPS bodies too (most of the web)."""
+    import ssl
+    key, cert = tls_identity
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(cert), str(key))
+
+    def handler(conn):
+        with ctx.wrap_socket(conn, server_side=True) as tls:
+            _read_request(tls)
+            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\nConnection: close\r\n\r\n")
+            _drip(tls, b"x" * 40)
+    port = raw_server(handler)
+    _assert_cut_at_the_deadline(f"https://slow.example:{port}/")
+
+
+def test_a_fast_https_page_is_fetched_with_the_certificate_checked(
+        raw_server, loopback_plays_public, tls_identity):
+    import ssl
+    key, cert = tls_identity
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(cert), str(key))
+
+    def handler(conn):
+        with ctx.wrap_socket(conn, server_side=True) as tls:
+            _read_request(tls)
+            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\ntls")
+    port = raw_server(handler)
+    res = sf.safe_get(f"https://slow.example:{port}/", timeout=5)
+    assert (res.status_code, res.content) == (200, b"tls")
+
+
+def test_an_unterminated_body_cut_at_the_deadline_is_a_timeout_not_a_short_page(
+        raw_server, loopback_plays_public):
+    """No Content-Length + Connection: close means EOF ends the body. The
+    watchdog's shutdown looks like EOF to urllib3, so the guard must report a
+    timeout instead of handing back a silently truncated page."""
+    def handler(conn):
+        _read_request(conn)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nstart")
+        _drip(conn, b"x" * 40)
+    port = raw_server(handler)
+    _assert_cut_at_the_deadline(f"http://slow.example:{port}/")
+
+
+def test_a_fast_page_is_unaffected_by_the_watchdog(raw_server, loopback_plays_public):
+    def handler(conn):
+        _read_request(conn)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfast")
+    port = raw_server(handler)
+    res = sf.safe_get(f"http://slow.example:{port}/", timeout=BUDGET)
+    assert (res.status_code, res.content) == (200, b"fast")
+
+
+def test_a_real_cookie_redirect_loop_back_to_itself_resolves(raw_server, loopback_plays_public):
+    def handler(conn):
+        req = _read_request(conn)
+        if b"Cookie: seen=1" in req:
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        else:
+            conn.sendall(b"HTTP/1.1 302 Found\r\nSet-Cookie: seen=1; Path=/\r\n"
+                         b"Location: /cookie\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    port = raw_server(handler)
+    res = sf.safe_get(f"http://slow.example:{port}/cookie", timeout=5)
+    assert (res.status_code, res.content) == (200, b"ok")
+
+
+# --------------------------------------------------------- the watchdog itself
+
+def _open_fds() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
+def test_watchdog_wakes_a_blocked_recv_at_the_deadline():
+    a, b = socket.socketpair()
+    try:
+        wd = sf._Watchdog(time.monotonic() + 0.3)
+        wd.watch(a)
+        a.settimeout(10)
+        t0 = time.monotonic()
+        assert a.recv(16) == b""            # shut down, not a 10 s timeout
+        assert time.monotonic() - t0 < 2.0
+        assert wd.fired
+        wd.stop()
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
+def test_watchdog_closes_every_handle_it_took():
+    """The watchdog holds a dup of each socket (so it can never act on a
+    reused descriptor); release()/stop() must close those dups, or each fetch
+    would leak a descriptor and keep its TCP connection half open."""
+    a, b = socket.socketpair()
+    try:
+        before = _open_fds()
+        wd = sf._Watchdog(time.monotonic() + 60)
+        wd.watch(a)
+        assert _open_fds() == before + 1
+        wd.release()
+        assert _open_fds() == before
+        wd.watch(a)
+        wd.stop()
+        assert _open_fds() == before
+        assert not wd.fired
+        wd.watch(a)                          # after stop: never tracked
+        assert _open_fds() == before
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
+def test_fetches_leave_no_descriptors_behind(raw_server, loopback_plays_public):
+    def handler(conn):
+        _read_request(conn)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+    port = raw_server(handler)
+    sf.safe_get(f"http://slow.example:{port}/", timeout=5)      # warm imports
+    time.sleep(0.2)
+    before = _open_fds()
+    for _ in range(5):
+        sf.safe_get(f"http://slow.example:{port}/", timeout=5)
+    time.sleep(0.2)                         # let the server threads close theirs
+    assert _open_fds() <= before

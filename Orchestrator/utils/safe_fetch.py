@@ -22,8 +22,14 @@ safe_get() is the one guarded path:
     TLS SNI and certificate check still use the name), so a DNS-rebinding name
     cannot swap the address between the check and the connect;
   * redirects are never followed by the transport: each Location is re-vetted
-    from scratch, at most `max_redirects` (3) hops;
-  * the body is capped at `max_bytes` and the whole fetch at `timeout` seconds.
+    from scratch, at most `max_redirects` (3) hops. Cookies a hop sets go to
+    later hops on the same host (as requests did), and a raw UTF-8 Location is
+    repaired the way requests repairs it;
+  * the body is capped at `max_bytes` (stacked Content-Encodings, a
+    decompression bomb, are refused) and the whole fetch at `timeout` seconds.
+    The time cap is enforced at the socket by a watchdog, not between reads:
+    urllib3's read timeout is per recv, so a server trickling one byte at a
+    time would otherwise hold the fetch open for hours.
 
 Deliberately stdlib + urllib3 + requests only (both the Orchestrator venv and
 the lean MCP venv have them). There is no LAN allow-list: a fetch of a LAN
@@ -31,16 +37,20 @@ host has to be made by something other than a model-driven tool.
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import re
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from typing import Mapping, Optional
 from urllib.parse import urljoin, urlsplit
 
 import requests
+import requests.cookies
 import urllib3
+import urllib3.connection
 from urllib3.exceptions import (
     ConnectTimeoutError,
     HTTPError as _Urllib3HTTPError,
@@ -304,17 +314,125 @@ def _ca_bundle() -> Optional[str]:
         return None     # urllib3 falls back to the system trust store
 
 
-def _open_pinned(vetted: VettedURL, ip: str, headers: Mapping[str, str], timeout: float):
+def _shutdown(sock) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass        # already closed by the peer
+
+
+class _Watchdog:
+    """Shuts a fetch's sockets down when its total budget runs out.
+
+    The blocked recv (TLS handshake, status line, headers or body) then sees
+    EOF and safe_get reports FetchTimeout. It holds a dup() of each socket,
+    never the original descriptor, so it can never shut down a descriptor the
+    OS has since reused for another connection; release()/stop() close the
+    dups (an open dup would keep the TCP connection alive)."""
+
+    def __init__(self, deadline: float):
+        self.fired = False
+        self._deadline = deadline
+        self._lock = threading.Lock()
+        self._socks: list = []
+        self._stopped = False
+        self._timer: Optional[threading.Timer] = None    # started by the first watch()
+
+    def watch(self, sock) -> None:
+        try:
+            dup = sock.dup()
+        except OSError:
+            return
+        with self._lock:
+            if not self._stopped:
+                self._socks.append(dup)
+                if self._timer is None:
+                    self._timer = threading.Timer(
+                        max(0.0, self._deadline - _monotonic()), self._fire)
+                    self._timer.daemon = True
+                    self._timer.start()
+                if self.fired:
+                    _shutdown(dup)
+                return
+        dup.close()
+
+    def _fire(self) -> None:
+        with self._lock:
+            if self._stopped:
+                return
+            self.fired = True
+            for sock in self._socks:
+                _shutdown(sock)
+
+    def release(self) -> None:
+        """Close the handles of a finished hop."""
+        with self._lock:
+            socks, self._socks = self._socks, []
+        for sock in socks:
+            sock.close()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            timer = self._timer
+        if timer is not None:
+            timer.cancel()
+        self.release()
+
+
+class _WatchedConnection:
+    """Hands each freshly connected socket (before any TLS wrap, so the
+    handshake is covered too) to the fetch's watchdog."""
+
+    _bb_watchdog: Optional[_Watchdog] = None
+
+    def _new_conn(self):
+        sock = super()._new_conn()
+        if self._bb_watchdog is not None:
+            self._bb_watchdog.watch(sock)
+        return sock
+
+
+class _WatchedHTTPConnection(_WatchedConnection, urllib3.connection.HTTPConnection):
+    pass
+
+
+class _WatchedHTTPSConnection(_WatchedConnection, urllib3.connection.HTTPSConnection):
+    pass
+
+
+class _WatchedPool:
+    def __init__(self, *args, watchdog: Optional[_Watchdog] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._bb_watchdog = watchdog
+
+    def _new_conn(self):
+        conn = super()._new_conn()
+        conn._bb_watchdog = self._bb_watchdog
+        return conn
+
+
+class _PinnedHTTPPool(_WatchedPool, urllib3.HTTPConnectionPool):
+    ConnectionCls = _WatchedHTTPConnection
+
+
+class _PinnedHTTPSPool(_WatchedPool, urllib3.HTTPSConnectionPool):
+    ConnectionCls = _WatchedHTTPSConnection
+
+
+def _open_pinned(vetted: VettedURL, ip: str, headers: Mapping[str, str], timeout: float,
+                 watchdog: Optional[_Watchdog] = None):
     """GET vetted.target from `ip`, sending Host/SNI/cert-check for vetted.host.
     Never follows redirects, never retries. Returns an unread urllib3 response."""
     t = urllib3.Timeout(connect=min(CONNECT_TIMEOUT, timeout), read=timeout)
     if vetted.scheme == "https":
-        pool = urllib3.HTTPSConnectionPool(
+        pool = _PinnedHTTPSPool(
             ip, vetted.port, timeout=t, retries=False, maxsize=1,
             cert_reqs="CERT_REQUIRED", ca_certs=_ca_bundle(),
-            assert_hostname=vetted.host, server_hostname=vetted.host)
+            assert_hostname=vetted.host, server_hostname=vetted.host, watchdog=watchdog)
     else:
-        pool = urllib3.HTTPConnectionPool(ip, vetted.port, timeout=t, retries=False, maxsize=1)
+        pool = _PinnedHTTPPool(ip, vetted.port, timeout=t, retries=False, maxsize=1,
+                               watchdog=watchdog)
     hdrs = {k: v for k, v in headers.items() if k.lower() != "host"}
     hdrs["Host"] = vetted.host_header
     try:
@@ -348,29 +466,46 @@ def _close(resp) -> None:
             return
 
 
-def _connect(vetted: VettedURL, headers: Mapping[str, str], deadline: float):
+def _expired(watchdog: Optional[_Watchdog]) -> bool:
+    return watchdog is not None and watchdog.fired
+
+
+def _connect(vetted: VettedURL, headers: Mapping[str, str], deadline: float,
+             watchdog: Optional[_Watchdog] = None):
     last: Optional[_ConnectFailed] = None
     for ip in vetted.addresses:
         remaining = deadline - _monotonic()
-        if remaining <= 0:
+        if remaining <= 0 or _expired(watchdog):
             raise FetchTimeout(f"timed out connecting to {vetted.host}")
         try:
-            return _open_pinned(vetted, ip, headers, remaining)
+            return _open_pinned(vetted, ip, headers, remaining, watchdog=watchdog)
         except _ConnectFailed as e:
             last = e
         except _Urllib3TimeoutError as e:
             raise FetchTimeout(f"timed out waiting for {vetted.host}") from e
-        except (_Urllib3HTTPError, OSError) as e:
+        except (_Urllib3HTTPError, http.client.HTTPException, OSError) as e:
+            if _expired(watchdog):      # the watchdog's shutdown looks like a hang-up
+                raise FetchTimeout(f"timed out waiting for {vetted.host}") from e
             raise FetchError(f"{type(e).__name__}: {e}") from e
     if last is not None and last.timed_out:
         raise FetchTimeout(f"timed out connecting to {vetted.host}")
     raise FetchError(f"could not connect to {vetted.host}: {last}")
 
 
-def _read_capped(resp, max_bytes: int, deadline: float) -> bytes:
+def _read_capped(resp, max_bytes: int, deadline: float,
+                 watchdog: Optional[_Watchdog] = None) -> bytes:
     declared = (_header(resp, "Content-Length") or "").strip()
     if declared.isdigit() and int(declared) > max_bytes:
         raise ResponseTooLarge(max_bytes, int(declared))
+    # The size cap counts DECODED bytes, after urllib3 has inflated a chunk.
+    # Stacked codings multiply, and the urllib3 2.5 in the Orchestrator lock
+    # inflates them with no bound (the rank-35 floor upgrades it): a few
+    # hundred bytes become hundreds of MB. One coding inflates at most ~1000x
+    # per 8 KB read, which the cap then cuts off.
+    codings = [c.strip().lower() for c in (_header(resp, "Content-Encoding") or "").split(",")]
+    codings = [c for c in codings if c and c != "identity"]
+    if len(codings) > 1:
+        raise FetchError(f"refusing stacked Content-Encodings ({', '.join(codings)})")
     body = bytearray()
     try:
         for chunk in resp.stream(_CHUNK, decode_content=True):
@@ -381,9 +516,26 @@ def _read_capped(resp, max_bytes: int, deadline: float) -> bytes:
                 raise FetchTimeout("timed out reading the response body")
     except _Urllib3TimeoutError as e:
         raise FetchTimeout("timed out reading the response body") from e
-    except (_Urllib3HTTPError, OSError) as e:
+    except (_Urllib3HTTPError, http.client.HTTPException, OSError) as e:
+        if _expired(watchdog):
+            raise FetchTimeout("timed out reading the response body") from e
         raise FetchError(f"{type(e).__name__}: {e}") from e
+    # A body without Content-Length ends at EOF, and the watchdog's shutdown is
+    # an EOF: never hand back a page that the deadline cut short.
+    if _expired(watchdog) or _monotonic() > deadline:
+        raise FetchTimeout("timed out reading the response body")
     return bytes(body)
+
+
+def _redirect_target(location: str) -> str:
+    """http.client decodes header bytes as latin-1, but a raw non-ASCII
+    Location is almost always UTF-8 (requests' get_redirect_target does the
+    same repair)."""
+    location = location.strip()
+    try:
+        return location.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return location
 
 
 def safe_get(url: str, *, headers: Optional[Mapping[str, str]] = None,
@@ -396,20 +548,36 @@ def safe_get(url: str, *, headers: Optional[Mapping[str, str]] = None,
     FetchTimeout, or FetchError for DNS/connect/TLS/protocol failures."""
     deadline = _monotonic() + timeout
     send = {"Accept-Encoding": "gzip, deflate", "Connection": "close", **(headers or {})}
+    # Cookies set by a redirect hop, sent on later hops by the stdlib cookie
+    # policy (same host/domain and path only). Scoped to this one call.
+    jar = requests.cookies.RequestsCookieJar()
+    watchdog = _Watchdog(deadline)
     current = url
-    for hop in range(max_redirects + 1):
-        vetted = vet_url(current)
-        resp = _connect(vetted, send, deadline)
-        try:
-            location = _header(resp, "Location") if resp.status in _REDIRECT_STATUSES else None
-            if location:
-                if hop >= max_redirects:
-                    raise TooManyRedirects(f"more than {max_redirects} redirects")
-                current = urljoin(vetted.url, location.strip())
-                continue
-            content = _read_capped(resp, max_bytes, deadline)
-            return FetchResult(url=vetted.url, status_code=resp.status,
-                               headers=resp.headers or {}, content=content)
-        finally:
-            _close(resp)
+    try:
+        for hop in range(max_redirects + 1):
+            if _monotonic() >= deadline:
+                raise FetchTimeout("timed out following redirects")
+            vetted = vet_url(current)
+            hop_headers = dict(send)
+            cookie_view = requests.Request("GET", vetted.url).prepare()
+            cookie = requests.cookies.get_cookie_header(jar, cookie_view)
+            if cookie:
+                hop_headers["Cookie"] = cookie
+            resp = _connect(vetted, hop_headers, deadline, watchdog)
+            try:
+                location = _header(resp, "Location") if resp.status in _REDIRECT_STATUSES else None
+                if location:
+                    if hop >= max_redirects:
+                        raise TooManyRedirects(f"more than {max_redirects} redirects")
+                    requests.cookies.extract_cookies_to_jar(jar, cookie_view, resp)
+                    current = urljoin(vetted.url, _redirect_target(location))
+                    continue
+                content = _read_capped(resp, max_bytes, deadline, watchdog)
+                return FetchResult(url=vetted.url, status_code=resp.status,
+                                   headers=resp.headers or {}, content=content)
+            finally:
+                _close(resp)
+                watchdog.release()
+    finally:
+        watchdog.stop()
     raise TooManyRedirects(f"more than {max_redirects} redirects")  # unreachable
