@@ -1,0 +1,5 @@
+# Tools the supply-chain workflow runs, compiled with hashes into
+# supply-chain-tools.lock.txt (see the header there to regenerate).
+# uv must match UV_VERSION in scripts/compile_python_lock.sh.
+uv==0.13.1
+pip-audit==2.10.1

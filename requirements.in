@@ -1,0 +1,121 @@
+# AI BlackBox Flight Recorder - Orchestrator venv: direct dependencies
+#
+# This is the human-edited manifest. Nothing installs it directly. After an
+# edit, run `scripts/compile_python_lock.sh`, which regenerates:
+#   requirements.lock.txt  the full closure, every package == pinned with its
+#                          sha256 hashes. Scripts/install.sh and the in-app
+#                          updater install it with `pip install --require-hashes`.
+#   requirements.txt       the same pins without hashes, for installs that
+#                          cannot use hash mode (combined with
+#                          requirements.dev.txt, or an updater older than the lock).
+# CI (.github/workflows/supply-chain.yml) fails when either file is out of sync
+# with this one, runs pip-audit against the lock, and runs
+# scripts/check_imports_vs_manifest.py.
+# Dev-only packages live in requirements.dev.txt. The MCP server has its own
+# venv and manifest (MCP/requirements.txt).
+#
+# Rules:
+#   - Every third-party import in Orchestrator/ and ToolVault/ is declared
+#     here, including lazy imports behind `except ImportError`, and every entry
+#     is imported. An entry that is not imported says why in a tag:
+#       [transitive]  a dependency's dependency, declared for its security
+#                     floor or a compatibility cap
+#       [runtime]     loaded by name, not by an import statement
+#   - Packages at 1.0 or later are capped below their next major. 0.x
+#     packages are capped below 1, or below their next minor where a minor
+#     release breaks us (httpx). The web stack stays at its validated versions
+#     until its upgrade lands (audit rank 70).
+#   - A security floor is the first release with the fix. Floors are what
+#     move an EXISTING box: pip leaves an installed version that satisfies a
+#     requirement alone. Raise a floor when an advisory lands.
+#
+# If the hashed install fails on a box (no wheel for its platform, a proxy
+# rewriting downloads), the installer and the updater stop with an error.
+# Nothing falls back by itself. The manual fallback is
+# `Orchestrator/venv/bin/pip install -r requirements.txt` (same pins, no hash
+# check); run pip-audit on the venv afterwards.
+
+# === Web framework / ASGI: held at the validated versions (upgrade: rank 70) ===
+# Starlette 0.48 carries advisories fixed only in 0.49.1 and 1.x
+# (CVE-2025-62727, CVE-2026-48710, -48817, -48818, -54282, -54283). fastapi
+# 0.118 requires starlette<0.49, so they close with the fastapi upgrade; the
+# pip-audit gate lists them as known exceptions until then.
+fastapi==0.118.0
+starlette==0.48.0
+uvicorn[standard]==0.30.0
+pydantic==2.9.0
+python-multipart>=0.0.32,<0.1   # [runtime] starlette's form parser (File/Form uploads); CVE-2024-53981, CVE-2026-24486, -40347, -42561, -53538..-53540
+
+# === HTTP clients ===
+requests>=2.33.0,<3             # CVE-2024-47081 (2.32.4), CVE-2026-25645 (2.33.0)
+httpx>=0.28.1,<0.29             # 0.28 removed `proxies=`/`app=`; a minor can break us
+aiohttp>=3.14.3,<4              # client path of the provider calls; CVE-2026-34518, -47265 (credentials kept across redirects), -54275 (SNI bypass), decompression bombs
+urllib3>=2.8.0,<3               # imported by utils/safe_fetch.py; CVE-2025-66418, -66471, CVE-2026-21441, -97689
+certifi>=2026.7.22              # safe_fetch.py's CA bundle; calendar-versioned CA data, so no cap
+
+# === WebSockets ===
+websockets>=13.0,<16            # provider realtime/STT bridges; validated on 15.x
+websocket-client>=1.9.0,<2      # synchronous CDP client (browser/screenshot.py)
+
+# === Environment / process ===
+python-dotenv>=1.2.2,<2         # CVE-2026-28684
+ptyprocess>=0.7.0,<1            # CLI agent PTY bridge
+psutil>=7.1.3,<8                # system introspection
+
+# === AI provider SDKs ===
+anthropic>=0.96,<1
+openai>=2.9,<3
+google-genai>=1.64,<2
+google-generativeai>=0.8.6,<0.9 # deprecated SDK; keeps protobuf below 6 (see below)
+google-api-python-client>=2.187.0,<3
+google-auth>=2.48,<3            # google.auth / google.oauth2, imported directly
+google-api-core>=2.28,<3        # google.api_core (Speech v2 client options), imported directly
+google-auth-oauthlib>=1.4,<2    # Gmail OAuth client validator (validators.validate_gmail_oauth) — caught missing on MSO2 Ultra fresh install 2026-05-17 (E12)
+google-cloud-speech>=2.27,<3    # Cloud Speech-to-Text v2 (chirp_2) streaming + file STT (Google provider)
+
+# === Task scheduling ===
+apscheduler>=3.10.4,<4          # 4.x drops AsyncIOScheduler, which scheduler/manager.py imports at startup
+tzlocal>=5.3.1,<6               # box-local IANA timezone for the cron scheduler
+
+# === Numeric / audio ===
+numpy>=2.4.0,<3
+scipy>=1.17.0,<2
+onnxruntime==1.27.0             # silero VAD v5 CPU inference (Orchestrator/stt/vad.py, lazy import); == pinned — the W1 gate depends on the exact v5 graph I/O contract (speaches loose-pin lesson)
+webrtcvad-wheels>=2.0.14,<3     # VAD for voice routes (lazy, inside audio handlers); precompiled wheels avoid a Cython build
+imageio-ffmpeg==0.6.0           # bundled ffmpeg for clone-reference transcode-to-WAV (Orchestrator/audio_transcode.py, lazy); == pinned (no system ffmpeg on customer boxes)
+
+# === HTML / documents / images ===
+beautifulsoup4>=4.14.0,<5
+lxml>=6.1.3,<7                  # [runtime] bs4 parser backend, selected by name ("lxml"); CVE-2026-41066 (6.1.0)
+pillow>=12.3.0,<13              # CVE-2026-25990 (PSD out-of-bounds write) and later fixes
+qrcode[pil]>=7.4.0,<9           # pairing QR codes
+reportlab>=4.4.5,<5
+python-docx>=1.2.0,<2
+
+# === Devices ===
+pyserial>=3.5,<4                # cellular modem AT-command channel (Orchestrator/cellular)
+
+# === Crypto ===
+# Uncapped on purpose: cryptography ships a new major several times a year and
+# security fixes land only on the newest. Only Fernet is used (asterisk/secrets.py).
+cryptography>=50.0.0            # CVE-2026-26007, -34073, -39892 + the bundled-OpenSSL advisory (48.0.1)
+
+# === Web search ===
+ddgs>=9.16,<10                  # keyless DuckDuckGo floor + fallback of every general web search (web_tools.py); replaces duckduckgo_search, which does not provide the ddgs module
+
+# === Local models / tokenization ===
+tiktoken>=0.13.0,<1             # exact local token counts, OpenAI encodings (Orchestrator/tokenization.py, lazy; vendored BPE cache)
+tokenizers>=0.23.1,<1           # exact local token counts, HF tokenizer.json (Orchestrator/tokenization.py, lazy; vendored assets)
+huggingface_hub>=1.21.0,<2      # local-model downloads (localstack_downloads.py, lazy)
+PyYAML>=6.0.3,<7                # llama-swap config (local_stack.py)
+
+# === Security floors and caps on transitive dependencies ===
+protobuf>=5.29.6,<6             # [transitive] google-ai-generativelanguage needs <6; CVE-2026-0994
+pyasn1>=0.6.4,<0.7              # [transitive] google-auth (rsa, pyasn1-modules)
+h11>=0.16.0,<1                  # [transitive] uvicorn's HTTP/1.1 parser; CVE-2025-43859 (chunked smuggling)
+idna>=3.15,<4                   # [transitive] requests/httpx/yarl hostname encoding; CVE-2026-45409
+anyio>=4.14.2,<5                # [transitive] starlette/httpx async layer; CVE-2026-63374, -64847
+multidict>=6.9.1,<7             # [transitive] aiohttp/yarl; CVE-2026-104874
+httplib2>=0.32.0,<1             # [transitive] google-api-python-client transport; CVE-2026-59939
+oauthlib>=4.0.0,<5              # [transitive] requests-oauthlib (Gmail OAuth); CVE-2026-49265, fixed only in 4.0 (drops JSONP revocation, unused here)
+soupsieve>=2.9.0,<3             # [transitive] bs4 CSS selectors; CVE-2026-49476, -49477, -85999, -86000
