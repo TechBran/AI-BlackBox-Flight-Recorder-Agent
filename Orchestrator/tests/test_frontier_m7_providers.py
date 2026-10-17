@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from Orchestrator.device_registry import pairing
 from Orchestrator import frontier_agent_loop as fal
 from Orchestrator import frontier_grounding as fg
 from Orchestrator.frontier_agent_loop import Decision
@@ -292,10 +293,10 @@ def test_openai_driver_parses_a_function_nav_call():
 def _wire_recorder(monkeypatch):
     posted = []
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return OBS_ABS
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
 
@@ -431,10 +432,10 @@ def test_capture_less_device_openai_falls_back_to_gemini_in_loop(monkeypatch):
     # empty-screenshot vision loop. The fallback happens before _make_driver is called.
     _fast(monkeypatch)
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return OBS_NOSHOT
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         return {"msg": "action_result", "success": True}
 
     monkeypatch.setattr(fal, "_pull_observation", fake_pull)
@@ -463,10 +464,10 @@ def test_capture_less_gemini_is_not_rerouted_in_loop(monkeypatch):
     # Gemini on a capture-less device stays Gemini (tree-first path is capture-independent).
     _fast(monkeypatch)
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return OBS_NOSHOT
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         return {"msg": "action_result", "success": True}
 
     monkeypatch.setattr(fal, "_pull_observation", fake_pull)
@@ -497,6 +498,16 @@ _spec.loader.exec_module(cd)
 
 NODE = Node(hostname="brandon-fold6", dns_name="brandon-fold6.tailnet-abc.ts.net",
             ip="100.88.0.7", online=True, os="android")
+
+
+@pytest.fixture(autouse=True)
+def _paired_listener(tmp_path, monkeypatch):
+    """The phone's listener requires its pairing secret (audit X02/X04): pair the test node
+    in a tmp store so these tests exercise the authenticated path."""
+    monkeypatch.setattr(pairing, "PAIRING_PATH", tmp_path / "device_pairing.json")
+    pairing.register(device_id="test-device", tailnet_ip=NODE.ip, secret="ab" * 32)
+
+
 CTX = ToolContext(operator="Brandon", base_url="http://localhost:9091")
 
 
@@ -507,7 +518,8 @@ def _patch_resolve(monkeypatch, node=NODE):
 def _capture_loop(monkeypatch):
     seen = {}
 
-    async def fake_loop(*, device_base_url, task, operator, model, capability, provider):
+    async def fake_loop(*, device_base_url, task, operator, model, capability, provider,
+                        device_headers=None):
         seen.update(provider=provider, model=model, task=task)
         return fal.FrontierResult(True, "done", steps=1, device=device_base_url)
 

@@ -28,6 +28,7 @@ from typing import Optional, Dict, Any, List
 from Orchestrator.device_registry import (
     get_registry, Device, DeviceType, DeviceProtocol
 )
+from Orchestrator.device_registry import pairing
 from Orchestrator.local_provider import mesh
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -238,6 +239,50 @@ async def list_mesh_devices(operator: Optional[str] = None):
         op = operator.lower()
         rows = [r for r in rows if r["owner"] is None or r["owner"].lower() == op]
     return {"devices": rows, "operator": operator}
+
+
+# --------------------------------------------------------------------------- #
+# Control-listener pairing (audit X02/X04). The phone registers the secret its
+# :8765 listener requires; the box sends it on every call. Secrets go in, never
+# out: every response here carries metadata only (see device_registry/pairing.py).
+# --------------------------------------------------------------------------- #
+class PairingBody(BaseModel):
+    device_id: str
+    tailnet_ip: str
+    secret: str
+    display_name: Optional[str] = ""
+    device_kind: Optional[str] = ""
+
+
+@router.post("/pairing")
+async def register_pairing(body: PairingBody):
+    """Record the secret a device's control listener requires (called by the device
+    itself whenever its listener starts). Re-registering replaces the previous secret."""
+    try:
+        row = pairing.register(
+            device_id=body.device_id,
+            tailnet_ip=body.tailnet_ip,
+            secret=body.secret,
+            display_name=body.display_name or "",
+            device_kind=body.device_kind or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"status": "paired", "device": row}
+
+
+@router.get("/pairing")
+async def list_pairings():
+    """Which devices have paired their control listener (metadata only, no secrets)."""
+    return {"devices": pairing.public_rows()}
+
+
+@router.delete("/pairing/{tailnet_ip}")
+async def forget_pairing(tailnet_ip: str):
+    """Forget a device's secret. The box refuses to call it until the app re-pairs."""
+    if not pairing.forget(tailnet_ip):
+        raise HTTPException(status_code=404, detail=f"No pairing recorded for {tailnet_ip}")
+    return {"status": "forgotten", "tailnet_ip": tailnet_ip}
 
 
 @router.post("/{device_id}/operator")

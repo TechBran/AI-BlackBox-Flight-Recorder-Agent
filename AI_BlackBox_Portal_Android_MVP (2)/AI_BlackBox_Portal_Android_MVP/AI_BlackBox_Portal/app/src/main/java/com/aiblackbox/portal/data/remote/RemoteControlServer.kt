@@ -29,6 +29,11 @@ import java.io.ByteArrayInputStream
  * fake handler). The real work — waking Gemma and running an ALLOWLISTED task — is
  * delegated to a [RemoteTaskHandler] supplied by [remoteTaskHandlerFactory] (wired
  * in Task 6). Auth/scope (paired hub + operator) is Task 8.
+ *
+ * Every request first passes the PRE-BODY gate ([gateBeforeBody], audit X02/X04): tailnet
+ * source, not this phone itself, the box's pairing secret on every route but `GET /healthz`,
+ * and a declared body of at most [MAX_REQUEST_BODY_BYTES] — all decided before a body byte is
+ * read. The secret is minted and registered with the box by [RemoteControlPairing].
  */
 
 /** Default port the listener binds to. MUST match the backend control_phone
@@ -620,10 +625,11 @@ suspend fun handleActionRequest(
 /**
  * Source/scope auth for the inbound listener (Task 8): blast-radius scoping ON TOP of
  * the Tailscale perimeter. Returns a 403 [RemoteResponse] to REJECT, or null to allow.
- * PURE → JVM-unit-testable.
+ * PURE → JVM-unit-testable. Runs AFTER [gateBeforeBody] (source, self, pairing secret,
+ * body size), once the bounded body has been read.
  *  - Every route: the caller's source IP must be on the tailnet (Tailscale CGNAT
- *    100.64.0.0/10 or the Tailscale IPv6 ULA) or loopback (same-device). A LAN /
- *    external caller that reached the 0.0.0.0-bound socket is rejected here.
+ *    100.64.0.0/10 or the Tailscale IPv6 ULA). A LAN / external / loopback caller that
+ *    reached the 0.0.0.0-bound socket is rejected here.
  *  - POST /task additionally: the request's `operator` must match the device's bound
  *    operator (a different operator's hub cannot drive this device). Fail-closed: a
  *    blank bound operator rejects.
@@ -689,11 +695,12 @@ fun authorize(method: String, path: String, remoteIp: String,
 }
 
 /** True iff [ip] is a Tailscale tailnet address (CGNAT 100.64.0.0/10 or the Tailscale
- *  IPv6 ULA fd7a:115c:a1e0::/48) or loopback (same-device). PURE. */
+ *  IPv6 ULA fd7a:115c:a1e0::/48). PURE. Loopback is deliberately NOT a tailnet source
+ *  (audit X04): every other app on the phone can reach 127.0.0.1, so "same device" proves
+ *  nothing about the caller. The box always arrives over the tailnet. */
 fun isTailnetSource(ip: String): Boolean {
-    val a = ip.trim().lowercase()
+    val a = normalizeRemoteIp(ip)
     if (a.isEmpty()) return false
-    if (a == "::1" || a.startsWith("127.")) return true        // loopback (same-device)
     if (a.startsWith("fd7a:115c:a1e0")) return true            // Tailscale IPv6 ULA
     val octets = a.split(".")                                  // IPv4 CGNAT 100.64.0.0/10
     if (octets.size == 4) {
@@ -738,12 +745,14 @@ fun streamKillGate(taskId: String, killed: Boolean,
     else null
 
 /**
- * Embedded HTTP listener (NanoHTTPD). Binds to all interfaces, but [authorize] gates
- * every request to tailnet-source callers (Tailscale/WireGuard encrypts the
- * transport), scopes POST /task to the device's bound operator, and scopes POST
- * /notify to the device's subscription allow-list. The socket binding is
- * device/compile-verified; the routing + auth it delegates to are unit-tested via
- * [routeRequest] / [authorize].
+ * Embedded HTTP listener (NanoHTTPD). Binds to all interfaces, but [gateBeforeBody] admits
+ * only a tailnet peer that is not this phone and presents the pairing secret (with a
+ * bounded, declared body) BEFORE anything is read; [authorize] then scopes POST /task to the
+ * device's bound operator and POST /notify to the device's subscription allow-list
+ * (Tailscale/WireGuard encrypts the transport). Connections are served by a bounded worker
+ * pool ([BoundedAsyncRunner]), not a thread per connection. The routing + auth it delegates
+ * to are unit-tested via [routeRequest] / [authorize] / [gateBeforeBody]; the socket path is
+ * covered by RemoteControlServerSocketTest.
  *
  * **Single owner on the control port (MN.4).** Exactly ONE of these binds
  * [REMOTE_CONTROL_PORT]; it is owned by [com.aiblackbox.portal.NotificationListenerFgs]
@@ -764,6 +773,10 @@ fun streamKillGate(taskId: String, killed: Boolean,
  * @param observationProvider (M1.2) optional device-side `buildObservation()` source. When
  *   wired, GET /stream/{id} emits one real `observation` frame and the `/action` follow-on
  *   can embed fresh screen state. Null keeps the M0 scaffold stream comment.
+ * @param pairingSecretProvider the secret the box must present ([RemoteControlPairing]),
+ *   read per request. Null (the default, or a phone that could not load one) serves nothing
+ *   but `GET /healthz` — fail-closed.
+ * @param ownAddressesProvider this phone's own interface addresses, refused as sources.
  */
 class RemoteControlServer(
     port: Int,
@@ -784,7 +797,13 @@ class RemoteControlServer(
     // (M8.3) the telemetry read seam for GET /telemetry/{taskId} + /telemetry/summary. Defaults
     // to the process-wide [BusTelemetryReader].
     private val telemetryReaderProvider: () -> TelemetryReader = { BusTelemetryReader },
+    private val pairingSecretProvider: () -> String? = { null },
+    private val ownAddressesProvider: () -> Set<String> = { OwnAddresses.current() },
 ) : NanoHTTPD(port) {
+
+    init {
+        setAsyncRunner(BoundedAsyncRunner())
+    }
 
     fun startServer() = start(SOCKET_READ_TIMEOUT, false)
     fun stopServer() = stop()
@@ -792,8 +811,20 @@ class RemoteControlServer(
     override fun serve(session: IHTTPSession): Response {
         val method = session.method?.name ?: "GET"
         val path = session.uri ?: "/"
-        val body = if (method.equals("POST", ignoreCase = true)) readBody(session) else ""
         val remoteIp = session.remoteIpAddress ?: ""
+        // Source, self, pairing secret and declared size — all from the request line and
+        // headers, before a single body byte is read (audit X02/X04).
+        val gate = gateBeforeBody(method, path, remoteIp, session.headers ?: emptyMap(),
+            ownAddressesProvider(), pairingSecretProvider())
+        val bodyLength = when (gate) {
+            is PreBodyDecision.Reject -> return rejection(gate.response, gate.headers)
+            is PreBodyDecision.Accept -> gate.bodyLength
+        }
+        // Read exactly the declared bytes (also for a non-POST, so a keep-alive connection
+        // never parses a leftover body as its next request); only POST routes use them.
+        val raw = readBody(session, bodyLength)
+            ?: return rejection(RemoteResponse(400, JSON.encodeToString(ErrorBody("incomplete request body"))))
+        val body = if (method.equals("POST", ignoreCase = true)) raw else ""
         // /task, /notify, (M0) /action and (M8.2) /kill* carry a top-level `operator` in the
         // POST body; (I1) GET /stream/{id} and (M8.3) GET /telemetry* — body-less GETs — carry it
         // as the ?operator= query param.
@@ -900,16 +931,27 @@ class RemoteControlServer(
         }
     }
 
-    private fun readBody(session: IHTTPSession): String {
-        val files = HashMap<String, String>()
+    /** The body as text, read with [readBoundedBody] (never NanoHTTPD's parseBody(), which
+     *  spools to a temp file and then copies the whole thing onto the heap — so NanoHTTPD's
+     *  temp-file manager, the CVE-2022-21230 surface, is never used for a request body).
+     *  Null when the peer sent less than it declared. */
+    private fun readBody(session: IHTTPSession, length: Int): String? {
+        if (length == 0) return ""
         return try {
-            session.parseBody(files)
-            files["postData"] ?: ""
+            readBoundedBody(session.inputStream, length)?.toString(Charsets.UTF_8)
         } catch (e: Exception) {
             Log.w(TAG, "failed to read request body (${e.javaClass.simpleName})")
-            ""
+            null
         }
     }
+
+    /** A refusal that also closes the connection: the request body was never read, so the
+     *  socket must not be reused for another request. */
+    private fun rejection(denied: RemoteResponse, headers: Map<String, String> = emptyMap()): Response =
+        newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json).apply {
+            headers.forEach { (k, v) -> addHeader(k, v) }
+            closeConnection(true)
+        }
 
     private fun statusOf(code: Int): Response.IStatus =
         Response.Status.values().firstOrNull { it.requestStatus == code }

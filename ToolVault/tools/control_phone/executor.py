@@ -10,10 +10,14 @@ Gemma on your phone — I'll report back…") before calling, since model load +
 can take a minute. Only SAFE device actions run remotely; the phone enforces an
 allowlist.
 
+Every request carries the phone's pairing secret (Authorization: Bearer — see
+Orchestrator/device_registry/pairing.py); the phone refuses anything without it.
+
 Structured errors (data["error_kind"]) let the frontier model decide to retry or
 stop. Resolution (mesh.resolve_device): invalid_target / origin_mismatch /
-no_primary_device / no_device. Execution: refused / wake_failed / bad_response /
-lost_contact / remote_error / timeout.
+no_primary_device / no_device. Pairing: not_paired (no secret on record, or the phone
+rejected it — the user opens the app once to re-pair). Execution: refused /
+wake_failed / bad_response / lost_contact / remote_error / timeout.
 """
 import asyncio
 import time
@@ -21,6 +25,7 @@ import time
 import aiohttp
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.device_registry import pairing
 from Orchestrator.local_provider import mesh
 
 # Defaults for reaching the phone's RemoteControlServer (Task 5). Tailscale already
@@ -81,22 +86,28 @@ def _clip(value, limit: int = 300) -> str:
     return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
-async def _post_task(base_url: str, payload: dict) -> dict:
+async def _post_task(base_url: str, payload: dict, headers: dict = None) -> dict:
     """POST the task to the phone's listener; return the JSON body. Test seam."""
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{base_url}/task", json=payload,
-                                timeout=_HTTP_TIMEOUT) as resp:
+                                timeout=_HTTP_TIMEOUT, headers=headers) as resp:
             resp.raise_for_status()
             return await resp.json()
 
 
-async def _get_status(base_url: str, task_id: str) -> dict:
+async def _get_status(base_url: str, task_id: str, headers: dict = None) -> dict:
     """GET the phone task's status; return the JSON body. Test seam."""
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{base_url}/status/{task_id}",
-                               timeout=_HTTP_TIMEOUT) as resp:
+                               timeout=_HTTP_TIMEOUT, headers=headers) as resp:
             resp.raise_for_status()
             return await resp.json()
+
+
+def _not_paired(message: str, device: str, **extra) -> ToolResult:
+    """The phone has no secret from this box (or refused ours): re-pairing, not a retry."""
+    return ToolResult(False, message,
+                      data={"error_kind": pairing.ERROR_KIND_NOT_PAIRED, "device": device, **extra})
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -123,11 +134,18 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     base_url = _phone_base_url(node)
     device = node.dns_name or node.ip
+    try:
+        headers = pairing.auth_headers_for_node(node)
+    except pairing.DeviceNotPaired as e:
+        return _not_paired(e.message, device)
 
     # Wake + start the task on the phone.
     try:
-        started = await _post_task(base_url, {"task": task, "operator": ctx.operator})
+        started = await _post_task(base_url, {"task": task, "operator": ctx.operator},
+                                   headers=headers)
     except aiohttp.ClientResponseError as e:
+        if pairing.is_pairing_rejection(e):
+            return _not_paired(pairing.rejected_message(device), device, http_status=e.status)
         # The phone WAS reached but refused/errored. A 4xx (esp. 403 from the phone's
         # source/operator auth) is a deliberate refusal — distinct from "couldn't reach"
         # so the frontier model stops instead of pointlessly retrying a wake.
@@ -169,9 +187,13 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     first_status_failure_at = None  # start of the current run of consecutive /status failures
     while True:
         try:
-            status = await _get_status(base_url, task_id)
+            status = await _get_status(base_url, task_id, headers=headers)
             first_status_failure_at = None  # responded → reset the failure run
         except Exception as e:
+            # A refused secret is not a transient drop: stop now rather than spend the
+            # lost-contact grace polling a phone that will keep answering 401.
+            if pairing.is_pairing_rejection(e):
+                return _not_paired(pairing.rejected_message(device), device, task_id=task_id)
             # Transient drop — the listener can briefly stop responding during a heavy
             # GPU cold-load. Tolerate it for LOST_CONTACT_GRACE_SECS before giving up;
             # the overall deadline still caps the total wait.

@@ -36,10 +36,14 @@ config-knobbed (``[computer_use] frontier_provider`` / ``frontier_model``), neve
 the real mobile model (or M7's Claude/OpenAI) drops in without a code change. Safety gates live
 on the PHONE (M1/M4) — this loop never re-implements them server-side.
 
+Every hop carries the device's pairing secret (``device_headers`` — the caller looks it up
+with ``Orchestrator.device_registry.pairing``); the phone answers 401 without it.
+
 Structured error kinds surfaced to the caller (data.error_kind): no_device / lost_contact /
-timeout / model_error / config_error / max_steps / invalid_argument, plus the TERMINAL device
-states the loop short-circuits on instead of burning model calls (F2): stopped (the user hit
-STOP on the device) and accessibility_off (the device's accessibility service is disabled).
+timeout / model_error / config_error / max_steps / invalid_argument / not_paired (the device
+refused this box's pairing secret — never retried), plus the TERMINAL device states the loop
+short-circuits on instead of burning model calls (F2): stopped (the user hit STOP on the
+device) and accessibility_off (the device's accessibility service is disabled).
 """
 from __future__ import annotations
 
@@ -50,7 +54,9 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
+from Orchestrator.device_registry import pairing
 from Orchestrator.frontier_grounding import (
     CoordinateAdapter,
     GeminiCoordinateAdapter,
@@ -317,8 +323,14 @@ def _wire_frame(task_id: str, operator: str, variant: Dict) -> Dict:
 
 
 # ── Phone I/O seams (lazy httpx import; monkeypatched in tests) ───────────────────────
+class _DevicePairingRejected(Exception):
+    """The device answered 401: it holds a different pairing secret than this box. Raised
+    out of the retry wrappers so the loop stops at once — retrying cannot fix a secret."""
+
+
 async def _pull_observation(base_url: str, task_id: str, operator: str,
-                            timeout_secs: float) -> Optional[Dict]:
+                            timeout_secs: float,
+                            headers: Optional[Dict[str, str]] = None) -> Optional[Dict]:
     """GET /stream/{task_id}?operator=… — read the first SSE ``data:`` frame → observation.
 
     M1 emits one real observation frame per open (then closes); opening it also marks the
@@ -328,7 +340,7 @@ async def _pull_observation(base_url: str, task_id: str, operator: str,
     """
     import httpx  # lazy: keep module import dependency-light + test-friendly
     url = f"{base_url}/stream/{task_id}"
-    async with httpx.AsyncClient(timeout=timeout_secs) as client:
+    async with httpx.AsyncClient(timeout=timeout_secs, headers=headers) as client:
         async with client.stream("GET", url, params={"operator": operator}) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
@@ -342,46 +354,54 @@ async def _pull_observation(base_url: str, task_id: str, operator: str,
     return None
 
 
-async def _post_action(base_url: str, action_frame: Dict, timeout_secs: float) -> Dict:
+async def _post_action(base_url: str, action_frame: Dict, timeout_secs: float,
+                       headers: Optional[Dict[str, str]] = None) -> Dict:
     """POST /action with a full action frame; return the ``action_result`` JSON dict."""
     import httpx
     url = f"{base_url}/action"
-    async with httpx.AsyncClient(timeout=timeout_secs) as client:
+    async with httpx.AsyncClient(timeout=timeout_secs, headers=headers) as client:
         resp = await client.post(url, json=action_frame)
         resp.raise_for_status()
         return resp.json()
 
 
 async def _pull_with_retry(base_url: str, task_id: str, operator: str,
-                           deadline: float) -> Optional[Dict]:
+                           deadline: float,
+                           headers: Optional[Dict[str, str]] = None) -> Optional[Dict]:
     """Pull an observation with bounded retries. ``None`` on exhaustion (transport failure
-    OR persistent empty stream). CancellationError propagates (BaseException, not caught)."""
+    OR persistent empty stream). A 401 raises :class:`_DevicePairingRejected` instead of
+    retrying. CancellationError propagates (BaseException, not caught)."""
     attempts = _retry_max()
     for i in range(attempts + 1):
         try:
             obs = await asyncio.wait_for(
-                _pull_observation(base_url, task_id, operator, _per_action_secs()),
+                _pull_observation(base_url, task_id, operator, _per_action_secs(),
+                                  headers=headers),
                 _per_action_secs() + 2.0)
             if obs is not None:
                 return obs
-        except Exception:
-            pass
+        except Exception as e:
+            if pairing.is_pairing_rejection(e):
+                raise _DevicePairingRejected() from e
         if time.monotonic() >= deadline or i >= attempts:
             break
         await asyncio.sleep(_retry_backoff_secs() * (i + 1))
     return None
 
 
-async def _post_with_retry(base_url: str, frame: Dict, deadline: float) -> Optional[Dict]:
-    """POST an action with bounded retries. ``None`` on exhaustion."""
+async def _post_with_retry(base_url: str, frame: Dict, deadline: float,
+                           headers: Optional[Dict[str, str]] = None) -> Optional[Dict]:
+    """POST an action with bounded retries. ``None`` on exhaustion; a 401 raises
+    :class:`_DevicePairingRejected`."""
     attempts = _retry_max()
     for i in range(attempts + 1):
         try:
             return await asyncio.wait_for(
-                _post_action(base_url, frame, _per_action_secs()),
+                _post_action(base_url, frame, _per_action_secs(), headers=headers),
                 _per_action_secs() + 2.0)
-        except Exception:
-            pass
+        except Exception as e:
+            if pairing.is_pairing_rejection(e):
+                raise _DevicePairingRejected() from e
         if time.monotonic() >= deadline or i >= attempts:
             break
         await asyncio.sleep(_retry_backoff_secs() * (i + 1))
@@ -525,18 +545,28 @@ def _make_driver(provider: str, model: str, task: str, operator: str, capability
 async def run_frontier_loop(device_base_url: str, task: str, operator: str,
                             model: Optional[str] = None,
                             capability: Optional[Dict] = None,
-                            provider: Optional[str] = None) -> FrontierResult:
+                            provider: Optional[str] = None,
+                            device_headers: Optional[Dict[str, str]] = None) -> FrontierResult:
     """Public entry: drive ``device_base_url`` to complete ``task`` and stamp per-step telemetry.
 
     Thin wrapper over :func:`_drive_frontier_loop` that owns the (mutable) telemetry list so
     EVERY exit path of the driver — including the early no_device / config_error returns and the
     terminal short-circuits — carries the same bounded, non-sensitive per-step record without the
-    driver having to thread it onto each of its return sites. Signature is unchanged (M2/M7
-    callers + tests are unaffected)."""
+    driver having to thread it onto each of its return sites.
+
+    ``device_headers`` are sent on every /stream and /action hop — the device's pairing
+    ``Authorization`` header. A 401 from the device ends the run as ``not_paired``."""
     telemetry: List[Dict] = []
-    result = await _drive_frontier_loop(
-        device_base_url, task, operator, model=model, capability=capability,
-        provider=provider, telemetry=telemetry)
+    try:
+        result = await _drive_frontier_loop(
+            device_base_url, task, operator, model=model, capability=capability,
+            provider=provider, telemetry=telemetry, device_headers=device_headers)
+    except _DevicePairingRejected:
+        device = urlsplit(device_base_url or "").hostname or device_base_url
+        result = FrontierResult(False, pairing.rejected_message(device),
+                                error_kind=pairing.ERROR_KIND_NOT_PAIRED,
+                                device=(device_base_url or "").rstrip("/"),
+                                steps=len(telemetry))
     result.telemetry = telemetry
     return result
 
@@ -545,7 +575,8 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
                                model: Optional[str] = None,
                                capability: Optional[Dict] = None,
                                provider: Optional[str] = None,
-                               telemetry: Optional[List[Dict]] = None) -> FrontierResult:
+                               telemetry: Optional[List[Dict]] = None,
+                               device_headers: Optional[Dict[str, str]] = None) -> FrontierResult:
     """Drive ``device_base_url`` (a phone's RemoteControlServer base URL) to complete ``task``.
 
     Async ReAct loop over the M1 ``/stream`` (observations) + ``/action`` (actions) channels,
@@ -580,7 +611,7 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
     deadline = min(hardcap, time.monotonic() + _session_base_secs())
 
     # 1) initial observation — also opens the on-device session (consent banner on M1).
-    obs = await _pull_with_retry(base_url, task_id, operator, deadline)
+    obs = await _pull_with_retry(base_url, task_id, operator, deadline, headers=device_headers)
     if obs is None:
         return FrontierResult(
             False,
@@ -649,7 +680,8 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
             # provider's protocol → it produces a last_result so the driver can respond next turn.
             if op == "wait":
                 await asyncio.sleep(min(float(model_action.get("seconds", 0) or 0), 5.0))
-                nxt = await _pull_with_retry(base_url, task_id, operator, deadline)
+                nxt = await _pull_with_retry(base_url, task_id, operator, deadline,
+                                             headers=device_headers)
                 if nxt is None:
                     return FrontierResult(False, "Lost contact with the device while waiting.",
                                           error_kind="lost_contact", device=base_url, steps=steps)
@@ -670,7 +702,8 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
             # 4) dispatch it to the phone (variant + transport envelope).
             _dispatch_t0 = time.monotonic()
             result = await _post_with_retry(
-                base_url, _wire_frame(task_id, operator, grounded.frame), deadline)
+                base_url, _wire_frame(task_id, operator, grounded.frame), deadline,
+                headers=device_headers)
             _latency_ms = int((time.monotonic() - _dispatch_t0) * 1000)
             if result is None:
                 # (M8.3) record the lost-contact step too (op + failure + timing; no secrets).
@@ -708,7 +741,8 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
                                          adapter=adapter)
                 if enter_grounded.frame is not None:
                     enter_result = await _post_with_retry(
-                        base_url, _wire_frame(task_id, operator, enter_grounded.frame), deadline)
+                        base_url, _wire_frame(task_id, operator, enter_grounded.frame), deadline,
+                        headers=device_headers)
                     if enter_result is None:
                         return FrontierResult(
                             False, f"Lost contact submitting after typing (step {steps}).",
@@ -730,7 +764,8 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
             if isinstance(embedded, dict) and embedded:
                 obs = embedded
             else:
-                nxt = await _pull_with_retry(base_url, task_id, operator, deadline)
+                nxt = await _pull_with_retry(base_url, task_id, operator, deadline,
+                                             headers=device_headers)
                 if nxt is None:
                     return FrontierResult(
                         False, f"Lost contact with the device after '{op}' (step {steps}).",

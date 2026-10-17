@@ -87,11 +87,11 @@ class _MockPhone:
         self.posted = []
         self.observations_served = []
 
-    async def pull(self, base_url, task_id, operator, timeout):
+    async def pull(self, base_url, task_id, operator, timeout, headers=None):
         self.observations_served.append(self.observation)
         return self.observation
 
-    async def post(self, base_url, frame, timeout):
+    async def post(self, base_url, frame, timeout, headers=None):
         self.posted.append(frame)
         return self.results.pop(0) if self.results else {"msg": "action_result", "success": True}
 

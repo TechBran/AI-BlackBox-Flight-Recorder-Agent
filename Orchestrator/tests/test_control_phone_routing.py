@@ -7,6 +7,9 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+from Orchestrator.device_registry import pairing
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.local_provider.mesh import Node, DeviceResolutionError
 
@@ -18,6 +21,14 @@ _spec.loader.exec_module(cp)
 
 NODE = Node(hostname="brandon-fold6", dns_name="brandon-fold6.tailnet-abc.ts.net",
             ip="100.88.0.7", online=True, os="android")
+
+
+@pytest.fixture(autouse=True)
+def _paired_listener(tmp_path, monkeypatch):
+    """The phone's listener requires its pairing secret (audit X02/X04): pair the test node
+    in a tmp store so these tests exercise the authenticated path."""
+    monkeypatch.setattr(pairing, "PAIRING_PATH", tmp_path / "device_pairing.json")
+    pairing.register(device_id="test-device", tailnet_ip=NODE.ip, secret="ab" * 32)
 
 
 def _run(coro):
@@ -35,11 +46,11 @@ def test_routes_through_resolve_device_with_origin_and_target(monkeypatch):
     monkeypatch.setattr(cp.mesh, "resolve_device", fake_resolve)
     monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
 
-    async def fake_post(base_url, payload):
+    async def fake_post(base_url, payload, headers=None):
         assert "brandon-fold6" in base_url
         return {"task_id": "t1"}
 
-    async def fake_status(base_url, task_id):
+    async def fake_status(base_url, task_id, headers=None):
         return {"phase": "done", "result": "ok"}
 
     monkeypatch.setattr(cp, "_post_task", fake_post)

@@ -60,10 +60,10 @@ def _run(coro):
 def test_telemetry_records_one_step_per_action(monkeypatch):
     _fast(monkeypatch)
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return OBS_TREE_ONLY
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         return {"msg": "action_result", "success": True}
 
     monkeypatch.setattr(fal, "_pull_observation", fake_pull)

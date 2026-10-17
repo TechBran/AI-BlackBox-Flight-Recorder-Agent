@@ -75,10 +75,10 @@ def test_multi_step_open_type_tap_done(monkeypatch):
     _fast(monkeypatch)
     posted = []
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return OBS
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
 
@@ -113,7 +113,7 @@ def test_global_and_scroll_actions_marshal(monkeypatch):
     posted = []
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
     monkeypatch.setattr(fal, "_post_action", fake_post)
@@ -135,7 +135,7 @@ def test_type_with_no_prior_click_not_dispatched(monkeypatch):
     posted = []
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
     monkeypatch.setattr(fal, "_post_action", fake_post)
@@ -162,11 +162,11 @@ def test_embedded_observation_used_instead_of_pull(monkeypatch):
     _fast(monkeypatch)
     pulls = {"n": 0}
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         pulls["n"] += 1
         return OBS
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         # action_result carries a fresh observation → the loop must NOT pull again
         return {"msg": "action_result", "success": True, "observation": OBS}
 
@@ -194,7 +194,7 @@ def test_lost_contact_when_post_action_keeps_failing(monkeypatch):
     _fast(monkeypatch)
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def boom(base_url, frame, timeout):
+    async def boom(base_url, frame, timeout, headers=None):
         raise ConnectionError("dropped")
 
     monkeypatch.setattr(fal, "_post_action", boom)
@@ -211,7 +211,7 @@ def test_post_action_retries_then_succeeds(monkeypatch):
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
     calls = {"n": 0}
 
-    async def flaky(base_url, frame, timeout):
+    async def flaky(base_url, frame, timeout, headers=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConnectionResetError("transient")
@@ -257,7 +257,7 @@ def test_ungroundable_action_is_fed_back_not_fatal(monkeypatch):
     posted = []
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
 
@@ -354,7 +354,7 @@ def test_press_enter_emits_type_then_press_key(monkeypatch):
     posted = []
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
 
@@ -379,7 +379,7 @@ def test_press_key_op_grounds_to_frame_and_unknown_key_is_ungroundable(monkeypat
     posted = []
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
 
@@ -413,7 +413,7 @@ def test_terminal_not_wired_short_circuits_to_no_device(monkeypatch):
     posted = []
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": False, "error": "not_wired",
                 "detail": "no action dispatcher registered on this device"}
@@ -470,7 +470,7 @@ def test_observation_a11y_off_short_circuits_to_intent_only(monkeypatch):
     _fast(monkeypatch)
     posted = []
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
 
@@ -495,7 +495,7 @@ def test_observation_a11y_on_does_not_short_circuit(monkeypatch):
     _fast(monkeypatch)
     monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         return {"msg": "action_result", "success": True}
 
     monkeypatch.setattr(fal, "_post_action", fake_post)
@@ -645,10 +645,10 @@ def test_xr_loop_drives_element_intent_only_with_zero_screenshots(monkeypatch):
     _fast(monkeypatch)
     posted = []
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return XR_OBS
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}   # no embedded screenshot either
 

@@ -9,12 +9,17 @@ the task killed, so every subsequent ``/action`` + ``/stream`` frame for it is r
 consent banner drops. Operator-scoped + tailnet-gated exactly like ``/action`` (the phone's
 authorize() rejects a foreign operator with 403). Never actuates the device — it only cancels.
 
+The kill carries the device's pairing secret (Authorization: Bearer — see
+Orchestrator/device_registry/pairing.py) like every other call to the listener.
+
 Structured errors (data["error_kind"]): resolution (invalid_target / origin_mismatch /
-no_primary_device / no_device) + delivery (refused / bad_response / lost_contact).
+no_primary_device / no_device) + pairing (not_paired) + delivery (refused / bad_response /
+lost_contact).
 """
 import aiohttp
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.device_registry import pairing
 from Orchestrator.local_provider import mesh
 
 REMOTE_CONTROL_PORT = 8765
@@ -41,12 +46,12 @@ def _clip(value, limit: int = 300) -> str:
     return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
-async def _post_kill(base_url: str, path: str, operator: str) -> dict:
+async def _post_kill(base_url: str, path: str, operator: str, headers: dict = None) -> dict:
     """POST the kill to the phone's listener; return the JSON body ({ok, killed_count}).
     Test seam — monkeypatched in unit tests so no socket is touched."""
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{base_url}{path}", json={"operator": operator},
-                                timeout=_HTTP_TIMEOUT) as resp:
+                                timeout=_HTTP_TIMEOUT, headers=headers) as resp:
             resp.raise_for_status()
             return await resp.json()
 
@@ -71,12 +76,22 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     base_url = _phone_base_url(node)
     device_name = node.dns_name or node.ip
+    try:
+        headers = pairing.auth_headers_for_node(node)
+    except pairing.DeviceNotPaired as e:
+        return ToolResult(False, e.message,
+                          data={"error_kind": pairing.ERROR_KIND_NOT_PAIRED, "device": device_name})
     # A specific task → /kill/{id}; else the operator-wide kill-all (the common "stop" case).
     path = f"/kill/{task_id}" if task_id else "/kill-all"
 
     try:
-        body = await _post_kill(base_url, path, ctx.operator)
+        body = await _post_kill(base_url, path, ctx.operator, headers=headers)
     except aiohttp.ClientResponseError as e:
+        if pairing.is_pairing_rejection(e):
+            return ToolResult(
+                False, pairing.rejected_message(device_name),
+                data={"error_kind": pairing.ERROR_KIND_NOT_PAIRED, "device": device_name,
+                      "http_status": e.status})
         # The device was reached but refused (e.g. 403 from the phone's operator-scope auth).
         if 400 <= e.status < 500:
             return ToolResult(

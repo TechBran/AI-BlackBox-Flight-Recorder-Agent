@@ -22,13 +22,17 @@ node; else the ORIGIN device (ctx.origin_device_id) it came from — but only if
 belongs to this operator (never silently retarget); else the operator's PRIMARY device from the
 registry; else an error. Safety gates live ON THE PHONE (M1/M4).
 
+Every /stream + /action hop carries the device's pairing secret (Authorization: Bearer — see
+Orchestrator/device_registry/pairing.py); a device with none on record is refused up front.
+
 Structured errors (data["error_kind"]) let the frontier model decide to retry or stop:
 no_device / no_primary_device / invalid_target / origin_mismatch / invalid_argument (bad
-provider) / stopped / accessibility_off / lost_contact / timeout / model_error / config_error /
-max_steps / loop_error. The loop SHORT-CIRCUITS on terminal device states instead of burning
-model calls (F2).
+provider) / not_paired / stopped / accessibility_off / lost_contact / timeout / model_error /
+config_error / max_steps / loop_error. The loop SHORT-CIRCUITS on terminal device states instead
+of burning model calls (F2).
 """
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.device_registry import pairing
 from Orchestrator.local_provider import mesh
 from Orchestrator import frontier_agent_loop
 
@@ -169,6 +173,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     base_url = _phone_base_url(node)
     device_name = node.dns_name or node.ip
     model = (params.get("model") or "").strip() or None
+    try:
+        device_headers = pairing.auth_headers_for_node(node)
+    except pairing.DeviceNotPaired as e:
+        return ToolResult(False, e.message,
+                          data={"error_kind": pairing.ERROR_KIND_NOT_PAIRED,
+                                "device": device_name, "provider": provider})
 
     # Run the server-side frontier ReAct loop. capability=None → the loop starts from phone
     # defaults and adopts the device's authoritative device_capability from the first
@@ -182,6 +192,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             model=model,
             capability=None,
             provider=provider,
+            device_headers=device_headers,
         )
     except Exception as e:  # never let an unexpected error escape the tool boundary
         return ToolResult(

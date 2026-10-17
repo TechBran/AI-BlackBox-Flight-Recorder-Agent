@@ -18,7 +18,7 @@
     },
     "required": []
   },
-  "returns": "A confirmation of the kill, plus data.killed_count (how many in-flight tasks were aborted), data.device, and — on failure — a structured error_kind (no_device / no_primary_device / invalid_target / origin_mismatch / lost_contact / refused / bad_response).",
+  "returns": "A confirmation of the kill, plus data.killed_count (how many in-flight tasks were aborted), data.device, and — on failure — a structured error_kind (no_device / no_primary_device / invalid_target / origin_mismatch / not_paired (the device has not paired with this box — the user opens the BlackBox app on it once) / lost_contact / refused / bad_response).",
   "example": "stop_device_control()",
   "notes": "M8.2 of the frontier-driven device-control rewire: reaches the phone's RemoteControlServer POST /kill-all (or POST /kill/{task_id}) over Tailscale, which calls RemoteSessionBus.stopAll(operator) / stop(taskId) on-device (the killed task is refused on every subsequent /action + /stream frame, and its consent banner drops). Operator-scoped + tailnet-gated exactly like /action. Device resolution is origin-aware (mesh.resolve_device), the same rule control_device uses. Also reachable as control_device(action=\"stop\"). See docs/plans/2026-06-30-android-control-frontier-driven-plan.md (M8)."
 }

@@ -19,9 +19,11 @@ import com.aiblackbox.portal.data.remote.ObservationBuilder
 import com.aiblackbox.portal.data.remote.PhoneActionDispatcher
 import com.aiblackbox.portal.data.remote.REMOTE_CONTROL_PORT
 import com.aiblackbox.portal.data.remote.RemoteActionDispatcher
+import com.aiblackbox.portal.data.remote.RemoteControlPairing
 import com.aiblackbox.portal.data.remote.RemoteControlServer
 import com.aiblackbox.portal.data.remote.RemoteSessionBus
 import com.aiblackbox.portal.data.remote.RemoteTaskHandlerHolder
+import com.aiblackbox.portal.data.remote.pairingRetryDelayMs
 import com.aiblackbox.portal.data.local.AutonomyStore
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.NotificationSubscriptionStore
@@ -30,7 +32,15 @@ import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.NavigationNotifier
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -76,10 +86,18 @@ import kotlinx.coroutines.runBlocking
  * **Best-effort + graceful.** Every start/bind is wrapped so a platform refusal can
  * never crash; the worst case is "notifications not received while backgrounded",
  * never an app crash.
+ *
+ * **Pairing (audit X02/X04).** The listener answers only a box that presents this install's
+ * pairing secret ([RemoteControlPairing]). Every START (app launch, boot, sticky restart)
+ * re-registers the secret with the paired box, retrying with backoff until it lands — so
+ * "open the app once" is always enough to re-pair.
  */
 class NotificationListenerFgs : Service() {
 
     private var server: RemoteControlServer? = null
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var pairingJob: Job? = null
 
     /**
      * (M1.3) The actuator seam POST /action dispatches through — built lazily so it exists
@@ -160,6 +178,7 @@ class NotificationListenerFgs : Service() {
                 startForegroundWith(buildNotification())
                 _isRunning = true
                 startListenerIfNeeded()
+                registerPairingSecret()
             }
         }
         // START_STICKY: keep the model-free listener alive across OS kills so the phone
@@ -199,6 +218,8 @@ class NotificationListenerFgs : Service() {
                 // real observation. Both degrade gracefully when a11y is off.
                 actionDispatcherProvider = { actionDispatcher },
                 observationProvider = { ObservationBuilder.fromDevice(appContext).build() },
+                // (X02/X04) the secret the box must present on every route but /healthz.
+                pairingSecretProvider = { RemoteControlPairing.secret(appContext) },
             ).also {
                 it.startServer()
                 server = it
@@ -207,6 +228,22 @@ class NotificationListenerFgs : Service() {
         }.onFailure {
             Log.w(TAG, "listener start refused (${it.javaClass.simpleName}); FGS stays up to retry")
             server = null
+        }
+    }
+
+    /**
+     * (Re)register this install's listener secret with the paired box, off the main thread,
+     * retrying with backoff until the box has it (no box origin yet / off the tailnet / box
+     * unreachable all retry). A new START replaces any registration still in flight.
+     */
+    private fun registerPairingSecret() {
+        pairingJob?.cancel()
+        val appContext = applicationContext
+        pairingJob = serviceScope.launch {
+            var attempt = 0
+            while (isActive && !RemoteControlPairing.registerWithBox(appContext)) {
+                delay(pairingRetryDelayMs(attempt++))
+            }
         }
     }
 
@@ -260,6 +297,7 @@ class NotificationListenerFgs : Service() {
 
     override fun onDestroy() {
         _isRunning = false
+        serviceScope.cancel()
         stopListener()
         RemoteSessionBus.removeListener(sessionListener)
         runCatching { cancelControlBanner() }

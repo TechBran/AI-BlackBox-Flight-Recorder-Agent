@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from Orchestrator.device_registry import pairing
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.local_provider.mesh import Node, DeviceResolutionError
 from Orchestrator.toolvault.schema_spec import validate_module_dict, KNOWN_GROUPS
@@ -33,6 +34,16 @@ SCHEMA = json.loads((_TOOL_DIR / "schema.json").read_text())
 
 NODE = Node(hostname="brandon-fold6", dns_name="brandon-fold6.tailnet-abc.ts.net",
             ip="100.88.0.7", online=True, os="android")
+
+
+@pytest.fixture(autouse=True)
+def _paired_listener(tmp_path, monkeypatch):
+    """The phone's listener requires its pairing secret (audit X02/X04): pair the test node
+    in a tmp store so these tests exercise the authenticated path."""
+    monkeypatch.setattr(pairing, "PAIRING_PATH", tmp_path / "device_pairing.json")
+    pairing.register(device_id="test-device", tailnet_ip=NODE.ip, secret="ab" * 32)
+
+
 CTX = ToolContext(operator="Brandon", base_url="http://localhost:9091")
 ORIGIN_CTX = ToolContext(operator="Brandon", base_url="http://localhost:9091",
                          origin_device_id="brandon-fold6")
@@ -59,7 +70,7 @@ def _raises(kind, message="nope", detail=None):
 
 
 def _capture_post(calls, response=OK):
-    async def _f(base_url, frame):
+    async def _f(base_url, frame, headers=None):
         calls.append({"base_url": base_url, "frame": frame})
         if isinstance(response, Exception):
             raise response

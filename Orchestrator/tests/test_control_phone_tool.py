@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from Orchestrator.device_registry import pairing
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.local_provider.mesh import Node
 
@@ -24,6 +25,16 @@ _spec.loader.exec_module(cp)
 
 NODE = Node(hostname="brandon-fold6", dns_name="brandon-fold6.tailnet-abc.ts.net",
             ip="100.88.0.7", online=True, os="android")
+
+
+@pytest.fixture(autouse=True)
+def _paired_listener(tmp_path, monkeypatch):
+    """The phone's listener requires its pairing secret (audit X02/X04): pair the test node
+    in a tmp store so these tests exercise the authenticated path."""
+    monkeypatch.setattr(pairing, "PAIRING_PATH", tmp_path / "device_pairing.json")
+    pairing.register(device_id="test-device", tailnet_ip=NODE.ip, secret="ab" * 32)
+
+
 CTX = ToolContext(operator="Brandon", base_url="http://localhost:9091")
 
 
@@ -55,7 +66,7 @@ def test_happy_path_waking_working_done(monkeypatch):
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
     monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
 
-    async def fake_post(base_url, payload):
+    async def fake_post(base_url, payload, headers=None):
         assert "brandon-fold6" in base_url           # addressed the resolved node
         assert payload == {"task": "open maps", "operator": "Brandon"}
         return {"task_id": "t1"}
@@ -63,7 +74,7 @@ def test_happy_path_waking_working_done(monkeypatch):
     seq = iter([{"phase": "waking"}, {"phase": "working"},
                 {"phase": "done", "result": "Opened Maps."}])
 
-    async def fake_status(base_url, task_id):
+    async def fake_status(base_url, task_id, headers=None):
         assert task_id == "t1"
         return next(seq)
 
@@ -92,7 +103,7 @@ def test_remote_error_surfaces_message(monkeypatch):
 def test_wake_failed_when_post_raises(monkeypatch):
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
 
-    async def boom(base_url, payload):
+    async def boom(base_url, payload, headers=None):
         raise ConnectionError("no route to host")
 
     monkeypatch.setattr(cp, "_post_task", boom)
@@ -116,7 +127,7 @@ def test_lost_contact_when_status_raises(monkeypatch):
     monkeypatch.setattr(cp, "LOST_CONTACT_GRACE_SECS", 0.0)  # no grace -> first failure is fatal
     monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
 
-    async def boom(base_url, task_id):
+    async def boom(base_url, task_id, headers=None):
         raise ConnectionError("dropped")
 
     monkeypatch.setattr(cp, "_get_status", boom)
@@ -133,7 +144,7 @@ def test_transient_status_drops_during_wake_are_tolerated(monkeypatch):
     monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
     calls = {"n": 0}
 
-    async def flaky_status(base_url, task_id):
+    async def flaky_status(base_url, task_id, headers=None):
         calls["n"] += 1
         if calls["n"] <= 3:
             raise ConnectionResetError("dropped during wake")
@@ -149,7 +160,7 @@ def test_http_4xx_from_phone_is_refused(monkeypatch):
     import aiohttp
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
 
-    async def refuse(base_url, payload):
+    async def refuse(base_url, payload, headers=None):
         raise aiohttp.ClientResponseError(request_info=None, history=(), status=403, message="forbidden")
 
     monkeypatch.setattr(cp, "_post_task", refuse)
@@ -163,7 +174,7 @@ def test_http_5xx_from_phone_is_wake_failed(monkeypatch):
     import aiohttp
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
 
-    async def boom(base_url, payload):
+    async def boom(base_url, payload, headers=None):
         raise aiohttp.ClientResponseError(request_info=None, history=(), status=502, message="bad gateway")
 
     monkeypatch.setattr(cp, "_post_task", boom)
@@ -200,7 +211,7 @@ def test_done_within_budget_after_waking(monkeypatch):
     seq = iter([{"phase": "waking"}, {"phase": "waking"},
                 {"phase": "working"}, {"phase": "done", "result": "ok"}])
 
-    async def status(base_url, task_id):
+    async def status(base_url, task_id, headers=None):
         return next(seq)
 
     monkeypatch.setattr(cp, "_get_status", status)
@@ -217,7 +228,7 @@ def test_cancellation_propagates_not_swallowed(monkeypatch):
     monkeypatch.setattr(cp, "_total_timeout_secs", lambda: 60.0)
     monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
 
-    async def hang(base_url, task_id):
+    async def hang(base_url, task_id, headers=None):
         await asyncio.sleep(5)  # long status call we cancel mid-flight
         return {"phase": "working"}
 

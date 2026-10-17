@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from Orchestrator.device_registry import pairing
 from Orchestrator.local_provider.mesh import Node
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.toolvault.schema_spec import validate_module_dict
@@ -64,6 +65,15 @@ JOB_ADDRESS = "1247 Main St W, Hamilton, ON"
 
 NODE = Node(hostname="brandon-fold6", dns_name="brandon-fold6.tailnet-abc.ts.net",
             ip="100.88.0.7", online=True, os="android")
+
+
+@pytest.fixture(autouse=True)
+def _paired_listener(tmp_path, monkeypatch):
+    """The phone's listener requires its pairing secret (audit X02/X04): pair the test node
+    in a tmp store so these tests exercise the authenticated path."""
+    monkeypatch.setattr(pairing, "PAIRING_PATH", tmp_path / "device_pairing.json")
+    pairing.register(device_id="test-device", tailnet_ip=NODE.ip, secret="ab" * 32)
+
 
 # What the device answers for a notification-delivered navigate (M3 wire contract).
 NOTIFY_OK = {"msg": "action_result", "success": True,
@@ -341,7 +351,7 @@ def _resolves_to(node, seen=None):
 
 
 def _capture_post(calls, response=NOTIFY_OK):
-    async def _f(base_url, frame):
+    async def _f(base_url, frame, headers=None):
         calls.append({"base_url": base_url, "frame": frame})
         return response
     return _f

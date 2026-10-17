@@ -21,6 +21,11 @@ no UI consumed it). Removed 2026-07-11 per Brandon. Do NOT reintroduce a mint
 here; if a durable inbox is ever actually needed, build it as its own store,
 not as ledger snapshots.
 
+Each POST carries the device's pairing secret (``Authorization: Bearer``, looked up by the
+target node's tailnet IP — see ``Orchestrator/device_registry/pairing.py``). A subscriber
+with no secret on record is counted ``unreachable`` without a request: its listener would
+answer 401, and an unauthenticated push is exactly what the phone now refuses.
+
 Two design contracts:
   * ``notify()`` MUST NEVER raise and never block past the per-device timeout.
   * Cross-operator payloads are METADATA-ONLY: a device subscribed via the 'all'
@@ -43,6 +48,7 @@ from typing import List, Optional
 
 import aiohttp
 
+from Orchestrator.device_registry import pairing
 from Orchestrator.notifications.reachability import reachable_subscribers
 from Orchestrator.notifications.subscriptions import SubscriptionStore
 
@@ -143,12 +149,22 @@ async def _post_to_device(device: dict, payload: dict) -> dict:
 
     A SHORT per-device timeout caps the wait so one dead device cannot stall the
     gather. Raises on any transport/HTTP error — the caller counts that as
-    unreachable.
+    unreachable — and raises ``pairing.DeviceNotPaired`` BEFORE any request when the
+    box holds no pairing secret for the device.
     """
+    node = device.get("node") or {}
+    try:
+        headers = pairing.auth_headers_for_ip(node.get("ip") or "",
+                                              node.get("dns_name") or device.get("device_id") or "")
+    except pairing.DeviceNotPaired:
+        logger.info("[NOTIFY] skip device=%s: no pairing secret on record (open the app on it "
+                    "once to pair)", device.get("device_id"))
+        raise
     base_url = _device_base_url(device)
     timeout = aiohttp.ClientTimeout(total=PER_DEVICE_TIMEOUT_SECS)
     async with aiohttp.ClientSession() as session:
-        async with session.post(f"{base_url}/notify", json=payload, timeout=timeout) as resp:
+        async with session.post(f"{base_url}/notify", json=payload, timeout=timeout,
+                                headers=headers) as resp:
             resp.raise_for_status()
             try:
                 return await resp.json()

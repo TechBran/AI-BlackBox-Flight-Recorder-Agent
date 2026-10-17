@@ -43,6 +43,7 @@ is honoured too if that schema is later widened.
 Structured errors (data["error_kind"]) — each with a user-facing string the model can read
 aloud verbatim:
   resolution : invalid_argument / no_device / no_primary_device / invalid_target / origin_mismatch
+  pairing    : not_paired (no listener secret on record for the device, or it refused ours)
   delivery   : lost_contact / not_authorized / bad_response / unsupported_delivery
   device     : maps_missing / unsupported_device / invalid_destination / declined /
                background_blocked / notifications_blocked / device_error
@@ -51,6 +52,7 @@ import re
 import uuid
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.device_registry import pairing
 from Orchestrator.local_provider import mesh
 from Orchestrator import frontier_agent_loop
 
@@ -277,10 +279,11 @@ def resolve_delivery(result: dict) -> tuple:
     return "", False
 
 
-async def _post_intent(base_url: str, frame: dict) -> dict:
+async def _post_intent(base_url: str, frame: dict, headers: dict = None) -> dict:
     """POST the one action frame to the device. Test seam — monkeypatched in unit tests so no
     socket is touched. Delegates to the frontier loop's existing /action client (httpx)."""
-    return await frontier_agent_loop._post_action(base_url, frame, _POST_TIMEOUT_SECS)
+    return await frontier_agent_loop._post_action(base_url, frame, _POST_TIMEOUT_SECS,
+                                                  headers=headers)
 
 
 def _http_status(exc) -> int:
@@ -490,9 +493,20 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
                  "app": app_package or None, "delivery_requested": delivery}
 
     try:
-        result = await _post_intent(base_url, frame)
+        headers = pairing.auth_headers_for_node(node)
+    except pairing.DeviceNotPaired as e:
+        return ToolResult(False, e.message,
+                          data={**base_data, "error_kind": pairing.ERROR_KIND_NOT_PAIRED})
+
+    try:
+        result = await _post_intent(base_url, frame, headers=headers)
     except Exception as e:  # transport/status errors (CancelledError is a BaseException)
         status = _http_status(e)
+        if status == 401:
+            return ToolResult(
+                False, pairing.rejected_message(device_name),
+                data={**base_data, "error_kind": pairing.ERROR_KIND_NOT_PAIRED,
+                      "http_status": status})
         if status == 403:
             return ToolResult(
                 False,

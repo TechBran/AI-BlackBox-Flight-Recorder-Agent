@@ -282,10 +282,10 @@ def test_frontier_loop_toolset_model_end_to_end(monkeypatch):
     monkeypatch.setattr(fal, "_max_steps", lambda: 40)
     posted = []
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return OBS
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         posted.append(frame)
         return {"msg": "action_result", "success": True}
 

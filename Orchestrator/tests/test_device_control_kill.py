@@ -11,6 +11,9 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+from Orchestrator.device_registry import pairing
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.local_provider.mesh import Node, DeviceResolutionError
 from Orchestrator import frontier_agent_loop as fal
@@ -30,6 +33,16 @@ cd = _load("control_device")
 
 NODE = Node(hostname="brandon-fold6", dns_name="brandon-fold6.ts.net",
             ip="100.88.0.7", online=True, os="android")
+
+
+@pytest.fixture(autouse=True)
+def _paired_listener(tmp_path, monkeypatch):
+    """The phone's listener requires its pairing secret (audit X02/X04): pair the test node
+    in a tmp store so these tests exercise the authenticated path."""
+    monkeypatch.setattr(pairing, "PAIRING_PATH", tmp_path / "device_pairing.json")
+    pairing.register(device_id="test-device", tailnet_ip=NODE.ip, secret="ab" * 32)
+
+
 CTX = ToolContext(operator="Brandon", base_url="http://localhost:9091")
 
 
@@ -94,10 +107,10 @@ _OBS = {"msg": "observation",
 def test_loop_short_circuits_on_killed(monkeypatch):
     _fast(monkeypatch)
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return _OBS
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         # a concurrent operator incident-kill lands → the phone refuses with the killed detail.
         return {"msg": "action_result", "success": False,
                 "detail": "remote control killed by operator"}
@@ -114,10 +127,10 @@ def test_loop_short_circuits_on_killed(monkeypatch):
 def test_loop_short_circuits_on_intent_only(monkeypatch):
     _fast(monkeypatch)
 
-    async def fake_pull(base_url, task_id, operator, timeout):
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
         return _OBS
 
-    async def fake_post(base_url, frame, timeout):
+    async def fake_post(base_url, frame, timeout, headers=None):
         return {"msg": "action_result", "success": False, "error": "intent_only_mode",
                 "detail": "intent_only_mode: accessibility is off; intents work: open_url, dial"}
 
@@ -135,7 +148,7 @@ def test_stop_device_control_kill_all(monkeypatch):
     monkeypatch.setattr(stop_mod.mesh, "resolve_device", _resolves_to(NODE))
     seen = {}
 
-    async def fake_post_kill(base_url, path, operator):
+    async def fake_post_kill(base_url, path, operator, headers=None):
         seen.update(base_url=base_url, path=path, operator=operator)
         return {"ok": True, "killed_count": 1}
 
@@ -153,7 +166,7 @@ def test_stop_device_control_specific_task(monkeypatch):
     monkeypatch.setattr(stop_mod.mesh, "resolve_device", _resolves_to(NODE))
     seen = {}
 
-    async def fake_post_kill(base_url, path, operator):
+    async def fake_post_kill(base_url, path, operator, headers=None):
         seen["path"] = path
         return {"ok": True, "killed_count": 1}
 
@@ -173,7 +186,7 @@ def test_stop_device_control_resolution_error(monkeypatch):
 def test_stop_device_control_nothing_in_flight(monkeypatch):
     monkeypatch.setattr(stop_mod.mesh, "resolve_device", _resolves_to(NODE))
 
-    async def fake_post_kill(base_url, path, operator):
+    async def fake_post_kill(base_url, path, operator, headers=None):
         return {"ok": True, "killed_count": 0}
 
     monkeypatch.setattr(stop_mod, "_post_kill", fake_post_kill)

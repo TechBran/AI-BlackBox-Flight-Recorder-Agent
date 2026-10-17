@@ -11,6 +11,9 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+from Orchestrator.device_registry import pairing
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.local_provider.mesh import Node, DeviceResolutionError
 from Orchestrator.frontier_agent_loop import FrontierResult
@@ -23,6 +26,16 @@ _spec.loader.exec_module(cd)
 
 NODE = Node(hostname="brandon-fold6", dns_name="brandon-fold6.tailnet-abc.ts.net",
             ip="100.88.0.7", online=True, os="android")
+
+
+@pytest.fixture(autouse=True)
+def _paired_listener(tmp_path, monkeypatch):
+    """The phone's listener requires its pairing secret (audit X02/X04): pair the test node
+    in a tmp store so these tests exercise the authenticated path."""
+    monkeypatch.setattr(pairing, "PAIRING_PATH", tmp_path / "device_pairing.json")
+    pairing.register(device_id="test-device", tailnet_ip=NODE.ip, secret="ab" * 32)
+
+
 CTX = ToolContext(operator="Brandon", base_url="http://localhost:9091")
 
 
@@ -60,7 +73,8 @@ def test_happy_path_returns_toolresult(monkeypatch):
     monkeypatch.setattr(cd.mesh, "default_provider_for_node", lambda *a, **k: None)
     seen = {}
 
-    async def fake_loop(*, device_base_url, task, operator, model, capability, provider):
+    async def fake_loop(*, device_base_url, task, operator, model, capability, provider,
+                        device_headers=None):
         seen.update(device_base_url=device_base_url, task=task, operator=operator,
                     provider=provider)
         return FrontierResult(True, "Opened Maps and searched for coffee.",

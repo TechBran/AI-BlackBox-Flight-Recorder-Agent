@@ -117,7 +117,8 @@ class RemoteControlServerTest {
     @Test fun isTailnetSource_classification() {
         assertTrue(isTailnetSource("100.64.0.1"))
         assertTrue(isTailnetSource("100.127.255.255"))
-        assertTrue(isTailnetSource("127.0.0.1"))             // loopback (same-device)
+        assertFalse(isTailnetSource("127.0.0.1"))            // loopback = any app on the phone (X04)
+        assertFalse(isTailnetSource("::1"))
         assertTrue(isTailnetSource("fd7a:115c:a1e0::1"))     // Tailscale IPv6
         assertFalse(isTailnetSource("100.63.255.255"))       // just below CGNAT
         assertFalse(isTailnetSource("100.128.0.1"))          // just above CGNAT
