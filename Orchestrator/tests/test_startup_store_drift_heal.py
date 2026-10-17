@@ -44,11 +44,11 @@ def heal(monkeypatch, tmp_path):
     monkeypatch.setattr(os.path, "isfile",
                         lambda p: True if p == HELPER else real_isfile(p))
     calls = []
-    state = {"rc": 0, "stderr": ""}
+    state = {"rc": 0, "stderr": "", "stdout": ""}
 
     def fake_run(argv, **kwargs):
         calls.append(list(argv))
-        return subprocess.CompletedProcess(argv, state["rc"], stdout="",
+        return subprocess.CompletedProcess(argv, state["rc"], stdout=state["stdout"],
                                            stderr=state["stderr"])
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -108,6 +108,22 @@ def test_rc0_logs_the_heal(heal, caplog, tmp_path):
         drift_heal("sudoers-system", str(tmp_path / "s"), "sudoers")
     assert any("drift-healed" in m for m in _messages(caplog, logging.INFO))
     assert not _messages(caplog, logging.ERROR)
+
+
+def test_rc0_already_current_logs_a_match_not_a_heal(heal, caplog, tmp_path):
+    """The service cannot read the root-only 0440 sudoers file, so the helper
+    (root) compares it: an already-current file is reported as a match, with
+    no 'drift-healed' claim and no warning (it used to log a failed write on
+    every boot because /etc is read-only inside the service namespace)."""
+    drift_heal, calls, state, _ = heal
+    state.update(rc=0, stdout="[blackbox-write-systemd] /etc/sudoers.d/blackbox-system "
+                              "already current (matches /etc/blackbox/templates/sudoers-system)\n")
+    with caplog.at_level(logging.INFO, logger="test.startup.drift_heal"):
+        drift_heal("sudoers-system", str(tmp_path / "unreadable-sudoers"), "sudoers")
+    info = _messages(caplog, logging.INFO)
+    assert any("already matches the trusted store" in m for m in info), info
+    assert not any("drift-healed" in m for m in info)
+    assert not _messages(caplog, logging.WARNING) and not _messages(caplog, logging.ERROR)
 
 
 def test_startup_dispatches_only_kinds_the_sudoers_template_grants():

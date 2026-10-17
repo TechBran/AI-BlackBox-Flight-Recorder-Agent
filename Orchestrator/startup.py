@@ -474,7 +474,12 @@ def _drift_heal_from_store(kind: str, deployed: str, log_tag: str) -> None:
             ["sudo", "-n", helper, kind],
             capture_output=True, text=True, timeout=10,
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and "already current" in (result.stdout or ""):
+            # The helper (root) compared it for us: a root-only 0440 file the
+            # service cannot read is still verified, with nothing written.
+            logger.info("[%s] %s already matches the trusted store (checked by %s)",
+                        log_tag, deployed, os.path.basename(helper))
+        elif result.returncode == 0:
             logger.info("[%s] drift-healed %s from the trusted store",
                         log_tag, deployed)
         elif result.returncode == 6:

@@ -197,6 +197,26 @@ if [[ "$KIND" == "sudoers" ]]; then
     fi
 fi
 
+# Mode per kind: sudoers 0440, sbin dispatch helpers 0755 (executable — the
+# same perimeter as install.sh installs them with), systemd + plain files 0644.
+case "$KIND" in
+    sudoers) WANT_MODE=440 ;;
+    sbin)    WANT_MODE=755 ;;
+    *)       WANT_MODE=644 ;;
+esac
+
+# Already current: same bytes, mode and (in production) root ownership as the
+# store would write. Report it and write nothing. The service's own drift-heal
+# relies on this: it cannot read the root-only 0440 sudoers file to compare,
+# and inside its ProtectSystem=strict namespace /etc is read-only, so without
+# this check every boot logged a failed write for a file that was already right.
+if [[ -f "$DEST" ]] && cmp -s "$STORE_FILE" "$DEST" \
+        && [[ "$(stat -c %a "$DEST")" == "$WANT_MODE" ]] \
+        && { [[ -n "${BLACKBOX_WRITE_SYSTEMD_DEST_ROOT:-}" ]] || [[ "$(stat -c %u:%g "$DEST")" == "0:0" ]]; }; then
+    echo "[blackbox-write-systemd] $DEST already current (matches $STORE_FILE)"
+    exit 0
+fi
+
 # Ensure dest dir exists (the .d/ dir may not exist on a fresh install).
 mkdir -p "$(dirname "$DEST")"
 
@@ -210,13 +230,7 @@ if [[ -z "${BLACKBOX_WRITE_SYSTEMD_DEST_ROOT:-}" ]]; then
     chown root:root "$TMPDEST"
 fi
 
-# Mode per kind: sudoers 0440, sbin dispatch helpers 0755 (executable — the
-# same perimeter as install.sh installs them with), systemd + plain files 0644.
-case "$KIND" in
-    sudoers) chmod 0440 "$TMPDEST" ;;
-    sbin)    chmod 0755 "$TMPDEST" ;;
-    *)       chmod 0644 "$TMPDEST" ;;
-esac
+chmod "0$WANT_MODE" "$TMPDEST"
 
 mv "$TMPDEST" "$DEST"
 echo "[blackbox-write-systemd] Wrote $DEST (from $STORE_FILE)"
