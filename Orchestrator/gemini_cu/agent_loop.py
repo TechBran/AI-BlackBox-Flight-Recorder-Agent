@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, List, AsyncGenerator
 from google import genai
 from google.genai import types
 
+from Orchestrator import provider_billing
 from Orchestrator.browser.actions import ActionExecutor, COORD_SPACE_GEMINI
 from Orchestrator.browser.session_manager import fold_event_to_reasoning
 
@@ -637,9 +638,13 @@ async def run_gemini_cu_loop(
             print(f"[GEMINI CU] Step {step}: API response received, candidates={len(response.candidates) if response.candidates else 0}")
         except Exception as e:
             print(f"[GEMINI CU] Step {step}: API ERROR: {e}")
-            yield {"type": "error", "data": {"message": f"Gemini API error: {e}"}}
+            # W09: a prepay/billing refusal says so (credits_exhausted).
+            billing = provider_billing.check_exception("google", e, surface="computer use")
+            yield (billing.event(wrap=True) if billing else
+                   {"type": "error", "data": {"message": f"Gemini API error: {e}"}})
             session.status = "error"
             return
+        provider_billing.note_ok("google")
 
         # Track tokens
         if hasattr(response, "usage_metadata") and response.usage_metadata:

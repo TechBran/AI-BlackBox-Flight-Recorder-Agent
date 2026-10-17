@@ -70,6 +70,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from Orchestrator.checkpoint import app
 from Orchestrator import config
+from Orchestrator import provider_billing
 from Orchestrator.elevenlabs.client import (
     resolve_api_key, WS_BASE_URL, auth_headers, map_error, classify_realtime_frame,
 )
@@ -209,6 +210,22 @@ async def run_stt_bridge(websocket: WebSocket, provider: str, start: dict):
 # OpenAI realtime transcription bridge (websockets lib, no gRPC)
 # =============================================================================
 
+def _openai_stt_error(event: dict) -> dict:
+    """The stt_error frame for an OpenAI realtime error event.
+
+    W09: insufficient_quota arrives here as a realtime error event (journald,
+    2026-07-29); it is classified (credits_exhausted, reported + pushed) and the
+    frame carries the remedy plus an additive ``error_kind``. Any other error
+    keeps the provider's message. Pure apart from the report, so it is
+    unit-testable without a socket.
+    """
+    billing = provider_billing.check("openai", None, event, surface="speech-to-text")
+    if billing is not None:
+        return {"type": "stt_error", "message": billing.text, "error_kind": billing.kind}
+    detail = (event.get("error") or {}).get("message") or json.dumps(event)[:300]
+    return {"type": "stt_error", "message": f"OpenAI: {detail}"}
+
+
 async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     """Bridge client PCM -> OpenAI realtime transcription -> client deltas/finals."""
     api_key = (config.OPENAI_API_KEY or "").strip()
@@ -287,10 +304,9 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                 # Surface OpenAI error events (e.g. rejected session config / bad
                 # model) instead of silently swallowing them as "unmapped".
                 if "error" in etype:
-                    detail = (event.get("error") or {}).get("message") or json.dumps(event)[:300]
                     print(f"[STT/WS] openai ERROR event: {json.dumps(event)[:500]}")
                     try:
-                        await websocket.send_json({"type": "stt_error", "message": f"OpenAI: {detail}"})
+                        await websocket.send_json(_openai_stt_error(event))
                     except Exception:
                         pass
                     continue

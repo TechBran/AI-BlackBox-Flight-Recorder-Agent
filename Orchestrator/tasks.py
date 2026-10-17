@@ -48,6 +48,7 @@ from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator import tool_outcomes
+from Orchestrator import provider_billing
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.secret_redaction import redact, response_error
 from Orchestrator.utils.paths import AUDIO_EXTS, IMAGE_EXTS, INLINE_MAX_BYTES, UploadPathError, resolve_upload_path
@@ -1838,6 +1839,9 @@ def process_browser_use(task: Task):
                     **(task.result_data or {}),
                     "screenshots": result.get("screenshots", []),
                     "steps": result.get("steps", 0),
+                    # W09: credits_exhausted (+ provider/reason) when the CU
+                    # provider refused for billing; absent otherwise.
+                    **{k: v for k, v in result.items() if k.startswith("error_")},
                 },
                 progress=0,
             )
@@ -1949,6 +1953,14 @@ def process_cli_agent(task: Task):
         msg = f"CLI agent {provider} failed ({err})"
         if snippet:
             msg = f"{msg}: {snippet}"
+        # W09: the CLI ran on its OWN login (API keys are stripped), so a
+        # billing refusal here is that account's, scope "cli": its own hourly
+        # push, never the box key's preflight flag. Only a FAILED run's tail
+        # is classified: a successful agent may well print the phrase.
+        billing = provider_billing.check(provider, None, snippet, scope="cli",
+                                         surface=f"CLI agent ({provider})")
+        if billing:
+            msg = f"CLI agent {provider} failed ({err}): {billing.text}"
         update_task(
             task.task_id,
             status=TaskStatus.FAILED,
@@ -1956,7 +1968,8 @@ def process_cli_agent(task: Task):
             result_data={**task_rd,
                          "tail": tail[:headless.TAIL_MAX_CHARS],
                          "exit_code": result.get("exit_code"),
-                         "timed_out": result.get("timed_out", False)},
+                         "timed_out": result.get("timed_out", False),
+                         **(billing.record_fields() if billing else {})},
             progress=0,
         )
         print(f"[WORKER] CLI-agent task {task.task_id} failed: {err}")
@@ -2733,11 +2746,19 @@ def process_chat_task(task: Task):
         error_msg = str(e)
         trace = traceback.format_exc()
         print(f"[WORKER] Chat task {task.task_id} failed: {error_msg}\n{trace}")
+        failure = {"error": error_msg, "trace": trace}
+        # W09: a provider billing refusal (call_* raised CreditsExhaustedError,
+        # already reported + pushed) records its kind, so cron run records,
+        # SMS and the Portal can tell it from a crash.
+        billing = provider_billing.billing_of(e)
+        if billing:
+            error_msg = billing.text
+            failure.update(error=error_msg, **billing.record_fields())
 
         update_task(task.task_id,
                    status=TaskStatus.FAILED,
                    error_message=error_msg,
-                   result_data={"error": error_msg, "trace": trace},
+                   result_data=failure,
                    progress=0)
     finally:
         tool_outcomes.end()

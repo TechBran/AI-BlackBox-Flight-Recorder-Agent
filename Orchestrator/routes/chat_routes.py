@@ -53,6 +53,7 @@ from Orchestrator.telemetry_events import build_retrieval_activity
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.secret_redaction import error_message_from_body, redact, response_error
+from Orchestrator import provider_billing
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
 from Orchestrator.browser.dispatch import resolve_backend
 from Orchestrator.onboarding import custom_servers
@@ -502,7 +503,9 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                 payload["reasoning_effort"] = "none"
                 print("[OPENAI] 400 mentions reasoning_effort — retrying once with reasoning_effort='none'")
                 continue
+            provider_billing.raise_if_exhausted("openai", r.status_code, r.text, surface="chat")
             raise HTTPException(r.status_code, r.text)
+        provider_billing.note_ok("openai")
 
         data = r.json()
         message = data["choices"][0]["message"]
@@ -749,7 +752,9 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
     for iteration in range(max_tool_calls):
         r = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=200)
         if r.status_code != 200:
+            provider_billing.raise_if_exhausted("anthropic", r.status_code, r.text, surface="chat")
             raise HTTPException(r.status_code, r.text)
+        provider_billing.note_ok("anthropic")
 
         data = r.json()
         blocks = data.get("content", [])
@@ -1402,8 +1407,10 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
         r = requests.post(url, headers={"x-goog-api-key": GOOGLE_API_KEY}, json=payload, timeout=200)
 
         if r.status_code != 200:
+            provider_billing.raise_if_exhausted("google", r.status_code, r.text, surface="chat")
             status, message = response_error(r)
             raise HTTPException(status, f"Gemini API error: {message}")
+        provider_billing.note_ok("google")
         data = r.json()
 
         if not data.get("candidates"):
@@ -1949,7 +1956,9 @@ def call_xai(messages: List[Dict], model: str, operator: str):
     for iteration in range(max_tool_calls):
         r = requests.post(XAI_URL, headers=headers, json=payload, timeout=200)
         if r.status_code != 200:
+            provider_billing.raise_if_exhausted("xai", r.status_code, r.text, surface="chat")
             raise HTTPException(r.status_code, r.text)
+        provider_billing.note_ok("xai")
 
         data = r.json()
         message = data["choices"][0]["message"]
@@ -2423,8 +2432,13 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                             print("[OPENAI] 400 mentions reasoning_effort — retrying once with reasoning_effort='none'")
                             continue
                         print(f"[OPENAI] API Error: {error_msg}")
+                        billing = provider_billing.check("openai", response.status_code, error_msg, surface="chat")
+                        if billing:
+                            yield billing.event()
+                            return
                         yield {"type": "error", "data": f"OpenAI API error ({response.status_code}): {error_msg}"}
                         return
+                    provider_billing.note_ok("openai")
 
                     reasoning_buffer = ""
                     content_buffer = ""
@@ -3180,8 +3194,13 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                 async with client.stream("POST", ANTHROPIC_URL, headers=headers, json=payload) as response:
                     if response.status_code != 200:
                         error_text = await response.aread()
+                        billing = provider_billing.check("anthropic", response.status_code, error_text, surface="chat")
+                        if billing:
+                            yield billing.event()
+                            return
                         yield {"type": "error", "data": f"Anthropic API error: {error_text.decode()}"}
                         return
+                    provider_billing.note_ok("anthropic")
 
                     thinking_buffer = ""
                     content_buffer = ""
@@ -5247,11 +5266,14 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                         error_text = await response.aread()
                         error_msg = redact(error_message_from_body(error_text) or "no error message")[:500]
                         print(f"[GEMINI-STREAM] API error {response.status_code} (iter {iteration}): {error_msg}", flush=True)
-                        yield {"type": "error", "data": f"Gemini API error ({response.status_code}): {error_msg}"}
+                        billing = provider_billing.check("google", response.status_code, error_text, surface="chat")
+                        yield (billing.event() if billing else
+                               {"type": "error", "data": f"Gemini API error ({response.status_code}): {error_msg}"})
                         # If we have content from previous iterations, still yield done
                         if content_buffer or thinking_buffer:
                             yield {"type": "done", "data": {"thinking": thinking_buffer, "content": content_buffer}}
                         return
+                    provider_billing.note_ok("google")
 
                     response_parts = []
                     function_calls = []
@@ -5935,8 +5957,13 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                         error_text = await response.aread()
                         error_msg = error_text.decode()
                         print(f"[XAI] API Error: {error_msg}")
+                        billing = provider_billing.check("xai", response.status_code, error_msg, surface="chat")
+                        if billing:
+                            yield billing.event()
+                            return
                         yield {"type": "error", "data": f"xAI API error ({response.status_code}): {error_msg}"}
                         return
+                    provider_billing.note_ok("xai")
 
                     reasoning_buffer = ""
                     content_buffer = ""
@@ -7398,6 +7425,22 @@ def _context_error_frames(route_tag: str, exc: Exception):
     ]
 
 
+def _error_detail_frame(event: dict) -> str:
+    """The structured twin of an error event, as an ``error_detail`` SSE frame.
+
+    W09: a classified provider failure (credits_exhausted) carries
+    ``error_detail`` {kind, provider, reason, message} beside its plain-string
+    data. The frame goes right BEFORE the ``error`` frame so a client can key
+    on the kind; clients that don't know the event ignore it (Portal's switch
+    has no default, Android logs unknown events), and the ``error`` frame
+    itself is unchanged. "" when the event carries no detail.
+    """
+    detail = event.get("error_detail")
+    if not isinstance(detail, dict):
+        return ""
+    return f"event: error_detail\ndata: {json.dumps(detail)}\n\n"
+
+
 # There is no GET /chat/stream (audit M3 U20): it ran a whole tool-executing
 # turn from query parameters, so a cross-site <img src=...> could start one.
 # Every client (Portal, Android, cron) POSTs.
@@ -7526,6 +7569,11 @@ async def chat_stream_post(request: Request):
                     # Every provider's error text funnels here: mask secrets
                     # (exception text can embed a request URL) before the client.
                     event_data = redact(event_data)
+                    # W09: a classified failure (credits_exhausted) also gets its
+                    # structured error_detail frame, right before the error frame.
+                    detail_frame = _error_detail_frame(event)
+                    if detail_frame:
+                        yield detail_frame
 
                 # Debug logging for image_task events
                 if event_type == "image_task":

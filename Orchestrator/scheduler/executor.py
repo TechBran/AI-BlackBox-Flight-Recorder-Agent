@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 # function of the model string + CU_MODEL_FILTERS, shared with the CU dispatch
 # path. Imported into this namespace so _execute_cu_job's call site stays local.
 from Orchestrator.browser.dispatch import resolve_cu_model
+from Orchestrator.provider_billing import CREDITS_EXHAUSTED
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,21 @@ class CronToolFailure(RuntimeError):
     @property
     def delivery_status(self) -> str:
         return "partial" if self.partial else "error"
+
+
+class CronCreditsExhausted(RuntimeError):
+    """The provider refused the job's turn for billing (W09).
+
+    The message starts with ``credits_exhausted:`` so the run record (the
+    history ``error`` column) and the cron failure alert name the kind, and
+    ``error_kind`` carries it for code. The box-wide billing push was already
+    sent (at most one per provider per hour) where the refusal was classified.
+    """
+
+    error_kind = CREDITS_EXHAUSTED
+
+    def __init__(self, message: str):
+        super().__init__(f"{CREDITS_EXHAUSTED}: {message}")
 
 
 def _summarize_tool_failures(failures: list) -> str:
@@ -280,6 +296,7 @@ async def _execute_cu_job(
 
     result_text = ""
     error_text = ""
+    error_kind = None
     event_type = None
 
     cu_lock = _get_cu_lock()
@@ -324,6 +341,10 @@ async def _execute_cu_job(
                                 logger.info("[CU-CRON] Done event for '%s'", job_name)
                                 break
 
+                            elif event_type == "error_detail":
+                                if isinstance(data, dict):
+                                    error_kind = data.get("kind")
+
                             elif event_type == "error":
                                 error_text = data if isinstance(data, str) else str(data)
                                 logger.error("[CU-CRON] Error for '%s': %s", job_name, error_text)
@@ -342,6 +363,8 @@ async def _execute_cu_job(
             raise RuntimeError(f"CU job '{job_name}' timed out after {_CU_STREAM_TIMEOUT}s")
 
     if error_text and not result_text:
+        if error_kind == CREDITS_EXHAUSTED:
+            raise CronCreditsExhausted(f"CU job '{job_name}' failed: {error_text}")
         raise RuntimeError(f"CU job '{job_name}' failed: {error_text}")
 
     return result_text or "(CU job completed with no response text)"
@@ -459,6 +482,10 @@ async def _poll_task_until_done(task_id: str, job_name: str) -> str:
                 error_msg = data.get("error_message") or ""
                 result_data = data.get("result_data") or {}
                 detail = error_msg or result_data.get("error", "Unknown error")
+                if result_data.get("error_kind") == CREDITS_EXHAUSTED:
+                    raise CronCreditsExhausted(
+                        f"Chat task {task_id} failed for job '{job_name}': {detail}"
+                    )
                 raise RuntimeError(
                     f"Chat task {task_id} failed for job '{job_name}': {detail}"
                 )

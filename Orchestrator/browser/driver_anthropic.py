@@ -8,6 +8,7 @@ instead of yielding, so the loop survives client disconnection.
 import asyncio
 import json
 
+from Orchestrator import provider_billing
 from Orchestrator.browser.config import (
     COMPUTER_TOOLSET_NAME, DISPLAY_WIDTH, DISPLAY_HEIGHT,
     anthropic_cu_tool, anthropic_cu_uses_toolset,
@@ -129,6 +130,18 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
         except asyncio.QueueFull:
             pass  # drop event if queue full (consumer gone for too long)
 
+    async def _stopped_for_billing(status, body) -> bool:
+        """W09: a billing refusal ends the run with ONE classified error.
+        Never retried: credits don't come back in seconds, and the tier
+        spend-cap 429 has no retry-after (the 429 branch would sleep 30 s x3)."""
+        billing = provider_billing.check("anthropic", status, body, surface="computer use")
+        if billing is None:
+            return False
+        await emit(billing.event())
+        session.status = "error"
+        session.error_message = billing.text
+        return True
+
     result_text = ""
     try:
         session.status = "running"
@@ -197,6 +210,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     async with httpx.AsyncClient(timeout=300) as client:
                         async with client.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=payload) as response:
                             if response.status_code == 200:
+                                provider_billing.note_ok("anthropic")
                                 async for line in response.aiter_lines():
                                     if not line or not line.startswith("data: "):
                                         continue
@@ -319,6 +333,8 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                                 api_success = True
                                 break  # Success — exit retry loop
                             elif response.status_code == 429:
+                                if await _stopped_for_billing(429, await response.aread()):
+                                    return
                                 retry_after = int(response.headers.get("retry-after", 30))
                                 wait = min(retry_after, 60)
                                 print(f"[CU-BG] Rate limited (429), waiting {wait}s (attempt {attempt+1}/{max_retries})")
@@ -334,6 +350,8 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                             else:
                                 # 4xx client error — don't retry
                                 error_text = await response.aread()
+                                if await _stopped_for_billing(response.status_code, error_text):
+                                    return
                                 error_msg = error_text.decode()[:500]
                                 print(f"[CU-BG] API error {response.status_code}: {error_msg}")
                                 await emit({"type": "error", "data": f"API error {response.status_code}: {error_msg}"})

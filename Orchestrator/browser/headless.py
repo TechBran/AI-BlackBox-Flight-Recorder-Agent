@@ -192,6 +192,7 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
     result_text = ""
     content_accumulated = ""
     error_msg = None
+    error_fields = {}    # W09: error_kind/provider/reason of a classified failure
     stopped_reason = None
     done_seen = False
     tokens = {"input": 0, "output": 0}
@@ -355,6 +356,11 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
                     error_msg = data.get("message") or str(data)
                 else:
                     error_msg = data if isinstance(data, str) else str(data)
+                detail = event.get("error_detail")
+                error_fields = ({"error_kind": detail["kind"],
+                                 "error_provider": detail.get("provider"),
+                                 "error_reason": detail.get("reason")}
+                                if isinstance(detail, dict) and detail.get("kind") else {})
             elif etype == "cu_stopped":
                 stopped_reason = (data or {}).get("reason", "stopped")
                 _flush_reasoning()  # keep the pre-stop narration in the transcript
@@ -384,10 +390,12 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
 
     final_screenshot = screenshots[-1] if screenshots else None
     if error_msg:
+        # error_fields is additive: only a classified failure adds keys, so the
+        # golden contract dict is unchanged for every other error.
         return {
             "success": False, "result_text": error_msg,
             "screenshots": screenshots, "final_screenshot": final_screenshot,
-            "steps": session.current_step, "tokens": tokens,
+            "steps": session.current_step, "tokens": tokens, **error_fields,
         }
     if stopped_reason:
         # E-stop: a stopped task is FAILED, not a success.

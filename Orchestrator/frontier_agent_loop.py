@@ -40,7 +40,8 @@ Every hop carries the device's pairing secret (``device_headers`` — the caller
 with ``Orchestrator.device_registry.pairing``); the phone answers 401 without it.
 
 Structured error kinds surfaced to the caller (data.error_kind): no_device / lost_contact /
-timeout / model_error / config_error / max_steps / invalid_argument / not_paired (the device
+timeout / model_error / credits_exhausted (the provider refused for billing — W09) /
+config_error / max_steps / invalid_argument / not_paired (the device
 refused this box's pairing secret — never retried), plus the TERMINAL device states the loop
 short-circuits on instead of burning model calls (F2): stopped (the user hit STOP on the
 device) and accessibility_off (the device's accessibility service is disabled).
@@ -56,6 +57,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
+from Orchestrator import provider_billing
 from Orchestrator.device_registry import pairing
 from Orchestrator.frontier_grounding import (
     CoordinateAdapter,
@@ -666,6 +668,11 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
                     False, f"The model did not respond within {int(_per_turn_secs())}s (step {steps}).",
                     error_kind="timeout", device=base_url, steps=steps)
             except Exception as e:
+                # W09: the provider refused for billing — say so, with the remedy.
+                billing = provider_billing.check_exception(provider, e, surface="device control")
+                if billing:
+                    return FrontierResult(False, billing.text, error_kind=billing.kind,
+                                          device=base_url, steps=steps)
                 return FrontierResult(False, f"The model call failed (step {steps}): {_clip(e)}",
                                       error_kind="model_error", device=base_url, steps=steps)
 

@@ -6,6 +6,7 @@ only warn, never fail — remote devices are optional.
 """
 import os
 import shutil
+import time
 
 from Orchestrator.config import ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY
 from Orchestrator.browser.config import (
@@ -94,6 +95,35 @@ def check_api_keys() -> dict:
     return _check("api_keys", "ok", "All three CU backend keys present")
 
 
+def check_billing() -> dict:
+    """W09: a keyed CU backend whose LAST provider call was refused for billing.
+
+    Reads the outcome provider_billing recorded (chat, CU, cron, STT all record
+    into it); spends no tokens and makes no provider call. A later successful
+    call to that provider clears it. Every keyed backend refused -> fail (no CU
+    model can run); some -> warn (the selector still has a working backend).
+    """
+    from Orchestrator import provider_billing
+
+    keyed = [p for p, key in (("anthropic", ANTHROPIC_API_KEY), ("google", GOOGLE_API_KEY),
+                              ("openai", OPENAI_API_KEY)) if key]
+    refused = {p: f for p in keyed if (f := provider_billing.last_failure(p))}
+    if not refused:
+        return _check("billing", "ok", "No billing refusals recorded for the CU backends")
+    now = time.time()
+    parts = []
+    for f in refused.values():
+        mins = max(0, int((now - float(f.get("ts") or now)) // 60))
+        parts.append(f"{f.get('message')} (last refused {mins} min ago, on {f.get('surface')})")
+    check = _check(
+        "billing", "fail" if len(refused) == len(keyed) else "warn", "; ".join(parts),
+        "Fix it in the provider's console as named above, then run the task again: "
+        "the warning clears on the next successful call")
+    check["kind"] = provider_billing.CREDITS_EXHAUSTED
+    check["providers"] = sorted(refused)
+    return check
+
+
 def check_chrome() -> dict:
     if os.path.isfile(CHROME_PATH):
         return _check("chrome", "ok", f"Chrome at {CHROME_PATH}")
@@ -155,6 +185,7 @@ def run_preflight(skip_screenshot: bool = False) -> dict:
         # force=False on the cheap path — avoids a second expensive Portal capture
         ("resolution", lambda: check_resolution(force=not skip_screenshot)),
         ("api_keys", lambda: check_api_keys()),
+        ("billing", lambda: check_billing()),
         ("chrome", lambda: check_chrome()),
         ("virtual_display", lambda: check_virtual_display()),
         ("live_view", lambda: check_live_view()),

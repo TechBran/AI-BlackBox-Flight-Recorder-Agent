@@ -43,6 +43,7 @@ from typing import AsyncGenerator, Optional
 
 from openai import AsyncOpenAI
 
+from Orchestrator import provider_billing
 from Orchestrator.browser.screenshot import (
     resize_screenshot, screenshot_to_base64,
     save_screenshot_to_uploads,
@@ -460,6 +461,12 @@ async def run_openai_cu_loop(
             if response is None:
                 print(f"[OPENAI CU] Step {step}: API ERROR: {e}")
                 _restore_turn_start_id()  # abnormal exit (C1)
+                # W09: an insufficient_quota / spend-limit refusal says so.
+                billing = provider_billing.check_exception("openai", e, surface="computer use")
+                if billing:
+                    yield billing.event(wrap=True)
+                    session.status = "error"
+                    return
                 msg = f"OpenAI API error: {e}"
                 # model_not_found = the ORG lacks access to this model id
                 # (e.g. the deprecated, tier-gated computer-use-preview, or a
@@ -476,6 +483,7 @@ async def run_openai_cu_loop(
                 session.status = "error"
                 return
 
+        provider_billing.note_ok("openai")
         previous_response_id = response.id
         session.openai_previous_response_id = response.id
 

@@ -61,8 +61,8 @@ def _canned(id_, status):
 
 
 _CHECK_NAMES = ["check_display", "check_input_backend", "check_resolution",
-                "check_api_keys", "check_chrome", "check_virtual_display",
-                "check_live_view", "check_remote_tools"]
+                "check_api_keys", "check_billing", "check_chrome",
+                "check_virtual_display", "check_live_view", "check_remote_tools"]
 
 
 def test_aggregation_precedence(monkeypatch):
@@ -73,13 +73,16 @@ def test_aggregation_precedence(monkeypatch):
                 preflight, name,
                 lambda *a, _n=name, _s=status, **kw: _canned(_n, _s))
 
-    set_all(["ok"] * 8)
+    set_all(["ok"] * 9)
     assert preflight.run_preflight(skip_screenshot=True)["status"] == "ok"
 
-    set_all(["ok", "warn", "ok", "ok", "ok", "ok", "ok", "ok"])
+    set_all(["ok", "warn", "ok", "ok", "ok", "ok", "ok", "ok", "ok"])
     assert preflight.run_preflight(skip_screenshot=True)["status"] == "warn"
 
-    set_all(["ok", "warn", "ok", "fail", "ok", "ok", "ok", "warn"])
+    set_all(["ok", "warn", "ok", "fail", "ok", "ok", "ok", "ok", "warn"])
+    assert preflight.run_preflight(skip_screenshot=True)["status"] == "fail"
+
+    set_all(["ok", "ok", "ok", "ok", "fail", "ok", "ok", "ok", "ok"])   # billing (W09)
     assert preflight.run_preflight(skip_screenshot=True)["status"] == "fail"
 
 
