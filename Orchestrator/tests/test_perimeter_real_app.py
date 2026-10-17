@@ -180,7 +180,8 @@ def test_tailnet_host_without_origin_ok(client):
 def test_rebinding_host_refused(client):
     r = client.get("/agent/apps", headers={"host": "attacker.example"})
     assert r.status_code == 400
-    assert r.json() == {"detail": REFUSED_HOST}
+    assert r.json()["detail"] == REFUSED_HOST
+    assert "extra_allowed_hosts" in r.json()["hint"]
 
 
 def test_user_app_origin_allowed_with_cors(client):

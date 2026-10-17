@@ -98,6 +98,7 @@ def _get(client, path="/agent/apps", host=f"{LAN}:9091", origin=None, **extra):
     "localhost:9091", "127.0.0.1:9091", "[::1]:9091", f"{LAN}:9091",
     "[fd7a:115c:a1e0::1]", "testserver", "blackbox-mini",
     "box.local", "box.localhost", "box.lan", "box.home.arpa", "box.internal",
+    "box.home", "box.fios-router.home", "box.localdomain", "box.corp",   # router DHCP domains
     TAILNET, "BOX.Tail1234.TS.NET.", f"{TAILNET}:8443",
     "blackbox.example.com",          # [security] extra_allowed_hosts
     "box.corp.example:9091",         # the box's own FQDN
@@ -111,14 +112,25 @@ def test_local_and_configured_hosts_pass(client, rec, host):
 @pytest.mark.parametrize("host", [
     "attacker.example", "attacker.example:9091", "evil.com.",
     "ts.net.evil.com", "localhost.evil.com", "box.local.evil.com",
+    "box.home.evil.com", "localdomain.evil.com", "corp.evil.com",
 ])
 def test_rebinding_hosts_refused_400(client, rec, host):
     """DNS rebinding: the attacker's name resolves to the box, so the page is
     same-origin with itself and sends NO Origin — only the Host tells."""
     r = _get(client, host=host)
     assert r.status_code == 400
-    assert r.json() == {"detail": REFUSED_HOST}
+    assert r.json()["detail"] == REFUSED_HOST
     assert rec.calls == []
+
+
+def test_refused_host_points_the_operator_at_the_escape_hatch(client, caplog):
+    """A box bookmarked by an unusual local name must be fixable from the
+    error alone: the body and the log both name [security] extra_allowed_hosts."""
+    caplog.set_level(logging.WARNING, logger="Orchestrator.security.origin_guard")
+    r = _get(client, host="box.mynet.example:9091")
+    assert "extra_allowed_hosts" in r.json()["hint"]
+    lines = [rec.getMessage() for rec in caplog.records if "[ORIGIN-GUARD]" in rec.getMessage()]
+    assert any("box.mynet.example" in m and "extra_allowed_hosts" in m for m in lines), lines
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -271,9 +283,12 @@ def test_duplicate_origin_headers_refused(client, rec):
 
 def test_null_origin_allowed_only_on_registered_user_app_proxy(client, rec):
     """#appPreviewFrame drops allow-same-origin (P07-html-css-13), so a user
-    app's own fetches to /app-proxy/<its port>/ arrive with Origin: null.
-    Those reach only the proxied app — never the API, never zellij."""
-    r = _get(client, path="/app-proxy/8065/api/items", origin="null")
+    app's own fetches to /app-proxy/<its port>/ arrive with Origin: null —
+    and, in Chrome, with NO Referer and Sec-Fetch-Site: cross-site, so they
+    look exactly like a foreign sandboxed frame's. Those reach only the
+    proxied app — never the API, never zellij."""
+    r = _get(client, path="/app-proxy/8065/api/items", origin="null",
+             **{"sec-fetch-site": "cross-site", "sec-fetch-mode": "cors"})
     assert r.status_code == 200
     # The upstream app owns CORS on its own proxied paths: the guard must not
     # stack a second Access-Control-Allow-Origin on top of the app's.
@@ -360,6 +375,29 @@ def test_refusals_logged_once_per_origin_and_prefix(client, caplog):
     lines = [r.getMessage() for r in caplog.records if "[ORIGIN-GUARD]" in r.getMessage()]
     assert len(lines) == 2, lines
     assert "https://evil.example" in lines[0] and "/chat" in lines[0]
+
+
+# --------------------------------------------------- config entry parsing
+
+def test_url_valued_config_origins_reduced_to_their_origin():
+    """[pairing] default_origin is a URL (https://<ts>/ui/); an operator may
+    paste one into extra_allowed_origins too. Keep the origin, drop the path."""
+    p = _policy(extra_origins=["https://blackbox.example.com/ui/", "http://dev.example:5173/x?y#z",
+                               "https://plain.example"])
+    assert p.extra_origins == {"https://blackbox.example.com", "http://dev.example:5173",
+                               "https://plain.example"}
+
+
+def test_unusable_config_entries_warned_not_silently_dropped(caplog):
+    caplog.set_level(logging.WARNING, logger="Orchestrator.security.origin_guard")
+    p = _policy(extra_hosts=["*.example.com", "ok.example.com", "bad host"],
+                extra_origins=["not an origin", "https://*.example.com", "https://ok.example"])
+    assert p.extra_hosts == {"ok.example.com"}
+    assert p.extra_origins == {"https://ok.example"}
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    for bad in ("*.example.com", "bad host", "not an origin", "https://*.example.com"):
+        assert bad in text, (bad, text)
+    assert "ok.example" not in text
 
 
 def test_registered_ports_read_live(rec):

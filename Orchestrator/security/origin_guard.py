@@ -18,8 +18,9 @@ never sees sockets) closes both:
 * Host (anti-rebinding): only names an attacker cannot register publicly pass
   — IP literals, single-label names (localhost, the box hostname, MagicDNS
   short names, TestClient's "testserver"), .local / .localhost / .lan /
-  .home.arpa / .internal, any *.ts.net name, the box's own FQDN, and the
-  configured extras. Anything else: 400 (http) / close 1008 (websocket).
+  .home.arpa / .internal / .home / .localdomain / .corp, any *.ts.net name,
+  the box's own FQDN, and the configured extras. Anything else: 400 (http) /
+  close 1008 (websocket).
 * Origin: absent -> allowed (Android OkHttp, MCP, cron, curl, Twilio: native
   clients never send one). Same-origin with the request's Host -> allowed.
   A short list of cross-origin-but-trusted origins (user apps and zellij on
@@ -28,7 +29,13 @@ never sees sockets) closes both:
   including `Origin: null` and every other *.ts.net site (Funnel sites are
   public and attacker-controllable) -> 403 JSON / close 1008 BEFORE accept.
   One carve-out: `Origin: null` may reach /app-proxy/<registered user app>/
-  — the sandboxed #appPreviewFrame's own fetches to its own app.
+  — the sandboxed #appPreviewFrame's own fetches to its own app. It cannot
+  be narrowed further: a sandboxed document sends no Referer at all (even
+  under Referrer-Policy: unsafe-url) and Sec-Fetch-Site: cross-site for its
+  own requests (verified in Chrome 155), exactly like a foreign page's
+  sandboxed srcdoc or data: frame. So any page can reach a registered user
+  app through the proxy, much as it can on the app's own port — never the
+  API, never zellij.
 
 No login, sessions or keys: the perimeter is still Tailscale + LAN.
 """
@@ -58,10 +65,15 @@ LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # Name suffixes nobody can register as a public domain, so a rebinding page
 # can never present one as its Host: mDNS (.local), RFC 6761 .localhost,
-# RFC 8375 .home.arpa, ICANN-reserved .internal, the common router .lan, and
-# Tailscale MagicDNS .ts.net (tailnet names are issued by Tailscale, never by
-# an attacker's DNS).
-LOCAL_NAME_SUFFIXES = (".local", ".localhost", ".lan", ".home.arpa", ".internal", ".ts.net")
+# RFC 8375 .home.arpa, ICANN-reserved .internal, the router DHCP domains
+# .lan / .localdomain (pfSense, UniFi) / .home (Fios) / .corp (.home and
+# .corp are ICANN name-collision TLDs, never to be delegated), and Tailscale
+# MagicDNS .ts.net (tailnet names are issued by Tailscale, never by an
+# attacker's DNS).
+LOCAL_NAME_SUFFIXES = (
+    ".local", ".localhost", ".lan", ".home.arpa", ".internal",
+    ".home", ".localdomain", ".corp", ".ts.net",
+)
 
 DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _WS_TO_HTTP = {"ws": "http", "wss": "https"}
@@ -73,6 +85,14 @@ CORS_MAX_AGE = "600"
 
 REFUSED_ORIGIN = "origin not allowed"
 REFUSED_HOST = "host not allowed"
+# The escape hatch, named in the 400 body and the refusal log so an operator
+# whose box answers to an unusual local name can fix it from the error alone.
+HOST_HINT = ("if this is a name of this BlackBox, add it to [security] "
+             "extra_allowed_hosts in config.ini and restart")
+ORIGIN_HINT = ("if this page is yours, add its origin to [security] "
+               "extra_allowed_origins in config.ini and restart")
+NULL_ORIGIN_HINT = ("Origin: null (a sandboxed frame, data: or file: page) is only "
+                    "allowed on /app-proxy/<registered app>/")
 
 # classify() verdicts
 SAME = "same"        # same-origin: pass, no CORS headers needed
@@ -161,12 +181,42 @@ def normalize_origin(value: str) -> Optional[str]:
 
 
 def _host_only(value: str) -> Optional[str]:
-    """Config entries may be 'name', 'name:port' or a URL — keep the host."""
+    """Config entries may be 'name', 'name:port' or a URL — keep the host.
+    Wildcards are not patterns: '*.example.com' is unusable (None)."""
     v = (value or "").strip()
     if "://" in v:
         v = v.split("://", 1)[1].split("/", 1)[0]
     parsed = split_host(v)
-    return parsed[0] if parsed else None
+    return parsed[0] if parsed and "*" not in parsed[0] else None
+
+
+def _origin_only(value: str) -> Optional[str]:
+    """Config entries may be an origin or a URL ([pairing] default_origin is
+    https://<ts>/ui/) — keep scheme://host[:port]."""
+    v = (value or "").strip()
+    scheme, sep, rest = v.partition("://")
+    if sep:
+        for cut in "/?#":
+            rest = rest.split(cut, 1)[0]
+        v = f"{scheme}://{rest}"
+    origin = normalize_origin(v)
+    return origin if origin and "*" not in origin else None
+
+
+def _usable(entries: Iterable[str], parse: Callable[[str], Optional[str]], key: str) -> frozenset:
+    """Parse config entries, warning about each one that cannot be used
+    instead of dropping it silently."""
+    kept = set()
+    for entry in entries:
+        value = parse(entry)
+        if value:
+            kept.add(value)
+        elif (entry or "").strip():
+            logger.warning(
+                "[ORIGIN-GUARD] ignoring [security] %s entry %r: not a usable %s "
+                "(wildcards are not supported; list each name)",
+                key, entry, "host" if key.endswith("hosts") else "origin")
+    return frozenset(kept)
 
 
 class OriginPolicy:
@@ -191,8 +241,8 @@ class OriginPolicy:
         self.orchestrator_port = int(orchestrator_port)
         self.zellij_port = int(zellij_port)
         self._registered = registered_app_ports
-        self.extra_hosts = frozenset(h for h in (_host_only(x) for x in extra_hosts) if h)
-        self.extra_origins = frozenset(o for o in (normalize_origin(x) for x in extra_origins) if o)
+        self.extra_hosts = _usable(extra_hosts, _host_only, "extra_allowed_hosts")
+        self.extra_origins = _usable(extra_origins, _origin_only, "extra_allowed_origins")
         if box_names is None:
             box_names = []
             for fn in (socket.gethostname, socket.getfqdn):
@@ -244,7 +294,8 @@ class OriginPolicy:
                  forwarded_proto: Optional[str] = None, path: str = "") -> str:
         if origin.strip().lower() == "null":
             # Opaque origin: sandboxed iframes, data: URLs, file: pages. Only
-            # the sandboxed app preview talking to its own proxied app.
+            # the sandboxed app preview talking to its own proxied app (see
+            # the module docstring for why nothing narrower is possible).
             return PASS if self.user_app_proxy_port(path) is not None else REFUSE
         parsed = parse_origin(origin)
         if parsed is None:
@@ -319,7 +370,7 @@ class OriginGuardMiddleware:
 
         if len(hosts) > 1 or (hosts and not self.policy.request_host_allowed(hosts[0])):
             self._note(kind, "host", hosts[0] if hosts else "", path)
-            await _refuse(kind, receive, send, 400, REFUSED_HOST)
+            await _refuse(kind, receive, send, 400, REFUSED_HOST, HOST_HINT)
             return
 
         if not origins:
@@ -360,8 +411,10 @@ class OriginGuardMiddleware:
             self._logged.add(key)
         logger.warning(
             "[ORIGIN-GUARD] refused %s %s=%r on %r (first of its kind; later "
-            "refusals for this %s under %r are not logged)",
-            kind, what, value[:200], path[:200], what, prefix[:64])
+            "refusals for this %s under %r are not logged; %s)",
+            kind, what, value[:200], path[:200], what, prefix[:64],
+            HOST_HINT if what == "host"
+            else NULL_ORIGIN_HINT if value.strip().lower() == "null" else ORIGIN_HINT)
 
 
 def _read_headers(scope):
@@ -384,14 +437,18 @@ def _read_headers(scope):
     return hosts, origins, forwarded_proto, preflight, request_headers
 
 
-async def _refuse(kind: str, receive, send, status: int, reason: str) -> None:
+async def _refuse(kind: str, receive, send, status: int, reason: str,
+                  hint: Optional[str] = None) -> None:
     if kind == "websocket":
         # ASGI order: take the client's connect event, then close BEFORE
         # accept — the server answers the upgrade with 403 and no route runs.
         await receive()
         await send({"type": "websocket.close", "code": 1008, "reason": reason})
         return
-    body = json.dumps({"detail": reason}).encode()
+    payload = {"detail": reason}
+    if hint:
+        payload["hint"] = hint
+    body = json.dumps(payload).encode()
     await send({"type": "http.response.start", "status": status, "headers": [
         (b"content-type", b"application/json"),
         (b"content-length", str(len(body)).encode()),
