@@ -69,11 +69,19 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _voiceGroups = MutableStateFlow(com.aiblackbox.portal.data.repository.TTS_VOICE_GROUPS)
     val voiceGroups: StateFlow<List<com.aiblackbox.portal.data.repository.VoiceGroup>> = _voiceGroups.asStateFlow()
 
+    // The box default voice from /tts/catalog `default` (null until loaded, offline,
+    // or from an older server): what an operator with no saved voice hears, so the
+    // picker shows it instead of a pinned id (VoicePicker.effectiveVoice).
+    private val _defaultVoiceId = MutableStateFlow<String?>(null)
+    val defaultVoiceId: StateFlow<String?> = _defaultVoiceId.asStateFlow()
+
     fun loadVoiceCatalog() {
         val api = api ?: return
         viewModelScope.launch {
             try {
-                _voiceGroups.value = com.aiblackbox.portal.data.repository.TtsRepository(api).fetchCatalog()
+                val catalog = com.aiblackbox.portal.data.repository.TtsRepository(api).fetchCatalogWithDefault()
+                _voiceGroups.value = catalog.groups
+                _defaultVoiceId.value = catalog.defaultVoiceId
             } catch (_: Exception) { /* keep the offline default already in _voiceGroups */ }
         }
     }
@@ -112,7 +120,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             try {
                 val repo = com.aiblackbox.portal.data.repository.TtsRepository(api)
                 val text = "Hello! This is a preview of the selected voice."
-                val cfg = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceId)
+                val cfg = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceId, _voiceGroups.value)
                 val operator = store.operator.first()
                 val url = when {
                     cfg.provider == "elevenlabs" ->

@@ -1510,11 +1510,12 @@ class OverlayService : Service() {
                     .readTimeout(60, TimeUnit.SECONDS)
                     .build()
 
-                // Use the /tts endpoint - returns raw audio data
+                // Use the /tts endpoint - returns raw audio data. No voice or
+                // model: the box speaks its default (GET /tts/catalog "default")
+                // with that provider's configured model, so the overlay works on
+                // a box without an OpenAI key instead of pinning onyx/tts-1-hd.
                 val requestBody = JSONObject().apply {
                     put("text", ttsText)
-                    put("voice", "onyx")  // Deep voice for AI responses
-                    put("model", "tts-1-hd")
                 }.toString().toRequestBody("application/json".toMediaType())
 
                 Log.d(TAG, "TTS request to: $serverUrl/tts")

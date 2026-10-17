@@ -8,6 +8,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -56,9 +57,9 @@ data class GeminiTtsResponse(
  * Matches Portal's parseVoiceValue() function.
  */
 data class VoiceConfig(
-    val provider: String,  // "openai" or "gemini-pro"
+    val provider: String,  // "openai" or "gemini-pro"; "" = nothing chosen (box default)
     val voice: String,     // e.g., "alloy", "Charon"
-    val model: String      // e.g., "tts-1-hd", "gemini-2.5-flash-tts"
+    val model: String      // e.g., "gemini-2.5-flash-tts"; "" = the server picks
 )
 
 class TtsRepository(private val api: BlackBoxApi) {
@@ -74,6 +75,9 @@ class TtsRepository(private val api: BlackBoxApi) {
         // SLOW_FIRST_BYTE_MS. Kept here so the two surfaces can never drift on
         // the provider sentinel or the threshold.
         const val ON_BOX_PROVIDER = "qwen"
+
+        /** Same lenient parser the repository instances use, for [parseCatalog]. */
+        private val CATALOG_JSON = Json { ignoreUnknownKeys = true; isLenient = true }
         const val SLOW_FIRST_BYTE_MS = 1500L
 
         /**
@@ -94,27 +98,71 @@ class TtsRepository(private val api: BlackBoxApi) {
          * Matches Portal parseVoiceValue().
          *
          * Examples:
-         *   "openai:alloy" → VoiceConfig("openai", "alloy", "tts-1-hd")
+         *   "openai:alloy" → VoiceConfig("openai", "alloy", "") (the box's [audio] model)
          *   "gemini-flash:Zephyr" → VoiceConfig("gemini-flash", "Zephyr", "gemini-2.5-flash-tts")
          *   "gemini-pro:Charon" → VoiceConfig("gemini-pro", "Charon", "gemini-2.5-pro-tts")
-         *   "onyx" → VoiceConfig("openai", "onyx", "tts-1-hd") (legacy fallback)
+         *   "onyx" → VoiceConfig("openai", "onyx", "") (legacy fallback)
+         *   "" → VoiceConfig("", "", "") (nothing chosen: the server speaks its default)
+         *
+         * No OpenAI/ElevenLabs/local/on-box model is sent: the server applies the
+         * one it is configured with (the old "tts-1-hd" pin overrode config.ini
+         * [audio]). Gemini still needs a model for /generate/gemini_tts: the
+         * matching [groups] entry's `model` from GET /tts/catalog when given, else
+         * the ids below as the offline fallback.
          */
-        fun parseVoice(voiceValue: String): VoiceConfig {
+        fun parseVoice(voiceValue: String, groups: List<VoiceGroup> = emptyList()): VoiceConfig {
+            if (voiceValue.isBlank()) return VoiceConfig("", "", "")
             val parts = voiceValue.split(":", limit = 2)
             return if (parts.size == 2) {
                 val provider = parts[0]
                 val voice = parts[1]
-                val model = when (provider) {
-                    "gemini-flash" -> "gemini-2.5-flash-tts"
-                    "gemini-pro" -> "gemini-2.5-pro-tts"
-                    "elevenlabs" -> ""  // model chosen server-side (eleven_v3 default)
-                    else -> "tts-1-hd"
+                val catalogModel = groups.firstOrNull { it.id == provider }?.model.orEmpty()
+                val model = catalogModel.ifBlank {
+                    when (provider) {
+                        "gemini-flash" -> "gemini-2.5-flash-tts"
+                        "gemini-pro" -> "gemini-2.5-pro-tts"
+                        else -> ""  // the server picks (config [audio] / eleven_v3 / local)
+                    }
                 }
                 VoiceConfig(provider, voice, model)
             } else {
                 // Legacy: just a voice name, assume OpenAI
-                VoiceConfig("openai", voiceValue, "tts-1-hd")
+                VoiceConfig("openai", voiceValue, "")
             }
+        }
+
+        /**
+         * Parse a GET /tts/catalog body. Reads the additive fields (group `id`,
+         * `available`, `model`; top-level `default`) and keeps `default.id` only
+         * when it names a listed voice. Null when there are no groups, so callers
+         * keep the offline fallback. Throws on a malformed voice (missing id/name),
+         * like the old inline parse.
+         */
+        fun parseCatalog(raw: String): TtsCatalog? {
+            val root = CATALOG_JSON.parseToJsonElement(raw).jsonObject
+            val groups = root["groups"]?.jsonArray ?: return null
+            val parsed = groups.map { g ->
+                val o = g.jsonObject
+                VoiceGroup(
+                    label = o["label"]?.jsonPrimitive?.content ?: "",
+                    voices = (o["voices"]?.jsonArray ?: JsonArray(emptyList())).map { v ->
+                        val vo = v.jsonObject
+                        VoiceOption(
+                            id = vo["id"]!!.jsonPrimitive.content,
+                            name = vo["name"]!!.jsonPrimitive.content,
+                            description = vo["description"]?.jsonPrimitive?.content ?: "",
+                        )
+                    },
+                    id = o["id"]?.jsonPrimitive?.contentOrNull ?: "",
+                    available = o["available"]?.jsonPrimitive?.booleanOrNull ?: true,
+                    model = o["model"]?.jsonPrimitive?.contentOrNull ?: "",
+                )
+            }
+            if (parsed.isEmpty()) return null
+            val defaultId = (root["default"] as? JsonObject)
+                ?.get("id")?.jsonPrimitive?.contentOrNull
+                ?.takeIf { id -> parsed.any { g -> g.voices.any { it.id == id } } }
+            return TtsCatalog(parsed, defaultId)
         }
     }
 
@@ -124,10 +172,10 @@ class TtsRepository(private val api: BlackBoxApi) {
     // =========================================================================
     suspend fun generateTts(
         text: String,
-        voice: String = "onyx",
-        model: String = "tts-1-hd",
+        voice: String = "",      // "" + provider "" = the box default voice
+        model: String = "",      // "" = the server's model for the provider
         format: String = "mp3",
-        provider: String = "openai",
+        provider: String = "",
         operator: String,
     ): TtsResponse {
         val sanitized = text
@@ -398,33 +446,29 @@ class TtsRepository(private val api: BlackBoxApi) {
 
     // =========================================================================
     // Voice Catalog — GET /tts/catalog (live catalog with offline fallback)
-    // Backend shape: {"groups":[{"id","label","voices":[{"id","name","description"}]}]}
-    // Returns TTS_VOICE_GROUPS on ANY failure (network, parse, empty).
+    // Backend shape: {"groups":[{"id","label","voices":[{"id","name","description"}],
+    //   "available","model"}], "default":{"id",...}} (available/model/default additive)
+    // Returns TTS_VOICE_GROUPS (and no default) on ANY failure (network, parse, empty).
     // =========================================================================
-    suspend fun fetchCatalog(): List<VoiceGroup> = try {
-        val raw = api.get("/tts/catalog")
-        val groups = json.parseToJsonElement(raw).jsonObject["groups"]?.jsonArray
-            ?: return TTS_VOICE_GROUPS
-        val parsed = groups.map { g ->
-            val o = g.jsonObject
-            VoiceGroup(
-                label = o["label"]?.jsonPrimitive?.content ?: "",
-                voices = (o["voices"]?.jsonArray ?: JsonArray(emptyList())).map { v ->
-                    val vo = v.jsonObject
-                    VoiceOption(
-                        id = vo["id"]!!.jsonPrimitive.content,
-                        name = vo["name"]!!.jsonPrimitive.content,
-                        description = vo["description"]?.jsonPrimitive?.content ?: "",
-                    )
-                },
-            )
-        }
-        if (parsed.isEmpty()) TTS_VOICE_GROUPS else parsed
+    suspend fun fetchCatalog(): List<VoiceGroup> = fetchCatalogWithDefault().groups
+
+    /** The catalog plus the box default voice id (null offline / on an older server). */
+    suspend fun fetchCatalogWithDefault(): TtsCatalog = try {
+        parseCatalog(api.get("/tts/catalog")) ?: TtsCatalog(TTS_VOICE_GROUPS, null)
     } catch (e: Exception) {
         Log.w(TAG, "fetchCatalog failed, using offline fallback: ${e.message}")
-        TTS_VOICE_GROUPS
+        TtsCatalog(TTS_VOICE_GROUPS, null)
     }
 }
+
+/**
+ * GET /tts/catalog: the voice groups and the box default voice -- the voice the
+ * box speaks with when nothing is chosen (null when the server sent none).
+ */
+data class TtsCatalog(
+    val groups: List<VoiceGroup>,
+    val defaultVoiceId: String?,
+)
 
 // =============================================================================
 // Voice List — matches Portal ttsVoiceSelect optgroups
@@ -438,7 +482,12 @@ data class VoiceOption(
 
 data class VoiceGroup(
     val label: String,
-    val voices: List<VoiceOption>
+    val voices: List<VoiceOption>,
+    // Additive /tts/catalog fields: the group id ("openai", "elevenlabs", ...),
+    // whether the box has credentials for it, and the model it synthesises with.
+    val id: String = "",
+    val available: Boolean = true,
+    val model: String = "",
 )
 
 /**
@@ -491,7 +540,7 @@ val GEMINI_TTS_VOICE_PAIRS: List<Pair<String, String>> = listOf(
 // The provider-first two-step picker (VoicePicker) derives its providers from
 // whatever groups are present, so the live catalog surfaces qwen when available.
 val TTS_VOICE_GROUPS = listOf(
-    VoiceGroup("OpenAI TTS HD", listOf(
+    VoiceGroup(id = "openai", label = "OpenAI TTS HD", voices = listOf(
         VoiceOption("openai:alloy", "Alloy", "Neutral, balanced"),
         VoiceOption("openai:ash", "Ash", "Clear, direct"),
         VoiceOption("openai:ballad", "Ballad", "Warm, gentle"),
@@ -504,11 +553,11 @@ val TTS_VOICE_GROUPS = listOf(
         VoiceOption("openai:shimmer", "Shimmer", "Soft, ethereal"),
         VoiceOption("openai:verse", "Verse", "Poetic, dramatic"),
     )),
-    VoiceGroup("Gemini Flash TTS",
-        GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-flash:$n", n, d) }
+    VoiceGroup(id = "gemini-flash", label = "Gemini Flash TTS",
+        voices = GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-flash:$n", n, d) }
     ),
-    VoiceGroup("Gemini Pro TTS",
-        GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-pro:$n", n, d) }
+    VoiceGroup(id = "gemini-pro", label = "Gemini Pro TTS",
+        voices = GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-pro:$n", n, d) }
     ),
 )
 
@@ -540,6 +589,17 @@ object VoicePicker {
 
     /** The voices that populate the second dropdown for the chosen [group]. */
     fun voicesFor(group: VoiceGroup?): List<VoiceOption> = group?.voices ?: emptyList()
+
+    /** The voice to show and speak: the operator's saved [stored] id, else the box
+     *  default from GET /tts/catalog, else "" (requests then name no voice and the
+     *  server speaks its own default). */
+    fun effectiveVoice(stored: String, defaultVoiceId: String?): String =
+        stored.ifBlank { defaultVoiceId.orEmpty() }
+
+    /** Provider dropdown label: a group the box has no key for is still listed
+     *  (it shows what a key unlocks) but marked. */
+    fun providerLabel(group: VoiceGroup): String =
+        if (group.available) group.label else "${group.label} (not configured)"
 }
 
 // =============================================================================

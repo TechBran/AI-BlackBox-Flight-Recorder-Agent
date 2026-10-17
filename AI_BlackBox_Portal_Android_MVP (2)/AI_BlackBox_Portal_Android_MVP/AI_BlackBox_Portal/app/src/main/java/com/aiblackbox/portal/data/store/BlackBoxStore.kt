@@ -191,14 +191,16 @@ class BlackBoxStore(private val context: Context) {
     val claudeModel: Flow<String> = context.dataStore.data.map { it[KEY_CLAUDE_MODEL] ?: "sonnet" }
     suspend fun setClaudeModel(value: String) { context.dataStore.edit { it[KEY_CLAUDE_MODEL] = value } }
 
-    // TTS Voice (global default)
-    val ttsVoice: Flow<String> = context.dataStore.data.map { it[KEY_TTS_VOICE] ?: "openai:onyx" }
+    // TTS Voice (global default). Unset = "" = the box default voice from
+    // GET /tts/catalog (VoicePicker.effectiveVoice); "" also tells /tts/batch to
+    // speak that default, so no provider is assumed on a box without its key.
+    val ttsVoice: Flow<String> = context.dataStore.data.map { it[KEY_TTS_VOICE] ?: "" }
     suspend fun setTtsVoice(value: String) { context.dataStore.edit { it[KEY_TTS_VOICE] = value } }
 
     // Per-operator TTS voice — matches Portal OPERATOR_VOICE_STORE pattern
-    // Key format: "voice_{operator}" → "provider:voice" (e.g., "openai:alloy")
+    // Key format: "voice_{operator}" → "provider:voice" (e.g., "openai:alloy"); "" = box default
     fun getOperatorVoice(operator: String): Flow<String> =
-        context.dataStore.data.map { it[stringPreferencesKey("voice_$operator")] ?: "openai:onyx" }
+        context.dataStore.data.map { it[stringPreferencesKey("voice_$operator")] ?: "" }
 
     suspend fun setOperatorVoice(operator: String, voiceValue: String) {
         context.dataStore.edit {

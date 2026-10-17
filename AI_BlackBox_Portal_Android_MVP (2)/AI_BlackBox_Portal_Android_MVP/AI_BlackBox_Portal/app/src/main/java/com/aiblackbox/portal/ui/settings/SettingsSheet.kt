@@ -513,8 +513,13 @@ fun SettingsSheet(
             // ══════════════════════════════════════════════════════════════
             SectionHeader("\uD83D\uDD0A Voice", SolidGreen)
 
-            val currentVoice by viewModel.store.getOperatorVoice(operator)
-                .collectAsState(initial = "openai:onyx")
+            // No saved voice = the box default from /tts/catalog `default` (never a
+            // pinned id); with neither, "" and the server speaks its own default.
+            val storedVoice by viewModel.store.getOperatorVoice(operator)
+                .collectAsState(initial = "")
+            val defaultVoiceId by viewModel.defaultVoiceId.collectAsState()
+            val currentVoice = com.aiblackbox.portal.data.repository.VoicePicker
+                .effectiveVoice(storedVoice, defaultVoiceId)
             var showVoiceMenu by remember { mutableStateOf(false) }
 
             // Find current voice display name — render the FETCHED catalog so the
@@ -522,7 +527,8 @@ fun SettingsSheet(
             // Load is chained after initialize(origin) (line ~130) so api is ready.
             val allVoiceGroups by viewModel.voiceGroups.collectAsState()
             val currentVoiceDisplay = allVoiceGroups.flatMap { it.voices }
-                .find { it.id == currentVoice }?.let { "${it.name} — ${it.description}" } ?: currentVoice
+                .find { it.id == currentVoice }?.let { "${it.name} — ${it.description}" }
+                ?: currentVoice.ifBlank { "Box default" }
 
             // Single ▶ preview button beside the dropdown — synthesizes a fixed
             // phrase for the CURRENTLY selected voice and plays it (mirrors the
@@ -554,7 +560,9 @@ fun SettingsSheet(
 
             SettingsDropdown(
                 label = "Voice provider",
-                value = selectedVoiceGroup?.label ?: "—",
+                value = selectedVoiceGroup?.let {
+                    com.aiblackbox.portal.data.repository.VoicePicker.providerLabel(it)
+                } ?: "—",
                 expanded = showVoiceProviderMenu,
                 onExpandedChange = { showVoiceProviderMenu = it },
                 accentColor = SolidGreen
@@ -564,7 +572,7 @@ fun SettingsSheet(
                     DropdownMenuItem(
                         text = {
                             Text(
-                                group.label,
+                                com.aiblackbox.portal.data.repository.VoicePicker.providerLabel(group),
                                 color = if (isSel) SolidGreen else BbxWhite,
                                 fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = 13.sp
