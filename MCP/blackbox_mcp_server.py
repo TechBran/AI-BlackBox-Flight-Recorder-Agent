@@ -437,6 +437,12 @@ sys.path.insert(0, str(BLACKBOX_ROOT))
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
 from web_tools import perform_web_fetch
 
+# web_fetch blocks for up to its whole time budget. Its own small pool keeps a
+# burst of slow fetches from a Funnel caller from starving the default
+# executor, which asyncio's getaddrinfo (every proxied tool call) runs on.
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+_WEB_FETCH_POOL = _ThreadPoolExecutor(max_workers=4, thread_name_prefix="web-fetch")
+
 # E21 (2026-05-17): load tool_registry.py as a STANDALONE module to bypass
 # Orchestrator/tools/__init__.py, which re-exports blackbox_tools -- and
 # blackbox_tools transitively pulls in aiohttp, Orchestrator.contacts, and
@@ -910,8 +916,9 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             # perform_web_fetch is the SSRF-guarded fetch (Orchestrator/utils/
             # safe_fetch.py): this runs in-process for Funnel callers, so a
             # loopback/LAN/tailnet URL is refused, never fetched. Blocking I/O,
-            # so it runs off the event loop.
-            result = await asyncio.to_thread(perform_web_fetch, url, max_chars)
+            # so it runs off the event loop, on its own pool.
+            result = await asyncio.get_running_loop().run_in_executor(
+                _WEB_FETCH_POOL, perform_web_fetch, url, max_chars)
             return [TextContent(type="text", text=result)]
 
         elif name == "get_media":

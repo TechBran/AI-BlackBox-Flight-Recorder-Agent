@@ -256,6 +256,27 @@ def test_web_fetch_refuses_loopback_and_private_targets():
         _requests.get, _sf._open_pinned, _sf._resolve = saved
 
 
+def test_web_fetch_runs_on_its_own_pool_not_the_default_executor():
+    """A fetch can block for its whole time budget. Funnel callers can start
+    many at once, and the default executor also runs asyncio's getaddrinfo for
+    every proxied tool call, so web_fetch must not run there."""
+    import threading as _th
+    seen = []
+
+    def _fake_fetch(url, max_chars=80000):
+        seen.append(_th.current_thread().name)
+        return f"fetched {url}"
+
+    saved = srv.perform_web_fetch
+    srv.perform_web_fetch = _fake_fetch
+    try:
+        res = asyncio.run(srv.call_tool("web_fetch", {"url": "https://example.com/"}))
+    finally:
+        srv.perform_web_fetch = saved
+    assert _text(res) == "fetched https://example.com/"
+    assert seen and seen[0].startswith("web-fetch"), seen
+
+
 def test_mint_snapshot_posts_to_chat_save_and_returns_snap_id():
     """mint_snapshot must POST /chat/save (not /chat) and return the real snap_id."""
     _stub_operator("alice")

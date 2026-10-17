@@ -68,6 +68,7 @@ from Orchestrator.fossils import (
 )
 from Orchestrator.context_builder import build_fossil_context
 from Orchestrator.web_tools import perform_web_fetch
+from Orchestrator.utils.async_helpers import run_blocking
 from Orchestrator.tasks import create_task
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
@@ -873,7 +874,8 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
             url = arguments.get("url", "")
             max_chars = arguments.get("max_chars", 80000)
             print(f"[REALTIME] Executing web fetch: {url}")
-            result = perform_web_fetch(url, max_chars)
+            # Off the event loop: a fetch can take its whole time budget.
+            result = await run_blocking(perform_web_fetch, url, max_chars)
             print(f"[REALTIME] Web fetch result length: {len(result)} chars")
         elif name in IMAGE_TOOL_PROVIDERS:
             provider = IMAGE_TOOL_PROVIDERS[name]
