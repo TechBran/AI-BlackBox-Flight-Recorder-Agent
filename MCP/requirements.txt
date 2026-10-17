@@ -2,17 +2,34 @@
 # Kept in a SEPARATE venv (MCP/venv/) from Orchestrator/venv/ because mcp's
 # transitive starlette>=0.49 conflicts with fastapi 0.118's starlette<0.49
 # upper bound. Two venvs is the cost of isolation.
-mcp>=1.0.0
+#
+# This venv serves the Funnel-exposed (public internet) HTTP transport, so every
+# package that parses attacker-controlled bytes carries a SECURITY FLOOR (the
+# first release with the fix) and a cap below its next major. Floors matter on
+# EXISTING boxes: the updater's mcp_pip phase and install.sh run a plain
+# `pip install -r` (no --upgrade), so only a raised floor moves an installed
+# version. Bump a floor when an advisory lands; never drop a cap without
+# re-running MCP/test_*.py against the new major.
+
+# mcp 2.x removed the low-level @server.list_tools()/@server.call_tool()
+# decorators this server registers its handlers with, so a fresh install
+# without the cap crashes at import. 1.27.2 fixes CVE-2026-52869 (sessions not
+# bound to the authenticated principal) and CVE-2026-52870; 1.30.0 fixes
+# CVE-2026-59951 (unbounded Streamable HTTP session accumulation).
+mcp>=1.30.0,<2
 httpx>=0.25.0
-requests>=2.31.0          # Orchestrator/web_tools.py imports (re-used by MCP server's web search/fetch tools)
-beautifulsoup4>=4.12.0    # Orchestrator/web_tools.py imports (HTML parsing for web_fetch)
+requests>=2.33.0          # Orchestrator/web_tools.py (web_fetch); CVE-2024-47081, CVE-2026-25645
+urllib3>=2.8.0,<3         # requests' transport for web_fetch: decompression-bomb + redirect-header CVEs
+idna>=3.15                # web_fetch hostname encoding; CVE-2026-45409
+beautifulsoup4>=4.12.0    # Orchestrator/web_tools.py (HTML parsing for web_fetch)
+lxml>=6.1.3               # the parser web_fetch asks bs4 for; CVE-2026-41066 fixed in 6.1.0
 
 # M2 (Streamable HTTP transport): the SDK's StreamableHTTPSessionManager runs in
-# a Starlette ASGI app served by uvicorn. Both are ALREADY transitive deps of
-# `mcp` (starlette via mcp, uvicorn via mcp[cli]/the streamable-http extra), so
-# `pip install mcp` already provisions them in this lean venv -- they are pinned
-# here only to make the HTTP transport's requirement EXPLICIT and reproducible on
-# a fresh box. fastapi is deliberately NOT added (that is the starlette-version
-# conflict the lean venv exists to avoid).
-starlette>=0.49          # ASGI app hosting the StreamableHTTPSessionManager (transitive via mcp)
-uvicorn>=0.30            # ASGI server for the localhost-only HTTP transport (transitive via mcp)
+# a Starlette ASGI app served by uvicorn. Both are transitive deps of `mcp`;
+# they are listed here to make the HTTP transport's requirement EXPLICIT and to
+# carry the security floors. fastapi is deliberately NOT added (that is the
+# starlette-version conflict the lean venv exists to avoid).
+starlette>=1.3.1,<2       # ASGI app + the public /authorize and /token form parsing; CVE-2026-48710, CVE-2026-54283
+python-multipart>=0.0.32  # starlette's form parser for /authorize + /token; CVE-2026-40347/-42561/-53537..-53540
+uvicorn>=0.38.0,<1        # ASGI server for the HTTP transport (the version the shipped boxes run)
+h11>=0.16.0               # uvicorn's HTTP/1.1 parser on the public port; CVE-2025-43859 (chunked smuggling)
