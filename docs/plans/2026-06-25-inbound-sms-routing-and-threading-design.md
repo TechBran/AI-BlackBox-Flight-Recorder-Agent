@@ -12,7 +12,7 @@ The BlackBox sends/receives SMS via a TG200 gateway. Outbound delivery is fixed 
 2. **Whitelist == contact book.** Being in *any* operator's book is what authorizes texting in; there is no separate notion. Random numbers are dropped (`Ignoring SMS from unknown number`, `router.py:168`). (`router.py:164-170`)
 3. **Amnesiac replies.** Inbound POSTs to `/chat`, so the model already gets persona + snapshot retrieval + tools — but the payload carries only the single current text; the per-thread SMS history (which we already persist) is never injected.
 
-**Live evidence of the collision:** `+14108166914` is in three books — `Brandon` (owner), `Anna` (husband), `system` (owner). Today Brandon wins by config order, not intent. **The "whitelisted non-operator texts in" path has never run in production** (the `matched operator … (self/owner)` log fires from the *outbound* sender-lookup; `_find_operator_by_phone` has two callers — `router.py:167` inbound and `router.py:387` outbound). **Latent bug:** Anna's legitimate self-marker contact has `created_by="system"`, which `_is_system_seed` (`router.py:40-48`) currently excludes from identity matching.
+**Live evidence of the collision:** `+15555550112` is in three books — `Brandon` (owner), `Anna` (husband), `system` (owner). Today Brandon wins by config order, not intent. **The "whitelisted non-operator texts in" path has never run in production** (the `matched operator … (self/owner)` log fires from the *outbound* sender-lookup; `_find_operator_by_phone` has two callers — `router.py:167` inbound and `router.py:387` outbound). **Latent bug:** Anna's legitimate self-marker contact has `created_by="system"`, which `_is_system_seed` (`router.py:40-48`) currently excludes from identity matching.
 
 ## Decisions (confirmed)
 
@@ -23,7 +23,7 @@ The BlackBox sends/receives SMS via a TG200 gateway. Outbound delivery is fixed 
 | 3 | Whitelisted non-operator (Anna) | **Auto-reply in operator's voice + notify operator**, who can take over via manual send. |
 | 4 | Thread memory | **Auto-inject the recent thread (~20 msgs)** from the local store; no model-facing tool. |
 
-Defaults taken on the mechanical sub-decisions (no further input needed): per-`(operator, phone, line_number)` thread scoping; trim the just-stored current message caller-side; `ORDER BY timestamp, id` ordering tiebreak; `_is_system_seed` gates only the literal seed phone `+17164512527`; multi-match tie-break = most-recently-updated contact + a logged `WARNING`; existing contacts migrate to `inbound_allowed=true`.
+Defaults taken on the mechanical sub-decisions (no further input needed): per-`(operator, phone, line_number)` thread scoping; trim the just-stored current message caller-side; `ORDER BY timestamp, id` ordering tiebreak; `_is_system_seed` gates only the literal seed phone `+15555550100`; multi-match tie-break = most-recently-updated contact + a logged `WARNING`; existing contacts migrate to `inbound_allowed=true`.
 
 ## Source of truth (history)
 

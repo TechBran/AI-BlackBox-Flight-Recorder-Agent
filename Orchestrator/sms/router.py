@@ -10,6 +10,7 @@ Flow:
 """
 
 import asyncio
+import hashlib
 import logging
 from collections import namedtuple
 from datetime import datetime, timezone
@@ -40,7 +41,13 @@ SMS_THREAD_WINDOW = 20
 # number can NEVER satisfy the inbound whitelist, regardless of created_by /
 # is_operator_self / tags. Gate by the NUMBER (last-10-digit), not by metadata,
 # so a real operator contact that merely has created_by="system" is unaffected.
-SEED_PHONE = "+17164512527"
+# Must equal contacts.SEED_CONTACT["phone"].
+SEED_PHONE = "+15555550100"
+
+# Books seeded before 2026-10 carry the previous seed number, a real DID. It is
+# gated by the SHA-256 of its last 10 digits so the number itself stays out of
+# this public source.
+_LEGACY_SEED_PHONE_SHA256 = "6cbf6b02a2a8d8b079a48e45f81d6545cb54d489c8aada40c0a3090264c621a5"
 
 
 def _normalize_phone(phone: str) -> str:
@@ -97,14 +104,18 @@ class SMSRouter:
         """The auto-injected system/self seed contact must NEVER satisfy the
         inbound whitelist (its number is fixed + spoofable).
 
-        Gate ONLY the literal seed phone +17164512527 — NOT all
-        created_by="system" contacts. A real operator contact can legitimately
-        carry created_by="system" (e.g. Anna's self-marker for Brandon was
-        created during system seeding); the old metadata-based check wrongly
-        excluded it from identity matching. The number is the spoofable fact, so
-        the number is what we gate.
+        Gate ONLY the seed phone (SEED_PHONE, or the pre-2026-10 seed number by
+        digest) — NOT all created_by="system" contacts. A real operator contact
+        can legitimately carry created_by="system" (e.g. Anna's self-marker for
+        Brandon was created during system seeding); the old metadata-based check
+        wrongly excluded it from identity matching. The number is the spoofable
+        fact, so the number is what we gate.
         """
-        return _phones_match(contact.get("phone", ""), SEED_PHONE)
+        phone = contact.get("phone", "")
+        if _phones_match(phone, SEED_PHONE):
+            return True
+        digest = hashlib.sha256(_normalize_phone(phone).encode()).hexdigest()
+        return digest == _LEGACY_SEED_PHONE_SHA256
 
     def _find_operator_by_phone(self, phone: str):
         """Route incoming SMS to the correct operator.
@@ -327,7 +338,7 @@ class SMSRouter:
         """Process an incoming SMS from one of the gateway AMI clients.
 
         Args:
-            sender: Sender phone number (E.164, e.g. +14108166914)
+            sender: Sender phone number (E.164, e.g. +15555550112)
             body: Decoded message text
             span: GSM span that received the message
             recvtime: Timestamp from TG200 (e.g. "2026-03-25 17:20:48")

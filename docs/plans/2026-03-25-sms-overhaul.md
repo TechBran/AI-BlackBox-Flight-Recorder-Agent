@@ -16,7 +16,7 @@
 |----------|-------|
 | TG200 AMI | `192.168.1.200:5038`, user `blackbox`, pass `<REDACTED-SECRET>` |
 | Active GSM Span | `2` (Quectel EC21, AT&T) |
-| TG200 Phone | `+14103497272` |
+| TG200 Phone | `+15555550110` |
 | Operator Prefs | `Manifest/operator_preferences.json` via `state.py` get/set_operator_preference |
 | Contacts | `Contacts/contacts.json` via `contacts.py` load/save/upsert/search |
 | SMS DB | `Manifest/sms_messages.db` via `sms/message_store.py` |
@@ -317,11 +317,11 @@ async def delete_contact(contact_id: str, operator: str = Query(...)):
 │ [Search...]                            [+ Add Contact] │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │ ★ Brandon                        +14108166914    │   │
+│  │ ★ Brandon                        +15555550112    │   │
 │  │   Owner | brandon@email.com                      │   │
 │  │   Tags: owner, system         [Edit] [Delete]    │   │
 │  ├─────────────────────────────────────────────────┤   │
-│  │   Anna                           +14108165293    │   │
+│  │   Anna                           +15555550115    │   │
 │  │   Sister | anna@email.com                        │   │
 │  │   Tags: family                [Edit] [Delete]    │   │
 │  └─────────────────────────────────────────────────┘   │

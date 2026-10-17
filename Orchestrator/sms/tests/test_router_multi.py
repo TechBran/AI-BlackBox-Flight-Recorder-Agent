@@ -154,10 +154,10 @@ async def test_send_manual_resolves_from_number(monkeypatch):
 
     # from_number owned by gateway B slot 1 -> span 3.
     res = await router.send_manual(
-        "Brandon", "+14109990000", "hey", from_number="+14105554444"
+        "Brandon", "+15555550113", "hey", from_number="+14105554444"
     )
     assert res["success"] is True
-    assert m.get("b").sent == [("+14109990000", "hey", 3)]
+    assert m.get("b").sent == [("+15555550113", "hey", 3)]
     assert m.get("a").sent == []
     # Outbound stored tagged with the resolved line + chosen gateway.
     assert len(store.messages) == 1
@@ -180,10 +180,10 @@ async def test_send_manual_explicit_gateway_id(monkeypatch):
 
     # Explicit gateway_id "b" -> that client (default span 2 when unresolved).
     res = await router.send_manual(
-        "Brandon", "+14109990000", "via b", gateway_id="b"
+        "Brandon", "+15555550113", "via b", gateway_id="b"
     )
     assert res["success"] is True
-    assert m.get("b").sent == [("+14109990000", "via b", 2)]
+    assert m.get("b").sent == [("+15555550113", "via b", 2)]
     assert m.get("a").sent == []
     msg = store.messages[0]
     assert msg["gateway_id"] == "b"

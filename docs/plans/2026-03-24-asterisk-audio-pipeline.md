@@ -865,7 +865,7 @@ sudo journalctl -u blackbox.service -f | grep -iE "ASTERISK|AudioSocket|bridge"
 ```bash
 curl -X POST http://localhost:9091/asterisk/call \
   -H "Content-Type: application/json" \
-  -d '{"to": "+14108166914", "backend": "openai_realtime", "operator": "Brandon"}'
+  -d '{"to": "+15555550112", "backend": "openai_realtime", "operator": "Brandon"}'
 ```
 
 Phone should ring. Pick up. Should hear AI greeting. Speak back — AI should respond.

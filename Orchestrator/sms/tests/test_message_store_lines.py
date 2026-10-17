@@ -17,23 +17,23 @@ def test_new_columns_exist(tmp_path, monkeypatch):
 def test_store_and_filter_by_line(tmp_path, monkeypatch):
     s = _store(tmp_path, monkeypatch)
     s.store_message(operator="Brandon", direction="inbound", phone_number="+14105550001",
-                    contact_name="A", body="hi on line 1", line_number="+14103497272", gateway_id="g1")
+                    contact_name="A", body="hi on line 1", line_number="+15555550110", gateway_id="g1")
     s.store_message(operator="Brandon", direction="inbound", phone_number="+14105550001",
                     contact_name="A", body="hi on line 2", line_number="+15559990000", gateway_id="g2")
     all_msgs = s.get_conversation("Brandon", "+14105550001")
     assert len(all_msgs) == 2                       # no line filter = both
-    line1 = s.get_conversation("Brandon", "+14105550001", line_number="+14103497272")
+    line1 = s.get_conversation("Brandon", "+14105550001", line_number="+15555550110")
     assert len(line1) == 1 and line1[0]["body"] == "hi on line 1"
 
 
 def test_recent_threads_scoped_by_line(tmp_path, monkeypatch):
     s = _store(tmp_path, monkeypatch)
     s.store_message(operator="Brandon", direction="inbound", phone_number="+14105550001",
-                    contact_name="A", body="x", line_number="+14103497272", gateway_id="g1")
+                    contact_name="A", body="x", line_number="+15555550110", gateway_id="g1")
     s.store_message(operator="Brandon", direction="inbound", phone_number="+14105550002",
                     contact_name="B", body="y", line_number="+15559990000", gateway_id="g2")
     assert len(s.get_recent_threads("Brandon")) == 2
-    scoped = s.get_recent_threads("Brandon", line_number="+14103497272")
+    scoped = s.get_recent_threads("Brandon", line_number="+15555550110")
     assert len(scoped) == 1 and "line_number" in scoped[0]
 
 
@@ -101,9 +101,9 @@ def test_migration_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(msm, "DB_PATH", db)
     s1 = msm.MessageStore()
     s1.store_message(operator="Brandon", direction="inbound", phone_number="+14105550001",
-                     contact_name="A", body="hi", line_number="+14103497272", gateway_id="g1")
+                     contact_name="A", body="hi", line_number="+15555550110", gateway_id="g1")
     s2 = msm.MessageStore()                          # second open must not error
     cols = {r[1] for r in s2._conn.execute("PRAGMA table_info(messages)").fetchall()}
     assert "line_number" in cols and "gateway_id" in cols
-    rows = s2.get_conversation("Brandon", "+14105550001", line_number="+14103497272")
+    rows = s2.get_conversation("Brandon", "+14105550001", line_number="+15555550110")
     assert len(rows) == 1

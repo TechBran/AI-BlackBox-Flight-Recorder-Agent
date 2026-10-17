@@ -27,14 +27,14 @@ _SPAN2_DETAIL = (
     "Type: CPE\n"
     "Manufacturer: Quectel\n"
     "Model Name: EC21\n"
-    "Model IMEI: 864395065175647\n"
+    "Model IMEI: 350000000000001\n"
     "Revision: EC21AFAR05A06M4G_30.002.30.002\n"
     "Network Name: AT&T\n"
     "Network Status: Registered (Home network)\n"
     "Signal Quality (0,31): 19\n"
     "BER value (0,7): -1\n"
-    "SIM IMSI: 310410475394916\n"
-    "SIM SMS Center Number: +13123149810\n"
+    "SIM IMSI: 310410000000001\n"
+    "SIM SMS Center Number: +15555550111\n"
     "PDD: 0\n"
     "ASR: 0\n"
     "ACD: 0\n"
@@ -170,7 +170,7 @@ async def test_check_gateway_status_maps_sims_from_ami(monkeypatch):
         "trunk_name": "tg200",
         "http_port": 80,
         "ports": [
-            {"span": 2, "slot": 0, "phone_number": "+14103497272"},
+            {"span": 2, "slot": 0, "phone_number": "+15555550110"},
             {"span": 3, "slot": 1, "phone_number": ""},
         ],
     }
@@ -186,7 +186,7 @@ async def test_check_gateway_status_maps_sims_from_ami(monkeypatch):
     assert s2["signal"] == 61
     assert s2["registered"] is True
     # phone_number comes from the gateway port, NOT from AMI.
-    assert s2["phone_number"] == "+14103497272"
+    assert s2["phone_number"] == "+15555550110"
 
     s3 = slots[3]
     assert s3["status"] == "down"

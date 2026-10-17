@@ -942,7 +942,7 @@ This is the main UI element - a full management panel:
             <!-- Delivery Target (phone number, shown for sms/voice) -->
             <div id="cronDeliveryTargetWrap" class="cron-field hide">
                 <label for="cronDeliveryTarget">Phone Number</label>
-                <input type="tel" id="cronDeliveryTarget" placeholder="+14108166914" class="cron-input">
+                <input type="tel" id="cronDeliveryTarget" placeholder="+15555550112" class="cron-input">
             </div>
 
             <!-- One-shot toggle -->

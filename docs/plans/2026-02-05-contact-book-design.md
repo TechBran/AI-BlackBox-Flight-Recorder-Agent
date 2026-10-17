@@ -26,7 +26,7 @@ Single JSON file. Per-operator scoping at the top level.
     "a1b2c3d4-uuid-here": {
       "id": "a1b2c3d4-uuid-here",
       "name": "AI BlackBox Flight Recorder",
-      "phone": "+17164512527",
+      "phone": "+15555550100",
       "email": "brandon@aiblackboxfc.com",
       "relationship": "self",
       "notes": "This is your own phone number. The AI BlackBox system number.",
@@ -61,7 +61,7 @@ Single JSON file. Per-operator scoping at the top level.
 - Each operator gets their own namespace (phone book) in the file
 - Operator resolved from context automatically (no parameter needed from model)
 - New operators get an empty phone book on first access
-- Seed contact (AI BlackBox: +17164512527, brandon@aiblackboxfc.com) added to every new operator's book automatically
+- Seed contact (AI BlackBox: +15555550100, brandon@aiblackboxfc.com) added to every new operator's book automatically
 
 ## Backend Module
 
@@ -144,7 +144,7 @@ Pre-populated for every operator:
 ```json
 {
   "name": "AI BlackBox Flight Recorder",
-  "phone": "+17164512527",
+  "phone": "+15555550100",
   "email": "brandon@aiblackboxfc.com",
   "relationship": "self",
   "notes": "This is your own phone number. The AI BlackBox system number. Use this as the caller identity.",

@@ -220,15 +220,15 @@ async def test_tier2_identity_wins_even_when_plain_contact_elsewhere(monkeypatch
     """Unowned line: sender is is_operator_self in Brandon's book AND a plain
     inbound_allowed contact in Alice's book -> identity (Brandon) wins."""
     r = _make_router(monkeypatch, {
-        "Brandon": {"c1": _contact("Brandon", "+14108166914",
+        "Brandon": {"c1": _contact("Brandon", "+15555550112",
                                    inbound_allowed=True, is_operator_self=True)},
-        "Alice": {"c2": _contact("Brandon", "+14108166914", inbound_allowed=True)},
+        "Alice": {"c2": _contact("Brandon", "+15555550112", inbound_allowed=True)},
     })
-    res = r.resolve_inbound("+14108166914", owner=None)
+    res = r.resolve_inbound("+15555550112", owner=None)
     assert res.operator == "Brandon"
     assert res.classification == "self"
 
-    await r.handle_incoming(sender="+14108166914", body="hi", span=3,
+    await r.handle_incoming(sender="+15555550112", body="hi", span=3,
                             recvtime="2026-06-07 12:00:00", gateway_id="g1")
     assert len(r._chat_calls) == 1
     assert r._chat_calls[0]["operator"] == "Brandon"
@@ -239,14 +239,14 @@ async def test_tier2_multiple_self_flags_most_recent_wins_and_warns(monkeypatch,
     """Defensive: two operators self-flag the same number -> most-recently-updated
     wins + a WARNING naming all candidates."""
     r = _make_router(monkeypatch, {
-        "Brandon": {"c1": _contact("Me", "+14108166914", is_operator_self=True,
+        "Brandon": {"c1": _contact("Me", "+15555550112", is_operator_self=True,
                                    updated_at="2026-01-01T00:00:00+00:00")},
-        "Alice": {"c2": _contact("Me", "+14108166914", is_operator_self=True,
+        "Alice": {"c2": _contact("Me", "+15555550112", is_operator_self=True,
                                  updated_at="2026-05-01T00:00:00+00:00")},
     })
     import logging
     with caplog.at_level(logging.WARNING, logger="sms.router"):
-        res = r.resolve_inbound("+14108166914", owner=None)
+        res = r.resolve_inbound("+15555550112", owner=None)
     assert res.operator == "Alice"  # most-recently-updated
     assert res.classification == "self"
     warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
@@ -350,7 +350,7 @@ async def test_tier5_no_match_drops_nothing_stored(monkeypatch):
 # ===========================================================================
 # Task 2.2 — System-seed fix
 # ===========================================================================
-SEED_NUMBER = "+17164512527"
+from Orchestrator.sms.router import SEED_PHONE as SEED_NUMBER  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -375,22 +375,22 @@ async def test_created_by_system_real_contact_now_resolves(monkeypatch):
     (NOT the seed phone) now resolves — Anna's latent bug is fixed. Previously
     _is_system_seed excluded ALL created_by='system' contacts."""
     r = _make_router(monkeypatch, {
-        "Anna": {"c1": _contact("Brandon", "+14108166914",
+        "Anna": {"c1": _contact("Brandon", "+15555550112",
                                 inbound_allowed=True, is_operator_self=True,
                                 created_by="system")},
     })
-    res = r.resolve_inbound("+14108166914", owner=None)
+    res = r.resolve_inbound("+15555550112", owner=None)
     assert res.operator == "Anna"
     assert res.classification == "self"
 
 
 # ===========================================================================
-# Task 2.3 — Symmetric Anna/Brandon regression (live +14108166914 3-book shape)
+# Task 2.3 — Symmetric Anna/Brandon regression (live +15555550112 3-book shape)
 # ===========================================================================
 def _live_three_book_shape():
-    """Mirror the real disk shape of +14108166914 (Brandon owner / Anna husband /
+    """Mirror the real disk shape of +15555550112 (Brandon owner / Anna husband /
     system owner), plus Brandon's own self-flag so identity binds to Brandon."""
-    num = "+14108166914"
+    num = "+15555550112"
     return {
         "Brandon": {
             "b1": _contact("Brandon", num, inbound_allowed=True,
@@ -399,7 +399,7 @@ def _live_three_book_shape():
                            updated_at="2026-02-11T01:11:46+00:00"),
         },
         "Anna": {
-            "a1": _contact("Brandon", "14108166914", inbound_allowed=True,
+            "a1": _contact("Brandon", "15555550112", inbound_allowed=True,
                            is_operator_self=False, created_by="Anna",
                            relationship="husband king", tags=[],
                            updated_at="2026-03-26T02:07:05+00:00"),
@@ -424,7 +424,7 @@ async def test_symmetric_inbound_from_brandon_phone_resolves_brandon(monkeypatch
     """Inbound from Brandon's phone -> Brandon via identity (tier2), regardless of
     being cross-listed in Anna's and system's books."""
     r = _make_router(monkeypatch, _live_three_book_shape())
-    res = r.resolve_inbound("+14108166914", owner=None)
+    res = r.resolve_inbound("+15555550112", owner=None)
     assert res.operator == "Brandon"
     assert res.classification == "self"
 
@@ -443,7 +443,7 @@ async def test_live_three_book_brandon_inbound_routes_through(monkeypatch):
     """End-to-end on the unowned line: the 3-book Brandon shape routes to Brandon
     (deterministic, not USERS_LIST order accident)."""
     r = _make_router(monkeypatch, _live_three_book_shape())
-    await r.handle_incoming(sender="+14108166914", body="hey", span=3,
+    await r.handle_incoming(sender="+15555550112", body="hey", span=3,
                             recvtime="2026-06-07 12:00:00", gateway_id="g1")
     assert len(r._chat_calls) == 1
     assert r._chat_calls[0]["operator"] == "Brandon"

@@ -20,14 +20,14 @@
 | **AMI Username** | `blackbox` |
 | **AMI Password** | `<REDACTED-SECRET>` |
 | **API Permitted IP** | `192.168.1.164` (BlackBox only) |
-| **TG200 Phone Number** | `+14103497272` |
+| **TG200 Phone Number** | `+15555550110` |
 | **Active GSM Span** | `2` (Quectel EC21, AT&T, signal 21/31) |
 | **Span 3** | Down (no SIM / not registered) |
 | **Web GUI** | `http://192.168.1.200` (Boa/0.94.14rc21, admin login, NOT used for SMS API) |
 | **Web GUI Auth** | Cookie-based with obfuscated base64 (charcode+2 shift) — NOT needed for SMS |
-| **SMS Center** | `+13123149810` (AT&T) |
+| **SMS Center** | `+15555550111` (AT&T) |
 | **Modem** | Quectel EC21 (EC21AFAR05A06M4G) |
-| **IMEI** | `864395065175647` |
+| **IMEI** | `350000000000001` (fixture) |
 
 ### AMI Protocol — Validated Commands
 
@@ -54,11 +54,11 @@ Event: ReceivedSMS
 Privilege: all,smscommand
 ID:
 GsmSpan: 2
-Sender: +14108166914
+Sender: +15555550112
 Recvtime: 2026-03-25 17:20:48
 Index: 0
 Total: 1
-Smsc: +19703769769
+Smsc: +15555550114
 Content: Got+ir
 --END SMS EVENT--
 ```
@@ -99,7 +99,7 @@ Returns: Network Name, Signal Quality, SIM IMSI, SMS Center Number, State, etc.
 | SMS sending via AMI | **Working** | `gsm send sms 2 {number} "{msg}"` — validated, message received |
 | SMS receiving via AMI | **Working** | `ReceivedSMS` event — validated, event captured |
 | SMS processing (AI) | **Working** | `sms_processor.py` — Claude with tools, returns reply text |
-| Contact book | **Working** | `contacts.py` — per-operator, has Brandon (+14108166914) and Anna (4108165293) |
+| Contact book | **Working** | `contacts.py` — per-operator, has Brandon (+15555550112) and Anna (5555550115) |
 | SMS sending via HTTP | **BROKEN** | `gateway_manager.py:send_sms_via_gateway()` uses non-existent `/api/v1.0/sms/send` — must replace with AMI |
 | Portal SMS UI | **NOT IMPLEMENTED** | No inbox, no send UI |
 | Operator phone matching | **NOT IMPLEMENTED** | Need to match incoming number → contact → operator |
@@ -113,7 +113,7 @@ Returns: Network Name, Signal Quality, SIM IMSI, SMS Center Number, State, etc.
 - AMI also provides GSM span status, signal quality, etc.
 
 ### Phone Number Matching
-- Incoming SMS has a `Sender` field in E.164 format (e.g., `+14108166914`)
+- Incoming SMS has a `Sender` field in E.164 format (e.g., `+15555550112`)
 - Search ALL operator contact books for a matching phone number
 - If found → route to that operator
 - If not found → ignore (whitelist enforcement)
@@ -358,7 +358,7 @@ GET  /sms/status                                          — Get AMI connection
 ```json
 {
     "operator": "Brandon",
-    "to": "+14108166914",
+    "to": "+15555550112",
     "message": "Hello from the Portal!"
 }
 ```
@@ -381,13 +381,13 @@ This stores the outbound message in the message store AND sends via AMI.
 │                                                         │
 │  ┌─ Threads ──────────┐  ┌─ Conversation ────────────┐ │
 │  │                     │  │                           │ │
-│  │  Brandon            │  │  ← Brandon +14108166914   │ │
-│  │  +14108166914       │  │                           │ │
+│  │  Brandon            │  │  ← Brandon +15555550112   │ │
+│  │  +15555550112       │  │                           │ │
 │  │  "Hey, checking in" │  │  [12:30] Hey, checking in │ │
 │  │  2m ago         (1) │  │                           │ │
 │  │                     │  │  [12:30] Hi Brandon! How  │ │
 │  │  Anna               │  │  can I help you today?    │ │
-│  │  +14108165293       │  │                           │ │
+│  │  +15555550115       │  │                           │ │
 │  │  "Thanks!"          │  │  [12:35] What's the       │ │
 │  │  1h ago             │  │  weather like?            │ │
 │  │                     │  │                           │ │
@@ -498,7 +498,7 @@ Poll for unread count every 30 seconds to update the badge.
 ## Task 9: End-to-End Test
 
 1. Start BlackBox service — verify `[SMS] System started — AMI connected` in logs
-2. Send SMS from cell phone (+14108166914) to TG200 (+14103497272)
+2. Send SMS from cell phone (+15555550112) to TG200 (+15555550110)
 3. Check logs: `ReceivedSMS` event received, operator matched to "Brandon", AI processed
 4. Check phone: AI reply received back
 5. Open Portal → System Menu → SMS Inbox

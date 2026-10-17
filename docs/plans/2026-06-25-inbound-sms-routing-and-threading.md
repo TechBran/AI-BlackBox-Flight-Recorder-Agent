@@ -46,9 +46,9 @@
   - No match → drop (`Ignoring SMS from unknown number`), nothing stored.
   Implement the ordered resolver returning `(operator, contact, classification)` where classification ∈ {`self`,`peer`}.
 
-**Task 2.2 — System-seed fix.** Test: a real operator contact with `created_by="system"` flagged `is_operator_self` now resolves (Anna's latent bug); the literal seed phone `+17164512527` still cannot whitelist itself. Narrow `_is_system_seed` to the seed phone only.
+**Task 2.2 — System-seed fix.** Test: a real operator contact with `created_by="system"` flagged `is_operator_self` now resolves (Anna's latent bug); the literal seed phone `+15555550100` still cannot whitelist itself. Narrow `_is_system_seed` to the seed phone only.
 
-**Task 2.3 — Symmetric Anna/Brandon case.** Test: with Brandon `is_operator_self` on his number and both cross-listed in each other's books, an inbound from Brandon's phone → Brandon context; from Anna's phone → Anna context. Regression lock on the live `+14108166914` 3-book shape.
+**Task 2.3 — Symmetric Anna/Brandon case.** Test: with Brandon `is_operator_self` on his number and both cross-listed in each other's books, an inbound from Brandon's phone → Brandon context; from Anna's phone → Anna context. Regression lock on the live `+15555550112` 3-book shape.
 
 **Commit:** `feat(sms): deterministic 5-tier inbound operator resolution + collision logging`
 

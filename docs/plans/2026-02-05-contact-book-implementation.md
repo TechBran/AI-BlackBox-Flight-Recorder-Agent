@@ -40,7 +40,7 @@ CONTACTS_FILE = CONTACTS_DIR / "contacts.json"
 # Seed contact added to every new operator's book
 SEED_CONTACT = {
     "name": "AI BlackBox Flight Recorder",
-    "phone": "+17164512527",
+    "phone": "+15555550100",
     "email": "brandon@aiblackboxfc.com",
     "relationship": "self",
     "notes": "This is your own phone number. The AI BlackBox system number. Use this as the caller identity.",

@@ -10,9 +10,12 @@ Hermetic: fake manager (gateways()/get()/default()), fake store, stubbed
 contact loader (monkeypatched), and a stubbed _route_through_chat that records
 whether it was called.
 """
+import hashlib
+
 import pytest
 
-from Orchestrator.sms.router import SMSRouter
+from Orchestrator.sms import router as router_mod
+from Orchestrator.sms.router import SEED_PHONE, SMSRouter
 
 
 # ---------------------------------------------------------------------------
@@ -204,20 +207,20 @@ async def test_unowned_line_unknown_sender_dropped(router):
 # System/self seed contact must NEVER satisfy the inbound whitelist.
 #
 # ensure_operator_book() auto-injects SEED_CONTACT (the fixed, spoofable system
-# number +17164512527, created_by 'system', tags ['system','self']) into any
+# number SEED_PHONE, created_by 'system', tags ['system','self']) into any
 # bookless operator. The whitelist lookup must be READ-ONLY (no book
 # fabrication) and must skip any system/self seed contact, so the seed number
 # can never reach the chat pipeline. A real operator-added self contact
 # (created_by a user, no 'system' tag) must still route.
 # ---------------------------------------------------------------------------
-SEED_NUMBER = "+17164512527"
+SEED_NUMBER = SEED_PHONE
 
 # A faithful copy of the auto-injected seed contact, as it would land on disk.
 SEED_ON_DISK = {
     "id": "seedid",
     "name": "AI BlackBox Flight Recorder",
     "phone": SEED_NUMBER,
-    "email": "brandon@aiblackboxfc.com",
+    "email": "",
     "relationship": "self",
     "notes": "This is your own phone number. The AI BlackBox system number.",
     "tags": ["system", "self"],
@@ -307,3 +310,36 @@ async def test_seed_number_dropped_all_books(router, monkeypatch):
     assert router._chat_calls == []
     assert router._fake_mgr.client.sent == []
     assert router._fake_store.messages == []
+
+
+# ---------------------------------------------------------------------------
+# The seed number is a fixture now (W05: no real DIDs in tracked files), but
+# books seeded earlier still carry the old real number; it stays gated by digest.
+# ---------------------------------------------------------------------------
+def test_seed_phone_matches_the_contact_seed():
+    from Orchestrator.contacts import SEED_CONTACT
+    assert SEED_CONTACT["phone"] == SEED_PHONE
+    assert SEED_PHONE.startswith("+1555555")  # fictional 555-01xx range
+    assert SEED_CONTACT["email"] == ""
+
+
+def test_legacy_seed_digest_is_well_formed():
+    digest = router_mod._LEGACY_SEED_PHONE_SHA256
+    assert len(digest) == 64 and int(digest, 16) >= 0
+    assert digest != hashlib.sha256(router_mod._normalize_phone(SEED_PHONE).encode()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_legacy_seed_number_on_disk_does_not_whitelist(router, monkeypatch):
+    legacy = "+15555550177"  # stands in for the pre-fixture seed number
+    monkeypatch.setattr(router_mod, "_LEGACY_SEED_PHONE_SHA256",
+                        hashlib.sha256(legacy[-10:].encode()).hexdigest())
+    _patch_contacts(monkeypatch, {"Brandon": {"seedid": {**SEED_ON_DISK, "phone": legacy}}})
+    for span in (2, 3):  # owned line and the all-books pass
+        await router.handle_incoming(
+            sender=legacy, body="spoofed", span=span,
+            recvtime="2026-06-07 12:00:00", gateway_id="g1",
+        )
+    assert router._chat_calls == []
+    assert router._fake_store.messages == []
+    assert router.resolve_inbound(legacy, owner=None).operator is None

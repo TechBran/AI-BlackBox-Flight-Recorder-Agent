@@ -841,7 +841,7 @@ PHONE_CLI_SESSION_TIMEOUT_MIN = int(os.getenv("PHONE_CLI_SESSION_TIMEOUT_MIN", "
 # Twilio Integration (alternative to FreeSwitch for phone-AI bridging)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")  # e.g., "+17164512527"
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")  # e.g., "+15555550100"
 # Public base URL for Twilio webhooks (must be HTTPS accessible from internet)
 # For local development, use ngrok: "wss://your-ngrok-url.ngrok.io"
 # For production: "wss://your-domain.com"

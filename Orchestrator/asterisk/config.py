@@ -54,7 +54,7 @@ TG200_HTTP_PASSWORD = os.getenv("TG200_HTTP_PASSWORD", "password")
 # Multi-Trunk Scalability
 # ---------------------------------------------------------------------------
 # JSON array of trunk configs for multiple gateways:
-# [{"name":"tg200-1","ip":"192.168.5.150","phone":"+14103497272","capacity":2}, ...]
+# [{"name":"tg200-1","ip":"192.168.5.150","phone":"+15555550110","capacity":2}, ...]
 _trunks_json = os.getenv("ASTERISK_TRUNKS", "[]")
 try:
     ASTERISK_TRUNKS = json.loads(_trunks_json)

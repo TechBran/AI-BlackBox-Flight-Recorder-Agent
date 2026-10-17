@@ -77,7 +77,7 @@ curl -s http://localhost:9091/asterisk/status | grep -i audio
 curl -X POST http://localhost:9091/asterisk/call \
   -H "Content-Type: application/json" \
   -d '{
-    "to": "+14108166914",
+    "to": "+15555550112",
     "backend": "openai_realtime",
     "operator": "Brandon",
     "greeting": "Hello Brandon, this is a test call from the AI BlackBox.",

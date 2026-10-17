@@ -42,7 +42,7 @@ def test_upsert_stores_both_flags(isolated_contacts):
         tags=[],
         operator="Brandon",
         created_by="Brandon",
-        phone="+14108166914",
+        phone="+15555550112",
         inbound_allowed=True,
         is_operator_self=True,
     )
@@ -57,7 +57,7 @@ def test_load_contacts_round_trips_flags(isolated_contacts):
         tags=[],
         operator="Brandon",
         created_by="Brandon",
-        phone="+14108166914",
+        phone="+15555550112",
         inbound_allowed=True,
         is_operator_self=True,
     )
@@ -93,7 +93,7 @@ def test_flagless_update_preserves_flags(isolated_contacts):
         tags=[],
         operator="Brandon",
         created_by="Brandon",
-        phone="+14108166914",
+        phone="+15555550112",
         inbound_allowed=True,
         is_operator_self=True,
     )
@@ -105,7 +105,7 @@ def test_flagless_update_preserves_flags(isolated_contacts):
         tags=[],
         operator="Brandon",
         created_by="grok-live",
-        phone="+14108166914",
+        phone="+15555550112",
     )
 
     data = contacts_mod.load_contacts()
@@ -186,7 +186,7 @@ def test_post_contacts_persists_flags(isolated_contacts):
         json={
             "operator": "Brandon",
             "name": "Anna",
-            "phone": "+14108166914",
+            "phone": "+15555550112",
             "inbound_allowed": True,
             "is_operator_self": True,
         },
@@ -276,7 +276,7 @@ def test_self_flag_collision_returns_warning(isolated_contacts):
         tags=[],
         operator="Anna",
         created_by="Anna",
-        phone="+14108166914",
+        phone="+15555550112",
         is_operator_self=True,
     )
 
@@ -286,7 +286,7 @@ def test_self_flag_collision_returns_warning(isolated_contacts):
         tags=[],
         operator="Brandon",
         created_by="Brandon",
-        phone="+1 410 816 6914",  # same last-10 digits
+        phone="+1 555 555 0112",  # same last-10 digits
         is_operator_self=True,
     )
 
@@ -343,7 +343,7 @@ def test_no_warning_when_not_self_flagged(isolated_contacts):
         tags=[],
         operator="Anna",
         created_by="Anna",
-        phone="+14108166914",
+        phone="+15555550112",
         is_operator_self=True,
     )
     result = contacts_mod.upsert_contact(
@@ -352,7 +352,7 @@ def test_no_warning_when_not_self_flagged(isolated_contacts):
         tags=[],
         operator="Brandon",
         created_by="Brandon",
-        phone="+14108166914",
+        phone="+15555550112",
         inbound_allowed=True,
         is_operator_self=False,
     )
@@ -369,7 +369,7 @@ def test_cron_contacts_includes_both_flags(isolated_contacts):
         tags=[],
         operator="Brandon",
         created_by="Brandon",
-        phone="+14108166914",
+        phone="+15555550112",
         inbound_allowed=True,
         is_operator_self=True,
     )

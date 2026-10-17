@@ -901,6 +901,25 @@ if ! grep -qE "^CLI_AGENT_IDLE_DAYS=" "$BLACKBOX_ROOT/.env" 2>/dev/null; then
     echo "[install] Appended CLI_AGENT_IDLE_DAYS=7 to .env (was missing)"
 fi
 
+# Step 3a-tel: TELEPHONY_SECRET_KEY (audit W05). Gateway credentials are
+# Fernet-encrypted at rest with it; when it is empty, Orchestrator/asterisk/
+# secrets.py falls back to a constant key that is public in this repo. Generated
+# once, in place, as $REAL_USER (Scripts/env_key.py never prints it and never
+# replaces a set value). Skipped when gateways.json already holds values
+# encrypted under that fallback key: a new key would make them unreadable.
+if ! grep -qE "^TELEPHONY_SECRET_KEY=.+" "$BLACKBOX_ROOT/.env" 2>/dev/null; then
+    GATEWAYS_JSON="$BLACKBOX_ROOT/Orchestrator/asterisk/gateways.json"
+    if [[ -f "$GATEWAYS_JSON" ]] && grep -q '"enc:' "$GATEWAYS_JSON"; then
+        echo "[install] WARN: TELEPHONY_SECRET_KEY is unset but $GATEWAYS_JSON holds credentials"
+        echo "[install]       encrypted with the built-in fallback key; not generating one (they would"
+        echo "[install]       become unreadable). Set TELEPHONY_SECRET_KEY in .env, restart, then re-enter"
+        echo "[install]       each gateway's HTTP password and AMI secret in the Portal (Telephony > Edit)."
+    else
+        sudo -u "$REAL_USER" python3 -I "$BLACKBOX_ROOT/Scripts/env_key.py" generate --kind fernet \
+            "$BLACKBOX_ROOT/.env" TELEPHONY_SECRET_KEY
+    fi
+fi
+
 # ── Step 3b: config.ini from template (per-customer state — operators + pairing) ──
 # Customer ZIP doesn't ship config.ini (gitignored to prevent shipping the
 # author's operator roster + tailnet hostname). Wizard's operator + tailscale

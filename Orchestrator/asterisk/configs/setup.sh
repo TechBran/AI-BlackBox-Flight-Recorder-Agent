@@ -1,13 +1,9 @@
 #!/bin/bash
-S="${BLACKBOX_ROOT:?}/Orchestrator/asterisk/configs"
-D="/etc/asterisk"
-cp "$S/pjsip.conf" "$D/pjsip.conf"
-cp "$S/extensions.conf" "$D/extensions.conf"
-cp "$S/ari.conf" "$D/ari.conf"
-cp "$S/http.conf" "$D/http.conf"
-chown asterisk:asterisk "$D/pjsip.conf" "$D/extensions.conf" "$D/ari.conf" "$D/http.conf"
-chmod 640 "$D/pjsip.conf" "$D/extensions.conf" "$D/ari.conf" "$D/http.conf"
-systemctl restart asterisk
-sleep 2
-echo "Done. Testing ARI..."
-curl -s -u blackbox:blackbox-ari-secret-2026 http://127.0.0.1:8088/ari/asterisk/info
+# setup.sh — kept as an alias of install.sh (same arguments).
+#
+# It used to copy a hand-written ari.conf and test ARI with a password written
+# into this file. install.sh now renders ari.conf from ASTERISK_ARI_PASSWORD in
+# .env (generating one when empty), so no secret lives in the repo.
+#
+# Run with: sudo bash Orchestrator/asterisk/configs/setup.sh [--rotate-ari-password]
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh" "$@"

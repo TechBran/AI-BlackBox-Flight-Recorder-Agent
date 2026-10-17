@@ -15,13 +15,16 @@ from typing import Dict, Any, List, Optional
 CONTACTS_DIR = Path(__file__).resolve().parent.parent / "Contacts"
 CONTACTS_FILE = CONTACTS_DIR / "contacts.json"
 
-# Seed contact added to every new operator's book
+# Seed contact added to every new operator's book. The number is a fictional
+# 555-01xx placeholder (it used to be a real line, published in this public
+# repo); sms/router.py SEED_PHONE must equal it, so the seed can never
+# whitelist an inbound SMS.
 SEED_CONTACT = {
     "name": "AI BlackBox Flight Recorder",
-    "phone": "+17164512527",
-    "email": "brandon@aiblackboxfc.com",
+    "phone": "+15555550100",
+    "email": "",
     "relationship": "self",
-    "notes": "This is your own phone number. The AI BlackBox system number. Use this as the caller identity.",
+    "notes": "Placeholder for this BlackBox's own phone number. Edit it to the box's real line to use it as the caller identity.",
     "tags": ["system", "self"],
     "created_by": "system"
 }
