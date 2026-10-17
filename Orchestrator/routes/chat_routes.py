@@ -2331,7 +2331,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
         "messages": messages,
         "stream": True,
         "stream_options": {"include_usage": True},
-        "tools": _get_tools("openai", _last_user_msg(messages))
+        "tools": await asyncio.to_thread(_get_tools, "openai", _last_user_msg(messages))
     }
 
     # For reasoning-capable models, request reasoning output
@@ -2693,7 +2693,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                     tool_result = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = read_text_safe(VOL_PATH)
+                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
                                         search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
@@ -3095,7 +3095,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
         "max_tokens": 32000,
         "stream": True,
         "messages": amsgs,
-        "tools": _get_tools("anthropic", _last_user_msg(messages))
+        "tools": await asyncio.to_thread(_get_tools, "anthropic", _last_user_msg(messages))
     }
     # Adaptive thinking + effort for Claude models that support it (Opus 4.7, Sonnet 4.6).
     # display="summarized" is required on Opus 4.7 — default "omitted" streams empty thinking blocks.
@@ -3488,7 +3488,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     result_message = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = read_text_safe(VOL_PATH)
+                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
                                         search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
@@ -4345,7 +4345,7 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
                 system_prompt += device_context
 
         # Enrich with fossil context (reduced counts for CU token budget)
-        cu_fossil_context, cu_provenance = build_cu_context(user_text, operator)
+        cu_fossil_context, cu_provenance = await asyncio.to_thread(build_cu_context, user_text, operator)
         session.provenance = cu_provenance
         if cu_fossil_context:
             system_prompt += "\n\n" + cu_fossil_context
@@ -4364,7 +4364,7 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
         # ── Tool array + headers: the computer tool entry and beta header are
         #    per model (5.5+ = toolset, no beta) ──
         tools, headers = build_anthropic_cu_request(
-            model, CU_API_KEY, _get_tools("anthropic", _last_user_msg(history), group="chat_cu"))
+            model, CU_API_KEY, await asyncio.to_thread(_get_tools, "anthropic", _last_user_msg(history), group="chat_cu"))
 
         # ── Claim the shared physical display ONLY for a NATIVE launch (M9). A
         #    virtual launch drives its own per-session display and never contends,
@@ -4600,7 +4600,7 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             from Orchestrator.gemini_cu.agent_loop import _default_system_prompt
             system_prompt = _default_system_prompt(session)
 
-        cu_fossil_context, cu_provenance = build_cu_context(user_text, operator)
+        cu_fossil_context, cu_provenance = await asyncio.to_thread(build_cu_context, user_text, operator)
         session.provenance = cu_provenance
         if cu_fossil_context:
             # HARD cap for gemini CU (the chat-path half of the MS02 chess-game
@@ -4735,7 +4735,7 @@ async def _gemini_cu_agent_loop(session, operator: str, user_text: str,
             # Build system prompt for next turn
             from Orchestrator.gemini_cu.agent_loop import _default_system_prompt
             next_system = _default_system_prompt(session)
-            cu_fossil_context, cu_provenance = build_cu_context(next_prompt, operator)
+            cu_fossil_context, cu_provenance = await asyncio.to_thread(build_cu_context, next_prompt, operator)
             session.provenance = cu_provenance
             if cu_fossil_context:
                 next_system += "\n\n" + cu_fossil_context
@@ -4896,7 +4896,7 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
         from Orchestrator.openai_cu.agent_loop import _default_system_prompt
         system_prompt = _default_system_prompt()
 
-        cu_fossil_context, cu_provenance = build_cu_context(user_text, operator)
+        cu_fossil_context, cu_provenance = await asyncio.to_thread(build_cu_context, user_text, operator)
         session.provenance = cu_provenance
         if cu_fossil_context:
             system_prompt += "\n\n" + cu_fossil_context
@@ -5031,7 +5031,7 @@ async def _openai_cu_agent_loop(session, operator: str, user_text: str,
             # session.openai_previous_response_id inside the driver)
             from Orchestrator.openai_cu.agent_loop import _default_system_prompt
             next_system = _default_system_prompt()
-            cu_fossil_context, cu_provenance = build_cu_context(next_prompt, operator)
+            cu_fossil_context, cu_provenance = await asyncio.to_thread(build_cu_context, next_prompt, operator)
             session.provenance = cu_provenance
             if cu_fossil_context:
                 next_system += "\n\n" + cu_fossil_context
@@ -5153,7 +5153,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
         "generationConfig": {
             **thinking_config
         },
-        "tools": _get_tools("gemini", _last_user_msg(messages))
+        "tools": await asyncio.to_thread(_get_tools, "gemini", _last_user_msg(messages))
     }
     if system_instruction["parts"]:
         payload["system_instruction"] = system_instruction
@@ -5521,7 +5521,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                     result_message = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = read_text_safe(VOL_PATH)
+                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
                                         search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
@@ -5864,7 +5864,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
         "messages": processed_messages,
         "stream": True,
         "stream_options": {"include_usage": True},
-        "tools": _get_tools("grok", _last_user_msg(messages))
+        "tools": await asyncio.to_thread(_get_tools, "grok", _last_user_msg(messages))
     }
 
     # Only grok-3-mini supports the reasoning_effort parameter
@@ -6191,7 +6191,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                     tool_result = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = read_text_safe(VOL_PATH)
+                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
                                         search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
@@ -6426,7 +6426,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
         "messages": processed_messages,
         "stream": True,
         "stream_options": {"include_usage": True},
-        "tools": _get_tools("custom", _last_user_msg(messages))
+        "tools": await asyncio.to_thread(_get_tools, "custom", _last_user_msg(messages))
     }
     # NOTE: no max_tokens — llama-server generates until EOS/ctx; reasoning
     # models need the headroom (INTEGRATION.md §6).
@@ -6776,7 +6776,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                     tool_result = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = read_text_safe(VOL_PATH)
+                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
                                         search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
@@ -7329,6 +7329,38 @@ async def _stream_with_keepalive(stream, interval_s: float = KEEPALIVE_INTERVAL_
         yield event
 
 
+# Audit rank 45: retrieval (embed + hybrid search + rerank) is synchronous and
+# takes ~31 s warm on MS02 when the reranker is on. Called inline from these
+# async routes it froze the WHOLE event loop for that long - every other chat,
+# voice socket and health probe stalled behind one reranking turn. It now runs
+# in a worker thread (asyncio.to_thread copies contextvars, so the request-
+# scoped origin device id still reaches it) INSIDE the SSE generator, and the
+# same keepalive sentinels cover the wait so idle client read timeouts never
+# trip while the context builds.
+async def _streaming_context_off_loop(messages, operator, provider, window_guard_tokens,
+                                      interval_s: Optional[float] = None):
+    """Yield ``None`` keepalive sentinels while build_streaming_context runs in a
+    worker thread, then yield its (context_messages, provenance, telemetry)
+    tuple once. Exceptions from the build propagate unchanged. The interval is
+    read at call time so tests can shrink KEEPALIVE_INTERVAL_S."""
+    async def _once():
+        yield await asyncio.to_thread(build_streaming_context, messages, operator, provider,
+                                      window_guard_tokens=window_guard_tokens)
+    interval = KEEPALIVE_INTERVAL_S if interval_s is None else interval_s
+    async for item in _stream_with_keepalive(_once(), interval_s=interval):
+        yield item
+
+
+def _context_error_frames(route_tag: str, exc: Exception):
+    """SSE frames for a context build that failed after the 200 was sent."""
+    import traceback
+    print(f"[{route_tag}] Context build failed: {exc}\n{traceback.format_exc()}")
+    return [
+        f"event: error\ndata: {json.dumps(f'Context build failed: {exc}')}\n\n",
+        f"event: stream_end\ndata: {json.dumps({'status': 'error'})}\n\n",
+    ]
+
+
 @app.get("/chat/stream")
 async def chat_stream(request: Request):
     """SSE streaming chat endpoint with thinking/reasoning support.
@@ -7403,21 +7435,32 @@ async def chat_stream(request: Request):
             else:
                 model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
 
-        # Build context-enriched messages with fossil retrieval. telemetry is
-        # The Signal's presentation-only metrics sink (Task 1.3 will emit it);
-        # the route resolves `model`, so it is recorded here. Never prompt-bound.
-        context_messages, provenance, telemetry = build_streaming_context(messages, operator, provider,
-                                                               window_guard_tokens=guard)
-        telemetry["model"] = model
-
-        # M1: the location rides along INSIDE the user prompt block. Applied
-        # AFTER context building on purpose — retrieval/tool-injection queries
-        # stay byte-identical to today; only what the model reads changes.
-        # No location -> the same list object back -> perfect no-op.
-        context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
-
         async def generate_sse():
             """Generate SSE events from provider stream."""
+            # Build context-enriched messages with fossil retrieval, off the
+            # event loop (rank 45; see _streaming_context_off_loop). telemetry is
+            # The Signal's presentation-only metrics sink; the route resolves
+            # `model`, so it is recorded here. Never prompt-bound.
+            ctx = None
+            try:
+                async for item in _streaming_context_off_loop(messages, operator, provider, guard):
+                    if item is None:
+                        yield SSE_KEEPALIVE_FRAME
+                        continue
+                    ctx = item
+            except Exception as e:
+                for frame in _context_error_frames("STREAM", e):
+                    yield frame
+                return
+            context_messages, provenance, telemetry = ctx
+            telemetry["model"] = model
+
+            # M1: the location rides along INSIDE the user prompt block. Applied
+            # AFTER context building on purpose — retrieval/tool-injection queries
+            # stay byte-identical to today; only what the model reads changes.
+            # No location -> the same list object back -> perfect no-op.
+            context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
+
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
 
             # The Signal (Task 1.3): burst the honest retrieval telemetry as
@@ -7544,18 +7587,27 @@ async def chat_stream_post(request: Request):
             else:
                 model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
 
-        # Build context-enriched messages with fossil retrieval. telemetry is
-        # The Signal's presentation-only metrics sink (Task 1.3 will emit it);
-        # the route resolves `model`, so it is recorded here. Never prompt-bound.
-        context_messages, provenance, telemetry = build_streaming_context(messages, operator, provider,
-                                                               window_guard_tokens=guard)
-        telemetry["model"] = model
-
-        # M1: location rides along inside the user prompt block (see the GET
-        # route). Applied after context building so retrieval stays unchanged.
-        context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
-
         async def generate_sse():
+            # Context build off the event loop with keepalives (rank 45; see
+            # _streaming_context_off_loop and the GET route).
+            ctx = None
+            try:
+                async for item in _streaming_context_off_loop(messages, operator, provider, guard):
+                    if item is None:
+                        yield SSE_KEEPALIVE_FRAME
+                        continue
+                    ctx = item
+            except Exception as e:
+                for frame in _context_error_frames("STREAM POST", e):
+                    yield frame
+                return
+            context_messages, provenance, telemetry = ctx
+            telemetry["model"] = model
+
+            # M1: location rides along inside the user prompt block (see the GET
+            # route). Applied after context building so retrieval stays unchanged.
+            context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
+
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
 
             # The Signal (Task 1.3): burst the honest retrieval telemetry as
