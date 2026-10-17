@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketState
 from Orchestrator.checkpoint import app
 from Orchestrator.models import TaskType, TaskStatus
 from Orchestrator.tasks import create_task
+from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from Orchestrator.browser.interaction import click, type_text, press_key, scroll
 
 
@@ -37,9 +38,15 @@ def browser_run(req: BrowserRunIn):
     if req.url and not is_domain_allowed(req.url):
         return {"error": f"Domain blocked by security policy: {req.url}"}, 403
 
+    operator = req.operator or "system"
+    try:
+        validate_operator(operator)
+    except InvalidOperatorName as e:
+        return JSONResponse({"error": f"Invalid operator: {e}"}, status_code=400)
+
     task = create_task(
         TaskType.USE_COMPUTER,
-        operator=req.operator or "system",
+        operator=operator,
         prompt=req.prompt,
         result_data={
             "url": req.url,
@@ -251,6 +258,10 @@ async def cu_session_open(req: Optional[CuSessionOpenIn] = Body(default=None)):
         destroy_session_by_id, get_operator_session, get_or_create_session,
     )
     operator = (req.operator if req and req.operator else "system")
+    try:
+        validate_operator(operator)
+    except InvalidOperatorName as e:
+        return JSONResponse({"error": f"Invalid operator: {e}"}, status_code=400)
 
     # Compute `reused` with the SAME predicate get_or_create_session applies,
     # BEFORE calling it (it reports nothing back about which branch it took).

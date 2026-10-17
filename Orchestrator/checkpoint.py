@@ -30,6 +30,7 @@ from Orchestrator.config import CHECKPOINT_AUTO_CREATE_INTERVAL, CHECKPOINT_MIN_
 from Orchestrator.fossils import get_recent_fossils_for_operator, update_snapshot_index
 from Orchestrator.monitoring import drift_state_for, render_snapshot_body_v71
 from Orchestrator.state import get_state, save_operator_state, mint_lock
+from Orchestrator.utils.operators import validate_operator
 from Orchestrator.volume import append_snapshot_text, archive_volume, next_snap_id_from_tail, now_utc_iso, parse_tail, verify_gm_or_halt, read_text_safe
 
 
@@ -236,6 +237,11 @@ def should_create_checkpoint(operator: str) -> bool:
 # Mint
 # -----------------------------------------------------------------------------
 def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
+    # The ledger choke point: the operator is rendered verbatim into the body
+    # ("OPERATOR: <name>", "operator=<name>"), so a name carrying a newline
+    # would forge snapshot lines. Routes refuse it with a 400 first; this
+    # raises InvalidOperatorName for any caller that did not.
+    validate_operator(operator)
     verify_gm_or_halt()
     s = get_state(operator)
 
@@ -374,6 +380,7 @@ def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_
     Returns:
         Dict with snap_id and archive info
     """
+    validate_operator(operator)  # see perform_mint
     verify_gm_or_halt()
 
     with mint_lock:

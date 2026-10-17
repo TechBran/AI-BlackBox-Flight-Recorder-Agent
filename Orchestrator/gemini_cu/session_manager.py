@@ -6,6 +6,8 @@ import time
 import uuid
 from typing import Optional, Dict, List, Any
 
+from Orchestrator.utils.operators import validate_operator
+
 MAX_ITERATIONS = 50
 SESSION_TIMEOUT = 300
 
@@ -43,7 +45,10 @@ class GeminiCUSession:
     def __init__(self, operator: str, device_id: str, environment: str,
                  session_id: Optional[str] = None):
         self.session_id = session_id or str(uuid.uuid4())
-        self.operator = operator
+        # A desktop session never builds a ChromeInstance (whose profile dir
+        # check would refuse it), and the operator names this session's
+        # screenshot files and its ledger turn: refuse an unsafe one here.
+        self.operator = validate_operator(operator)
         self.device_id = device_id
         self.environment = environment  # "browser", "desktop", or "android"
         self.conversation_history: List[Any] = []

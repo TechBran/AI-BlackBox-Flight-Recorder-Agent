@@ -3994,6 +3994,13 @@ async def _cu_save_to_blackbox(operator: str, user_text: str, result_text: str, 
     agent loop so results persist even if the frontend disconnected.
     """
     try:
+        # The CU loops carry the operator of whatever route started them; refuse
+        # an unsafe one here, before get_state() or the ledger ever sees it.
+        validate_operator(operator)
+    except InvalidOperatorName as e:
+        print(f"[CU-SAVE] Not saving: {e}")
+        return
+    try:
         s = get_state(operator)
         utc_now = now_utc_iso()
 
@@ -7375,7 +7382,11 @@ async def chat_stream(request: Request):
         messages_json = request.query_params.get("messages")
         provider = request.query_params.get("provider", "gemini")
         model = request.query_params.get("model")
-        operator = request.query_params.get("operator", current_default())
+        # Same check as the POST twin: switching the method must not skip it.
+        try:
+            operator = _checked_operator(request.query_params.get("operator"))
+        except InvalidOperatorName as e:
+            return JSONResponse(status_code=400, content={"error": f"Invalid operator: {e}"})
         # M3: originating device (self-reported by the Android app; Portal EventSource
         # leaves it unset → primary-device fallback). Request-scoped for the whole turn.
         _set_origin_device_id(request.query_params.get("origin_device_id"))

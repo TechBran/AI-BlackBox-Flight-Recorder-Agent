@@ -23,6 +23,7 @@ from Orchestrator.gemini_cu.config import (
     BROWSER_ONLY_FUNCTIONS
 )
 from Orchestrator.gemini_cu.session_manager import GeminiCUSession
+from Orchestrator.utils.paths import safe_filename, uploads_dir
 from Orchestrator.config import GOOGLE_API_KEY
 from Orchestrator.agent_context import (
     append_fossils_to_system,
@@ -419,13 +420,13 @@ async def _execute_custom_function(session: GeminiCUSession,
 
 def _save_screenshot(png_bytes: bytes, session: GeminiCUSession) -> str:
     """Save screenshot to uploads directory and return URL path."""
-    uploads_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "Portal", "uploads"
-    )
-    os.makedirs(uploads_dir, exist_ok=True)
-    filename = f"gemini_cu_{session.operator}_{session.screenshot_count:03d}.png"
-    filepath = os.path.join(uploads_dir, filename)
+    uploads = str(uploads_dir())
+    os.makedirs(uploads, exist_ok=True)
+    # The operator must never steer this path, even though GeminiCUSession
+    # already refuses an unsafe one.
+    op = safe_filename(session.operator, fallback="operator")
+    filename = f"gemini_cu_{op}_{session.screenshot_count:03d}.png"
+    filepath = os.path.join(uploads, filename)
     with open(filepath, "wb") as f:
         f.write(png_bytes)
     session.screenshot_count += 1

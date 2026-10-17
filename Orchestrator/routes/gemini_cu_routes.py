@@ -12,6 +12,7 @@ from Orchestrator.gemini_cu import (
 )
 from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL
 from Orchestrator.device_registry import get_registry, DeviceProtocol
+from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 
 router = APIRouter(prefix="/gemini-cu", tags=["gemini-cu"])
 
@@ -48,6 +49,15 @@ async def _snapshot_cu_result(task_id: str, operator: str, device_id: str,
     print(f"[GEMINI CU] Snapshot saved for task {task_id}")
 
 
+def _require_safe_operator(operator: str) -> None:
+    """400 for an operator unsafe to put in a path or the ledger. The Gemini
+    session refuses one too, but only once the background task is running."""
+    try:
+        validate_operator(operator)
+    except InvalidOperatorName as e:
+        raise HTTPException(status_code=400, detail=f"Invalid operator: {e}")
+
+
 class GeminiCURequest(BaseModel):
     prompt: str
     operator: str
@@ -60,6 +70,7 @@ class GeminiCURequest(BaseModel):
 @router.post("/run")
 async def run_gemini_cu(body: GeminiCURequest):
     """Start a Gemini Computer Use task. Returns a task_id for status polling."""
+    _require_safe_operator(body.operator)
     registry = get_registry()
     device = registry.get_device(body.device_id)
     if not device:
@@ -246,6 +257,7 @@ async def _run_task(task_id, operator, device_id, environment,
 @router.post("/stream")
 async def stream_gemini_cu(body: GeminiCURequest):
     """Stream Gemini CU events via SSE."""
+    _require_safe_operator(body.operator)
     registry = get_registry()
     device = registry.get_device(body.device_id)
     if not device:
