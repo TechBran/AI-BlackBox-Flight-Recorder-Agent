@@ -17,11 +17,22 @@ three voice routes and, through them, the phone bridge chain.
 """
 
 import json
+import os
 
 import aiohttp
 from typing import Dict, Optional, Set
 
 from starlette.websockets import WebSocketState
+
+
+def voice_debug_enabled() -> bool:
+    """VOICE_DEBUG=1|true|yes|on opts into full session-config dumps in the logs.
+
+    Off by default: a realtime session.update carries the operator's injected
+    snapshot memory, custom role and every tool schema (audit
+    O09-live-voice-providers-12). Read per call, so no import-time freeze.
+    """
+    return os.getenv("VOICE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def tool_error_text(name: str, exc: BaseException) -> str:

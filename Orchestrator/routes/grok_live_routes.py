@@ -78,6 +78,7 @@ from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 from Orchestrator.routes.voice_ws_shared import (
     save_voice_transcript,
     send_openai_style_tool_error,
+    voice_debug_enabled,
 )
 
 
@@ -604,7 +605,10 @@ Do this BEFORE responding to the user - check what happened recently so you're c
     print(f"[GROK-LIVE] ===== SENDING SESSION CONFIG =====")
     print(f"[GROK-LIVE] Number of tools: {len(grok_live_tools)}")
     print(f"[GROK-LIVE] Tool names: {[t['name'] for t in grok_live_tools]}")
-    print(f"[GROK-LIVE] Full config: {json.dumps(config_event, indent=2)}")
+    print(f"[GROK-LIVE] Instructions: {len(system_instructions)} chars")
+    # The full session.update carries the operator's snapshot memory: opt-in only.
+    if voice_debug_enabled():
+        print(f"[GROK-LIVE] Full config: {json.dumps(config_event, indent=2)}")
 
     await session.grok_ws.send(json.dumps(config_event))
     session.context_injected = True
@@ -1239,7 +1243,9 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
         session_data = event.get("session", {})
         tools = session_data.get("tools", [])
         print(f"[GROK-LIVE] Confirmed tools: {[t.get('name') for t in tools]}")
-        print(f"[GROK-LIVE] Full session data: {json.dumps(session_data, indent=2)}")
+        print(f"[GROK-LIVE] Confirmed instructions: {len(session_data.get('instructions') or '')} chars")
+        if voice_debug_enabled():
+            print(f"[GROK-LIVE] Full session data: {json.dumps(session_data, indent=2)}")
 
     elif event_type == "conversation.created":
         # Conversation initialized — capture the id for session resumption
