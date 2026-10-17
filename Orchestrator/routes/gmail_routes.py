@@ -9,17 +9,23 @@ Endpoints:
   POST /gmail/disconnect/{operator}         — remove tokens (logout)
 """
 
+import asyncio
+import html
 import os
-import json
-import base64
+import secrets
+import time
+from typing import Dict, Optional
+from urllib.parse import quote
 
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
+from Orchestrator import config as _cfg
 from Orchestrator.checkpoint import app
 from Orchestrator.config import GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET
 from Orchestrator.gmail.service import (
-    SCOPES, save_tokens, load_tokens, delete_tokens, is_connected, get_gmail_service
+    SCOPES, save_tokens, delete_tokens, is_connected, probe_connection,
+    token_data_from_credentials,
 )
 
 # Allow HTTP for local dev (OAuth library requires HTTPS by default)
@@ -33,16 +39,85 @@ os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 # we persist creds.scopes (the actual grant), so this loses no information.
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
-# In-memory store for PKCE code verifiers (keyed by state)
-_pending_verifiers: dict = {}
+# Pending authorizations, keyed by the OAuth `state` we hand Google:
+#   state -> {operator, code_verifier, redirect_uri, created_at}
+# The state is an unguessable secrets.token_urlsafe(32), so a callback can only
+# complete a flow THIS server started (no login-CSRF binding someone else's
+# Google account to an operator), and each flow keeps its own PKCE verifier
+# (two concurrent sign-ins for one operator used to share a state and clobber
+# each other's). Entries are single-use and expire after _PENDING_TTL_S;
+# _PENDING_MAX bounds the dict however often /authorize is hit.
+_pending_flows: Dict[str, dict] = {}
+_PENDING_TTL_S = 10 * 60
+_PENDING_MAX = 64
+_now = time.monotonic  # module-level so tests can drive the clock
+
+# The callback pages carry no script at all; this makes any value that ever
+# slipped past html.escape inert as well.
+_CALLBACK_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def _client_config() -> dict:
+    return {"web": {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }}
+
+
+def _authorize_path(operator: str) -> str:
+    """Root-relative sign-in URL for an operator (each client resolves it
+    against the origin it already talks to: LAN, localhost or tailnet)."""
+    return f"/auth/gmail/authorize?operator={quote(operator, safe='')}"
+
+
+def _prune_pending() -> None:
+    now = _now()
+    for key in [k for k, v in _pending_flows.items() if now - v["created_at"] > _PENDING_TTL_S]:
+        del _pending_flows[key]
+    while len(_pending_flows) >= _PENDING_MAX:
+        del _pending_flows[min(_pending_flows, key=lambda k: _pending_flows[k]["created_at"])]
+
+
+def _take_pending(state: str) -> Optional[dict]:
+    """Pop the flow for `state`: single use, and None once it has expired."""
+    entry = _pending_flows.pop(state, None) if state else None
+    if entry is None or _now() - entry["created_at"] > _PENDING_TTL_S:
+        return None
+    return entry
+
+
+def _callback_page(title: str, message: str, status_code: int = 200) -> HTMLResponse:
+    """The small page the OAuth popup lands on. Every value is escaped."""
+    return HTMLResponse(
+        content=(
+            "<html><head><meta charset='utf-8'>"
+            f"<title>{html.escape(title)}</title></head>"
+            "<body style='font-family: sans-serif; text-align: center; padding-top: 80px;'>"
+            f"<h2>{html.escape(title)}</h2><p>{html.escape(message)}</p>"
+            "<p>You can close this window.</p></body></html>"
+        ),
+        status_code=status_code,
+        headers=_CALLBACK_HEADERS,
+    )
 
 
 # ---------------------------------------------------------------------------
 # GET /auth/gmail/authorize?operator={operator}
 # ---------------------------------------------------------------------------
 @app.get("/auth/gmail/authorize")
-async def gmail_authorize(request: Request, operator: str = "Brandon"):
+async def gmail_authorize(request: Request, operator: str = ""):
     """Generate Google OAuth URL and redirect the user to Google sign-in."""
+    operator = (operator or "").strip()
+    if not operator:
+        raise HTTPException(status_code=400, detail="operator is required")
+    if operator not in _cfg.USERS_LIST:
+        raise HTTPException(status_code=400, detail="Unknown operator — add the operator first, then connect Google")
     if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Google OAuth credentials not configured in .env")
 
@@ -51,29 +126,25 @@ async def gmail_authorize(request: Request, operator: str = "Brandon"):
     # Build redirect URI dynamically from the incoming request (supports localhost + Tailscale)
     redirect_uri = str(request.url_for("gmail_callback"))
 
-    flow = Flow.from_client_config(
-        {"web": {
-            "client_id": GOOGLE_OAUTH_CLIENT_ID,
-            "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        }},
-        scopes=SCOPES,
-        redirect_uri=redirect_uri,
-    )
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
 
-    # Encode operator in the state so callback knows who to save tokens for
-    state = base64.urlsafe_b64encode(json.dumps({"operator": operator}).encode()).decode()
+    _prune_pending()
+    state = secrets.token_urlsafe(32)
 
-    authorization_url, generated_state = flow.authorization_url(
+    authorization_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
         state=state,
     )
 
-    # Store the code_verifier so the callback can use it for PKCE token exchange
-    _pending_verifiers[state] = flow.code_verifier
+    # The callback needs this flow's operator, PKCE verifier and redirect URI.
+    _pending_flows[state] = {
+        "operator": operator,
+        "code_verifier": flow.code_verifier,
+        "redirect_uri": redirect_uri,
+        "created_at": _now(),
+    }
 
     return RedirectResponse(url=authorization_url)
 
@@ -84,72 +155,48 @@ async def gmail_authorize(request: Request, operator: str = "Brandon"):
 @app.get("/auth/gmail/callback")
 async def gmail_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     """Handle the OAuth callback from Google. Exchange code for tokens."""
+    # Consume the state first: an error response (e.g. access_denied) still
+    # uses up its flow.
+    pending = _take_pending(state)
+
     if error:
-        return HTMLResponse(
-            content=f"<html><body><h2>Gmail Authorization Failed</h2><p>{error}</p>"
-                    f"<p>You can close this window.</p></body></html>",
-            status_code=400,
-        )
+        return _callback_page("Gmail Authorization Failed", error, status_code=400)
 
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state parameter")
 
-    # Decode operator from state
-    try:
-        state_data = json.loads(base64.urlsafe_b64decode(state))
-        operator = state_data.get("operator", "Brandon")
-    except Exception:
-        operator = "Brandon"
+    if pending is None:
+        return _callback_page(
+            "Sign-in link expired",
+            "This Google sign-in link is unknown, expired or already used. "
+            "Start again from Google Workspace in the Portal or the Android app.",
+            status_code=400,
+        )
+
+    operator = pending["operator"]
+    if operator not in _cfg.USERS_LIST:
+        return _callback_page("Unknown operator", f"Operator {operator} no longer exists.", status_code=400)
 
     from google_auth_oauthlib.flow import Flow
 
-    # Rebuild redirect URI from the current request (same origin that started the flow)
-    redirect_uri = str(request.url_for("gmail_callback"))
-
-    flow = Flow.from_client_config(
-        {"web": {
-            "client_id": GOOGLE_OAUTH_CLIENT_ID,
-            "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        }},
-        scopes=SCOPES,
-        redirect_uri=redirect_uri,
-    )
+    # Same redirect URI the authorize step sent Google (they must match).
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=pending["redirect_uri"])
 
     # Restore the PKCE code_verifier from the authorize step
-    code_verifier = _pending_verifiers.pop(state, None)
-    if code_verifier:
-        flow.code_verifier = code_verifier
+    if pending.get("code_verifier"):
+        flow.code_verifier = pending["code_verifier"]
 
-    # Exchange authorization code for tokens
+    # Exchange authorization code for tokens (a blocking HTTPS call)
     try:
-        flow.fetch_token(code=code)
+        await asyncio.to_thread(flow.fetch_token, code=code)
     except Exception as e:
-        return HTMLResponse(
-            content=f"<html><body><h2>Token Exchange Failed</h2><p>{str(e)}</p>"
-                    f"<p>You can close this window.</p></body></html>",
-            status_code=500,
-        )
+        return _callback_page("Token Exchange Failed", str(e), status_code=500)
 
-    creds = flow.credentials
-    token_data = {
-        "access_token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": list(creds.scopes) if creds.scopes else list(SCOPES),
-    }
-    save_tokens(operator, token_data)
+    save_tokens(operator, token_data_from_credentials(flow.credentials))
 
     print(f"[Gmail] OAuth tokens saved for operator: {operator}")
 
-    return HTMLResponse(
-        content=f"<html><body style='font-family: sans-serif; text-align: center; padding-top: 80px;'>"
-                f"<h2>Gmail connected for {operator}!</h2>"
-                f"<p>You can close this window.</p></body></html>"
-    )
+    return _callback_page(f"Gmail connected for {operator}!", "Google Workspace is ready for this operator.")
 
 
 # ---------------------------------------------------------------------------
@@ -157,23 +204,24 @@ async def gmail_callback(request: Request, code: str = "", state: str = "", erro
 # ---------------------------------------------------------------------------
 @app.get("/gmail/status/{operator}")
 async def gmail_status(operator: str):
-    """Check Gmail connection status for an operator. Returns email if connected."""
-    connected = is_connected(operator)
-    email = ""
+    """Connection status for an operator, PROVEN with a live Google call.
 
-    if connected:
-        try:
-            service = get_gmail_service(operator)
-            if service:
-                profile = service.users().getProfile(userId="me").execute()
-                email = profile.get("emailAddress", "")
-        except Exception as e:
-            print(f"[Gmail] Status check error for {operator}: {e}")
-
+    `connected` is true only when Google accepted the stored grant (or could
+    not be reached to ask — state "unverified"). A revoked/expired grant is
+    connected:false + needs_reauth + reauth_url, never "connected" because a
+    token file happens to exist.
+    """
+    probe = await asyncio.to_thread(probe_connection, operator)
+    needs_reauth = probe["state"] == "needs_reauth"
     return JSONResponse(content={
-        "connected": connected,
-        "email": email,
+        "connected": probe["state"] in ("connected", "unverified"),
+        "email": probe["email"],
         "operator": operator,
+        "state": probe["state"],
+        "needs_reauth": needs_reauth,
+        "error": probe["error"],
+        "error_message": probe["error_message"],
+        "reauth_url": _authorize_path(operator) if needs_reauth else None,
     })
 
 

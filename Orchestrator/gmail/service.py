@@ -3,14 +3,19 @@
 import base64
 import json
 import os
+import re
+import tempfile
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from Orchestrator.config import GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET
 
@@ -23,8 +28,134 @@ SCOPES = [
     "https://www.googleapis.com/auth/presentations",
     "https://www.googleapis.com/auth/calendar",
 ]
+TOKEN_URI = "https://oauth2.googleapis.com/token"
+# Created lazily (owner-only) by save_tokens, not at import.
 TOKEN_DIR = Path("Manifest/gmail_tokens")
-TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class GoogleReauthRequired(RefreshError):
+    """The operator's stored Google grant can no longer be refreshed.
+
+    Google answered the refresh with an OAuth error (``invalid_grant`` when the
+    grant was revoked or expired, ``invalid_client`` when the OAuth client
+    changed, ...): only a fresh sign-in fixes it. A RefreshError subclass, so
+    existing ``except RefreshError`` handlers still catch it; ``str()`` is the
+    customer-facing message tools and cron history carry.
+    """
+
+    def __init__(self, operator: str, code: str, detail: str = ""):
+        self.operator = operator
+        self.code = code
+        self.detail = detail
+        super().__init__(reauth_message(operator, code))
+
+
+def reauth_message(operator: str, code: str) -> str:
+    """The one wording for "this operator must sign in to Google again"."""
+    return (
+        f"Google sign-in for {operator} is no longer valid ({code}). Reconnect Google "
+        f"Workspace for this operator: Portal Tools > Google Workspace > Reconnect, "
+        f"or Android Settings > Google Workspace > Reconnect."
+    )
+
+
+def oauth_error_code(exc: BaseException) -> str:
+    """Google's OAuth error code from a RefreshError ('invalid_grant', ...).
+
+    google-auth raises RefreshError('invalid_grant: Bad Request',
+    {'error': 'invalid_grant', ...}); prefer the structured body, fall back to
+    the 'code:' prefix of the message.
+    """
+    args = getattr(exc, "args", ()) or ()
+    if len(args) > 1 and isinstance(args[1], dict) and args[1].get("error"):
+        return str(args[1]["error"])
+    m = re.match(r"\s*([a-z_]+):", str(args[0]) if args else "")
+    return m.group(1) if m else "refresh_failed"
+
+
+def reauth_error_code(exc: BaseException) -> Optional[str]:
+    """The error code when ``exc`` proves the stored grant is unusable, else None.
+
+    Dead grant: a non-retryable RefreshError (raised by our refresh or by the
+    API transport's own 401-refresh), an HTTP 401, or an HTTP 403 for missing
+    scopes (fixed by re-consenting). Anything else — network trouble, a 5xx, a
+    Google API that is disabled in the Cloud project — says nothing about the
+    grant, so it returns None and nobody is told to sign in again.
+    """
+    if isinstance(exc, GoogleReauthRequired):
+        return exc.code
+    if isinstance(exc, RefreshError):
+        return None if getattr(exc, "retryable", False) else oauth_error_code(exc)
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            return None
+        if status == 401:
+            return "unauthorized"
+        if status == 403:
+            from Orchestrator.google_workspace._errors import _is_service_disabled
+            return None if _is_service_disabled(exc) else "insufficient_scope"
+    return None
+
+
+def is_error_result(result: Any) -> bool:
+    """True when a Gmail helper's return value is its error shape.
+
+    The helpers never raise for an API problem: they return {"error": ...}, or
+    [{"error": ...}] from the list-returning ones. An empty list (no matches)
+    is a successful result.
+    """
+    if isinstance(result, dict):
+        return "error" in result
+    if isinstance(result, list):
+        return any(isinstance(item, dict) and "error" in item for item in result)
+    return False
+
+
+def _api_error(prefix: str, operator: str, exc: BaseException) -> str:
+    """Error text for a failed Gmail call: reconnect guidance for a dead grant."""
+    code = reauth_error_code(exc)
+    return reauth_message(operator, code) if code else f"{prefix}: {exc}"
+
+
+def _parse_expiry(value: Any) -> Optional[datetime]:
+    """Stored ISO-8601 expiry -> the naive-UTC datetime google-auth compares against."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _format_expiry(dt: Optional[datetime]) -> Optional[str]:
+    """google-auth's naive-UTC expiry -> ISO-8601 'Z' (Credentials.to_json's format)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat() + "Z"
+
+
+def token_data_from_credentials(creds) -> dict:
+    """The token-file record for a freshly granted credential.
+
+    Carries the access token's expiry so _get_credentials knows when to
+    refresh. Deliberately NO client_id/client_secret: both come from config at
+    load time, so the token file never holds a copy of the OAuth client secret.
+    """
+    return {
+        "access_token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri or TOKEN_URI,
+        "expiry": _format_expiry(getattr(creds, "expiry", None)),
+        "scopes": list(creds.scopes) if creds.scopes else list(SCOPES),
+    }
 
 
 def _token_path(operator: str) -> Path:
@@ -34,9 +165,31 @@ def _token_path(operator: str) -> Path:
 
 
 def save_tokens(operator: str, token_data: dict):
-    """Save OAuth tokens to disk for an operator."""
+    """Save an operator's OAuth tokens: owner-only (0600 file, 0700 dir), atomic.
+
+    A refresh token grants the operator's whole Google account (mail, Drive,
+    Calendar), so the file is written to a private temp sibling and swapped in
+    with os.replace — a reader sees the old or the new file, never half of one.
+    """
     path = _token_path(operator)
-    path.write_text(json.dumps(token_data, indent=2))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(token_data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_tokens(operator: str) -> Optional[dict]:
@@ -55,7 +208,11 @@ def delete_tokens(operator: str):
 
 
 def is_connected(operator: str) -> bool:
-    """Check if an operator has valid Gmail tokens."""
+    """True iff the operator has a stored token with a refresh_token.
+
+    Presence only — it does not prove Google still accepts the grant; that is
+    probe_connection's job (GET /gmail/status).
+    """
     tokens = load_tokens(operator)
     return tokens is not None and "refresh_token" in tokens
 
@@ -68,8 +225,12 @@ def workspace_connected(operator: str) -> bool:
 
 
 def _get_credentials(operator: str) -> Optional[Credentials]:
-    """Build (and refresh if needed) shared OAuth credentials for an operator.
-    Returns None if no token, no refresh_token, or the refresh fails.
+    """Build (and refresh if due) shared OAuth credentials for an operator.
+
+    Returns None when the operator has no token or no refresh_token. Raises
+    GoogleReauthRequired when Google refuses the refresh (revoked/expired
+    grant), and lets transient refresh/network errors propagate — a dead or
+    unreachable grant is never disguised as "not connected".
     These credentials are scoped for Gmail + Docs/Sheets/Slides/Drive/Calendar.
     """
     tokens = load_tokens(operator)
@@ -79,29 +240,84 @@ def _get_credentials(operator: str) -> Optional[Credentials]:
     creds = Credentials(
         token=tokens.get("access_token"),
         refresh_token=tokens["refresh_token"],
-        token_uri="https://oauth2.googleapis.com/token",
+        token_uri=TOKEN_URI,
         client_id=GOOGLE_OAUTH_CLIENT_ID,
         client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
-        scopes=SCOPES
+        scopes=SCOPES,
+        expiry=_parse_expiry(tokens.get("expiry")),
     )
 
-    # Refresh if expired
-    if creds.expired or not creds.valid:
+    # Refresh when the access token is expired or missing — and when its age is
+    # unknown: a token file written before expiry was persisted is refreshed
+    # once, after which its expiry is on disk. (Without an expiry google-auth
+    # treats the token as never expiring, so it was never refreshed here.)
+    if creds.expiry is None or not creds.valid:
         try:
             creds.refresh(Request())
-            # Save refreshed tokens
-            tokens["access_token"] = creds.token
-            save_tokens(operator, tokens)
-        except Exception as e:
-            print(f"[Google] Token refresh failed for {operator}: {e}")
-            return None
+        except RefreshError as e:
+            if getattr(e, "retryable", False):
+                raise
+            print(f"[Google] Token refresh refused for {operator}: {e}")
+            raise GoogleReauthRequired(operator, oauth_error_code(e), str(e)) from e
+        _save_refreshed(operator, tokens, creds)
 
     return creds
 
 
+def _save_refreshed(operator: str, tokens: dict, creds: Credentials) -> None:
+    """Persist a refreshed access token + its expiry (and a rotated refresh token).
+
+    Also drops the client_id/client_secret copies older token files carried.
+    A failed write is logged, not raised: the credentials in hand still work.
+    """
+    updated = {k: v for k, v in tokens.items() if k not in ("client_id", "client_secret")}
+    updated["access_token"] = creds.token
+    updated["expiry"] = _format_expiry(creds.expiry)
+    if creds.refresh_token:
+        updated["refresh_token"] = creds.refresh_token
+    try:
+        save_tokens(operator, updated)
+    except OSError as e:
+        print(f"[Google] Could not save refreshed token for {operator}: {e}")
+
+
+def probe_connection(operator: str) -> Dict[str, Any]:
+    """Prove the operator's stored grant still works (one cheap users.getProfile).
+
+    Blocking — callers on the event loop run it in a thread. Returns
+    {"state", "email", "error", "error_message"} where state is one of:
+      not_connected  no stored token
+      connected      Google accepted the grant (email filled in)
+      needs_reauth   the grant is dead; error is Google's code (invalid_grant, ...)
+      unverified     Google could not be asked (network, 5xx); the grant may be fine
+    """
+    out: Dict[str, Any] = {"state": "not_connected", "email": "", "error": None, "error_message": None}
+    try:
+        if not is_connected(operator):
+            return out
+    except (OSError, ValueError) as e:
+        out.update(state="needs_reauth", error="token_unreadable",
+                   error_message=reauth_message(operator, "token_unreadable"))
+        print(f"[Gmail] Token file for {operator} is unreadable: {e}")
+        return out
+    try:
+        service = get_gmail_service(operator)
+        profile = service.users().getProfile(userId="me").execute()
+        out.update(state="connected", email=profile.get("emailAddress", "") or "")
+    except Exception as e:
+        code = reauth_error_code(e)
+        if code:
+            out.update(state="needs_reauth", error=code, error_message=reauth_message(operator, code))
+        else:
+            out.update(state="unverified", error="probe_failed",
+                       error_message=f"Could not reach Google to verify the sign-in: {e}")
+        print(f"[Gmail] Status probe for {operator}: {out['state']} ({e})")
+    return out
+
+
 def get_gmail_service(operator: str):
     """Build an authenticated Gmail API service for an operator.
-    Returns None if not connected or tokens are invalid.
+    Returns None if not connected; raises GoogleReauthRequired for a dead grant.
     """
     creds = _get_credentials(operator)
     return build("gmail", "v1", credentials=creds, cache_discovery=False) if creds else None
@@ -170,7 +386,7 @@ def list_messages(operator: str, query: str = "", max_results: int = 10) -> List
             })
         return summaries
     except Exception as e:
-        return [{"error": f"Gmail API error: {str(e)}"}]
+        return [{"error": _api_error("Gmail API error", operator, e)}]
 
 
 def get_message(operator: str, message_id: str) -> Dict:
@@ -212,7 +428,7 @@ def get_message(operator: str, message_id: str) -> Dict:
             "labelIds": msg.get("labelIds", [])
         }
     except Exception as e:
-        return {"error": f"Gmail API error: {str(e)}"}
+        return {"error": _api_error("Gmail API error", operator, e)}
 
 
 def send_email(operator: str, to: str, subject: str, body: str,
@@ -241,7 +457,7 @@ def send_email(operator: str, to: str, subject: str, body: str,
         result = service.users().messages().send(userId="me", body=send_body).execute()
         return {"success": True, "messageId": result.get("id"), "threadId": result.get("threadId")}
     except Exception as e:
-        return {"error": f"Send failed: {str(e)}"}
+        return {"error": _api_error("Send failed", operator, e)}
 
 
 def get_labels(operator: str) -> List[Dict]:
@@ -255,7 +471,7 @@ def get_labels(operator: str) -> List[Dict]:
         return [{"id": l["id"], "name": l["name"], "type": l.get("type", "")}
                 for l in result.get("labels", [])]
     except Exception as e:
-        return [{"error": f"Gmail API error: {str(e)}"}]
+        return [{"error": _api_error("Gmail API error", operator, e)}]
 
 
 def modify_message(operator: str, message_id: str, add_labels: List[str] = None,
@@ -274,4 +490,4 @@ def modify_message(operator: str, message_id: str, add_labels: List[str] = None,
         result = service.users().messages().modify(userId="me", id=message_id, body=body).execute()
         return {"success": True, "labelIds": result.get("labelIds", [])}
     except Exception as e:
-        return {"error": f"Gmail API error: {str(e)}"}
+        return {"error": _api_error("Gmail API error", operator, e)}

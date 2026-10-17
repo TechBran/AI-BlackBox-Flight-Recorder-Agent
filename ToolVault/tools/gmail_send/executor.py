@@ -5,7 +5,7 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Compose and send a new email."""
     import json
-    from Orchestrator.gmail.service import send_email
+    from Orchestrator.gmail.service import send_email, is_error_result
     operator = params.get("operator", ctx.operator or "Brandon")
     to = params.get("to", "")
     subject = params.get("subject", "")
@@ -16,4 +16,4 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(success=False, result=f"to, subject, and body are all required. Got: to='{to}', subject='{subject}', body_len={len(body)}")
     result = send_email(operator, to, subject, body, cc)
     print(f"[GMAIL-SEND] Result: {json.dumps(result)}")
-    return ToolResult(success=True, result=json.dumps(result))
+    return ToolResult(success=not is_error_result(result), result=json.dumps(result))

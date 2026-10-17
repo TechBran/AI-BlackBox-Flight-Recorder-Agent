@@ -5,9 +5,10 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Search/list emails in the operator's Gmail inbox."""
     import json
-    from Orchestrator.gmail.service import list_messages
+    from Orchestrator.gmail.service import list_messages, is_error_result
     operator = params.get("operator", ctx.operator or "Brandon")
     query = params.get("query", "")
     max_results = min(int(params.get("max_results", 10)), 20)
     results = list_messages(operator, query, max_results)
-    return ToolResult(success=True, result=json.dumps(results, indent=2))
+    # An error entry is a failed call; an empty list (no matches) is not.
+    return ToolResult(success=not is_error_result(results), result=json.dumps(results, indent=2))

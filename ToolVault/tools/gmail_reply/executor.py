@@ -5,7 +5,7 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Reply to an existing email thread."""
     import json
-    from Orchestrator.gmail.service import send_email, get_message
+    from Orchestrator.gmail.service import send_email, get_message, is_error_result
     operator = params.get("operator", ctx.operator or "Brandon")
     message_id = params.get("message_id", "")
     thread_id = params.get("thread_id", "")
@@ -14,9 +14,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(success=False, result="message_id, thread_id, and body are all required")
     # Get original message to extract subject and sender for reply
     original = get_message(operator, message_id)
+    if is_error_result(original):
+        # No sender to reply to — never send a reply to an empty address.
+        return ToolResult(success=False, result=json.dumps(original))
     to = original.get("from", "")
     subject = original.get("subject", "")
     if not subject.startswith("Re: "):
         subject = f"Re: {subject}"
     result = send_email(operator, to, subject, body, reply_to_message_id=message_id, thread_id=thread_id)
-    return ToolResult(success=True, result=json.dumps(result))
+    return ToolResult(success=not is_error_result(result), result=json.dumps(result))

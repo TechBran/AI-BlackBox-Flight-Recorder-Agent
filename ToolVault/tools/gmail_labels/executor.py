@@ -5,14 +5,14 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """List labels or modify message labels."""
     import json
-    from Orchestrator.gmail.service import get_labels, modify_message
+    from Orchestrator.gmail.service import get_labels, modify_message, is_error_result
     operator = params.get("operator", ctx.operator or "Brandon")
     action = params.get("action", "list")
     message_id = params.get("message_id", "")
 
     if action == "list":
         result = get_labels(operator)
-        return ToolResult(success=True, result=json.dumps(result, indent=2))
+        return ToolResult(success=not is_error_result(result), result=json.dumps(result, indent=2))
 
     if not message_id:
         return ToolResult(success=False, result="message_id required for modify actions")
@@ -26,4 +26,4 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     }
     add_labels, remove_labels = label_map.get(action, ([], []))
     result = modify_message(operator, message_id, add_labels, remove_labels)
-    return ToolResult(success=True, result=json.dumps(result))
+    return ToolResult(success=not is_error_result(result), result=json.dumps(result))
