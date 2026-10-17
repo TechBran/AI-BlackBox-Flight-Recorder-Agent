@@ -149,7 +149,7 @@ def _raw_mcp_init_post(base_url: str, headers: dict) -> httpx.Response:
 # CHUNK 6c: validate OAuth access tokens on /mcp through the SAME M3 operator-
 # isolation path as a static bearer. The tests below (k-n) drive the full OAuth
 # flow to mint a real access token, then use it AS the /mcp bearer and assert:
-#   (k) end-to-end: initialize + list_tools -> 74 tools (gate opens for OAuth).
+#   (k) end-to-end: initialize + list_tools -> the catalog (gate opens for OAuth).
 #   (l) operator-isolation: an OAuth token bound to operator X cannot read
 #       ANOTHER operator's snap (get_snapshot/seek_snapshot_direct -> not_found)
 #       and list_operators/get_current_operator return ONLY X (mirrors M3 #2A,
@@ -307,7 +307,7 @@ def _run_oauth_isolation(failures: list) -> None:
     SAME M3 #2A isolation as a static bearer -- cannot read alice's data, CAN
     read its own, and the roster is scoped to bob only. This proves an OAuth
     token is routed to request.state.bound_operator on the IDENTICAL path and
-    is NEVER a bypass of per-operator scoping. (The init+74-tools e2e is asserted
+    is NEVER a bypass of per-operator scoping. (The init + catalog e2e is asserted
     separately as (k) on the default-index server.)
 
     Needs the backend (get_current_operator/list_operators do a real /operators
@@ -389,7 +389,7 @@ def _run_oauth_isolation(failures: list) -> None:
 
         c = httpx.Client(timeout=15)
         # Open an /mcp session under the bob-bound OAuth token (the gate must
-        # accept it; (k) asserts the full init+74-tools count on the default-index
+        # accept it; (k) asserts the full init + catalog count on the default-index
         # server where ToolVault/ is present -- this seeded overlay lacks the
         # root ToolVault/ dir, so its tool count is intentionally not asserted).
         sid = _raw_init(c, mcp_url, access_token)
@@ -1041,7 +1041,7 @@ def main() -> int:
           "6b-g: wrong verifier rejected; 6b-h: bad redirect_uri direct-400 no-open-redirect; "
           "6b-i: code single-use; 6b-j: state echoed; "
           "6b-store: access token persisted 0600 + operator-bound; "
-          "6c-k: OAuth token opens /mcp -> init + 74 tools; "
+          "6c-k: OAuth token opens /mcp -> init + the tool catalog; "
           "6c-l: OAuth token subject to M3 #2A isolation (cross-op not_found, "
           "own-read ok, roster scoped); 6c-m: bogus + EXPIRED OAuth token -> 401 "
           "(strict expiry); 6c-n: static-bearer path STILL works).")

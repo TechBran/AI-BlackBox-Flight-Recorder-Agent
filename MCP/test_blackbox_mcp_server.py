@@ -33,8 +33,9 @@ os.environ.setdefault("BLACKBOX_ROOT", str(_HERE.parent))
 # Run from MCP/ so the same-dir `from operator_resolution import ...` works.
 os.chdir(_HERE)
 sys.path.insert(0, str(_HERE))
-from _test_catalog import expected_mcp_tool_count  # noqa: E402
-EXPECTED_TOOLS = expected_mcp_tool_count()  # the full MCP catalog, from ToolVault
+from _test_catalog import all_providers_available, expected_mcp_tool_count  # noqa: E402
+EXPECTED_TOOLS = expected_mcp_tool_count()  # the catalog this env lists, from ToolVault
+FULL_CATALOG = expected_mcp_tool_count(available_only=False)
 
 _spec = _ilu.spec_from_file_location("bbmcp_under_test", str(_HERE / "blackbox_mcp_server.py"))
 srv = _ilu.module_from_spec(_spec)
@@ -123,8 +124,11 @@ def _text(result):
 # ===========================================================================
 
 def test_list_tools_returns_full_catalog():
-    tools = asyncio.run(srv.list_tools())
-    assert len(tools) == EXPECTED_TOOLS, f"expected {EXPECTED_TOOLS} tools, got {len(tools)}"
+    # Every provider gate open, so the check does not depend on the keys this
+    # box (or a CI runner, which has none) holds.
+    with all_providers_available():
+        tools = asyncio.run(srv.list_tools())
+    assert len(tools) == FULL_CATALOG, f"expected {FULL_CATALOG} tools, got {len(tools)}"
     names = {t.name for t in tools}
     # Spot-check representatives of each class.
     for n in ("search_snapshots", "mint_snapshot", "gmail_send",
@@ -132,7 +136,16 @@ def test_list_tools_returns_full_catalog():
         assert n in names, f"{n} missing from catalog"
 
 
+def test_list_tools_hides_a_tool_whose_provider_key_is_absent():
+    tools = {t.name for t in asyncio.run(srv.list_tools())}
+    assert len(tools) == EXPECTED_TOOLS
+    with all_providers_available():
+        everything = {t.name for t in asyncio.run(srv.list_tools())}
+    assert tools <= everything
+
+
 def test_valid_tool_names_memoized_and_complete():
+    srv._VALID_TOOL_NAMES = None
     s1 = srv._valid_tool_names()
     s2 = srv._valid_tool_names()
     assert s1 is s2, "valid-tool-name set should be memoized (same object)"
@@ -171,10 +184,13 @@ def test_web_search_routes_to_local_tools_execute():
         return _FakeResponse(200, {"success": True, "result": "search results"})
 
     cap = _install_fake_client(router)
+    srv._VALID_TOOL_NAMES = None  # memoized: rebuild it with the gate open
     try:
-        res = asyncio.run(srv.call_tool("perplexity_web_search", {"query": "x"}))
+        with all_providers_available():
+            res = asyncio.run(srv.call_tool("perplexity_web_search", {"query": "x"}))
     finally:
         _restore_client()
+        srv._VALID_TOOL_NAMES = None
     method, url, kwargs = cap["client"].calls[0]
     assert url.endswith("/local/tools/execute"), url
     assert kwargs["json"]["tool"] == "perplexity_web_search"
@@ -202,7 +218,13 @@ def test_gmail_tool_routes_to_gmail_execute():
 
 def test_local_tool_does_not_proxy():
     """list_operators is a LOCAL index read -- it must NOT hit the backend."""
-    # Point the index loader at an in-memory fake.
+    # Point the index loader at an in-memory fake. The loader returns {} when
+    # no index file exists (a fresh checkout), so give it an empty one to stat.
+    import tempfile
+    real_index = srv.SNAPSHOT_INDEX
+    index_file = Path(tempfile.mkdtemp(prefix="bbmcp_index_")) / "snapshot_index.json"
+    index_file.write_text("{}")
+    srv.SNAPSHOT_INDEX = index_file
     srv._index_cache = {
         "SNAP-1": {"operator": "alice", "timestamp": "2026-01-01", "type": "normal",
                    "byte_start": 0, "byte_end": 10},
@@ -221,6 +243,7 @@ def test_local_tool_does_not_proxy():
         _restore_client()
         srv._index_cache = None
         srv._index_cache_mtime = 0
+        srv.SNAPSHOT_INDEX = real_index
     payload = json.loads(_text(res))
     ops = {o["name"]: o["snapshot_count"] for o in payload["operators"]}
     assert ops == {"alice": 1, "bob": 1}
