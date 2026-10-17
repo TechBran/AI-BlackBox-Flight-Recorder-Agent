@@ -51,6 +51,10 @@ from urllib.parse import urlparse, parse_qs
 import httpx
 
 _HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+from _test_catalog import expected_mcp_tool_count  # noqa: E402
+EXPECTED_TOOLS = expected_mcp_tool_count()  # the full MCP catalog, from ToolVault
 _REPO_ROOT = _HERE.parent
 os.environ.setdefault("BLACKBOX_ROOT", str(_REPO_ROOT))
 
@@ -920,13 +924,13 @@ def main() -> int:
             ck = httpx.Client(timeout=15)
             sid_oauth = _raw_init(ck, mcp_url, access_token)
             tools_oauth = _raw_list_tools(ck, mcp_url, access_token, sid_oauth)
-            if sid_oauth and len(tools_oauth) == 74:
+            if sid_oauth and len(tools_oauth) == EXPECTED_TOOLS:
                 print(f"[oauth] PASS (k) OAuth access token on /mcp -> initialize + "
                       f"list_tools = {len(tools_oauth)} tools (gate opens for a REAL OAuth "
                       "credential, same path as a static bearer)")
             else:
                 failures.append(f"(k) OAuth e2e: sid={sid_oauth!r} tools={len(tools_oauth)} "
-                                "(expected a session + 74 tools)")
+                                f"(expected a session + {EXPECTED_TOOLS} tools)")
             ck.close()
         else:
             failures.append("(k) no OAuth access token minted in 6b-e to run the e2e check")
@@ -998,12 +1002,12 @@ def main() -> int:
         c = httpx.Client(timeout=15)
         sid_static = _raw_init(c, mcp_url, VALID_TOKEN)
         tools_static = _raw_list_tools(c, mcp_url, VALID_TOKEN, sid_static)
-        if sid_static and len(tools_static) == 74:
+        if sid_static and len(tools_static) == EXPECTED_TOOLS:
             print(f"[oauth] PASS (n) STATIC bearer on /mcp STILL works -> initialize + "
                   f"list_tools = {len(tools_static)} tools (no regression from the OAuth branch)")
         else:
             failures.append(f"(n) static-bearer regression: sid={sid_static!r} "
-                            f"tools={len(tools_static)} (expected 74)")
+                            f"tools={len(tools_static)} (expected {EXPECTED_TOOLS})")
         c.close()
 
     finally:

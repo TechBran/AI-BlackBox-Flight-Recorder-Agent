@@ -7,7 +7,7 @@ This is the M2 milestone gate. It:
   1. Starts the HTTP server as a SUBPROCESS on a free test port (127.0.0.1).
   2. Connects with the SDK's streamablehttp_client + ClientSession.
   3. Asserts:
-       (a) list_tools() returns the full 74-tool catalog,
+       (a) list_tools() returns the full tool catalog,
        (b) a LOCAL read tool (get_index_stats) returns a valid result WITHOUT
            touching the backend,
        (c) a PROXIED tool (get_current_operator) round-trips through the backend
@@ -43,10 +43,14 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 _HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+from _test_catalog import expected_mcp_tool_count  # noqa: E402
+EXPECTED_TOOLS = expected_mcp_tool_count()  # the full MCP catalog, from ToolVault
 _REPO_ROOT = _HERE.parent
 os.environ.setdefault("BLACKBOX_ROOT", str(_REPO_ROOT))
 
-EXPECTED_TOOL_COUNT = 74
+EXPECTED_TOOL_COUNT = EXPECTED_TOOLS
 BACKEND_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
 # M3: the HTTP transport now REQUIRES bearer auth. This smoke runs the server with

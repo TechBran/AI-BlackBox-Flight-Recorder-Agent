@@ -5,8 +5,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { PORTAL, VENDORED_PURIFY, MARKED_UMD } from "./helpers/portal-dom.mjs";
 
 const read = (p) => readFileSync(p);
@@ -67,8 +67,23 @@ test("the marked SRI pin matches the exact bytes the tests run against", () => {
 });
 
 test("no Portal page loads DOMPurify from a CDN", () => {
-    for (const page of ["index.html", "index-modular.html", "fx-lab.html", "onboarding/index.html", "cu-view/index.html"]) {
-        const html = read(resolve(PORTAL, page)).toString("utf8");
+    // Every HTML page under Portal/ (runtime uploads excluded), so a moved or
+    // newly added page cannot slip back onto the CDN copy.
+    const pages = [];
+    const walk = (dir) => {
+        for (const ent of readdirSync(dir, { withFileTypes: true })) {
+            const p = resolve(dir, ent.name);
+            if (ent.isDirectory()) {
+                if (!["uploads", "node_modules", "vendor"].includes(ent.name)) walk(p);
+            } else if (ent.name.endsWith(".html")) {
+                pages.push(p);
+            }
+        }
+    };
+    walk(PORTAL);
+    assert.ok(pages.some((p) => p.endsWith(`${sep}index.html`)), "Portal/index.html found");
+    for (const page of pages) {
+        const html = read(page).toString("utf8");
         assert.doesNotMatch(html, /https?:\/\/[^"']*dompurify/i, page);
     }
 });

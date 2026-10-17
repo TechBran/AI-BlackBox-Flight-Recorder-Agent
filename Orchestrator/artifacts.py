@@ -243,7 +243,7 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
         # page or email can make the model emit the tag), and this HTML is rendered
         # by the Portal and kept in history: escape every interpolated value. For
         # ordinary names escaping is the identity, so the Portal's HTML is unchanged.
-        safe_filename = html.escape(filename, quote=True)
+        html_filename = html.escape(filename, quote=True)
 
         print(f"[ARTIFACT] Processing: filename={filename}, type={artifact_type}, content_len={len(content)}")
 
@@ -284,7 +284,7 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
                 "size_kb": round(size_kb, 1),
             })
             safe_href = html.escape(f"/artifacts/{artifact_id}", quote=True)
-            return f'<div class="artifact-download"><a href="{safe_href}" download="{safe_filename}" class="btn artifact-btn">📥 Download {safe_filename} ({size_kb:.1f} KB)</a></div>'
+            return f'<div class="artifact-download"><a href="{safe_href}" download="{html_filename}" class="btn artifact-btn">📥 Download {html_filename} ({size_kb:.1f} KB)</a></div>'
         except Exception as e:
             print(f"[ARTIFACT] Error generating {filename} (type={artifact_type}): {e}")
             import traceback
@@ -293,7 +293,7 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
             error_msg = str(e)
             if len(error_msg) > 200:
                 error_msg = error_msg[:200] + "..."
-            return f'<div class="artifact-error" style="color: #ff6b6b; padding: 12px; background: #1a1a1a; border-radius: 4px; margin: 8px 0;">⚠️ Failed to generate {safe_filename}: {html.escape(error_msg, quote=True)}</div>'
+            return f'<div class="artifact-error" style="color: #ff6b6b; padding: 12px; background: #1a1a1a; border-radius: 4px; margin: 8px 0;">⚠️ Failed to generate {html_filename}: {html.escape(error_msg, quote=True)}</div>'
 
     modified = re.sub(pattern, process_match, ui_reply, flags=re.DOTALL)
     return modified, artifacts_list

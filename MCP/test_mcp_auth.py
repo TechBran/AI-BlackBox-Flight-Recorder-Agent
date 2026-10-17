@@ -49,6 +49,10 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.stdio import stdio_client, StdioServerParameters
 
 _HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+from _test_catalog import expected_mcp_tool_count  # noqa: E402
+EXPECTED_TOOLS = expected_mcp_tool_count()  # the full MCP catalog, from ToolVault
 _REPO_ROOT = _HERE.parent
 os.environ.setdefault("BLACKBOX_ROOT", str(_REPO_ROOT))
 
@@ -500,7 +504,7 @@ def main() -> int:
     # ----- (f) stdio path, no auth -----
     try:
         res = asyncio.run(_drive_stdio())
-        if res["f_tool_count"] == 74 and not res["f_isError"]:
+        if res["f_tool_count"] == EXPECTED_TOOLS and not res["f_isError"]:
             try:
                 stats = json.loads(res["f_text"])
                 if "total_snapshots" in stats:
@@ -511,7 +515,7 @@ def main() -> int:
             except Exception as e:
                 failures.append(f"(f) stdio stats not JSON ({e}): {res['f_text'][:200]}")
         else:
-            failures.append(f"(f) stdio expected 74 tools + no error, got "
+            failures.append(f"(f) stdio expected {EXPECTED_TOOLS} tools + no error, got "
                             f"count={res['f_tool_count']} isError={res['f_isError']}")
     except Exception as e:
         failures.append(f"(f) stdio path raised: {e}")

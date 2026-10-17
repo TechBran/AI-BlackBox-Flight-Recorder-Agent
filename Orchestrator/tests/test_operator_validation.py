@@ -262,9 +262,21 @@ def test_get_chat_stream_keeps_legit_operators(monkeypatch, params, expected):
     import Orchestrator.routes.chat_routes as cr
     built = []
     monkeypatch.setattr(cr, "build_streaming_context", lambda *a, **k: built.append(a) or ([], {}, {}))
+
+    async def _fake_stream(*a, **k):  # hermetic: never reach the real provider
+        yield {"type": "content", "data": "ok"}
+
+    monkeypatch.setattr(cr, "stream_openai_with_reasoning", _fake_stream)
     q = {"messages": json.dumps([{"role": "user", "content": "hi"}]),
          "provider": "openai", "model": "test", **params}
-    r = asyncio.run(cr.chat_stream(_QReq(q)))
+    async def go():
+        resp = await cr.chat_stream(_QReq(q))
+        # The context now builds inside the SSE generator (audit rank 45), so
+        # drain the stream before looking at what it was built with.
+        async for _ in resp.body_iterator:
+            pass
+        return resp
+    r = asyncio.run(go())
     assert r.status_code == 200
     assert built[0][1] == (expected if expected is not None else cr.current_default())
 

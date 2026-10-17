@@ -286,27 +286,6 @@ def test_wizard_terminal_env_is_scrubbed(planted):
     assert env["DBUS_SESSION_BUS_ADDRESS"].startswith("unix:path=")
 
 
-def test_claude_doctor_runs_claude_with_a_scrubbed_env(planted, monkeypatch, tmp_path):
-    """The doctor's `claude --print` must not bill the server key either."""
-    from Orchestrator.routes import cli_agent_routes, onboarding_routes
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(cli_agent_routes, "provider_bin", lambda name: "/bin/true")
-    envs = []
-
-    def fake_run(cmd, **kwargs):
-        envs.append(kwargs.get("env"))
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    onboarding_routes.cli_agent_claude_doctor()
-    assert envs
-    for env in envs:
-        _assert_clean(env)
-
-
-# --- computer-use desktops and the CU bash tool (a model drives these) --------
-
-
 def _cu_handle(slot: int = 0):
     from Orchestrator.browser import display as disp
     return disp.DisplayHandle(

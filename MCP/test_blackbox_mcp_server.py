@@ -33,6 +33,8 @@ os.environ.setdefault("BLACKBOX_ROOT", str(_HERE.parent))
 # Run from MCP/ so the same-dir `from operator_resolution import ...` works.
 os.chdir(_HERE)
 sys.path.insert(0, str(_HERE))
+from _test_catalog import expected_mcp_tool_count  # noqa: E402
+EXPECTED_TOOLS = expected_mcp_tool_count()  # the full MCP catalog, from ToolVault
 
 _spec = _ilu.spec_from_file_location("bbmcp_under_test", str(_HERE / "blackbox_mcp_server.py"))
 srv = _ilu.module_from_spec(_spec)
@@ -122,7 +124,7 @@ def _text(result):
 
 def test_list_tools_returns_full_catalog():
     tools = asyncio.run(srv.list_tools())
-    assert len(tools) == 74, f"expected 74 tools, got {len(tools)}"
+    assert len(tools) == EXPECTED_TOOLS, f"expected {EXPECTED_TOOLS} tools, got {len(tools)}"
     names = {t.name for t in tools}
     # Spot-check representatives of each class.
     for n in ("search_snapshots", "mint_snapshot", "gmail_send",
@@ -134,7 +136,7 @@ def test_valid_tool_names_memoized_and_complete():
     s1 = srv._valid_tool_names()
     s2 = srv._valid_tool_names()
     assert s1 is s2, "valid-tool-name set should be memoized (same object)"
-    assert len(s1) == 74
+    assert len(s1) == EXPECTED_TOOLS
 
 
 def test_generic_tool_routes_to_local_tools_execute():

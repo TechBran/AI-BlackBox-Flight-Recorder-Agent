@@ -996,6 +996,36 @@ async def restart_blackbox_service() -> dict:
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
 
 
+def _journal_access_hint() -> str | None:
+    """Explain the fix when this process cannot read the system journal.
+
+    journalctl only shows other users' and systemd's own entries to root and
+    to members of systemd-journal (systemd's journal ACLs also admit adm and
+    wheel). install.sh adds the service user to systemd-journal; a box that has
+    not re-run it since the root journalctl grant was removed would otherwise
+    show a near-empty log with no explanation. Returns None when access is fine
+    or cannot be determined."""
+    try:
+        if os.geteuid() == 0:
+            return None
+        import grp
+
+        gids = set(os.getgroups()) | {os.getegid()}
+        for name in ("systemd-journal", "adm", "wheel"):
+            try:
+                if grp.getgrnam(name).gr_gid in gids:
+                    return None
+            except KeyError:
+                continue
+    except Exception:  # noqa: BLE001 — a hint must never break the stream
+        return None
+    root = Path(__file__).resolve().parents[2]
+    return ("[logs] This service user is not in the systemd-journal group, so "
+            "system entries for blackbox.service are hidden. Run "
+            f"`sudo bash {root}/Scripts/install.sh` once (it adds the group), "
+            "then restart the service.")
+
+
 @router.get("/cli-agent/url-handlers")
 def url_handler_status() -> dict:
     """Return the current xdg-mime default for HTTP(S) and text/html so

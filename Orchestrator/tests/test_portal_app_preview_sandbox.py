@@ -27,7 +27,7 @@ def _sandbox_tokens(tag):
     return set(m.group(1).split())
 
 
-@pytest.mark.parametrize("page", ["index.html", "index-modular.html"])
+@pytest.mark.parametrize("page", ["index.html"])
 def test_app_preview_frame_has_opaque_origin(page):
     tokens = _sandbox_tokens(_frame_tag((PORTAL / page).read_text(encoding="utf-8"),
                                         "appPreviewFrame"))

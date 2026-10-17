@@ -5,7 +5,9 @@ parse_and_process_artifacts_with_meta() turns a model-emitted
 the Portal renders and the conversation history keeps. The filename, the type
 and the generator's error text are all model/attacker-controlled (a
 prompt-injected web page or email can make the model emit the tag), so every
-one of them must be HTML-escaped where it is interpolated.
+one of them must be HTML-escaped where it is interpolated. The filename is
+also reduced to a safe basename first (audit rank 16, utils.paths.safe_filename),
+so the download name is the REDUCED name, escaped.
 """
 
 import re
@@ -15,6 +17,7 @@ import pytest
 
 import Orchestrator.artifacts as artifacts_mod
 from Orchestrator.artifacts import parse_and_process_artifacts_with_meta
+from Orchestrator.utils.paths import safe_filename
 
 
 @pytest.fixture(autouse=True)
@@ -64,11 +67,12 @@ def test_hostile_filename_is_escaped_in_attribute_and_text():
     parsed = _assert_no_script_vectors(modified)
     anchors = [attrs for tag, attrs in parsed.tags if tag == "a"]
     assert len(anchors) == 1
-    # The browser sees exactly the original name as the download name...
-    assert anchors[0]["download"] == HOSTILE_NAME
+    # The browser sees the reduced safe basename as the download name...
+    reduced = safe_filename(HOSTILE_NAME, fallback="artifact.txt")
+    assert anchors[0]["download"] == reduced
     assert anchors[0]["href"] == artifacts[0]["url"]
     # ...and as text, not markup.
-    assert HOSTILE_NAME in "".join(parsed.text)
+    assert reduced in "".join(parsed.text)
     assert "<img" not in modified
 
 
@@ -95,7 +99,7 @@ def test_hostile_error_text_and_filename_are_escaped(monkeypatch):
     parsed = _assert_no_script_vectors(modified)
     assert "<script" not in modified and "<b>" not in modified
     text = "".join(parsed.text)
-    assert f"Failed to generate {name}" in text
+    assert f"Failed to generate {safe_filename(name, fallback='artifact.txt')}" in text
     assert '<script>alert("err")</script>' in text
 
 

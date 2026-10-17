@@ -285,12 +285,13 @@ def _tracked_portal_files():
 
 def test_no_tracked_portal_asset_is_refused():
     """The guard must not break the Portal: every tracked file is served except
-    the Node-only package.json marker, the extensionless vendored pako LICENSE
-    (nothing fetches either) and the dev pages. A new tracked asset type fails
-    here until WEB_ASSET_SUFFIXES names it."""
+    the Node-only package.json marker, the extensionless vendored LICENSE files
+    (pako's and DOMPurify's; nothing fetches them) and the dev pages. A new
+    tracked asset type fails here until WEB_ASSET_SUFFIXES names it."""
     ui_static = _mounted("/ui")
     refused = {rel for rel in _tracked_portal_files() if ui_static.is_refused(rel)}
-    expected = {"package.json", "vendor/novnc/vendor/pako/LICENSE"}
+    expected = {"package.json", "vendor/novnc/vendor/pako/LICENSE",
+                "vendor/dompurify/LICENSE", "vendor/dompurify/LICENSE-MPL"}
     assert refused - expected == {r for r in refused if r.startswith("dev/")}
     assert "index.html" not in refused and "app-modular.js" not in refused
 
