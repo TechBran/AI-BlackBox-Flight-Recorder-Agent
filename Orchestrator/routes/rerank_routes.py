@@ -12,9 +12,11 @@ would — safe to poll (every probe result is cached).
 
 POST /rerank/select — the wizard/Portal write surface (M8): persist a reranker
 selection (provider+model+enabled, optional api_key) so a choice takes effect
-with NO restart or config.ini edit. Loopback-only by design — same trust model
-as POST /embeddings/placement, /onboarding/credentials, and config reveal: it
-writes a secret to .env, so it must never be exposed off-box.
+with NO restart or config.ini edit. Trust model: the Tailscale + LAN perimeter,
+same as POST /embeddings/placement and /onboarding/credentials. No loopback gate
+is enforced (none would hold: tailscale serve delivers tailnet requests from
+127.0.0.1). It writes a secret to .env, so it must never be exposed beyond the
+perimeter (e.g. through Funnel).
 """
 import os
 

@@ -6,7 +6,13 @@ certs, etc.) that live in the credentials/ folder. Pattern:
 - POST /onboarding/credentials/upload (multipart) → write to credentials/
 - DELETE /onboarding/credentials/{filename} → remove + clear env if linked
 
-Loopback-only by design — same trust model as /onboarding/config/{key}?reveal=1.
+Trust model: the Tailscale + LAN perimeter, like the rest of the wizard API.
+There is NO loopback gate here (and loopback would prove nothing: tailscale
+serve delivers every tailnet request from 127.0.0.1).
+
+credentials/ also holds BlackBox's own registries (RESERVED_FILENAMES). They
+are not credentials: they are hidden from the list and cannot be overwritten
+by an upload or removed through these routes.
 
 NEVER returns or logs file contents — only filename, size, and an
 is_google_service_account boolean derived from inspecting the type field.
@@ -34,6 +40,12 @@ CREDS_DIR = resolve("credentials")
 # Defends against path traversal (../) and weird characters that could break
 # the atomic-write rename.
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.json$")
+# Registries other modules keep in credentials/ (custom_servers.REGISTRY_PATH,
+# voice_agents.registry.REGISTRY_PATH, xai_phone.provisioning.STORE_PATH).
+# An upload named like one would overwrite it AND, with the default
+# set_as_google_app_creds, point GOOGLE_APPLICATION_CREDENTIALS at it; a DELETE
+# would wipe it. A test keeps this set in step with those modules.
+RESERVED_FILENAMES = frozenset({"custom_models.json", "voice_agents.json", "xai_phone.json"})
 
 
 class CredentialFileMeta(BaseModel):
@@ -59,7 +71,10 @@ def _is_google_service_account(path: Path) -> bool:
     try:
         with path.open() as f:
             data = json.load(f)
-        return data.get("type") == "service_account" and "client_email" in data
+        # A JSON array/string/number/null is not a service account, and must
+        # not raise: that 500'd every GET /onboarding/credentials.
+        return (isinstance(data, dict) and data.get("type") == "service_account"
+                and "client_email" in data)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return False
 
@@ -84,7 +99,7 @@ def list_credentials() -> CredentialsListResponse:
         os.chmod(CREDS_DIR, 0o700)
     files: list[CredentialFileMeta] = []
     for p in sorted(CREDS_DIR.glob("*.json")):
-        if p.is_file():
+        if p.is_file() and p.name not in RESERVED_FILENAMES:
             files.append(_file_meta(p))
     return CredentialsListResponse(
         files=files,
@@ -109,13 +124,23 @@ async def upload_credential(
             status_code=400,
             detail=f"Invalid filename {filename!r}. Must match {_FILENAME_RE.pattern}",
         )
+    if filename in RESERVED_FILENAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{filename!r} is reserved for BlackBox's own settings; rename the file",
+        )
     contents = await file.read()
     if len(contents) > 64 * 1024:  # 64KB ceiling — service-account JSONs are ~2-3KB
         raise HTTPException(status_code=413, detail="File too large (64KB max)")
     try:
-        json.loads(contents.decode("utf-8"))
+        parsed = json.loads(contents.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid credential: the JSON must be an object (a service-account key file)",
+        )
 
     CREDS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CREDS_DIR, 0o700)
@@ -158,6 +183,11 @@ def delete_credential(filename: str) -> dict:
     """
     if not _FILENAME_RE.match(filename):
         raise HTTPException(status_code=400, detail=f"Invalid filename {filename!r}")
+    if filename in RESERVED_FILENAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{filename!r} holds BlackBox's own settings, not a credential",
+        )
     target = CREDS_DIR / filename
     if not target.exists():
         return {"ok": True, "removed": False, "reason": "not present"}
