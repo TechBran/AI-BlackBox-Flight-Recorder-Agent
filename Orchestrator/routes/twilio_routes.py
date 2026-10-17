@@ -979,7 +979,7 @@ CLI_PHONE_SESSIONS: Dict[str, CLIPhoneSession] = {}
 class CLICallRequest(BaseModel):
     """Request to initiate a phone call connected to Claude Code CLI."""
     to: str  # Phone number to call (E.164 format)
-    operator: str = "Brandon"
+    operator: Optional[str] = None  # None = the roster default (current_default)
 
 
 class CLISpeakRequest(BaseModel):
@@ -1025,6 +1025,8 @@ async def cli_initiate_call(call_request: CLICallRequest):
 
     # Create phone session with special CLI backend marker
     phone_session_id = f"phone-cli-{uuid.uuid4().hex[:12]}"
+    from Orchestrator.config import current_default
+    operator = call_request.operator or current_default()
 
     session = PhoneSession(
         session_id=phone_session_id,
@@ -1035,7 +1037,7 @@ async def cli_initiate_call(call_request: CLICallRequest):
         status=PhoneStatus.RINGING,
         created_at=now_utc_iso(),
         last_activity=now_utc_iso(),
-        operator=call_request.operator,
+        operator=operator,
         ai_backend=AIBackend.CLAUDE_CODE,
         ivr_selection=1,  # Claude
     )
@@ -1050,7 +1052,7 @@ async def cli_initiate_call(call_request: CLICallRequest):
     cli_session = CLIPhoneSession(
         session_id=cli_session_id,
         phone_session_id=phone_session_id,
-        operator=call_request.operator,
+        operator=operator,
     )
     CLI_PHONE_SESSIONS[cli_session_id] = cli_session
 

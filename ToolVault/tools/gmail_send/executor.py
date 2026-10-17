@@ -6,7 +6,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Compose and send a new email."""
     import json
     from Orchestrator.gmail.service import send_email, is_error_result
-    operator = params.get("operator", ctx.operator or "Brandon")
+    from Orchestrator.config import current_default
+    operator = params.get("operator") or ctx.operator or current_default()
     to = params.get("to", "")
     subject = params.get("subject", "")
     body = params.get("body", "")

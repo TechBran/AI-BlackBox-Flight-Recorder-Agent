@@ -47,7 +47,7 @@ def _list_operators(ctx: ToolContext) -> list[str]:
         )
         cp = configparser.ConfigParser()
         cp.read(os.path.join(root, "config.ini"))
-        raw = cp.get("users", "list", fallback="Brandon")
+        raw = cp.get("users", "list", fallback="Default")  # config.ini.template's seed
         return [u.strip() for u in raw.split(",") if u.strip()]
 
 

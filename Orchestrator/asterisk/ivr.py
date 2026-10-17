@@ -304,13 +304,13 @@ class AsteriskIVR:
 
     async def _run_operator_select(self) -> Optional[str]:
         """Operator selection stage."""
-        from Orchestrator.config import USERS_LIST
+        from Orchestrator.config import USERS_LIST, current_default
 
         # Filter to real human operators for IVR
         ivr_operators = filter_ivr_operators(USERS_LIST) if USERS_LIST else []
 
         if not ivr_operators or len(ivr_operators) <= 1:
-            operator = ivr_operators[0] if ivr_operators else (USERS_LIST[0] if USERS_LIST else "Brandon")
+            operator = ivr_operators[0] if ivr_operators else (USERS_LIST[0] if USERS_LIST else current_default())
             print(f"[ASTERISK-IVR] Single operator, auto-selecting: {operator}")
             return operator
 

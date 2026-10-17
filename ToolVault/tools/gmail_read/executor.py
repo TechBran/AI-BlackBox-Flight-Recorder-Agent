@@ -6,7 +6,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Read full email content by message ID."""
     import json
     from Orchestrator.gmail.service import get_message, is_error_result
-    operator = params.get("operator", ctx.operator or "Brandon")
+    from Orchestrator.config import current_default
+    operator = params.get("operator") or ctx.operator or current_default()
     message_id = params.get("message_id", "")
     if not message_id:
         return ToolResult(success=False, result="message_id is required")

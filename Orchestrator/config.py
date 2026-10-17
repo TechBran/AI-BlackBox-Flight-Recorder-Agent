@@ -167,7 +167,8 @@ TTS_MODEL     = CFG.get("audio","model", fallback="tts-1").strip()
 TTS_VOICE     = CFG.get("audio","voice", fallback="alloy").strip()
 TTS_FORMAT    = CFG.get("audio","format",fallback="mp3").strip()
 TTS_TIMEOUT   = CFG.getint("audio","timeout_ms",fallback=120000)
-USERS_LIST     = [u.strip() for u in CFG.get("users","list",fallback="Brandon").split(",") if u.strip()]
+# Fallback = config.ini.template's seed operator (a fresh box runs on that).
+USERS_LIST     = [u.strip() for u in CFG.get("users","list",fallback="Default").split(",") if u.strip()]
 USERS_DEFAULT  = CFG.get("users","default",fallback=(USERS_LIST[0] if USERS_LIST else "Operator")).strip()
 
 # ── Flight Recorder operator (design 2026-07-23) ────────────────────────────
@@ -543,11 +544,6 @@ VOYAGE_API_KEY    = os.getenv("VOYAGE_API_KEY", "")
 COHERE_API_KEY    = os.getenv("COHERE_API_KEY", "")
 VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "")
 
-# Pairing defaults (used by /pair/claim and /pair/qr/{token} response payload).
-# Customers register their own operators in onboarding step T2.7.1; "Brandon" is the system seed.
-DEFAULT_OPERATOR = os.getenv("DEFAULT_OPERATOR", "Brandon")
-DEFAULT_ORIGIN = os.getenv("DEFAULT_ORIGIN", "http://localhost:9091")
-
 # Canonical Orchestrator listen port. The app serves on this port (uvicorn in
 # Orchestrator/app.py); in-process clients that loop back to the local app
 # (e.g. the cron executor) derive http://localhost:<port> from this rather
@@ -558,6 +554,58 @@ ORCHESTRATOR_PORT = int(
     os.getenv("ORCHESTRATOR_PORT")
     or CFG.getint("server", "port", fallback=9091)
 )
+
+
+def orchestrator_url(path: str = "", *, scheme: str = "http", host: str = "localhost") -> str:
+    """Loopback URL of THIS Orchestrator: every in-process caller that talks to
+    the local app (SMS replies, /chat/save mints, phone/voice bridges, the cron
+    executor, tool executors) builds its URL here, so a box served on another
+    ORCHESTRATOR_PORT still reaches itself. Read at call time."""
+    return f"{scheme}://{host}:{ORCHESTRATOR_PORT}{path}"
+
+
+# Pairing defaults (/pair/claim, /pair/qr/{token} and /health's pairing block).
+# DEFAULT_ORIGIN is the operator's override; perimeter.py also trusts it.
+DEFAULT_ORIGIN = os.getenv("DEFAULT_ORIGIN") or orchestrator_url()
+
+
+def _pairing_config_operator() -> str:
+    """config.ini [pairing] default_operator (empty when unset)."""
+    try:
+        return (CFG.get("pairing", "default_operator", fallback="") or "").strip()
+    except Exception:
+        return ""
+
+
+def _wizard_default_operator() -> str:
+    """DEFAULT_OPERATOR, which the onboarding wizard's operator step writes to
+    .env for the first operator it adds. Read fresh, so it applies without a
+    restart; os.environ covers a value set outside .env."""
+    try:
+        from dotenv import dotenv_values
+        from Orchestrator.onboarding.secrets_writer import ENV_FILE
+        value = dotenv_values(str(ENV_FILE)).get("DEFAULT_OPERATOR")
+    except Exception:
+        value = None
+    return (value or os.getenv("DEFAULT_OPERATOR") or "").strip()
+
+
+def pairing_operator(requested: Optional[str] = None) -> str:
+    """The operator a newly paired device starts as.
+
+    First name that is on the live roster wins: ``requested`` (chosen when the
+    token was minted) -> DEFAULT_OPERATOR (the wizard's choice) -> config.ini
+    [pairing] default_operator -> current_default(). A name that is not (or no
+    longer) on the roster is skipped, so a phone is never paired to a phantom
+    operator. The wizard pairs the phone before its operator step runs, so on
+    a fresh box this is the roster default until an operator is added.
+    """
+    for name in (requested, _wizard_default_operator(), _pairing_config_operator()):
+        name = (name or "").strip()
+        if name and name in USERS_LIST:
+            return name
+    return current_default()
+
 
 # Tailnet hostname (set by onboarding T2.3.1 after Tailscale validation succeeds).
 # When present, used to construct the canonical https://<hostname> origin for QR
@@ -894,7 +942,7 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")  # e.g., "+1555555010
 # Public base URL for Twilio webhooks (must be HTTPS accessible from internet)
 # For local development, use ngrok: "wss://your-ngrok-url.ngrok.io"
 # For production: "wss://your-domain.com"
-TWILIO_WEBHOOK_BASE_URL = os.getenv("TWILIO_WEBHOOK_BASE_URL", "wss://localhost:9091")
+TWILIO_WEBHOOK_BASE_URL = os.getenv("TWILIO_WEBHOOK_BASE_URL") or orchestrator_url(scheme="wss")
 
 # Sovereign SIM - Cellular Modem Integration (SIMCom SIM8260G-M2)
 CELLULAR_ENABLED = os.getenv("CELLULAR_ENABLED", "false").lower() == "true"
@@ -928,8 +976,20 @@ TELEPHONY_SECRET_KEY = os.getenv("TELEPHONY_SECRET_KEY", "")
 UGV_ER_URL: str = os.getenv("UGV_ER_URL", "http://ugv-beast:8082")
 UGV_ER_TIMEOUT_S: int = int(os.getenv("UGV_ER_TIMEOUT_S", "10"))
 
-# ToolVault — Dynamic tool injection
-TOOLVAULT_ENABLED = os.getenv("TOOLVAULT_ENABLED", "false").lower() == "true"
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Boolean env var: unset/empty -> ``default``; false/0/no/off -> False;
+    any other value -> True."""
+    value = (os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    return value not in ("false", "0", "no", "off")
+
+
+# ToolVault — Dynamic tool injection. ToolVault is the product's tool catalog,
+# so it is ON unless TOOLVAULT_ENABLED explicitly switches it off (a fresh box
+# has no .env entry for it; the old false default ran the frozen static prompt).
+TOOLVAULT_ENABLED = _env_flag("TOOLVAULT_ENABLED", True)
 
 # Google OAuth 2.0 (Gmail integration)
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
@@ -941,7 +1001,14 @@ USE_CLOUD_TTS = bool(GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(GOOGLE_AP
 
 # Default Models
 OPENAI_MODEL_DEFAULT    = os.getenv("OPENAI_MODEL", "gpt-5.1")
-ANTHROPIC_MODEL_DEFAULT = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
+
+
+def _anthropic_model_default() -> str:
+    """ANTHROPIC_MODEL, else the current flagship Opus (owner decision 2026-10-17)."""
+    return os.getenv("ANTHROPIC_MODEL") or "claude-opus-5-5"
+
+
+ANTHROPIC_MODEL_DEFAULT = _anthropic_model_default()
 
 # Extended thinking config per Claude model.
 # Opus 4.8 (added 2026-05-28): newest Opus; mirrors 4.7's constraints
@@ -954,6 +1021,11 @@ ANTHROPIC_MODEL_DEFAULT = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
 # Haiku 4.5 is deliberately omitted — it doesn't support effort or adaptive thinking.
 # Claude 5.x (added 2026-10-07): Opus 5.5/5, Sonnet 5.5/5, Haiku 5.5, Fable/Mythos 5.1
 # all accept {type: "adaptive", display: "summarized"} and every effort level.
+# Opus 5.5 (the built-in default since 2026-10-17), Sonnet 5.5, Haiku 5.5 and
+# Fable 5.1 reject {type: "disabled"}, budget_tokens, sampling params and
+# forced tool_choice (any/tool); every chat payload here sends adaptive thinking
+# and tool_choice auto (or none), so none of those go out. 1M context, 128K
+# output each — context_builder's anthropic window guard budgets for that.
 ANTHROPIC_THINKING_MODELS = {
     "claude-fable-5-1", "claude-mythos-5-1",
     "claude-fable-5",   # Mythos-class: thinking always on; explicit {type: "adaptive"} accepted
@@ -1015,6 +1087,84 @@ ANTHROPIC_THINKING_DISPLAY_MODELS = {
 GEMINI_MODEL_DEFAULT    = os.getenv("GOOGLE_GEMINI_MODEL", "gemini-3.1-pro-preview")
 XAI_MODEL_DEFAULT       = os.getenv("XAI_MODEL", "grok-4.3")  # Bumped 2026-05-18: prior default grok-4-1-fast-reasoning is on xAI's May 2026 deprecation list (auto-redirected to grok-4.3 server-side)
 DEFAULT_PROVIDER        = (os.getenv("DEFAULT_PROVIDER") or "google").strip().lower()
+
+# ── Retired Claude ids -> the newest live model of the same family ──────────
+# An id saved before Anthropic retired it (an SMS model preference, a cron job,
+# an Android DataStore value) 404s with not_found_error. successor_for() maps it
+# at dispatch instead. Owner decision 2026-10-17; the Android app carries the
+# identical table, so change both together. Retired: Claude 4.0 (claude-{opus,
+# sonnet}-4, -4-0, -4-YYYYMMDD), Opus 4.1 (dated or not) and every claude-3*,
+# claude-2* and claude-instant* id. A family-less id maps by tier: instant was
+# the fast tier (-> haiku), Claude 2 the flagship (-> opus).
+ANTHROPIC_RETIRED_SUCCESSORS = {
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-5-5",
+}
+_ANTHROPIC_RETIRED_ID_RX = re.compile(
+    r"claude-(?:"
+    r"(?:sonnet|opus)-4(?:-0|-1)?(?:-\d{8})?"
+    r"|3(?:[.-][\w.-]*)?"
+    r"|2(?:[.-][\w.-]*)?"
+    r"|instant(?:-[\w.-]*)?"
+    r")"
+)
+
+
+def anthropic_model_retired(model_id: Optional[str]) -> bool:
+    """True when ``model_id`` is a Claude id Anthropic has retired (it 404s)."""
+    return _ANTHROPIC_RETIRED_ID_RX.fullmatch((model_id or "").strip()) is not None
+
+
+def successor_for(model_id: str) -> str:
+    """``model_id`` unchanged, unless it is a retired Claude id: then the newest
+    live model of its family (ANTHROPIC_RETIRED_SUCCESSORS)."""
+    if not anthropic_model_retired(model_id):
+        return model_id
+    mid = model_id.strip()
+    for family in ("opus", "sonnet", "haiku"):
+        if family in mid:
+            return ANTHROPIC_RETIRED_SUCCESSORS[family]
+    if "instant" in mid:
+        return ANTHROPIC_RETIRED_SUCCESSORS["haiku"]
+    return ANTHROPIC_RETIRED_SUCCESSORS["opus"]
+
+
+_PROVIDER_ALIASES = {"gemini": "google", "claude": "anthropic", "gpt": "openai",
+                     "grok": "xai", "cu": "computer-use"}
+
+
+def resolve_default_model(provider: Optional[str] = None, model: Optional[str] = None) -> str:
+    """The model id to dispatch for ``provider`` when the caller asked for ``model``.
+
+    One resolver for every chat path (both /chat/stream routes, the non-stream
+    worker that serves /chat, cron and SMS, the SMS router and /sms/preferences):
+      * an empty provider is DEFAULT_PROVIDER;
+      * an empty, whitespace or "Auto" model (the Portal's "(Auto - Latest)"
+        option sends "") is that provider's configured *_MODEL_DEFAULT, read at
+        call time so the env overrides (ANTHROPIC_MODEL, GOOGLE_GEMINI_MODEL,
+        OPENAI_MODEL, XAI_MODEL) apply everywhere;
+      * a concrete model passes through, except that an anthropic dispatch of a
+        retired Claude id gets successor_for()'s live model;
+      * provider "custom" is returned untouched: its default is the registry's
+        first discovered model, which the custom branches resolve themselves.
+    An unknown provider resolves like Gemini (the /chat/stream fallthrough).
+    """
+    key = (provider or "").strip().lower() or DEFAULT_PROVIDER
+    key = _PROVIDER_ALIASES.get(key, key)
+    if key == "custom":
+        return model or ""
+    requested = (model or "").strip()
+    if requested and requested.lower() != "auto":
+        return successor_for(requested) if key == "anthropic" else requested
+    return {
+        "anthropic": ANTHROPIC_MODEL_DEFAULT,
+        "openai": OPENAI_MODEL_DEFAULT,
+        "xai": XAI_MODEL_DEFAULT,
+        "computer-use": CU_MODEL_DEFAULT,
+    }.get(key, GEMINI_MODEL_DEFAULT)
+
+
 STT_MODEL       = os.getenv("STT_MODEL","whisper-1").strip()
 
 # --- STT provider/model registry (swap a string to upgrade the model) ---

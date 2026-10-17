@@ -139,9 +139,26 @@ def test_configured_default_is_not_retired():
     assert not _is_retired(config.ANTHROPIC_MODEL_DEFAULT)
 
 
+@pytest.mark.parametrize("model_id", [
+    "claude-sonnet-4-20250514", "claude-opus-4-1", "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229", "claude-2.1", "claude-instant-1.2",
+])
+def test_config_matcher_agrees_with_this_guard(model_id):
+    # config.anthropic_model_retired drives successor_for at dispatch; this
+    # file's regex is the independent oracle. Both must call the same ids retired.
+    assert _is_retired(model_id) and config.anthropic_model_retired(model_id)
+    assert set(config.ANTHROPIC_RETIRED_SUCCESSORS.values()) <= set(LIVE_IDS)
+    assert config.successor_for(model_id) in LIVE_IDS
+
+
+@pytest.mark.parametrize("model_id", LIVE_IDS)
+def test_config_matcher_spares_live_ids(model_id):
+    assert not config.anthropic_model_retired(model_id)
+
+
 # ── 2. Static fallback catalogs list only live ids ───────────────────────────
 
-def test_anthropic_fallback_catalog_has_only_live_ids():
+def test_anthropic_fallback_catalog_has_only_live_ids(monkeypatch):
     from Orchestrator.routes.admin_routes import _FALLBACK_MODELS
     ids = [m["id"] for m in _FALLBACK_MODELS["anthropic"]]
     assert ids, "fallback catalog must not be empty"
@@ -151,7 +168,8 @@ def test_anthropic_fallback_catalog_has_only_live_ids():
     assert set(ids) <= set(LIVE_IDS), sorted(set(ids) - set(LIVE_IDS))
     assert all(m["name"].startswith("Claude ") for m in _FALLBACK_MODELS["anthropic"])
     # The shipped default must be selectable when /v1/models is unreachable.
-    assert "claude-opus-4-8" in ids
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    assert config._anthropic_model_default() in ids
 
 
 def test_cu_fallback_anthropic_entries_are_live_and_cu_capable():

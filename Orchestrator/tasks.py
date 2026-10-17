@@ -1709,8 +1709,9 @@ def _mint_cu_failure_snapshot(task: Task, operator: str, error_text: str,
             f"TERMINAL ERROR: {str(error_text)[:600]}"
         )
         import requests as req
+        from Orchestrator.config import orchestrator_url
         resp = req.post(
-            "http://localhost:9091/chat/save",
+            orchestrator_url("/chat/save"),
             json={
                 "operator": operator,
                 "user_message": f"Computer Use task FAILED: {(task.prompt or '')[:300]}",
@@ -1802,6 +1803,7 @@ def process_browser_use(task: Task):
             # auto-mint — no LLM round-trip like the old /chat POST)
             try:
                 import requests as req
+                from Orchestrator.config import orchestrator_url
                 screenshots = result.get("screenshots", [])
                 summary = (
                     f"COMPUTER USE AGENT — TASK RESULT\n\n"
@@ -1813,7 +1815,7 @@ def process_browser_use(task: Task):
                     f"Screenshots captured: {', '.join(screenshots[-5:])}"
                 )
                 resp = req.post(
-                    "http://localhost:9091/chat/save",
+                    orchestrator_url("/chat/save"),
                     json={
                         "operator": operator,
                         "user_message": f"Computer Use task: {(task.prompt or '')[:300]}",
@@ -1976,6 +1978,7 @@ def process_cli_agent(task: Task):
     # Auto-snapshot: BOUNDED summary via /chat/save (direct save + auto-mint).
     try:
         import requests as req
+        from Orchestrator.config import orchestrator_url
         summary = (
             f"CLI AGENT — TASK RESULT\n\n"
             f"Task ID: {task.task_id}\n"
@@ -1985,7 +1988,7 @@ def process_cli_agent(task: Task):
             f"Result:\n{result_text[:1000]}"
         )
         resp = req.post(
-            "http://localhost:9091/chat/save",
+            orchestrator_url("/chat/save"),
             json={
                 "operator": operator,
                 "user_message": f"CLI agent ({provider}) task: {prompt[:300]}",
@@ -2396,14 +2399,16 @@ def process_chat_task(task: Task):
             provider = "anthropic"
             print("[AUTO-ROUTE] Switched from computer-use to anthropic (non-streaming fallback)")
 
-        if provider == "anthropic":
-            selected_model = inp.model or ANTHROPIC_MODEL_DEFAULT
+        if provider in ("anthropic", "google", "openai", "xai"):
+            # Empty/"Auto" -> the provider's configured *_MODEL_DEFAULT, a retired
+            # Claude id -> its successor: the resolver /chat/stream and SMS share.
+            # After a media auto-route the requested id belongs to the original
+            # provider, so the new provider runs its own default.
+            from Orchestrator.config import resolve_default_model
+            selected_model = resolve_default_model(provider, None if provider_switched else inp.model)
             # A CU model id may be Gemini/OpenAI (gemini-2.5-computer-use-..., gpt-5.5) — Anthropic 404s it.
             if cu_fallback and not selected_model.startswith("claude-"):
-                selected_model = ANTHROPIC_MODEL_DEFAULT
-        elif provider == "google": selected_model = inp.model or GEMINI_MODEL_DEFAULT
-        elif provider == "openai": selected_model = inp.model or OPENAI_MODEL_DEFAULT
-        elif provider == "xai": selected_model = inp.model or XAI_MODEL_DEFAULT
+                selected_model = resolve_default_model("anthropic")
         elif provider == "custom":
             # Registry-derived default — never a hardcoded literal: an empty or
             # "Auto" model resolves to the server's first discovered model,

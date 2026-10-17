@@ -33,9 +33,10 @@ async def _snapshot_cu_result(task_id: str, operator: str, device_id: str,
         f"Result:\n{result_text}\n\n"
         f"Screenshots captured: {', '.join(screenshots)}"
     )
+    from Orchestrator.config import orchestrator_url
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            "http://localhost:9091/chat/save",
+            orchestrator_url("/chat/save"),
             json={
                 "operator": operator,
                 "user_message": f"Gemini Computer Use task on {device_id}: {prompt}",

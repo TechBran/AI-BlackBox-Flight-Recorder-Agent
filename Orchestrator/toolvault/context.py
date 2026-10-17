@@ -12,7 +12,9 @@ ToolResult back from blackbox_tools, that chain would deadlock mid-import.
 (See Task 0.1's documented fallback.)
 """
 
-from dataclasses import dataclass
+import os
+import sys
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 # Caller marker for the ON-DEVICE phone bridge (M8/WI-7a). /local/tools/execute
@@ -40,6 +42,17 @@ class ToolResult:
         return self.result
 
 
+def _local_base_url() -> str:
+    """Loopback base URL of the local Orchestrator: config.orchestrator_url()
+    (ORCHESTRATOR_PORT) once the app has loaded config. This module also loads
+    in the lean MCP venv, which never imports config; there the port comes
+    from the ORCHESTRATOR_PORT env var, else the app's default."""
+    cfg = sys.modules.get("Orchestrator.config")
+    if cfg is not None and hasattr(cfg, "orchestrator_url"):
+        return cfg.orchestrator_url()
+    return f"http://localhost:{os.getenv('ORCHESTRATOR_PORT') or 9091}"
+
+
 @dataclass
 class ToolContext:
     """Per-call execution context passed to module executors.
@@ -59,6 +72,6 @@ class ToolContext:
     bound (search_snapshots) budget on it. Back-compat default None.
     """
     operator: str = "system"
-    base_url: str = "http://localhost:9091"
+    base_url: str = field(default_factory=_local_base_url)
     origin_device_id: Optional[str] = None
     caller: Optional[str] = None

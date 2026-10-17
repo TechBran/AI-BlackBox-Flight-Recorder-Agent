@@ -436,10 +436,10 @@ class CellularIVR:
 
     async def run_operator_selection(self) -> Optional[str]:
         """Run operator selection stage."""
-        from Orchestrator.config import USERS_LIST
+        from Orchestrator.config import USERS_LIST, current_default
 
         if not USERS_LIST or len(USERS_LIST) <= 1:
-            operator = USERS_LIST[0] if USERS_LIST else "Brandon"
+            operator = USERS_LIST[0] if USERS_LIST else current_default()
             print(f"[CELLULAR-IVR] Single operator, skipping selection: {operator}")
             return operator
 

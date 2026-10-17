@@ -337,6 +337,26 @@ def startup_embeddings_transcode():
 
 
 @boot_hook(app, "startup")
+def startup_strip_retired_seed_contacts():
+    """Migration: drop the fixed 'self' contact earlier releases seeded into
+    every contact book (the vendor's own line, later a 555 placeholder) and
+    give those books this box's configured line instead (audit X03-18).
+
+    Synchronous on purpose, like the transcode above: it runs before the first
+    request, so no contacts write can race it. Idempotent (exact-match only;
+    a no-op once the seeds are gone, including after a Rollback re-seeds), and
+    it writes a backup before it changes anything. NEVER raises.
+    """
+    try:
+        from Orchestrator import contacts
+        removed = contacts.strip_retired_seed_contacts(contacts.CONTACTS_FILE)
+        if removed:
+            logger.info("[CONTACTS] removed %d retired seed contact(s)", removed)
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[CONTACTS] retired-seed cleanup failed (non-fatal, store untouched): %s", e)
+
+
+@boot_hook(app, "startup")
 async def startup_embeddings_migration_resume():
     """Relaunch an embeddings migration that a restart interrupted (Task 8).
 

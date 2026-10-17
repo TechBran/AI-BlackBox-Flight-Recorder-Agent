@@ -10,7 +10,6 @@ Flow:
 """
 
 import asyncio
-import hashlib
 import logging
 from collections import namedtuple
 from datetime import datetime, timezone
@@ -37,17 +36,12 @@ PEER_NOTIFY_PREVIEW_CHARS = 200
 # 45s SMS reply deadline — do NOT inject unbounded history.
 SMS_THREAD_WINDOW = 20
 
-# The fixed, spoofable system/self seed number. A contact whose phone is this
-# number can NEVER satisfy the inbound whitelist, regardless of created_by /
-# is_operator_self / tags. Gate by the NUMBER (last-10-digit), not by metadata,
-# so a real operator contact that merely has created_by="system" is unaffected.
-# Must equal contacts.SEED_CONTACT["phone"].
-SEED_PHONE = "+15555550100"
-
-# Books seeded before 2026-10 carry the previous seed number, a real DID. It is
-# gated by the SHA-256 of its last 10 digits so the number itself stays out of
-# this public source.
-_LEGACY_SEED_PHONE_SHA256 = "6cbf6b02a2a8d8b079a48e45f81d6545cb54d489c8aada40c0a3090264c621a5"
+# This box's own lines (contacts.system_numbers) and the numbers earlier
+# releases seeded into every book (contacts.RETIRED_SEED_PHONE_SHA256) are
+# spoofable as a sender: a contact holding one can NEVER satisfy the inbound
+# whitelist, regardless of created_by / is_operator_self / tags. Gate by the
+# NUMBER (last-10-digit), not by metadata, so a real operator contact that merely
+# has created_by="system" is unaffected. See SMSRouter._is_system_seed.
 
 
 def _normalize_phone(phone: str) -> str:
@@ -81,7 +75,7 @@ def _recency_key(contact: dict) -> str:
     """Sort key for the most-recently-updated tiebreak.
 
     Contacts carry ISO-8601 ``updated_at``/``created_at`` strings (see
-    contacts._make_seed_contact / upsert_contact); ISO-8601 sorts correctly as
+    contacts.system_self_contact / upsert_contact); ISO-8601 sorts correctly as
     text. Missing both -> "" so timestamped contacts always outrank undated ones,
     and undated contacts preserve their USERS_LIST encounter order via a stable
     sort.
@@ -100,22 +94,33 @@ class SMSRouter:
         log.info("SMSRouter initialized — listening for incoming SMS across all gateways")
 
     @staticmethod
-    def _is_system_seed(contact: dict) -> bool:
-        """The auto-injected system/self seed contact must NEVER satisfy the
-        inbound whitelist (its number is fixed + spoofable).
+    def _system_lines():
+        """This box's own line numbers, read once per resolution."""
+        try:
+            from Orchestrator.contacts import system_numbers
+        except ImportError:
+            from contacts import system_numbers
+        return [number for number, _owner in system_numbers()]
 
-        Gate ONLY the seed phone (SEED_PHONE, or the pre-2026-10 seed number by
-        digest) — NOT all created_by="system" contacts. A real operator contact
-        can legitimately carry created_by="system" (e.g. Anna's self-marker for
-        Brandon was created during system seeding); the old metadata-based check
-        wrongly excluded it from identity matching. The number is the spoofable
-        fact, so the number is what we gate.
+    @staticmethod
+    def _is_system_seed(contact: dict, numbers=None) -> bool:
+        """A contact holding this box's own line, or a number earlier releases
+        seeded into every book, must NEVER satisfy the inbound whitelist (the
+        number is the box's own, or fixed and published, so it is spoofable).
+
+        Gate ONLY those numbers (contacts.is_system_number; ``numbers`` is the
+        box's lines from _system_lines, default read now) — NOT all
+        created_by="system" contacts. A real operator contact can legitimately
+        carry created_by="system" (e.g. a spouse's self-marker created during
+        system seeding); the old metadata-based check wrongly excluded it from
+        identity matching. The number is the spoofable fact, so the number is
+        what we gate.
         """
-        phone = contact.get("phone", "")
-        if _phones_match(phone, SEED_PHONE):
-            return True
-        digest = hashlib.sha256(_normalize_phone(phone).encode()).hexdigest()
-        return digest == _LEGACY_SEED_PHONE_SHA256
+        try:
+            from Orchestrator.contacts import is_system_number
+        except ImportError:
+            from contacts import is_system_number
+        return is_system_number(contact.get("phone", ""), numbers)
 
     def _find_operator_by_phone(self, phone: str):
         """Route incoming SMS to the correct operator.
@@ -125,8 +130,9 @@ class SMSRouter:
         2. Fall back: search all contact books for the number → route to book owner
 
         The lookup is READ-ONLY: it never fabricates a book (no
-        ensure_operator_book) and skips the auto-injected system/self seed
-        contact so the fixed, spoofable system number can't whitelist itself.
+        ensure_operator_book) and skips every contact holding this box's own
+        line or a retired seed number, so a spoofable number can't whitelist
+        itself.
 
         Returns:
             (operator: str, contact: dict) if found, else (None, None)
@@ -139,13 +145,14 @@ class SMSRouter:
             from config import USERS_LIST
 
         data = load_contacts()
+        lines = self._system_lines()
 
         # Pass 1: Is the sender an operator? (their own phone number)
         # Check contacts tagged as "self", "owner", or with relationship "self"/"owner"
         for operator in USERS_LIST:
             contacts = data.get(operator, {})
             for _cid, contact in contacts.items():
-                if self._is_system_seed(contact):
+                if self._is_system_seed(contact, lines):
                     continue
                 contact_phone = contact.get("phone", "")
                 if not contact_phone or not _phones_match(phone, contact_phone):
@@ -161,7 +168,7 @@ class SMSRouter:
         for operator in USERS_LIST:
             contacts = data.get(operator, {})
             for _cid, contact in contacts.items():
-                if self._is_system_seed(contact):
+                if self._is_system_seed(contact, lines):
                     continue
                 contact_phone = contact.get("phone", "")
                 if contact_phone and _phones_match(phone, contact_phone):
@@ -188,10 +195,10 @@ class SMSRouter:
     def resolve_inbound(self, sender: str, owner) -> Resolution:
         """Deterministic 5-tier inbound operator resolution (first match wins).
 
-        Every tier crossed is logged. The seed phone is gated everywhere via
-        ``_is_system_seed``. ``load_contacts`` guarantees every contact carries
-        ``inbound_allowed`` (default True for legacy) and ``is_operator_self``
-        (default False).
+        Every tier crossed is logged. The box's own lines and the retired seed
+        numbers are gated everywhere via ``_is_system_seed``. ``load_contacts``
+        guarantees every contact carries ``inbound_allowed`` (default True for
+        legacy) and ``is_operator_self`` (default False).
 
         Args:
             sender: the inbound sender's phone number (E.164).
@@ -220,11 +227,12 @@ class SMSRouter:
             from config import USERS_LIST
 
         data = load_contacts()
+        lines = self._system_lines()
 
         # ---- Tier 1: Line ownership (STRICT — owned lines never fall through).
         if owner:
             for _cid, contact in (data.get(owner, {}) or {}).items():
-                if self._is_system_seed(contact):
+                if self._is_system_seed(contact, lines):
                     continue
                 if not _phones_match(sender, contact.get("phone", "")):
                     continue
@@ -268,7 +276,7 @@ class SMSRouter:
         peer_matches = []   # (operator, contact) where inbound_allowed, not self
         for operator in ordered_ops:
             for _cid, contact in (data.get(operator, {}) or {}).items():
-                if self._is_system_seed(contact):
+                if self._is_system_seed(contact, lines):
                     continue
                 if not _phones_match(sender, contact.get("phone", "")):
                     continue
@@ -538,10 +546,14 @@ class SMSRouter:
         """
         import time
         import aiohttp
+        from Orchestrator import config
         from Orchestrator.state import get_operator_preference
 
-        sms_provider = get_operator_preference(operator, "sms_provider", "anthropic")
-        sms_model = get_operator_preference(operator, "sms_model", "claude-sonnet-4-5")
+        # Unset preferences follow the box's configured defaults (DEFAULT_PROVIDER,
+        # its *_MODEL_DEFAULT); a saved retired Claude id gets its successor.
+        sms_provider = get_operator_preference(operator, "sms_provider", "") or config.DEFAULT_PROVIDER
+        sms_model = config.resolve_default_model(
+            sms_provider, get_operator_preference(operator, "sms_model", ""))
 
         sms_context = f"[SMS from {contact_name} ({sender})]: {body}"
 
@@ -549,7 +561,7 @@ class SMSRouter:
         # then add the live current user turn. A first-ever inbound (no prior
         # thread) yields exactly the single current user turn (today's behavior).
         #
-        # SMS defaults to Anthropic, which REQUIRES strict user/assistant
+        # Anthropic (a common SMS provider) REQUIRES strict user/assistant
         # alternation and 400s on consecutive same-role turns. When a peer sends
         # two texts with no intervening AI reply, the trailing history turn is
         # already a `user` turn — appending the current text as a SECOND user dict
@@ -581,7 +593,7 @@ class SMSRouter:
             async with aiohttp.ClientSession() as session:
                 # Create the chat task
                 async with session.post(
-                    "http://localhost:9091/chat",
+                    config.orchestrator_url("/chat"),
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
@@ -596,7 +608,7 @@ class SMSRouter:
                 while time.time() < deadline:
                     await asyncio.sleep(1.5)
                     async with session.get(
-                        f"http://localhost:9091/tasks/{task_id}",
+                        config.orchestrator_url(f"/tasks/{task_id}"),
                         timeout=aiohttp.ClientTimeout(total=5),
                     ) as status_resp:
                         status_data = await status_resp.json()

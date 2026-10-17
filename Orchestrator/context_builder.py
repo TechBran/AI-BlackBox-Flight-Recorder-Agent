@@ -64,7 +64,9 @@ from Orchestrator.volume import read_text_safe
 # Budget math (floor-token budgets for the FOSSIL BLOCK; window / max output
 # from the M3 table; "overhead" reserves core system prompt + ToolVault
 # schemas — measured ≈19.4k chars ≈ 10k floor-tokens — plus user history):
-#   anthropic     claude-opus-4-8      1,000,000 − 128,000 out − 32,000 ovh =   840,000
+#   anthropic     claude-opus-5-5      1,000,000 − 128,000 out − 32,000 ovh =   840,000
+#                 (the default; Sonnet/Haiku 5.5 and Fable 5.1 share the 1M/128K
+#                 shape, so the guard holds for any of them)
 #   openai        gpt-5.1                272,000 input share  − 32,000 ovh =   240,000
 #                 (400k total = 272k input + 128k output — output does NOT
 #                 consume the input share)

@@ -71,7 +71,7 @@ def create_checkpoint_async(operator: str, manual: bool = False):
     3. Saves the compressed summary as a checkpoint snapshot
 
     Args:
-        operator: The operator name (e.g., "Brandon", "Anna")
+        operator: The operator name (e.g., "Alice", "Bob")
         manual: Whether this is a manual checkpoint (vs automatic at configured intervals)
     """
     try:
@@ -371,7 +371,7 @@ def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_
     directly from the provided content string.
 
     Args:
-        operator: The operator name (e.g., "Brandon-DEV")
+        operator: The operator name (e.g., "Alice-DEV")
         content: The content to save in the snapshot
         reason: Reason for minting (e.g., "DIRECT", "MCP", "AGENT")
         snap_type: Type of snapshot ("normal", "checkpoint", "summary")

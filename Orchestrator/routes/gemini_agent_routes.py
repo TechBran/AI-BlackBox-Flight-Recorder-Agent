@@ -89,22 +89,24 @@ gemini_agent_lock = threading.Lock()
 # =============================================================================
 
 def get_gemini_path() -> str:
-    """Get path to Gemini CLI executable."""
-    # Check nvm-installed location first
-    nvm_path = os.path.expanduser("~/.nvm/versions/node/v20.19.6/bin/gemini")
-    if os.path.exists(nvm_path):
-        return nvm_path
+    """Path to the Gemini CLI: the same resolver as the CLI-agent terminals
+    (provider_bin: CLI_AGENT_GEMINI_BIN, else PATH + ~/.local/bin + every nvm
+    Node version, newest first). The bare name when it is not installed."""
+    from Orchestrator.routes.cli_agent_routes import provider_bin
+    return provider_bin("gemini") or "gemini"
 
-    # Try to find via which
-    try:
-        result = subprocess.run(["which", "gemini"], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except:
-        pass
 
-    # Fallback to PATH
-    return "gemini"
+def _gemini_spawn_path(gemini_path: str, base_path: str) -> str:
+    """PATH for the CLI child: the CLI's own bin dir first (an nvm-installed
+    CLI's `#!/usr/bin/env node` shebang needs the node beside it), then the
+    inherited PATH and the standard extension dirs."""
+    from Orchestrator.cli_agent.path_extension import extended_path_dirs
+    dirs = []
+    if os.path.isabs(gemini_path):
+        dirs.append(os.path.dirname(gemini_path))
+    dirs += [d for d in (base_path or "").split(os.pathsep) if d]
+    dirs += extended_path_dirs()
+    return os.pathsep.join(dict.fromkeys(dirs))
 
 
 def create_gemini_streaming(
@@ -154,10 +156,9 @@ def create_gemini_streaming(
     # agent never inherits the server's other credentials (Anthropic/OpenAI/
     # xAI/Twilio/AMI — audit O14-cli-agents-devices-02/-03).
     env = scrubbed_child_env()
+    env["PATH"] = _gemini_spawn_path(gemini_path, env.get("PATH", ""))
     nvm_dir = os.path.expanduser("~/.nvm")
     if os.path.exists(nvm_dir):
-        node_path = os.path.expanduser("~/.nvm/versions/node/v20.19.6/bin")
-        env["PATH"] = node_path + ":" + env.get("PATH", "")
         env["NVM_DIR"] = nvm_dir
 
     # Add API key (central config falls back from GEMINI_API_KEY to GOOGLE_API_KEY).
@@ -694,16 +695,9 @@ async def gemini_agent_websocket(websocket: WebSocket, session_id: str):
 async def gemini_agent_status():
     """Get Gemini CLI agent status."""
     gemini_path = get_gemini_path()
-    gemini_exists = os.path.exists(gemini_path) if gemini_path != "gemini" else False
-
-    # Check if gemini is available via which
-    if not gemini_exists:
-        try:
-            result = subprocess.run(["which", "gemini"], capture_output=True, text=True,
-                                   env={**os.environ, "PATH": os.path.expanduser("~/.nvm/versions/node/v20.19.6/bin") + ":" + os.environ.get("PATH", "")})
-            gemini_exists = result.returncode == 0
-        except:
-            pass
+    # provider_bin already searched PATH, ~/.local/bin and every nvm version;
+    # the bare name back means the CLI is not installed.
+    gemini_exists = os.path.isabs(gemini_path) and os.access(gemini_path, os.X_OK)
 
     return {
         "available": gemini_exists,

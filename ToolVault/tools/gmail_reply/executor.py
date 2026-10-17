@@ -6,7 +6,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Reply to an existing email thread."""
     import json
     from Orchestrator.gmail.service import send_email, get_message, is_error_result
-    operator = params.get("operator", ctx.operator or "Brandon")
+    from Orchestrator.config import current_default
+    operator = params.get("operator") or ctx.operator or current_default()
     message_id = params.get("message_id", "")
     thread_id = params.get("thread_id", "")
     body = params.get("body", "")

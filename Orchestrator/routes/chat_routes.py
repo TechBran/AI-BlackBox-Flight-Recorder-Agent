@@ -67,6 +67,9 @@ from Orchestrator.tools.tool_registry import (
 )
 from Orchestrator.config import TOOLVAULT_ENABLED
 from Orchestrator.config import ANTHROPIC_THINKING_MODELS, ANTHROPIC_EFFORT_MAP, ANTHROPIC_THINKING_DISPLAY_MODELS, anthropic_accepts_sampling
+# Module handle for request-time reads (DEFAULT_PROVIDER, resolve_default_model):
+# the /chat/stream routes resolve "Auto" through the same resolver as /chat.
+from Orchestrator import config as _config
 
 # -----------------------------------------------------------------------------
 # M3 origin-aware routing (frontier device control).
@@ -7408,7 +7411,7 @@ async def chat_stream_post(request: Request):
     try:
         body = await request.json()
         messages = body.get("messages", [])
-        provider = body.get("provider", "gemini")
+        provider = body.get("provider") or _config.DEFAULT_PROVIDER
         model = body.get("model")
         try:
             operator = _checked_operator(body.get("operator"))
@@ -7450,17 +7453,11 @@ async def chat_stream_post(request: Request):
                     _bare = _discovered[0]
                     model = custom_servers.qualify(_srv.get("alias", ""), _bare)
             guard = custom_servers.window_guard_tokens(_srv, _bare)
-        elif not model:
-            if provider == "openai":
-                model = "gpt-5.1"
-            elif provider == "anthropic":
-                model = "claude-sonnet-4-5"  # Claude Sonnet 4.5 with extended thinking
-            elif provider == "xai":
-                model = XAI_MODEL_DEFAULT  # configured default (was hardcoded grok-4-1-fast-reasoning until audit M6 / 2026-05-18)
-            elif provider == "computer-use":
-                model = CU_MODEL_DEFAULT  # Computer Use default (single source: Orchestrator/config.py)
-            else:
-                model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
+        else:
+            # Empty/"Auto" -> the provider's configured *_MODEL_DEFAULT (the same
+            # resolver /chat, cron and SMS use); a retired Claude id -> its
+            # successor. An unknown provider falls through to Gemini below.
+            model = _config.resolve_default_model(provider, model)
 
         async def generate_sse():
             # Context build off the event loop with keepalives (rank 45; see

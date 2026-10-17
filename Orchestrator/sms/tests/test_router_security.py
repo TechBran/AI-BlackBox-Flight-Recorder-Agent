@@ -15,7 +15,11 @@ import hashlib
 import pytest
 
 from Orchestrator.sms import router as router_mod
-from Orchestrator.sms.router import SEED_PHONE, SMSRouter
+from Orchestrator.sms.router import SMSRouter
+
+# The 2026-10 placeholder seed number: no longer seeded, still gated by digest
+# (contacts.RETIRED_SEED_PHONE_SHA256) because older books carry it.
+SEED_PHONE = "+15555550100"
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +101,9 @@ def router(monkeypatch):
         {op: copy.deepcopy(book) for op, book in _CONTACTS.items()}
     ))
     monkeypatch.setattr(contacts_mod, "ensure_operator_book", lambda data, op: False)
+    # Hermetic: no telephony lines configured (the box-line gate has its own
+    # tests in Orchestrator/tests/test_contacts_system_number.py).
+    monkeypatch.setattr(contacts_mod, "system_numbers", lambda: [])
     monkeypatch.setattr(config_mod, "USERS_LIST", list(_CONTACTS.keys()))
 
     mgr = FakeManager()
@@ -206,12 +213,13 @@ async def test_unowned_line_unknown_sender_dropped(router):
 # ---------------------------------------------------------------------------
 # System/self seed contact must NEVER satisfy the inbound whitelist.
 #
-# ensure_operator_book() auto-injects SEED_CONTACT (the fixed, spoofable system
-# number SEED_PHONE, created_by 'system', tags ['system','self']) into any
-# bookless operator. The whitelist lookup must be READ-ONLY (no book
-# fabrication) and must skip any system/self seed contact, so the seed number
-# can never reach the chat pipeline. A real operator-added self contact
-# (created_by a user, no 'system' tag) must still route.
+# Earlier releases' ensure_operator_book() seeded a fixed, spoofable system
+# number (created_by 'system', tags ['system','self']) into every bookless
+# operator; books still carry it until the startup migration strips it. The
+# whitelist lookup must be READ-ONLY (no book fabrication) and must skip any
+# such contact, so the seed number can never reach the chat pipeline. A real
+# operator-added self contact (created_by a user, no 'system' tag) must still
+# route.
 # ---------------------------------------------------------------------------
 SEED_NUMBER = SEED_PHONE
 
@@ -313,27 +321,25 @@ async def test_seed_number_dropped_all_books(router, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The seed number is a fixture now (W05: no real DIDs in tracked files), but
-# books seeded earlier still carry the old real number; it stays gated by digest.
+# Nothing is seeded any more (the self contact comes from the box's telephony
+# config), but books seeded earlier carry the old numbers: a real DID, then the
+# 555-01xx placeholder. Both stay gated by digest.
 # ---------------------------------------------------------------------------
-def test_seed_phone_matches_the_contact_seed():
-    from Orchestrator.contacts import SEED_CONTACT
-    assert SEED_CONTACT["phone"] == SEED_PHONE
-    assert SEED_PHONE.startswith("+1555555")  # fictional 555-01xx range
-    assert SEED_CONTACT["email"] == ""
-
-
-def test_legacy_seed_digest_is_well_formed():
-    digest = router_mod._LEGACY_SEED_PHONE_SHA256
-    assert len(digest) == 64 and int(digest, 16) >= 0
-    assert digest != hashlib.sha256(router_mod._normalize_phone(SEED_PHONE).encode()).hexdigest()
+def test_retired_seed_numbers_are_gated_by_digest():
+    from Orchestrator import contacts
+    digests = contacts.RETIRED_SEED_PHONE_SHA256
+    assert len(digests) == 2
+    assert all(len(d) == 64 and int(d, 16) >= 0 for d in digests)
+    assert hashlib.sha256(router_mod._normalize_phone(SEED_PHONE).encode()).hexdigest() in digests
+    assert contacts.is_system_number(SEED_PHONE, numbers=[])
 
 
 @pytest.mark.asyncio
 async def test_legacy_seed_number_on_disk_does_not_whitelist(router, monkeypatch):
+    from Orchestrator import contacts
     legacy = "+15555550177"  # stands in for the pre-fixture seed number
-    monkeypatch.setattr(router_mod, "_LEGACY_SEED_PHONE_SHA256",
-                        hashlib.sha256(legacy[-10:].encode()).hexdigest())
+    monkeypatch.setattr(contacts, "RETIRED_SEED_PHONE_SHA256",
+                        frozenset({hashlib.sha256(legacy[-10:].encode()).hexdigest()}))
     _patch_contacts(monkeypatch, {"Brandon": {"seedid": {**SEED_ON_DISK, "phone": legacy}}})
     for span in (2, 3):  # owned line and the all-books pass
         await router.handle_incoming(

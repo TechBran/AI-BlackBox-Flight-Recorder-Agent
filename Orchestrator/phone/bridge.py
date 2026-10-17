@@ -2869,16 +2869,17 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             return None
 
         # Determine call endpoint based on TELEPHONY_PROVIDER
+        from Orchestrator.config import orchestrator_url
         try:
             from Orchestrator.config import TELEPHONY_PROVIDER, CELLULAR_ENABLED, ASTERISK_ENABLED
             if TELEPHONY_PROVIDER == "asterisk" and ASTERISK_ENABLED:
-                call_url = "http://localhost:9091/asterisk/call"
+                call_url = orchestrator_url("/asterisk/call")
             elif TELEPHONY_PROVIDER in ("cellular", "auto") and CELLULAR_ENABLED:
-                call_url = "http://localhost:9091/cellular/call"
+                call_url = orchestrator_url("/cellular/call")
             else:
-                call_url = "http://localhost:9091/twilio/call"
+                call_url = orchestrator_url("/twilio/call")
         except ImportError:
-            call_url = "http://localhost:9091/twilio/call"
+            call_url = orchestrator_url("/twilio/call")
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -3151,10 +3152,11 @@ The user's speech is being transcribed and sent to you. Respond conversationally
         if not AIOHTTP_AVAILABLE:
             return None
 
+        from Orchestrator.config import orchestrator_url
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    "http://localhost:9091/twilio/call",
+                    orchestrator_url("/twilio/call"),
                     json={
                         "to": phone_number,
                         "backend": "openai_realtime",  # Default to OpenAI for outbound calls

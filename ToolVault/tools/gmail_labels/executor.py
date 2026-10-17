@@ -6,7 +6,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """List labels or modify message labels."""
     import json
     from Orchestrator.gmail.service import get_labels, modify_message, is_error_result
-    operator = params.get("operator", ctx.operator or "Brandon")
+    from Orchestrator.config import current_default
+    operator = params.get("operator") or ctx.operator or current_default()
     action = params.get("action", "list")
     message_id = params.get("message_id", "")
 

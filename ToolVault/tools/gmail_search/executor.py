@@ -6,7 +6,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Search/list emails in the operator's Gmail inbox."""
     import json
     from Orchestrator.gmail.service import list_messages, is_error_result
-    operator = params.get("operator", ctx.operator or "Brandon")
+    from Orchestrator.config import current_default
+    operator = params.get("operator") or ctx.operator or current_default()
     query = params.get("query", "")
     max_results = min(int(params.get("max_results", 10)), 20)
     results = list_messages(operator, query, max_results)

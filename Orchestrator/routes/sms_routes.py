@@ -24,8 +24,10 @@ class SMSMarkReadRequest(BaseModel):
 
 class SMSPreferencesRequest(BaseModel):
     operator: str
-    sms_provider: str = "anthropic"
-    sms_model: str = "claude-sonnet-4-5"
+    # Empty = follow the box's configured default (DEFAULT_PROVIDER, its
+    # *_MODEL_DEFAULT); see config.resolve_default_model.
+    sms_provider: str = ""
+    sms_model: str = ""
 
 
 def _require_sms():
@@ -105,12 +107,23 @@ async def get_unread(operator: str = Query(...)):
 
 @router.get("/preferences")
 async def get_sms_preferences(operator: str = Query(...)):
-    """Get per-operator SMS model/provider preferences."""
+    """Get per-operator SMS model/provider preferences.
+
+    Unset preferences report the box's defaults: ``sms_provider`` is
+    DEFAULT_PROVIDER and ``sms_model`` is "" (Auto, which follows that
+    provider's configured default). ``sms_model_resolved`` is the model the
+    next SMS reply actually runs on (Auto resolved, a retired Claude id mapped
+    to its successor) — the same resolution the SMS router applies.
+    """
+    from Orchestrator import config
     from Orchestrator.state import get_operator_preference
+    provider = get_operator_preference(operator, "sms_provider", "") or config.DEFAULT_PROVIDER
+    model = get_operator_preference(operator, "sms_model", "") or ""
     return {
         "operator": operator,
-        "sms_provider": get_operator_preference(operator, "sms_provider", "anthropic"),
-        "sms_model": get_operator_preference(operator, "sms_model", "claude-sonnet-4-5"),
+        "sms_provider": provider,
+        "sms_model": model,
+        "sms_model_resolved": config.resolve_default_model(provider, model),
     }
 
 

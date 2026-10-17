@@ -61,7 +61,8 @@ from Orchestrator.config import (
     GEMINI_LIVE_DEFAULT_VOICE,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
-    VOL_PATH
+    VOL_PATH,
+    orchestrator_url,
 )
 from Orchestrator.models import GeminiLiveSession, GEMINI_LIVE_SESSIONS, TaskType
 from Orchestrator.volume import now_utc_iso, read_text_safe
@@ -711,7 +712,7 @@ async def transcribe_user_audio(session: GeminiLiveSession) -> Optional[str]:
         # Call internal STT endpoint
         async with aiohttp.ClientSession() as http_session:
             async with http_session.post(
-                "http://localhost:9091/stt/json",
+                orchestrator_url("/stt/json"),
                 json={
                     "audio": combined_base64,
                     "sample_rate": GEMINI_LIVE_INPUT_SAMPLE_RATE,
@@ -1310,7 +1311,7 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
                 try:
                     async with aiohttp.ClientSession() as http_session:
                         async with http_session.post(
-                            "http://localhost:9091/twilio/call",
+                            orchestrator_url("/twilio/call"),
                             json={
                                 "to": phone_number,
                                 "backend": backend,

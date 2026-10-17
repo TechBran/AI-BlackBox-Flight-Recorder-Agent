@@ -27,8 +27,10 @@ from urllib.parse import urlencode
 
 import websockets
 
+from Orchestrator.config import current_default, orchestrator_url
 
-HOST = "ws://localhost:9091"
+
+HOST = orchestrator_url(scheme="ws")
 
 
 def tmux_has(name: str) -> bool:
@@ -73,7 +75,7 @@ async def kill_via_rest(session_id: str) -> None:
     (which lives in blackbox.service's namespace and CAN see the session)."""
     import urllib.request
     req = urllib.request.Request(
-        f"http://localhost:9091/cli-agent/sessions/{session_id}",
+        orchestrator_url(f"/cli-agent/sessions/{session_id}"),
         method="DELETE",
     )
     try:
@@ -86,14 +88,15 @@ async def kill_via_rest(session_id: str) -> None:
 async def main() -> int:
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--operator", default="Brandon")
+    parser.add_argument("--operator", default=None,
+                        help="operator to run as (default: the roster default)")
     parser.add_argument("--provider", default="claude",
                         help="claude | gemini | codex (default: claude)")
     parser.add_argument("--app", default="grocery-store",
                         help='App slug under Apps/, or "" for Apps root')
     args = parser.parse_args()
 
-    operator = args.operator
+    operator = args.operator or current_default()
     provider = args.provider
     app = args.app
     slug = app if app else "_root"

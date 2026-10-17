@@ -55,7 +55,8 @@ from Orchestrator.config import (
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
     STT_OPENAI_STREAM,
-    VOL_PATH
+    VOL_PATH,
+    orchestrator_url,
 )
 from Orchestrator.models import RealtimeSession, REALTIME_SESSIONS, TaskType
 from Orchestrator.volume import now_utc_iso, read_text_safe
@@ -1048,7 +1049,7 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
             try:
                 async with aiohttp.ClientSession() as http_session:
                     async with http_session.post(
-                        "http://localhost:9091/twilio/call",
+                        orchestrator_url("/twilio/call"),
                         json={
                             "to": phone_number,
                             "backend": backend,

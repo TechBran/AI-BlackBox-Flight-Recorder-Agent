@@ -71,7 +71,7 @@ from Orchestrator.embeddings.store import get_active_slug, get_store
 BANNER_WIDTH = 70
 
 # Any HTTP response from here = the orchestrator owns the store files.
-SERVICE_STATUS_URL = "http://localhost:9091/embeddings/status"
+SERVICE_STATUS_URL = config.orchestrator_url("/embeddings/status")
 SERVICE_PROBE_TIMEOUT_S = 1.0
 
 
@@ -333,7 +333,7 @@ def main(argv=None) -> int:
     # service port = refuse; --force remains for a stopped-service edge only.
     if not args.force and _service_alive():
         print("=" * BANNER_WIDTH)
-        print("[REFUSED] the orchestrator service is RUNNING on localhost:9091")
+        print(f"[REFUSED] the orchestrator service is RUNNING on localhost:{config.ORCHESTRATOR_PORT}")
         print()
         print("  Writing store files from this script while the service is up")
         print("  races its own appends (mints, gap-heal, migrations) and can")

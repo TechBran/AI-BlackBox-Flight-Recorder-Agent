@@ -9,9 +9,9 @@ device registry (Orchestrator/device_registry/) — different concept.
 Usage:
     from Orchestrator.local_provider import get_local_registry
     reg = get_local_registry()
-    reg.attest(operator="Brandon", device_id="pixel-9", model_slug="gemma-4-e4b",
+    reg.attest(operator="Alice", device_id="pixel-9", model_slug="gemma-4-e4b",
                version="1.0", sha256="abc", delegate="gpu", autonomy_mode="permission")
-    reg.status(operator="Brandon")  # -> {"available": True, "models": [...]}
+    reg.status(operator="Alice")  # -> {"available": True, "models": [...]}
 """
 import json
 import time

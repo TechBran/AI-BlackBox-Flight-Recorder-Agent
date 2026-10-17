@@ -83,6 +83,7 @@ def _make_router(monkeypatch, books):
 
     monkeypatch.setattr(contacts_mod, "load_contacts",
                         lambda: copy.deepcopy(books))
+    monkeypatch.setattr(contacts_mod, "system_numbers", lambda: [])  # no lines configured
     monkeypatch.setattr(config_mod, "USERS_LIST", list(books.keys()) or ["Brandon"])
 
     mgr = FakeManager()
@@ -350,7 +351,8 @@ async def test_tier5_no_match_drops_nothing_stored(monkeypatch):
 # ===========================================================================
 # Task 2.2 — System-seed fix
 # ===========================================================================
-from Orchestrator.sms.router import SEED_PHONE as SEED_NUMBER  # noqa: E402
+# The retired 2026-10 placeholder seed (contacts.RETIRED_SEED_PHONE_SHA256).
+SEED_NUMBER = "+15555550100"
 
 
 @pytest.mark.asyncio

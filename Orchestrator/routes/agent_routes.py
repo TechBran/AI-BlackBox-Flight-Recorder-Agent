@@ -180,6 +180,22 @@ def build_claude_argv(claude_path: str, prompt: str, *, permission_mode: str,
     return cmd
 
 
+def _claude_path() -> str:
+    """Path to the claude CLI: provider_bin (CLI_AGENT_CLAUDE_BIN, else PATH,
+    ~/.local/bin and every nvm Node version), the bare name when not found."""
+    from Orchestrator.routes.cli_agent_routes import provider_bin
+    return provider_bin("claude") or "claude"
+
+
+def _claude_child_path(claude_path: str) -> str:
+    """The service PATH plus ~/.local/bin and the CLI's own dir (an nvm
+    install's `#!/usr/bin/env node` shebang needs the node beside it)."""
+    dirs = [os.environ.get("PATH", ""), os.path.expanduser("~/.local/bin")]
+    if os.path.isabs(claude_path):
+        dirs.append(os.path.dirname(claude_path))
+    return ":".join(dict.fromkeys(dirs))
+
+
 def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: str = None, continue_session: bool = False, resume_session: bool = False, model: str = None, permission_mode: str = PERMISSION_MODE_YOLO) -> subprocess.Popen:
     """Create Claude Code process in streaming print mode.
     Uses -p (print) mode with stream-json output for programmatic use.
@@ -195,9 +211,7 @@ def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: st
     Returns:
         subprocess.Popen with stdout pipe for reading JSON stream
     """
-    claude_path = os.path.expanduser("~/.local/bin/claude")
-    if not os.path.exists(claude_path):
-        claude_path = "claude"
+    claude_path = _claude_path()
 
     cmd = build_claude_argv(
         claude_path, prompt, permission_mode=permission_mode, model=model,
@@ -223,7 +237,7 @@ def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: st
         # credentials (audit O14-cli-agents-devices-02/-03).
         env={
             **scrubbed_child_env(),
-            "PATH": os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
+            "PATH": _claude_child_path(claude_path),
         },
         start_new_session=True
     )
@@ -255,10 +269,7 @@ def create_claude_pty(working_dir: str) -> Tuple[Any, int]:
     fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
     # Launch Claude Code CLI - use full path since service might not have ~/.local/bin in PATH
-    claude_path = os.path.expanduser("~/.local/bin/claude")
-    if not os.path.exists(claude_path):
-        # Fallback to PATH lookup
-        claude_path = "claude"
+    claude_path = _claude_path()
 
     # Use --dangerously-skip-permissions to bypass trust dialog and permission prompts
     # This allows for smooth streaming without interactive prompts
@@ -273,7 +284,7 @@ def create_claude_pty(working_dir: str) -> Tuple[Any, int]:
             "TERM": "xterm-256color",
             "COLUMNS": str(cols),
             "LINES": str(rows),
-            "PATH": os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
+            "PATH": _claude_child_path(claude_path)
         },
         start_new_session=True
     )
@@ -498,8 +509,8 @@ async def stream_agent_output(session: AgentSession):
 @app.get("/agent/test")
 async def test_agent_endpoint():
     """Test endpoint to verify agent functionality is available."""
-    claude_path = os.path.expanduser("~/.local/bin/claude")
-    claude_exists = os.path.exists(claude_path)
+    claude_path = _claude_path()
+    claude_exists = os.path.isabs(claude_path) and os.path.exists(claude_path)
 
     return {
         "status": "ok",

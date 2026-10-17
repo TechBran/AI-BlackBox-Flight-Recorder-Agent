@@ -2257,7 +2257,7 @@ import time as _time
 # BlackBox bearer token AUTHENTICATED at the consent form (/authorize POST) -- see
 # the consent gate below. There is deliberately NO server-wide default operator:
 # a real person's name must never be a fail-open fallback (a fresh customer box
-# has no "Brandon"). A code with no bound operator is a bug -> fail closed.
+# has no dev-box operator). A code with no bound operator is a bug -> fail closed.
 
 # Authorization codes are single-use + short-lived (seconds). Access tokens get
 # a longer (but still bounded) lifetime. Both are overridable per-deploy.

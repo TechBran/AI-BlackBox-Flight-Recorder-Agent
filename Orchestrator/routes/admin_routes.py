@@ -355,9 +355,11 @@ def health():
     except Exception:
         snapshot_count = 0
     try:
+        from Orchestrator import config as _config
         pairing = {
             "default_origin": _resolve_tailnet_origin(),
-            "default_operator": CFG.get("pairing", "default_operator", fallback=""),
+            # The same operator /pair/claim and the QR payload hand out.
+            "default_operator": _config.pairing_operator(),
         }
     except Exception:
         pairing = {"default_origin": "", "default_operator": ""}
@@ -1011,8 +1013,10 @@ def assert_volume():
     return {"bytes": len(b), "sha256": sha256_bytes(b), "volume": vol_text}
 
 @app.get("/debug/context")
-def debug_context_retrieval(operator: str = "Brandon", query: str = "test query"):
-    """Debug endpoint to see what context would be retrieved for a query"""
+def debug_context_retrieval(operator: str = "", query: str = "test query"):
+    """Debug endpoint to see what context would be retrieved for a query
+    (operator defaults to the roster default)."""
+    operator = _require_operator(operator or current_default())
     try:
         RF  = CFG.getint("context", "recent_fossils_per_user", fallback=3)
         KF  = CFG.getint("context", "keyword_fossils_per_user", fallback=33)
@@ -1179,12 +1183,16 @@ def create_dev_snapshot(body: dict = Body(...)):
 
     Required body fields:
         - content: The snapshot content (detailed session log)
-        - operator: The operator name (e.g., "Brandon-DEV")
+        - operator: The operator whose work this records (e.g., "Alice-DEV").
+          No default: a fresh box has no dev operator to guess, and a wrong
+          one files the session under someone else's memory.
     """
     from Orchestrator.checkpoint import mint_with_content
 
     content = body.get("content", "")
-    operator = _require_operator(body.get("operator", "Brandon-DEV"))
+    if not body.get("operator"):
+        raise HTTPException(status_code=400, detail="operator is required")
+    operator = _require_operator(body.get("operator"))
 
     if not content:
         return {"success": False, "error": "Content is required"}

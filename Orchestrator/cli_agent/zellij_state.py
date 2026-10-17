@@ -14,7 +14,7 @@ post-launch finds zero UUID-shaped strings.
 Schema per row::
 
     {
-      "operator": str,             # "Brandon", "Brandon-DEV", ...
+      "operator": str,             # "Alice", "Alice-DEV", ...
       "provider": str,             # "claude" | "gemini" | "codex" | "agy" | "terminal"
       "app": str | None,           # Apps/{name} context, or None for root
       "session_name": str,         # "{op}__{provider}__{app_or_root}"

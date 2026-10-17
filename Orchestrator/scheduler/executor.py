@@ -34,15 +34,12 @@ def _base_url() -> str:
     loopback; the port comes from ORCHESTRATOR_PORT (the same canonical port
     config the rest of the app uses) instead of a hardcoded 9091, so a fresh
     box that runs on a different port reaches its own app. config is a leaf
-    module, so importing it here is import-cycle-safe; falls back to the 9091
-    default if config is somehow unavailable.
+    module, so importing it here is import-cycle-safe; config.orchestrator_url
+    is the one helper every in-process loopback caller uses.
     """
-    try:
-        from Orchestrator.config import ORCHESTRATOR_PORT
+    from Orchestrator.config import orchestrator_url
 
-        return f"http://localhost:{ORCHESTRATOR_PORT}"
-    except Exception:
-        return "http://localhost:9091"
+    return orchestrator_url()
 
 
 # Resolved once at import so the hot path doesn't re-read config per request.
@@ -586,24 +583,17 @@ def _provider_default_model(provider: str) -> str:
     config constant but a live registry read (see _custom_default_model),
     which raises instead of Gemini-fallthrough when the registry is unusable.
     """
-    from Orchestrator.config import (
-        CU_MODEL_DEFAULT,
-        GEMINI_MODEL_DEFAULT,
-        ANTHROPIC_MODEL_DEFAULT,
-        OPENAI_MODEL_DEFAULT,
-        XAI_MODEL_DEFAULT,
-    )
+    from Orchestrator.config import GEMINI_MODEL_DEFAULT, resolve_default_model
 
     if provider == "custom":
         return _custom_default_model()
+    # An empty provider here is the legacy "no provider stored" case, which has
+    # always meant Gemini (config's own empty-provider default is DEFAULT_PROVIDER).
+    if not provider:
+        return GEMINI_MODEL_DEFAULT
 
-    return {
-        "computer-use": CU_MODEL_DEFAULT,
-        "anthropic": ANTHROPIC_MODEL_DEFAULT,
-        "openai": OPENAI_MODEL_DEFAULT,
-        "xai": XAI_MODEL_DEFAULT,
-        "google": GEMINI_MODEL_DEFAULT,
-    }.get(provider, GEMINI_MODEL_DEFAULT)
+    # The same per-provider map every chat path resolves "Auto" through.
+    return resolve_default_model(provider)
 
 
 def _resolve_model_name(model: str, provider: Optional[str] = None) -> str:

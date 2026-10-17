@@ -74,7 +74,7 @@ class Device:
     tailscale_ip: str                    # 100.x.x.x (or 127.0.0.1 for local)
     device_type: DeviceType
     protocol: DeviceProtocol
-    owner: str                           # Operator who owns this device: "Brandon"
+    owner: str                           # Operator who owns this device, e.g. "Alice"
     description: str = ""                # "GPU box with StoryBox", etc.
     adb_port: int = 5555                 # ADB wireless debugging port (Android only)
     vnc_port: int = 5900                 # VNC port (desktop only)

@@ -70,6 +70,7 @@ from Orchestrator.config import (
     PHONE_SAMPLE_RATE,
     PHONE_AUDIO_FORMAT,
     PBX_OUTBOUND_CALLER_ID,
+    orchestrator_url,
 )
 
 
@@ -691,7 +692,7 @@ async def init_phone_system():
             await freeswitch.answer_call(uuid)
 
             # Start audio streaming to our WebSocket endpoint
-            ws_url = f"ws://localhost:9091/ws/phone/{session_id}"
+            ws_url = orchestrator_url(f"/ws/phone/{session_id}", scheme="ws")
             await freeswitch.bridge_to_ws(uuid, ws_url)
 
         async def on_dtmf(uuid: str, digit: str):

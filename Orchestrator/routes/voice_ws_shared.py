@@ -145,7 +145,9 @@ async def send_gemini_tool_error(gemini_ws, portal_ws, event: Dict,
     return sent
 
 
-CHAT_SAVE_URL = "http://localhost:9091/chat/save"
+def _chat_save_url() -> str:
+    from Orchestrator.config import orchestrator_url
+    return orchestrator_url("/chat/save")
 
 
 async def save_voice_transcript(operator: str, user_message: str,
@@ -165,7 +167,7 @@ async def save_voice_transcript(operator: str, user_message: str,
     try:
         async with aiohttp.ClientSession() as http_session:
             async with http_session.post(
-                CHAT_SAVE_URL,
+                _chat_save_url(),
                 json={
                     "operator": operator,
                     "user_message": user_message,

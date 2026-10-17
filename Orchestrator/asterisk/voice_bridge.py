@@ -127,7 +127,8 @@ class AsteriskVoiceBridge:
             print(f"[VOICE-BRIDGE] Unknown backend: {self._backend}")
             return False
 
-        ws_url = f"ws://127.0.0.1:9091{endpoint}{self._session_id}"
+        from Orchestrator.config import orchestrator_url
+        ws_url = orchestrator_url(f"{endpoint}{self._session_id}", scheme="ws", host="127.0.0.1")
         print(f"[VOICE-BRIDGE] Connecting to {ws_url}")
 
         try:

@@ -170,15 +170,17 @@ class BlackBoxToolExecutor:
     Executes BlackBox tools with unified interface for all AI backends.
 
     Usage:
-        executor = BlackBoxToolExecutor(operator="Brandon")
+        executor = BlackBoxToolExecutor(operator="Alice")
         result = await executor.execute("send_sms", {"phone_number": "+1555...", "message": "Hello"})
     """
 
-    def __init__(self, operator: str = "system", base_url: str = "http://localhost:9091",
+    def __init__(self, operator: str = "system", base_url: Optional[str] = None,
                  origin_device_id: Optional[str] = None,
                  caller: Optional[str] = None):
+        from Orchestrator.config import orchestrator_url
         self.operator = operator
-        self.base_url = base_url
+        # Default: this box's own API (ORCHESTRATOR_PORT, never a literal port).
+        self.base_url = base_url or orchestrator_url()
         # M3: the tailnet identity of the ORIGINATING device (for origin-aware
         # device-control routing). None for the box/Portal + remote MCP (→ the
         # operator's primary device); the Android app stamps its own tailnet id here
@@ -296,7 +298,7 @@ async def execute_tool(
     everything else) so window-bound executors can budget their result size.
 
     Usage:
-        result = await execute_tool("send_sms", {"phone_number": "+1555...", "message": "Hello"}, "Brandon")
+        result = await execute_tool("send_sms", {"phone_number": "+1555...", "message": "Hello"}, "Alice")
     """
     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=origin_device_id,
                                     caller=caller)

@@ -1,6 +1,8 @@
 """Pairing routes — QR-based device pairing for AI BlackBox.
 
-POST /pair/start   — Mint a one-time pairing token (TTL 5min).
+POST /pair/start   — Mint a one-time pairing token (TTL 5min). Optional body
+                     {"operator": <roster name>}: the operator the device
+                     starts as (default: config.pairing_operator()).
 POST /pair/claim   — Redeem a token (called by the claiming device).
 GET  /pair/status  — Check if a token has been claimed (for poll-style UX).
 GET  /pair/qr/{token} — Render PNG QR code for the token (server-side).
@@ -28,7 +30,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from Orchestrator.config import BLACKBOX_TAILNET_HOSTNAME, DEFAULT_OPERATOR
+from Orchestrator import config
+from Orchestrator.config import BLACKBOX_TAILNET_HOSTNAME
 from Orchestrator.utils.paths import resolve
 
 logger = logging.getLogger(__name__)
@@ -165,6 +168,12 @@ def list_paired_devices() -> list[dict]:
     return _load_paired_devices()
 
 
+class PairStartRequest(BaseModel):
+    # The operator the paired device starts as; None = config.pairing_operator()
+    # at claim time (the wizard's choice, else the roster default).
+    operator: Optional[str] = None
+
+
 class PairStartResponse(BaseModel):
     type: str = "pair"
     token: str
@@ -202,8 +211,11 @@ def _purge_expired() -> None:
 
 
 @router.post("/start", response_model=PairStartResponse)
-def pair_start() -> PairStartResponse:
+def pair_start(req: Optional[PairStartRequest] = None) -> PairStartResponse:
     _purge_expired()
+    requested = ((req.operator if req else None) or "").strip() or None
+    if requested is not None and requested not in config.USERS_LIST:
+        raise HTTPException(status_code=400, detail="operator is not on this box's roster")
     token = secrets.token_urlsafe(16)
     now = time.time()
     _pair_tokens[token] = {
@@ -211,6 +223,7 @@ def pair_start() -> PairStartResponse:
         "claimed_at": None,
         "claimed_by": None,
         "device_kind": None,
+        "operator": requested,
     }
     logger.info("pair_token_minted token_id=%s exp=%d", token[:6], int(now + PAIR_TOKEN_TTL_SECS))
     return PairStartResponse(token=token, exp=int(now + PAIR_TOKEN_TTL_SECS))
@@ -254,7 +267,8 @@ def pair_claim(req: PairClaimRequest, request: Request) -> PairClaimResponse:
         "pair_claimed token_id=%s by=%s kind=%s",
         req.token[:6], req.device_name, req.device_kind,
     )
-    return PairClaimResponse(success=True, operator=DEFAULT_OPERATOR, origin=origin)
+    return PairClaimResponse(success=True, operator=config.pairing_operator(meta.get("operator")),
+                             origin=origin)
 
 
 @router.get("/status", response_model=PairStatusResponse)
@@ -304,7 +318,7 @@ def pair_qr(token: str, request: Request):
         "token": token,
         "exp": int(meta["created_at"] + PAIR_TOKEN_TTL_SECS),
         "origin": origin,
-        "operator": DEFAULT_OPERATOR,
+        "operator": config.pairing_operator(meta.get("operator")),
     })
     img = qrcode.make(payload)
     buf = io.BytesIO()

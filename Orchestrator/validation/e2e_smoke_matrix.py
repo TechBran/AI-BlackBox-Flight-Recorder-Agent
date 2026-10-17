@@ -110,7 +110,7 @@ def _drive(monkeypatch, profile, tree, script, results=None):
     monkeypatch.setattr(fal, "_pull_observation", phone.pull)
     monkeypatch.setattr(fal, "_post_action", phone.post)
     monkeypatch.setattr(fal, "_make_driver", lambda *a, **k: _FakeDriver(script))
-    result = asyncio.run(fal.run_frontier_loop("http://phone:8765", "task", "Brandon"))
+    result = asyncio.run(fal.run_frontier_loop("http://phone:8765", "task", "Alice"))
     return result, phone
 
 
@@ -127,7 +127,7 @@ def test_open_app(monkeypatch, profile):
     frames = _frames_of_type(phone, "open_app")
     assert len(frames) == 1
     assert frames[0]["package"] == "com.foo.bar"
-    assert frames[0]["msg"] == "action" and frames[0]["operator"] == "Brandon"
+    assert frames[0]["msg"] == "action" and frames[0]["operator"] == "Alice"
 
 
 # ── read → element_click (a11y-node snap; works on XR too) ───────────────────────────
