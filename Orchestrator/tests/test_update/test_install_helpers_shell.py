@@ -32,6 +32,16 @@ def test_shell_suites_are_found():
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 @pytest.mark.parametrize("script", SUITES)
 def test_shell_suite(script):
+    _run_shell_suite(script)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("shellcheck") is None,
+                    reason="bash or shellcheck not available")
+def test_shellcheck_installers():
+    _run_shell_suite("test_shellcheck_installers.sh")
+
+
+def _run_shell_suite(script):
     path = SHELL_TESTS / script
     assert path.is_file(), f"missing shell test {path}"
     result = subprocess.run(["bash", str(path)], capture_output=True,

@@ -27,18 +27,35 @@ if ! [[ "$REAL_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
 fi
 
 # Audit (customer, 2026-07-27 — stale helper after commit 5eabbe45): $BLACKBOX_ROOT
-# is templated into the root-owned dispatch helpers AND the sudoers file. Validate
-# it once, loudly, before it can reach either. This is a safety gate, NOT a naming
-# policy: install paths may legitimately contain spaces, `&`, `.`, parentheses and
-# `+` (the sed-substitution sites escape those), so those are permitted — what is
-# rejected is a control character, newline, quote, `$`, backtick or `;` that could
-# break the sudoers file or a sed program. A bad root baked into the apt helper is
-# precisely the incident (an unreadable allowlist path → rc=4 forever).
-_root_ok_re='^/[A-Za-z0-9 ._/+@%:,()~&-]+$'
+# is templated into the root-owned dispatch helpers, the sudoers file, the
+# systemd units below and the llama-swap config. Validate it once, loudly, before
+# it can reach any of them. A bad root baked into the apt helper is precisely the
+# incident (an unreadable allowlist path → rc=4 forever).
+#
+# 2026-10 audit X04-security-clients-infra-14 / O22-02: this used to admit
+# spaces, `&`, `()`, `%` and `:` on the theory that every substitution site
+# escapes them. The unit files do not: ExecStart=, WorkingDirectory=,
+# ReadWritePaths= and Environment= take the root unquoted, so a space splits the
+# value (226/NAMESPACE, 203/EXEC) and `%` is expanded as a systemd specifier;
+# the llama-swap qwen-tts member puts it in PYTHONPATH= inside a single-quoted
+# `sh -c`, where `:` splits the path list. The charset is therefore letters,
+# digits and `._/+@,~-` only — every real install root (the dev box and MS02
+# trees both contain a `.`-suffixed directory) fits it, and nothing in it means
+# anything to systemd, sed, sh or a path list. $REAL_HOME reaches the same unit
+# lines (the cli-agent drop-in), so it is held to the same charset.
+# installer/templates/blackbox-install-{localstack,reranker}.sh repeat this
+# exact pattern as _path_ok_re for standalone runs; keep the three identical
+# (scripts/tests/test_install_root_charset.sh pins it).
+_root_ok_re='^/[A-Za-z0-9._/+@,~-]+$'
 if [[ ! "$BLACKBOX_ROOT" =~ $_root_ok_re ]]; then
     echo "[install] ERROR: BLACKBOX_ROOT='$BLACKBOX_ROOT' contains characters unsafe to template into" >&2
-    echo "[install] the sudoers file and the /usr/local/sbin dispatch helpers. Reinstall to a path" >&2
-    echo "[install] matching ${_root_ok_re}." >&2
+    echo "[install] the systemd units, the sudoers file and the /usr/local/sbin dispatch helpers." >&2
+    echo "[install] Reinstall to a path matching ${_root_ok_re} (no spaces, & ( ) % : or quotes)." >&2
+    exit 1
+fi
+if [[ ! "$REAL_HOME" =~ $_root_ok_re ]]; then
+    echo "[install] ERROR: home directory '$REAL_HOME' of $REAL_USER contains characters unsafe to" >&2
+    echo "[install] template into the systemd units (it must match ${_root_ok_re})." >&2
     exit 1
 fi
 
@@ -685,48 +702,50 @@ step_2c_install_zellij() {
         fi
     fi
     if [[ $need_download -eq 1 ]]; then
-        local TMPDIR
-        TMPDIR=$(mktemp -d /tmp/zellij-install-XXXXXX)
-        # Trap covers the five exit-1 paths below (download/extract/hash-parse/
-        # hash-mismatch failures) so we never leak /tmp/zellij-install-* dirs.
-        # The explicit `rm -rf "$TMPDIR"` at the end of the happy path is kept
-        # as documented redundancy — the trap handles both happy + sad paths.
-        # ${TMPDIR:-} default protects against `local` going out of scope when
-        # the trap fires AFTER function-exit (set -u would otherwise kill the
-        # trap with "TMPDIR: unbound variable").
-        trap 'rm -rf "${TMPDIR:-}"' EXIT
+        # ZELLIJ_TMPDIR is a script GLOBAL on purpose (2026-10 audit
+        # X06-ops-deploy-07 / O22-01). This used to be `local TMPDIR`, which
+        # shadowed the environment variable mktemp and every child tool read:
+        # with TMPDIR exported, the shadow was exported too, so once this dir
+        # was removed every later mktemp in the step failed, and the EXIT trap
+        # (which runs outside the function's scope) expanded the CALLER's
+        # TMPDIR and rm -rf'd it. The trap covers the five exit-1 paths below
+        # (download/extract/hash-parse/hash-mismatch failures) so we never leak
+        # /tmp/zellij-install-* dirs, and is cleared after the explicit rm on
+        # the happy path so it can never fire later in the install.
+        ZELLIJ_TMPDIR=$(mktemp -d /tmp/zellij-install-XXXXXX)
+        trap 'rm -rf "${ZELLIJ_TMPDIR:-}"' EXIT
 
         local TARBALL_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.tar.gz"
         local SHA_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.sha256sum"
 
         echo "[install] Downloading zellij v${ZELLIJ_VERSION} (x86_64-linux-musl)..."
         if ! curl --fail --location --silent --show-error \
-                --output "$TMPDIR/zellij.tar.gz" "$TARBALL_URL"; then
+                --output "$ZELLIJ_TMPDIR/zellij.tar.gz" "$TARBALL_URL"; then
             echo "[install] ERROR: zellij tarball download failed: $TARBALL_URL" >&2
             exit 1
         fi
         if ! curl --fail --location --silent --show-error \
-                --output "$TMPDIR/zellij.sha256sum" "$SHA_URL"; then
+                --output "$ZELLIJ_TMPDIR/zellij.sha256sum" "$SHA_URL"; then
             echo "[install] ERROR: zellij sha256sum download failed: $SHA_URL" >&2
             exit 1
         fi
 
         echo "[install] Extracting zellij tarball..."
-        if ! tar -xzf "$TMPDIR/zellij.tar.gz" -C "$TMPDIR"; then
+        if ! tar -xzf "$ZELLIJ_TMPDIR/zellij.tar.gz" -C "$ZELLIJ_TMPDIR"; then
             echo "[install] ERROR: zellij tarball extraction failed" >&2
             exit 1
         fi
-        if [[ ! -f "$TMPDIR/zellij" ]]; then
-            echo "[install] ERROR: expected zellij binary not found at $TMPDIR/zellij after extract" >&2
+        if [[ ! -f "$ZELLIJ_TMPDIR/zellij" ]]; then
+            echo "[install] ERROR: expected zellij binary not found at $ZELLIJ_TMPDIR/zellij after extract" >&2
             exit 1
         fi
 
         # Phase 0 finding #4: hash the EXTRACTED binary, not the tarball.
         local EXPECTED ACTUAL
-        EXPECTED=$(awk '{print $1}' "$TMPDIR/zellij.sha256sum")
-        ACTUAL=$(sha256sum "$TMPDIR/zellij" | awk '{print $1}')
+        EXPECTED=$(awk '{print $1}' "$ZELLIJ_TMPDIR/zellij.sha256sum")
+        ACTUAL=$(sha256sum "$ZELLIJ_TMPDIR/zellij" | awk '{print $1}')
         if [[ -z "$EXPECTED" ]]; then
-            echo "[install] ERROR: could not parse expected hash from $TMPDIR/zellij.sha256sum" >&2
+            echo "[install] ERROR: could not parse expected hash from $ZELLIJ_TMPDIR/zellij.sha256sum" >&2
             exit 1
         fi
         if [[ "$EXPECTED" != "$ACTUAL" ]]; then
@@ -738,9 +757,11 @@ step_2c_install_zellij() {
         echo "[install] zellij sha256 verified ($ACTUAL)"
 
         # Atomic install + perms + ownership in one call.
-        sudo install -m 0755 -o root -g root "$TMPDIR/zellij" "$ZELLIJ_BIN"
+        sudo install -m 0755 -o root -g root "$ZELLIJ_TMPDIR/zellij" "$ZELLIJ_BIN"
         echo "[install] Installed $ZELLIJ_BIN (version $ZELLIJ_VERSION)"
-        rm -rf "$TMPDIR"
+        rm -rf "$ZELLIJ_TMPDIR"
+        ZELLIJ_TMPDIR=""
+        trap - EXIT
     fi
 
     # ─── 5. Write ~/.config/zellij/config.kdl ───
@@ -845,25 +866,31 @@ KDL_EOF
 }
 step_2c_install_zellij
 
-# ── Step 2d: vLLM reranker provisioning (retrieval M13 — GPU boxes only) ──
-# The script self-gates: nvidia-smi + >=8000 MB VRAM required, CPU boxes get
-# a clear skip message and exit 0 (vLLM must never land on a CPU box), so the
-# installer calls it unconditionally. Non-fatal like the Ollama step:
-# retrieval works un-reranked and the wizard's Memory & Search step shows the
-# remediation. Activation stays a deliberate config flip (rerank.py checklist)
-# — this only provisions the serving side (venv + start script + unit, port
-# 8091 = Orchestrator/rerank.py's base_url code fallback).
+# ── Step 2d: vLLM reranker provisioning (retrieval M13 — opt-in, GPU only) ──
+# OPT-IN since 2026-10 (audit X06-ops-deploy-06): the on-box reranker is the
+# local model stack (Step 2f), and the vLLM path is the kept alternative. The
+# script provisions only when asked — RERANK_PROVIDER=vllm in this script's
+# environment (e.g. `RERANK_PROVIDER=vllm bash Scripts/install.sh`) — and never
+# while blackbox-models.service is enabled; every other run exits 0 and leaves
+# an existing vllm-reranker.service exactly as it is. Before this, every re-run
+# upgraded vllm unpinned and re-enabled the unit the local-stack migration had
+# retired. It also self-gates on nvidia-smi + >=8000 MB VRAM (vLLM must never
+# land on a CPU box), so the installer calls it unconditionally. Non-fatal like
+# the Ollama step: retrieval works un-reranked and the wizard's Memory & Search
+# step shows the remediation. Activation stays a deliberate config flip
+# (rerank.py checklist) — this only provisions the serving side (venv + start
+# script + unit, port 8091 = Orchestrator/rerank.py's base_url code fallback).
 if ! bash "$BLACKBOX_ROOT/installer/templates/blackbox-install-reranker.sh" \
         "$REAL_USER" "$REAL_HOME" "$BLACKBOX_ROOT"; then
     echo "[install] WARN: reranker provisioning did not complete — search works un-reranked."
-    echo "[install]       Re-run later: sudo bash installer/templates/blackbox-install-reranker.sh"
+    echo "[install]       Re-run later: sudo RERANK_PROVIDER=vllm bash installer/templates/blackbox-install-reranker.sh"
 fi
 
 # ── Step 2e: CPU reranker deps (retrieval M5 — MID-tier boxes only) ──
 # The MID-tier sibling of Step 2d: no GPU + >=32 GB RAM installs the in-process
 # CrossEncoder stack (CPU torch + sentence-transformers) into the Orchestrator
 # venv. Self-gates via Orchestrator/hardware.py's probe(): GPU boxes skip (they
-# use Step 2d's vLLM reranker) and LOW (<32 GB) boxes skip (cloud-only rerank),
+# rerank on the GPU, Steps 2d/2f) and LOW (<32 GB) boxes skip (cloud-only rerank),
 # each exit 0 — so the installer calls it unconditionally. Non-fatal like the
 # GPU step. Enablement stays a deliberate wizard/config selection ([rerank]
 # provider = cpu); this only installs the deps + warms the model cache.
@@ -954,8 +981,14 @@ if [[ ! -f "$BLACKBOX_ROOT/Orchestrator/device_registry/devices.json" ]]; then
 fi
 
 # ── Step 4: systemd unit (audit M2 + M3 + Q3 + Q4) ──
+# Every unit and drop-in this script writes inline is produced by a render_*
+# function, so scripts/tests/test_systemd_units_verify.sh can run
+# `systemd-analyze verify` over exactly these bytes for a sample install root.
+# The heredocs are unquoted: escape every literal `$` and backtick in them,
+# or it is expanded (or executed) while install.sh writes the unit.
 echo "[install] Installing blackbox.service..."
-sudo tee /etc/systemd/system/blackbox.service > /dev/null <<EOF
+render_blackbox_unit() {
+    cat <<EOF
 [Unit]
 Description=AI BlackBox Orchestrator
 Documentation=https://github.com/TechBran/ai-blackbox-flight-recorder-agent
@@ -1011,8 +1044,8 @@ MemoryHigh=70%
 # this unit or its drop-ins. It holds /etc/blackbox/system-packages.txt — the
 # root-owned apt allowlist that blackbox-apt-install trusts as its SOLE source.
 # A service that could write it could append any package and turn the bounded
-# `NOPASSWD: /usr/local/sbin/blackbox-apt-install <pkg>` grant into
-# `apt-get install -y <anything>` as root. The directory already holds
+# \`NOPASSWD: /usr/local/sbin/blackbox-apt-install <pkg>\` grant into
+# \`apt-get install -y <anything>\` as root. The directory already holds
 # service-user-owned files (zellij cert/key), so a future "let the service
 # rotate its own certs" change is the plausible way this gets breached — add a
 # narrower ReadWritePaths (e.g. /etc/blackbox/zellij) if that ever lands, never
@@ -1032,6 +1065,8 @@ SyslogIdentifier=blackbox
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+render_blackbox_unit | sudo tee /etc/systemd/system/blackbox.service > /dev/null
 
 # ── BlackBox MCP HTTP (remote tool server) unit ──
 # The MCP server can't install/enable its own unit: ProtectSystem=strict makes
@@ -1041,7 +1076,8 @@ EOF
 # grants are all /etc-free). The public URL is NOT pinned here -- onboarding
 # writes Manifest/mcp_runtime.json (no /etc edit; OAuth 503 until set).
 echo "[install] Installing blackbox-mcp.service..."
-sudo tee /etc/systemd/system/blackbox-mcp.service > /dev/null <<EOF
+render_blackbox_mcp_unit() {
+    cat <<EOF
 [Unit]
 Description=BlackBox MCP HTTP Server (remote tool server, bearer/OAuth authed)
 After=network.target blackbox.service
@@ -1064,13 +1100,16 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+render_blackbox_mcp_unit | sudo tee /etc/systemd/system/blackbox-mcp.service > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable blackbox-mcp.service
 sudo systemctl restart blackbox-mcp.service || echo "[install] WARN: blackbox-mcp.service did not start (is MCP/venv present?)"
 
 # ── Step 4b: override.conf scaffold (audit M3 carry-forward) ──
 sudo mkdir -p /etc/systemd/system/blackbox.service.d
-sudo tee /etc/systemd/system/blackbox.service.d/override.conf > /dev/null <<EOF
+render_override_dropin() {
+    cat <<EOF
 # BlackBox service override — customize without modifying the main unit.
 # Uncomment + edit, then run:
 #   sudo systemctl daemon-reload && sudo systemctl restart blackbox
@@ -1086,6 +1125,8 @@ sudo tee /etc/systemd/system/blackbox.service.d/override.conf > /dev/null <<EOF
 # Override CPU priority:
 # Nice=-5
 EOF
+}
+render_override_dropin | sudo tee /etc/systemd/system/blackbox.service.d/override.conf > /dev/null
 
 # ── Step 4b1: CLI Agent compatibility drop-in (audit E22) ──
 # Brandon 2026-05-17: Android portal Tmux bridge showed blank screen on
@@ -1122,7 +1163,8 @@ sudo -u "$REAL_USER" mkdir -p \
     "$REAL_HOME/.npm" \
     "$REAL_HOME/.local/share/zellij" \
     "$REAL_HOME/.local/share/blackbox"
-sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/null <<EOF
+render_cli_agent_dropin() {
+    cat <<EOF
 # CLI Agent compatibility drop-in (E22). DO NOT EDIT — install.sh manages
 # this file. To customize service behavior, edit override.conf instead.
 [Service]
@@ -1169,6 +1211,8 @@ Environment=TERM=xterm-256color COLORTERM=truecolor
 # entirely. ProtectSystem=strict still protects /etc /usr /run.
 ProtectHome=no
 EOF
+}
+render_cli_agent_dropin | sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/null
 
 # ── Step 4b2: time-sync boot gate for the cron scheduler (cron M3.3) ──
 # The cron scheduler computes every job's next fire — and decides on cold
@@ -1180,18 +1224,24 @@ EOF
 #
 # Gate startup on time-sync so a fresh box always schedules against a synced
 # clock. After=time-sync.target orders us after systemd's time-sync milestone;
-# Wants=systemd-timesyncd pulls in the SNTP client that reaches that milestone
-# on a stock Ubuntu/Debian box (a no-op where the host runs chrony/ntpd instead
-# — those reach time-sync.target themselves). Lives in its own drop-in so it is
-# independent of the main unit + the cli-agent drop-in.
-sudo tee /etc/systemd/system/blackbox.service.d/time-sync.conf > /dev/null <<EOF
+# Wants=systemd-timesyncd.service pulls in the SNTP client that reaches that
+# milestone on a stock Ubuntu/Debian box (a no-op where the host runs
+# chrony/ntpd instead — those reach time-sync.target themselves). Lives in its
+# own drop-in so it is independent of the main unit + the cli-agent drop-in.
+# The `.service` suffix is required: systemd rejects a bare unit name in a
+# dependency ("Failed to add dependency ... Invalid argument") and drops it, so
+# until 2026-10 (audit W39) this gate silently pulled in nothing.
+render_time_sync_dropin() {
+    cat <<EOF
 # Time-sync boot gate for the cron scheduler (cron M3.3). DO NOT EDIT —
 # install.sh manages this file. Ensures a no-RTC cold boot computes cron
 # fires (and the cold-restart catch-up) against a synced wall clock.
 [Unit]
 After=time-sync.target
-Wants=systemd-timesyncd
+Wants=systemd-timesyncd.service
 EOF
+}
+render_time_sync_dropin | sudo tee /etc/systemd/system/blackbox.service.d/time-sync.conf > /dev/null
 
 # ── Step 4c: log retention — MOVED to Step 0d (2026-10 audit rank 12) ──
 # This used to write /etc/logrotate.d/blackbox for /var/log/blackbox/*.log, a
@@ -1449,7 +1499,8 @@ echo "[install] Added $REAL_USER to 'input' group (effective next login)"
 # Install ydotoold systemd unit. Daemon owns /dev/uinput access (root needed),
 # but the socket gets chowned to REAL_USER so blackbox.service can talk to it
 # without privilege escalation.
-sudo tee /etc/systemd/system/ydotoold.service > /dev/null <<EOF
+render_ydotoold_unit() {
+    cat <<EOF
 [Unit]
 Description=ydotool daemon (Wayland-compatible input injection for Computer Use)
 Documentation=https://github.com/ReimuNotMoe/ydotool
@@ -1471,6 +1522,8 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+render_ydotoold_unit | sudo tee /etc/systemd/system/ydotoold.service > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now ydotoold.service
 echo "[install] ydotoold.service enabled and running"
@@ -1541,39 +1594,153 @@ sudo -u "$REAL_USER" bash -c '
     fi
 ' || true
 
-# ── Step 5: Build + install Tauri setup app (audit C2 / Q1=A) ──
+# ── Step 5: BlackBox Setup app (Tauri .deb) — audit C2 / Q1=A ──
+# 2026-10 audit O22-03 (merged into O22-01): this used to rebuild the app on
+# EVERY install.sh and update.sh run, and ran rustup, npm and cargo as ROOT
+# inside the user-owned checkout — root-owned target/ and node_modules/ that a
+# later user build cannot write, a toolchain in root's home, and a multi-minute
+# cargo build of an unchanged app on every update. Now it builds only when asked
+# or needed, and only as $REAL_USER:
+#   BLACKBOX_BUILD_TAURI=1   rebuild and reinstall
+#   BLACKBOX_BUILD_TAURI=0   never build (a box without the app gets a warning)
+#   unset (default)          build only when /usr/bin/blackbox-setup is not
+#                            installed (a fresh box) or its package version
+#                            differs from installer/src-tauri/tauri.conf.json
+# rustup, cargo and npm run under `sudo -u $REAL_USER` with HOME=$REAL_HOME
+# (Step 2's discipline); only the apt build deps and the .deb install use root.
+# update.sh runs this script through sudo, whose env_reset drops
+# BLACKBOX_BUILD_TAURI — an update therefore always takes the default.
+SETUP_APP_BIN=/usr/bin/blackbox-setup
+
+tauri_source_version() {
+    python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' \
+        "$BLACKBOX_ROOT/installer/src-tauri/tauri.conf.json" 2>/dev/null || true
+}
+
+# The dpkg package that ships $SETUP_APP_BIN (empty when it is not installed).
+# Looked up by the binary rather than by name: the productName change in
+# 5eabbe45 also changed the package name Tauri derives from it.
+setup_app_package() {
+    local owner
+    owner="$(dpkg -S "$SETUP_APP_BIN" 2>/dev/null)" || return 0
+    printf '%s\n' "${owner%%:*}"
+}
+
+# Prints why the app must be (re)built; returns 1 when it need not be.
+setup_app_build_reason() {
+    local pkg have want
+    case "${BLACKBOX_BUILD_TAURI:-}" in
+        1|true|yes) echo "BLACKBOX_BUILD_TAURI=$BLACKBOX_BUILD_TAURI"; return 0 ;;
+        0|false|no) return 1 ;;
+    esac
+    pkg="$(setup_app_package)"
+    if [[ -z "$pkg" ]]; then
+        echo "it is not installed"
+        return 0
+    fi
+    have="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)"
+    want="$(tauri_source_version)"
+    if [[ -n "$want" && "$have" != "$want" ]]; then
+        echo "installed $pkg $have, source $want"
+        return 0
+    fi
+    return 1
+}
+
 build_tauri_setup() {
-    echo "[install] Building BlackBox Setup (Tauri .deb)..."
+    echo "[install] Building BlackBox Setup (Tauri .deb) as $REAL_USER..."
     sudo apt install -y \
         libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libxdo-dev \
-        libssl-dev libayatana-appindicator3-dev pkg-config build-essential
-    if ! command -v cargo > /dev/null; then
-        echo "[install] Installing Rust toolchain via rustup..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --default-toolchain stable
-        # shellcheck disable=SC1091
-        source "$HOME/.cargo/env"
-    fi
-    if ! cargo tauri --version 2>/dev/null | grep -q "^tauri-cli"; then
-        cargo install tauri-cli --locked --version "^2.0"
-    fi
-    # Pre-clean bundle dir so we always install the freshly-built .deb (audit I4)
-    rm -f "$BLACKBOX_ROOT/installer/src-tauri/target/release/bundle/deb/"*.deb 2>/dev/null || true
-    cd "$BLACKBOX_ROOT/installer"
-    npm install --no-audit --no-fund > /dev/null 2>&1 || true
-    cargo tauri build --bundles deb
-    DEB_FILE=$(ls "$BLACKBOX_ROOT/installer/src-tauri/target/release/bundle/deb/"*.deb | head -1)
-    if [[ ! -f "$DEB_FILE" ]]; then
-        echo "[install] ERROR: cargo tauri build did not produce a .deb" >&2
-        exit 1
-    fi
-    echo "[install] Built: $DEB_FILE"
-    cd "$BLACKBOX_ROOT"
+        libssl-dev libayatana-appindicator3-dev pkg-config build-essential || return 1
+    # A pre-2026-10 build ran as root and left these root-owned; the user build
+    # cannot write them. Report it rather than chown a service-writable tree as
+    # root.
+    local d foreign
+    for d in "$BLACKBOX_ROOT/installer/src-tauri/target" "$BLACKBOX_ROOT/installer/node_modules"; do
+        [[ -e "$d" ]] || continue
+        foreign="$(find "$d" -maxdepth 2 ! -user "$REAL_USER" -print -quit 2>/dev/null || true)"
+        if [[ -n "$foreign" ]]; then
+            echo "[install] ERROR: $foreign is not owned by $REAL_USER (left by an old root build)." >&2
+            echo "[install]        Fix with: sudo chown -R $REAL_USER: '$d'  — then re-run install.sh." >&2
+            return 1
+        fi
+    done
+    # The toolchain and the build, as $REAL_USER. sudo resets PATH, so a
+    # user-installed cargo comes from ~/.cargo/env and npm from nvm (Step 1c).
+    sudo -u "$REAL_USER" env HOME="$REAL_HOME" BLACKBOX_ROOT="$BLACKBOX_ROOT" bash -c '
+        set -euo pipefail
+        if [[ -f "$HOME/.cargo/env" ]]; then
+            . "$HOME/.cargo/env"
+        fi
+        if ! command -v cargo > /dev/null; then
+            echo "[install] Installing Rust toolchain via rustup (into $HOME/.cargo)..."
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable
+            . "$HOME/.cargo/env"
+        fi
+        if ! cargo tauri --version 2>/dev/null | grep -q "^tauri-cli"; then
+            cargo install tauri-cli --locked --version "^2.0"
+        fi
+        # Pre-clean the bundle dir so we always install the freshly-built .deb (audit I4).
+        rm -f "$BLACKBOX_ROOT/installer/src-tauri/target/release/bundle/deb/"*.deb
+        cd "$BLACKBOX_ROOT/installer"
+        export NVM_DIR="$HOME/.nvm"
+        if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+            . "$NVM_DIR/nvm.sh"
+        fi
+        npm install --no-audit --no-fund > /dev/null 2>&1 || true
+        cargo tauri build --bundles deb
+    '
 }
-build_tauri_setup
-DEB_FILE=$(ls "$BLACKBOX_ROOT/installer/src-tauri/target/release/bundle/deb/"*.deb | head -1)
-echo "[install] Installing $DEB_FILE..."
-sudo apt install -y "$DEB_FILE"   # apt 1.1+ resolves deps + installs in one step (audit N7)
+
+# The .deb the last build produced (the bundle dir is pre-cleaned per build).
+setup_app_deb() {
+    local debs=("$BLACKBOX_ROOT/installer/src-tauri/target/release/bundle/deb/"*.deb)
+    if [[ -f "${debs[0]}" ]]; then
+        printf '%s\n' "${debs[0]}"
+    fi
+}
+
+install_setup_app_deb() {
+    local deb="$1" new_pkg old_pkg
+    new_pkg="$(dpkg-deb -f "$deb" Package)"
+    old_pkg="$(setup_app_package)"
+    # Both packages ship $SETUP_APP_BIN, which dpkg refuses to overwrite from a
+    # differently-named package, so the renamed one has to replace the old.
+    if [[ -n "$old_pkg" && -n "$new_pkg" && "$old_pkg" != "$new_pkg" ]]; then
+        echo "[install] Removing $old_pkg (the setup app is now packaged as $new_pkg)"
+        sudo apt-get remove -y "$old_pkg"
+    fi
+    echo "[install] Installing $deb..."
+    sudo apt install -y "$deb"   # apt 1.1+ resolves deps + installs in one step (audit N7)
+}
+
+install_setup_app() {
+    local reason deb
+    if ! reason="$(setup_app_build_reason)"; then
+        if [[ -n "$(setup_app_package)" ]]; then
+            echo "[install] BlackBox Setup is current — not rebuilding (BLACKBOX_BUILD_TAURI=1 forces it)"
+        else
+            echo "[install] WARN: BlackBox Setup is not installed and BLACKBOX_BUILD_TAURI=0 skips the build;" >&2
+            echo "[install]       the first-run wizard will not launch. Re-run with BLACKBOX_BUILD_TAURI=1." >&2
+        fi
+        return 0
+    fi
+    echo "[install] BlackBox Setup needs a build: $reason"
+    if build_tauri_setup && deb="$(setup_app_deb)" && [[ -n "$deb" ]]; then
+        echo "[install] Built: $deb"
+        install_setup_app_deb "$deb"
+        return 0
+    fi
+    if [[ -n "$(setup_app_package)" ]]; then
+        echo "[install] WARN: BlackBox Setup build failed — keeping the installed version." >&2
+        echo "[install]       Retry later with: BLACKBOX_BUILD_TAURI=1 bash $BLACKBOX_ROOT/Scripts/install.sh" >&2
+        return 0
+    fi
+    echo "[install] ERROR: BlackBox Setup build failed and no setup app is installed" >&2
+    return 1
+}
+install_setup_app
 
 # ── Step 6a: autostart .desktop — first-boot wizard launch (audit M6) ──
 sudo -u "$REAL_USER" mkdir -p "$REAL_HOME/.config/autostart"
