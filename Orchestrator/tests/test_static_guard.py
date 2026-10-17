@@ -1,6 +1,7 @@
 """U10 (audit rank 24: X03-security-backend-07, P07-html-css-01, P07-html-css-05):
-the /ui and /onboarding static mounts refuse runtime data, server-side source,
-key/config material and dot-files, and stop serving dev pages.
+the /ui and /onboarding static mounts serve web assets (code tree) and media
+(Portal/uploads/) only — never runtime data, server-side source, key/config
+material or dot-files — and stop serving dev pages.
 
 The hostile requests run against the REAL mounted StaticFiles objects (taken from
 the shared app's routes) re-pointed at a temp static root, so the test exercises
@@ -9,6 +10,7 @@ checkout's Portal/ tree.
 """
 import copy
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -65,6 +67,14 @@ SERVED = {
     "uploads/report.docx": b"PK\x03\x04docx",
     "uploads/notes.txt": b"hello",
     "uploads/sessions/session-1-abc/photo.jpg": b"\xff\xd8\xff",
+    # An operator's own JSON / archive attachments are media, not internals.
+    "uploads/sessions/s1/data.json": b'{"a": 1}',
+    "uploads/archive.zip": b"PK\x03\x04zip",
+    "uploads/clip.webm": b"\x1aE\xdf\xa3webm",
+    "uploads/refimages/ref.webp": b"RIFFwebp",
+    "cu-view/index.html": b"<html>live view</html>",
+    "modules/fx/icon.svg": b"<svg/>",
+    "styles/fonts/x.woff2": b"wOF2",
 }
 
 REFUSED = [
@@ -95,6 +105,30 @@ REFUSED = [
     "artifacts/op_1234abcd_report.txt",
     "dev/fx-lab.html",
     "BACKUP.DB",
+    # Classes the code-tree allow-list refuses without naming them, and the
+    # bypass review's served-at-HEAD list (store.db3 ... AuthKey.p8).
+    "store.db3",
+    "vault.kdbx",
+    "release.jks",
+    "upload.keystore",
+    "secrets.yaml",
+    "config.toml",
+    "app.cfg",
+    "nginx.conf",
+    "server.crt",
+    "AuthKey.p8",
+    "LICENSE",
+    "backup.tar.gz",
+    "dump.sql",
+    "modules/state.json",
+    "vendor/thing.xml",
+    "uploads/id_rsa",
+    "uploads/secrets.yml",
+    "uploads/store.db3",
+    "uploads/server.crt",
+    "uploads/release.keystore",
+    "uploads/vault.kdbx",
+    "uploads/run.sh",
 ]
 
 
@@ -158,6 +192,50 @@ def test_ui_directory_index_still_works(ui):
     r = ui.get("/ui/")
     assert r.status_code == 200
     assert r.content == SERVED["index.html"]
+    # A directory has no suffix: the allow-list must not refuse it.
+    r = ui.get("/ui/cu-view/")
+    assert r.status_code == 200 and r.content == SERVED["cu-view/index.html"]
+    r = ui.get("/ui/cu-view", follow_redirects=False)
+    assert r.status_code in (301, 302, 307, 308)
+    assert r.headers["location"].endswith("/ui/cu-view/")
+
+
+def test_the_compat_link_to_the_moved_task_db_is_never_served(portal_root):
+    """migrations/tasks_db_location.py leaves Portal/tasks.db as a symlink to
+    ../data/tasks.db. Neither the guard nor the PLAIN StaticFiles the pre-move
+    code mounts (after an in-app Rollback) may serve it."""
+    from starlette.staticfiles import StaticFiles
+
+    data = portal_root.parent / "data"
+    data.mkdir()
+    (data / "tasks.db").write_bytes(b"SECRET-moved-db")
+    (portal_root / "tasks.db").unlink()
+    os.symlink("../data/tasks.db", portal_root / "tasks.db")
+    os.symlink("../data/tasks.db", portal_root / "uploads" / "renamed.mp3")
+
+    guarded = _client(_repointed(_mounted("/ui"), portal_root))
+    plain = _client(StaticFiles(directory=str(portal_root), html=True))
+    for client in (guarded, plain):
+        for url in ("/ui/tasks.db", "/ui/uploads/renamed.mp3"):
+            r = client.get(url)
+            assert r.status_code == 404, (url, r.status_code)
+            assert b"SECRET" not in r.content
+
+
+def test_drop_world_write_strips_only_the_other_write_bit(tmp_path):
+    from Orchestrator.utils.static_guard import drop_world_write
+
+    d = tmp_path / "Portal"
+    (d / "uploads").mkdir(parents=True)
+    os.chmod(d, 0o777)
+    os.chmod(d / "uploads", 0o775)
+    f = tmp_path / "file"
+    f.write_text("")
+    os.chmod(f, 0o666)
+    drop_world_write(d, d / "uploads", f, tmp_path / "missing")
+    assert stat.S_IMODE(os.stat(d).st_mode) == 0o775
+    assert stat.S_IMODE(os.stat(d / "uploads").st_mode) == 0o775
+    assert stat.S_IMODE(os.stat(f).st_mode) == 0o666  # only dirs are touched
 
 
 def test_ui_serves_a_range_request_for_an_upload(ui):
@@ -206,11 +284,14 @@ def _tracked_portal_files():
 
 
 def test_no_tracked_portal_asset_is_refused():
-    """The deny-list must not break the Portal: every tracked file is served
-    except the Node-only package.json marker and the dev pages."""
+    """The guard must not break the Portal: every tracked file is served except
+    the Node-only package.json marker, the extensionless vendored pako LICENSE
+    (nothing fetches either) and the dev pages. A new tracked asset type fails
+    here until WEB_ASSET_SUFFIXES names it."""
     ui_static = _mounted("/ui")
     refused = {rel for rel in _tracked_portal_files() if ui_static.is_refused(rel)}
-    assert refused - {"package.json"} == {r for r in refused if r.startswith("dev/")}
+    expected = {"package.json", "vendor/novnc/vendor/pako/LICENSE"}
+    assert refused - expected == {r for r in refused if r.startswith("dev/")}
     assert "index.html" not in refused and "app-modular.js" not in refused
 
 

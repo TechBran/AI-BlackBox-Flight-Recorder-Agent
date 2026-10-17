@@ -1,4 +1,5 @@
-"""StaticFiles that refuses runtime data, server-side source and dot-files.
+"""StaticFiles that serves web assets and media only, never runtime data,
+server-side source, key/config material or dot-files.
 
 WHY (audit rank 24 — X03-security-backend-07, P07-html-css-01): the /ui mount
 served EVERY file under Portal/, which doubled as a data directory, so
@@ -7,48 +8,73 @@ Portal/styles/css_manifest.json (an absolute home path) were downloadable by
 any tailnet/LAN peer. Moving tasks.db out of Portal/ fixes today's file; this
 guard makes a future stray file unservable too.
 
-DENY-LIST, NOT ALLOW-LIST: Portal/uploads/ holds whatever operators and tools
-produce or attach (mp3/wav/m4a/mp4/webm/png/jpg/apk/pdf/docx/txt/bin today, and
-any extension /upload preserves), and the Portal and the Android app fetch
-those by URL. An allow-list of extensions would break the next legitimate media
-type; the deny-list names the classes that are never a web asset:
-  * SQLite DBs and their -wal/-shm/-journal sidecars and .bak/.corrupt copies
-  * server-side code and bytecode (.py/.pyc/.pyo/.sh), logs, .env/.ini config,
-    key material (.pem/.key/.p12/.pfx), editor and backup copies
-  * every .json — the Portal fetches no static JSON (data comes from API
-    routes) and the only ones it ever held were internals; uploads never get
-    JSON from the backend (attachments are read server-side from disk)
-  * any dot-file or dot-directory segment, __pycache__/, node_modules/
-  * mount-specific top-level dirs (`refused_dirs`): Portal/artifacts/ has its
-    own /artifacts/{id} route, Portal/dev/ is only served behind [debug].
-Refused paths get the same bare 404 as a missing file. The check runs on the
-requested path AND on the resolved real path, so a served-looking name that
-symlinks to a refused file is refused too.
+TWO POLICIES, chosen by the first path segment:
+  * the code tree (everything outside `media_dirs`) is an ALLOW-LIST of web
+    asset suffixes (WEB_ASSET_SUFFIXES: markup, script, style, images, fonts,
+    audio/video, text docs). Git fixes what lives there, so a stray config,
+    dump, key or extensionless file is refused without having to be named.
+    JSON is not a web asset here: the Portal fetches no static JSON (data comes
+    from API routes) and the only ones it ever held were internals.
+  * `media_dirs` (Portal/uploads/) is a DENY-LIST: it holds whatever operators
+    and tools produce or attach (mp3/wav/m4a/mp4/webm/png/jpg/apk/pdf/docx/txt/
+    json/bin today, and any extension /upload preserves), fetched by URL from
+    the Portal and the Android app, so an allow-list would break the next
+    legitimate media type. Archives (zip, tar.gz) are ordinary uploads there.
+Both refuse REFUSED_NAME_PATTERNS — SQLite DBs and their -wal/-shm/-journal
+sidecars and .bak/.corrupt/.stray copies, server-side code and bytecode, logs,
+env/ini/cfg/conf/toml/yaml config, keys, certificates and password stores,
+editor and backup copies — plus any dot-file or dot-directory segment,
+__pycache__/, node_modules/ and the mount's `refused_dirs` (Portal/artifacts/
+has its own /artifacts/{id} route, Portal/dev/ is only served behind [debug]).
+Refused paths get the same bare 404 as a missing file.
+
+SYMLINKS: the check runs on the requested path AND on the resolved real path,
+so a served-looking name that symlinks to a refused file (or out of the root)
+is refused too. That is a check-then-open, so it holds only while no
+untrusted local user can write in the served tree — drop_world_write() strips
+o+w from the served roots at startup.
 """
 from __future__ import annotations
 
 import fnmatch
+import logging
 import os
-from typing import Iterable, Tuple
+import posixpath
+import stat
+from typing import FrozenSet, Iterable, Optional, Tuple
 
 from starlette.exceptions import HTTPException
 from starlette.staticfiles import StaticFiles
 
+logger = logging.getLogger(__name__)
+
 REFUSED_NAME_PATTERNS: Tuple[str, ...] = (
-    # SQLite: db, -wal/-shm/-journal sidecars, .bak/.corrupt-<ts> copies
-    "*.db", "*.db-*", "*.db.*", "*.sqlite*",
+    # SQLite: db, -wal/-shm/-journal sidecars, .bak/.corrupt-<ts>/.stray-<ts> copies
+    "*.db", "*.db-*", "*.db.*", "*.db3", "*.sqlite*",
     # server-side code and bytecode
     "*.py", "*.pyc", "*.pyo", "*.sh",
     # logs, env and config
-    "*.log", "*.log.*", "*.env", "*.ini",
-    # key material
-    "*.pem", "*.key", "*.p12", "*.pfx",
-    # manifests / indexes / package metadata
-    "*.json",
+    "*.log", "*.log.*", "*.env", "*.ini", "*.cfg", "*.conf", "*.toml", "*.yaml", "*.yml",
+    # keys, certificates and password stores
+    "*.pem", "*.key", "*.crt", "*.p8", "*.p12", "*.pfx", "*.jks", "*.keystore",
+    "*.kdbx", "*.ppk", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
     # editor and backup copies
     "*.bak", "*.backup", "*.orig", "*.swp", "*~",
 )
 REFUSED_DIR_NAMES = frozenset({"__pycache__", "node_modules"})
+
+# What a browser loads from the code tree. Lower-case, with the dot.
+WEB_ASSET_SUFFIXES: FrozenSet[str] = frozenset({
+    ".html", ".htm", ".js", ".mjs", ".css", ".map", ".wasm", ".webmanifest",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico", ".bmp",
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    ".mp3", ".wav", ".ogg", ".oga", ".m4a", ".aac", ".opus", ".flac",
+    ".mp4", ".webm", ".mov", ".m4v",
+    ".txt", ".md", ".pdf",
+})
+
+# Top-level Portal/ dirs served by the deny-list alone (user and tool media).
+PORTAL_MEDIA_DIRS: Tuple[str, ...] = ("uploads",)
 
 
 def portal_refused_dirs(serve_dev_pages: bool) -> Tuple[str, ...]:
@@ -56,25 +82,71 @@ def portal_refused_dirs(serve_dev_pages: bool) -> Tuple[str, ...]:
     return ("artifacts",) if serve_dev_pages else ("artifacts", "dev")
 
 
+def drop_world_write(*dirs) -> None:
+    """Strip o+w from served roots this process owns (the dev box had Portal/
+    and Portal/uploads at 0777). Best effort: a mode it cannot change is logged,
+    never fatal."""
+    for d in dirs:
+        try:
+            st = os.stat(d)
+        except FileNotFoundError:
+            continue  # e.g. Portal/uploads on a fresh box, created later
+        except OSError as exc:
+            logger.warning("[STATIC] could not check %s: %s", d, exc)
+            continue
+        if not stat.S_ISDIR(st.st_mode) or not st.st_mode & stat.S_IWOTH:
+            continue
+        if st.st_uid != os.getuid():
+            logger.warning("[STATIC] %s is world-writable and not ours to fix", d)
+            continue
+        try:
+            os.chmod(d, stat.S_IMODE(st.st_mode) & ~stat.S_IWOTH)
+        except OSError as exc:
+            logger.warning("[STATIC] could not remove o+w from %s: %s", d, exc)
+            continue
+        logger.warning("[STATIC] %s was world-writable — removed o+w", d)
+
+
 class GuardedStaticFiles(StaticFiles):
-    def __init__(self, *, refused_dirs: Iterable[str] = (), **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        refused_dirs: Iterable[str] = (),
+        media_dirs: Iterable[str] = (),
+        allowed_suffixes: Optional[Iterable[str]] = WEB_ASSET_SUFFIXES,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self.refused_dirs = tuple(d.strip("/").lower() for d in refused_dirs)
+        self.media_dirs = tuple(d.strip("/") for d in media_dirs)
+        self.allowed_suffixes = (None if allowed_suffixes is None
+                                 else frozenset(s.lower() for s in allowed_suffixes))
 
-    def is_refused(self, rel_path: str) -> bool:
-        """`rel_path` is relative to the mount directory (either separator)."""
-        rel = rel_path.replace(os.sep, "/").strip("/").lower()
+    def is_refused(self, rel_path: str, *, is_file: bool = True) -> bool:
+        """`rel_path` is relative to the mount directory (either separator).
+        `is_file=False` (a directory, or not yet known) skips the suffix
+        allow-list, which only names files."""
+        # normpath: StaticFiles joins "./index.html" for the mount root's index.
+        rel = posixpath.normpath(rel_path.replace(os.sep, "/")).strip("/")
         if rel in ("", "."):
             return False  # the mount root itself (its index.html is checked separately)
         parts = rel.split("/")
-        if any(seg.startswith(".") or seg in REFUSED_DIR_NAMES for seg in parts):
+        lowered = [seg.lower() for seg in parts]
+        if any(seg.startswith(".") or seg in REFUSED_DIR_NAMES for seg in lowered):
             return True
-        if parts[0] in self.refused_dirs:
+        if lowered[0] in self.refused_dirs:
             return True
-        return any(fnmatch.fnmatchcase(parts[-1], pat) for pat in REFUSED_NAME_PATTERNS)
+        name = lowered[-1]
+        if any(fnmatch.fnmatchcase(name, pat) for pat in REFUSED_NAME_PATTERNS):
+            return True
+        if not is_file or self.allowed_suffixes is None:
+            return False
+        if len(parts) > 1 and parts[0] in self.media_dirs:
+            return False  # media: the deny-list above is the whole policy
+        return os.path.splitext(name)[1] not in self.allowed_suffixes
 
     async def get_response(self, path, scope):
-        if self.is_refused(path):
+        if self.is_refused(path, is_file=False):
             raise HTTPException(status_code=404)
         return await super().get_response(path, scope)
 
@@ -82,6 +154,7 @@ class GuardedStaticFiles(StaticFiles):
         full_path, stat_result = super().lookup_path(path)
         if stat_result is None:
             return full_path, stat_result
+        is_file = stat.S_ISREG(stat_result.st_mode)
         real = os.path.realpath(full_path)
         for directory in self.all_directories:
             root = os.path.realpath(directory)
@@ -90,6 +163,6 @@ class GuardedStaticFiles(StaticFiles):
                 break
         else:
             rel = os.path.basename(real)  # follow_symlink=True escaped the root
-        if self.is_refused(rel):
+        if self.is_refused(path, is_file=is_file) or self.is_refused(rel, is_file=is_file):
             return "", None
         return full_path, stat_result

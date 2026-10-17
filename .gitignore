@@ -96,6 +96,10 @@ Portal/uploads/
 # Generated downloadable artifacts (config.ARTIFACTS_DIR, 4-day retention):
 # operator output such as PDFs and worksheets — never source (audit W31).
 Portal/artifacts/
+# Local-only zellij iframe smoke page: never committed (see
+# docs/plans/2026-06-07-tg200-production-pass.md). It is .html, so /ui serves it
+# while it sits in Portal/ — move it to Portal/dev/ or delete it.
+/Portal/**/zellij-iframe-smoke.html
 
 # ============================================================================
 # Apps/ — customer-created app territory (T1 / audit C1 + I2)

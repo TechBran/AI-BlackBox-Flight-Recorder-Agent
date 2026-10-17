@@ -32,7 +32,9 @@ from Orchestrator.checkpoint import app
 from Orchestrator.config import SNAPSHOT_INDEX, OPERATOR_STATE_FILE, APPS_REGISTRY_FILE, UPLOADS_DIR, VOL_PATH, START_RX
 from Orchestrator.config import DEBUG_SERVE_DEV_PAGES
 from Orchestrator.utils.paths import portal_dir
-from Orchestrator.utils.static_guard import GuardedStaticFiles, portal_refused_dirs
+from Orchestrator.utils.static_guard import (
+    PORTAL_MEDIA_DIRS, GuardedStaticFiles, drop_world_write, portal_refused_dirs,
+)
 from Orchestrator.fossils import (
     load_snapshot_index, rebuild_snapshot_index, update_snapshot_index,
     read_schema_version, write_schema_version, CURRENT_SCHEMA_VERSION,
@@ -992,13 +994,17 @@ class StaticCacheMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(StaticCacheMiddleware)
 
-# Portal/ is served through a guard that 404s runtime data, server-side source,
-# key/config material, dot-files, Portal/artifacts/ and (unless [debug]
-# serve_dev_pages) Portal/dev/ — see utils/static_guard.py (audit rank 24).
+# Portal/ is served through a guard: web assets only in the code tree, and
+# never runtime data, server-side source, key/config material, dot-files,
+# Portal/artifacts/ or (unless [debug] serve_dev_pages) Portal/dev/ — see
+# utils/static_guard.py (audit rank 24). Its symlink check assumes no untrusted
+# local user can write in the served tree, hence drop_world_write.
+drop_world_write(portal_dir(), portal_dir() / "uploads")
 app.mount(
     "/ui",
     GuardedStaticFiles(directory=str(portal_dir()), html=True,
-                       refused_dirs=portal_refused_dirs(DEBUG_SERVE_DEV_PAGES)),
+                       refused_dirs=portal_refused_dirs(DEBUG_SERVE_DEV_PAGES),
+                       media_dirs=PORTAL_MEDIA_DIRS),
     name="ui",
 )
 
