@@ -44,16 +44,17 @@ except ImportError:
 # Handles both Orchestrator context (from Orchestrator.config) and MCP context (from config directly)
 try:
     from Orchestrator.config import (PERPLEXITY_API_KEY, PERPLEXITY_URL,
-        OPENAI_API_KEY, XAI_API_KEY, GEMINI_API_KEY)
+        PERPLEXITY_SEARCH_MODEL, OPENAI_API_KEY, XAI_API_KEY, GEMINI_API_KEY)
 except ImportError:
     try:
         from config import (PERPLEXITY_API_KEY, PERPLEXITY_URL,
-            OPENAI_API_KEY, XAI_API_KEY, GEMINI_API_KEY)
+            PERPLEXITY_SEARCH_MODEL, OPENAI_API_KEY, XAI_API_KEY, GEMINI_API_KEY)
     except ImportError:
         # Last-resort fallback if neither import path works (should never happen
         # in production; central config import is the authoritative source).
         PERPLEXITY_API_KEY = ""
         PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
+        PERPLEXITY_SEARCH_MODEL = "sonar"
         OPENAI_API_KEY = ""
         XAI_API_KEY = ""
         GEMINI_API_KEY = ""
@@ -251,7 +252,7 @@ def _search_perplexity(query: str, recency: str) -> "SearchResult":
 
     headers = {"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "sonar",
+        "model": PERPLEXITY_SEARCH_MODEL,   # shared with the wizard key probe
         "messages": [{"role": "user", "content": query}],
         "search_recency_filter": recency,
     }

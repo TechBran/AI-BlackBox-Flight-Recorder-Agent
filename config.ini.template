@@ -79,6 +79,13 @@ google_tts_synthesize = https://texttospeech.googleapis.com/v1/text:synthesize
 google_tts_voices = https://texttospeech.googleapis.com/v1/voices
 google_veo = veo-3.1-generate-preview
 
+[web_search]
+# Perplexity Sonar model sent by perplexity_web_search AND used by the setup
+# wizard to test a Perplexity key (Perplexity has no model list to discover it
+# from). Optional: the code default is sonar. Change it here if Perplexity
+# retires that id, then restart.
+# perplexity_model = sonar
+
 [computer_use]
 # native_mode = true  -> CU drives the real desktop; false -> sandboxed Xvfb
 native_mode = true

@@ -4,6 +4,12 @@ Each validator does a CHEAP call (1 token cost or one cheap metadata API)
 to confirm the supplied credential works. Returns ValidationResult with
 ok/error/latency_ms so the wizard can show clean per-provider feedback.
 
+No probe names a model id of its own: a provider retiring that id would turn
+a valid key into "invalid" (audit O16-12; the 6071f260 retired-id class).
+Providers with a zero-cost model list are probed with it (OpenAI, Anthropic,
+Google, xAI); Perplexity and Voyage have none, so they probe with the model
+the web-search and rerank layers actually send, read from the same config.
+
 Tier-1 (v1 wizard): OpenAI, Anthropic, Google, xAI, Perplexity, Tailscale, Gmail.
 Wizard-active (Tier-1): ElevenLabs (key validator below — surfaces plan tier + cloning gate).
 Custom (user-registered): OpenAI-compatible LAN servers via validate_custom (models.list doubles as model discovery).
@@ -59,16 +65,12 @@ def validate_openai(api_key: str) -> ValidationResult:
 
 
 def validate_anthropic(api_key: str) -> ValidationResult:
-    """Validate Anthropic key via cheapest-possible message (1-token completion)."""
+    """Validate Anthropic key via models.list (no token cost, no model id)."""
     def _fn():
         import anthropic
         with anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=0) as client:
-            resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
-            )
-            return {"model": resp.model, "id": resp.id}
+            models = client.models.list()
+            return {"model_count": len(models.data)}
     return _measure(_fn)
 
 
@@ -87,10 +89,12 @@ def validate_google(api_key: str) -> ValidationResult:
 
 
 def validate_xai(api_key: str) -> ValidationResult:
-    """Validate xAI key via cheapest-possible chat completion (1-token completion).
+    """Validate xAI key via models.list (no token cost, no model id).
 
     xAI exposes an OpenAI-compatible API at api.x.ai/v1, so we reuse the openai SDK
-    with a custom base_url. Avoids adding a new SDK dependency.
+    with a custom base_url. Avoids adding a new SDK dependency. GET /v1/models
+    needs a valid key, and xAI has already retired whole model families
+    (admin_routes records the grok-3 drop), so a named-model probe would rot.
     """
     def _fn():
         from openai import OpenAI
@@ -100,12 +104,8 @@ def validate_xai(api_key: str) -> ValidationResult:
             timeout=10.0,
             max_retries=0,
         ) as client:
-            resp = client.chat.completions.create(
-                model="grok-3-mini",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
-            )
-            return {"model": resp.model, "id": resp.id}
+            models = client.models.list()
+            return {"model_count": len(models.data)}
     return _measure(_fn)
 
 
@@ -115,10 +115,13 @@ def validate_perplexity(api_key: str) -> ValidationResult:
     Perplexity exposes an OpenAI-compatible API at api.perplexity.ai. Same SDK
     reuse pattern as xAI. NOTE: Perplexity rejects max_tokens < 16 with a 400
     ("max_tokens must be at least 16"), so we ask for exactly 16 — the minimum
-    valid (and cheapest) probe.
+    valid (and cheapest) probe. Perplexity publishes no model list, so the probe
+    uses config.PERPLEXITY_SEARCH_MODEL — the model perplexity_web_search sends
+    — and one retirement fix in config covers both.
     """
     def _fn():
         from openai import OpenAI
+        from Orchestrator.config import PERPLEXITY_SEARCH_MODEL
         with OpenAI(
             api_key=api_key,
             base_url="https://api.perplexity.ai",
@@ -126,7 +129,7 @@ def validate_perplexity(api_key: str) -> ValidationResult:
             max_retries=0,
         ) as client:
             resp = client.chat.completions.create(
-                model="sonar",
+                model=PERPLEXITY_SEARCH_MODEL,
                 max_tokens=16,
                 messages=[{"role": "user", "content": "hi"}],
             )
@@ -241,15 +244,35 @@ def validate_cohere(api_key: str) -> ValidationResult:
     return _measure(_fn)
 
 
+def _voyage_probe_model() -> str:
+    """The Voyage rerank model to probe with: the one the box scores with when the
+    reranker is set to Voyage, else the Voyage entry of rerank.RERANK_MODELS (the
+    rerank layer's own catalog). Voyage publishes no model list, so this keeps the
+    probe on the id the rerank layer sends -- one retirement fix covers both."""
+    from Orchestrator import rerank
+    try:
+        settings = rerank.get_settings()
+    except Exception:
+        settings = {}
+    if settings.get("provider") == "voyage" and settings.get("model_id"):
+        return settings["model_id"]
+    for entry in rerank.RERANK_MODELS.values():
+        if entry.get("provider") == "voyage" and entry.get("model_id"):
+            return entry["model_id"]
+    raise RuntimeError("no Voyage model in the rerank catalog to probe the key with")
+
+
 def validate_voyage(api_key: str) -> ValidationResult:
     """Validate a Voyage key via a tiny 1-document POST /v1/rerank.
 
     Reranker upgrade key (M10). A ONE-document rerank stays under the free-tier
     10K-TPM cap that a full 40-doc rerank exceeds (the M8 live finding) while
-    still exercising the key end-to-end. raw requests, no new SDK.
+    still exercising the key end-to-end. raw requests, no new SDK. The model is
+    _voyage_probe_model() -- the rerank layer's own id, never a literal here.
     """
     def _fn():
         import requests
+        probe_model = _voyage_probe_model()
         r = requests.post(
             "https://api.voyageai.com/v1/rerank",
             headers={
@@ -257,7 +280,7 @@ def validate_voyage(api_key: str) -> ValidationResult:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "rerank-2.5",
+                "model": probe_model,
                 "query": "ping",
                 "documents": ["pong"],
                 "top_k": 1,
@@ -268,7 +291,7 @@ def validate_voyage(api_key: str) -> ValidationResult:
             raise RuntimeError("Invalid Voyage API key")
         r.raise_for_status()
         data = r.json() or {}
-        return {"model": data.get("model") or "rerank-2.5"}
+        return {"model": data.get("model") or probe_model}
     return _measure(_fn)
 
 

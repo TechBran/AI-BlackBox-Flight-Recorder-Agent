@@ -503,10 +503,12 @@ async function validateStoredProvider(p, container) {
 
 function formatDetail(providerId, detail) {
     if (!detail) return "";
-    if (providerId === "openai" || providerId === "google") {
+    // Anthropic and xAI are probed with models.list (no model id to retire).
+    if (providerId === "openai" || providerId === "google"
+        || providerId === "anthropic" || providerId === "xai") {
         return detail.model_count ? `${detail.model_count} models` : "";
     }
-    if (providerId === "anthropic" || providerId === "xai" || providerId === "perplexity") {
+    if (providerId === "perplexity") {
         return detail.model ? detail.model : "";
     }
     if (providerId === "voyage") {
