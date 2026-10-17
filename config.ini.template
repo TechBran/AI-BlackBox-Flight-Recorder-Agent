@@ -166,3 +166,16 @@ provider = null
 # preflight_ceiling_ms = 500
 # per-candidate passage budget, chars (~= the 1024-token chunk budget).
 # passage_chars = 4096
+
+[security]
+# Perimeter guard (Orchestrator/security/origin_guard.py). Tailscale + LAN is
+# the security boundary; this guard only refuses web pages and rebinding
+# domains that try to drive the API THROUGH the operator's browser. Already
+# allowed with no config: IP-literal hosts, single-label names, .local /
+# .localhost / .lan / .home.arpa / .internal, every *.ts.net name, this box's
+# FQDN, same-origin pages, user apps (ports 8060-8099 + registered apps) and
+# zellij on the same host, loopback, and the Tauri setup wizard.
+# Add comma-separated extras only for a custom reverse-proxy domain or a
+# webhook tunnel host (e.g. an ngrok name), then restart.
+# extra_allowed_hosts = blackbox.example.com
+# extra_allowed_origins = https://blackbox.example.com

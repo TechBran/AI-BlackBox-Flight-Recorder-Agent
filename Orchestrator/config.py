@@ -536,6 +536,21 @@ ORCHESTRATOR_PORT = int(
 # Magic DNS name (or LAN IP). Empty string when customer skipped Tailscale.
 BLACKBOX_TAILNET_HOSTNAME = os.getenv("BLACKBOX_TAILNET_HOSTNAME", "").strip()
 
+# Perimeter guard extras (Orchestrator/security/origin_guard.py, audit rank 13).
+# Built in already: IP-literal Hosts, single-label names, .local/.localhost/
+# .lan/.home.arpa/.internal, every *.ts.net name, this box's FQDN, the
+# pairing/DEFAULT_ORIGIN and Twilio webhook hosts, same-origin requests and
+# the trusted cross-origins (user apps + zellij on the same host, loopback,
+# Tauri). List anything else a legitimate caller uses — a custom reverse-proxy
+# domain, a webhook tunnel host, an extra dev origin — under [security] as
+# comma-separated values. Absent = none. Read at import: restart to apply.
+SECURITY_EXTRA_ALLOWED_HOSTS = [
+    h.strip() for h in CFG.get("security", "extra_allowed_hosts", fallback="").split(",") if h.strip()
+]
+SECURITY_EXTRA_ALLOWED_ORIGINS = [
+    o.strip() for o in CFG.get("security", "extra_allowed_origins", fallback="").split(",") if o.strip()
+]
+
 # Configure Gemini for embeddings
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
