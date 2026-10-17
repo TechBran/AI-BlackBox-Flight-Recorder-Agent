@@ -333,8 +333,21 @@ def _search_gemini(query: str, recency: str) -> "SearchResult":
     return SearchResult(ok=False, error=last_err, source_label=label)
 
 
+def ddgs_available() -> bool:
+    """True when the keyless DuckDuckGo floor can run: the `ddgs` package
+    (requirements.in) is importable. _search_duckduckgo imports it lazily, so
+    without this check a venv missing it shows up only as failed searches
+    (O06-frontier-agent-17); startup_web_search_floor_check logs it at boot."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec("ddgs") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _search_duckduckgo(query: str, recency: str) -> "SearchResult":
-    """DuckDuckGo adapter (keyless fallback engine)."""
+    """DuckDuckGo adapter (keyless fallback engine), on the ddgs API:
+    DDGS().text(query, max_results=N) -> [{"title", "href", "body"}, ...]."""
     label = "DuckDuckGo"
     try:
         from ddgs import DDGS

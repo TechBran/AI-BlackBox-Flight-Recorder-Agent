@@ -101,3 +101,75 @@ def test_duckduckgo_failure_no_recursion(monkeypatch):
     )
     out = perform_provider_search("duckduckgo", "q", use_cache=False)
     assert "Search failed" in out
+
+
+# ── DuckDuckGo adapter against the ddgs API (X01-deps-python-06) ────────────
+# ddgs replaced duckduckgo_search. These pin the call shape the adapter relies
+# on (DDGS().text(query, max_results=...) -> [{title, href, body}]) with a fake
+# module, so the test never touches the network.
+
+class _FakeDDGS:
+    calls = []
+
+    def text(self, query, **kwargs):
+        _FakeDDGS.calls.append((query, kwargs))
+        return [
+            {"title": "First", "href": "https://example.com/a", "body": "alpha"},
+            {"title": "Second", "href": "https://example.com/b", "body": "beta"},
+        ]
+
+
+def _fake_ddgs_module():
+    import importlib.machinery
+    import types
+    mod = types.ModuleType("ddgs")
+    mod.__spec__ = importlib.machinery.ModuleSpec("ddgs", None)
+    mod.DDGS = _FakeDDGS
+    return mod
+
+
+def test_duckduckgo_adapter_uses_the_ddgs_api(monkeypatch):
+    import sys
+    _FakeDDGS.calls = []
+    monkeypatch.setitem(sys.modules, "ddgs", _fake_ddgs_module())
+    r = wt._search_duckduckgo("solar flares", "month")
+    assert r.ok
+    assert _FakeDDGS.calls == [("solar flares", {"max_results": 5})]
+    assert r.citations == ["https://example.com/a", "https://example.com/b"]
+    assert "**First**" in r.answer and "alpha" in r.answer
+    assert r.source_label == "DuckDuckGo"
+
+
+def test_duckduckgo_adapter_reports_missing_ddgs(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "ddgs", None)  # `import ddgs` -> ImportError
+    r = wt._search_duckduckgo("q", "month")
+    assert not r.ok
+    assert "ddgs" in r.error
+
+
+def test_ddgs_available_tracks_importability(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "ddgs", None)
+    assert wt.ddgs_available() is False
+    monkeypatch.setitem(sys.modules, "ddgs", _fake_ddgs_module())
+    assert wt.ddgs_available() is True
+
+
+def test_startup_says_so_when_the_keyless_floor_is_missing(monkeypatch, caplog):
+    """O06-frontier-agent-17: the import is lazy, so a venv without ddgs only
+    surfaced as a failed search. Boot must say it, and say how to fix it."""
+    import asyncio
+    import logging
+    from Orchestrator import startup
+    monkeypatch.setattr(wt, "ddgs_available", lambda: False)
+    with caplog.at_level(logging.WARNING, logger="blackbox.startup"):
+        asyncio.run(startup.startup_web_search_floor_check())
+    assert "ddgs" in caplog.text
+    assert "requirements.lock.txt" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(wt, "ddgs_available", lambda: True)
+    with caplog.at_level(logging.WARNING, logger="blackbox.startup"):
+        asyncio.run(startup.startup_web_search_floor_check())
+    assert caplog.text == ""

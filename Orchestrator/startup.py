@@ -796,7 +796,7 @@ async def startup_cellular_internet():
         logger.error("Cellular internet manager error: %s (non-fatal, continuing)", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_phone_pin_check():
     """Say loudly at boot when inbound calls will be refused for lack of a PIN."""
     from Orchestrator import config
@@ -811,6 +811,23 @@ async def startup_phone_pin_check():
         pin_gate.log_unconfigured("PHONE-PIN")
     elif status == "disabled":
         logger.warning("PHONE_PIN_ENABLED=false: inbound calls reach the AI with NO PIN")
+
+
+@boot_hook(app, "startup")
+async def startup_web_search_floor_check():
+    """Say loudly at boot when the keyless DuckDuckGo floor cannot run.
+
+    ddgs is imported lazily, so a venv without it (a box built from the old
+    manifest, which named duckduckgo_search instead) only showed up as failed
+    searches: duckduckgo_web_search, and the fallback every general web search
+    takes when its provider fails (O06-frontier-agent-17)."""
+    from Orchestrator.web_tools import ddgs_available
+    if not ddgs_available():
+        logger.warning(
+            "ddgs is not installed: duckduckgo_web_search and the DuckDuckGo "
+            "fallback of every general web search will fail. Rebuild the venv "
+            "from requirements.lock.txt (pip install --require-hashes -r "
+            "requirements.lock.txt)")
 
 
 @boot_hook(app, "startup")
