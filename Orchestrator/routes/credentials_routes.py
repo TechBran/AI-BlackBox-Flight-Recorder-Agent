@@ -14,6 +14,11 @@ credentials/ also holds BlackBox's own registries (RESERVED_FILENAMES). They
 are not credentials: they are hidden from the list and cannot be overwritten
 by an upload or removed through these routes.
 
+An upload must be a Google service-account key with Google's token endpoint
+(onboarding/service_account.py), checked before anything is written: the file
+becomes GOOGLE_APPLICATION_CREDENTIALS, and google-auth would otherwise act on
+an external_account config that POSTs a local file (.env) to any URL.
+
 NEVER returns or logs file contents — only filename, size, and an
 is_google_service_account boolean derived from inspecting the type field.
 """
@@ -29,6 +34,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from Orchestrator.onboarding.secrets_writer import remove_env_keys, update_env
+from Orchestrator.onboarding.service_account import service_account_problem
 from Orchestrator.utils.paths import resolve
 
 logger = logging.getLogger(__name__)
@@ -112,8 +118,9 @@ async def upload_credential(
     file: UploadFile = File(...),
     set_as_google_app_creds: bool = True,
 ) -> dict:
-    """Upload a .json credential file. Validates JSON shape + filename.
-    Optionally updates GOOGLE_APPLICATION_CREDENTIALS env var to point at it.
+    """Upload a Google service-account key (.json). Validates the filename and
+    that the JSON is a service-account key (service_account_problem), then
+    optionally points GOOGLE_APPLICATION_CREDENTIALS at it.
 
     File is written atomically: .tmp + chmod 0600 + os.replace. credentials/
     dir is auto-created with chmod 0700 if absent.
@@ -136,11 +143,9 @@ async def upload_credential(
         parsed = json.loads(contents.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-    if not isinstance(parsed, dict):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid credential: the JSON must be an object (a service-account key file)",
-        )
+    problem = service_account_problem(parsed)
+    if problem:
+        raise HTTPException(status_code=400, detail=f"Invalid credential: {problem}")
 
     CREDS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CREDS_DIR, 0o700)

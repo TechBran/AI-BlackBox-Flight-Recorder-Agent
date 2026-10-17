@@ -1631,8 +1631,11 @@ class _FakeCreds:
 
 def _patch_vertex_auth(monkeypatch, creds, project):
     """Patch google.auth.default → (creds, project) — the real
-    _vertex_token_and_project then runs (refresh + project resolution)."""
+    _vertex_token_and_project then runs (refresh + project resolution).
+    GOOGLE_APPLICATION_CREDENTIALS is cleared: a set one is re-checked as a
+    service-account file first (test_service_account_guard covers that)."""
     import google.auth
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     monkeypatch.setattr(google.auth, "default", lambda *a, **k: (creds, project))
 
 

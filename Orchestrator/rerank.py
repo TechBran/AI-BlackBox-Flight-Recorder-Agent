@@ -1259,7 +1259,20 @@ def _vertex_token_and_project(settings: dict) -> "tuple[str, str] | tuple[None, 
     env override, else the SA JSON's project. Returns (None, None) on ANY auth
     failure (no creds, refresh error) or a missing token/project — so the caller
     degrades to None and NEVER raises (audit A9). google.auth is imported lazily
-    (it is a transitive dep — keep the module import surface minimal + robust)."""
+    (it is a transitive dep — keep the module import surface minimal + robust).
+
+    A GOOGLE_APPLICATION_CREDENTIALS file that is not a Google service-account
+    key is refused BEFORE google-auth sees it: google-auth would act on an
+    external_account config, which POSTs a local file (.env) to the config's
+    token_url. The upload route refuses such files now; this covers one an
+    older build accepted."""
+    gac = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if gac:
+        from Orchestrator.onboarding.service_account import service_account_file_problem
+        problem = service_account_file_problem(gac)
+        if problem:
+            print(f"[RERANK] vertex: refusing GOOGLE_APPLICATION_CREDENTIALS: {problem}")
+            return None, None
     try:
         import google.auth
         import google.auth.transport.requests as _ga_transport
