@@ -173,7 +173,7 @@ async def _drive_browse(base_url: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# RAW JSON-RPC helpers (for #2A direct-tool gating + #2B session-hijack). The
+# RAW JSON-RPC helpers (for #2A direct-tool gating + #2B session binding). The
 # MCP ClientSession won't let us reuse a session-id under a DIFFERENT token, so
 # we drive the wire directly (mirrors the reviewer's probe_direct/probe_session).
 # ---------------------------------------------------------------------------
@@ -289,34 +289,38 @@ def _run_2a_2b(base_url: str) -> list:
         print("[auth] PASS (k) #2A get_index_stats by bob -> only bob, no FS paths")
     else:
         fails.append(f"(k) get_index_stats leaked: ops={ops} fs_paths={leaks_paths}")
-    # get_media with a `..` traversal url -> rejected
+    # get_media with a bare url (here a `..` traversal) -> rejected: a remote
+    # caller fetches media only through a task it owns (the stdio `..` guard is
+    # covered in-process by test_mcp_remote_scoping.py).
     err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "get_media", {"url": "/ui/../../etc/passwd"})
     txt = json.dumps(body)
-    if err is True and ("Illegal path" in txt or "escapes" in txt or "invalid_arguments" in txt):
-        print("[auth] PASS (l) #2A get_media `..` traversal -> rejected")
+    if err is True and "invalid_arguments" in txt and "root:" not in txt:
+        print("[auth] PASS (l) #2A get_media bare url / `..` traversal -> rejected")
     else:
-        fails.append(f"(l) get_media traversal NOT rejected: err={err} body={txt[:200]}")
+        fails.append(f"(l) get_media url-only NOT rejected: err={err} body={txt[:200]}")
 
-    # --- #2B: token-A request riding token-B's session must run as A, not B ---
+    # --- #2B / CVE-2026-52869: a session id only works with the token that
+    # opened it. Token A presenting bob's session id is refused with the SDK's
+    # own unknown-session 404 -- no tool runs, as either operator. ---
     sid_bob = _raw_init(c, base_url, OTHER_TOKEN)  # bob opens a session
-    # alice's token reuses bob's session-id
-    err, body = _raw_call(c, base_url, VALID_TOKEN, sid_bob, "get_current_operator", {})
-    resolved = body.get("resolved") if isinstance(body, dict) else None
-    if resolved == VALID_OPERATOR:
-        print("[auth] PASS (m) #2B tokenA on tokenB's session -> runs as alice (NOT bob; hijack closed)")
-    elif resolved == OTHER_OPERATOR:
-        fails.append("(m) #2B SESSION HIJACK: tokenA on bob's session executed as bob (STALE BINDING)")
+    for label, tool in (("m", "get_current_operator"), ("n", "browse_index")):
+        r = c.post(base_url, json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": tool, "arguments": {}}},
+            headers={"Authorization": f"Bearer {VALID_TOKEN}", "Content-Type": "application/json",
+                     "Accept": _ACCEPT, "mcp-session-id": sid_bob})
+        body = _sse_or_json(r) or {}
+        if r.status_code == 404 and "result" not in body and "Session not found" in r.text:
+            print(f"[auth] PASS ({label}) #2B tokenA on bob's session {tool} -> 404 (session bound to its token)")
+        else:
+            fails.append(f"({label}) #2B SESSION RIDING: tokenA on bob's session {tool} -> "
+                         f"{r.status_code} {r.text[:200]}")
+    # bob's own session keeps working for bob (the binding is per token, not deny-all)
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_bob, "get_current_operator", {})
+    if isinstance(body, dict) and body.get("resolved") == OTHER_OPERATOR:
+        print("[auth] PASS (n') bob's own session still runs as bob")
     else:
-        fails.append(f"(m) #2B unexpected resolved={resolved!r}")
-    # and the data it sees is alice's, never bob's
-    err, body = _raw_call(c, base_url, VALID_TOKEN, sid_bob, "browse_index", {})
-    seen = {s["operator"] for s in body.get("snapshots", [])} if isinstance(body, dict) else set()
-    if seen == {VALID_OPERATOR}:
-        print("[auth] PASS (n) #2B tokenA on bob's session browse_index -> only alice's data")
-    elif seen == {OTHER_OPERATOR}:
-        fails.append("(n) #2B CROSS-OP READ: tokenA on bob's session read BOB's snapshots")
-    else:
-        fails.append(f"(n) #2B browse leaked/odd: operators={seen}")
+        fails.append(f"(n') bob refused on his own session: err={err} body={json.dumps(body)[:200]}")
     c.close()
     return fails
 
@@ -521,11 +525,11 @@ def main() -> int:
         print(f"\n[auth] {len(failures)} assertion(s) failed.")
         return 1
 
-    print("\n[auth] ALL 15 ASSERTIONS PASSED "
+    print("\n[auth] ALL 16 ASSERTIONS PASSED "
           "(401 no-header, 401 wrong-token, valid-token ok, operator-binding, "
           "read-scoping, stdio-unchanged; #2A get_snapshot/seek/own-read/"
-          "list_operators/get_current_operator/index_stats/media-traversal gated; "
-          "#2B session-hijack closed for get_current_operator + browse_index).")
+          "list_operators/get_current_operator/index_stats/media-url gated; "
+          "#2B session ids bound to their token for get_current_operator + browse_index).")
     return 0
 
 

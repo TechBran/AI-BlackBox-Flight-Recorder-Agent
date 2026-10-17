@@ -73,6 +73,9 @@ and stays auth-free and behaviourally UNCHANGED:
   3. AUDIT LOG: every HTTP request logs (at INFO) a token IDENTIFIER (a short
      sha256 prefix -- NEVER the token value), the bound operator, the method/
      path, and the request id. This is the audit trail for the public surface.
+  4. SESSION BINDING (2026-10, CVE-2026-52869): an mcp-session-id is bound to
+     the token whose initialize opened it; any other token presenting it (or an
+     id this process never issued) gets the SDK's unknown-session 404.
 
   Token store (secure, NOT committed -- both sources are gitignored):
     * env  BLACKBOX_MCP_TOKENS = {"<token>":"<operator>", ...}  (JSON), and/or
@@ -89,6 +92,7 @@ import logging
 import os
 import sys
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional, Dict, List
 import httpx
@@ -247,8 +251,9 @@ def _current_bound_operator() -> Optional[str]:
     handler runs (mcp/server/lowlevel/server.py). Our auth middleware stashes the
     request's token-operator on `request.state.bound_operator`. Reading it HERE
     therefore yields the operator of the TOKEN ON THIS REQUEST -- not the token
-    that opened the session. This is what kills the session-hijack / stale-binding
-    hole: a token-B request riding a token-A session executes as B.
+    that opened the session. The middleware now refuses a session id presented
+    with any token other than the one that opened it (CVE-2026-52869), so the
+    two always agree; reading per request stays as defense in depth.
 
     Returns the per-request operator on the HTTP path, or None on stdio (no
     active request context -> resolution falls back to the trusted stdio rules).
@@ -334,6 +339,32 @@ def _deny_if_not_owned(metadata) -> Optional[str]:
     if owner != scope:
         return f"cross-operator access denied (owner={owner!r} caller={scope!r})"
     return None
+
+
+# #2A: Device fields a remote (bound) caller never sees -- the tailnet address,
+# the control ports and the metadata block (Tailscale DNS name + hostname).
+_REMOTE_DEVICE_HIDDEN_FIELDS = frozenset(
+    {"tailscale_ip", "adb_port", "vnc_port", "rdp_port", "metadata"})
+
+
+def _read_device_registry():
+    """A fresh, READ-ONLY view of the backend's device store.
+
+    The backend owns devices.json. DeviceRegistry's load path can rewrite it
+    (legacy migration, primary de-dup), which would make this process a second
+    writer, and the get_registry() singleton would never see a device registered
+    after this process started. Load fresh per call with saving disabled, and
+    keep the registry's stdout prints off the stdio JSON-RPC channel.
+    """
+    import contextlib
+    from Orchestrator.device_registry import DeviceRegistry
+
+    class _ReadOnlyDeviceRegistry(DeviceRegistry):
+        def _save_to_file(self):
+            pass
+
+    with contextlib.redirect_stdout(sys.stderr):
+        return _ReadOnlyDeviceRegistry()
 
 # Put the REPO ROOT on sys.path so the `Orchestrator` PACKAGE is importable.
 # get_mcp_tools() (below) lazily runs `from Orchestrator.toolvault import registry`
@@ -552,13 +583,43 @@ async def _proxy_tool(name: str, arguments: dict, client: httpx.AsyncClient):
 # TOOLS - Actions the agent can take
 # =============================================================================
 
+def _scope_operator_enums(tools: list, bound: str) -> list:
+    """Narrow every resolved operator enum to the bound operator (HTTP only).
+
+    The x-source "operators" resolver expands to the box's whole roster, which a
+    remote caller must never see (#2A already scopes list_operators,
+    get_index_stats and get_current_operator). The value is forced to the bound
+    operator on this path anyway. The fail-closed sentinel is never advertised:
+    the enum is dropped instead. get_mcp_tools() builds fresh Tool objects on
+    every call, so editing them in place cannot leak into another request.
+    """
+    for tool in tools:
+        prop = ((tool.inputSchema or {}).get("properties") or {}).get("operator")
+        if isinstance(prop, dict) and "enum" in prop:
+            if bound == _DENY_OPERATOR:
+                prop.pop("enum")
+            else:
+                prop["enum"] = [bound]
+    return tools
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List all available BlackBox tools -- generated from tool_registry.py."""
-    return get_mcp_tools()
+    tools = get_mcp_tools()
+    bound = _current_bound_operator()
+    if bound is not None:
+        tools = _scope_operator_enums(tools, bound)
+    return tools
 
 
-@server.call_tool()
+# validate_input=False: the SDK would jsonschema-check arguments against a tool
+# cache it shares across every session, filled by whichever caller listed tools
+# last -- with per-operator enums above that rejects valid calls, and on stdio it
+# rejects the documented operator='' ("span all") before call_tool runs. Every
+# branch below reads its own arguments (proxied tools are checked again by the
+# backend executor) and turns a bad one into a structured error envelope.
+@server.call_tool(validate_input=False)
 async def call_tool(name: str, arguments: dict[str, Any]):
     """Execute a BlackBox tool.
 
@@ -584,8 +645,8 @@ async def call_tool(name: str, arguments: dict[str, Any]):
     _tid = _TOKEN_ID.get()
     if _tid is not None:
         # AUDIT (M3): every tool invocation on the HTTP/public surface logs the
-        # token id (never the value) + the CURRENT request's operator (per-request,
-        # so a hijacked session is audited as the ACTUAL caller) + tool + rid.
+        # token id (never the value) + the CURRENT request's operator (read per
+        # request, never the session-frozen value) + tool + rid.
         _log(logging.INFO, name, f"AUDIT tool-call tid={_tid}", operator=_current_bound_operator())
     _log(logging.INFO, name, "call received")
 
@@ -776,55 +837,74 @@ async def call_tool(name: str, arguments: dict[str, Any]):
         elif name == "get_media":
             import base64
             import mimetypes
+            from urllib.parse import urlparse
 
             url = arguments.get("url")
             task_id = arguments.get("task_id")
             include_base64 = arguments.get("include_base64", True)
             include_metadata = arguments.get("include_metadata", True)
 
-            # If task_id provided, look up URL from task
-            if task_id and not url:
+            def _url_path(u):
+                # Clean URL - remove host prefix if present
+                if u and (u.startswith("http://") or u.startswith("https://")):
+                    return urlparse(u).path
+                return u
+
+            # ONE task lookup serves the url, the ownership gate and the metadata.
+            task_data = None
+            if task_id:
                 async with httpx.AsyncClient(timeout=30) as client:
                     task_response = await client.get(f"{BLACKBOX_URL}/tasks/{task_id}")
-                    if task_response.status_code == 200:
-                        task_data = task_response.json()
-                        url = task_data.get("result_url")
-                        if not url:
-                            return _error("not_found", name, f"Task {task_id} has no result_url")
-                    else:
-                        return _error("not_found", name, f"Task {task_id} not found")
+                if task_response.status_code == 200:
+                    task_data = task_response.json() or {}
+
+            # #2A: a bound (HTTP) caller reaches media ONLY through a task it
+            # owns -- a bare url would serve any file under Portal/ (other
+            # operators' uploads and generations). The url, if given, must be
+            # that task's own result. Every denial is not_found (never confirm
+            # that another operator's task exists).
+            _scope = _current_bound_operator()
+            if _scope is not None:
+                if not task_id:
+                    return _error("invalid_arguments", name,
+                                  "task_id is required: remote callers fetch media by the task that produced it")
+                if task_data is None:
+                    return _error("not_found", name, f"Task {task_id} not found")
+                _owner = task_data.get("operator")
+                if not _owner:
+                    logger.warning("rid=%s get_media: /tasks/%s returned no operator -- denying "
+                                   "(the ownership gate cannot be enforced without it)",
+                                   _REQUEST_ID.get(), task_id)
+                if _owner != _scope:
+                    return _error("not_found", name, f"Task {task_id} not found")
+                task_url = _url_path(task_data.get("result_url"))
+                if not task_url:
+                    return _error("not_found", name, f"Task {task_id} has no result_url")
+                if url and _url_path(url) != task_url:
+                    return _error("not_found", name, f"Task {task_id} has no media at that url")
+                url = task_url
+            elif task_id and not url:
+                # If task_id provided, look up URL from task
+                if task_data is None:
+                    return _error("not_found", name, f"Task {task_id} not found")
+                url = task_data.get("result_url")
+                if not url:
+                    return _error("not_found", name, f"Task {task_id} has no result_url")
 
             if not url:
                 return _error("invalid_arguments", name, "No URL or task_id provided")
 
-            # Clean URL - remove host prefix if present
-            if url.startswith("http://") or url.startswith("https://"):
-                from urllib.parse import urlparse
-                parsed = urlparse(url)
-                url = parsed.path
+            url = _url_path(url)
 
             # #2A: reject path traversal BEFORE the /ui/->Portal join. A `..`
             # anywhere in the url could escape Portal/ and read arbitrary files.
             if ".." in url:
                 return _error("invalid_arguments", name, "Illegal path component in url")
 
-            # #2A: when a task is involved, the media belongs to the task's
-            # operator -- a bound (HTTP) caller may only fetch its OWN task's media.
-            # Resolve the owning operator and deny cross-operator (not_found).
-            _scope = _current_bound_operator()
-            if _scope is not None and task_id:
-                async with httpx.AsyncClient(timeout=30) as _oclient:
-                    _tr = await _oclient.get(f"{BLACKBOX_URL}/tasks/{task_id}")
-                if _tr.status_code != 200:
-                    return _error("not_found", name, f"Task {task_id} not found")
-                _owner = (_tr.json() or {}).get("operator")
-                if _owner != _scope:
-                    return _error("not_found", name, f"Task {task_id} not found")
-
             # Resolve to file path
             # URL format: /ui/uploads/filename.ext -> Portal/uploads/filename.ext
             if url.startswith("/ui/"):
-                relative_path = url.replace("/ui/", "")
+                relative_path = url[len("/ui/"):]
                 file_path = (BLACKBOX_ROOT / "Portal" / relative_path).resolve()
                 # Defense in depth: the resolved path MUST stay under Portal/.
                 _portal_root = (BLACKBOX_ROOT / "Portal").resolve()
@@ -834,7 +914,9 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 return _error("invalid_arguments", name, f"Invalid URL format: {url}")
 
             if not file_path.exists():
-                return _error("not_found", name, f"File not found: {file_path}")
+                # #2A: never echo an absolute server path to a remote caller.
+                return _error("not_found", name,
+                              f"File not found: {url if _scope is not None else file_path}")
 
             # Detect media type
             suffix = file_path.suffix.lower()
@@ -852,11 +934,14 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
             result = {
                 "url": url,
-                "file_path": str(file_path),
                 "file_size_bytes": file_path.stat().st_size,
                 "media_type": media_type,
                 "mime_type": mime_type
             }
+            # #2A: the absolute server path is for the trusted stdio caller only
+            # (get_index_stats withholds its paths from bound callers the same way).
+            if _scope is None:
+                result["file_path"] = str(file_path)
 
             # Include base64 for images under 10MB
             if include_base64 and media_type == "image":
@@ -868,35 +953,43 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                     result["base64_skipped"] = "File too large (>10MB)"
 
             # Include metadata from task if task_id provided
-            if include_metadata and task_id:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    task_response = await client.get(f"{BLACKBOX_URL}/tasks/{task_id}")
-                    if task_response.status_code == 200:
-                        t = task_response.json()
-                        result["metadata"] = {
-                            "prompt": t.get("prompt"),
-                            "task_type": t.get("task_type"),
-                            "operator": t.get("operator"),
-                            "created_at": t.get("created_at"),
-                            "task_id": task_id
-                        }
-                        # Include artifact if present in result_data
-                        if t.get("result_data") and "artifact" in t.get("result_data", {}):
-                            result["artifact"] = t["result_data"]["artifact"]
+            if include_metadata and task_data is not None:
+                t = task_data
+                result["metadata"] = {
+                    "prompt": t.get("prompt"),
+                    "task_type": t.get("task_type"),
+                    "operator": t.get("operator"),
+                    "created_at": t.get("created_at"),
+                    "task_id": task_id
+                }
+                # Include artifact if present in result_data
+                if t.get("result_data") and "artifact" in t.get("result_data", {}):
+                    result["artifact"] = t["result_data"]["artifact"]
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "list_devices":
-            # In-process device registry read -- NOT an HTTP proxy. The registry
-            # is a local singleton, so this stays a dedicated branch.
-            from Orchestrator.device_registry import get_registry, DeviceType
-            registry = get_registry()
+            # In-process read of the backend's device store -- NOT an HTTP proxy.
+            from Orchestrator.device_registry import DeviceType
             dtype = arguments.get("device_type")
-            if dtype:
-                devices = registry.get_devices_by_type(DeviceType(dtype))
+            try:
+                dtype = DeviceType(dtype) if dtype else None
+            except ValueError:
+                return _error("invalid_arguments", name, f"Unknown device_type: {dtype!r}")
+            registry = _read_device_registry()
+            # #2A: a bound (HTTP) caller sees only its OWN devices, and never
+            # their tailnet addresses, ports or DNS names. stdio (scope None) -> all.
+            scope = _current_bound_operator()
+            if scope is not None:
+                devices = registry.get_devices_by_owner(scope)
             else:
                 devices = registry.get_all_devices()
+            if dtype is not None:
+                devices = [d for d in devices if d.device_type == dtype]
             device_list = [d.to_dict() for d in devices]
+            if scope is not None:
+                device_list = [{k: v for k, v in d.items() if k not in _REMOTE_DEVICE_HIDDEN_FIELDS}
+                               for d in device_list]
             return [TextContent(type="text", text=json.dumps({"devices": device_list}, indent=2))]
 
         # === SPECIAL HTTP TOOLS (genuine logic the generic proxy does NOT replicate) ===
@@ -1541,6 +1634,43 @@ def _extract_bearer(scope) -> Optional[str]:
     return None
 
 
+# Session binding (CVE-2026-52869, audit X01-deps-python-04): a Streamable HTTP
+# session id is only valid with the credential that opened it. The SDK matches
+# requests to sessions by id alone (and only checks the principal from 1.27.2
+# on, and only when scope["user"] is set), so without this a holder of token B
+# could attach to token A's session -- including A's server-to-client SSE stream
+# -- just by presenting A's mcp-session-id. The cap matches the SDK's own
+# DEFAULT_MAX_SESSIONS; the least recently used binding is dropped first, and a
+# dropped session simply answers 404 so the client re-initializes.
+MCP_SESSION_HEADER = b"mcp-session-id"
+MAX_BOUND_SESSIONS = 10_000
+
+
+def _token_fingerprint(token: str) -> str:
+    """Full sha256 of a token: the session-binding key (never the token value)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _request_header(scope, name: bytes) -> Optional[str]:
+    """One request header from an ASGI scope (latin-1, as the wire carries it)."""
+    for k, v in scope.get("headers", []):
+        if k.lower() == name:
+            return v.decode("latin-1")
+    return None
+
+
+def _sdk_principal(fingerprint: str):
+    """An SDK AuthenticatedUser for scope["user"], so mcp>=1.27.2's own
+    session-owner check binds sessions to the same per-token identity. None on
+    an SDK without the auth module -- the middleware binding still applies."""
+    try:
+        from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+        from mcp.server.auth.provider import AccessToken
+    except ImportError:
+        return None
+    return AuthenticatedUser(AccessToken(token=fingerprint, client_id=fingerprint, scopes=[]))
+
+
 class BearerAuthMiddleware:
     """Pure-ASGI bearer-auth gate wrapping the /mcp app (HTTP transport ONLY).
 
@@ -1559,6 +1689,23 @@ class BearerAuthMiddleware:
     def __init__(self, app, token_map: Dict[str, str]):
         self.app = app
         self.token_map = token_map
+        # mcp-session-id -> fingerprint of the token whose initialize opened it.
+        self.session_owners: "OrderedDict[str, str]" = OrderedDict()
+
+    def _bind_session(self, session_id: str, fingerprint: str) -> None:
+        self.session_owners[session_id] = fingerprint
+        self.session_owners.move_to_end(session_id)
+        while len(self.session_owners) > MAX_BOUND_SESSIONS:
+            self.session_owners.popitem(last=False)
+
+    async def _reject_unknown_session(self, send) -> None:
+        # The SDK's own answer for an unknown session (404 + JSON-RPC error), so
+        # a foreign token cannot even confirm that the session exists.
+        body = json.dumps({"jsonrpc": "2.0", "id": "server-error",
+                           "error": {"code": -32600, "message": "Session not found"}}).encode("utf-8")
+        await send({"type": "http.response.start", "status": 404,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": body})
 
     async def _reject_401(self, send, detail: str) -> None:
         body = json.dumps({"error": {"code": "unauthorized", "message": detail}}).encode("utf-8")
@@ -1629,12 +1776,29 @@ class BearerAuthMiddleware:
             await self._reject_401(send, "Unknown or invalid bearer token")
             return
 
+        # Session binding: a request naming a session must carry the token that
+        # opened it. Unknown ids are refused here too -- every live session was
+        # opened through this middleware, so an id it never bound is stale or
+        # forged (the SDK would 404 it anyway).
+        fingerprint = _token_fingerprint(presented)
+        session_id = _request_header(scope, MCP_SESSION_HEADER)
+        if session_id is not None:
+            owner = self.session_owners.get(session_id)
+            if owner is None or not hmac.compare_digest(owner, fingerprint):
+                logger.warning("rid=%s AUDIT session-reject tid=%s operator=%s session=%r... (%s) %s %s",
+                               rid, token_id, operator, session_id[:12],
+                               "unknown session" if owner is None else "opened by a different token",
+                               scope.get("method"), scope.get("path"))
+                await self._reject_unknown_session(send)
+                return
+            self.session_owners.move_to_end(session_id)
+
         # #2B (Option A): stash the operator + token id on THIS request's state.
         # The SDK threads the current Starlette Request through to the handler
         # (request_ctx.request, set fresh per JSON-RPC message), so handlers read
         # the CURRENT request's operator via _current_bound_operator() -- NOT the
-        # session-frozen value. This is what defeats session hijack / stale
-        # binding: a token-B request on a token-A session executes as B.
+        # session-frozen value. With the session binding above every request on
+        # a session carries the same token, so this is now defense in depth.
         # request.state writes persist in scope["state"], which the SDK's later
         # Request(scope, receive) reads back.
         from starlette.requests import Request as _StarletteRequest
@@ -1646,10 +1810,28 @@ class BearerAuthMiddleware:
         # resolution (it can be session-stale); _current_bound_operator() is.
         _BOUND_OPERATOR.set(operator)
         _TOKEN_ID.set(token_id)
+        principal = _sdk_principal(fingerprint)
+        if principal is not None:
+            scope["user"] = principal
         # AUDIT (M3): token id (never the value) + bound operator + method/path + rid.
         logger.info("rid=%s AUDIT auth-ok kind=%s tid=%s operator=%s %s %s",
                     rid, auth_kind, token_id, operator, scope.get("method"), scope.get("path"))
-        await self.app(scope, receive, send)
+
+        is_delete = scope.get("method") == "DELETE"
+
+        async def send_and_track(message):
+            if message.get("type") == "http.response.start" and 200 <= message.get("status", 0) < 300:
+                if session_id is None:
+                    # A successful opening request: bind the id the SDK issued
+                    # BEFORE the client sees it. A failed open never binds.
+                    issued = _request_header(message, MCP_SESSION_HEADER)
+                    if issued:
+                        self._bind_session(issued, fingerprint)
+                elif is_delete:
+                    self.session_owners.pop(session_id, None)
+            await send(message)
+
+        await self.app(scope, receive, send_and_track)
 
 
 # =============================================================================
