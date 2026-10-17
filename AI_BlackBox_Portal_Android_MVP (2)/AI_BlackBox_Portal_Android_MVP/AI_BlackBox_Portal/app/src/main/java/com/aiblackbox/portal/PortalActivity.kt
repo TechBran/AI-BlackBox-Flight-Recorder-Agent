@@ -28,6 +28,7 @@ import android.util.Log
 import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -82,6 +83,15 @@ class PortalActivity : AppCompatActivity() {
     private var isRecording = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val TAG = "BlackBoxBridge"
+
+    // (A01-activities-root-01 / X04-security-clients-infra-05) The ONE origin this WebView may
+    // stay on and hand its bridges to: the paired box (scheme://host[:port] of the URL loadPortal
+    // loads), set once in onCreate. Null — unpaired or unparseable — refuses everything.
+    @Volatile private var pairedOrigin: String? = null
+    // Origin of the page in the MAIN frame, kept by the WebViewClient callbacks (UI thread) and
+    // read by the @JavascriptInterface methods, which run on the JavaBridge thread — where
+    // web.url must not be called. Null (between pages, or unknown) refuses like a foreign page.
+    @Volatile private var pageOrigin: String? = null
 
     // Audio streaming for Realtime API. The streaming thread owns its AudioRecord outright (a local,
     // released in its own finally); everything else holds only this session's stop signal — one per
@@ -261,6 +271,9 @@ class PortalActivity : AppCompatActivity() {
             startActivity(Intent(this, PairingActivity::class.java))
             finish(); return
         }
+        // The origin of exactly what loadPortal loads (normalizeOrigin forces https and drops
+        // the port for a .ts.net name), so the first page is recognized as the paired box.
+        pairedOrigin = PortalWebGuard.originOf(normalizeOrigin(origin))
 
         setContentView(R.layout.activity_portal)
 
@@ -343,8 +356,10 @@ class PortalActivity : AppCompatActivity() {
             try {
                 val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
                 Log.d(TAG, "Download triggered via setDownloadListener: $fileName from $url")
-                // Delegate to our OkHttp-based download function that works with VPN and MediaStore
-                webAppInterface.downloadFile(url, fileName)
+                // Delegate to our OkHttp-based download function that works with VPN and MediaStore.
+                // Native, not a JS call — so it skips the bridge gate, but startDownload still only
+                // fetches from the paired box (an iframe can trigger a download too).
+                webAppInterface.startDownload(url, fileName)
             } catch (e: Exception) {
                 Toast.makeText(applicationContext, "Error setting up download: ${e.message}", Toast.LENGTH_LONG).show()
                 e.printStackTrace()
@@ -352,6 +367,53 @@ class PortalActivity : AppCompatActivity() {
         }
 
         web.webViewClient = object : WebViewClient() {
+            /**
+             * (A01-activities-root-01) Only the paired box stays in this WebView — a link in a chat
+             * reply, a target=_blank, a redirect off-box all go to the system (a browser, the
+             * dialer…) instead of becoming the page that owns every bridge. Subframes (embeds,
+             * proxied Apps) load in place: the bridges gate on the MAIN frame's origin.
+             */
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val req = request ?: return false
+                if (!req.isForMainFrame) return false
+                if (PortalWebGuard.isPairedOrigin(req.url?.toString(), pairedOrigin)) return false
+                Log.i(TAG, "Off-box navigation handed to the system: ${PortalWebGuard.originOf(req.url?.toString()) ?: req.url?.scheme}")
+                openExternally(req.url)
+                return true
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                pageOrigin = PortalWebGuard.originOf(url)
+                // A page that is not the box must not inherit a live mic started by the Portal:
+                // evalInPortal already drops its chunks/transcript, and this frees the mic, which
+                // the foreign page could not stop (its bridge calls are refused).
+                if (!isPortalPage()) {
+                    if (isStreaming) stopAudioStreamingInternal()
+                    if (isRecording) stopRecordingInternal()
+                }
+                super.onPageStarted(view, url, favicon)
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                // Every main-frame history entry, including back/forward and pushState.
+                pageOrigin = PortalWebGuard.originOf(url)
+                super.doUpdateVisitedHistory(view, url, isReload)
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): android.webkit.WebResourceResponse? {
+                // A main-frame load that skipped shouldOverrideUrlLoading (a form POST off-box)
+                // revokes the bridges BEFORE the foreign document commits, not only once
+                // onPageStarted reports it. Background thread; the field is @Volatile.
+                if (request?.isForMainFrame == true &&
+                    !PortalWebGuard.isPairedOrigin(request.url?.toString(), pairedOrigin)) {
+                    pageOrigin = null
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+
             override fun onReceivedError(
                 view: WebView?,
                 req: WebResourceRequest?,
@@ -378,14 +440,15 @@ class PortalActivity : AppCompatActivity() {
             override fun onPermissionRequest(request: PermissionRequest) {
                 runOnUiThread {
                     val wantsAudio = request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
-                    val isSecureOrigin = request.origin?.toString()?.startsWith("https://") == true ||
-                            request.origin?.toString()?.startsWith("http://localhost") == true ||
-                            request.origin?.toString()?.contains(".ts.net") == true
+                    // (A01-activities-root-01) Mic capture for the paired box ONLY — the exact
+                    // origin, not "any https" or "contains .ts.net" (foo.ts.net.evil.example
+                    // matched that), and never a foreign iframe asking on the Portal's behalf.
+                    val fromPairedBox = PortalWebGuard.isPairedOrigin(request.origin?.toString(), pairedOrigin)
 
-                    if (wantsAudio && isSecureOrigin && hasMicPerm()) {
+                    if (wantsAudio && fromPairedBox && hasMicPerm()) {
                         request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
                     } else {
-                        Log.w("PermissionRequest", "Denying permission. wantsAudio=$wantsAudio, isSecure=$isSecureOrigin, hasMicPerm=${hasMicPerm()}")
+                        Log.w("PermissionRequest", "Denying permission. wantsAudio=$wantsAudio, fromPairedBox=$fromPairedBox, hasMicPerm=${hasMicPerm()}")
                         request.deny()
                     }
                 }
@@ -484,10 +547,75 @@ class PortalActivity : AppCompatActivity() {
         return u
     }
 
+    // ============ ORIGIN GATE (A01-activities-root-01 / X04-security-clients-infra-05) ============
+
+    /** The main frame is the paired box: the gate on every JS bridge and native→page callback. */
+    private fun isPortalPage(): Boolean {
+        val paired = pairedOrigin ?: return false
+        return pageOrigin == paired
+    }
+
+    /**
+     * First line of EVERY @JavascriptInterface method. Those run on the JavaBridge thread, so
+     * this reads the @Volatile [pageOrigin] the WebViewClient keeps — never web.url (UI thread).
+     */
+    private fun bridgeAllowed(method: String): Boolean {
+        if (isPortalPage()) return true
+        Log.w(TAG, "JS bridge $method refused: page ${pageOrigin ?: "(unknown)"} is not the paired box")
+        return false
+    }
+
+    /**
+     * Hand an off-box URL to the system. CATEGORY_BROWSABLE limits it to activities that accept
+     * links from a browser (as Chrome does); an intent: or file: URL simply finds no taker.
+     */
+    private fun openExternally(uri: Uri?) {
+        if (uri == null) return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        } catch (e: Exception) { // ActivityNotFoundException, FileUriExposedException
+            Log.w(TAG, "No app to open off-box link (${uri.scheme}): ${e.message}")
+            Toast.makeText(this, "No app can open this link", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * `window.<fn> && window.<fn>(…)` with every argument JSON-encoded — JSONObject.quote for
+     * strings — so a file name, server reply or exception message can never break out of its
+     * string literal into script. [fn] is always one of our own callback names, never data.
+     */
+    private fun jsCall(fn: String, vararg args: Any?): String =
+        args.joinToString(", ", prefix = "window.$fn && window.$fn(", postfix = ");") { arg ->
+            when (arg) {
+                null -> "null"
+                is Boolean, is Int, is Long -> arg.toString()
+                else -> JSONObject.quote(arg.toString())
+            }
+        }
+
+    /**
+     * Run [script] in the page only while it is the paired box: a mic chunk, transcript, picked
+     * file or download result must never reach a page that has navigated elsewhere. UI thread.
+     */
+    private fun evalInPortal(script: String, callback: ValueCallback<String>? = null) {
+        if (!isPortalPage()) {
+            Log.w(TAG, "Dropped a native→page callback: page ${pageOrigin ?: "(unknown)"} is not the paired box")
+            return
+        }
+        web.evaluateJavascript(script, callback)
+    }
+
     private fun loadPortal(origin: String) {
         val normalizedUrl = normalizeOrigin(origin)
         Log.d("LoadPortal", "Loading URL: $normalizedUrl")
         retryPanel.visibility = View.GONE
+        // The document about to run IS the paired box's, so the gate opens now rather than when
+        // the posted onPageStarted lands — an early Portal script's bridge call must not race it.
+        // (An off-box redirect never commits: shouldOverrideUrlLoading hands it to the system.)
+        pageOrigin = PortalWebGuard.originOf(normalizedUrl)
         web.loadUrl(normalizedUrl)
     }
 
@@ -541,16 +669,11 @@ class PortalActivity : AppCompatActivity() {
 
             if (bytes != null) {
                 val encodedFile = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                val safeFileName = fileName
-                    .replace("\\", "\\\\")
-                    .replace("'", "\\'")
-                    .replace("\"", "\\\"")
-                    .replace("\n", "\\n")
-                    .replace("\r", "\\r")
-
-                val script = "window.onNativeFileSelected('$encodedFile', '$mimeType', '$safeFileName');"
+                // The MIME type comes from the providing app and the name from the file itself:
+                // both are JSON-quoted (jsCall), never spliced into the script raw.
+                val script = jsCall("onNativeFileSelected", encodedFile, mimeType, fileName)
                 web.post {
-                    web.evaluateJavascript(script) { result ->
+                    evalInPortal(script) { result ->
                         Log.d("JSCallback", "onNativeFileSelected result: $result")
                     }
                 }
@@ -626,16 +749,9 @@ class PortalActivity : AppCompatActivity() {
                     Log.d("DirectUpload", "File uploaded successfully: $uploadUrl")
 
                     // Notify JS that file was uploaded directly (pass URL instead of base64)
-                    val safeFileName = fileName
-                        .replace("\\", "\\\\")
-                        .replace("'", "\\'")
-                        .replace("\"", "\\\"")
-                        .replace("\n", "\\n")
-                        .replace("\r", "\\r")
-
-                    val script = "window.onNativeFileUploaded('$uploadUrl', '$mimeType', '$safeFileName');"
+                    val script = jsCall("onNativeFileUploaded", uploadUrl, mimeType, fileName)
                     withContext(Dispatchers.Main) {
-                        web.evaluateJavascript(script) { result ->
+                        evalInPortal(script) { result ->
                             Log.d("JSCallback", "onNativeFileUploaded result: $result")
                         }
                         Toast.makeText(this@PortalActivity, "Uploaded $fileName", Toast.LENGTH_SHORT).show()
@@ -656,10 +772,14 @@ class PortalActivity : AppCompatActivity() {
         }
     }
 
+    // Every @JavascriptInterface method below opens with bridgeAllowed(): addJavascriptInterface
+    // exposes these objects to WHATEVER page the WebView shows, so each call checks that page is
+    // the paired box (A01-activities-root-01 / X04-security-clients-infra-05).
     inner class FilePickerInterface {
         @Suppress("unused")
         @JavascriptInterface
         fun openFileChooser(acceptType: String) {
+            if (!bridgeAllowed("openFileChooser")) return
             runOnUiThread {
                 try {
                     val mimeTypes = acceptType.split(",").map { it.trim() }.toTypedArray()
@@ -690,6 +810,7 @@ class PortalActivity : AppCompatActivity() {
         // PRIMARY METHOD - Matches app.js call: AndroidBridge.showNotification(title, body)
         @JavascriptInterface
         fun showNotification(title: String, body: String) {
+            if (!bridgeAllowed("showNotification")) return
             Log.d(TAG, "showNotification called (simple): $title - $body")
             runOnUiThread {
                 notificationManager.showTaskNotification(title, body)
@@ -699,6 +820,7 @@ class PortalActivity : AppCompatActivity() {
         // SECONDARY METHOD - Matches complex calls if any
         @JavascriptInterface
         fun showNotification(title: String, body: String, operator: String?, taskType: String?, isSuccess: Boolean) {
+            if (!bridgeAllowed("showNotification")) return
             Log.d(TAG, "showNotification called (complex): $title - $body")
             runOnUiThread {
                 notificationManager.showTaskNotification(title, body, operator, taskType, isSuccess)
@@ -707,6 +829,7 @@ class PortalActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun vibrate(pattern: String) {
+            if (!bridgeAllowed("vibrate")) return
             Log.d(TAG, "vibrate called (pattern): $pattern")
             runOnUiThread {
                 try {
@@ -738,6 +861,7 @@ class PortalActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun requestNotificationPermission(): Boolean {
+            if (!bridgeAllowed("requestNotificationPermission")) return false
             Log.d(TAG, "requestNotificationPermission called")
             runOnUiThread {
                 ensureNotificationPermission()
@@ -747,16 +871,18 @@ class PortalActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun isNotificationEnabled(): Boolean {
+            if (!bridgeAllowed("isNotificationEnabled")) return false
             val enabled = hasNotificationPerm()
             Log.d(TAG, "isNotificationEnabled called: $enabled")
             return enabled
         }
         
         @JavascriptInterface
-        fun isAndroidApp(): Boolean = true
+        fun isAndroidApp(): Boolean = bridgeAllowed("isAndroidApp")
 
         @JavascriptInterface
         fun log(message: String) {
+            if (!bridgeAllowed("log")) return
             Log.d(TAG, "JS LOG: $message")
         }
 
@@ -769,6 +895,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun startOverlay() {
+            if (!bridgeAllowed("startOverlay")) return
             Log.d(TAG, "startOverlay called from JS")
             runOnUiThread {
                 if (OverlayService.isRunning()) {
@@ -790,6 +917,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun stopOverlay() {
+            if (!bridgeAllowed("stopOverlay")) return
             Log.d(TAG, "stopOverlay called from JS")
             runOnUiThread {
                 stopOverlayService()
@@ -803,6 +931,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun isOverlayRunning(): Boolean {
+            if (!bridgeAllowed("isOverlayRunning")) return false
             return OverlayService.isRunning()
         }
 
@@ -813,6 +942,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun hasOverlayPerm(): Boolean {
+            if (!bridgeAllowed("hasOverlayPerm")) return false
             return hasOverlayPermission()
         }
 
@@ -827,6 +957,23 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun downloadFile(url: String, filename: String) {
+            if (!bridgeAllowed("downloadFile")) return
+            startDownload(url, filename)
+        }
+
+        /**
+         * The download itself — shared by the JS bridge above and the WebView's DownloadListener.
+         * Fetches only from the paired box (the app's OkHttp rides the tailnet; it is not a
+         * general fetch-anything-into-Downloads primitive): an off-box URL goes to the system
+         * browser, which downloads it itself. The name is reduced to a plain file name.
+         */
+        fun startDownload(url: String, requestedName: String) {
+            if (!PortalWebGuard.isPairedOrigin(url, pairedOrigin)) {
+                Log.w(TAG, "Off-box download handed to the system: ${PortalWebGuard.originOf(url) ?: "(no origin)"}")
+                runOnUiThread { openExternally(Uri.parse(url)) }
+                return
+            }
+            val filename = PortalWebGuard.safeDownloadName(requestedName)
             Log.d(TAG, "downloadFile called: url=$url, filename=$filename")
 
             CoroutineScope(Dispatchers.Main).launch {
@@ -927,10 +1074,7 @@ class PortalActivity : AppCompatActivity() {
                                 ).show()
 
                                 // Notify JavaScript of success
-                                web.evaluateJavascript(
-                                    "window.onAndroidDownloadComplete && window.onAndroidDownloadComplete('$filename', true);",
-                                    null
-                                )
+                                evalInPortal(jsCall("onAndroidDownloadComplete", filename, true))
                             }
                         } else {
                             throw IOException("Empty response body")
@@ -951,11 +1095,7 @@ class PortalActivity : AppCompatActivity() {
                         ).show()
 
                         // Notify JavaScript of failure
-                        val safeError = e.message?.replace("'", "\\'") ?: "Unknown error"
-                        web.evaluateJavascript(
-                            "window.onAndroidDownloadComplete && window.onAndroidDownloadComplete('$filename', false, '$safeError');",
-                            null
-                        )
+                        evalInPortal(jsCall("onAndroidDownloadComplete", filename, false, e.message ?: "Unknown error"))
                     }
                 }
             }  // end withContext(Dispatchers.IO)
@@ -966,6 +1106,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun vibrate(duration: Int) {
+            if (!bridgeAllowed("vibrate")) return
              Log.d(TAG, "vibrate called (duration): $duration")
             runOnUiThread {
                 try {
@@ -998,20 +1139,21 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun startRecording() {
+            if (!bridgeAllowed("startRecording")) return
             Log.d(TAG, "startRecording called - isRecording=$isRecording, isStreaming=$isStreaming")
             runOnUiThread {
                 Log.d(TAG, "startRecording runOnUiThread - checking permissions")
                 if (!hasMicPerm()) {
                     Log.e(TAG, "startRecording - mic permission denied")
                     web.post {
-                        web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Permission denied');", null)
+                        evalInPortal(jsCall("onNativeMicError", "Permission denied"))
                     }
                     return@runOnUiThread
                 }
 
                 if (isRecording) {
                     Log.w(TAG, "startRecording - already recording, rejecting")
-                    web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Already recording');", null) }
+                    web.post { evalInPortal(jsCall("onNativeMicError", "Already recording")) }
                     return@runOnUiThread
                 }
 
@@ -1043,7 +1185,7 @@ class PortalActivity : AppCompatActivity() {
                         setOnErrorListener { _, what, extra ->
                             Log.e("MediaRecorderError", "Recording Error - what: $what, extra: $extra")
                             runOnUiThread {
-                                web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Recording error code: $what');", null) }
+                                web.post { evalInPortal(jsCall("onNativeMicError", "Recording error code: $what")) }
                                 stopRecordingInternal()
                             }
                         }
@@ -1056,12 +1198,12 @@ class PortalActivity : AppCompatActivity() {
 
                     isRecording = true
                     Log.d(TAG, "startRecording - calling onNativeMicStart callback")
-                    web.post { web.evaluateJavascript("window.onNativeMicStart && window.onNativeMicStart();", null) }
+                    web.post { evalInPortal(jsCall("onNativeMicStart")) }
 
                 } catch (e: Exception) {
                     Log.e(TAG, "startRecording - EXCEPTION: ${e.message}", e)
                     e.printStackTrace()
-                    web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Start failed: ${e.message?.replace("'", "\\'")}');", null) }
+                    web.post { evalInPortal(jsCall("onNativeMicError", "Start failed: ${e.message}")) }
                     stopRecordingInternal()
                 }
             }
@@ -1070,6 +1212,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun stopRecording() {
+            if (!bridgeAllowed("stopRecording")) return
             runOnUiThread { stopRecordingInternal() }
         }
 
@@ -1082,13 +1225,14 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun stopRecordingAndGetAudio() {
+            if (!bridgeAllowed("stopRecordingAndGetAudio")) return
             Log.d(TAG, "stopRecordingAndGetAudio called")
             runOnUiThread { stopRecordingAndReturnAudio() }
         }
 
         @Suppress("unused")
         @JavascriptInterface
-        fun isRecording(): Boolean = isRecording
+        fun isRecording(): Boolean = bridgeAllowed("isRecording") && isRecording
 
         /**
          * Release the microphone without uploading to Whisper.
@@ -1098,6 +1242,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun releaseMic() {
+            if (!bridgeAllowed("releaseMic")) return
             Log.d(TAG, "releaseMic called - releasing native mic resources")
             runOnUiThread {
                 try {
@@ -1133,7 +1278,7 @@ class PortalActivity : AppCompatActivity() {
                     Log.d(TAG, "Native mic resources released")
                     // Notify JavaScript that mic is released
                     web.post {
-                        web.evaluateJavascript("window.onNativeMicReleased && window.onNativeMicReleased();", null)
+                        evalInPortal(jsCall("onNativeMicReleased"))
                     }
                 }
             }
@@ -1150,10 +1295,11 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun startAudioStreaming() {
+            if (!bridgeAllowed("startAudioStreaming")) return
             Log.d(TAG, "startAudioStreaming called")
             if (!hasMicPerm()) {
                 web.post {
-                    web.evaluateJavascript("window.onNativeStreamError && window.onNativeStreamError('Permission denied');", null)
+                    evalInPortal(jsCall("onNativeStreamError", "Permission denied"))
                 }
                 return
             }
@@ -1193,7 +1339,7 @@ class PortalActivity : AppCompatActivity() {
                 if (record.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord failed to initialize")
                     web.post {
-                        web.evaluateJavascript("window.onNativeStreamError && window.onNativeStreamError('Failed to initialize audio capture');", null)
+                        evalInPortal(jsCall("onNativeStreamError", "Failed to initialize audio capture"))
                     }
                     return
                 }
@@ -1207,7 +1353,7 @@ class PortalActivity : AppCompatActivity() {
 
                 // Notify JavaScript that streaming started
                 web.post {
-                    web.evaluateJavascript("window.onNativeStreamStart && window.onNativeStreamStart();", null)
+                    evalInPortal(jsCall("onNativeStreamStart"))
                 }
 
                 // Start streaming thread
@@ -1236,13 +1382,11 @@ class PortalActivity : AppCompatActivity() {
 
                                     // Send to JavaScript — unless this session has ended by the time
                                     // the UI thread gets to it: a chunk must not reach a newer
-                                    // session's handler, nor a WebView that onDestroy tore down.
+                                    // session's handler, nor a WebView that onDestroy tore down —
+                                    // nor a page that is no longer the paired box (evalInPortal).
                                     runOnUiThread {
                                         if (live.get()) {
-                                            web.evaluateJavascript(
-                                                "window.onNativeAudioChunk && window.onNativeAudioChunk('$base64Data');",
-                                                null
-                                            )
+                                            evalInPortal(jsCall("onNativeAudioChunk", base64Data))
                                         }
                                     }
                                 }
@@ -1266,10 +1410,7 @@ class PortalActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting audio streaming: ${e.message}", e)
                 web.post {
-                    web.evaluateJavascript(
-                        "window.onNativeStreamError && window.onNativeStreamError('${e.message?.replace("'", "\\'")}');",
-                        null
-                    )
+                    evalInPortal(jsCall("onNativeStreamError", e.message ?: "Unknown error"))
                 }
                 stopAudioStreamingInternal()
             } finally {
@@ -1284,11 +1425,12 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun stopAudioStreaming() {
+            if (!bridgeAllowed("stopAudioStreaming")) return
             Log.d(TAG, "stopAudioStreaming called")
             runOnUiThread {
                 stopAudioStreamingInternal()
                 web.post {
-                    web.evaluateJavascript("window.onNativeStreamStop && window.onNativeStreamStop();", null)
+                    evalInPortal(jsCall("onNativeStreamStop"))
                 }
             }
         }
@@ -1299,7 +1441,7 @@ class PortalActivity : AppCompatActivity() {
          */
         @Suppress("unused")
         @JavascriptInterface
-        fun isAudioStreaming(): Boolean = isStreaming
+        fun isAudioStreaming(): Boolean = bridgeAllowed("isAudioStreaming") && isStreaming
 
         // ============ ADB QUICK PAIR HELPERS ============
 
@@ -1311,6 +1453,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun getDeviceTailscaleIp(): String {
+            if (!bridgeAllowed("getDeviceTailscaleIp")) return ""
             try {
                 val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
                 while (interfaces.hasMoreElements()) {
@@ -1342,6 +1485,7 @@ class PortalActivity : AppCompatActivity() {
         @Suppress("unused")
         @JavascriptInterface
         fun openWirelessDebuggingSettings() {
+            if (!bridgeAllowed("openWirelessDebuggingSettings")) return
             Log.d(TAG, "openWirelessDebuggingSettings called")
             runOnUiThread {
                 try {
@@ -1414,7 +1558,7 @@ class PortalActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "stopRecordingInternal - EXCEPTION: ${e.message}", e)
             e.printStackTrace()
-            web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Stop/Release failed: ${e.message?.replace("'", "\\'")}');", null) }
+            web.post { evalInPortal(jsCall("onNativeMicError", "Stop/Release failed: ${e.message}")) }
         } finally {
             mediaRecorder = null
             isRecording = false
@@ -1425,7 +1569,7 @@ class PortalActivity : AppCompatActivity() {
                 uploadToWhisper(currentAudioFile)
             } else {
                 Log.w(TAG, "stopRecordingInternal - Audio file is null, doesn't exist, or is empty. Skipping upload.")
-                web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('No valid audio file recorded');", null) }
+                web.post { evalInPortal(jsCall("onNativeMicError", "No valid audio file recorded")) }
             }
             audioFile = null
         }
@@ -1438,7 +1582,7 @@ class PortalActivity : AppCompatActivity() {
     private fun stopRecordingAndReturnAudio() {
         if (!isRecording) {
             Log.w(TAG, "stopRecordingAndReturnAudio called but not recording")
-            web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Not recording');", null) }
+            web.post { evalInPortal(jsCall("onNativeMicError", "Not recording")) }
             return
         }
 
@@ -1449,7 +1593,7 @@ class PortalActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Stop/Release failed: ${e.message?.replace("'", "\\'")}');", null) }
+            web.post { evalInPortal(jsCall("onNativeMicError", "Stop/Release failed: ${e.message}")) }
         } finally {
             mediaRecorder = null
             isRecording = false
@@ -1460,7 +1604,7 @@ class PortalActivity : AppCompatActivity() {
                 returnAudioAsBase64(currentAudioFile)
             } else {
                 Log.w(TAG, "Audio file is null, doesn't exist, or is empty.")
-                web.post { web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('No valid audio file recorded');", null) }
+                web.post { evalInPortal(jsCall("onNativeMicError", "No valid audio file recorded")) }
             }
             audioFile = null
         }
@@ -1482,19 +1626,13 @@ class PortalActivity : AppCompatActivity() {
 
                 withContext(Dispatchers.Main) {
                     // Call JavaScript callback with the audio data
-                    web.evaluateJavascript(
-                        "window.onNativeMicAudio && window.onNativeMicAudio('$base64Data', '$mimeType', '$fileName');",
-                        null
-                    )
+                    evalInPortal(jsCall("onNativeMicAudio", base64Data, mimeType, fileName))
                     Log.d(TAG, "Called onNativeMicAudio callback")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error reading audio file: ${e.message}", e)
                 withContext(Dispatchers.Main) {
-                    web.evaluateJavascript(
-                        "window.onNativeMicError && window.onNativeMicError('Failed to read audio: ${e.message?.replace("'", "\\'")}');",
-                        null
-                    )
+                    evalInPortal(jsCall("onNativeMicError", "Failed to read audio: ${e.message}"))
                 }
             } finally {
                 // Clean up the temp file
@@ -1551,38 +1689,30 @@ class PortalActivity : AppCompatActivity() {
                             val text = json.optString("text", "").trim()
 
                             if (text.isNotEmpty()) {
-                                val escapedText = text
-                                    .replace("\\", "\\\\")
-                                    .replace("'", "\\'")
-                                    .replace("\"", "\\\"")
-                                    .replace("\n", "\\n")
-                                    .replace("\r", "\\r")
-                                web.evaluateJavascript(
-                                    "window.onNativeMicTranscript && window.onNativeMicTranscript('$escapedText');",
-                                    null
-                                )
+                                // A transcript can say anything: JSON-quoted by jsCall, not hand-escaped.
+                                evalInPortal(jsCall("onNativeMicTranscript", text))
                             } else {
-                                web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('No transcript received from server');", null)
+                                evalInPortal(jsCall("onNativeMicError", "No transcript received from server"))
                             }
                         } catch (e: org.json.JSONException) {
-                            web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Failed to parse server response');", null)
+                            evalInPortal(jsCall("onNativeMicError", "Failed to parse server response"))
                             e.printStackTrace()
                         }
                     } else {
                         val errorDetail = responseBody ?: "Unknown error"
-                        web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Upload failed: $responseCode - ${errorDetail.take(100).replace("'", "\\'")}');", null)
+                        evalInPortal(jsCall("onNativeMicError", "Upload failed: $responseCode - ${errorDetail.take(100)}"))
                     }
                 }
 
             } catch (e: IOException) {
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
-                    web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('Network or file error: ${e.message?.replace("'", "\\'")}');", null)
+                    evalInPortal(jsCall("onNativeMicError", "Network or file error: ${e.message}"))
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
-                    web.evaluateJavascript("window.onNativeMicError && window.onNativeMicError('An unexpected error occurred: ${e.message?.replace("'", "\\'")}');", null)
+                    evalInPortal(jsCall("onNativeMicError", "An unexpected error occurred: ${e.message}"))
                 }
             } finally {
                 val deleted = file.delete()

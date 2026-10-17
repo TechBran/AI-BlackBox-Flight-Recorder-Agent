@@ -15,7 +15,8 @@ class PairingActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        prefs.getString("origin", null)?.let {
+        // A blank origin is unpaired too (PortalActivity bounces a blank one back here).
+        if (currentLaunchTarget() != LaunchTarget.PAIRING) {
             launchMainActivity()
             finish(); return
         }
@@ -72,8 +73,9 @@ class PairingActivity : AppCompatActivity() {
     }
 
     private fun launchMainActivity() {
-        val useNative = prefs.getBoolean("use_native_ui", true)
-        val target = if (useNative) NativeMainActivity::class.java else PortalActivity::class.java
-        startActivity(Intent(this, target))
+        // The shared launch rule (LaunchRouting.kt) — a notification tap follows the same one.
+        val target = currentLaunchTarget()
+        if (target == LaunchTarget.PAIRING) return
+        startActivity(Intent(this, target.activityClass()))
     }
 }

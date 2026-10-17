@@ -35,7 +35,31 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
         const val CHANNEL_ID_NAVIGATION = "blackbox_navigation"
         private const val TAG = "BlackBoxBridge"
         private const val DOWNLOAD_NOTIFICATION_ID = 9999
+
+        /** (A01-activities-root-04) One intent action per notification KIND. The action is
+         *  part of a PendingIntent's identity (request codes alone are not: a /notify id can
+         *  equal another kind's code), so a task tap and a /notify tap never share — and
+         *  overwrite — one PendingIntent. */
+        internal const val ACTION_OPEN_FROM_TASK = "com.aiblackbox.portal.action.OPEN_FROM_TASK_NOTIFICATION"
+        internal const val ACTION_OPEN_FROM_REMOTE = "com.aiblackbox.portal.action.OPEN_FROM_REMOTE_NOTIFICATION"
+
+        /** Task notifications all open the same screen, so they share one PendingIntent. */
+        internal const val REQUEST_CODE_TASK = 4101
     }
+
+    /**
+     * The tap target for a task / /notify notification: wherever the launcher would land
+     * ([currentLaunchTarget] — the native UI by default, the web UI only when chosen,
+     * pairing when unpaired). SINGLE_TOP + CLEAR_TOP bring the running screen forward
+     * instead of recreating it (a recreate would drop the live chat stream).
+     */
+    private fun openAppIntent(action: String): Intent =
+        Intent(context, context.currentLaunchTarget().activityClass()).apply {
+            this.action = action
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
 
     init {
         createNotificationChannels()
@@ -233,12 +257,9 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
     ) {
         Log.d(TAG, "showRemoteNotification: title=$title, hasBody=${body.isNotBlank()}, notifId=$notifId")
 
-        val intent = Intent(context, PortalActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra("from_notification", true)
-            putExtra("notif_category", category)
-            putExtra("notif_operator", operator)
-        }
+        // Opens the app where the launcher would (A01-activities-root-04). No extras: no
+        // screen deep-links from a notification yet, and nothing read the old ones.
+        val intent = openAppIntent(ACTION_OPEN_FROM_REMOTE)
 
         // STABLE (tag, id): tag = notifId (the bus idempotency key); id = a stable hash of
         // it so the (tag, id) notify overload collapses retries. A NanoHTTPD worker may
@@ -400,16 +421,12 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
     ) {
         Log.d(TAG, "Notification Manager: Building notification - Title: $title, Body: $body")
 
-        // Create intent to open app when notification clicked
-        val intent = Intent(context, PortalActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra("from_notification", true)
-            putExtra("task_type", taskType)
-        }
+        // Open the app where the launcher would when clicked (A01-activities-root-04)
+        val intent = openAppIntent(ACTION_OPEN_FROM_TASK)
 
         val pendingIntent = PendingIntent.getActivity(
             context,
-            0,
+            REQUEST_CODE_TASK,
             intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
