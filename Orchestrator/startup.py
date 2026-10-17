@@ -30,6 +30,9 @@ from pydantic import BaseModel
 # Local imports - Import app from checkpoint to register event handlers
 from Orchestrator.checkpoint import app
 from Orchestrator.config import SNAPSHOT_INDEX, OPERATOR_STATE_FILE, APPS_REGISTRY_FILE, UPLOADS_DIR, VOL_PATH, START_RX
+from Orchestrator.config import DEBUG_SERVE_DEV_PAGES
+from Orchestrator.utils.paths import portal_dir
+from Orchestrator.utils.static_guard import GuardedStaticFiles, portal_refused_dirs
 from Orchestrator.fossils import (
     load_snapshot_index, rebuild_snapshot_index, update_snapshot_index,
     read_schema_version, write_schema_version, CURRENT_SCHEMA_VERSION,
@@ -989,7 +992,15 @@ class StaticCacheMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(StaticCacheMiddleware)
 
-app.mount("/ui", StaticFiles(directory="Portal", html=True), name="ui")
+# Portal/ is served through a guard that 404s runtime data, server-side source,
+# key/config material, dot-files, Portal/artifacts/ and (unless [debug]
+# serve_dev_pages) Portal/dev/ — see utils/static_guard.py (audit rank 24).
+app.mount(
+    "/ui",
+    GuardedStaticFiles(directory=str(portal_dir()), html=True,
+                       refused_dirs=portal_refused_dirs(DEBUG_SERVE_DEV_PAGES)),
+    name="ui",
+)
 
 class ChatIn(BaseModel):
     messages: Optional[list] = None

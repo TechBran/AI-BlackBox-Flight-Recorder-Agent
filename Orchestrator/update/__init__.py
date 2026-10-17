@@ -4,7 +4,7 @@ The Portal's "Install update" button triggers a full-stack update of the
 BlackBox install: git pull, pip install, MCP venv update, apt install (via
 the bounded /usr/local/sbin/blackbox-apt-install helper), systemd unit
 regeneration (via /usr/local/sbin/blackbox-write-systemd helper), and a
-detached service restart. User data (Volumes/, Manifest/, Fossils/,
+detached service restart. User data (Volumes/, Manifest/, Fossils/, data/,
 Portal/uploads/, .env, config.ini, devices.json) is preserved by the
 combination of .gitignore (those dirs are untracked → git reset --hard
 won't touch them) and pip-sync-style rollback for the venvs.

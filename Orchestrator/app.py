@@ -201,15 +201,17 @@ app.add_middleware(FirstRunMiddleware)
 # in T2.1.1 Step 5 verifies this ordering. Don't reorder these blocks.
 from fastapi.staticfiles import StaticFiles
 from Orchestrator.utils.paths import resolve as _resolve_path
+from Orchestrator.utils.static_guard import GuardedStaticFiles
 
 
-class _NoCacheStaticFiles(StaticFiles):
+class _NoCacheStaticFiles(GuardedStaticFiles):
     """Forces no-cache on all responses. Caught 2026-05-16 on Brandon's
     MSO2 Ultra: Tauri's WebKitGTK aggressively caches the onboarding
     wizard's HTML/JS/CSS in ~/.local/share/com.blackbox.setup/WebKitCache/
     — survives PC reboots + Tauri shell restarts. Customer would see stale
     wizard UI after any update. no-store defeats the cache; multi-header
-    belt-and-suspenders for WebKitGTK's historical aggressiveness."""
+    belt-and-suspenders for WebKitGTK's historical aggressiveness.
+    Guarded like /ui (utils/static_guard.py): the wizard tree is Portal/ too."""
     async def get_response(self, path, scope):
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"

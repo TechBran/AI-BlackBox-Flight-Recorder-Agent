@@ -183,3 +183,11 @@ provider = null
 # [ORIGIN-GUARD] warnings at startup.
 # extra_allowed_hosts = blackbox.example.com
 # extra_allowed_origins = https://blackbox.example.com
+
+[debug]
+# Developer-only switches. The whole section is optional; every key defaults
+# to false (fresh-box rule).
+# serve_dev_pages: serve Portal/dev/ (the FX Lab effect gallery, the approved
+# onboarding mocks) at /ui/dev/. Off, those pages 404 like any missing file.
+# Restart the service after changing it.
+serve_dev_pages = false

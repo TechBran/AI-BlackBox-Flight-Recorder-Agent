@@ -8,8 +8,9 @@ Orchestrator/media_relocation for the full investigation — these are INPUT
 reference images (already consumed by the provider at generation time, never read
 back), so relocating them to disk is safe and lossless.
 
-This script, run ONCE against the live DB (BACK IT UP FIRST — `cp Portal/tasks.db
-Portal/tasks.db.bak`), performs three idempotent steps:
+This script, run ONCE against the live DB (BACK IT UP FIRST — `cp data/tasks.db
+data/tasks.db.bak`; the DB lived at Portal/tasks.db before the 2026-10 move out
+of the served tree), performs three idempotent steps:
 
   1. CREATE INDEX IF NOT EXISTS idx_tasks_created_at  (Part 1 — kills the TEMP
      B-TREE sort on /tasks/list; takes effect for the live process immediately
@@ -21,7 +22,7 @@ Portal/tasks.db.bak`), performs three idempotent steps:
      reclaim the freed pages.
 
 Run:  python -m Orchestrator.migrations.relocate_reference_images [db_path] [uploads_dir]
-Defaults: db_path=Portal/tasks.db  uploads_dir=Portal/uploads
+Defaults: db_path=config.TASKS_DB_PATH (data/tasks.db)  uploads_dir=Portal/uploads
 Add --dry-run to report what WOULD change without writing.
 """
 from __future__ import annotations
@@ -118,11 +119,26 @@ def relocate_all(
     return rows_changed, images_relocated
 
 
-def run(db_path: str = "Portal/tasks.db",
+def default_db_path() -> str:
+    """config.TASKS_DB_PATH — imported lazily because config reads config.ini
+    from the cwd, and the helpers above are importable without it."""
+    from Orchestrator.config import TASKS_DB_PATH
+    return str(TASKS_DB_PATH)
+
+
+def run(db_path: str | None = None,
         uploads_dir: str = "Portal/uploads",
         dry_run: bool = False) -> dict:
     """Execute all three steps against db_path. Returns a summary dict."""
-    before_size = Path(db_path).stat().st_size if Path(db_path).exists() else 0
+    db_path = db_path or default_db_path()
+    if not Path(db_path).exists():
+        # sqlite3.connect would CREATE an empty file here, and an empty DB at the
+        # configured path would strand the real one at the legacy location.
+        raise FileNotFoundError(
+            f"no task DB at {db_path} (if the service has not restarted since the "
+            f"move out of Portal/, it is still at Portal/tasks.db: restart first)"
+        )
+    before_size = Path(db_path).stat().st_size
 
     # Generous busy_timeout so a VACUUM/UPDATE waits for a write window rather than
     # failing on a live WAL DB the service is occasionally writing to.
@@ -170,7 +186,7 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     dry_run = "--dry-run" in argv
     argv = [a for a in argv if not a.startswith("--")]
-    db_path = argv[0] if len(argv) > 0 else "Portal/tasks.db"
+    db_path = argv[0] if len(argv) > 0 else default_db_path()
     uploads_dir = argv[1] if len(argv) > 1 else "Portal/uploads"
 
     print(f"[MIGRATE] db={db_path} uploads={uploads_dir} dry_run={dry_run}")

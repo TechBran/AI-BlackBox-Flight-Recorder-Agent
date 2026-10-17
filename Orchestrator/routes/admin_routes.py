@@ -29,7 +29,7 @@ from Orchestrator.config import (
     CTX_MAX, CU_MODEL_DEFAULT, CU_MODEL_FILTERS, current_operator, END_RX,
     GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_AUTH_AVAILABLE,
     MANIFEST, OPENAI_API_KEY, OPENAI_MODEL_DEFAULT,
-    SNAPSHOT_INDEX, START_RX, STT_MODEL, TTS_MODEL,
+    SNAPSHOT_INDEX, START_RX, STT_MODEL, TASKS_DB_PATH, TTS_MODEL,
     UPLOADS_DIR, USERS_DEFAULT, USERS_LIST, USE_CLOUD_TTS, VOL_PATH, current_default,
     XAI_API_KEY, XAI_MODEL_DEFAULT,
 )
@@ -475,7 +475,7 @@ def dashboard():
     try:
         import sqlite3
         from datetime import datetime, timezone, timedelta
-        db_path = Path("Portal/tasks.db")
+        db_path = TASKS_DB_PATH
         task_stats = {
             "active": 0,
             "completed_last_24h": 0,
@@ -565,7 +565,7 @@ def watchdog():
         "volume_accessible": VOL_PATH.exists(),
         "manifest_accessible": MANIFEST.exists(),
         "worker_running": models_module.worker_running,
-        "database_accessible": Path("Portal/tasks.db").exists()
+        "database_accessible": TASKS_DB_PATH.exists()
     }
 
     # Check disk space

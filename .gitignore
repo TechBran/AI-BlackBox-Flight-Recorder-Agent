@@ -83,12 +83,19 @@ Orchestrator/asterisk/ivr_cache/pin_unavailable.wav
 Volumes/
 Manifest/
 Fossils/
+# Runtime databases (tasks.db + -wal/-shm), 0700 — moved out of the served
+# Portal/ tree 2026-10 (Orchestrator/migrations/tasks_db_location.py). Anchored:
+# the Android app has source packages named data/.
+/data/
 
 # ============================================================================
 # Generated media — outputs of BlackBox tools, not source
 # ============================================================================
 
 Portal/uploads/
+# Generated downloadable artifacts (config.ARTIFACTS_DIR, 4-day retention):
+# operator output such as PDFs and worksheets — never source (audit W31).
+Portal/artifacts/
 
 # ============================================================================
 # Apps/ — customer-created app territory (T1 / audit C1 + I2)
@@ -285,6 +292,13 @@ Orchestrator/cli_agent/state/zellij_sessions.json
 # scope shouldn't ship at all.
 .mcp.json
 .gemini/settings.json
+# Same class for Codex: .codex/config.toml holds the dev box's absolute MCP
+# paths (audit W34).
+/.codex/
+
+# Convenience symlink install.sh recreates on every box -> Scripts/blackbox-status.sh
+# (the tracked script). Anchored so the real script stays tracked (audit W34).
+/blackbox-status.sh
 
 # stray 'script' command capture artifact
 typescript

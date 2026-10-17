@@ -87,6 +87,10 @@ try:
     from Orchestrator.behavioral_core import DEFAULT_PERSONA_CHAT
 except ImportError:
     from behavioral_core import DEFAULT_PERSONA_CHAT
+try:
+    from Orchestrator.utils.paths import blackbox_root as _blackbox_root
+except ImportError:
+    from utils.paths import blackbox_root as _blackbox_root
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
@@ -131,6 +135,21 @@ UPLOADS_DIR = Path("Portal/uploads") # For generated and uploaded media
 ARTIFACTS_DIR = Path("Portal/artifacts")  # For generated downloadable artifacts
 ARTIFACT_RETENTION_DAYS = 4  # Auto-cleanup after 4 days
 ARTIFACT_MAX_SIZE_MB = 50  # Maximum artifact size
+
+# Runtime databases live in a 0700 data/ dir, NEVER inside Portal/: /ui is a
+# StaticFiles mount of Portal/, so the old Portal/tasks.db default made every
+# operator's prompts, results and error strings downloadable at /ui/tasks.db
+# (audit NEW-core-1 / X03-security-backend-07). The ONE definition of the task
+# DB path — models, monitoring, admin_routes and the relocate CLI import it.
+# migrations/tasks_db_location.py moves a legacy Portal/tasks.db (+ -wal/-shm)
+# here before the first open and keeps the dir 0700 / the files 0600.
+BLACKBOX_DATA_DIR = _blackbox_root() / "data"
+TASKS_DB_PATH = BLACKBOX_DATA_DIR / "tasks.db"
+LEGACY_TASKS_DB_PATH = _blackbox_root() / "Portal" / "tasks.db"  # pre-2026-10 location
+
+# [debug] serve_dev_pages: Portal/dev/ (the FX Lab gallery, the approved
+# onboarding mocks) is served at /ui/dev/ only when this is true.
+DEBUG_SERVE_DEV_PAGES = CFG.getboolean("debug", "serve_dev_pages", fallback=False)
 
 AUDIO_ENGINE  = CFG.get("audio","engine",fallback="auto").strip().lower()
 TTS_MODEL     = CFG.get("audio","model", fallback="tts-1").strip()
