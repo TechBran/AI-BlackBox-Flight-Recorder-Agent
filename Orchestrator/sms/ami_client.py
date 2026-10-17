@@ -7,12 +7,37 @@ SMS uses the proprietary SMSCommand action and ReceivedSMS event.
 
 import asyncio
 import logging
+import re
 import urllib.parse
 import uuid
 from datetime import datetime
 from typing import Callable, Optional
 
 log = logging.getLogger("sms.ami")
+
+# E.164-style destination: optional leading +, then 3-15 ASCII digits (short
+# codes through full international numbers). [0-9], not \d — \d also matches
+# non-ASCII digits.
+_SMS_DESTINATION_RE = re.compile(r"\+?[0-9]{3,15}")
+
+
+def is_valid_sms_destination(destination) -> bool:
+    """True for an E.164-style number the gateway's `gsm send sms` can take.
+
+    The destination is placed raw into the AMI ``Command:`` header and is a
+    model tool argument (send_sms), so anything else — spaces, quotes, CR/LF —
+    is refused rather than escaped (audit O12-messaging-09)."""
+    return isinstance(destination, str) and _SMS_DESTINATION_RE.fullmatch(destination) is not None
+
+
+def _ami_value(value) -> str:
+    """Make a value safe for one AMI header line.
+
+    AMI is line-oriented: a CR or LF inside a value ends the field, and a blank
+    line ends the action, so a value carrying "\r\n\r\nAction: ..." would
+    inject a second action on the gateway. Strip both from every value placed
+    into an action (audit O12-messaging-09)."""
+    return str(value).replace("\r", "").replace("\n", "")
 
 
 def _strip_unrenderable(text: str) -> str:
@@ -197,8 +222,8 @@ class AMISMSClient:
         """Send Login action and verify success."""
         payload = (
             "Action: Login\r\n"
-            f"Username: {self.username}\r\n"
-            f"Secret: {self.secret}\r\n"
+            f"Username: {_ami_value(self.username)}\r\n"
+            f"Secret: {_ami_value(self.secret)}\r\n"
             "Events: on\r\n"
             "\r\n"
         )
@@ -249,9 +274,9 @@ class AMISMSClient:
     async def _send_action(self, action: str, **params) -> str:
         """Send an AMI action with a unique ActionID and return the raw response."""
         action_id = uuid.uuid4().hex[:12]
-        lines = [f"Action: {action}", f"ActionID: {action_id}"]
+        lines = [f"Action: {_ami_value(action)}", f"ActionID: {action_id}"]
         for key, value in params.items():
-            lines.append(f"{key}: {value}")
+            lines.append(f"{_ami_value(key)}: {_ami_value(value)}")
         payload = "\r\n".join(lines) + "\r\n\r\n"
 
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -516,6 +541,18 @@ class AMISMSClient:
         if not self._authenticated:
             return {"success": False, "error": "Not connected to AMI"}
 
+        # destination and span go raw into the AMI Command: header (and the
+        # destination is a model tool argument), so refuse anything that is not
+        # an E.164-style number / a positive span number before building it.
+        if not is_valid_sms_destination(destination):
+            log.warning("send_sms refused: invalid destination %r", destination)
+            return {"success": False,
+                    "error": "invalid SMS destination: expected an E.164-style number "
+                             "(optional leading +, 3-15 digits, no spaces or punctuation)"}
+        if isinstance(span, bool) or not isinstance(span, int) or span < 1:
+            log.warning("send_sms refused: invalid span %r", span)
+            return {"success": False, "error": "invalid GSM span: expected a positive integer"}
+
         # Make the body safe for the line-oriented AMI Command: field. First drop
         # characters the gateway can't render (astral-plane emoji garble), then
         # percent-encode the framing-breakers so a raw newline can't truncate the
@@ -530,7 +567,7 @@ class AMISMSClient:
             # The read loop will consume the response/events normally
             await self._send_raw(
                 f"Action: SMSCommand\r\n"
-                f"Command: {command}\r\n"
+                f"Command: {_ami_value(command)}\r\n"
                 f"\r\n"
             )
             log.info("SMS dispatched to %s", destination)
