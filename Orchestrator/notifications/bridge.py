@@ -23,6 +23,8 @@ This module packages that for notifications as a fire-and-forget helper:
     producer (a notify failure must never break the producer's own work). The
     scheduled future's exception is retrieved in a done-callback so it neither
     leaks as an unretrieved-exception warning nor surfaces anywhere.
+  * ``notify_box_in_background(...)`` — the same for the box-wide ``notify_box``;
+    returns whether the push was scheduled.
 
 If no loop has been captured (or it is closed), the helper degrades to a logged
 no-op — a producer must still finish its own work on a box where the loop was
@@ -34,7 +36,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from Orchestrator.notifications.bus import notify
+from Orchestrator.notifications.bus import notify, notify_box
 
 logger = logging.getLogger(__name__)
 
@@ -104,3 +106,37 @@ def notify_in_background(
         future.add_done_callback(_swallow_future_exception)
     except Exception as e:  # noqa: BLE001 — scheduling itself must never break the producer
         logger.warning("[NOTIFY-BRIDGE] failed to schedule notify (non-fatal): %r", e)
+
+
+def notify_box_in_background(
+    title: str,
+    body: str,
+    category: str = "alert",
+    *,
+    dedup_key: Optional[str] = None,
+) -> bool:
+    """Fire-and-forget ``notify_box(...)`` (a box-wide alert) from sync code.
+
+    Same contract as ``notify_in_background`` (returns immediately, NEVER
+    raises), except it reports whether the push was scheduled: a caller that
+    sends at most one alert per window (provider_billing) must not count a
+    push it dropped for lack of a loop as sent.
+    """
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        logger.debug(
+            "[NOTIFY-BRIDGE] no live main loop captured; dropping box notify "
+            "(cat=%s title=%r)",
+            category, title,
+        )
+        return False
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            notify_box(title, body, category=category, dedup_key=dedup_key),
+            loop,
+        )
+        future.add_done_callback(_swallow_future_exception)
+        return True
+    except Exception as e:  # noqa: BLE001 — scheduling itself must never break the producer
+        logger.warning("[NOTIFY-BRIDGE] failed to schedule box notify (non-fatal): %r", e)
+        return False

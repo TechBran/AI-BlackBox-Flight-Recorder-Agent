@@ -17,6 +17,6 @@ Modules:
 """
 
 from .subscriptions import SubscriptionStore
-from .bus import notify, NotifyResult
+from .bus import notify, notify_box, NotifyResult
 
-__all__ = ["SubscriptionStore", "notify", "NotifyResult"]
+__all__ = ["SubscriptionStore", "notify", "notify_box", "NotifyResult"]

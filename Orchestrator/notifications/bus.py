@@ -49,7 +49,10 @@ from typing import List, Optional
 import aiohttp
 
 from Orchestrator.device_registry import pairing
-from Orchestrator.notifications.reachability import reachable_subscribers
+from Orchestrator.notifications.reachability import (
+    reachable_box_subscribers,
+    reachable_subscribers,
+)
 from Orchestrator.notifications.subscriptions import SubscriptionStore
 
 logger = logging.getLogger(__name__)
@@ -201,24 +204,11 @@ async def notify(
 
     total = len(targets)
 
-    delivered: List[str] = []
-    unreachable: List[str] = []
-
-    if targets:
-        payloads = [
-            _payload_for_device(d, operator, title, body, category, notif_id)
-            for d in targets
-        ]
-        results = await asyncio.gather(
-            *(_dispatch(d, p) for d, p in zip(targets, payloads)),
-            return_exceptions=True,
-        )
-        for device, outcome in zip(targets, results):
-            device_id = device.get("device_id")
-            if isinstance(outcome, Exception):
-                unreachable.append(device_id)
-            else:
-                delivered.append(device_id)
+    payloads = [
+        _payload_for_device(d, operator, title, body, category, notif_id)
+        for d in targets
+    ]
+    delivered, unreachable = await _fan_out(targets, payloads)
 
     # Deliver-only: deliberately NO snapshot record (see module docstring — the
     # old always-mint "durable inbox" flooded the ledger and context retrieval).
@@ -237,6 +227,90 @@ async def notify(
         unreachable=unreachable,
         recorded=False,
     )
+
+
+# The payload ``operator`` of a box-wide alert. The Android receiver only uses
+# the field as a label; it never routes or navigates on it.
+BOX_OPERATOR = "system"
+
+
+async def notify_box(
+    title: str,
+    body: str,
+    category: str = "alert",
+    *,
+    dedup_key: Optional[str] = None,
+) -> NotifyResult:
+    """Send a BOX-WIDE alert to every device subscribed to any operator, once each.
+
+    For events that belong to the box rather than to one operator (W09: a
+    provider account out of credits stops every operator's chat, cron and CU
+    runs at once). ``notify(operator)`` cannot express that: it reaches one
+    operator's subscribers, and 'system' cannot be subscribed to. The targets
+    are ``reachable_box_subscribers()``; each gets the FULL body, so a box
+    alert must carry box-level text only (a provider and a console, never an
+    operator's prompt or reply). Same contracts as ``notify``: NEVER raises,
+    never blocks past the per-device timeout, never mints.
+    """
+    notif_id = _make_notif_id(dedup_key)
+    try:
+        found = reachable_box_subscribers()
+    except Exception as e:
+        logger.warning("[NOTIFY] reachable_box_subscribers failed: %s", e)
+        found = []
+
+    targets: List[dict] = []
+    seen = set()
+    for device in found:
+        device_id = device.get("device_id")
+        if device_id in seen:
+            continue
+        seen.add(device_id)
+        targets.append(device)
+
+    payload = {
+        "title": title,
+        "category": category,
+        "operator": BOX_OPERATOR,
+        "notif_id": notif_id,
+        "body": body,
+    }
+    delivered, unreachable = await _fan_out(targets, [dict(payload) for _ in targets])
+    logger.info(
+        "[NOTIFY] box cat=%s delivered=%d/%d id=%s",
+        category,
+        len(delivered),
+        len(targets),
+        notif_id,
+    )
+    return NotifyResult(
+        notif_id=notif_id,
+        delivered=delivered,
+        unreachable=unreachable,
+        recorded=False,
+    )
+
+
+async def _fan_out(targets: List[dict], payloads: List[dict]):
+    """POST each payload to its device concurrently; (delivered, unreachable) ids.
+
+    gather(return_exceptions=True) isolates one failing device from the rest.
+    """
+    delivered: List[str] = []
+    unreachable: List[str] = []
+    if not targets:
+        return delivered, unreachable
+    results = await asyncio.gather(
+        *(_dispatch(d, p) for d, p in zip(targets, payloads)),
+        return_exceptions=True,
+    )
+    for device, outcome in zip(targets, results):
+        device_id = device.get("device_id")
+        if isinstance(outcome, Exception):
+            unreachable.append(device_id)
+        else:
+            delivered.append(device_id)
+    return delivered, unreachable
 
 
 async def _dispatch(device: dict, payload: dict):

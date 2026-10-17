@@ -58,13 +58,43 @@ def reachable_subscribers(
     a corrupt subscription store yields no subscribers — both degrade to ``[]``.
     """
     sub_store = store if store is not None else SubscriptionStore()
+    return _online_targets(sub_store, sub_store.subscribers_for(operator), status_json)
 
+
+def reachable_box_subscribers(
+    *,
+    store: Optional[SubscriptionStore] = None,
+    status_json: Optional[str] = None,
+) -> List[dict]:
+    """Every device subscribed to ANYTHING (the 'all' sentinel or at least one
+    operator) that is CURRENTLY ONLINE — the targets of a box-wide alert.
+
+    A box-level event (a provider out of credits stops every operator's runs at
+    once) has no single operator to route by, and 'system' cannot be subscribed
+    to. Opt-in still holds: a row subscribed to nothing is not a target. Same
+    shape, seams and never-raises contract as ``reachable_subscribers``.
+    """
+    sub_store = store if store is not None else SubscriptionStore()
+    device_ids = [
+        device_id
+        for device_id, row in sub_store.all_subscriptions().items()
+        if row.get("all") or row.get("operators")
+    ]
+    return _online_targets(sub_store, device_ids, status_json)
+
+
+def _online_targets(
+    sub_store: SubscriptionStore,
+    device_ids: List[str],
+    status_json: Optional[str],
+) -> List[dict]:
+    """Join ``device_ids``' subscription rows to the online tailnet node set."""
     # Online tailnet node set — resolved IDENTICALLY to mesh.reachable_devices.
     raw = status_json if status_json is not None else mesh._run_tailscale_status()
     online_nodes = [n for n in mesh.parse_tailscale_status(raw) if n.online]
 
     targets: List[dict] = []
-    for device_id in sub_store.subscribers_for(operator):
+    for device_id in device_ids:
         row = sub_store.get(device_id)
         tname = (row or {}).get("tailnet_name")
         if not tname:
