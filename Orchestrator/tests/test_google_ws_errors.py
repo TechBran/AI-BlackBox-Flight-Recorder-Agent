@@ -76,3 +76,16 @@ def test_is_service_disabled_detection():
     assert _is_service_disabled(HttpError(FakeResp(403), b"not json")) is False
     assert _is_service_disabled(HttpError(FakeResp(403),
         b'{"error": {"details": [{"reason": "OTHER"}]}}')) is False
+
+
+def test_rate_limit_403_says_retry_not_reconnect():
+    # Gmail/Drive/Calendar answer 403 (not 429) for usageLimits: a quota blip,
+    # not a scope problem — re-consenting fixes nothing.
+    content = json.dumps({
+        "error": {"code": 403, "message": "User Rate Limit Exceeded",
+                  "errors": [{"domain": "usageLimits", "reason": "userRateLimitExceeded"}]}
+    }).encode()
+    out = http_error_to_dict(HttpError(FakeResp(403), content), "Calendar")
+    assert "reconnect" not in out["error"].lower()
+    assert "rate limit" in out["error"].lower()
+    assert "Calendar" in out["error"]

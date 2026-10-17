@@ -320,3 +320,125 @@ def test_status_reauth_url_encodes_the_operator(token_dir, fake_gmail, refresh_o
 
     body = _status("Flight Recorder")
     assert body["reauth_url"] == "/auth/gmail/authorize?operator=Flight%20Recorder"
+
+
+# ---------------------------------------------------------------------------
+# A 403 is a dead grant only when Google says the token lacks a scope
+# ---------------------------------------------------------------------------
+
+def _http_error_body(status, body):
+    return HttpError(httplib2.Response({"status": str(status)}), json.dumps(body).encode())
+
+
+RATE_LIMIT_403 = {"error": {
+    "code": 403, "message": "User Rate Limit Exceeded", "status": "PERMISSION_DENIED",
+    "errors": [{"domain": "usageLimits", "reason": "userRateLimitExceeded",
+                "message": "User Rate Limit Exceeded"}],
+}}
+GLOBAL_RATE_LIMIT_403 = {"error": {
+    "code": 403, "message": "Rate Limit Exceeded",
+    "errors": [{"domain": "usageLimits", "reason": "rateLimitExceeded"}],
+}}
+DAILY_LIMIT_403 = {"error": {
+    "code": 403, "message": "Daily Limit Exceeded",
+    "errors": [{"domain": "usageLimits", "reason": "dailyLimitExceeded"}],
+}}
+QUOTA_403 = {"error": {
+    "code": 403, "message": "Quota exceeded for quota metric 'Queries'.", "status": "PERMISSION_DENIED",
+    "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                 "reason": "RATE_LIMIT_EXCEEDED", "domain": "googleapis.com"}],
+}}
+SCOPE_403 = {"error": {
+    "code": 403, "message": "Request had insufficient authentication scopes.",
+    "status": "PERMISSION_DENIED",
+    "errors": [{"message": "Insufficient Permission", "domain": "global",
+                "reason": "insufficientPermissions"}],
+    "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                 "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "domain": "googleapis.com"}],
+}}
+
+
+@pytest.mark.parametrize("body", [RATE_LIMIT_403, GLOBAL_RATE_LIMIT_403, DAILY_LIMIT_403,
+                                  QUOTA_403, {"error": {"code": 403, "message": "nope"}}])
+def test_a_403_that_is_not_about_scopes_is_not_a_dead_grant(body):
+    assert service.reauth_error_code(_http_error_body(403, body)) is None
+
+
+@pytest.mark.parametrize("body", [
+    SCOPE_403,
+    {"error": {"code": 403, "errors": [{"reason": "insufficientPermissions"}]}},
+    {"error": {"code": 403, "details": [{"reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}},
+])
+def test_a_403_for_missing_scopes_is_a_dead_grant(body):
+    assert service.reauth_error_code(_http_error_body(403, body)) == "insufficient_scope"
+
+
+def test_status_for_a_rate_limited_probe_is_unverified_not_dead(token_dir, fake_gmail, refresh_ok):
+    # A quota blip must not push the operator to sign in again.
+    _write_token(token_dir, "Robin", expiry=_iso(NOW + timedelta(minutes=30)))
+    fake_gmail(_http_error_body(403, RATE_LIMIT_403))
+
+    body = _status("Robin")
+    assert body["connected"] is True
+    assert body["state"] == "unverified"
+    assert body["needs_reauth"] is False
+    assert body["reauth_url"] is None
+
+
+def test_status_for_a_scope_403_needs_reauth(token_dir, fake_gmail, refresh_ok):
+    _write_token(token_dir, "Robin", expiry=_iso(NOW + timedelta(minutes=30)))
+    fake_gmail(_http_error_body(403, SCOPE_403))
+
+    body = _status("Robin")
+    assert body["connected"] is False
+    assert body["needs_reauth"] is True
+    assert body["error"] == "insufficient_scope"
+
+
+def test_a_gmail_tool_rate_limit_error_carries_the_real_error_not_reconnect():
+    text = service._api_error("Search failed", "Robin", _http_error_body(403, RATE_LIMIT_403))
+    assert "Reconnect" not in text
+    assert "Rate Limit" in text
+
+
+# ---------------------------------------------------------------------------
+# Disconnect works for the token the status calls unreadable
+# ---------------------------------------------------------------------------
+
+def test_disconnect_removes_an_unreadable_token_file(token_dir):
+    from Orchestrator.routes import gmail_routes
+
+    token_dir.mkdir(parents=True, exist_ok=True)
+    (token_dir / "Robin.json").write_text("{not json")
+    assert _status("Robin")["error"] == "token_unreadable"
+
+    resp = asyncio.run(gmail_routes.gmail_disconnect("Robin"))
+
+    assert resp.status_code == 200
+    assert json.loads(resp.body)["disconnected"] is True
+    assert not (token_dir / "Robin.json").exists()
+    assert _status("Robin")["state"] == "not_connected"
+
+
+# ---------------------------------------------------------------------------
+# The token store lives under the project root, whatever the process CWD
+# ---------------------------------------------------------------------------
+
+def test_token_store_resolves_under_the_project_root_not_the_cwd(tmp_path, monkeypatch):
+    from Orchestrator.utils import paths
+
+    root = tmp_path / "box"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(service, "TOKEN_DIR", None)  # the default: resolved on use
+    monkeypatch.setenv("BLACKBOX_ROOT", str(root))
+    monkeypatch.chdir(elsewhere)
+    paths.blackbox_root.cache_clear()
+    try:
+        assert service._token_path("Robin") == root / "Manifest" / "gmail_tokens" / "Robin.json"
+        service.save_tokens("Robin", {"refresh_token": "r"})
+        assert (root / "Manifest" / "gmail_tokens" / "Robin.json").exists()
+        assert not (elsewhere / "Manifest").exists()
+    finally:
+        paths.blackbox_root.cache_clear()

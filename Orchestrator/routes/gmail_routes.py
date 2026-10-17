@@ -231,7 +231,12 @@ async def gmail_status(operator: str):
 @app.post("/gmail/disconnect/{operator}")
 async def gmail_disconnect(operator: str):
     """Remove Gmail tokens for an operator (logout)."""
-    was_connected = is_connected(operator)
+    try:
+        was_connected = is_connected(operator)
+    except (OSError, ValueError):
+        # An unreadable token file (status: needs_reauth/token_unreadable) is
+        # exactly what Disconnect is offered for: remove it regardless.
+        was_connected = False
     delete_tokens(operator)
 
     print(f"[Gmail] Disconnected operator: {operator} (was_connected={was_connected})")

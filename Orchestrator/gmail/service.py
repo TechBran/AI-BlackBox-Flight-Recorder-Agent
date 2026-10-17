@@ -18,6 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from Orchestrator.config import GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET
+from Orchestrator.utils.paths import resolve
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -29,8 +30,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
-# Created lazily (owner-only) by save_tokens, not at import.
-TOKEN_DIR = Path("Manifest/gmail_tokens")
+# The token store. None = Manifest/gmail_tokens under the project root
+# (BLACKBOX_ROOT first), resolved on use rather than relative to the process
+# CWD; created lazily (owner-only) by save_tokens, not at import. Tests point it
+# at a temp dir.
+TOKEN_DIR: Optional[Path] = None
 
 
 class GoogleReauthRequired(RefreshError):
@@ -77,10 +81,12 @@ def reauth_error_code(exc: BaseException) -> Optional[str]:
     """The error code when ``exc`` proves the stored grant is unusable, else None.
 
     Dead grant: a non-retryable RefreshError (raised by our refresh or by the
-    API transport's own 401-refresh), an HTTP 401, or an HTTP 403 for missing
-    scopes (fixed by re-consenting). Anything else — network trouble, a 5xx, a
-    Google API that is disabled in the Cloud project — says nothing about the
-    grant, so it returns None and nobody is told to sign in again.
+    API transport's own 401-refresh), an HTTP 401, or an HTTP 403 whose body
+    says the token lacks a scope (fixed by re-consenting). Anything else —
+    network trouble, a 5xx, a 403 rate/quota limit (Gmail answers those with
+    403, not 429), a Google API that is disabled in the Cloud project, a 403
+    whose reason is unknown — says nothing about the grant, so it returns None
+    and nobody is told to sign in again.
     """
     if isinstance(exc, GoogleReauthRequired):
         return exc.code
@@ -95,8 +101,8 @@ def reauth_error_code(exc: BaseException) -> Optional[str]:
         if status == 401:
             return "unauthorized"
         if status == 403:
-            from Orchestrator.google_workspace._errors import _is_service_disabled
-            return None if _is_service_disabled(exc) else "insufficient_scope"
+            from Orchestrator.google_workspace._errors import _is_scope_insufficient
+            return "insufficient_scope" if _is_scope_insufficient(exc) else None
     return None
 
 
@@ -161,7 +167,8 @@ def token_data_from_credentials(creds) -> dict:
 def _token_path(operator: str) -> Path:
     """Get token file path for an operator."""
     safe_name = operator.replace("/", "_").replace("\\", "_")
-    return TOKEN_DIR / f"{safe_name}.json"
+    token_dir = TOKEN_DIR if TOKEN_DIR is not None else resolve("Manifest", "gmail_tokens")
+    return token_dir / f"{safe_name}.json"
 
 
 def save_tokens(operator: str, token_data: dict):
