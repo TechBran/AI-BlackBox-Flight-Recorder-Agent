@@ -626,7 +626,9 @@ async function initApp() {
     console.log('[Portal] Phase 1: Foundation...');
     await initProviderModelSelectors();
     initClaudeModelSelector();
-    initOperatorSelector();
+    // Resolved from GET /operators; awaited below before anything that needs the
+    // operator (the agent-session restores) so they never run against nobody.
+    const operatorReady = initOperatorSelector();
 
     // Phase 2: UI Components
     console.log('[Portal] Phase 2: UI Components...');
@@ -750,8 +752,10 @@ async function initApp() {
     initParticleModeControl();     // build the field picker FROM THE EFFECT REGISTRY (never a hard-coded list)
     initParticleTuningControls();  // wire the Intensity slider + Quality tier (persisted, fx/tuning.js)
 
-    // Check for existing agent session
+    // Check for existing agent sessions — for the resolved operator only
+    await operatorReady;
     await checkExistingAgentSession();
+    await checkExistingGeminiAgentSession();
 
     // Check for running Computer Use background task
     await checkCUBackgroundStatus();

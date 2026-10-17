@@ -4,7 +4,7 @@
  */
 
 import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr } from './core-utils.js';
-import { getOperator } from './state-management.js';
+import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { openWizard } from './telephony-wizard.js';
 
 // =============================================================================
@@ -499,6 +499,12 @@ function handleFormSave() {
         document.getElementById('gwFormIP')?.focus();
         return;
     }
+    // The gateway is persisted as this operator's: never under a made-up owner.
+    const owner = getOperator();
+    if (!owner) {
+        toastError(OPERATOR_REQUIRED_MESSAGE);
+        return;
+    }
 
     const config = {
         name,
@@ -509,7 +515,7 @@ function handleFormSave() {
         codec,
         http_user: httpUser || null,
         ami_user: amiUser || null,
-        operator: getOperator() || 'Brandon'
+        operator: owner
     };
 
     // Send-on-change: only include secrets when actually entered.

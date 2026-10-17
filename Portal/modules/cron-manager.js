@@ -189,7 +189,7 @@ async function fetchContacts() {
     try {
         // Fresh-box-safe operator fallback: current operator → server-driven
         // operator list head → empty (NEVER a hardcoded person's name).
-        const operator = getOperator() || window.__operator || (_operatorList && _operatorList[0]) || '';
+        const operator = getOperator() || (_operatorList && _operatorList[0]) || '';
         const resp = await fetch(`/api/cron/contacts?operator=${encodeURIComponent(operator)}`);
         if (!resp.ok) return [];
         const data = await resp.json();

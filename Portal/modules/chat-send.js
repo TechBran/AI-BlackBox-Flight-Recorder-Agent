@@ -8,7 +8,7 @@
  */
 
 import { $, toast, escapeAttr } from './core-utils.js';
-import { getHistoryData, setHistoryData, saveHistory, loadHistory, getOperator } from './state-management.js';
+import { getHistoryData, setHistoryData, saveHistory, loadHistory, getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
 import { addBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
@@ -818,7 +818,7 @@ export function finalizeStreamingBubble(bubble, fullResponse, fullThinking) {
         showNotification("\uD83D\uDCAC AI Response Ready", {
             body: responsePreview + (fullResponse.length > 50 ? '...' : ''),
             tag: "chat-complete",
-            operator: window.__operator
+            operator: getOperator()
         });
     }
 
@@ -1644,9 +1644,9 @@ export async function pollVideoTasks() {
 
             if (data.status === 'completed' && data.result_url) {
                 const parentBubble = placeholder.closest('.bubble');
-                const taskOperator = data.result_data?.operator || window.__operator;
-                const currentOperator = getOperator() || window.__operator || 'Brandon';
-                const isOwnTask = !taskOperator || taskOperator === currentOperator;
+                const taskOperator = data.result_data?.operator;
+                const currentOperator = getOperator();
+                const isOwnTask = !taskOperator || !currentOperator || taskOperator === currentOperator;
 
                 const videoHTML = `<video src="${escapeAttr(data.result_url)}" controls preload="metadata" class="generated-video" style="max-width: 100%; border-radius: 8px; margin: 8px 0;">Your browser does not support the video tag.</video>`;
                 placeholder.outerHTML = videoHTML;
@@ -1690,9 +1690,9 @@ export async function pollImageTasks() {
             if (data.status === 'completed' && data.result_url) {
                 const parentBubble = placeholder.closest('.bubble');
                 const parentElement = placeholder.parentElement;
-                const taskOperator = data.result_data?.operator || window.__operator;
-                const currentOperator = getOperator() || window.__operator || 'Brandon';
-                const isOwnTask = !taskOperator || taskOperator === currentOperator;
+                const taskOperator = data.result_data?.operator;
+                const currentOperator = getOperator();
+                const isOwnTask = !taskOperator || !currentOperator || taskOperator === currentOperator;
 
                 // Built with DOM APIs: the URL never becomes markup or a CSS selector.
                 const newImage = document.createElement('img');
@@ -1741,9 +1741,9 @@ export async function pollMusicTasks() {
 
             if (data.status === 'completed' && data.result_url) {
                 const parentBubble = placeholder.closest('.bubble');
-                const taskOperator = data.result_data?.operator || window.__operator;
-                const currentOperator = getOperator() || window.__operator || 'Brandon';
-                const isOwnTask = !taskOperator || taskOperator === currentOperator;
+                const taskOperator = data.result_data?.operator;
+                const currentOperator = getOperator();
+                const isOwnTask = !taskOperator || !currentOperator || taskOperator === currentOperator;
 
                 const audioHTML = `<div class="audio-result" style="margin: 8px 0;">
                     <span class="audio-label" style="font-size: 13px; font-weight: 600; color: #27d980;">\uD83C\uDFB5 Generated Music</span>
@@ -1820,6 +1820,13 @@ export async function send() {
         return;
     }
 
+    // Every turn is the resolved operator's: with none picked yet (several on the box,
+    // or none), nothing is sent and the draft stays put.
+    if (!getOperator()) {
+        toast(OPERATOR_REQUIRED_MESSAGE);
+        return;
+    }
+
     // Handle agents provider (Claude Code CLI) via WebSocket
     if (window.__provider === 'agents') {
         console.log('[Agent] send() called, provider is agents, txt:', txt);
@@ -1829,7 +1836,7 @@ export async function send() {
 
         toast(`[DEBUG v103] Agent mode: ${attachedFiles.length} file(s) attached`);
 
-        if (agentHandler && agentHandler.isActive()) {
+        if (agentHandler && agentHandler.isActive() && agentHandler.belongsTo(getOperator())) {
             console.log('[Agent] Active session detected, sending input to existing session');
 
             let inputPrompt = txt;
@@ -2011,7 +2018,7 @@ export async function send() {
         let geminiHandler = getGeminiAgentHandler();
         console.log('[GeminiAgent] geminiHandler exists:', !!geminiHandler);
 
-        if (geminiHandler && geminiHandler.isActive()) {
+        if (geminiHandler && geminiHandler.isActive() && geminiHandler.belongsTo(getOperator())) {
             console.log('[GeminiAgent] Active session detected, sending input to existing session');
 
             let inputPrompt = txt;

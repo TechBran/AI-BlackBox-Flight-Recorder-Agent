@@ -45,12 +45,12 @@ export function vibrate(pattern = [200]) {
  * @returns {Notification|undefined} The notification object if created
  */
 export function showNotification(title, options = {}) {
-    // Use getOperator() which reads from localStorage - more reliable than window.__operator
-    const currentOperator = getOperator() || window.__operator || 'Brandon';
+    const currentOperator = getOperator();
     console.log('[DEBUG] showNotification called:', { title, options, androidBridge: typeof AndroidBridge, currentOperator });
 
-    // Check operator filtering - only notify if task belongs to current operator
-    if (options.operator && options.operator !== currentOperator) {
+    // Check operator filtering - only notify if task belongs to current operator.
+    // A page with no resolved operator yet filters nothing (it owns every task).
+    if (options.operator && currentOperator && options.operator !== currentOperator) {
         console.log(`[Notifications] Skipping - task belongs to ${options.operator}, current operator is ${currentOperator}`);
         return;
     }
@@ -137,7 +137,7 @@ export function notifyNewMessage(messagePreview) {
  * @param {string} [taskOperator=null] - Operator who initiated the task
  */
 export function notifyTaskComplete(taskType, success = true, taskOperator = null) {
-    console.log('[DEBUG] notifyTaskComplete called:', { taskType, success, taskOperator, currentOperator: window.__operator });
+    console.log('[DEBUG] notifyTaskComplete called:', { taskType, success, taskOperator, currentOperator: getOperator() });
 
     if (success) {
         // Success vibration (two short pulses)

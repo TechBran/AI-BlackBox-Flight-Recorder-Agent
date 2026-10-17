@@ -6,6 +6,8 @@
  * Refactored: 2025-12-20
  */
 
+import { toast } from './core-utils.js';
+
 // =============================================================================
 // Storage Keys
 // =============================================================================
@@ -46,6 +48,31 @@ export function getOperator() {
  */
 export function setOperator(name) {
     localStorage.setItem(OP_STORE, (name || "").trim());
+}
+
+/** What a send, a session start or an ownership write says while no operator is resolved. */
+export const OPERATOR_REQUIRED_MESSAGE = "Select an operator first";
+
+/**
+ * Decide the active operator from the box's roster (GET /operators). The ONE rule the
+ * clients share (Android: OperatorResolver.resolve), so no client ever falls back to a
+ * name the box does not have (A09-data-local-model-05, P01-chat-core-web-14):
+ *  - the persisted pick, while the box still lists it;
+ *  - otherwise the box's only person; reserved overseers (the Flight Recorder) are
+ *    never anyone's operator by default, so they do not count;
+ *  - otherwise nobody: several people -> the operator picks (needsSelection), none ->
+ *    guidance to add one (noOperators). The server default is never adopted silently.
+ * @param {{persisted?: string, operators?: string[], reserved?: string[]}} [roster]
+ * @returns {{operator: string, needsSelection: boolean, noOperators: boolean}}
+ */
+export function chooseOperator({ persisted = "", operators = [], reserved = [] } = {}) {
+    const list = Array.isArray(operators) ? operators : [];
+    const held = (persisted || "").trim();
+    if (held && list.includes(held)) return { operator: held, needsSelection: false, noOperators: false };
+    const overseers = Array.isArray(reserved) ? reserved : [];
+    const people = list.filter(name => !overseers.includes(name));
+    if (people.length === 1) return { operator: people[0], needsSelection: false, noOperators: false };
+    return { operator: "", needsSelection: people.length > 1, noOperators: people.length === 0 };
 }
 
 /**
@@ -439,8 +466,7 @@ const MODEL_CONFIG = {
         models: [  // Offline fallback — replaced by /models/xai fetch
             { id: "", name: "(Auto - Latest)", default: true },
             { id: "grok-4.3", name: "Grok 4.3" },
-            { id: "grok-4.20-multi-agent-0309", name: "Grok 4.20 Multi-Agent" },
-            { id: "grok-3-mini-beta", name: "Grok 3 Mini (legacy, cheap)" }
+            { id: "grok-4.20-multi-agent-0309", name: "Grok 4.20 Multi-Agent" }
         ]
     },
     custom: {
@@ -737,25 +763,26 @@ function abbreviateOperator(name) {
 }
 
 /**
- * Initialize operator selector dropdown
- * Note: This function doesn't handle session switching to avoid circular dependencies.
- * The onchange handler should be extended by app-init.js if needed.
+ * Initialize operator selector dropdown from GET /operators, resolving the active
+ * operator with [chooseOperator]. Several people and no valid pick leave the operator
+ * unresolved ("") behind a "Select operator…" placeholder until the operator picks;
+ * sends and session starts refuse meanwhile. An unreachable box keeps the persisted pick.
+ * Note: This function doesn't handle session switching to avoid circular dependencies;
+ * a pick dispatches `bbx:operator-changed` (detail.operator) for modules that care.
+ * @returns {Promise<string>} the active operator ("" while unresolved)
  */
 export async function initOperatorSelector() {
     try {
-        const r = await fetch("/health");
+        const r = await fetch("/operators");
         const j = await r.json();
-        const serverOps = (j.users && Array.isArray(j.users.list)) ? j.users.list : [];
+        const serverOps = Array.isArray(j.operators)
+            ? j.operators.filter(n => typeof n === "string" && n.trim())
+            : [];
 
         // Reserved operators (Flight Recorder) — additive `reserved` key on
         // GET /operators (design 2026-07-23 §10). Never hardcode the name;
         // graceful [] on older servers.
-        let reservedOps = [];
-        try {
-            const ro = await fetch("/operators");
-            const rj = await ro.json();
-            if (Array.isArray(rj.reserved)) reservedOps = rj.reserved;
-        } catch (_) { /* older server — no pinning */ }
+        const reservedOps = Array.isArray(j.reserved) ? j.reserved : [];
 
         // Reserved pinned at the top of the dropdown, rest in server order.
         const allOps = [
@@ -763,10 +790,23 @@ export async function initOperatorSelector() {
             ...serverOps.filter(n => !reservedOps.includes(n)),
         ];
 
-        const def = (j.users && j.users.default) ? j.users.default : (allOps[0] || "Operator");
+        const choice = chooseOperator({ persisted: getOperator(), operators: allOps, reserved: reservedOps });
+        // "" clears a pick the box no longer lists, so it is never sent.
+        setOperator(choice.operator);
+        let active = choice.operator;
+
         const sel = document.getElementById("operatorSelect");
-        if (!sel) return;
+        if (!sel) return active;
         sel.innerHTML = "";
+
+        // Unresolved: a placeholder holds the empty value until the operator picks.
+        if (!active) {
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.disabled = true;
+            placeholder.textContent = choice.noOperators ? "No operators" : "Select operator…";
+            sel.appendChild(placeholder);
+        }
 
         // Add all operators with abbreviated display text
         allOps.forEach(name => {
@@ -787,10 +827,12 @@ export async function initOperatorSelector() {
         addOpt.style.color = "var(--accent)";
         sel.appendChild(addOpt);
 
-        const persisted = getOperator();
-        const active = (persisted && allOps.includes(persisted)) ? persisted : def;
         sel.value = active;
-        setOperator(active);
+        if (choice.needsSelection) {
+            toast("Several operators share this BlackBox. Select yours to start.");
+        } else if (choice.noOperators) {
+            toast("No operators on this BlackBox yet. Choose + Add... to create one.");
+        }
 
         sel.onchange = () => {
             if (sel.value === "__add__") {
@@ -801,8 +843,10 @@ export async function initOperatorSelector() {
                 sel.value = active;
             } else {
                 const newOperator = sel.value;
+                if (!newOperator) return;
+                active = newOperator;
                 setOperator(newOperator);
-                window.__operator = newOperator;
+                window.dispatchEvent(new CustomEvent("bbx:operator-changed", { detail: { operator: newOperator } }));
                 // Refresh health to update checkpoint counter for new operator
                 import('./ui-setup.js').then(({ refreshHealth }) => refreshHealth());
                 // Sync voice dropdown to new operator's preference
@@ -811,7 +855,9 @@ export async function initOperatorSelector() {
                 import('./tts-stt.js').then(m => m.syncSystemPromptTextarea && m.syncSystemPromptTextarea());
             }
         };
+        return active;
     } catch (e) {
         console.warn("initOperatorSelector failed:", e);
+        return getOperator();
     }
 }

@@ -142,10 +142,12 @@ async function fetchUnreadCount() {
     }
 }
 
+// An empty sms_model is "Auto": the box answers with its own configured default for
+// the provider, so the inbox never pins a model id that later retires.
 async function fetchPreferences() {
     const op = getOperator();
     const res = await fetch(`/sms/preferences?operator=${encodeURIComponent(op)}`);
-    if (!res.ok) return { sms_provider: 'anthropic', sms_model: 'claude-sonnet-4-5' };
+    if (!res.ok) return { sms_provider: 'anthropic', sms_model: '' };
     return await res.json();
 }
 
@@ -181,7 +183,7 @@ function renderThreadList(threads) {
             <option value="openai">OpenAI</option>
             <option value="xai">xAI</option>
         </select>
-        <input type="text" id="smsModelInput" class="sms-prefs-input" placeholder="Model name" />
+        <input type="text" id="smsModelInput" class="sms-prefs-input" placeholder="Auto (box default)" />
     </div>`;
 
     if (!threads.length) {
@@ -250,8 +252,11 @@ function _wireThreadListEvents(el) {
     const modInput = $('smsModelInput');
     if (provSel) {
         provSel.addEventListener('change', async () => {
-            const model = $('smsModelInput')?.value || '';
-            await savePreferences(provSel.value, model);
+            // A new provider starts on Auto: the previous provider's model id is
+            // foreign to it (a Claude id sent to OpenAI fails every reply).
+            const field = $('smsModelInput');
+            if (field) field.value = '';
+            await savePreferences(provSel.value, '');
             toastSuccess('SMS provider updated');
         });
     }
@@ -582,7 +587,7 @@ export async function openSMSInbox() {
         const provSel = $('smsProviderSelect');
         const modInput = $('smsModelInput');
         if (provSel) provSel.value = prefs.sms_provider || 'anthropic';
-        if (modInput) modInput.value = prefs.sms_model || 'claude-sonnet-4-5';
+        if (modInput) modInput.value = prefs.sms_model || '';
     } catch (_) {}
 
     startPolling();

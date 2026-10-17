@@ -8,7 +8,7 @@
  */
 
 import { $, toast, escapeHtml as sharedEscapeHtml } from './core-utils.js';
-import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession } from './state-management.js';
+import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
 import { markdownToSafeHtml, markdownCodeSpan } from './markdown-renderer.js';
 import { sanitizeAssistantHtml } from './sanitize.js';
@@ -215,8 +215,8 @@ export class AgentChatHandler {
      */
     confirmNewSession() {
         console.log('[Agent] Starting new session');
-        const operator = this.currentOperator || window.__operator || 'Brandon';
-        clearOperatorSession(operator);
+        const operator = this.currentOperator || getOperator();
+        if (operator) clearOperatorSession(operator);
         todoTracker.clear();  // Clear todo tracker for new session
         statusLine.reset();   // Reset status line for new session
         this.endSession();
@@ -357,7 +357,7 @@ export class AgentChatHandler {
 
                     this.ws.send(JSON.stringify({
                         type: 'reconnect',
-                        operator: this.currentOperator || window.__operator || 'Brandon'
+                        operator: this.currentOperator || getOperator()
                     }));
                 };
 
@@ -393,7 +393,15 @@ export class AgentChatHandler {
      * @param {string} operator - Operator name
      */
     async startSession(prompt, operator) {
-        this.currentOperator = operator || window.__operator || 'Brandon';
+        const op = operator || getOperator();
+        if (!op) {
+            toast(OPERATOR_REQUIRED_MESSAGE);
+            return;
+        }
+        // An operator switch never continues the previous operator's session: let go of
+        // it so this operator's own persisted session (or a fresh one) is used below.
+        if (this.currentOperator && this.currentOperator !== op) this._releaseSession();
+        this.currentOperator = op;
 
         const persistedSessionId = getOperatorSession(this.currentOperator);
         const isNewSession = !this.hasActiveSession || !this.sessionId;
@@ -467,7 +475,7 @@ export class AgentChatHandler {
             const message = {
                 type: 'prompt',
                 text: prompt,
-                operator: operator || window.__operator || 'Brandon',
+                operator: this.currentOperator,
                 working_dir: null,
                 model: selectedModel,
                 // The banner's mode switch: plan = read-only, yolo = every tool approved.
@@ -1532,7 +1540,7 @@ export class AgentChatHandler {
                         this.ws.send(JSON.stringify({
                             type: 'prompt',
                             text: text,
-                            operator: window.__operator || 'Brandon',
+                            operator: this.currentOperator || getOperator(),
                             model: selectedModel,
                             ...permissionPayload(this.permissionMode)
                         }));
@@ -1607,6 +1615,37 @@ export class AgentChatHandler {
         const active = wsOpen || this.hasActiveSession;
         console.log(`[Agent] isActive() = ${active}, hasActiveSession=${this.hasActiveSession}, wsOpen=${wsOpen}`);
         return active;
+    }
+
+    /**
+     * Whether this session may take [operator]'s next prompt: it has no owner yet or is
+     * theirs. Another operator's prompt starts (or restores) their own session instead.
+     * @param {string} operator - Operator about to send
+     * @returns {boolean}
+     */
+    belongsTo(operator) {
+        return !this.currentOperator || this.currentOperator === operator;
+    }
+
+    /**
+     * Let go of the current session WITHOUT ending it server-side (it stays the previous
+     * operator's to resume): the socket is closed quietly so its close handler cannot
+     * start a reconnect loop for the session that replaces it.
+     */
+    _releaseSession() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        if (this.ws) {
+            this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null;
+            try { this.ws.close(1000); } catch (_) { /* already closed */ }
+            this.ws = null;
+        }
+        this.sessionId = null;
+        this.hasActiveSession = false;
+        this.isStreaming = false;
+        this.messageCount = 0;
     }
 
     /**
@@ -1877,10 +1916,13 @@ export function setAgentHandler(handler) {
 
 /**
  * Check for existing agent session on page load
- * Restores the last session ID per operator from localStorage
+ * Restores the last session ID per operator from localStorage. Runs once the
+ * operator is resolved (app-init awaits initOperatorSelector); with no operator
+ * there is nobody's session to look for, so it neither probes nor restores.
  */
 export async function checkExistingAgentSession() {
-    const operator = window.__operator || 'Brandon';
+    const operator = getOperator();
+    if (!operator) return;
 
     const persistedSessionId = getOperatorSession(operator);
     if (persistedSessionId) {
@@ -1888,7 +1930,7 @@ export async function checkExistingAgentSession() {
     }
 
     try {
-        const resp = await fetch(`/agent/session/${operator}`);
+        const resp = await fetch(`/agent/session/${encodeURIComponent(operator)}`);
         if (resp.ok) {
             const data = await resp.json();
             if (data.session && data.session.status !== 'completed') {
@@ -2020,10 +2062,27 @@ function openAppPreviewSimple(port, name) {
 }
 
 /**
- * Initialize agent handler on DOM ready
+ * Initialize agent handler on DOM ready. The session restore is NOT started here:
+ * app-init runs checkExistingAgentSession once the operator is resolved (a second,
+ * earlier run probed before the operator was known and raced the first).
  */
 export function initAgentHandler() {
     initAppPreviewModal();
     loadRegisteredApps();
-    checkExistingAgentSession();
+    window.addEventListener('bbx:operator-changed', restoreAgentSessionForOperatorSwitch);
+}
+
+/**
+ * An operator switch restores THAT operator's session: the previous operator's is let
+ * go (not ended — it stays theirs to resume) and the new one's is looked up. A turn
+ * that is still streaming keeps its operator; the next send switches instead.
+ */
+export async function restoreAgentSessionForOperatorSwitch() {
+    const handler = agentHandler;
+    if (handler && handler.isStreaming) return;
+    if (handler && handler.currentOperator && !handler.belongsTo(getOperator())) {
+        handler._releaseSession();
+        handler.updateBannerStatus('Ready');
+    }
+    await checkExistingAgentSession();
 }

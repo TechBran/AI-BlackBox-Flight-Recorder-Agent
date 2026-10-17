@@ -6,7 +6,7 @@
  */
 
 import { $, toast, escapeHtml as sharedEscapeHtml } from './core-utils.js';
-import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession } from './state-management.js';
+import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
 import { markdownToSafeHtml } from './markdown-renderer.js';
 import { sanitizeAssistantHtml } from './sanitize.js';
@@ -136,8 +136,8 @@ export class GeminiAgentHandler {
      */
     confirmNewSession() {
         console.log('[GeminiAgent] Starting new session');
-        const operator = this.currentOperator || window.__operator || 'Brandon';
-        clearOperatorSession(operator + '-gemini');
+        const operator = this.currentOperator || getOperator();
+        if (operator) clearOperatorSession(operator + '-gemini');
         this.endSession();
         toast('Gemini session cleared. Ready for new prompt.');
 
@@ -262,7 +262,15 @@ export class GeminiAgentHandler {
      * @param {string} operator - Operator name
      */
     async startSession(prompt, operator) {
-        this.currentOperator = operator || window.__operator || 'Brandon';
+        const op = operator || getOperator();
+        if (!op) {
+            toast(OPERATOR_REQUIRED_MESSAGE);
+            return;
+        }
+        // An operator switch never continues the previous operator's session: let go of
+        // it so this operator's own persisted session (or a fresh one) is used below.
+        if (this.currentOperator && this.currentOperator !== op) this._releaseSession();
+        this.currentOperator = op;
 
         const persistedSessionId = getOperatorSession(this.currentOperator + '-gemini');
 
@@ -329,7 +337,7 @@ export class GeminiAgentHandler {
             const message = {
                 type: 'prompt',
                 text: prompt,
-                operator: operator || window.__operator || 'Brandon',
+                operator: this.currentOperator,
                 working_dir: null,
                 yolo_mode: this.yoloMode,
                 resume_session: shouldResume  // Tell backend to use --resume latest
@@ -991,7 +999,7 @@ export class GeminiAgentHandler {
                         this.ws.send(JSON.stringify({
                             type: 'prompt',
                             text: text,
-                            operator: window.__operator || 'Brandon',
+                            operator: this.currentOperator || getOperator(),
                             yolo_mode: this.yoloMode
                         }));
                     };
@@ -1056,6 +1064,33 @@ export class GeminiAgentHandler {
         const wsOpen = this.ws && this.ws.readyState === WebSocket.OPEN;
         const active = wsOpen || this.hasActiveSession;
         return active;
+    }
+
+    /**
+     * Whether this session may take [operator]'s next prompt: it has no owner yet or is
+     * theirs. Another operator's prompt starts (or restores) their own session instead.
+     * @param {string} operator - Operator about to send
+     * @returns {boolean}
+     */
+    belongsTo(operator) {
+        return !this.currentOperator || this.currentOperator === operator;
+    }
+
+    /**
+     * Let go of the current session WITHOUT ending it server-side (it stays the previous
+     * operator's to resume): the socket is closed quietly so no handler of the old
+     * session runs against the one that replaces it.
+     */
+    _releaseSession() {
+        if (this.ws) {
+            this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null;
+            try { this.ws.close(1000); } catch (_) { /* already closed */ }
+            this.ws = null;
+        }
+        this.sessionId = null;
+        this.hasActiveSession = false;
+        this.isStreaming = false;
+        this.messageCount = 0;
     }
 
     /**
@@ -1125,10 +1160,13 @@ export function setGeminiAgentHandler(handler) {
 // =============================================================================
 
 /**
- * Check for existing Gemini agent session on page load
+ * Check for existing Gemini agent session on page load, once the operator is
+ * resolved (app-init awaits initOperatorSelector). With no operator there is
+ * nobody's session to look for, so it neither probes nor restores.
  */
 export async function checkExistingGeminiAgentSession() {
-    const operator = window.__operator || 'Brandon';
+    const operator = getOperator();
+    if (!operator) return;
 
     const persistedSessionId = getOperatorSession(operator + '-gemini');
     if (persistedSessionId) {
@@ -1136,7 +1174,7 @@ export async function checkExistingGeminiAgentSession() {
     }
 
     try {
-        const resp = await fetch(`/gemini-agent/session/${operator}`);
+        const resp = await fetch(`/gemini-agent/session/${encodeURIComponent(operator)}`);
         if (resp.ok) {
             const data = await resp.json();
             if (data.session && data.session.status !== 'completed') {
@@ -1170,8 +1208,25 @@ export async function checkExistingGeminiAgentSession() {
 }
 
 /**
- * Initialize Gemini agent handler
+ * Initialize Gemini agent handler. The boot-time session restore runs from app-init
+ * once the operator is resolved (checkExistingGeminiAgentSession); running it here
+ * probed before the operator was known.
  */
 export function initGeminiAgentHandler() {
-    checkExistingGeminiAgentSession();
+    window.addEventListener('bbx:operator-changed', restoreGeminiSessionForOperatorSwitch);
+}
+
+/**
+ * An operator switch restores THAT operator's Gemini session: the previous operator's
+ * is let go (not ended) and the new one's is looked up. A streaming turn keeps its
+ * operator; the next send switches instead.
+ */
+export async function restoreGeminiSessionForOperatorSwitch() {
+    const handler = geminiAgentHandler;
+    if (handler && handler.isStreaming) return;
+    if (handler && handler.currentOperator && !handler.belongsTo(getOperator())) {
+        handler._releaseSession();
+        handler.updateBannerStatus('Ready');
+    }
+    await checkExistingGeminiAgentSession();
 }

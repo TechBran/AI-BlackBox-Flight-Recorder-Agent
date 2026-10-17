@@ -522,7 +522,7 @@ function updateTaskMonitor(tasks) {
             showNotification("🎯 Tasks Completed", {
                 body: `${completedCount} task${completedCount > 1 ? 's' : ''} finished! ${currentCount} remaining.`,
                 tag: "task-progress",
-                operator: window.__operator
+                operator: getOperator()
             });
         });
     }
