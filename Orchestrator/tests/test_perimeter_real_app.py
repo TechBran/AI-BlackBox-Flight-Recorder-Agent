@@ -20,12 +20,13 @@ import re
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.routing import Mount, WebSocketRoute
+from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 import Orchestrator.app  # noqa: F401 — registers every route on the shared app
 from Orchestrator.checkpoint import app
 from Orchestrator.security.origin_guard import (
+    REFUSED_CROSS_SITE,
     REFUSED_HOST,
     REFUSED_ORIGIN,
     OriginGuardMiddleware,
@@ -54,6 +55,27 @@ def _ws_paths():
 
 
 WS_PATHS = _ws_paths()
+
+
+def _get_paths():
+    """Every GET route path, plus each static mount's root."""
+    out = []
+
+    def walk(routes, prefix=""):
+        for r in routes:
+            if isinstance(r, Route) and "GET" in (r.methods or ()):
+                out.append(prefix + r.path)
+            elif isinstance(r, Mount):
+                if getattr(r, "routes", None):
+                    walk(r.routes, prefix + r.path)
+                else:
+                    out.append(prefix + r.path + "/")
+
+    walk(app.router.routes)
+    return sorted(set(out))
+
+
+GET_PATHS = _get_paths()
 
 
 def _concrete(path):
@@ -207,3 +229,78 @@ def test_cors_preflight_for_foreign_origin_refused(client):
         "origin": EVIL, "access-control-request-method": "POST"})
     assert r.status_code == 403
     assert "access-control-allow-origin" not in r.headers
+
+
+
+# ------------------------------------------- cross-site GET (no Origin sent)
+
+CROSS_SITE = {"sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image"}
+
+# The only real routes a foreign page may load or link (no Origin): pages and
+# files with no side effect. A new entry here needs the same justification
+# as the allow-list in origin_guard.py.
+CROSS_SITE_EMBEDDABLE = {
+    "/", "/artifacts/{artifact_id}", "/auth/gmail/callback",
+    "/ui/", "/onboarding/",
+}
+
+
+def test_get_enumeration_finds_known_routes():
+    must = {"/agent/apps", "/sms/messages", "/onboarding/logs/stream",
+            "/app-proxy/{port}/{path:path}", "/ui/", "/onboarding/"}
+    assert must <= set(GET_PATHS), sorted(must - set(GET_PATHS))
+
+
+def test_cross_site_allow_list_matches_only_read_only_routes():
+    allowed = {p for p in GET_PATHS if _installed_policy().cross_site_get_allowed(_concrete(p))}
+    assert allowed == CROSS_SITE_EMBEDDABLE
+
+
+class _HttpStub:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, scope, receive, send):
+        self.calls.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"reached"})
+
+
+@pytest.mark.parametrize("route", sorted(set(GET_PATHS) - CROSS_SITE_EMBEDDABLE))
+def test_every_get_route_refuses_cross_site_loads(route):
+    """An <img src=...> or link from a foreign page: no Origin, so only
+    Sec-Fetch-Site gives it away. The installed policy around a stub, so a
+    regression can never run a real handler (journalctl --follow, live
+    provider probes) from the test."""
+    stub = _HttpStub()
+    guarded = TestClient(OriginGuardMiddleware(stub, policy=_installed_policy()))
+    r = guarded.get(_concrete(route), headers=CROSS_SITE)
+    assert r.status_code == 403, (route, r.status_code, r.text[:200])
+    assert r.json()["detail"] == REFUSED_CROSS_SITE
+    assert stub.calls == []
+
+
+def test_real_app_refuses_a_cross_site_load(client):
+    """...and the real middleware stack does it before routing."""
+    r = client.get("/agent/apps", headers=CROSS_SITE)
+    assert r.status_code == 403
+    assert r.json()["detail"] == REFUSED_CROSS_SITE
+
+
+@pytest.mark.parametrize("route", sorted(CROSS_SITE_EMBEDDABLE))
+def test_embeddable_routes_still_load_cross_site(route):
+    stub = _HttpStub()
+    guarded = TestClient(OriginGuardMiddleware(stub, policy=_installed_policy()))
+    path = _concrete(route)
+    assert guarded.get(path, headers=CROSS_SITE).status_code == 200
+    assert stub.calls == [path]
+
+
+@pytest.mark.parametrize("route", GET_PATHS)
+def test_every_get_route_admits_native_and_same_origin_clients(route):
+    stub = _HttpStub()
+    guarded = TestClient(OriginGuardMiddleware(stub, policy=_installed_policy()))
+    path = _concrete(route)
+    assert guarded.get(path).status_code == 200                       # Android, MCP, cron
+    assert guarded.get(path, headers={"sec-fetch-site": "same-origin"}).status_code == 200
+    assert stub.calls == [path, path]

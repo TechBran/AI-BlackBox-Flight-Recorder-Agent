@@ -22,6 +22,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from Orchestrator.security.origin_guard import (
+    REFUSED_CROSS_SITE,
     REFUSED_HOST,
     REFUSED_ORIGIN,
     OriginGuardMiddleware,
@@ -311,6 +312,90 @@ def test_null_origin_refused_everywhere_else(client, rec, path):
 def test_foreign_origin_refused_on_user_app_proxy_too(client, rec):
     assert _get(client, path="/app-proxy/8065/", origin="https://evil.example").status_code == 403
     assert rec.calls == []
+
+
+# ------------------------------------------- cross-site GET (no Origin at all)
+#
+# An <img>, <script>, <link>, <iframe>, a link click or window.open from a
+# foreign page sends a GET with NO Origin header, so the Origin tier above
+# never sees it. The browser still says where it came from in Sec-Fetch-Site.
+
+XS = {"sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image"}
+XS_NAV = {"sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document"}
+
+
+@pytest.mark.parametrize("path", [
+    "/chat/stream?messages=%5B%5D", "/internet/speed-test", "/sms/messages?operator=a&phone=1",
+    "/agent/apps", "/onboarding/state", "/onboarding/config/OPENAI_API_KEY",
+    "/onboarding/logs/stream", "/browser/screenshot/live", "/docs", "/openapi.json",
+    "/auth/gmail/authorize?operator=a",
+    "/app-proxy/9097/",              # zellij is not a user app
+    "/app-proxy/8066/",              # not registered
+    "/uix/x.png", "/ui-evil/x.png", "/artifactsx/a", "/onboarding/x/../state",
+    "/ui/../chat/stream",            # dot segments: never on the allow-list
+    "/app-proxy/8065/../../chat/stream",
+])
+@pytest.mark.parametrize("headers", [XS, XS_NAV], ids=["subresource", "navigation"])
+def test_cross_site_get_without_origin_refused(client, rec, path, headers):
+    r = _get(client, path=path, **headers)
+    assert r.status_code == 403, (path, r.text)
+    assert r.json()["detail"] == REFUSED_CROSS_SITE
+    assert rec.calls == []
+
+
+def test_cross_site_head_refused_too(client, rec):
+    r = client.head("/agent/apps", headers={"host": f"{LAN}:9091", **XS})
+    assert r.status_code == 403
+    assert rec.calls == []
+
+
+@pytest.mark.parametrize("path", [
+    "/", "/ui", "/ui/", "/ui/index.html", "/ui/uploads/x.png", "/ui/uploads/sessions/s1/clip.wav",
+    "/artifacts/op_0123abcd_notes.md",
+    "/onboarding", "/onboarding/", "/onboarding/index.html",
+    "/auth/gmail/callback?code=c&state=s",      # Google's OAuth redirect lands cross-site
+    "/app-proxy/8065/", "/app-proxy/8065/style.css",   # the sandboxed app preview's own loads
+])
+def test_cross_site_get_allowed_on_embeddable_paths(client, rec, path):
+    r = _get(client, path=path, **XS_NAV)
+    assert r.status_code == 200, (path, r.text)
+    assert rec.calls == [path.split("?", 1)[0]]
+
+
+@pytest.mark.parametrize("site", ["same-origin", "same-site", "none", None])
+def test_non_cross_site_get_passes(client, rec, site):
+    """same-origin: the Portal itself; same-site: a user app on this host;
+    none: a typed URL or bookmark; absent: every native client (Android
+    OkHttp, MCP, cron, curl) and older browsers."""
+    extra = {} if site is None else {"sec-fetch-site": site}
+    assert _get(client, path="/agent/apps", **extra).status_code == 200
+    assert rec.calls == ["/agent/apps"]
+
+
+def test_cross_site_post_left_to_the_origin_tier(client, rec):
+    """Browsers always send Origin on a cross-site POST; that tier decides."""
+    r = client.post("/agent/apps", headers={"host": f"{LAN}:9091", "origin": "https://evil.example", **XS})
+    assert r.status_code == 403
+    assert r.json()["detail"] == REFUSED_ORIGIN
+
+
+def test_cross_site_get_with_trusted_origin_keeps_cors(client, rec):
+    """A CORS-mode fetch carries Origin; a trusted one (a user app, the Tauri
+    wizard) keeps working even though the browser calls it cross-site."""
+    r = _get(client, origin="tauri://localhost", **{"sec-fetch-site": "cross-site", "sec-fetch-mode": "cors"})
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "tauri://localhost"
+
+
+def test_cross_site_refusal_points_at_the_allowed_paths(client, caplog):
+    caplog.set_level(logging.WARNING, logger="Orchestrator.security.origin_guard")
+    for _ in range(3):
+        _get(client, path="/agent/apps", **XS)
+    r = _get(client, path="/agent/session/x", **XS)
+    assert "/ui/" in r.json()["hint"]
+    lines = [m.getMessage() for m in caplog.records if "[ORIGIN-GUARD]" in m.getMessage()]
+    assert len(lines) == 1, lines
+    assert "cross-site" in lines[0] and "/agent" in lines[0]
 
 
 # ------------------------------------------------------------- WebSockets

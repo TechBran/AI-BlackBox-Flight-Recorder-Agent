@@ -36,6 +36,19 @@ never sees sockets) closes both:
   sandboxed srcdoc or data: frame. So any page can reach a registered user
   app through the proxy, much as it can on the app's own port — never the
   API, never zellij.
+* Cross-site GET/HEAD with no Origin (audit M3 U20): an <img>, <script>,
+  <iframe>, link click or window.open from a foreign page sends no Origin,
+  so the tier above never sees it — yet a GET can still have side effects.
+  Every current browser labels it Sec-Fetch-Site: cross-site; such a request
+  is refused (403) unless its path is meant to be embedded or linked from
+  anywhere: the static Portal tree and its media (/ui/ — claude.ai and other
+  clients render generated media straight from /ui/uploads/), artifact
+  downloads (/artifacts/<id>), the Portal and wizard entry pages (/,
+  /onboarding/), Google's OAuth redirect (/auth/gmail/callback) and
+  registered user apps (/app-proxy/<port>/ — the sandboxed preview's own
+  subresource loads are cross-site, see above). same-site, same-origin,
+  none (a typed URL) and an absent header (native clients, old browsers)
+  are untouched.
 
 No login, sessions or keys: the perimeter is still Tailscale + LAN.
 """
@@ -85,6 +98,7 @@ CORS_MAX_AGE = "600"
 
 REFUSED_ORIGIN = "origin not allowed"
 REFUSED_HOST = "host not allowed"
+REFUSED_CROSS_SITE = "cross-site request not allowed"
 # The escape hatch, named in the 400 body and the refusal log so an operator
 # whose box answers to an unusual local name can fix it from the error alone.
 HOST_HINT = ("if this is a name of this BlackBox, add it to [security] "
@@ -93,6 +107,20 @@ ORIGIN_HINT = ("if this page is yours, add its origin to [security] "
                "extra_allowed_origins in config.ini and restart")
 NULL_ORIGIN_HINT = ("Origin: null (a sandboxed frame, data: or file: page) is only "
                     "allowed on /app-proxy/<registered app>/")
+CROSS_SITE_HINT = ("a page on another site may only load /ui/ assets and media, "
+                   "/artifacts/ downloads, the Portal and wizard entry pages and "
+                   "registered user apps; use the API from the Portal itself")
+
+# Methods a cross-site page can send WITHOUT an Origin header (subresource
+# loads, navigations, <form method=get>); browsers add Origin to the rest.
+_NO_ORIGIN_METHODS = frozenset({"GET", "HEAD"})
+# Cross-site embeddable paths (see the module docstring): whole trees ...
+_CROSS_SITE_PREFIXES = ("/ui/", "/artifacts/")
+# ... and single entry pages.
+_CROSS_SITE_PAGES = frozenset({
+    "/", "/ui", "/onboarding", "/onboarding/", "/onboarding/index.html",
+    "/auth/gmail/callback",
+})
 
 # classify() verdicts
 SAME = "same"        # same-origin: pass, no CORS headers needed
@@ -288,6 +316,19 @@ class OriginPolicy:
         parsed = split_host(value)
         return parsed is not None and self.host_allowed(parsed[0])
 
+    # -- cross-site GET ----------------------------------------------------
+
+    def cross_site_get_allowed(self, path: str) -> bool:
+        """May a foreign page embed or link this path (no Origin sent)?"""
+        path = path or "/"
+        # Browsers normalize dot segments before sending; one that arrives
+        # anyway is never on the allow-list, whatever its prefix.
+        if any(seg in (".", "..") for seg in path.split("/")):
+            return False
+        if path in _CROSS_SITE_PAGES or path.startswith(_CROSS_SITE_PREFIXES):
+            return True
+        return self.user_app_proxy_port(path) is not None
+
     # -- Origin ------------------------------------------------------------
 
     def classify(self, origin: str, *, host: Optional[str], scheme: str = "http",
@@ -365,7 +406,7 @@ class OriginGuardMiddleware:
             await self.app(scope, receive, send)
             return
 
-        hosts, origins, forwarded_proto, preflight, request_headers = _read_headers(scope)
+        hosts, origins, forwarded_proto, preflight, request_headers, fetch_site = _read_headers(scope)
         path = scope.get("path") or "/"
 
         if len(hosts) > 1 or (hosts and not self.policy.request_host_allowed(hosts[0])):
@@ -374,6 +415,12 @@ class OriginGuardMiddleware:
             return
 
         if not origins:
+            if (kind == "http" and fetch_site == "cross-site"
+                    and scope.get("method") in _NO_ORIGIN_METHODS
+                    and not self.policy.cross_site_get_allowed(path)):
+                self._note(kind, "sec-fetch-site", fetch_site, path)
+                await _refuse(kind, receive, send, 403, REFUSED_CROSS_SITE, CROSS_SITE_HINT)
+                return
             await self.app(scope, receive, send)
             return
 
@@ -414,6 +461,7 @@ class OriginGuardMiddleware:
             "refusals for this %s under %r are not logged; %s)",
             kind, what, value[:200], path[:200], what, prefix[:64],
             HOST_HINT if what == "host"
+            else CROSS_SITE_HINT if what == "sec-fetch-site"
             else NULL_ORIGIN_HINT if value.strip().lower() == "null" else ORIGIN_HINT)
 
 
@@ -422,6 +470,7 @@ def _read_headers(scope):
     forwarded_proto = None
     preflight = False
     request_headers = None
+    fetch_site = None
     for raw_name, raw_value in scope.get("headers") or ():
         name = raw_name.lower()
         if name == b"host":
@@ -434,7 +483,9 @@ def _read_headers(scope):
             preflight = True
         elif name == b"access-control-request-headers":
             request_headers = raw_value
-    return hosts, origins, forwarded_proto, preflight, request_headers
+        elif name == b"sec-fetch-site" and fetch_site is None:
+            fetch_site = raw_value.decode("latin-1").strip().lower()
+    return hosts, origins, forwarded_proto, preflight, request_headers, fetch_site
 
 
 async def _refuse(kind: str, receive, send, status: int, reason: str,
