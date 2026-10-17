@@ -6,15 +6,22 @@ Audio is generated at 24kHz PCM16, then downsampled to 8kHz using a
 streaming Butterworth anti-alias filter (same as voice_bridge.py).
 
 Files are saved to:
-  - /usr/share/asterisk/sounds/custom/ivr/  (Asterisk plays via ARI)
-  - Orchestrator/asterisk/ivr_cache/        (local backup)
+  - /usr/share/asterisk/sounds/en/custom/ivr/  (Asterisk plays via ARI)
+  - Orchestrator/asterisk/ivr_cache/           (local cache; the fallback prompts are tracked)
 
 Asterisk ARI plays prompts as: sound:custom/ivr/{name}  (no .wav extension)
+
+blackbox.service runs with ProtectSystem=strict, so the Asterisk sound dir is
+read-only to the service and to sudo inside it. The runtime can only cache
+prompts; configs/install_prompts.py (run as root by Scripts/install.sh and
+configs/install.sh) installs the cache. The call path therefore never makes
+or copies audio: it picks an installed prompt with resolve_prompt().
 """
 
 import asyncio
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess
 import traceback
@@ -30,6 +37,8 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 # ---------------------------------------------------------------------------
 ASTERISK_SOUND_DIR = "/usr/share/asterisk/sounds/en/custom/ivr"
 LOCAL_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ivr_cache")
+INSTALL_HINT = "sudo python3 -I " + shlex.quote(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "install_prompts.py"))
 
 # ---------------------------------------------------------------------------
 # TTS config
@@ -78,60 +87,96 @@ def _get_openai_config():
     return OPENAI_API_KEY, OPENAI_TTS_URL
 
 
-async def generate_prompt(name: str, text: str, voice: str = TTS_VOICE) -> bool:
-    """Generate a single TTS prompt and save as WAV.
+def _usable(path: str) -> bool:
+    """True when ``path`` is a WAV big enough to be a real prompt. Never raises."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 100
+    except (OSError, ValueError):
+        return False
 
-    Returns True if successful (or already cached in Asterisk sounds).
+
+def is_installed(name: str) -> bool:
+    """True when prompt ``name`` is installed where Asterisk plays it."""
+    return _usable(os.path.join(ASTERISK_SOUND_DIR, f"{name}.wav"))
+
+
+def _install(local_path: str, asterisk_path: str) -> bool:
+    """Copy a cached prompt into the Asterisk sound dir. Never raises.
+
+    Under blackbox.service the dir is read-only (EROFS, not PermissionError),
+    for sudo too, so this only works outside the service namespace. On such a
+    box install_prompts.py installs the cache as root.
+    """
+    try:
+        os.makedirs(ASTERISK_SOUND_DIR, exist_ok=True)
+        shutil.copy2(local_path, asterisk_path)
+    except OSError:
+        try:
+            subprocess.run(['sudo', '-n', 'mkdir', '-p', ASTERISK_SOUND_DIR],
+                           capture_output=True, timeout=10)
+            subprocess.run(['sudo', '-n', 'cp', local_path, asterisk_path],
+                           capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _usable(asterisk_path)
+
+
+async def _fetch_tts_pcm(text: str, voice: str) -> Optional[bytes]:
+    """24 kHz PCM16 for ``text`` from OpenAI TTS, or None."""
+    api_key, tts_url = _get_openai_config()
+    if not api_key:
+        print("[IVR-AUDIO] No OpenAI API key — cannot generate TTS")
+        return None
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            tts_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": TTS_MODEL,
+                "voice": voice,
+                "input": text.strip(),
+                "response_format": "pcm",  # raw 24kHz PCM16
+            },
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status != 200:
+                error = await resp.text()
+                print(f"[IVR-AUDIO] TTS error {resp.status}: {error[:200]}")
+                return None
+            return await resp.read()
+
+
+async def generate_prompt(name: str, text: str, voice: str = TTS_VOICE) -> bool:
+    """Make sure prompt ``name`` is installed, from the cache or via TTS.
+
+    Returns True only when the prompt is installed where Asterisk plays it.
+    A prompt that could only be cached (read-only sound dir) returns False.
+    Never raises (except on cancellation). Not for the call path: TTS can
+    take seconds; calls use resolve_prompt().
     """
     asterisk_path = os.path.join(ASTERISK_SOUND_DIR, f"{name}.wav")
     local_path = os.path.join(LOCAL_CACHE_DIR, f"{name}.wav")
 
     # --- Already in Asterisk sounds? ---
-    if os.path.exists(asterisk_path) and os.path.getsize(asterisk_path) > 100:
+    if _usable(asterisk_path):
         return True
 
     # --- In local cache? Copy to Asterisk sounds ---
-    if os.path.exists(local_path) and os.path.getsize(local_path) > 100:
-        try:
-            os.makedirs(ASTERISK_SOUND_DIR, exist_ok=True)
-            shutil.copy2(local_path, asterisk_path)
-            return True
-        except PermissionError:
-            os.system(f'sudo mkdir -p "{ASTERISK_SOUND_DIR}"')
-            os.system(f'sudo cp "{local_path}" "{asterisk_path}"')
-            return os.path.exists(asterisk_path)
+    if _usable(local_path):
+        return _install(local_path, asterisk_path)
 
     # --- Generate via OpenAI TTS ---
-    api_key, tts_url = _get_openai_config()
-    if not api_key:
-        print("[IVR-AUDIO] No OpenAI API key — cannot generate TTS")
-        return False
-
     try:
         display_text = text[:60] + ("..." if len(text) > 60 else "")
         print(f'[IVR-AUDIO] Generating: {name} — "{display_text}"')
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                tts_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": TTS_MODEL,
-                    "voice": voice,
-                    "input": text.strip(),
-                    "response_format": "pcm",  # raw 24kHz PCM16
-                },
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status != 200:
-                    error = await resp.text()
-                    print(f"[IVR-AUDIO] TTS error {resp.status}: {error[:200]}")
-                    return False
-                pcm_24k = await resp.read()
-
+        pcm_24k = await _fetch_tts_pcm(text, voice)
+        if pcm_24k is None:
+            return False
         if len(pcm_24k) < 100:
             print(f"[IVR-AUDIO] TTS returned too little data ({len(pcm_24k)} bytes)")
             return False
@@ -141,19 +186,10 @@ async def generate_prompt(name: str, text: str, voice: str = TTS_VOICE) -> bool:
         duration = len(pcm_8k) / (8000 * 2)
         print(f"[IVR-AUDIO] Generated: {name} ({duration:.1f}s, {len(pcm_8k)} bytes)")
 
-        # Save to local cache
+        # Save to local cache, then install it if this process can
         os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
         _save_wav(local_path, pcm_8k)
-
-        # Copy to Asterisk sounds directory (always use sudo — dir is root-owned)
-        subprocess.run(['sudo', 'mkdir', '-p', ASTERISK_SOUND_DIR], capture_output=True)
-        result = subprocess.run(['sudo', 'cp', local_path, asterisk_path], capture_output=True)
-        if result.returncode != 0:
-            print(f"[IVR-AUDIO] Failed to copy to Asterisk dir: {result.stderr.decode()}")
-        elif not os.path.exists(asterisk_path):
-            print(f"[IVR-AUDIO] WARNING: cp succeeded but file not found at {asterisk_path}")
-
-        return True
+        return _install(local_path, asterisk_path)
 
     except asyncio.CancelledError:
         raise
@@ -164,8 +200,32 @@ async def generate_prompt(name: str, text: str, voice: str = TTS_VOICE) -> bool:
 
 
 def get_prompt_uri(name: str) -> str:
-    """Get the Asterisk sound URI for a prompt (used with ARI playMedia)."""
-    return f"sound:ivr/{name}"
+    """Get the Asterisk sound URI for a prompt (used with ARI playMedia).
+
+    Asterisk looks a sound up as <sounds>/<channel language>/<name>, so the
+    files in ASTERISK_SOUND_DIR (<sounds>/en/custom/ivr) play as custom/ivr/.
+    """
+    return f"sound:custom/ivr/{name}"
+
+
+# Tracked prompts (installed everywhere) that stand in for the optional ones,
+# which are only made at boot when TTS works and installed by install_prompts.py.
+PROMPT_FALLBACKS = {
+    "pin_locked": ("pin_failed",),
+    "pin_unavailable": ("goodbye",),
+}
+
+
+def resolve_prompt(name: str, *fallbacks: str) -> str:
+    """The first of ``name``, ``fallbacks`` and PROMPT_FALLBACKS that is installed.
+
+    Safe in the call path: an existence check only, never TTS, a copy or an
+    exception. With nothing installed it returns ``name`` (Asterisk logs it).
+    """
+    for candidate in (name, *fallbacks, *PROMPT_FALLBACKS.get(name, ())):
+        if is_installed(candidate):
+            return candidate
+    return name
 
 
 def pin_prompt_text(length: int) -> str:
@@ -173,17 +233,17 @@ def pin_prompt_text(length: int) -> str:
     return f"Please enter your {length}-digit access code."
 
 
-async def ensure_pin_prompt(length: int) -> str:
-    """Return the prompt name for a ``length``-digit PIN, generating it once.
+def pin_prompt_name(length: int) -> str:
+    """The installed prompt asking for a ``length``-digit PIN (call path safe).
 
-    The name carries the length because the cache is keyed by name, not text
-    (a changed PIN length must never replay a stale "N-digit" recording).
-    Falls back to the length-free ``pin_entry`` prompt if TTS is unavailable.
+    pin_prompt_<N>digit carries the length in its name, so a changed PIN
+    length never replays a stale "N-digit" recording. Only the 4-digit one is
+    tracked; others are made at boot (ensure_all_prompts) when TTS works.
+    Falls back to the tracked, length-free ``pin_entry``, then, for 4-digit
+    PINs, to the pre-2026-10 ``pin_prompt`` (its recording says "4-digit").
     """
-    name = f"pin_prompt_{length}digit"
-    if await generate_prompt(name, pin_prompt_text(length)):
-        return name
-    return "pin_entry"
+    legacy = ("pin_prompt",) if length == 4 else ()
+    return resolve_prompt(f"pin_prompt_{length}digit", "pin_entry", *legacy)
 
 
 def filter_ivr_operators(operators: List[str], max_operators: int = 4) -> List[str]:
@@ -235,9 +295,10 @@ async def generate_operator_menu(operators: List[str]) -> str:
 # ---------------------------------------------------------------------------
 STATIC_PROMPTS = {
     "greeting": "Thank you for calling AI BlackBox.",
-    # The digit-count prompt is generated per PIN length (ensure_pin_prompt);
-    # pin_entry is its length-free fallback.
+    # The digit-count prompt (pin_prompt_<N>digit) is made for the configured
+    # PIN length in ensure_all_prompts; pin_entry is its length-free fallback.
     "pin_entry": "Please enter your access code.",
+    "pin_prompt_4digit": pin_prompt_text(4),
     "pin_accepted": "Access granted.",
     "pin_retry": "That code was incorrect. Please try again.",
     "pin_failed": "Too many incorrect attempts. Goodbye.",
@@ -267,43 +328,52 @@ STATIC_PROMPTS = {
 
 
 async def ensure_all_prompts():
-    """Generate all static IVR prompts if not already cached.
+    """Install (or generate) every static IVR prompt that is missing.
 
-    Called at startup to pre-generate the full set of IVR audio files.
+    Called at startup. Never raises; on a box where the service cannot write
+    the Asterisk sound dir it says once how to install the prompts.
     """
     os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
-    os.system(f'sudo mkdir -p "{ASTERISK_SOUND_DIR}"')
-    os.system(f'sudo chmod 755 "{ASTERISK_SOUND_DIR}"')
 
-    generated = 0
-    cached = 0
-    failed = 0
-
-    for name, text in STATIC_PROMPTS.items():
-        asterisk_path = os.path.join(ASTERISK_SOUND_DIR, f"{name}.wav")
-        if os.path.exists(asterisk_path) and os.path.getsize(asterisk_path) > 100:
-            cached += 1
-            continue
-        success = await generate_prompt(name, text)
-        if success:
-            generated += 1
-        else:
-            failed += 1
-
-    total = len(STATIC_PROMPTS)
-    print(
-        f"[IVR-AUDIO] Prompts ready: {cached} cached + {generated} generated"
-        f" = {cached + generated}/{total}"
-        + (f" ({failed} failed)" if failed else "")
-    )
-
-    # Pre-generate the PIN prompt for the configured PIN length
+    prompts = dict(STATIC_PROMPTS)
     try:
         from Orchestrator.phone import pin_gate
         if pin_gate.pin_length():
-            await ensure_pin_prompt(pin_gate.pin_length())
+            prompts[f"pin_prompt_{pin_gate.pin_length()}digit"] = pin_prompt_text(pin_gate.pin_length())
     except Exception as e:
-        print(f"[IVR-AUDIO] PIN prompt generation error: {e}")
+        print(f"[IVR-AUDIO] PIN length unavailable: {e}")
+
+    generated = 0
+    cached = 0
+    not_installed = []   # cached locally, but this process cannot install it
+    not_made = []        # no cached copy and TTS failed
+
+    for name, text in prompts.items():
+        if is_installed(name):
+            cached += 1
+            continue
+        if await generate_prompt(name, text):
+            generated += 1
+        elif _usable(os.path.join(LOCAL_CACHE_DIR, f"{name}.wav")):
+            not_installed.append(name)
+        else:
+            not_made.append(name)
+
+    failed = len(not_installed) + len(not_made)
+    print(
+        f"[IVR-AUDIO] Prompts ready: {cached} cached + {generated} generated"
+        f" = {cached + generated}/{len(prompts)}"
+        + (f" ({failed} failed)" if failed else "")
+    )
+    if not_installed:
+        print(
+            f"[IVR-AUDIO] {len(not_installed)} prompt(s) are cached but not installed in"
+            f" {ASTERISK_SOUND_DIR} (this service cannot write there); callers hear a"
+            f" fallback or silence instead. Fix: {INSTALL_HINT}"
+        )
+    if not_made:
+        print(f"[IVR-AUDIO] Could not generate (TTS unavailable): {', '.join(not_made)};"
+              f" the IVR plays an installed fallback for them")
 
     # Pre-generate dynamic operator menu so it's available before first call
     try:

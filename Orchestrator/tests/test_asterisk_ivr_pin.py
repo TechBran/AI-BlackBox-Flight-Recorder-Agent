@@ -64,11 +64,13 @@ def pin_env(tmp_path, monkeypatch):
     monkeypatch.setattr(pin_gate, "LOCKOUT_PATH", tmp_path / "phone_pin_lockout.json")
     requested = []
 
-    async def fake_ensure_pin_prompt(length):
+    def fake_pin_prompt_name(length):
+        # Every prompt "installed": the real resolution is in test_asterisk_ivr_prompts.py.
         requested.append(length)
         return f"pin_prompt_{length}digit"
 
-    monkeypatch.setattr(ivr_mod, "ensure_pin_prompt", fake_ensure_pin_prompt)
+    monkeypatch.setattr(ivr_mod, "pin_prompt_name", fake_pin_prompt_name)
+    monkeypatch.setattr(ivr_mod, "resolve_prompt", lambda name, *fallbacks: name)
     monkeypatch.setattr(ivr_mod.asyncio, "sleep", _fast_sleep)
     return requested
 
@@ -100,8 +102,8 @@ def test_correct_pin_accepted_without_logging_it(capsys, pin_env):
     out = capsys.readouterr().out
     assert ok is True
     assert pin_env == [len(PIN)], "prompt must be derived from the PIN length"
-    assert "sound:ivr/pin_prompt_6digit" in fake.played
-    assert "sound:ivr/pin_accepted" in fake.played
+    assert "sound:custom/ivr/pin_prompt_6digit" in fake.played
+    assert "sound:custom/ivr/pin_accepted" in fake.played
     _assert_no_secrets(out, PIN)
 
 
@@ -110,7 +112,7 @@ def test_wrong_pins_log_only_attempt_numbers(capsys):
     out = capsys.readouterr().out
     assert ok is False
     assert "attempt 1" in out and "attempt 3" in out
-    assert fake.played[-1] in ("sound:ivr/pin_failed", "sound:ivr/pin_locked")
+    assert fake.played[-1] in ("sound:custom/ivr/pin_failed", "sound:custom/ivr/pin_locked")
     _assert_no_secrets(out, PIN, WRONG)
 
 
@@ -126,7 +128,7 @@ def test_unconfigured_pin_refuses_the_call(capsys, monkeypatch):
     ok, fake = _run_pin([PIN])
     out = capsys.readouterr().out
     assert ok is False
-    assert fake.played == ["sound:ivr/pin_unavailable"], "refuse before any digit prompt"
+    assert fake.played == ["sound:custom/ivr/pin_unavailable"], "refuse before any digit prompt"
     assert "PHONE_PIN_CODE" in out
 
 
@@ -138,7 +140,7 @@ def test_lockout_persists_into_the_next_call(capsys):
     ok2, fake2 = _run_pin([PIN])
     out = capsys.readouterr().out
     assert ok2 is False
-    assert fake2.played == ["sound:ivr/pin_locked"]
+    assert fake2.played == ["sound:custom/ivr/pin_locked"]
     _assert_no_secrets(out, PIN, WRONG)
 
 
@@ -147,7 +149,7 @@ def test_ivr_run_hangs_up_on_refusal(monkeypatch):
     fake = FakeARI([])
     ivr = ivr_mod.AsteriskIVR(ari_client=fake, channel_id=CHANNEL, caller_id=CALLER)
     assert asyncio.run(ivr.run()) is None
-    assert "sound:ivr/backend_menu" not in fake.played
+    assert "sound:custom/ivr/backend_menu" not in fake.played
 
 
 def test_ari_client_does_not_log_dtmf_digits(capsys):

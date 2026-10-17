@@ -15,7 +15,8 @@ import traceback
 from typing import Optional, Dict
 
 from Orchestrator.asterisk.ivr_audio import (
-    get_prompt_uri, generate_operator_menu, filter_ivr_operators, ensure_pin_prompt,
+    get_prompt_uri, generate_operator_menu, filter_ivr_operators,
+    pin_prompt_name, resolve_prompt,
 )
 from Orchestrator.phone import pin_gate
 
@@ -227,9 +228,20 @@ class AsteriskIVR:
     # ----- IVR Stages -----
 
     async def _refuse(self, prompt: str):
-        """Play a refusal and let it finish; the caller hangs up on None."""
-        await self._play(get_prompt_uri(prompt))
+        """Play a refusal (or its installed fallback) and let it finish; the
+        caller hangs up on None."""
+        await self._play(get_prompt_uri(resolve_prompt(prompt)))
         await asyncio.sleep(1.5)  # Let prompt finish
+
+    async def _refuse_if_locked(self) -> bool:
+        """Refuse when this caller (or every caller) is locked out right now."""
+        locked_for = pin_gate.lockout_remaining(self._caller_id)
+        if not locked_for:
+            return False
+        print(f"[ASTERISK-IVR] Caller {pin_gate.mask_caller(self._caller_id)} "
+              f"is locked out ({locked_for}s left), refusing")
+        await self._refuse("pin_locked")
+        return True
 
     async def _run_pin(self) -> bool:
         """PIN verification stage. Fails closed; never logs the PIN or digits."""
@@ -242,17 +254,14 @@ class AsteriskIVR:
             await self._refuse("pin_unavailable")
             return False
 
-        locked_for = pin_gate.lockout_remaining(self._caller_id)
-        if locked_for:
-            print(f"[ASTERISK-IVR] Caller {pin_gate.mask_caller(self._caller_id)} "
-                  f"is locked out ({locked_for}s left), refusing")
-            await self._refuse("pin_locked")
+        if await self._refuse_if_locked():
             return False
 
         pin_len = pin_gate.pin_length()
         attempts = pin_gate.max_attempts()
         print(f"[ASTERISK-IVR] PIN verification ({pin_len} digits, {attempts} attempts)")
-        prompt = await ensure_pin_prompt(pin_len)
+        # Existence check only: no audio is made or copied while a caller waits.
+        prompt = pin_prompt_name(pin_len)
 
         # Play greeting first
         await self._play(get_prompt_uri("greeting"))

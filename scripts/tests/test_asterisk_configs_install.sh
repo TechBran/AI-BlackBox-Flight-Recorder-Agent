@@ -7,7 +7,8 @@
 # mktemp sandbox (ASTERISK_ETC + BLACKBOX_ROOT overrides) with systemctl,
 # asterisk, chown, journalctl and curl stubbed on PATH, so no real /etc, no
 # root and no running Asterisk are needed. Asserts the password never reaches
-# stdout or curl's argv.
+# stdout or curl's argv, and that a full install (not a rotation) installs the
+# IVR prompts into ASTERISK_IVR_SOUND_DIR.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -35,7 +36,11 @@ trap 'rm -rf "$WORK"' EXIT
 CONFIGS="$WORK/root/Orchestrator/asterisk/configs"
 mkdir -p "$WORK/root/Scripts" "$CONFIGS" "$WORK/etc/asterisk" "$WORK/bin"
 cp "$REPO_ROOT/Scripts/env_key.py" "$WORK/root/Scripts/env_key.py"
-cp "$SCRIPT" "$SETUP" "$CONFIGS/"
+cp "$SCRIPT" "$SETUP" "$REPO_ROOT/Orchestrator/asterisk/configs/install_prompts.py" "$CONFIGS/"
+mkdir -p "$WORK/root/Orchestrator/asterisk/ivr_cache" "$WORK/sounds"
+python3 -I -c 'import sys, wave
+w = wave.open(sys.argv[1], "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+w.writeframes(b"\x01\x00" * 4000); w.close()' "$WORK/root/Orchestrator/asterisk/ivr_cache/greeting.wav"
 SCRIPT="$CONFIGS/install.sh"
 SETUP="$CONFIGS/setup.sh"
 printf 'ASTERISK_ARI_USER=blackbox\nASTERISK_ARI_PASSWORD=\nOTHER=keep\n' > "$WORK/root/.env"
@@ -56,7 +61,7 @@ chmod +x "$WORK/bin/"*
 
 run() {
     PATH="$WORK/bin:$PATH" ASTERISK_ETC="$WORK/etc/asterisk" BLACKBOX_ROOT="$WORK/root" \
-        bash "$SCRIPT" "$@" > "$WORK/out.log" 2>&1
+        ASTERISK_IVR_SOUND_DIR="$WORK/sounds/ivr" bash "$SCRIPT" "$@" > "$WORK/out.log" 2>&1
 }
 
 env_val() { python3 -I "$WORK/root/Scripts/env_key.py" get "$WORK/root/.env" "$1"; }
@@ -74,6 +79,8 @@ grep -qF "$PW1" "$WORK/curl.argv" && fail "the ARI password was on curl's comman
 grep -qF "$PW1" "$WORK/curl.stdin" || fail "curl did not get the credentials on stdin"
 grep -q "ARI is responding" "$WORK/out.log" || fail "verification step did not run"
 [[ "$(cat "$WORK/etc/asterisk/pjsip.conf")" == "; repo pjsip" ]] || fail "full install did not copy pjsip.conf"
+cmp -s "$WORK/root/Orchestrator/asterisk/ivr_cache/greeting.wav" "$WORK/sounds/ivr/greeting.wav" \
+    || { cat "$WORK/out.log"; fail "full install did not install the IVR prompts"; }
 
 # ── Run 2: existing password is kept ──────────────────────────────────────────
 run || fail "install.sh failed on second run"
@@ -82,8 +89,11 @@ run || fail "install.sh failed on second run"
 # ── Run 3: --rotate-ari-password replaces it (setup.sh delegates) ────────────
 printf '; installed pjsip\n' > "$WORK/etc/asterisk/pjsip.conf"
 BAKS_BEFORE="$(ls "$WORK/etc/asterisk/" | grep -c '^pjsip.conf.bak')"
+rm -rf "$WORK/sounds/ivr"
 PATH="$WORK/bin:$PATH" ASTERISK_ETC="$WORK/etc/asterisk" BLACKBOX_ROOT="$WORK/root" \
+    ASTERISK_IVR_SOUND_DIR="$WORK/sounds/ivr" \
     bash "$SETUP" --rotate-ari-password > "$WORK/out.log" 2>&1 || fail "setup.sh --rotate-ari-password failed"
+[[ -e "$WORK/sounds/ivr" ]] && fail "--rotate-ari-password installed prompts (it must touch ari.conf only)"
 [[ "$(cat "$WORK/etc/asterisk/pjsip.conf")" == "; installed pjsip" ]] \
     || fail "--rotate-ari-password overwrote pjsip.conf (rotation must touch ari.conf only)"
 [[ "$(ls "$WORK/etc/asterisk/" | grep -c '^pjsip.conf.bak')" == "$BAKS_BEFORE" ]] \

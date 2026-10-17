@@ -1340,6 +1340,11 @@ SUDOERS
 if [[ -x /usr/sbin/asterisk ]]; then
     echo "[install] Asterisk detected — enabling blackbox.d include plumbing"
     sudo SKIP_VISUDO="${SKIP_VISUDO:-0}" bash -c "REAL_USER='$REAL_USER'; $(declare -f setup_asterisk_blackbox_include); setup_asterisk_blackbox_include"
+    # IVR prompts: ProtectSystem=strict keeps blackbox.service from writing
+    # Asterisk's sound dir, so they are installed here, as root, from the
+    # tracked cache (the script refuses symlinks and non-WAV files).
+    sudo python3 -I "$BLACKBOX_ROOT/Orchestrator/asterisk/configs/install_prompts.py" \
+        || echo "[install] WARN: IVR prompts not installed; inbound callers will hear silence until it succeeds"
 else
     echo "[install] Asterisk not installed (/usr/sbin/asterisk absent) — skipping telephony include setup"
 fi

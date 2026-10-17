@@ -41,6 +41,17 @@ Docker/freeswitch/config/directory/
 # Telephony gateway configs hold per-device credentials (encrypted, but never commit)
 Orchestrator/asterisk/gateways.json
 
+# IVR prompts made per box at runtime: operator menus (from its operator names)
+# and the optional prompts ensure_all_prompts makes when TTS works. Ignored so
+# they are never committed and a pull can always replace them; to ship one,
+# drop its line here and `git add` it. The prompts the IVR falls back to are
+# tracked. configs/install_prompts.py installs both kinds.
+Orchestrator/asterisk/ivr_cache/operator_menu_*.wav
+Orchestrator/asterisk/ivr_cache/pin_prompt_*digit.wav
+!Orchestrator/asterisk/ivr_cache/pin_prompt_4digit.wav
+Orchestrator/asterisk/ivr_cache/pin_locked.wav
+Orchestrator/asterisk/ivr_cache/pin_unavailable.wav
+
 # Claude Code local config (per-machine permissions, not project source)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
