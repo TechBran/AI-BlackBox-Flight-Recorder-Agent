@@ -2,6 +2,9 @@ package com.aiblackbox.portal
 
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
+import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 /**
  * Origin checks for the legacy WebView wrapper ([PortalActivity]) —
@@ -51,6 +54,34 @@ internal object PortalWebGuard {
         if (pairedOrigin == null) return false
         return originOf(url) == pairedOrigin
     }
+
+    /**
+     * shouldInterceptRequest refuses this request: a main-frame load off the paired box.
+     * WebView never asks shouldOverrideUrlLoading about a form POST, so this is where an
+     * off-box `<form method=post>` (a prompt-injected chat reply can carry one) is
+     * stopped before the foreign page commits inside the app. Subresources are untouched.
+     */
+    fun blocksMainFrameLoad(url: String?, isForMainFrame: Boolean, pairedOrigin: String?): Boolean =
+        isForMainFrame && !isPairedOrigin(url, pairedOrigin)
+
+    /**
+     * The client for PortalActivity's downloads into Downloads: every hop, redirects
+     * included, must be on [pairedOrigin]. Checking only the first URL let a box URL that
+     * redirects (an OAuth start, a proxied App's 302) write another origin's bytes into
+     * Downloads. An off-box hop fails the call with an IOException before it is sent.
+     */
+    fun pairedOnlyDownloadClient(pairedOrigin: String?): OkHttpClient =
+        OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .addNetworkInterceptor { chain ->
+                val url = chain.request().url.toString()
+                if (!isPairedOrigin(url, pairedOrigin)) {
+                    throw IOException("Download left the BlackBox (${originOf(url) ?: "no origin"})")
+                }
+                chain.proceed(chain.request())
+            }
+            .build()
 
     /**
      * A file name a page asked to save, reduced to its last path segment so it

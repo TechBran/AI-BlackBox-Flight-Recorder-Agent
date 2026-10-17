@@ -1,10 +1,15 @@
 package com.aiblackbox.portal
 
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import okhttp3.Request
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 
 /**
  * A01-activities-root-01 / X04-security-clients-infra-05 — the legacy WebView
@@ -96,6 +101,75 @@ class PortalWebGuardTest {
     @Test fun `with no paired origin nothing matches`() {
         assertFalse(PortalWebGuard.isPairedOrigin("https://box.tail0000.ts.net/ui/", null))
         assertFalse(PortalWebGuard.isPairedOrigin(null, null))
+    }
+
+    // ── Main-frame loads that skip shouldOverrideUrlLoading (review of A01-activities-root-01) ──
+    //
+    // WebView never asks shouldOverrideUrlLoading about a form POST, so an off-box
+    // <form method=post> in a chat reply (DOMPurify's defaults keep form/action/method)
+    // loaded the foreign page inside the app. shouldInterceptRequest now refuses every
+    // off-box main-frame request outright.
+
+    @Test fun `an off-box main-frame load is blocked`() {
+        assertTrue(PortalWebGuard.blocksMainFrameLoad("https://evil.example/collect", true, tailnet))
+        assertTrue(PortalWebGuard.blocksMainFrameLoad("https://box.tail0000.ts.net@evil.example/", true, tailnet))
+        assertTrue(PortalWebGuard.blocksMainFrameLoad("http://box.tail0000.ts.net/ui/", true, tailnet))
+        assertTrue(PortalWebGuard.blocksMainFrameLoad("https://box.tail0000.ts.net:8443/", true, tailnet))
+        // No pairing: nothing is the box, so no main-frame load is let through.
+        assertTrue(PortalWebGuard.blocksMainFrameLoad("https://box.tail0000.ts.net/ui/", true, null))
+    }
+
+    @Test fun `the box's own pages and every subresource load as before`() {
+        assertFalse(PortalWebGuard.blocksMainFrameLoad("https://box.tail0000.ts.net/ui/", true, tailnet))
+        assertFalse(PortalWebGuard.blocksMainFrameLoad("https://BOX.tail0000.ts.net./ui/?v=1", true, tailnet))
+        assertFalse(PortalWebGuard.blocksMainFrameLoad("http://192.168.1.50:9091/auth/x", true, lan))
+        // Images, fonts and scripts from a CDN are not navigations.
+        assertFalse(PortalWebGuard.blocksMainFrameLoad("https://cdn.example/lib.js", false, tailnet))
+    }
+
+    // ── Downloads follow redirects only on the box (review of A01-activities-root-01) ──
+
+    private fun get(client: okhttp3.OkHttpClient, url: String): String =
+        client.newCall(Request.Builder().url(url).build()).execute().use { it.body.string() }
+
+    @Test fun `a download redirected off the box is refused before it is fetched`() {
+        MockWebServer().use { box ->
+            MockWebServer().use { other ->
+                box.start(); other.start()
+                box.enqueue(MockResponse.Builder().code(302)
+                    .setHeader("Location", other.url("/payload.apk").toString()).build())
+                other.enqueue(MockResponse.Builder().body("OFF-BOX-BYTES").build())
+                val paired = PortalWebGuard.originOf(box.url("/").toString())
+
+                val client = PortalWebGuard.pairedOnlyDownloadClient(paired)
+
+                assertThrows(IOException::class.java) { get(client, box.url("/ui/uploads/a.apk").toString()) }
+                assertEquals(0, other.requestCount)
+            }
+        }
+    }
+
+    @Test fun `a redirect within the box is followed`() {
+        MockWebServer().use { box ->
+            box.start()
+            box.enqueue(MockResponse.Builder().code(302).setHeader("Location", "/ui/uploads/real.pdf").build())
+            box.enqueue(MockResponse.Builder().body("PDF-BYTES").build())
+            val client = PortalWebGuard.pairedOnlyDownloadClient(PortalWebGuard.originOf(box.url("/").toString()))
+
+            assertEquals("PDF-BYTES", get(client, box.url("/download/report").toString()))
+            assertEquals(2, box.requestCount)
+        }
+    }
+
+    @Test fun `a download client with no pairing fetches nothing`() {
+        MockWebServer().use { box ->
+            box.start()
+            box.enqueue(MockResponse.Builder().body("BYTES").build())
+            val client = PortalWebGuard.pairedOnlyDownloadClient(null)
+
+            assertThrows(IOException::class.java) { get(client, box.url("/ui/uploads/a.png").toString()) }
+            assertEquals(0, box.requestCount)
+        }
     }
 
     @Test fun `download names cannot climb out of Downloads`() {

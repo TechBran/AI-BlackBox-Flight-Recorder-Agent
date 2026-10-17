@@ -404,12 +404,26 @@ class PortalActivity : AppCompatActivity() {
                 view: WebView?,
                 request: WebResourceRequest?
             ): android.webkit.WebResourceResponse? {
-                // A main-frame load that skipped shouldOverrideUrlLoading (a form POST off-box)
-                // revokes the bridges BEFORE the foreign document commits, not only once
-                // onPageStarted reports it. Background thread; the field is @Volatile.
-                if (request?.isForMainFrame == true &&
-                    !PortalWebGuard.isPairedOrigin(request.url?.toString(), pairedOrigin)) {
-                    pageOrigin = null
+                // A main-frame load that skipped shouldOverrideUrlLoading — WebView never asks it
+                // about a form POST, and a chat reply can carry an off-box <form method=post> —
+                // is refused before the foreign page can commit in this URL-bar-less WebView. A
+                // 204 aborts the navigation and leaves the Portal (and its bridges) on screen; a
+                // GET goes to the system as shouldOverrideUrlLoading would. Background thread.
+                if (request != null && PortalWebGuard.blocksMainFrameLoad(
+                        request.url?.toString(), request.isForMainFrame, pairedOrigin)) {
+                    val method = request.method ?: "GET"
+                    Log.w(TAG, "Off-box main-frame $method refused: ${PortalWebGuard.originOf(request.url?.toString()) ?: request.url?.scheme}")
+                    runOnUiThread {
+                        if (method.equals("GET", ignoreCase = true)) {
+                            openExternally(request.url)
+                        } else {
+                            Toast.makeText(applicationContext, "Blocked a form that sends to a site outside the BlackBox", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    return android.webkit.WebResourceResponse(
+                        "text/plain", "utf-8", 204, "No Content", emptyMap(),
+                        java.io.ByteArrayInputStream(ByteArray(0))
+                    )
                 }
                 return super.shouldInterceptRequest(view, request)
             }
@@ -419,7 +433,9 @@ class PortalActivity : AppCompatActivity() {
                 req: WebResourceRequest?,
                 err: WebResourceError?
             ) {
-                if (req?.isForMainFrame == true) {
+                // An off-box load refused above is not the Portal failing to load: no retry panel.
+                if (req?.isForMainFrame == true &&
+                    !PortalWebGuard.blocksMainFrameLoad(req.url?.toString(), true, pairedOrigin)) {
                     runOnUiThread {
                         retryPanel.visibility = View.VISIBLE
                     }
@@ -965,7 +981,8 @@ class PortalActivity : AppCompatActivity() {
          * The download itself — shared by the JS bridge above and the WebView's DownloadListener.
          * Fetches only from the paired box (the app's OkHttp rides the tailnet; it is not a
          * general fetch-anything-into-Downloads primitive): an off-box URL goes to the system
-         * browser, which downloads it itself. The name is reduced to a plain file name.
+         * browser, which downloads it itself, and a redirect off the box fails the download
+         * ([PortalWebGuard.pairedOnlyDownloadClient]). The name is reduced to a plain file name.
          */
         fun startDownload(url: String, requestedName: String) {
             if (!PortalWebGuard.isPairedOrigin(url, pairedOrigin)) {
@@ -984,10 +1001,7 @@ class PortalActivity : AppCompatActivity() {
                 // Now do the actual download on IO thread
                 withContext(Dispatchers.IO) {
                 try {
-                    val client = OkHttpClient.Builder()
-                        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                        .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                        .build()
+                    val client = PortalWebGuard.pairedOnlyDownloadClient(pairedOrigin)
 
                     val request = Request.Builder()
                         .url(url)
