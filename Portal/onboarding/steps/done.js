@@ -9,6 +9,7 @@
 // threshold; the system is now theirs.
 
 import { openLogsModal, mountRestartControl, mountUpdatesBadge } from "../hub-controls.js";
+import { escapeHtml } from "../util.js";
 
 // Per-render busy state — module globals would survive across remounts and
 // silently dead-lock the buttons. Reset each render. (The restart busy guard
@@ -196,14 +197,4 @@ async function completeAndOpen(btn) {
     } finally {
         rs.busy = false;
     }
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

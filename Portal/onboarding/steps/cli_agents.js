@@ -37,6 +37,8 @@
 // their auth flow in gnome-terminal independently and comes back to
 // click Re-check. Same passive UX as the api_keys validate buttons.
 
+import { escapeHtml } from "../util.js";
+
 const PROVIDERS = [
     {
         key: "claude",
@@ -345,14 +347,4 @@ function showHint(container, msg, isError) {
     }
     hint.classList.toggle("ob-cli-agent-hint-error", !!isError);
     hint.textContent = msg;
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

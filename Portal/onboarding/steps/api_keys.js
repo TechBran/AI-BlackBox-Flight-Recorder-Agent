@@ -22,6 +22,8 @@
 // an inline "Remove? ✓/✕" toggle. A configured custom server counts as
 // "retained existing" for Save-button enablement.
 
+import { escapeHtml } from "../util.js";
+
 const PROVIDERS = [
     {
         id: "openai",
@@ -1443,14 +1445,4 @@ function wireSave(container, state, next) {
             busy = false;
         }
     });
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

@@ -4,8 +4,8 @@
 // All HTML comes from the presentational status.js — this file is
 // orchestration + the SSE lifecycle.
 
-import { groupsHtml, readinessHtml, attentionHtml, applySectionEvent, renderRail, updateRailItem, renderPortalUrlCard, escapeHtml } from "./status.js";
-import { cssEscape } from "./util.js";
+import { groupsHtml, readinessHtml, attentionHtml, applySectionEvent, renderRail, updateRailItem, renderPortalUrlCard } from "./status.js";
+import { cssEscape, escapeHtml } from "./util.js";
 import { openLogsModal, mountRestartControl, mountUpdatesBadge } from "./hub-controls.js";
 
 let sse = null;  // active EventSource — closed on re-render / unmount

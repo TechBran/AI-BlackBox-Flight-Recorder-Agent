@@ -21,6 +21,8 @@
 // Visual reference: Portal/dev/onboarding-mocks/tailscale.html (shows Branch C
 // with the disclosure expanded).
 
+import { escapeHtml } from "../util.js";
+
 // Per-render state — module globals leaked across non-linear hub mounts.
 // _active points at the latest render so a new render can abort the old
 // render's auth poll loop.
@@ -708,15 +710,4 @@ function wireCopyBtn(scope) {
             }, 1500);
         });
     });
-}
-
-// ── HTML escape (step modules are isolated; shell has its own copy) ──
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

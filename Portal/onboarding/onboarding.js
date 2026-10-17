@@ -2,6 +2,8 @@
 // Reads ?mode= from URL — "setup" (default) is linear flow, "manage" is
 // a step-grid landing page (Phase 2.10 — not yet implemented).
 
+import { escapeHtml } from "./util.js";
+
 const STEPS = [
     "welcome", "tailscale", "api_keys", "embeddings", "local_models",
     "optional_integrations", "transcription", "web_search", "image", "pair_phone", "cli_agents", "mcp", "operator", "done",
@@ -93,16 +95,6 @@ document.addEventListener("click", function (e) {
         window.location.assign(a.href);
     });
 }, true);  // capture phase — fires before any per-anchor handlers
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-}
 
 function ensureToastStyles() {
     if (document.getElementById("ob-toast-styles")) return;

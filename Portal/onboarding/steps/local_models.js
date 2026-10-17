@@ -9,6 +9,7 @@
 //   stt / tts  → /local-models/capability (config seed flag; stt also pins
 //                STT_PROVIDER=onbox)
 import { stepSigilContext } from "../onboarding.js";
+import { escapeHtml } from "../util.js";
 
 let status = null;         // last GET /local-models/status
 let busy = {};             // per-capability activation in-flight guard
@@ -564,9 +565,4 @@ async function fetchJson(url) {
 }
 async function safeDetail(r) {
     try { const j = await r.json(); return j.detail || `HTTP ${r.status}`; } catch (_) { return `HTTP ${r.status}`; }
-}
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }

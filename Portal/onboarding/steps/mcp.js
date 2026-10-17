@@ -8,7 +8,7 @@
 // it and one-clicks the runtime pieces. Funnel-up is PUBLIC-internet exposure, so
 // it's gated behind an explicit inline confirmation.
 
-import { cssEscape } from "../util.js";
+import { cssEscape, escapeHtml } from "../util.js";
 
 let lastMintedToken = null;   // shown ONCE after a mint, for the config snippets
 
@@ -258,8 +258,4 @@ async function postJson(url, body) {
         if (!r.ok) return { ...j, ok: false, detail: j.detail };
         return j;
     } catch (_) { return null; }
-}
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }

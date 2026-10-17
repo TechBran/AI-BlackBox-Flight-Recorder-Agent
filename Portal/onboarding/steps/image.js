@@ -301,14 +301,4 @@ async function fetchJson(url) {
 }
 
 // cssEscape is the shared pure helper in ../util.js (de-duped across steps).
-import { cssEscape } from "../util.js";
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-}
+import { cssEscape, escapeHtml } from "../util.js";

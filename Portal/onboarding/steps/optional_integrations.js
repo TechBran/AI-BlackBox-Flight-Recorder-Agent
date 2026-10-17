@@ -11,6 +11,8 @@
 // If ELEVENLABS_API_KEY is present (current-config providers.elevenlabs.present)
 // we render the ElevenLabs card in its configured state with a Replace button.
 
+import { escapeHtml } from "../util.js";
+
 const GMAIL_PROVIDER = {
     id: "gmail",
     label: "Google Workspace",
@@ -994,14 +996,4 @@ function wireSave(container, state, next) {
             busy = false;
         }
     });
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

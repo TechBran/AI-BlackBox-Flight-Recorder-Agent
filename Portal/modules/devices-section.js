@@ -14,7 +14,7 @@
  * older GET /devices/ CRUD) — it does not touch that surface.
  */
 
-import { $, toastSuccess, toastError } from './core-utils.js';
+import { $, escapeHtml, toastSuccess, toastError } from './core-utils.js';
 
 // Provider choices mirror the backend enum {gemma,gemini,claude,openai|null}.
 const PROVIDERS = [
@@ -40,11 +40,6 @@ let _lastMenuVisible = false;
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    ));
-}
 
 // Tailscale status can list the same relay/ingress node multiple times; keep the
 // first occurrence of each id so the management list shows one row per device.

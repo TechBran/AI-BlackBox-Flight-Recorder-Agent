@@ -18,7 +18,7 @@
  * the .modal / .modal-card / .modal-head shell matches the Portal convention.
  */
 
-import { toastSuccess, toastError } from './modules/core-utils.js';
+import { escapeHtml, toastSuccess, toastError } from './modules/core-utils.js';
 import { populateVoiceCatalog } from './modules/tts-stt.js';
 
 const MODAL_ID = 'voiceLibraryModal';
@@ -30,12 +30,6 @@ const SEARCH_DEBOUNCE_MS = 350;
 let previewAudio = null;
 let playingBtn = null;       // the ▶ button currently in the "playing" state
 let searchTimer = null;
-
-function escapeHtml(s) {
-    return String(s == null ? '' : s)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
 
 /** Build "American · Male · Middle aged" from whatever sub-fields exist. */
 function subLine(v) {

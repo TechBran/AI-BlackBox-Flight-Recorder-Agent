@@ -14,6 +14,8 @@
 // readonly rows + pending editable rows) separated by section divider when
 // both present.
 
+import { escapeHtml } from "../util.js";
+
 const NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 let busy = false;
@@ -373,14 +375,4 @@ async function onSave(container, state, next) {
     } finally {
         busy = false;
     }
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

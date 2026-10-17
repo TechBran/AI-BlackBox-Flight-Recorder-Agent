@@ -2,7 +2,7 @@
 // Contains NO derivation logic — state, summary, and attention rows are all
 // pre-computed server-side. This file just turns the payload into HTML.
 
-import { cssEscape } from "./util.js";
+import { cssEscape, escapeHtml } from "./util.js";
 
 const GROUP_ORDER = ["network", "keys", "capabilities", "identity"];
 const GROUP_LABELS = {
@@ -38,16 +38,6 @@ const PIP_TEXT = {
     optional: "– Optional",
     checking: "Checking…",
 };
-
-export function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-}
 
 // One tile. `state`/`summary` come straight from the payload.
 export function sectionCardHtml(section) {

@@ -45,6 +45,7 @@
 // no buttons and no errors.
 
 import { audioArtifacts, audioArtifactRowHtml, runArtifactDownload } from "./local_models.js";
+import { escapeHtml } from "../util.js";
 
 const PROVIDERS = [
     {
@@ -623,14 +624,4 @@ async function fetchJson(url) {
     } catch (_) {
         return null;
     }
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

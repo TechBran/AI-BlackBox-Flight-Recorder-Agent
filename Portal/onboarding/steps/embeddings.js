@@ -41,6 +41,8 @@
 
 // Selected-card highlight is the shared .ob-card-selected class (onboarding.css).
 
+import { escapeHtml } from "../util.js";
+
 const POLL_MS = 2000;
 // Rough chars-per-snapshot used ONLY for the cloud re-embed cost PREVIEW
 // (clearly labelled an estimate in the confirm copy). Not a billing figure.
@@ -1617,14 +1619,4 @@ async function fetchJson(url) {
     } catch (_) {
         return null;
     }
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

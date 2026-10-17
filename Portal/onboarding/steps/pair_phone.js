@@ -16,6 +16,8 @@
 // On render() entry, the previous interval (if any) is cleared so re-renders
 // (or back/skip navigation) don't leave zombie pollers.
 
+import { escapeHtml } from "../util.js";
+
 // Per-render poll state. Module-level singletons (pollRef/activeToken) leaked
 // across non-linear mounts; scope them per render() instead. `_active` points
 // at the most recent render's state so a NEW render can stop the OLD poller.
@@ -350,14 +352,4 @@ function formatExpiresIn(seconds) {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
 }

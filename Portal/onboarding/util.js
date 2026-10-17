@@ -10,3 +10,20 @@
 export function cssEscape(s) {
     return String(s).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }
+
+// Escape a value for use as HTML element content or inside a QUOTED
+// attribute value. The wizard is served from its own /onboarding/ mount, so
+// it cannot import /ui/modules/core-utils.js; this must escape exactly like
+// core-utils' escapeHtml/escapeAttr (Portal/onboarding/escape.test.mjs pins
+// it): all five of & < > " ', null/undefined -> "". Never for unquoted
+// attributes or inline handlers.
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+export function escapeHtml(value) {
+    if (value === null || value === undefined) return "";
+    return String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+export function escapeAttr(value) {
+    return escapeHtml(value);
+}
