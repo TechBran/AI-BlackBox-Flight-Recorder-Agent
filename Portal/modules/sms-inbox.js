@@ -74,7 +74,18 @@ async function fetchMessages(phone) {
     const res = await fetch(`/sms/messages?operator=${encodeURIComponent(op)}&phone=${encodeURIComponent(phone)}&limit=100`);
     if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`);
     const data = await res.json();
+    markThreadRead(op, phone);
     return data.messages || [];
+}
+
+// The thread is on screen: mark it read. GET /sms/messages is read-only, so
+// this is explicit. Best-effort: a failure only leaves the badge up.
+function markThreadRead(op, phone) {
+    fetch('/sms/mark-read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator: op, phone })
+    }).catch(() => {});
 }
 
 async function sendMessage(to, message) {

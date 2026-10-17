@@ -105,14 +105,27 @@ def ensure_operator_book(data: Dict[str, Any], operator: str) -> bool:
     return False
 
 
+def ensure_book_for_read(data: Dict[str, Any], operator: str) -> None:
+    """Give a READ path (a GET route, a search) the operator's book.
+
+    The new book and its editable seed contact are saved only for an operator
+    on the live roster: a GET's query string or a tool argument can carry any
+    name, and a read must not create a book for each one. Any other name sees
+    the seed book in memory only.
+    """
+    if ensure_operator_book(data, operator):
+        from Orchestrator import config as _cfg  # lazy: keep this module import-light
+        if operator in _cfg.USERS_LIST:
+            save_contacts(data)
+
+
 def search_contacts(query: str, operator: str) -> List[Dict[str, Any]]:
     """
     Case-insensitive fuzzy match across all contact fields.
     Returns up to 10 matches, exact name matches ranked first.
     """
     data = load_contacts()
-    if ensure_operator_book(data, operator):
-        save_contacts(data)
+    ensure_book_for_read(data, operator)
 
     book = data.get(operator, {})
     query_lower = query.lower()

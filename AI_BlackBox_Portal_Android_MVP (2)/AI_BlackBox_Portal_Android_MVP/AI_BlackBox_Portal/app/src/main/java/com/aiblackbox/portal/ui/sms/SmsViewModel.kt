@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,10 +13,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.put
 
 data class SmsThread(
     val phoneNumber: String,
@@ -190,9 +193,25 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                         status = obj["status"]?.jsonPrimitive?.content ?: ""
                     )
                 }
+                markThreadRead(api, phone)
             } catch (_: Exception) {
                 _messages.value = emptyList()
             }
+        }
+    }
+
+    // The thread is on screen: mark it read. GET /sms/messages is read-only
+    // (a cross-site GET must not change state), so this is explicit.
+    // Best-effort: a failure only leaves the unread badge up.
+    private suspend fun markThreadRead(api: BlackBoxApi, phone: String) {
+        try {
+            api.post("/sms/mark-read", buildJsonObject {
+                put("operator", operator)
+                put("phone", phone)
+            }.toString())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
         }
     }
 

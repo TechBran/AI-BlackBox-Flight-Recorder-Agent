@@ -39,7 +39,7 @@ from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from Orchestrator.fossils import extract_snap_ids, get_recent_fossils_for_operator, hybrid_retrieve, rebuild_snapshot_index
 import Orchestrator.models as models_module  # Import module for dynamic access to models_module.worker_running
 from Orchestrator.models import task_queue
-from Orchestrator.monitoring import cleanup_stuck_tasks, drift_state_global, get_disk_usage
+from Orchestrator.monitoring import drift_state_global, get_disk_usage
 from Orchestrator.state import get_state, state_by_op
 from Orchestrator.volume import cleanup_old_archives, parse_tail, read_text_safe, sha256_bytes, verify_gm_or_halt
 
@@ -572,12 +572,8 @@ def watchdog():
     usage = get_disk_usage()
     checks["disk_space_ok"] = usage["disk"]["percent"] < 95
 
-    # Clean up stuck tasks periodically (runs every watchdog check)
-    try:
-        task_cleanup = cleanup_stuck_tasks(max_hours=24)
-        checks["stuck_tasks_cleaned"] = task_cleanup["marked_failed"]
-    except Exception as e:
-        checks["stuck_tasks_error"] = str(e)
+    # Report only: a GET must not change state (a cross-site <img> can send
+    # one). Stuck tasks are swept at startup (startup.py cleanup_stuck_tasks).
 
     # If any critical check fails, return error
     if not all([checks["volume_accessible"], checks["manifest_accessible"],

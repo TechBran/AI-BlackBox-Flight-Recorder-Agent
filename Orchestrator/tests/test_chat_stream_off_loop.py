@@ -10,7 +10,6 @@ build becomes an SSE error instead of a hung stream.
 Hermetic: the build and the provider stream are fakes; intervals are tiny.
 """
 import asyncio
-import json
 import threading
 import time
 
@@ -25,11 +24,6 @@ class _Req:
 
     async def json(self):
         return self._body
-
-
-class _GetReq:
-    def __init__(self, params):
-        self.query_params = params
 
 
 @pytest.fixture
@@ -115,15 +109,3 @@ def test_failed_build_becomes_an_sse_error_not_a_hang(monkeypatch, fakes):
     assert "event: stream_end" in text
     assert "messages" not in fakes  # the provider was never called
 
-
-def test_get_route_also_builds_off_loop(fakes):
-    params = {"messages": json.dumps(_BODY["messages"]), "provider": "openai",
-              "model": "test-model", "operator": "OffLoopTester"}
-
-    async def go():
-        resp = await cr.chat_stream(_GetReq(params))
-        return await _drain_with_ticker(resp)
-
-    text, ticks = asyncio.run(go())
-    assert "event: content" in text
-    assert ticks >= 15

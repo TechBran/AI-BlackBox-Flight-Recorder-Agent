@@ -5,8 +5,8 @@ O07-tts-voice-01 / X03-security-backend-11).
     because tasks.db rows are served back to the Portal and Android by /tasks
     polling and the old Google key was found in 18 of them (worker str(e) and
     tracebacks carried the request URL).
-  * GET and POST /chat/stream mask every provider's "error" event before it
-    reaches the client.
+  * POST /chat/stream masks every provider's "error" event before it
+    reaches the client (the GET twin is gone: audit M3 U20).
 
 Hermetic: in-memory task store; the routes run against stubbed context and a
 stubbed provider stream, with no lifespan.
@@ -73,7 +73,7 @@ def test_append_task_progress_masks_secrets(fake_db):
 
 
 # --------------------------------------------------------------------------- #
-# /chat/stream SSE error events (GET + POST share the choke point)            #
+# /chat/stream SSE error events                                              #
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
@@ -95,16 +95,6 @@ def sse_client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cr, "stream_custom_with_reasoning", leaky_stream)
     return TestClient(app)   # no `with`: the production lifespan never starts
-
-
-def test_chat_stream_get_masks_error_events(sse_client):
-    import json
-    r = sse_client.get("/chat/stream", params={
-        "messages": json.dumps([{"role": "user", "content": "hi"}]),
-        "provider": "custom", "operator": "TestOp"})
-    assert r.status_code == 200
-    assert "event: error" in r.text
-    assert FAKE_KEY not in r.text
 
 
 def test_chat_stream_post_masks_error_events(sse_client):

@@ -41,6 +41,7 @@ TWILIO_WEBHOOKS = {
 INTERNAL_APIS = {
     "/twilio/call", "/twilio/cli/call", "/twilio/cli/{cli_session_id}/thinking",
     "/twilio/cli/{cli_session_id}/speak", "/twilio/cli/{cli_session_id}/audio",
+    "/twilio/cli/{cli_session_id}/transcriptions",   # dequeues, so POST (audit M3 U20)
     "/twilio/inject-audio",
 }
 

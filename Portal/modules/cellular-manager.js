@@ -51,7 +51,8 @@ async function runSpeedTest() {
     renderSpeedTest();
 
     try {
-        const res = await fetch('/internet/speed-test');
+        // POST: the test spends cellular data, so it is never a GET.
+        const res = await fetch('/internet/speed-test', { method: 'POST' });
         const data = await res.json();
         renderSpeedTestResults(data);
     } catch (e) {

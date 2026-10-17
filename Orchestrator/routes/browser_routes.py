@@ -107,9 +107,10 @@ def browser_status():
         return {"display_running": False, "error": str(e)}
 
 
-@app.get("/browser/screenshot")
+@app.post("/browser/screenshot")
 def browser_screenshot():
-    """Capture a screenshot from the display right now."""
+    """Capture a screenshot from the display right now and save it as a new
+    /ui/uploads file. POST: every call writes a file of the real desktop."""
     try:
         from Orchestrator.browser.screenshot import capture_screenshot, save_screenshot_to_uploads
         import time

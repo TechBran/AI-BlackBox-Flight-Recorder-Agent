@@ -7395,179 +7395,9 @@ def _context_error_frames(route_tag: str, exc: Exception):
     ]
 
 
-@app.get("/chat/stream")
-async def chat_stream(request: Request):
-    """SSE streaming chat endpoint with thinking/reasoning support.
-    Query params:
-    - messages: JSON-encoded messages array
-    - provider: openai|anthropic|gemini
-    - model: specific model name
-    - operator: operator name
-    Returns Server-Sent Events stream with:
-    - thinking: Reasoning/thinking content
-    - content: Main response content
-    - usage: Token usage info
-    - done: Stream complete
-    - error: Error occurred
-    """
-    try:
-        # Parse query parameters
-        messages_json = request.query_params.get("messages")
-        provider = request.query_params.get("provider", "gemini")
-        model = request.query_params.get("model")
-        # Same check as the POST twin: switching the method must not skip it.
-        try:
-            operator = _checked_operator(request.query_params.get("operator"))
-        except InvalidOperatorName as e:
-            return JSONResponse(status_code=400, content={"error": f"Invalid operator: {e}"})
-        # M3: originating device (self-reported by the Android app; Portal EventSource
-        # leaves it unset → primary-device fallback). Request-scoped for the whole turn.
-        _set_origin_device_id(request.query_params.get("origin_device_id"))
-        # M1: optional per-turn location, JSON-encoded query param (the Portal
-        # EventSource leaves it unset -> None -> perfect no-op). Untrusted input:
-        # normalize() validates and returns None for anything junk, and the whole
-        # parse is guarded — a bad location can never fail a chat turn.
-        turn_location = None
-        try:
-            _loc_raw = request.query_params.get("location")
-            if _loc_raw:
-                turn_location = user_location.normalize(json.loads(_loc_raw))
-        except Exception:
-            turn_location = None
-        _stash_turn_location(operator, turn_location)
-
-        if not messages_json:
-            return JSONResponse(status_code=400, content={"error": "messages parameter required"})
-
-        try:
-            messages = json.loads(messages_json)
-        except json.JSONDecodeError:
-            return JSONResponse(status_code=400, content={"error": "Invalid messages JSON"})
-
-        # Default models with thinking support
-        guard = None  # non-custom providers use context_builder's provider window table
-        if provider == "custom":
-            # Resolve the server BEFORE build_streaming_context (order matters:
-            # its context window sizes the window guard). Empty/Auto model ->
-            # the server's first discovered model, alias-qualified; unresolved
-            # server / no discovered models stay as-is — stream_custom_with_reasoning
-            # emits the clean error event. The guard budgets from the FINAL
-            # dispatched bare model (per-model model_context override on
-            # multi-model llama-swap hosts), falling back to context_tokens.
-            _srv, _bare = custom_servers.resolve_model(model or "")
-            if _srv is not None and (not model or _bare.strip().lower() == "auto"):
-                _discovered = _srv.get("last_models") or []
-                if _discovered:
-                    _bare = _discovered[0]
-                    model = custom_servers.qualify(_srv.get("alias", ""), _bare)
-            guard = custom_servers.window_guard_tokens(_srv, _bare)
-        elif not model:
-            if provider == "openai":
-                model = "gpt-5.1"  # Latest OpenAI with reasoning
-            elif provider == "anthropic":
-                model = "claude-sonnet-4-5"  # Claude Sonnet 4.5 with extended thinking
-            elif provider == "xai":
-                model = XAI_MODEL_DEFAULT  # configured default (was hardcoded grok-4-1-fast-reasoning until audit M6 / 2026-05-18)
-            elif provider == "computer-use":
-                model = CU_MODEL_DEFAULT  # Computer Use default (single source: Orchestrator/config.py)
-            else:
-                model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
-
-        async def generate_sse():
-            """Generate SSE events from provider stream."""
-            # Build context-enriched messages with fossil retrieval, off the
-            # event loop (rank 45; see _streaming_context_off_loop). telemetry is
-            # The Signal's presentation-only metrics sink; the route resolves
-            # `model`, so it is recorded here. Never prompt-bound.
-            ctx = None
-            try:
-                async for item in _streaming_context_off_loop(messages, operator, provider, guard):
-                    if item is None:
-                        yield SSE_KEEPALIVE_FRAME
-                        continue
-                    ctx = item
-            except Exception as e:
-                for frame in _context_error_frames("STREAM", e):
-                    yield frame
-                return
-            context_messages, provenance, telemetry = ctx
-            telemetry["model"] = model
-
-            # M1: the location rides along INSIDE the user prompt block. Applied
-            # AFTER context building on purpose — retrieval/tool-injection queries
-            # stay byte-identical to today; only what the model reads changes.
-            # No location -> the same list object back -> perfect no-op.
-            context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
-
-            yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
-
-            # The Signal (Task 1.3): burst the honest retrieval telemetry as
-            # UI-only `system_activity` SSE frames, immediately after stream_start
-            # and before the provider's first token. `telemetry` is captured from
-            # the enclosing route scope (model already recorded there). These are
-            # PRESENTATION-ONLY — serialized straight to the wire, never added to
-            # the prompt/context/messages or any snapshot. Honest degradation: a
-            # non-retrieval / empty-corpus turn yields [] and nothing is emitted.
-            for _sa in build_retrieval_activity(telemetry):
-                yield f"event: {_sa['type']}\ndata: {json.dumps(_sa['data'])}\n\n"
-
-            # Select provider stream
-            if provider == "openai":
-                stream = stream_openai_with_reasoning(context_messages, model, operator=operator)
-            elif provider == "anthropic":
-                stream = stream_anthropic_with_thinking(context_messages, model, operator=operator)
-            elif provider == "xai":
-                stream = stream_xai_with_reasoning(context_messages, model, operator=operator)
-            elif provider == "custom":
-                stream = stream_custom_with_reasoning(context_messages, model, operator=operator)
-            elif provider == "computer-use":
-                _get_device_id = request.query_params.get("device_id", "blackbox")
-                backend = resolve_backend(model)
-                if backend == "google":
-                    stream = stream_gemini_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
-                elif backend == "openai":
-                    stream = stream_openai_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
-                else:
-                    stream = stream_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
-            else:
-                stream = stream_gemini_with_thinking(context_messages, model, operator=operator)
-
-            async for event in _stream_with_keepalive(stream):
-                if event is None:
-                    # M7: provider prefill keepalive — inert SSE comment frame.
-                    yield SSE_KEEPALIVE_FRAME
-                    continue
-                event_type = event.get("type", "unknown")
-                event_data = event.get("data", "")
-                if event_type == "error":
-                    # Every provider's error text funnels here: mask secrets
-                    # (exception text can embed a request URL) before the client.
-                    event_data = redact(event_data)
-
-                # Convert data to JSON if it's not a string
-                if not isinstance(event_data, str):
-                    event_data = json.dumps(event_data)
-                else:
-                    event_data = json.dumps(event_data)
-
-                yield f"event: {event_type}\ndata: {event_data}\n\n"
-
-            yield f"event: stream_end\ndata: {json.dumps({'status': 'complete'})}\n\n"
-
-        return StreamingResponse(
-            generate_sse(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"  # Disable nginx buffering
-            }
-        )
-
-    except Exception as e:
-        import traceback
-        print(f"[STREAM] Error: {e}\n{traceback.format_exc()}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+# There is no GET /chat/stream (audit M3 U20): it ran a whole tool-executing
+# turn from query parameters, so a cross-site <img src=...> could start one.
+# Every client (Portal, Android, cron) POSTs.
 
 
 @app.post("/chat/stream")
@@ -7634,7 +7464,7 @@ async def chat_stream_post(request: Request):
 
         async def generate_sse():
             # Context build off the event loop with keepalives (rank 45; see
-            # _streaming_context_off_loop and the GET route).
+            # _streaming_context_off_loop).
             ctx = None
             try:
                 async for item in _streaming_context_off_loop(messages, operator, provider, guard):
@@ -7649,8 +7479,9 @@ async def chat_stream_post(request: Request):
             context_messages, provenance, telemetry = ctx
             telemetry["model"] = model
 
-            # M1: location rides along inside the user prompt block (see the GET
-            # route). Applied after context building so retrieval stays unchanged.
+            # M1: location rides along inside the user prompt block. Applied
+            # after context building so retrieval/tool-injection queries stay
+            # byte-identical; only what the model reads changes.
             context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
 
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
@@ -7695,7 +7526,9 @@ async def chat_stream_post(request: Request):
                 event_type = event.get("type", "unknown")
                 event_data = event.get("data", "")
                 if event_type == "error":
-                    event_data = redact(event_data)   # see GET /chat/stream
+                    # Every provider's error text funnels here: mask secrets
+                    # (exception text can embed a request URL) before the client.
+                    event_data = redact(event_data)
 
                 # Debug logging for image_task events
                 if event_type == "image_task":

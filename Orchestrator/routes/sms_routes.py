@@ -50,11 +50,13 @@ async def get_messages(
     limit: int = Query(50),
     offset: int = Query(0),
 ):
-    """Return messages in a conversation thread (oldest first for chat)."""
+    """Return messages in a conversation thread (oldest first for chat).
+
+    Read-only: clients POST /sms/mark-read once they show the thread (a GET
+    that marked threads read could be fired by any cross-site <img>)."""
     _require_sms()
     store = get_message_store()
     messages = store.get_conversation(operator, phone, limit, offset)
-    store.mark_all_read(operator, phone)
     return {"messages": messages, "operator": operator, "phone": phone}
 
 

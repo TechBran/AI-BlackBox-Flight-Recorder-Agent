@@ -62,10 +62,9 @@ class CronPreview(BaseModel):
 @app.get("/api/cron/contacts")
 async def list_cron_contacts(operator: str):
     """List contacts with phone numbers for cron delivery target selection."""
-    from Orchestrator.contacts import load_contacts, ensure_operator_book, save_contacts
+    from Orchestrator.contacts import load_contacts, ensure_book_for_read
     data = load_contacts()
-    if ensure_operator_book(data, operator):
-        save_contacts(data)
+    ensure_book_for_read(data, operator)
     book = data.get(operator, {})
     contacts = [
         {

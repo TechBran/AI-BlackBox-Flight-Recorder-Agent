@@ -21,11 +21,9 @@ class ContactUpsertRequest(BaseModel):
 @router.get("")
 async def list_contacts(operator: str = Query(...)):
     """List all contacts for an operator, sorted by name."""
-    from Orchestrator.contacts import load_contacts, ensure_operator_book, save_contacts
+    from Orchestrator.contacts import load_contacts, ensure_book_for_read
     data = load_contacts()
-    changed = ensure_operator_book(data, operator)
-    if changed:
-        save_contacts(data)
+    ensure_book_for_read(data, operator)
     contacts = list(data.get(operator, {}).values())
     contacts.sort(key=lambda c: c.get("name", "").lower())
     return {"contacts": contacts, "operator": operator}

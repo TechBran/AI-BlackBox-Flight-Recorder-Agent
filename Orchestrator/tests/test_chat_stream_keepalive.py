@@ -1,7 +1,7 @@
 """M7 / WI-10 transport hardening: SSE keepalive during provider prefill.
 
 `chat_routes._stream_with_keepalive` wraps every provider stream on
-/chat/stream (GET + POST) and yields a ``None`` sentinel for every
+POST /chat/stream and yields a ``None`` sentinel for every
 KEEPALIVE_INTERVAL_S of provider silence; generate_sse renders each sentinel
 as an SSE comment frame (": keepalive") — inert for compliant SSE parsers
 (Android M7.1a comment-frame tolerance is test-pinned; the Portal parser

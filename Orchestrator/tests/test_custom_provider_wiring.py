@@ -16,10 +16,10 @@ Task 4.2 seams, all additive:
   3. chat_routes — "custom" in _get_tools' openai-format tuple;
      build_streaming_context threads window_guard_tokens through.
 
-Task 4.3 seams (route-level, BOTH /chat/stream routes):
+Task 4.3 seams (route-level, POST /chat/stream — the GET twin is gone, audit M3 U20):
   4. custom_servers.window_guard_tokens(server) — the ONE shared formula
-     max(4000, int(context_tokens * 0.6)) both routes use.
-  5. GET + POST /chat/stream — provider "custom" resolves the server in the
+     max(4000, int(context_tokens * 0.6)) the route uses.
+  5. POST /chat/stream — provider "custom" resolves the server in the
      default-model block (BEFORE build_streaming_context — order matters),
      qualifies an empty/Auto model to the server's first discovered model,
      threads the guard, and dispatches to stream_custom_with_reasoning.
@@ -200,7 +200,7 @@ def test_window_guard_tokens_custom_16k():
     assert cs.window_guard_tokens({"context_tokens": 16384}) == 9830  # int(0.6 x 16,384)
 
 
-# --- Task 4.3: /chat/stream route wiring (GET + POST, symmetric) -----------------
+# --- Task 4.3: /chat/stream route wiring (POST) -----------------------------------
 # House main-app TestClient pattern (test_stt_onboarding.py). The route's
 # collaborators are patched at the chat_routes module seam: a recording
 # build_streaming_context (captures window_guard_tokens) and a fake
@@ -256,11 +256,11 @@ def route_fakes(monkeypatch):
 _MSGS = [{"role": "user", "content": "hi"}]
 
 
-def test_get_stream_custom_qualifies_default_model_and_threads_guard(custom_registry, route_fakes):
-    """GET /chat/stream, empty model: resolves 'lab', qualifies its first
+def test_post_stream_custom_qualifies_default_model_and_threads_guard(custom_registry, route_fakes):
+    """POST /chat/stream, no model: resolves 'lab', qualifies its first
     discovered model, threads guard = int(0.6 x 16,384) = 9,830, dispatches."""
-    r = _client().get("/chat/stream", params={
-        "messages": json.dumps(_MSGS), "provider": "custom", "operator": "TestOp",
+    r = _client().post("/chat/stream", json={
+        "messages": _MSGS, "provider": "custom", "operator": "TestOp",
     })
     assert r.status_code == 200
     assert route_fakes["window_guard_tokens"] == 9830
@@ -272,7 +272,7 @@ def test_get_stream_custom_qualifies_default_model_and_threads_guard(custom_regi
 
 def test_post_stream_custom_auto_model_qualifies_default(custom_registry, route_fakes):
     """POST /chat/stream, model='Auto' (picker sentinel): same qualified
-    default + guard as the GET route — the two routes stay symmetric."""
+    default + guard as an omitted model."""
     r = _client().post("/chat/stream", json={
         "messages": _MSGS, "provider": "custom", "model": "Auto", "operator": "TestOp",
     })
@@ -293,13 +293,13 @@ def test_post_stream_custom_explicit_model_passes_through(custom_registry, route
     assert route_fakes["window_guard_tokens"] == 9830
 
 
-def test_get_stream_custom_no_servers_floor_guard_model_untouched(tmp_path, monkeypatch, route_fakes):
+def test_post_stream_custom_no_servers_floor_guard_model_untouched(tmp_path, monkeypatch, route_fakes):
     """No enabled servers: guard falls back to the default-derived floor
     (19,660) and the model is left as-is — stream_custom_with_reasoning owns
     the clean error event (route must not invent a model)."""
     monkeypatch.setattr(cs, "REGISTRY_PATH", str(tmp_path / "absent.json"))
-    r = _client().get("/chat/stream", params={
-        "messages": json.dumps(_MSGS), "provider": "custom", "operator": "TestOp",
+    r = _client().post("/chat/stream", json={
+        "messages": _MSGS, "provider": "custom", "operator": "TestOp",
     })
     assert r.status_code == 200
     assert route_fakes["window_guard_tokens"] == 19660
@@ -353,16 +353,6 @@ def test_post_stream_custom_model_not_in_map_uses_server_window(per_model_regist
     assert r.status_code == 200
     assert route_fakes["window_guard_tokens"] == 78643
     assert route_fakes["dispatch_model"] == "swap::m-big"
-
-
-def test_get_stream_custom_per_model_guard_override(per_model_registry, route_fakes):
-    """GET route symmetric with POST for the per-model override."""
-    r = _client().get("/chat/stream", params={
-        "messages": json.dumps(_MSGS), "provider": "custom",
-        "model": "swap::m-small", "operator": "TestOp",
-    })
-    assert r.status_code == 200
-    assert route_fakes["window_guard_tokens"] == 9830
 
 
 def test_post_stream_custom_default_model_uses_final_bare_for_guard(per_model_registry, route_fakes):

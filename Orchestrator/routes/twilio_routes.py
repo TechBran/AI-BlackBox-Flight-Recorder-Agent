@@ -1087,7 +1087,7 @@ async def cli_initiate_call(call_request: CLICallRequest):
                 "call_sid": session.call_id,
                 "to": to_number,
                 "instructions": {
-                    "poll_transcriptions": f"GET /twilio/cli/{cli_session_id}/transcriptions",
+                    "poll_transcriptions": f"POST /twilio/cli/{cli_session_id}/transcriptions",
                     "send_audio": f"POST /twilio/cli/{cli_session_id}/audio",
                     "speak_text": f"POST /twilio/cli/{cli_session_id}/speak",
                     "hangup": f"DELETE /twilio/cli/{cli_session_id}",
@@ -1450,12 +1450,14 @@ async def transcribe_and_queue(audio_bytes: bytes, cli_session: CLIPhoneSession)
         print(f"[TWILIO-CLI-STT] Error: {e}")
 
 
-@app.get("/twilio/cli/{cli_session_id}/transcriptions")
+@app.post("/twilio/cli/{cli_session_id}/transcriptions")
 async def cli_get_transcriptions(cli_session_id: str):
     """
     Poll for new transcriptions from the phone call.
 
-    Returns all queued transcriptions since last poll.
+    Returns all queued transcriptions since last poll. POST, not GET: the
+    poll DEQUEUES them, so a GET (a cross-site <img>) could drain the
+    caller's speech before the CLI reads it.
     """
     cli_session = CLI_PHONE_SESSIONS.get(cli_session_id)
     if not cli_session:
@@ -1848,7 +1850,7 @@ async def twilio_info():
         ],
         "cli_phone_api": {
             "start_call": "POST /twilio/cli/call",
-            "poll_transcriptions": "GET /twilio/cli/{session_id}/transcriptions",
+            "poll_transcriptions": "POST /twilio/cli/{session_id}/transcriptions",
             "speak_text": "POST /twilio/cli/{session_id}/speak",
             "send_audio": "POST /twilio/cli/{session_id}/audio",
             "hangup": "DELETE /twilio/cli/{session_id}",

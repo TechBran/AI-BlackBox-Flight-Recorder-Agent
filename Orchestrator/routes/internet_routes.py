@@ -6,7 +6,7 @@ Passive monitoring + manual deep-reconnect. NM handles connection lifecycle.
 
   GET  /internet/status         — Full modem + signal + connection + routing status
   POST /internet/deep-reconnect — Cycle radio for fresh carrier session (manual only)
-  GET  /internet/speed-test     — Run speed test through wwan0
+  POST /internet/speed-test     — Run speed test through wwan0 (spends cellular data)
   POST /internet/at-command     — Send AT command via mmcli (debug)
   GET  /internet/history        — Recent event log
 """
@@ -46,8 +46,10 @@ async def internet_deep_reconnect():
     return JSONResponse(content=result, status_code=code)
 
 
-@app.get("/internet/speed-test")
+@app.post("/internet/speed-test")
 async def internet_speed_test():
+    """Pull ~10 MB down and push up over wwan0. POST, not GET: it spends
+    metered cellular data, and a cross-site <img> must never start it."""
     mgr = _get_manager()
     result = await mgr.run_speed_test()
     return JSONResponse(content=result)
