@@ -47,6 +47,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.FoldingFeatureMonitor
 import com.aiblackbox.portal.overlay.OverlayService
@@ -225,7 +226,22 @@ class PortalActivity : AppCompatActivity() {
         mediaProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())
     }
 
+    /**
+     * Hand the overlay the operator the web Portal has selected (its own localStorage pick),
+     * read only off the paired box's page; "" when there is none, and the overlay resolves
+     * one from the box's roster itself (OperatorResolver.forSpinner). Never a seed name.
+     */
     private fun startOverlayService(resultCode: Int, resultData: Intent) {
+        if (!isPortalPage()) {
+            launchOverlayService(resultCode, resultData, operator = "")
+            return
+        }
+        web.evaluateJavascript(
+            "(function(){try{return localStorage.getItem('bbx_operator')}catch(e){return null}})()"
+        ) { raw -> launchOverlayService(resultCode, resultData, OperatorResolver.fromJsResult(raw)) }
+    }
+
+    private fun launchOverlayService(resultCode: Int, resultData: Intent, operator: String) {
         val origin = prefs.getString("origin", "") ?: ""
         val baseUrl = normalizeOrigin(origin).removeSuffix("/ui/")
 
@@ -233,7 +249,7 @@ class PortalActivity : AppCompatActivity() {
             putExtra(OverlayService.EXTRA_RESULT_CODE, resultCode)
             putExtra(OverlayService.EXTRA_RESULT_DATA, resultData)
             putExtra(OverlayService.EXTRA_SERVER_URL, baseUrl)
-            putExtra(OverlayService.EXTRA_OPERATOR, "Brandon")
+            putExtra(OverlayService.EXTRA_OPERATOR, operator)
             putExtra(OverlayService.EXTRA_RECORDING_MODE, pendingRecordingMode)  // Android 14+ fix
         }
 

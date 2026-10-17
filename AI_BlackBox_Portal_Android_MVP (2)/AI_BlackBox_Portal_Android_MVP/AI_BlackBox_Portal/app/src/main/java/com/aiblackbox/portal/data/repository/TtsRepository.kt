@@ -7,6 +7,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -127,7 +128,7 @@ class TtsRepository(private val api: BlackBoxApi) {
         model: String = "tts-1-hd",
         format: String = "mp3",
         provider: String = "openai",
-        operator: String = "Brandon"
+        operator: String,
     ): TtsResponse {
         val sanitized = text
             .take(TTS_MAX_CHARS)
@@ -141,7 +142,7 @@ class TtsRepository(private val api: BlackBoxApi) {
             append(",\"model\":\"$model\"")
             append(",\"format\":\"$format\"")
             append(",\"provider\":\"$provider\"")
-            append(",\"operator\":\"$operator\"")
+            append(",\"operator\":${JsonPrimitive(operator)}")
             append("}")
         }
 
@@ -158,7 +159,7 @@ class TtsRepository(private val api: BlackBoxApi) {
     suspend fun generateElevenLabsTts(
         text: String,
         voiceId: String,
-        operator: String = "Brandon"
+        operator: String,
     ): TtsResponse {
         val sanitized = text
             .take(TTS_MAX_CHARS)
@@ -173,7 +174,7 @@ class TtsRepository(private val api: BlackBoxApi) {
             append(",\"voice\":\"elevenlabs:$voiceId\"")
             append(",\"provider\":\"elevenlabs\"")
             append(",\"return_json\":true")
-            append(",\"operator\":\"$operator\"")
+            append(",\"operator\":${JsonPrimitive(operator)}")
             append("}")
         }
 
@@ -189,7 +190,7 @@ class TtsRepository(private val api: BlackBoxApi) {
         text: String,
         voice: String = "Charon",
         model: String = "gemini-2.5-flash-tts",
-        operator: String = "Brandon"
+        operator: String,
     ): GeminiTtsResponse {
         val sanitized = text
             .take(TTS_MAX_CHARS)
@@ -201,7 +202,7 @@ class TtsRepository(private val api: BlackBoxApi) {
             append("{\"text\":\"$sanitized\"")
             append(",\"voice_name\":\"$voice\"")
             append(",\"model\":\"$model\"")
-            append(",\"operator\":\"$operator\"")
+            append(",\"operator\":${JsonPrimitive(operator)}")
             append("}")
         }
 
@@ -242,7 +243,7 @@ class TtsRepository(private val api: BlackBoxApi) {
     suspend fun generateWithVoice(
         text: String,
         voiceValue: String,
-        operator: String = "Brandon"
+        operator: String,
     ): TtsResponse {
         val config = parseVoice(voiceValue)
         Log.d(TAG, "generateWithVoice: provider=${config.provider}, voice=${config.voice}")

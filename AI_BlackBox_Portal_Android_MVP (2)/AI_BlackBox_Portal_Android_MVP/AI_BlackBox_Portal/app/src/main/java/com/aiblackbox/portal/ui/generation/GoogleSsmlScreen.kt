@@ -59,6 +59,7 @@ import com.aiblackbox.portal.data.repository.TaskPollOutcome
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.repository.isTerminalTaskStatus
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import com.aiblackbox.portal.ui.components.AudioPlayerBar
 import com.aiblackbox.portal.ui.components.EmberBackdrop
 import com.aiblackbox.portal.ui.components.GlassCard
@@ -79,6 +80,7 @@ import com.aiblackbox.portal.ui.theme.glassSurface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -135,12 +137,6 @@ class GoogleSsmlViewModel(application: Application) : AndroidViewModel(applicati
     private val _audioUrl = MutableStateFlow<String?>(null)
     val audioUrl: StateFlow<String?> = _audioUrl.asStateFlow()
 
-    private var currentOperator = "Brandon"
-
-    init {
-        viewModelScope.launch { store.operator.collect { currentOperator = it } }
-    }
-
     // ── Public API ──
 
     fun initialize(origin: String) {
@@ -156,7 +152,7 @@ class GoogleSsmlViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun generate(voiceName: String, text: String, pitch: Float, rate: Float, operator: String) {
+    fun generate(voiceName: String, text: String, pitch: Float, rate: Float) {
         val api = api ?: return
         if (text.isBlank() || voiceName.isBlank()) return
 
@@ -166,6 +162,8 @@ class GoogleSsmlViewModel(application: Application) : AndroidViewModel(applicati
 
         viewModelScope.launch {
             try {
+                // The operator for THIS request, read from the store now — never a seed name.
+                val operator = store.operator.first().ifBlank { throw OperatorUnresolvedException() }
                 val isSsml = text.trimStart().startsWith("<speak")
 
                 val body = buildJsonObject {
@@ -651,8 +649,7 @@ fun GoogleSsmlScreen(
                             voiceName = voice.name,
                             text = textInput,
                             pitch = pitch,
-                            rate = speed,
-                            operator = "Brandon"
+                            rate = speed
                         )
                     }
                 }

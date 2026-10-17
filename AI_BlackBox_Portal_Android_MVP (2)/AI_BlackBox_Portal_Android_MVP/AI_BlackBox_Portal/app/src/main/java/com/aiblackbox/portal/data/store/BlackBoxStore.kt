@@ -11,13 +11,23 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.aiblackbox.portal.ui.components.ParticleQuality
 import com.aiblackbox.portal.ui.components.ParticleTuning
 import com.aiblackbox.portal.ui.components.wave.WaveformStyles
+import com.aiblackbox.portal.util.Constants
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
     name = "bbx_settings",
     // W22: rewrite retired model ids once, before the first read (see ModelSelection).
-    produceMigrations = { listOf(RetiredModelIdMigration) },
+    // A09: move the pairing QR's operator out of the legacy bbx_prefs once.
+    produceMigrations = { context ->
+        listOf(
+            RetiredModelIdMigration,
+            LegacyPairingOperatorMigration {
+                context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString(Constants.KEY_OPERATOR, null)
+            },
+        )
+    },
 )
 
 class BlackBoxStore(private val context: Context) {
@@ -39,15 +49,20 @@ class BlackBoxStore(private val context: Context) {
         val KEY_LOCATION_ATTACH = booleanPreferencesKey("location_attach")
         val KEY_LOCATION_ASKED = booleanPreferencesKey("location_permission_asked")
         val KEY_NOTIFICATION_ASKED = booleanPreferencesKey("notification_permission_asked")
+
+        /** The stored operator; "" = unresolved (nothing picked, paired or auto-selected yet). */
+        fun operatorOf(prefs: Preferences): String = prefs[KEY_OPERATOR].orEmpty().trim()
     }
 
     // Origin (server URL)
     val origin: Flow<String> = context.dataStore.data.map { it[KEY_ORIGIN] ?: "" }
     suspend fun setOrigin(value: String) { context.dataStore.edit { it[KEY_ORIGIN] = value } }
 
-    // Operator
-    val operator: Flow<String> = context.dataStore.data.map { it[KEY_OPERATOR] ?: "Brandon" }
-    suspend fun setOperator(value: String) { context.dataStore.edit { it[KEY_OPERATOR] = value } }
+    // Operator — "" until resolved from the box (OperatorResolver: the pairing QR's, the
+    // one person on the box, or the operator's pick). Never a seed name: a fresh box's
+    // operators are whoever it lists (A09-data-local-model-05).
+    val operator: Flow<String> = context.dataStore.data.map { operatorOf(it) }
+    suspend fun setOperator(value: String) { context.dataStore.edit { it[KEY_OPERATOR] = value.trim() } }
 
     // Provider
     val provider: Flow<String> = context.dataStore.data.map { it[KEY_PROVIDER] ?: "gemini" }

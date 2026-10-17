@@ -31,10 +31,12 @@ import org.junit.rules.TemporaryFolder
  *
  * Coverage:
  *  1. migration: retired ids rewritten in the global `model` key AND every
- *     `model_<provider>` key — to a named successor where the key's provider takes a
- *     Claude id, else to Auto; any other retired id (the server's pattern) → Auto; a
- *     Claude id or the on-device slug left in the global key under a provider that
- *     cannot serve it → Auto; unknown ids and non-model keys untouched; flag stamped.
+ *     `model_<provider>` key — to the newest live model of the SAME family (opus,
+ *     sonnet, haiku; the owner's 2026-10-17 map, mirrored server-side) where the key's
+ *     provider takes a Claude id, else to Auto; a retired id of no family → Auto; the
+ *     ids the pickers no longer offer (not on the live catalogs) likewise; a Claude id
+ *     or the on-device slug left in the global key under a provider that cannot serve
+ *     it → Auto; unknown ids and non-model keys untouched; flag stamped.
  *  2. migration runs ONCE: a retired id written after the stamped run survives a reopen.
  *  3. provider switch: the previous provider's (foreign) id never survives — Auto at
  *     once, before the live list is even asked for; a stale/retired/foreign
@@ -89,9 +91,29 @@ class ModelSelectionTest {
 
     // ── 1. the one-time retired-id migration ─────────────────────────────────
 
-    @Test fun `the mapping is the one 6071f260 applied to the Android pickers`() {
-        assertEquals("claude-opus-4-8", ModelSelection.RETIRED_MODEL_IDS["claude-opus-4-1"])
+    @Test fun `retired ids map to the newest live model of the same family`() {
+        assertEquals("claude-opus-5-5", ModelSelection.RETIRED_MODEL_IDS["claude-opus-4-1"])
+        assertEquals("claude-opus-5-5", ModelSelection.RETIRED_MODEL_IDS["claude-opus-4-1-20250805"])
         assertEquals("claude-sonnet-5-5", ModelSelection.RETIRED_MODEL_IDS["claude-sonnet-4"])
+        assertEquals("claude-sonnet-5-5", ModelSelection.RETIRED_MODEL_IDS["claude-3-7-sonnet-20250219"])
+        assertEquals("claude-haiku-5-5", ModelSelection.RETIRED_MODEL_IDS["claude-3-5-haiku-20241022"])
+        assertEquals(
+            mapOf("opus" to "claude-opus-5-5", "sonnet" to "claude-sonnet-5-5", "haiku" to "claude-haiku-5-5"),
+            ModelSelection.FAMILY_SUCCESSORS,
+        )
+        // Every named successor is its family's.
+        for ((retired, current) in ModelSelection.RETIRED_MODEL_IDS) {
+            assertEquals(retired, ModelSelection.successorOf(retired), current)
+        }
+        // Retired ids no table names still land on their family; no family → Auto.
+        assertEquals("claude-opus-5-5", ModelSelection.successorOf("claude-opus-4-20250514"))
+        assertEquals("claude-opus-5-5", ModelSelection.successorOf("claude-3-opus-20240229"))
+        assertEquals("claude-sonnet-5-5", ModelSelection.successorOf("claude-3-5-sonnet-latest"))
+        assertEquals("claude-haiku-5-5", ModelSelection.successorOf("claude-3-haiku-20240307"))
+        assertEquals("", ModelSelection.successorOf("claude-2.1"))
+        assertEquals("", ModelSelection.successorOf("claude-instant-1.2"))
+        // A live id has no successor.
+        assertEquals(null, ModelSelection.successorOf("claude-opus-4-8"))
         // No current id is ever a retired key, and no replacement is itself retired.
         for ((retired, current) in ModelSelection.RETIRED_MODEL_IDS) {
             assertFalse("$current is retired", current in ModelSelection.RETIRED_MODEL_IDS)
@@ -99,15 +121,41 @@ class ModelSelectionTest {
         }
     }
 
-    @Test fun `every successor is on the live Anthropic list and every key is retired server-side`() {
+    @Test fun `every successor is on the live Anthropic list and every key is retired or off the pickers`() {
         // On the live list, so a migrated model_anthropic can be restored by a switch back
         // (claude-haiku-4-5 is an alias, NOT on /models/anthropic: never restorable).
-        assertEquals("claude-haiku-5-5", ModelSelection.RETIRED_MODEL_IDS["claude-3-5-haiku-20241022"])
+        for (current in ModelSelection.FAMILY_SUCCESSORS.values) {
+            assertTrue("$current is not live", current in LIVE_ANTHROPIC_IDS)
+        }
         for ((retired, current) in ModelSelection.RETIRED_MODEL_IDS) {
             assertTrue("$current is not live", current in LIVE_ANTHROPIC_IDS)
-            assertTrue("$retired is not retired", ModelSelection.RETIRED_CLAUDE_ID.matches(retired))
+            assertTrue(
+                "$retired is neither retired nor a dropped picker id",
+                ModelSelection.RETIRED_CLAUDE_ID.matches(retired) || retired in ModelSelection.DROPPED_PICKER_IDS,
+            )
             assertFalse("$current is retired", ModelSelection.RETIRED_CLAUDE_ID.matches(current))
+            assertFalse("$retired is live", retired in LIVE_ANTHROPIC_IDS)
         }
+        // The dropped picker ids are exactly the ones not on the live catalogs.
+        for (id in ModelSelection.DROPPED_PICKER_IDS) assertFalse("$id is live", id in LIVE_ANTHROPIC_IDS)
+    }
+
+    @Test fun `no picker offers an id the live catalogs do not`() {
+        val config = com.aiblackbox.portal.util.Constants.MODEL_CONFIG
+        for ((provider, entries) in config) {
+            for ((id, _) in entries) {
+                assertFalse("$provider offers dropped $id", id in ModelSelection.DROPPED_PICKER_IDS)
+                assertFalse("$provider offers dropped $id", id in ModelSelection.DROPPED_NON_CLAUDE_IDS)
+                if (id.startsWith("claude-")) assertTrue("$provider offers non-live $id", id in LIVE_ANTHROPIC_IDS)
+            }
+        }
+        // Auto first wherever a cloud chat picker offers it: an empty model is the server's default.
+        for (provider in listOf("gemini", "openai", "anthropic", "xai", "custom", "computer-use")) {
+            assertEquals(provider, "", config[provider]!!.first().first)
+        }
+        // The newest of each family is offered, so a migrated pick shows by name.
+        val anthropic = config["anthropic"]!!.map { it.first }
+        for (current in ModelSelection.FAMILY_SUCCESSORS.values) assertTrue(current, current in anthropic)
     }
 
     @Test fun `the retired pattern is the server's - every retired family, no live or picker id`() {
@@ -141,7 +189,7 @@ class ModelSelectionTest {
 
         val prefs = open(listOf(RetiredModelIdMigration)).snapshot()
 
-        assertEquals("claude-opus-4-8", prefs[MODEL])
+        assertEquals("claude-opus-5-5", prefs[MODEL])
         assertEquals("claude-sonnet-5-5", prefs[key("model_anthropic")])
         // custom ids are alias-qualified: a bare Claude id was never a custom pick → Auto.
         assertEquals("", prefs[key("model_custom")])
@@ -181,16 +229,52 @@ class ModelSelectionTest {
         assertEquals("gemini", prefs[PROVIDER])
     }
 
-    @Test fun `a retired id with no named successor becomes Auto`() = runBlocking {
+    @Test fun `a retired id no table names still gets its family's newest, or Auto with no family`() = runBlocking {
         val prefs = migrated(
             "provider" to "anthropic",
             "model" to "claude-3-5-sonnet-20241022",
             "model_anthropic" to "claude-opus-4-20250514",
             "model_computer-use" to "claude-3-opus-20240229",
         )
+        assertEquals("claude-sonnet-5-5", prefs[MODEL])
+        assertEquals("claude-opus-5-5", prefs[key("model_anthropic")])
+        assertEquals("claude-opus-5-5", prefs[key("model_computer-use")])
+        assertEquals("", migrated("provider" to "anthropic", "model" to "claude-2.1")[MODEL])
+        assertEquals("", migrated("provider" to "anthropic", "model" to "claude-instant-1.2")[MODEL])
+    }
+
+    @Test fun `ids the pickers dropped are rewritten too - same family, or Auto`() = runBlocking {
+        val prefs = migrated(
+            "provider" to "xai",
+            "model" to "grok-3-mini-beta",
+            "model_xai" to "grok-3-mini-beta",
+            "model_anthropic" to "claude-sonnet-4-5",
+            "model_computer-use" to "claude-haiku-4-5",
+            // Live ids (one the v1 migration itself wrote) are picks: they stay.
+            "model_openai" to "gpt-5",
+        )
         assertEquals("", prefs[MODEL])
-        assertEquals("", prefs[key("model_anthropic")])
-        assertEquals("", prefs[key("model_computer-use")])
+        assertEquals("", prefs[key("model_xai")])
+        assertEquals("claude-sonnet-5-5", prefs[key("model_anthropic")])
+        assertEquals("claude-haiku-5-5", prefs[key("model_computer-use")])
+        assertEquals("gpt-5", prefs[key("model_openai")])
+        assertEquals("claude-opus-4-8", migrated("provider" to "anthropic", "model" to "claude-opus-4-8")[MODEL])
+    }
+
+    @Test fun `a device that ran the v1 migration runs this one`() = runBlocking {
+        open().edit {
+            it[ModelSelection.KEY_RETIRED_MODEL_IDS_VERSION] = 1
+            it[PROVIDER] = "anthropic"
+            // What a v1 device could hold: the dropped picker id, and v1's own successor.
+            it[MODEL] = "claude-sonnet-4-5"
+            it[key("model_anthropic")] = "claude-opus-4-8"
+        }
+        closeAll()
+        assertTrue(ModelSelection.RETIRED_MODEL_IDS_VERSION > 1)
+        val prefs = open(listOf(RetiredModelIdMigration)).snapshot()
+        assertEquals("claude-sonnet-5-5", prefs[MODEL])
+        assertEquals("claude-opus-4-8", prefs[key("model_anthropic")])
+        assertEquals(ModelSelection.RETIRED_MODEL_IDS_VERSION, prefs[ModelSelection.KEY_RETIRED_MODEL_IDS_VERSION])
     }
 
     @Test fun `a Claude id the active provider cannot serve becomes Auto, not a successor`() = runBlocking {
@@ -263,7 +347,7 @@ class ModelSelectionTest {
         }
         closeAll()
         val prefs = open(listOf(RetiredModelIdMigration)).snapshot()
-        assertEquals("claude-opus-4-8", prefs[MODEL])
+        assertEquals("claude-opus-5-5", prefs[MODEL])
         assertEquals(
             ModelSelection.RETIRED_MODEL_IDS_VERSION,
             prefs[ModelSelection.KEY_RETIRED_MODEL_IDS_VERSION],

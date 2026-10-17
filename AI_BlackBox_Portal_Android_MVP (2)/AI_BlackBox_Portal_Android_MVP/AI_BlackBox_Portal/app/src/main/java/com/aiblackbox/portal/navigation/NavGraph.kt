@@ -87,6 +87,8 @@ fun BlackBoxNavGraph(
     navController: NavHostController,
     origin: String,
     operator: String,
+    // The box's roster (ChatViewModel.operators) — the Timeline's operator filter.
+    operators: List<String> = emptyList(),
     currentModel: String = "",
     chatViewModel: ChatViewModel? = null,
     /**
@@ -160,7 +162,7 @@ fun BlackBoxNavGraph(
             )
         }
         composable(Routes.SETTINGS) { PlaceholderScreen("Settings") }
-        composable(Routes.TIMELINE) { TimelineScreen(origin = origin, operator = operator) }
+        composable(Routes.TIMELINE) { TimelineScreen(origin = origin, operator = operator, operators = operators) }
         composable(Routes.MEDIA) { MediaBrowserScreen(origin = origin) }
         composable(Routes.DEVICES) { DeviceManagerScreen(origin = origin) }
         composable(Routes.CRON) { CronManagerScreen(origin = origin) }
@@ -293,7 +295,7 @@ fun BlackBoxNavGraph(
         }
         composable(Routes.VOICE) { VoiceScreen(origin = origin) }
         composable(Routes.VOICE_LAB) { VoiceLabScreen(origin = origin) }
-        composable(Routes.SMS_INBOX) { SmsInboxScreen(origin = origin, operator = operator) }
+        composable(Routes.SMS_INBOX) { SmsInboxScreen(origin = origin) }
         composable(Routes.CONTACTS) { ContactsScreen(origin = origin, operator = operator) }
         composable(Routes.UPDATES) {
             // B5: use the activity-scoped instance so the top-bar badge and this

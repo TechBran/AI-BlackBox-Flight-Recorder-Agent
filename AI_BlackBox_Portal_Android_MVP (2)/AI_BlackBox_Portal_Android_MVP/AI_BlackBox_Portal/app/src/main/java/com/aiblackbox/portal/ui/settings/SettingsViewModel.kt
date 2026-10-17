@@ -6,13 +6,17 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.ui.chat.ChatViewModel
 import com.aiblackbox.portal.ui.chat.ProviderPickerViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -40,7 +44,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val store = BlackBoxStore(application)
     internal var api: BlackBoxApi? = null
 
-    private val _operators = MutableStateFlow(listOf("Brandon"))
+    // The box's roster (GET /operators); empty until it loads — never a seed name.
+    private val _operators = MutableStateFlow<List<String>>(emptyList())
     val operators: StateFlow<List<String>> = _operators.asStateFlow()
 
     // ── On-device (local) provider gating (Task 1.6) ──
@@ -50,11 +55,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _localAvailable = MutableStateFlow(false)
     val localAvailable: StateFlow<Boolean> = _localAvailable.asStateFlow()
     private var providerPicker: ProviderPickerViewModel? = null
-    private var currentOperator: String = "Brandon"
 
-    init {
-        viewModelScope.launch { store.operator.collect { currentOperator = it } }
-    }
+    // The store's operator, live: read at each use (suspend paths read store.operator
+    // directly), never a copy kept from when the sheet opened. "" = unresolved.
+    private val operatorNow: StateFlow<String> =
+        store.operator.stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
     private val _apps = MutableStateFlow<List<RegisteredApp>>(emptyList())
     val apps: StateFlow<List<RegisteredApp>> = _apps.asStateFlow()
@@ -108,18 +113,19 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 val repo = com.aiblackbox.portal.data.repository.TtsRepository(api)
                 val text = "Hello! This is a preview of the selected voice."
                 val cfg = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceId)
+                val operator = store.operator.first()
                 val url = when {
                     cfg.provider == "elevenlabs" ->
-                        repo.generateElevenLabsTts(text, cfg.voice).audio_url
+                        repo.generateElevenLabsTts(text, cfg.voice, operator = operator).audio_url
                     cfg.provider == "gemini-pro" || cfg.provider == "gemini-flash" -> {
-                        val sub = repo.generateGeminiTts(text, cfg.voice, cfg.model)
+                        val sub = repo.generateGeminiTts(text, cfg.voice, cfg.model, operator = operator)
                         repo.pollGeminiTaskForUrl(sub.task_id)
                     }
                     // openai / local / qwen — synchronous /tts/batch, provider passed
                     // through (M0 generic-provider fix). Without this a qwen/local
                     // preview fell into the Gemini poll and failed.
                     else ->
-                        repo.generateTts(text, cfg.voice, cfg.model, provider = cfg.provider).audio_url
+                        repo.generateTts(text, cfg.voice, cfg.model, provider = cfg.provider, operator = operator).audio_url
                 }
                 if (url.isNotBlank()) playPreview(url)
                 else throw Exception("No audio url returned")
@@ -161,8 +167,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         if (origin.isBlank() || api != null) return
         api = BlackBoxApi(origin)
         // First persona load now that api is ready — the reactive collector's
-        // startup emissions were no-ops while api was null.
-        loadOperatorPersona(currentOperator)
+        // startup emissions were no-ops while api was null. The operator is read
+        // from the store now, not from a copy that may not have arrived yet.
+        viewModelScope.launch { loadOperatorPersona(store.operator.first()) }
         loadOperators()
         loadApps()
 
@@ -170,7 +177,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val picker = ProviderPickerViewModel.fromContext(
             context = getApplication(),
             api = api!!,
-            operatorProvider = { currentOperator },
+            operatorProvider = { operatorNow.value },
             ioDispatcher = Dispatchers.IO,
         )
         providerPicker = picker
@@ -269,6 +276,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun loadOperatorPersona(operator: String) {
         val a = api ?: return
+        if (operator.isBlank()) return  // unresolved: nobody's persona to show
         viewModelScope.launch {
             try {
                 val resp = a.get("/operator/persona/" + android.net.Uri.encode(operator))
@@ -283,6 +291,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setOperatorPersona(operator: String, text: String) {
         val a = api ?: return
+        if (operator.isBlank()) return
         viewModelScope.launch {
             try {
                 // Build the JSON body via the serializer, NOT interpolation: persona
@@ -298,6 +307,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun resetOperatorPersona(operator: String) {
         val a = api ?: return
+        if (operator.isBlank()) return
         viewModelScope.launch {
             try {
                 a.delete("/operator/persona/" + android.net.Uri.encode(operator))
@@ -403,15 +413,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private fun loadOperators() {
         viewModelScope.launch {
             try {
+                // GET /operators serves a STRING array; the shared parser reads it (the old
+                // per-object read threw on every entry and left a seed name in the list).
                 val response = api?.get("/operators") ?: return@launch
-                val json = Json { ignoreUnknownKeys = true }
-                val obj = json.parseToJsonElement(response).jsonObject
-                val ops = obj["operators"]?.jsonArray?.mapNotNull { elem ->
-                    elem.jsonObject["operator"]?.jsonPrimitive?.content
-                } ?: emptyList()
-                if (ops.isNotEmpty()) _operators.value = ops
+                OperatorResolver.parseRoster(response)?.let { _operators.value = it.operators }
             } catch (_: Exception) {
-                // Keep default operator list on failure
+                // Keep the last known list on failure
             }
         }
     }

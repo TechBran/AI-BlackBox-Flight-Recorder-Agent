@@ -33,6 +33,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.aiblackbox.portal.data.store.OperatorPrompt
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -74,7 +76,7 @@ private val BubbleShape = RoundedCornerShape(16.dp) // --radius-xl
 @Composable
 fun BlackBoxTopBar(
     operator: String,
-    operators: List<String> = listOf("Brandon"),
+    operators: List<String> = emptyList(),
     snapshotCount: Int = 0,
     checkpointTurns: Int = 0,
     isHealthy: Boolean = true,
@@ -85,7 +87,10 @@ fun BlackBoxTopBar(
     showUpdatesBadge: Boolean = false,
     onUpdatesClick: () -> Unit = {},
     onOperatorChange: (String) -> Unit = {},
-    onAddOperator: (String) -> Unit = {}
+    onAddOperator: (String) -> Unit = {},
+    // A09: what the box's roster asks of the operator. CHOOSE (several people, none
+    // picked) and ADD_FIRST (nobody yet) open the picker once, when they arrive.
+    operatorPrompt: OperatorPrompt = OperatorPrompt.NONE,
 ) {
     val healthColor by animateColorAsState(
         targetValue = if (isHealthy) SolidGreen else BbxAccent,
@@ -94,6 +99,9 @@ fun BlackBoxTopBar(
     var showOperatorMenu by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var newOperatorName by remember { mutableStateOf("") }
+    LaunchedEffect(operatorPrompt) {
+        if (operatorPrompt != OperatorPrompt.NONE) showOperatorMenu = true
+    }
 
     // Transparent topbar — floating pills, no background
     // Box layout so operator pill is truly centered regardless of timeline button
@@ -132,7 +140,7 @@ fun BlackBoxTopBar(
                 // Operator name (tappable dropdown) — RED for visibility
                 Box {
                     Text(
-                        text = operator,
+                        text = operator.ifBlank { "Select" },
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontWeight = FontWeight.Medium
                         ),

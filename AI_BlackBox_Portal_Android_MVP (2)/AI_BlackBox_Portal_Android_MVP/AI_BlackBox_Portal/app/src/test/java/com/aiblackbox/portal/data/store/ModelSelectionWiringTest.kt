@@ -20,7 +20,7 @@ import java.io.File
  *    onModelChange) — a picker that writes only the global key leaves a stale
  *    model_<provider> for the next switch back to restore;
  *  - the Settings sheet DISPLAYS the global model — the id ChatViewModel sends.
- *  - the DataStore is built with the retired-id migration.
+ *  - the DataStore is built with the retired-id migration and the pairing-operator one.
  */
 class ModelSelectionWiringTest {
 
@@ -95,9 +95,14 @@ class ModelSelectionWiringTest {
         assertFalse("getString(\"model_\$provider\"" in sheet)
     }
 
-    @Test fun `the store is built with the retired-id migration`() {
+    @Test fun `the store is built with the retired-id and pairing-operator migrations`() {
         val store = moduleSource("$root/data/store/BlackBoxStore.kt")
         val delegate = store.substringAfter("private val Context.dataStore").substringBefore("\nclass ")
-        assertTrue(delegate, "produceMigrations = { listOf(RetiredModelIdMigration) }" in delegate)
+        val migrations = delegate.substringAfter("produceMigrations = {").substringBefore("\n)")
+        assertTrue(delegate, "RetiredModelIdMigration," in migrations)
+        // The QR operator is read from the same prefs PairingActivity wrote it to.
+        assertTrue(delegate, "LegacyPairingOperatorMigration {" in migrations)
+        assertTrue(delegate, "getSharedPreferences(Constants.PREFS_NAME" in migrations)
+        assertTrue(delegate, "getString(Constants.KEY_OPERATOR, null)" in migrations)
     }
 }

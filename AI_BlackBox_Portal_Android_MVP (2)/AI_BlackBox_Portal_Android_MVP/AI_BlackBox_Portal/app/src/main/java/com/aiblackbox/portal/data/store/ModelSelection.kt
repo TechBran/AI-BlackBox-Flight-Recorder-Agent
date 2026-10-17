@@ -33,27 +33,58 @@ import com.aiblackbox.portal.util.Constants
 object ModelSelection {
 
     /**
-     * Retired Claude ids → a current successor, each on the live /models/anthropic list (so
-     * a migrated `model_anthropic` can still be restored by a switch back). An id saved
-     * before commit 6071f260 (2026-10-07) keeps 404ing until the operator re-picks, so
-     * [RetiredModelIdMigration] rewrites it once. 6071f260 named the successors of the two
-     * Android picker ids only; the dated and 3.x targets are this migration's own
-     * same-family choices (server-side, 6071f260 sent ANTHROPIC_MODEL_DEFAULT where it
-     * dropped claude-sonnet-4-20250514). Any other retired id ([RETIRED_CLAUDE_ID]) → Auto.
+     * The newest live model of each Claude family — where a retired id of that family goes
+     * (the owner's 2026-10-17 decision; the server applies the identical map). Each is on
+     * the live /models/anthropic list, so a migrated `model_anthropic` can still be
+     * restored by a switch back.
+     */
+    val FAMILY_SUCCESSORS: Map<String, String> = mapOf(
+        "opus" to "claude-opus-5-5",
+        "sonnet" to "claude-sonnet-5-5",
+        "haiku" to "claude-haiku-5-5",
+    )
+
+    /**
+     * Claude ids the Android pickers offered that are not on the live catalogs (the undated
+     * 4.5 aliases, 2026-10-17): dropped from Constants.MODEL_CONFIG, and rewritten like a
+     * retired id, since no picker can show (or a switch back restore) them any more.
+     */
+    val DROPPED_PICKER_IDS: Set<String> = setOf("claude-sonnet-4-5", "claude-haiku-4-5")
+
+    /** Non-Claude ids dropped from the pickers for the same reason; they go to Auto. */
+    val DROPPED_NON_CLAUDE_IDS: Set<String> = setOf("grok-3-mini-beta")
+
+    /**
+     * The ids an older build stored that can only 404 (or that no picker offers), each
+     * named with its family's [FAMILY_SUCCESSORS] entry; [successorOf] covers every other
+     * retired id ([RETIRED_CLAUDE_ID]) the same way. [RetiredModelIdMigration] rewrites
+     * them once per [RETIRED_MODEL_IDS_VERSION].
      */
     val RETIRED_MODEL_IDS: Map<String, String> = mapOf(
-        // Dropped from Constants.MODEL_CONFIG["anthropic"] (the Settings + SMS pickers) by
-        // 6071f260, which replaced them with the server default Opus and the current Sonnet.
-        "claude-opus-4-1" to "claude-opus-4-8",
+        // Dropped from Constants.MODEL_CONFIG["anthropic"] (the Settings + SMS pickers) by 6071f260.
+        "claude-opus-4-1" to "claude-opus-5-5",
         "claude-sonnet-4" to "claude-sonnet-5-5",
         // Their dated twins, offered to the composer pill by the server's /models/anthropic
         // fallback catalog until the same commit.
-        "claude-opus-4-1-20250805" to "claude-opus-4-8",
+        "claude-opus-4-1-20250805" to "claude-opus-5-5",
         "claude-sonnet-4-20250514" to "claude-sonnet-5-5",
-        // The two 3.x ids that fallback catalog also offered: the newest of the same family.
+        // The two 3.x ids that fallback catalog also offered.
         "claude-3-7-sonnet-20250219" to "claude-sonnet-5-5",
         "claude-3-5-haiku-20241022" to "claude-haiku-5-5",
+        // [DROPPED_PICKER_IDS].
+        "claude-sonnet-4-5" to "claude-sonnet-5-5",
+        "claude-haiku-4-5" to "claude-haiku-5-5",
     )
+
+    /**
+     * What a stored Claude [id] becomes: its [RETIRED_MODEL_IDS] entry; for any other
+     * retired id, its family's newest ("" = Auto for a retired id of no family, such as
+     * claude-2 or claude-instant); null when [id] is current and stays.
+     */
+    fun successorOf(id: String): String? = RETIRED_MODEL_IDS[id]
+        ?: if (RETIRED_CLAUDE_ID.matches(id)) {
+            FAMILY_SUCCESSORS.entries.firstOrNull { (family, _) -> family in id }?.value ?: ""
+        } else null
 
     /**
      * Every Claude id the server treats as retired — the same pattern as RETIRED_ID_RX in
@@ -72,11 +103,12 @@ object ModelSelection {
 
     /**
      * Run-once stamp for [RetiredModelIdMigration]. Bump [RETIRED_MODEL_IDS_VERSION] when
-     * [RETIRED_MODEL_IDS], [RETIRED_CLAUDE_ID] or the rules in [rewriteRetiredModelIds]
-     * change, so the next launch rewrites the newly retired ids once.
+     * [RETIRED_MODEL_IDS], [FAMILY_SUCCESSORS], [RETIRED_CLAUDE_ID], the dropped-id sets or
+     * the rules in [rewriteRetiredModelIds] change, so the next launch rewrites the newly
+     * retired ids once. 2 (2026-10-17): same-family successors, the dropped picker ids.
      */
     val KEY_RETIRED_MODEL_IDS_VERSION = intPreferencesKey("retired_model_ids_version")
-    const val RETIRED_MODEL_IDS_VERSION = 1
+    const val RETIRED_MODEL_IDS_VERSION = 2
 
     private const val PROVIDER_MODEL_PREFIX = "model_"
 
@@ -88,15 +120,16 @@ object ModelSelection {
 
     /**
      * What a model [id] stored for [provider] becomes in the migration; null = keep it.
-     * A Claude id under a provider that cannot serve one (custom ids are alias-qualified)
-     * was never a pick for it, only A11 residue that 404s → Auto. Under a Claude provider
-     * a retired id gets its [RETIRED_MODEL_IDS] successor, or Auto when only
-     * [RETIRED_CLAUDE_ID] knows it; a current id stays.
+     * A dropped non-Claude picker id → Auto. A Claude id under a provider that cannot serve
+     * one (custom ids are alias-qualified) was never a pick for it, only A11 residue that
+     * 404s → Auto. Under a Claude provider a retired or dropped id gets [successorOf]; a
+     * current id stays.
      */
     private fun migratedModelId(id: String, provider: String): String? = when {
+        id in DROPPED_NON_CLAUDE_IDS -> ""
         !id.startsWith("claude-") -> null
         provider !in CLAUDE_ID_PROVIDERS -> ""
-        else -> RETIRED_MODEL_IDS[id] ?: if (RETIRED_CLAUDE_ID.matches(id)) "" else null
+        else -> successorOf(id)
     }
 
     /**

@@ -71,6 +71,7 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.ClaudeAccent
@@ -93,9 +94,11 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
 // Glass tokens from worktree Color.kt (no Glass.kt in worktree)
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 internal fun cliLiveStatusLabel(
@@ -234,15 +237,15 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     private val _messageCount = MutableStateFlow(0)
     val messageCount: StateFlow<Int> = _messageCount.asStateFlow()
 
-    private var currentOperator = "Brandon"
+    // The store's operator, live: "" until the box resolves one, never a seed name.
+    private val operatorNow: StateFlow<String> =
+        store.operator.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    private val currentOperator: String get() = operatorNow.value
     private var currentProvider = "agents"
     private var outputBuffer = StringBuilder()
     private var thinkingBuffer = StringBuilder()
 
     init {
-        viewModelScope.launch {
-            store.operator.collect { currentOperator = it }
-        }
         viewModelScope.launch {
             store.claudeModel.collect { _currentModel.value = it }
         }
@@ -471,6 +474,11 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendPrompt(text: String) {
         val client = agentClient ?: return
+        // Every prompt is the resolved operator's: with none yet, nothing is sent.
+        if (currentOperator.isBlank()) {
+            _status.value = OperatorResolver.CHOOSE_MESSAGE
+            return
+        }
 
         // Add user message to UI immediately
         _messages.value = _messages.value + UiMessage(role = "user", content = text)

@@ -134,7 +134,7 @@ import com.aiblackbox.portal.util.Constants
 fun SettingsSheet(
     origin: String,
     modifier: Modifier = Modifier,
-    operators: List<String> = listOf("Brandon"),
+    operators: List<String> = emptyList(),
     onDismiss: () -> Unit,
     onNavigate: (String) -> Unit = {},
     onClearHistory: () -> Unit = {},
@@ -144,7 +144,8 @@ fun SettingsSheet(
     val feedback = rememberPressFeedback()
     val provider by viewModel.store.provider.collectAsState(initial = "gemini")
     val currentModel by viewModel.store.model.collectAsState(initial = "")
-    val operator by viewModel.store.operator.collectAsState(initial = "Brandon")
+    // "" until the box resolves it (OperatorResolver) — never a seed name.
+    val operator by viewModel.store.operator.collectAsState(initial = "")
     val streaming by viewModel.store.streamingEnabled.collectAsState(initial = true)
     val emberMode by viewModel.store.emberMode.collectAsState(initial = "always")
     val particleMode by viewModel.store.particleMode.collectAsState(initial = "stars")
@@ -854,7 +855,7 @@ fun SettingsSheet(
 
             SettingsDropdown(
                 label = "Operator",
-                value = operator,
+                value = operator.ifBlank { "Select an operator" },
                 expanded = showOperatorMenu,
                 onExpandedChange = { showOperatorMenu = it }
             ) {

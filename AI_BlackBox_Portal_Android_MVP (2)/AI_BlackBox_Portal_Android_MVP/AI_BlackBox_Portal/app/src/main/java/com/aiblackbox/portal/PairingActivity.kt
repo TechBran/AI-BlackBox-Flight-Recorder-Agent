@@ -6,7 +6,10 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.google.zxing.integration.android.IntentIntegrator
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 class PairingActivity : AppCompatActivity() {
@@ -59,11 +62,16 @@ class PairingActivity : AppCompatActivity() {
                     Toast.makeText(this, "Invalid QR: missing origin", Toast.LENGTH_SHORT).show()
                 } else {
                     prefs.edit().putString("origin", origin).apply()
-                    json.optString("operator").takeIf { it.isNotBlank() }?.let {
-                        prefs.edit().putString("operator", it).apply()
+                    // The QR names who this phone is on the box: straight into the store the
+                    // app reads (it used to land in bbx_prefs, which nothing read). Without one
+                    // the app resolves the operator from the box's roster on first contact.
+                    val qrOperator = json.optString("operator").trim()
+                    lifecycleScope.launch {
+                        if (qrOperator.isNotEmpty()) BlackBoxStore(applicationContext).setOperator(qrOperator)
+                        launchMainActivity()
+                        finish()
                     }
-                    launchMainActivity()
-                    finish(); return
+                    return
                 }
             } catch (e: Exception) {
                 Toast.makeText(this, "Invalid pairing QR", Toast.LENGTH_SHORT).show()

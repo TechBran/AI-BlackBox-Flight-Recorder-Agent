@@ -4,10 +4,15 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
@@ -29,8 +34,11 @@ data class Contact(
 )
 
 class ContactsViewModel(application: Application) : AndroidViewModel(application) {
-    private var api: BlackBoxApi? = null
-    private var operator: String = ""
+    private val store = BlackBoxStore(application)
+    // Every request reads the operator at that moment (ContactsBookApi), never a copy
+    // kept from when the screen first opened (A14-ui-misc-07).
+    private var book: ContactsBookApi? = null
+    private var boundOrigin = ""
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     // -- Raw state --
@@ -77,21 +85,32 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
                 }
             }.collect { _filteredContacts.value = it }
         }
+        // An operator switch while the screen is open: the list and any open edit or
+        // delete were the previous operator's book, so close them and load the new one.
+        viewModelScope.launch {
+            store.operator.distinctUntilChanged().drop(1).collect {
+                hideEdit()
+                hideDelete()
+                _allContacts.value = emptyList()
+                loadContacts()
+            }
+        }
     }
 
-    fun initialize(origin: String, operator: String) {
-        if (origin.isBlank() || api != null) return
-        this.operator = operator
-        api = BlackBoxApi(origin)
+    /** Bind to [origin]; a different origin (a re-pair) rebinds and reloads. */
+    fun initialize(origin: String) {
+        if (origin.isBlank() || origin == boundOrigin) return
+        boundOrigin = origin
+        book = ContactsBookApi(BlackBoxApi(origin)) { store.operator.first() }
         loadContacts()
     }
 
     fun loadContacts() {
-        val api = api ?: return
+        val book = book ?: return
         _isLoading.value = true
         viewModelScope.launch {
             try {
-                val response = api.get("/contacts?operator=$operator")
+                val response = book.list() ?: run { _allContacts.value = emptyList(); return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 val arr = root["contacts"]?.jsonArray ?: return@launch
                 _allContacts.value = arr.map { el ->
@@ -132,17 +151,17 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
         inboundAllowed: Boolean,
         isOperatorSelf: Boolean
     ) {
-        val api = api ?: return
+        val book = book ?: return
         if (_isSaving.value) return
         _isSaving.value = true
 
         viewModelScope.launch {
             try {
-                val tagsJson = tags.split(",").map { it.trim() }.filter { it.isNotBlank() }.joinToString(",") { "\"$it\"" }
-                val body = """{"operator":"$operator","name":"${name.replace("\"", "\\\"")}","phone":"$phone","email":"$email","relationship":"$relationship","notes":"${notes.replace("\"", "\\\"")}","tags":[$tagsJson],"inbound_allowed":$inboundAllowed,"is_operator_self":$isOperatorSelf}"""
-
-                // Always use POST — backend upserts by name (case-insensitive match)
-                val response = api.post("/contacts", body)
+                // Always a POST — backend upserts by name (case-insensitive match)
+                val response = book.save(
+                    name = name, phone = phone, email = email, relationship = relationship,
+                    notes = notes, tags = tags, inboundAllowed = inboundAllowed, isOperatorSelf = isOperatorSelf,
+                )
                 val existingId = _editingContact.value?.id
 
                 // Surface the write-time identity guard warning if present (save still succeeded)
@@ -157,6 +176,8 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
                 _showEditDialog.value = false
                 _editingContact.value = null
                 loadContacts()
+            } catch (e: OperatorUnresolvedException) {
+                _actionMessage.value = e.message
             } catch (e: Exception) {
                 _actionMessage.value = "Failed to save: ${e.message}"
             } finally {
@@ -166,13 +187,15 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun deleteContact(id: String) {
-        val api = api ?: return
+        val book = book ?: return
         _showDeleteConfirm.value = null
         viewModelScope.launch {
             try {
-                api.delete("/contacts/$id?operator=$operator")
+                book.delete(id)
                 _actionMessage.value = "Contact deleted"
                 loadContacts()
+            } catch (e: OperatorUnresolvedException) {
+                _actionMessage.value = e.message
             } catch (e: Exception) {
                 _actionMessage.value = "Failed to delete: ${e.message}"
             }

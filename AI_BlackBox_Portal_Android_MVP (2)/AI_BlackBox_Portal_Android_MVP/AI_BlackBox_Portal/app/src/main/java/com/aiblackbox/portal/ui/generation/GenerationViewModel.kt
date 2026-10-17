@@ -13,9 +13,11 @@ import com.aiblackbox.portal.data.repository.ImageCatalogProvider
 import com.aiblackbox.portal.data.repository.ImageCatalogRepository
 import com.aiblackbox.portal.data.repository.awaitTaskOutcome
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -63,17 +65,18 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
     private val _imageParamValues = MutableStateFlow<Map<String, String>>(emptyMap())
     val imageParamValues: StateFlow<Map<String, String>> = _imageParamValues.asStateFlow()
 
-    private var currentOperator = "Brandon"
-
     // The running task poll. Kept so reset() and the next submit cancel it — before,
     // an abandoned poll kept writing its late result over the fresh screen.
     private var pollJob: Job? = null
     // The task [pollJob] polls (or last polled), for "Check again" after a LOST poll.
     private var polledTaskId: String? = null
 
-    init {
-        viewModelScope.launch { store.operator.collect { currentOperator = it } }
-    }
+    /**
+     * The operator for THIS request, read from the store now (never a seed name); with
+     * none resolved the submit fails with the reason instead of going out under nobody.
+     */
+    private suspend fun operatorForRequest(): String =
+        store.operator.first().ifBlank { throw OperatorUnresolvedException() }
 
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
@@ -141,7 +144,7 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
             try {
                 val body = buildJsonObject {
                     put("prompt", prompt)
-                    put("operator", currentOperator)
+                    put("operator", operatorForRequest())
                     put("provider", provider)
                     params.forEach { (name, value) ->
                         if (name in intParamNames) {
@@ -173,7 +176,7 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
             try {
                 val body = buildJsonObject {
                     put("prompt", prompt)
-                    put("operator", currentOperator)
+                    put("operator", operatorForRequest())
                     put("aspectRatio", aspectRatio)
                     put("numberOfImages", numberOfImages)
                 }.toString()
@@ -199,7 +202,7 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
             try {
                 val body = buildJsonObject {
                     put("prompt", prompt)
-                    put("operator", currentOperator)
+                    put("operator", operatorForRequest())
                     put("aspectRatio", aspectRatio)
                     put("duration", duration)
                 }.toString()
@@ -221,7 +224,7 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
             try {
                 val body = buildJsonObject {
                     put("prompt", prompt)
-                    put("operator", currentOperator)
+                    put("operator", operatorForRequest())
                     if (negativePrompt.isNotBlank()) put("negative_prompt", negativePrompt)
                 }.toString()
                 val response = api.post("/generate/lyria_music", body)
@@ -253,7 +256,7 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
                     put("prompt", prompt)
                     put("music_length_ms", musicLengthMs)
                     put("force_instrumental", forceInstrumental)
-                    put("operator", currentOperator)
+                    put("operator", operatorForRequest())
                 }.toString()
                 val response = api.post("/generate/elevenlabs_music", body)
                 val taskResponse = api.json.decodeFromString(TaskResponse.serializer(), response)

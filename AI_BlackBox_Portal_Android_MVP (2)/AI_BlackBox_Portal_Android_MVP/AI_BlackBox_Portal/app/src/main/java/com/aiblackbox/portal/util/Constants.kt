@@ -50,9 +50,9 @@ object Constants {
     const val WS_GEMINI_AGENT = "/ws/gemini-agent"
     const val WS_STT = "/ws/stt"
 
-    // Default values
+    // Default values. There is no default operator: it is resolved from the box
+    // (GET /operators via data.store.OperatorResolver), never a seed name.
     const val DEFAULT_PROVIDER = "gemini"
-    const val DEFAULT_OPERATOR = "Brandon"
 
     // Client identification header
     const val CLIENT_HEADER = "X-BlackBox-Client"
@@ -82,18 +82,18 @@ object Constants {
             "gpt-4o" to "GPT-4o"
         ),
         // SettingsSheet + the SMS model picker read this list directly, so every
-        // id must be live on /v1/models (2026-10-07): claude-opus-4-1 and
-        // claude-sonnet-4 are retired (404) — replaced by the server default
-        // Opus (claude-opus-4-8) and the current Sonnet (claude-sonnet-5-5).
+        // id must be on the live /models/anthropic list (2026-10-17). Retired and
+        // dropped ids migrate to the newest of their family (ModelSelection), which
+        // is why each family's newest is offered here by name.
         "anthropic" to listOf(
             "" to "Auto - Latest",
+            "claude-opus-5-5" to "Claude Opus 5.5",
             "claude-sonnet-5-5" to "Claude Sonnet 5.5",
+            "claude-haiku-5-5" to "Claude Haiku 5.5",
             "claude-opus-4-8" to "Claude Opus 4.8",
             "claude-opus-4-7" to "Claude Opus 4.7 (1M ctx, adaptive thinking)",
             "claude-opus-4-6" to "Claude Opus 4.6",
-            "claude-sonnet-4-6" to "Claude Sonnet 4.6",
-            "claude-sonnet-4-5" to "Claude Sonnet 4.5",
-            "claude-haiku-4-5" to "Claude Haiku 4.5"
+            "claude-sonnet-4-6" to "Claude Sonnet 4.6"
         ),
         // T3 (2026-05-18): xai entries were MALFORMED — "grok-4", "grok-4.1-fast",
         // "grok-3-mini" don't exist in the xAI API and would silently fail at
@@ -103,8 +103,7 @@ object Constants {
         "xai" to listOf(
             "" to "Auto - Latest",
             "grok-4.3" to "Grok 4.3",
-            "grok-4.20-multi-agent-0309" to "Grok 4.20 Multi-Agent",
-            "grok-3-mini-beta" to "Grok 3 Mini (legacy)"
+            "grok-4.20-multi-agent-0309" to "Grok 4.20 Multi-Agent"
         ),
         "agents" to listOf(
             "sonnet" to "Sonnet",

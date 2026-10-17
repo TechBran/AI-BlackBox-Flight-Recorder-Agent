@@ -239,7 +239,8 @@ class NativeMainActivity : ComponentActivity() {
                 val navController = rememberNavController()
                 val store = remember { BlackBoxStore(applicationContext) }
                 val scope = rememberCoroutineScope()
-                val operator by store.operator.collectAsState(initial = Constants.DEFAULT_OPERATOR)
+                // "" until the box resolves it (ChatViewModel.refreshOperators) — never a seed name.
+                val operator by store.operator.collectAsState(initial = "")
                 val provider by store.provider.collectAsState(initial = Constants.DEFAULT_PROVIDER)
                 val currentModel by store.model.collectAsState(initial = "")
 
@@ -258,6 +259,7 @@ class NativeMainActivity : ComponentActivity() {
                 val isHealthy by chatViewModel.isHealthy.collectAsState()
                 val checkpointTurns by chatViewModel.checkpointTurns.collectAsState()
                 val operators by chatViewModel.operators.collectAsState()
+                val operatorPrompt by chatViewModel.operatorPrompt.collectAsState()
                 var showSettings by remember { mutableStateOf(false) }
                 // T23 device QA fix (2026-05-26): CliAgentScreen-in-Terminal-state
                 // must hide BOTH the floating operator chrome (Layer 2) AND the
@@ -541,6 +543,14 @@ class NativeMainActivity : ComponentActivity() {
                     }
                 }
 
+                // A09: why a send waited (no operator resolved yet) or what the roster
+                // asks (pick one, or add the first) — one toast each.
+                LaunchedEffect(Unit) {
+                    chatViewModel.operatorNotice.collect { notice ->
+                        Toast.makeText(applicationContext, notice, Toast.LENGTH_LONG).show()
+                    }
+                }
+
                 // B5: initialize the activity-scoped UpdatesViewModel once — this
                 // creates its api/repo AND does the first status+embeddings fetch, so
                 // the top-bar badge's `attention` flow is populated as soon as origin
@@ -749,6 +759,7 @@ class NativeMainActivity : ComponentActivity() {
                         navController = navController,
                         origin = origin,
                         operator = operator,
+                        operators = operators,
                         currentModel = currentModel,
                         chatViewModel = chatViewModel,
                         updatesVm = updatesVm,
@@ -990,6 +1001,7 @@ class NativeMainActivity : ComponentActivity() {
                         BlackBoxTopBar(
                             operator = operator,
                             operators = operators,
+                            operatorPrompt = operatorPrompt,
                             snapshotCount = snapshotCount,
                             checkpointTurns = checkpointTurns,
                             isHealthy = isHealthy,

@@ -83,7 +83,7 @@ import com.aiblackbox.portal.ui.theme.glassSurface
 fun TimelineScreen(
     origin: String,
     operator: String = "",
-    operators: List<String> = listOf("Brandon"),
+    operators: List<String> = emptyList(),
     modifier: Modifier = Modifier,
     viewModel: TimelineViewModel = viewModel()
 ) {

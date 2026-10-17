@@ -59,6 +59,7 @@ import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.PairingActivity
 import com.aiblackbox.portal.R
 import com.aiblackbox.portal.data.remote.RemoteSessionBus
+import com.aiblackbox.portal.data.store.OperatorResolver
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -170,8 +171,10 @@ class OverlayService : Service() {
     private var mediaProjectionInvalidated = false
 
     private var serverUrl: String = ""
-    private var currentOperator: String = "Brandon"
-    private var operatorsList: List<String> = listOf("Brandon", "default")
+    // The operator handed over by the starting screen ("" if it had none) until the box's
+    // roster arrives (fetchOperators); never a seed name.
+    private var currentOperator: String = ""
+    private var operatorsList: List<String> = emptyList()
 
     private val handler = Handler(Looper.getMainLooper())
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -591,7 +594,7 @@ class OverlayService : Service() {
 
         // Get other extras
         serverUrl = intent?.getStringExtra(EXTRA_SERVER_URL) ?: ""
-        currentOperator = intent?.getStringExtra(EXTRA_OPERATOR) ?: "default"
+        currentOperator = intent?.getStringExtra(EXTRA_OPERATOR)?.trim().orEmpty()
         val requestedRecordingMode = intent?.getBooleanExtra(EXTRA_RECORDING_MODE, false) ?: false
 
         // Initialize MediaProjection after foreground started
@@ -910,20 +913,16 @@ class OverlayService : Service() {
                 val response = client.newCall(request).execute()
 
                 if (response.isSuccessful) {
-                    val body = response.body?.string() ?: "{}"
-                    val json = JSONObject(body)
-                    val operators = json.optJSONArray("operators")
-                    val defaultOp = json.optString("default", "default")
-
-                    if (operators != null && operators.length() > 0) {
-                        val list = mutableListOf<String>()
-                        for (i in 0 until operators.length()) {
-                            list.add(operators.getString(i))
-                        }
-                        operatorsList = list
-
+                    val roster = OperatorResolver.parseRoster(response.body?.string() ?: "")
+                    if (roster != null && roster.operators.isNotEmpty()) {
+                        // The hand-over operator while the box lists it, else the shared
+                        // rule's pick, else the box default — shown in the spinner to change.
+                        val start = OperatorResolver.forSpinner(currentOperator, roster)
                         withContext(Dispatchers.Main) {
-                            setupOperatorSpinner(defaultOp)
+                            operatorsList = roster.operators
+                            currentOperator = start
+                            setupOperatorSpinner(start)
+                            syncBridgeState()  // the XR panel's picker (no spinner there)
                         }
                     }
                 }

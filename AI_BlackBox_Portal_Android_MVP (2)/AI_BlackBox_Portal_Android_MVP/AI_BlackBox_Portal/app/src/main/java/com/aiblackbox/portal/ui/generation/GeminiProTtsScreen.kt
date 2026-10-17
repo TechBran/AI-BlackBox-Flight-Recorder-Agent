@@ -64,6 +64,7 @@ import com.aiblackbox.portal.data.repository.LOST_CONNECTION_MESSAGE
 import com.aiblackbox.portal.data.repository.TaskPollOutcome
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import com.aiblackbox.portal.ui.components.AudioPlayerBar
 import com.aiblackbox.portal.ui.components.EmberBackdrop
 import com.aiblackbox.portal.ui.components.GlassCard
@@ -89,6 +90,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonArray
@@ -130,16 +132,11 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
     private val _audioUrl = MutableStateFlow<String?>(null)
     val audioUrl: StateFlow<String?> = _audioUrl.asStateFlow()
 
-    private var currentOperator = "Brandon"
     private var originBase = ""
 
     // The running submit + poll, so reset() stops it instead of letting a late
     // result land on the cleared screen.
     private var genJob: Job? = null
-
-    init {
-        viewModelScope.launch { store.operator.collect { currentOperator = it } }
-    }
 
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
@@ -159,7 +156,6 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
         speaker1Voice: String,
         speaker2Name: String,
         speaker2Voice: String,
-        operator: String
     ) {
         val api = api ?: return
         _isGenerating.value = true
@@ -169,6 +165,8 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
         genJob?.cancel()
         genJob = viewModelScope.launch {
             try {
+                // The operator for THIS request, read from the store now — never a seed name.
+                val operator = store.operator.first().ifBlank { throw OperatorUnresolvedException() }
                 val body = if (isMulti) {
                     buildJsonObject {
                         put("text", text)
@@ -620,7 +618,6 @@ fun GeminiProTtsScreen(
                         speaker1Voice = speaker1Voice,
                         speaker2Name = speaker2Name,
                         speaker2Voice = speaker2Voice,
-                        operator = "Brandon"
                     )
                 }
                 .padding(vertical = 14.dp),

@@ -50,6 +50,9 @@ import com.aiblackbox.portal.data.repository.ChatRepository
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.ChatHistoryStore
+import com.aiblackbox.portal.data.store.OperatorPrompt
+import com.aiblackbox.portal.data.store.OperatorResolution
+import com.aiblackbox.portal.data.store.OperatorResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
@@ -60,6 +63,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -346,8 +350,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _checkpointTurns = MutableStateFlow(0)
     val checkpointTurns: StateFlow<Int> = _checkpointTurns.asStateFlow()
 
-    private val _operators = MutableStateFlow(listOf("Brandon"))
+    // The box's roster (GET /operators) for the top-bar picker; empty until it loads.
+    private val _operators = MutableStateFlow<List<String>>(emptyList())
     val operators: StateFlow<List<String>> = _operators.asStateFlow()
+
+    // A09: what the roster asks of the operator (a pick, or a first operator); the top
+    // bar opens its picker for anything but NONE. See refreshOperators().
+    private val _operatorPrompt = MutableStateFlow(OperatorPrompt.NONE)
+    val operatorPrompt: StateFlow<OperatorPrompt> = _operatorPrompt.asStateFlow()
+
+    // One-line notices about the operator (a send blocked while none is resolved, the
+    // roster asking for a pick) — the activity shows them as toasts.
+    private val _operatorNotice = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val operatorNotice: SharedFlow<String> = _operatorNotice.asSharedFlow()
 
     // Media task IDs for polling (image/video/music generation)
     private val _pendingMediaTasks = MutableStateFlow<List<String>>(emptyList())
@@ -477,7 +492,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var streamJob: Job? = null
 
     // ── Cached values ──
-    private var currentOperator = "Brandon"
+    // Mirrors the store; "" until the box resolves an operator (refreshOperators).
+    private var currentOperator = ""
     private var currentProvider = "gemini"
     private var currentModel = ""
 
@@ -500,6 +516,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 store.operator.collect { op ->
                     val oldOp = currentOperator
                     currentOperator = op
+                    // A pick (top bar, Settings, add-operator) answers the roster's ask.
+                    if (op.isNotBlank()) _operatorPrompt.value = OperatorPrompt.NONE
                     // Load history when operator changes (or on first launch)
                     if (!historyLoaded || op != oldOp) {
                         loadHistory(op)
@@ -857,6 +875,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun sendMessage(imageUrls: List<String> = emptyList()) {
         val text = _inputText.value.text.trim()
         if (text.isBlank()) return
+        if (operatorBlocksSend()) return
 
         val repo = repository ?: run {
             Log.e(TAG, "Repository not initialized")
@@ -934,6 +953,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun fireSend(text: String, imageUrls: List<String>) {
         if (text.isBlank()) return
+        if (operatorBlocksSend()) return
         val repo = repository ?: run {
             Log.e(TAG, "Repository not initialized")
             return
@@ -2780,8 +2800,54 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * A09: every turn is the resolved operator's. With none resolved yet nothing is sent
+     * (the draft stays in the box) and the operator is told how to pick one.
+     */
+    private fun operatorBlocksSend(): Boolean {
+        val reason = OperatorResolver.sendBlockedReason(currentOperator, _operatorPrompt.value) ?: return false
+        _operatorNotice.tryEmit(reason)
+        return true
+    }
+
+    /**
+     * A09-data-local-model-05: resolve the operator from the box's roster (GET /operators)
+     * with the shared 0/1/many rule — the stored pick while the box lists it, else the
+     * box's only person (written to the store), else the top-bar picker (several people)
+     * or guidance (nobody). A stored pick the box no longer lists is cleared so it is
+     * never sent. Runs with every health check, so an operator removed on the box, or a
+     * re-pair to another box, re-resolves on its own; an unreachable box changes nothing.
+     */
+    fun refreshOperators() {
+        val currentApi = api ?: return
+        viewModelScope.launch {
+            val roster = try {
+                OperatorResolver.parseRoster(currentApi.get("/operators"))
+            } catch (_: Exception) {
+                null
+            } ?: return@launch
+            _operators.value = roster.operators
+            val stored = store.operator.first()
+            when (val resolution = OperatorResolver.resolve(stored, roster)) {
+                is OperatorResolution.Resolved -> {
+                    if (resolution.operator != stored) store.setOperator(resolution.operator)
+                    _operatorPrompt.value = OperatorPrompt.NONE
+                }
+                else -> {
+                    if (stored.isNotEmpty()) store.setOperator("")
+                    val prompt = resolution.prompt
+                    if (_operatorPrompt.value != prompt) {
+                        OperatorResolver.sendBlockedReason("", prompt)?.let { _operatorNotice.tryEmit(it) }
+                    }
+                    _operatorPrompt.value = prompt
+                }
+            }
+        }
+    }
+
     fun checkHealth() {
         val currentApi = api ?: return
+        refreshOperators()
         viewModelScope.launch {
             try {
                 val response = currentApi.get("/health")
@@ -2794,12 +2860,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         _checkpointTurns.value = it
                     }
 
-                obj["users"]?.jsonObject?.get("list")?.jsonArray?.let { arr ->
-                    val ops = arr.mapNotNull {
-                        try { it.jsonPrimitive.content } catch (_: Exception) { null }
-                    }
-                    if (ops.isNotEmpty()) _operators.value = ops
-                }
+                // The operator roster comes from GET /operators (refreshOperators), which
+                // also resolves the operator; /health's users list is no longer read here.
             } catch (e: Exception) {
                 _isHealthy.value = false
             }

@@ -65,7 +65,6 @@ import com.aiblackbox.portal.util.Constants
 @Composable
 fun SmsInboxScreen(
     origin: String,
-    operator: String = "",
     modifier: Modifier = Modifier,
     viewModel: SmsViewModel = viewModel()
 ) {
@@ -82,7 +81,9 @@ fun SmsInboxScreen(
     val lines by viewModel.lines.collectAsState()
     val selectedFromNumber by viewModel.selectedFromNumber.collectAsState()
 
-    LaunchedEffect(origin) { viewModel.initialize(origin, operator) }
+    // The view model reads the operator from the store at every request and reloads on a
+    // switch (A14-ui-misc-07), so only the origin is handed over here.
+    LaunchedEffect(origin) { viewModel.initialize(origin) }
     DisposableEffect(Unit) {
         viewModel.startPolling()
         onDispose { viewModel.stopPolling() }
@@ -539,7 +540,8 @@ private fun SmsModelSelector(
 
     val providerDisplay = providers.find { it.first == smsProvider }?.second ?: smsProvider
     val models = Constants.MODEL_CONFIG[smsProvider] ?: emptyList()
-    val modelDisplay = models.find { it.first == smsModel }?.second ?: "Auto"
+    // A stored id this static list cannot name is shown as itself, not as Auto.
+    val modelDisplay = models.find { it.first == smsModel }?.second ?: smsModel.ifBlank { "Auto" }
 
     Column(
         modifier = Modifier

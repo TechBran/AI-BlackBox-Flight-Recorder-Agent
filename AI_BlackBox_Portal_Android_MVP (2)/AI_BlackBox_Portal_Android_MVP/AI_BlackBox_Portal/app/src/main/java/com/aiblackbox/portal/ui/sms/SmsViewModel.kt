@@ -5,11 +5,16 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import kotlinx.coroutines.CancellationException
+import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -46,8 +51,12 @@ data class SmsMsg(
 )
 
 class SmsViewModel(application: Application) : AndroidViewModel(application) {
+    private val store = BlackBoxStore(application)
+    // Every request reads the operator at that moment (SmsInboxApi), never a copy kept
+    // from when the screen first opened (A14-ui-misc-07).
+    private var sms: SmsInboxApi? = null
     private var api: BlackBoxApi? = null
-    private var operator: String = ""
+    private var boundOrigin = ""
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val _threads = MutableStateFlow<List<SmsThread>>(emptyList())
@@ -77,10 +86,11 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected.asStateFlow()
 
-    private val _smsProvider = MutableStateFlow("anthropic")
+    private val _smsProvider = MutableStateFlow(SmsPreference.DEFAULT.provider)
     val smsProvider: StateFlow<String> = _smsProvider.asStateFlow()
 
-    private val _smsModel = MutableStateFlow("claude-sonnet-4-5")
+    // "" = Auto: the box's own default model for the provider (never a pinned id).
+    private val _smsModel = MutableStateFlow(SmsPreference.DEFAULT.model)
     val smsModel: StateFlow<String> = _smsModel.asStateFlow()
 
     // Our sendable lines (enabled gateways' enabled ports with a phone number)
@@ -93,10 +103,31 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
 
     private var pollJob: Job? = null
 
-    fun initialize(origin: String, op: String) {
-        if (origin.isBlank() || api != null) return
-        operator = op
-        api = BlackBoxApi(origin)
+    init {
+        // An operator switch while the inbox is open: the open thread, the list and the
+        // badge were the previous operator's, so drop them and load the new operator's.
+        viewModelScope.launch {
+            store.operator.distinctUntilChanged().drop(1).collect {
+                clearSelection()
+                _threads.value = emptyList()
+                _unreadCount.value = 0
+                loadAll()
+            }
+        }
+    }
+
+    /** Bind to [origin]; a different origin (a re-pair) rebinds and reloads. */
+    fun initialize(origin: String) {
+        if (origin.isBlank() || origin == boundOrigin) return
+        boundOrigin = origin
+        val client = BlackBoxApi(origin)
+        api = client
+        sms = SmsInboxApi(client) { store.operator.first() }
+        clearSelection()
+        loadAll()
+    }
+
+    private fun loadAll() {
         loadThreads()
         loadStatus()
         loadUnreadCount()
@@ -105,11 +136,11 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadThreads() {
-        val api = api ?: return
+        val sms = sms ?: return
         _isLoading.value = true
         viewModelScope.launch {
             try {
-                val response = api.get("/sms/threads?operator=$operator")
+                val response = sms.threads() ?: run { _threads.value = emptyList(); return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 val threadsArray = root["threads"]?.jsonArray ?: return@launch
                 _threads.value = threadsArray.map { el ->
@@ -174,12 +205,12 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadMessages(phone: String) {
-        val api = api ?: return
+        val sms = sms ?: return
         _selectedPhone.value = phone
         _selectedContactName.value = _threads.value.find { it.phoneNumber == phone }?.contactName ?: ""
         viewModelScope.launch {
             try {
-                val response = api.get("/sms/messages?operator=$operator&phone=$phone&limit=100")
+                val response = sms.messages(phone) ?: run { _messages.value = emptyList(); return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 val msgsArray = root["messages"]?.jsonArray ?: return@launch
                 _messages.value = msgsArray.map { el ->
@@ -216,18 +247,17 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendSms(message: String) {
-        val api = api ?: return
+        val sms = sms ?: return
         val phone = _selectedPhone.value ?: return
         if (_isSending.value) return
         _isSending.value = true
         viewModelScope.launch {
             try {
-                val from = _selectedFromNumber.value
-                val fromPart = if (!from.isNullOrBlank()) ",\"from_number\":\"${from.replace("\"", "\\\"")}\"" else ""
-                val body = """{"operator":"$operator","to":"$phone","message":"${message.replace("\"", "\\\"")}"$fromPart}"""
-                api.post("/sms/send", body)
+                sms.send(to = phone, message = message, fromNumber = _selectedFromNumber.value)
                 _actionMessage.value = "Message sent"
                 loadMessages(phone)
+            } catch (e: OperatorUnresolvedException) {
+                _actionMessage.value = e.message
             } catch (e: Exception) {
                 _actionMessage.value = "Failed to send: ${e.message}"
             } finally {
@@ -237,17 +267,16 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendNewSms(to: String, message: String) {
-        val api = api ?: return
+        val sms = sms ?: return
         if (_isSending.value) return
         _isSending.value = true
         viewModelScope.launch {
             try {
-                val from = _selectedFromNumber.value
-                val fromPart = if (!from.isNullOrBlank()) ",\"from_number\":\"${from.replace("\"", "\\\"")}\"" else ""
-                val body = """{"operator":"$operator","to":"$to","message":"${message.replace("\"", "\\\"")}"$fromPart}"""
-                api.post("/sms/send", body)
+                sms.send(to = to, message = message, fromNumber = _selectedFromNumber.value)
                 _actionMessage.value = "Message sent"
                 loadThreads()
+            } catch (e: OperatorUnresolvedException) {
+                _actionMessage.value = e.message
             } catch (e: Exception) {
                 _actionMessage.value = "Failed to send: ${e.message}"
             } finally {
@@ -270,10 +299,10 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadUnreadCount() {
-        val api = api ?: return
+        val sms = sms ?: return
         viewModelScope.launch {
             try {
-                val response = api.get("/sms/unread?operator=$operator")
+                val response = sms.unread() ?: run { _unreadCount.value = 0; return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 _unreadCount.value = root["unread_count"]?.jsonPrimitive?.intOrNull ?: 0
             } catch (_: Exception) {
@@ -283,25 +312,26 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadSmsPreferences() {
-        val api = api ?: return
+        val sms = sms ?: return
         viewModelScope.launch {
             try {
-                val response = api.get("/sms/preferences?operator=$operator")
-                val root = json.parseToJsonElement(response).jsonObject
-                _smsProvider.value = root["sms_provider"]?.jsonPrimitive?.content ?: "anthropic"
-                _smsModel.value = root["sms_model"]?.jsonPrimitive?.content ?: "claude-sonnet-4-5"
+                val pref = SmsPreference.parse(sms.preferences())
+                _smsProvider.value = pref.provider
+                _smsModel.value = pref.model
             } catch (_: Exception) {}
         }
     }
 
+    /** [model] "" = Auto (the provider switch in the screen always lands there). */
     fun saveSmsPreferences(provider: String, model: String) {
-        val api = api ?: return
+        val sms = sms ?: return
         _smsProvider.value = provider
         _smsModel.value = model
         viewModelScope.launch {
             try {
-                val body = """{"operator":"$operator","sms_provider":"$provider","sms_model":"$model"}"""
-                api.post("/sms/preferences", body)
+                sms.savePreferences(provider, model)
+            } catch (e: OperatorUnresolvedException) {
+                _actionMessage.value = e.message
             } catch (_: Exception) {}
         }
     }

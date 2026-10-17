@@ -40,7 +40,9 @@ fun ContactsScreen(
     val isSaving by viewModel.isSaving.collectAsState()
     val showDeleteConfirm by viewModel.showDeleteConfirm.collectAsState()
 
-    LaunchedEffect(origin) { viewModel.initialize(origin, operator) }
+    // The view model reads the operator from the store at every request and reloads on a
+    // switch (A14-ui-misc-07); [operator] here only labels the dialog.
+    LaunchedEffect(origin) { viewModel.initialize(origin) }
 
     val view = LocalView.current
     val snackbarHostState = remember { SnackbarHostState() }

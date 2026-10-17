@@ -35,12 +35,12 @@ object OverlayBridge {
         // Selectors
         val currentModel: String = "Gemini Live",
         val currentVoice: String = "Charon",
-        val currentOperator: String = "Brandon",
+        val currentOperator: String = "",
 
         // Lists for dropdowns
         val models: List<String> = listOf("Gemini Live", "GPT Realtime", "Grok Live"),
         val voices: List<String> = listOf("Charon", "Puck", "Kore", "Aoede", "Fenrir", "Orus"),
-        val operators: List<String> = listOf("Brandon", "default"),
+        val operators: List<String> = emptyList(),
 
         // Transcript
         val transcriptEntries: List<TranscriptEntry> = emptyList(),

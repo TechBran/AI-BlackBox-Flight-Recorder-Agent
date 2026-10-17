@@ -49,7 +49,7 @@ class TtsProviderRoutingTest {
     /** Drive generateWithVoice once and return (target, provider) actually sent. */
     private suspend fun routeVoice(voiceValue: String): Pair<String, String> {
         enqueueOk()
-        repo.generateWithVoice(text = "hello", voiceValue = voiceValue)
+        repo.generateWithVoice(text = "hello", voiceValue = voiceValue, operator = "op-a")
         val rec = server.takeRequest()
         val provider = Json.parseToJsonElement(rec.body!!.utf8())
             .jsonObject["provider"]!!.jsonPrimitive.content
