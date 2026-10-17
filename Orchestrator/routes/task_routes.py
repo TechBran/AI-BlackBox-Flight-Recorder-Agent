@@ -123,6 +123,9 @@ def get_task_status(task_id: str):
         "result_url": task.result_url,
         "result_data": task.result_data,
         "error_message": task.error_message,
+        # The owning operator (additive; /tasks/list already carries it). The
+        # MCP server's get_media ownership gate reads this for remote callers.
+        "operator": task.operator,
         # G3-T11 (additive): the live pill line. device_id stays reachable via the
         # already-returned result_data, so it is not re-surfaced as a top-level key.
         "progress_text": task.progress_text,

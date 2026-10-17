@@ -121,6 +121,41 @@ def _coerce_stringified_json_args(tool_name, tool_input):
     return coerced if coerced is not None else tool_input
 
 
+def _stamp_session_operator(tool_name, tool_input, operator):
+    """Make the session operator the only operator a tool can act as.
+
+    The Google Workspace and Gmail executors prefer params['operator'] over
+    ctx.operator, and the in-box chat and realtime-voice loops pass the model's
+    arguments verbatim, so without this a session running as operator A could
+    read, send or delete as operator B just by naming B (audit O18-06).
+    /local/tools/execute and /gmail/execute already overwrite the param for the
+    MCP and phone surfaces; this is the one dispatcher every surface shares.
+
+    Only a real operator is stamped. "system" (and an unset operator) is the
+    trusted internal scope with no session operator to protect, so it keeps
+    honouring an explicit operator argument. The Flight Recorder IS stamped:
+    its read-all capability is config.reads_all_operators() on ctx.operator,
+    never a model-supplied argument. ("system" is spelled out rather than
+    imported from config: this module is on the lean MCP venv's import path.)
+
+    Returns a copy; the caller's dict (often the model's own tool-call
+    arguments, echoed back into the conversation) is left untouched.
+    """
+    if not isinstance(tool_input, dict):
+        return tool_input
+    if not operator or not str(operator).strip() or operator == "system":
+        return tool_input
+    asserted = tool_input.get("operator")
+    if asserted == operator:
+        return tool_input
+    if asserted:
+        print(f"[TOOL-OPERATOR] {tool_name}: ignoring model-supplied operator "
+              f"{asserted!r}; the session operator is {operator!r}")
+    stamped = dict(tool_input)
+    stamped["operator"] = operator
+    return stamped
+
+
 class BlackBoxToolExecutor:
     """
     Executes BlackBox tools with unified interface for all AI backends.
@@ -181,6 +216,8 @@ class BlackBoxToolExecutor:
 
         # Models sometimes emit array/object params as JSON strings; parse back.
         tool_input = _coerce_stringified_json_args(tool_name, tool_input)
+        # A model-supplied operator never overrides the session operator.
+        tool_input = _stamp_session_operator(tool_name, tool_input, self.operator)
 
         try:
             return await ex(
