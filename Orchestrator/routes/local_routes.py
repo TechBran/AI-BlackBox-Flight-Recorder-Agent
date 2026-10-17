@@ -36,6 +36,7 @@ from Orchestrator.local_provider.tool_injection import (
 from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
 from Orchestrator.toolvault.context import ON_DEVICE_CALLER
+from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 
 # The MCP remote gateway (MCP/blackbox_mcp_server.py) REUSES POST /local/tools/execute
 # to run the FULL ToolVault catalog for frontier models (locked decision,
@@ -395,6 +396,12 @@ async def local_turn_complete(request: Request):
     operator = body.get("operator")
     if not isinstance(operator, str) or not operator.strip():
         return JSONResponse({"success": False, "error": "operator required"}, status_code=400)
+    # The operator lands in the ledger's OPERATOR: line, so refuse anything
+    # that could forge a line or steer a path.
+    try:
+        operator = validate_operator(operator.strip())
+    except InvalidOperatorName as e:
+        return JSONResponse({"success": False, "error": f"Invalid operator: {e}"}, status_code=400)
 
     final_response = body.get("final_response")
     if not isinstance(final_response, str) or not final_response.strip():

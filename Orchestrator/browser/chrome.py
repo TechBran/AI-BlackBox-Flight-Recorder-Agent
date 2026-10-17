@@ -11,6 +11,7 @@ from Orchestrator.browser.config import (
     CDP_PORT, ACTIVE_DISPLAY,
 )
 from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
+from Orchestrator.utils.operators import validate_operator
 
 
 def _active_display_env() -> dict:
@@ -27,7 +28,9 @@ class ChromeInstance:
 
     def __init__(self, operator: str = "system"):
         self.operator = operator
-        self.profile_dir = PROFILE_BASE / operator
+        # The operator names a directory that is mkdir'ed and handed to Chrome
+        # as --user-data-dir; refuse names that could point it elsewhere.
+        self.profile_dir = PROFILE_BASE / validate_operator(operator)
         self.process = None
         self.cdp_ws_url = None  # WebSocket URL for CDP
         self.cdp_port = CDP_PORT  # set per launch: the desktop's own port

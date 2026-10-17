@@ -20,6 +20,7 @@ from typing import Dict, Any, Optional, List
 import requests
 
 from Orchestrator.utils.async_helpers import run_blocking
+from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from Orchestrator.utils.paths import (
     DOC_EXTS, IMAGE_EXTS, INLINE_MAX_BYTES, MEDIA_EXTS, UploadNotFoundError, UploadPathError,
     blackbox_root, resolve_upload_path,
@@ -153,6 +154,19 @@ def _resolve_attachment(url, allowed_exts) -> Optional[Path]:
     except UploadPathError as e:
         print(f"[ATTACH] Not loading {str(url)[:120]!r}: {e}")
         return None
+
+
+def _checked_operator(raw) -> str:
+    """The request's operator, safe to join into a path or write to the ledger.
+
+    Missing/blank falls back to the box default and surrounding whitespace is
+    trimmed (as /chat always did); anything else validate_operator refuses
+    ('/', '..', NUL, newlines, ...) raises InvalidOperatorName for a 400.
+    """
+    op = raw.strip() if isinstance(raw, str) else raw
+    if op is None or op == "":
+        op = current_default()
+    return validate_operator(op)
 
 
 # Pre-built tool lists for each provider (static fallback)
@@ -7522,7 +7536,10 @@ async def chat_stream_post(request: Request):
         messages = body.get("messages", [])
         provider = body.get("provider", "gemini")
         model = body.get("model")
-        operator = body.get("operator", current_default())
+        try:
+            operator = _checked_operator(body.get("operator"))
+        except InvalidOperatorName as e:
+            return JSONResponse(status_code=400, content={"error": f"Invalid operator: {e}"})
         cu_session_id = body.get("session_id")  # CU session ID for reconnection/queuing
         cu_device_id = body.get("device_id", "blackbox")  # CU target device on Tailscale mesh
         # M3: originating device (Android app self-reports its tailnet IPv4). Absent for
@@ -7680,7 +7697,12 @@ async def chat_save(request: Request):
     """
     try:
         body = await request.json()
-        operator = body.get("operator", current_default())
+        # Checked before anything is written: the operator names the artifact
+        # files and the ledger's OPERATOR: line.
+        try:
+            operator = _checked_operator(body.get("operator"))
+        except InvalidOperatorName as e:
+            return JSONResponse(status_code=400, content={"error": f"Invalid operator: {e}"})
         user_message = body.get("user_message", "")
         assistant_response = body.get("assistant_response", "")
         reasoning = body.get("reasoning", "")
@@ -8053,7 +8075,10 @@ async def chat_async(request: Request):
         if not inp.messages:
             raise HTTPException(status_code=400, detail="The 'messages' field is required and cannot be empty.")
 
-        active_operator = (inp.operator or current_default()).strip()
+        try:
+            active_operator = _checked_operator(inp.operator)
+        except InvalidOperatorName as e:
+            raise HTTPException(status_code=400, detail=f"Invalid operator: {e}")
         set_current_operator(active_operator)
 
         # M4 origin-aware device routing: do NOT call _set_origin_device_id here.

@@ -34,6 +34,7 @@ from Orchestrator.config import (
     XAI_API_KEY, XAI_MODEL_DEFAULT,
 )
 from Orchestrator.utils.models_cache import get_cached_or_fetch as _models_cache_get
+from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from Orchestrator.fossils import extract_snap_ids, get_recent_fossils_for_operator, hybrid_retrieve, rebuild_snapshot_index
 import Orchestrator.models as models_module  # Import module for dynamic access to models_module.worker_running
 from Orchestrator.models import task_queue
@@ -41,6 +42,15 @@ from Orchestrator.monitoring import cleanup_stuck_tasks, drift_state_global, get
 from Orchestrator.state import get_state, state_by_op
 from Orchestrator.volume import cleanup_old_archives, parse_tail, read_text_safe, sha256_bytes, verify_gm_or_halt
 
+
+def _require_operator(name) -> str:
+    """400 unless ``name`` is safe to join into a path or write to the ledger
+    (no '/', '..', NUL, newlines, commas, ...). Syntactic only -- 'system'
+    and not-yet-added names stay legal."""
+    try:
+        return validate_operator(name)
+    except InvalidOperatorName as e:
+        raise HTTPException(status_code=400, detail=f"Invalid operator: {e}")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1067,6 +1077,9 @@ def artifact(which: str = "latest", utc: Optional[str] = None):
         if not man["archive"]: raise HTTPException(404, "No archive yet")
         return FileResponse(Path(man["archive"][-1]["path"]))
     elif utc:
+        # utc is a query parameter joined into a filename: no path syntax.
+        if any(c in utc for c in ("/", "\\", "\x00")) or ".." in utc:
+            raise HTTPException(400, "Invalid utc")
         p = ARC_DIR / f"Volume_{utc}.txt"
         if not p.exists(): raise HTTPException(404, "Not found")
         return FileResponse(p)
@@ -1096,9 +1109,11 @@ def download_artifact(artifact_id: str):
     }
     media_type = content_types.get(suffix, 'application/octet-stream')
 
-    # Extract original filename from artifact_id (format: operator_uuid_filename)
-    parts = safe_id.split('_', 2)
-    original_filename = parts[2] if len(parts) >= 3 else safe_id
+    # Extract original filename from artifact_id (format: operator_<8 hex>_filename).
+    # The operator part may itself contain '_' (artifacts.py maps unsafe
+    # characters to it), so anchor on the hex segment instead of the 2nd '_'.
+    m = re.search(r"_[0-9a-f]{8}_(.+)$", safe_id)
+    original_filename = m.group(1) if m else safe_id
 
     return FileResponse(artifact_path, media_type=media_type, filename=original_filename)
 
@@ -1112,7 +1127,7 @@ def reprocess_artifacts(body: dict = Body(...)):
     from Orchestrator.artifacts import parse_and_process_artifacts
 
     content = body.get("content", "")
-    operator = body.get("operator", "unknown")
+    operator = _require_operator(body.get("operator", "unknown"))
 
     if not content or '[ARTIFACT:' not in content:
         return {"processed_html": None, "message": "No artifact tags found"}
@@ -1133,7 +1148,7 @@ def mint_manual(body: dict = Body(None)):
 
     body = body or {}
     operator = body.get("operator")
-    op = (operator or current_operator() or current_default()).strip()
+    op = _require_operator((operator or current_operator() or current_default()).strip())
     content = body.get("content")
     snap_type = body.get("type", "normal")
 
@@ -1165,7 +1180,7 @@ def create_dev_snapshot(body: dict = Body(...)):
     from Orchestrator.checkpoint import mint_with_content
 
     content = body.get("content", "")
-    operator = body.get("operator", "Brandon-DEV")
+    operator = _require_operator(body.get("operator", "Brandon-DEV"))
 
     if not content:
         return {"success": False, "error": "Content is required"}
@@ -1190,7 +1205,7 @@ def create_dev_snapshot(body: dict = Body(...)):
 async def create_checkpoint_manual(body: dict = Body(None)):
     """Create a manual checkpoint for the specified operator"""
     operator = (body or {}).get("operator") # Read operator from JSON body
-    op = (operator or current_operator() or current_default()).strip()
+    op = _require_operator((operator or current_operator() or current_default()).strip())
     try:
         s = get_state(op)
         # Trigger checkpoint creation in background thread (fire-and-forget)
@@ -1215,6 +1230,9 @@ def add_operator(body: dict = Body(...)):
 
     if not operator_name:
         raise HTTPException(status_code=400, detail="Operator name is required")
+    # Refused before config.ini is touched: the roster is a comma-separated
+    # list, and every name ends up in file paths and the ledger.
+    _require_operator(operator_name)
 
     # Reserved-name shadow guard (design 2026-07-23 §3): nobody may pre-claim
     # or case-shadow a reserved operator. The exact reserved name that's
