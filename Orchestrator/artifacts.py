@@ -185,6 +185,11 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
         filename = safe_filename(match.group(1).strip(), fallback="artifact.txt")
         artifact_type = match.group(2).strip().lower()
         content = match.group(3).strip()
+        # filename, type and error text come from model output (a prompt-injected
+        # page or email can make the model emit the tag), and this HTML is rendered
+        # by the Portal and kept in history: escape every interpolated value. For
+        # ordinary names escaping is the identity, so the Portal's HTML is unchanged.
+        safe_filename = html.escape(filename, quote=True)
 
         print(f"[ARTIFACT] Processing: filename={filename}, type={artifact_type}, content_len={len(content)}")
 
@@ -211,7 +216,7 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
                 print(f"[ARTIFACT] Ignoring image_placeholder artifact - handled by task manager")
                 return ''
             else:
-                return f'<div class="artifact-error" style="color: #ff6b6b; padding: 8px; background: #1a1a1a; border-radius: 4px;">⚠️ Unsupported artifact type: {artifact_type}</div>'
+                return f'<div class="artifact-error" style="color: #ff6b6b; padding: 8px; background: #1a1a1a; border-radius: 4px;">⚠️ Unsupported artifact type: {html.escape(artifact_type, quote=True)}</div>'
 
             # Return download button HTML
             size_kb = artifact_path.stat().st_size / 1024
@@ -223,7 +228,8 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
                 "url": f"/artifacts/{artifact_id}",
                 "size_kb": round(size_kb, 1),
             })
-            return f'<div class="artifact-download"><a href="/artifacts/{artifact_id}" download="{filename}" class="btn artifact-btn">📥 Download {filename} ({size_kb:.1f} KB)</a></div>'
+            safe_href = html.escape(f"/artifacts/{artifact_id}", quote=True)
+            return f'<div class="artifact-download"><a href="{safe_href}" download="{safe_filename}" class="btn artifact-btn">📥 Download {safe_filename} ({size_kb:.1f} KB)</a></div>'
         except Exception as e:
             print(f"[ARTIFACT] Error generating {filename} (type={artifact_type}): {e}")
             import traceback
@@ -232,7 +238,7 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
             error_msg = str(e)
             if len(error_msg) > 200:
                 error_msg = error_msg[:200] + "..."
-            return f'<div class="artifact-error" style="color: #ff6b6b; padding: 12px; background: #1a1a1a; border-radius: 4px; margin: 8px 0;">⚠️ Failed to generate {filename}: {error_msg}</div>'
+            return f'<div class="artifact-error" style="color: #ff6b6b; padding: 12px; background: #1a1a1a; border-radius: 4px; margin: 8px 0;">⚠️ Failed to generate {safe_filename}: {html.escape(error_msg, quote=True)}</div>'
 
     modified = re.sub(pattern, process_match, ui_reply, flags=re.DOTALL)
     return modified, artifacts_list
