@@ -33,6 +33,7 @@ can never read a secret back, so it can never drive the device.
 """
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import json
 import logging
@@ -181,8 +182,10 @@ def register(device_id: str, tailnet_ip: str, secret: str,
     """Record (or replace) a device's listener secret. Returns the public row (no secret).
 
     Raises ValueError on a non-Tailscale address, a secret weaker than 256 bits, or a
-    missing device id. A device that re-registers from a NEW address drops its old row, so
-    a stale address never keeps a live secret."""
+    missing device id. The same install (same secret) re-registering from a NEW address
+    drops its old row, so a stale address never keeps a live secret. Rows are not matched
+    on device_id: Android reports one fixed fallback id when ANDROID_ID is unavailable, so
+    two phones can share it."""
     did = str(device_id or "").strip()
     if not did or len(did) > _MAX_DEVICE_ID:
         raise ValueError("device_id is required (at most 128 characters)")
@@ -200,7 +203,8 @@ def register(device_id: str, tailnet_ip: str, secret: str,
     }
     with _LOCK:
         devices = _read()
-        for other_ip in [k for k, v in devices.items() if v.get("device_id") == did and k != ip]:
+        for other_ip in [k for k, v in devices.items()
+                         if k != ip and hmac.compare_digest(v["secret"].encode(), secret.encode())]:
             del devices[other_ip]
         devices[ip] = row
         _write(devices)

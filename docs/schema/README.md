@@ -151,6 +151,12 @@ framing keys** —
   contract while the transport carries only correlation + scope.
 - The response (`action_result.json`) carries **no** envelope — it is the bare payload
   (the loop already knows the `task_id` it POSTed).
+- **Pairing header (audit X02/X04).** Every request to the device's listener except
+  `GET /healthz` carries `Authorization: Bearer <secret>` — the per-install secret the
+  device registered with its box (`POST /devices/pairing`, stored by
+  `Orchestrator/device_registry/pairing.py`). The device checks it, its tailnet source and a
+  256 KB declared-body cap before reading the body (`RemoteControlGate.kt`) and answers 401
+  without it; the box reports that as `error_kind: not_paired`.
 
 ## Gaps flagged for M1 (where this contract runs ahead of the current code)
 

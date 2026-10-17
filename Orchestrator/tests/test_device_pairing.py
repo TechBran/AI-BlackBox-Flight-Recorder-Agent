@@ -86,6 +86,15 @@ def test_device_that_moved_ip_drops_its_stale_row():
     assert pairing.secret_for_ip("100.88.0.99") == SECRET
 
 
+def test_devices_sharing_a_device_id_do_not_evict_each_other():
+    # Android falls back to one fixed id when ANDROID_ID is unavailable, so two phones can
+    # report the same device_id. Only the same install (same secret) moving IP is stale.
+    _register(device_id="android-device", tailnet_ip=PHONE_IP, secret=SECRET)
+    _register(device_id="android-device", tailnet_ip="100.88.0.8", secret=OTHER_SECRET)
+    assert pairing.secret_for_ip(PHONE_IP) == SECRET
+    assert pairing.secret_for_ip("100.88.0.8") == OTHER_SECRET
+
+
 def test_no_temp_files_left_behind(store_path):
     _register()
     _register(secret=OTHER_SECRET)
