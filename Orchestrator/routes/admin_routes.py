@@ -33,6 +33,7 @@ from Orchestrator.config import (
     UPLOADS_DIR, USERS_DEFAULT, USERS_LIST, USE_CLOUD_TTS, VOL_PATH, current_default,
     XAI_API_KEY, XAI_MODEL_DEFAULT,
 )
+from Orchestrator.artifacts import artifact_download_name
 from Orchestrator.utils.models_cache import get_cached_or_fetch as _models_cache_get
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from Orchestrator.fossils import extract_snap_ids, get_recent_fossils_for_operator, hybrid_retrieve, rebuild_snapshot_index
@@ -1111,11 +1112,18 @@ def download_artifact(artifact_id: str):
 
     # Extract original filename from artifact_id (format: operator_<8 hex>_filename).
     # The operator part may itself contain '_' (artifacts.py maps unsafe
-    # characters to it), so anchor on the hex segment instead of the 2nd '_'.
+    # characters to it), so anchor on the hex segment instead of the 2nd '_',
+    # then undo the inert suffix an active model-chosen name was stored with.
     m = re.search(r"_[0-9a-f]{8}_(.+)$", safe_id)
-    original_filename = m.group(1) if m else safe_id
+    original_filename = artifact_download_name(m.group(1) if m else safe_id)
 
-    return FileResponse(artifact_path, media_type=media_type, filename=original_filename)
+    # The filename and content are model-chosen: always a download (FileResponse
+    # sets Content-Disposition: attachment), never sniffed into another type, and
+    # sandboxed (opaque origin) should anything still render it.
+    return FileResponse(
+        artifact_path, media_type=media_type, filename=original_filename,
+        headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"},
+    )
 
 @app.post("/artifacts/reprocess")
 def reprocess_artifacts(body: dict = Body(...)):

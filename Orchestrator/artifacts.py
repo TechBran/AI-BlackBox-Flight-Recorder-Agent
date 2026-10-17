@@ -10,6 +10,7 @@ Original SHA-256: a097c60c4b2494335c9d05822e7abf6ab59c573afd1cae31c4d86e779d0d64
 """
 
 # Standard library imports
+import mimetypes
 import re
 import uuid
 from pathlib import Path
@@ -161,6 +162,59 @@ def generate_docx(content: str, output_path: Path):
 
     doc.save(str(output_path))
 
+# Media types a browser renders as an active document (script runs in the
+# serving origin) when it NAVIGATES to the file, plus the script types a later
+# Content-Security-Policy would trust from 'self'.
+_ACTIVE_MEDIA_TYPES = frozenset({
+    "text/html", "text/xsl", "text/x-component", "application/hta",
+    "text/javascript", "application/javascript", "application/x-javascript",
+    "text/ecmascript", "application/ecmascript",
+})
+
+# Appended to the on-disk name of an artifact whose model-chosen name is
+# active (see stored_artifact_name). Distinctive on purpose: ordinary names
+# never end with it, so their ids and links stay exactly as they were.
+INERT_SUFFIX = ".inert.txt"
+
+
+def _is_active_name(name: str) -> bool:
+    """True when a static file server would type `name` as an active document.
+
+    Uses mimetypes.guess_type, exactly as Starlette's StaticFiles/FileResponse
+    do, so the answer matches what /ui would send (case-insensitive extensions,
+    .html.gz -> text/html, and any extra mappings in /etc/mime.types).
+    """
+    media_type = (mimetypes.guess_type(name)[0] or "").lower()
+    return (
+        media_type in _ACTIVE_MEDIA_TYPES
+        or media_type.endswith(("/xml", "+xml"))
+        or media_type.startswith(("multipart/", "message/"))
+    )
+
+
+def stored_artifact_name(artifact_id: str) -> str:
+    """The on-disk name for an artifact id built from a model-chosen filename.
+
+    ARTIFACTS_DIR is Portal/artifacts, which the /ui StaticFiles mount ALSO
+    serves inline, typed by extension. A prompt-injected reply can name its
+    artifact "report.html" (or .svg, .xhtml, .xml, .js ...), and that file would
+    then run as a page with full Portal privileges at /ui/artifacts/<id>. Such
+    names get INERT_SUFFIX, so every server types them text/plain. Names that
+    already end in INERT_SUFFIX get it too, which keeps the mapping reversible
+    for every name (artifact_download_name undoes exactly one suffix).
+    """
+    if _is_active_name(artifact_id) or artifact_id.endswith(INERT_SUFFIX):
+        return artifact_id + INERT_SUFFIX
+    return artifact_id
+
+
+def artifact_download_name(stored_name: str) -> str:
+    """The name to download a stored artifact as: the model's original name."""
+    if stored_name.endswith(INERT_SUFFIX):
+        return stored_name[:-len(INERT_SUFFIX)]
+    return stored_name
+
+
 def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
     """
     Parse [ARTIFACT:...] blocks, generate files, replace with download links.
@@ -195,8 +249,9 @@ def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
 
         # Generate unique filename with operator prefix. Routes validate the
         # operator first; the prefix is reduced here too so no caller can steer
-        # the write elsewhere.
-        artifact_id = f"{operator_prefix}_{uuid.uuid4().hex[:8]}_{filename}"
+        # the write elsewhere. A name a browser would run as a page gets an inert
+        # on-disk suffix (the download keeps the name).
+        artifact_id = stored_artifact_name(f"{operator_prefix}_{uuid.uuid4().hex[:8]}_{filename}")
         artifact_path = ARTIFACTS_DIR / artifact_id
         if not artifact_path.resolve().is_relative_to(Path(ARTIFACTS_DIR).resolve()):
             return '<div class="artifact-error" style="color: #ff6b6b; padding: 8px; background: #1a1a1a; border-radius: 4px;">⚠️ Refused artifact path</div>'
