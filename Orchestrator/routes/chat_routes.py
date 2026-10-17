@@ -22,8 +22,9 @@ import requests
 from Orchestrator.utils.async_helpers import run_blocking
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from Orchestrator.utils.paths import (
-    DOC_EXTS, IMAGE_EXTS, INLINE_MAX_BYTES, MEDIA_EXTS, UploadNotFoundError, UploadPathError,
-    blackbox_root, resolve_upload_path,
+    DOC_EXTS, GEMINI_INLINE_MAX_BYTES, IMAGE_EXTS, INLINE_MAX_BYTES, MEDIA_EXTS,
+    UploadNotAcceptedError, UploadNotFoundError, UploadPathError, blackbox_root,
+    resolve_upload_path,
 )
 
 # External library imports
@@ -144,16 +145,30 @@ def _take_turn_location(operator: str) -> Optional[dict]:
 # (audit 2026-10-09 rank 16). Each attachment / reference-image loader below
 # used to join the value onto a CWD-relative Path("Portal") — or take an
 # absolute path verbatim — then base64 the bytes into a third-party request.
-# Now they all ask resolve_upload_path() and treat a refusal exactly like the
-# old "file does not exist" branch (pass the part through / skip it).
+# Now they all ask resolve_upload_path() and treat a refusal like the old
+# "file does not exist" branch (pass the part through / skip it) -- except an
+# upload refused only for its size or type, which the user-attachment loaders
+# replace with a short note so the model can say why it was not seen.
 # -----------------------------------------------------------------------------
-def _resolve_attachment(url, allowed_exts) -> Optional[Path]:
-    """The contained upload ``url`` names, or None (refused or missing)."""
+def _load_attachment(url, allowed_exts, max_bytes=None):
+    """``(path, None)`` for a contained upload this loader can inline;
+    ``(None, note)`` for an upload refused for its size or type, ``note``
+    being text for the model; ``(None, None)`` for anything else (a missing
+    file, an external URL, a reference outside the uploads)."""
+    cap = INLINE_MAX_BYTES if max_bytes is None else max_bytes
     try:
-        return resolve_upload_path(url, allowed_exts=allowed_exts, max_bytes=INLINE_MAX_BYTES)
+        return resolve_upload_path(url, allowed_exts=allowed_exts, max_bytes=cap), None
+    except UploadNotAcceptedError as e:
+        print(f"[ATTACH] Not loading {str(url)[:120]!r}: {e}")
+        return None, f"[Note: an attached file was not loaded: {e}]"
     except UploadPathError as e:
         print(f"[ATTACH] Not loading {str(url)[:120]!r}: {e}")
-        return None
+        return None, None
+
+
+def _resolve_attachment(url, allowed_exts) -> Optional[Path]:
+    """The contained upload ``url`` names, or None (refused or missing)."""
+    return _load_attachment(url, allowed_exts)[0]
 
 
 def _checked_operator(raw) -> str:
@@ -376,7 +391,7 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                         # Handle images - convert local paths to base64 data URLs
                         url = part["image_url"]["url"]
                         try:
-                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            local_path, refused = _load_attachment(url, IMAGE_EXTS)
                             if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 # Determine MIME type
@@ -402,6 +417,8 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                                         "url": f"data:{mime_type};base64,{base64_image}"
                                     }
                                 })
+                            elif refused:
+                                new_content.append({"type": "text", "text": refused})
                             else:
                                 # If file doesn't exist, keep original URL
                                 new_content.append(part)
@@ -419,7 +436,9 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                         # For OpenAI, extract text from documents and append as text
                         url = part["document_url"]["url"]
                         try:
-                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            local_path, refused = _load_attachment(url, DOC_EXTS)
+                            if refused:
+                                new_content.append({"type": "text", "text": refused})
                             if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".txt":
@@ -641,7 +660,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     elif part.get("type") == "image_url":
                         url = part["image_url"]["url"]
                         try:
-                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            local_path, refused = _load_attachment(url, IMAGE_EXTS)
                             if local_path is not None:
                                 media_type = "image/jpeg" if local_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                                 img_bytes = local_path.read_bytes()
@@ -650,6 +669,8 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                                     "type": "image",
                                     "source": { "type": "base64", "media_type": media_type, "data": base64_image }
                                 })
+                            elif refused:
+                                new_content.append({"type": "text", "text": refused})
                         except Exception as e:
                             print(f"Could not process local image for Anthropic: {e}")
                     elif part.get("type") == "video_url":
@@ -663,7 +684,9 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                         # Anthropic supports PDF documents
                         url = part["document_url"]["url"]
                         try:
-                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            local_path, refused = _load_attachment(url, DOC_EXTS)
+                            if refused:
+                                new_content.append({"type": "text", "text": refused})
                             if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".pdf":
@@ -1278,7 +1301,9 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                         media_key = part.get("type") # "image_url", "video_url", "audio_url", or "document_url"
                         url = part[media_key]["url"]
                         try:
-                            local_path = _resolve_attachment(url, MEDIA_EXTS)
+                            local_path, refused = _load_attachment(url, MEDIA_EXTS, GEMINI_INLINE_MAX_BYTES)
+                            if refused:
+                                content_parts.append({"text": refused})
                             if local_path is not None:
                                 media_bytes = local_path.read_bytes()
 
@@ -1834,7 +1859,7 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                         local_path = None
                         try:
                             # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
-                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            local_path, refused = _load_attachment(url, IMAGE_EXTS)
 
                             if local_path is not None:
                                 suffix = local_path.suffix.lower()
@@ -1861,7 +1886,7 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                                 print(f"[XAI] WARNING: Image file not found: {local_path}, skipping image")
                                 new_content.append({
                                     "type": "text",
-                                    "text": "[Image could not be loaded]"
+                                    "text": refused or "[Image could not be loaded]"
                                 })
                         except Exception as e:
                             print(f"[XAI] ERROR processing image: {e}")
@@ -1880,7 +1905,9 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                         # For xAI, extract text from documents and append as text
                         url = part["document_url"]["url"]
                         try:
-                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            local_path, refused = _load_attachment(url, DOC_EXTS)
+                            if refused:
+                                new_content.append({"type": "text", "text": refused})
                             if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".txt":
@@ -2117,7 +2144,7 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                         local_path = None
                         try:
                             # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
-                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            local_path, refused = _load_attachment(url, IMAGE_EXTS)
 
                             if local_path is not None:
                                 suffix = local_path.suffix.lower()
@@ -2144,7 +2171,7 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                                 print(f"[CUSTOM-CALL] WARNING: Image file not found: {local_path}, skipping image")
                                 new_content.append({
                                     "type": "text",
-                                    "text": "[Image could not be loaded]"
+                                    "text": refused or "[Image could not be loaded]"
                                 })
                         except Exception as e:
                             print(f"[CUSTOM-CALL] ERROR processing image: {e}")
@@ -2175,7 +2202,9 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                         # Extract text from documents and append as text
                         url = part["document_url"]["url"]
                         try:
-                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            local_path, refused = _load_attachment(url, DOC_EXTS)
+                            if refused:
+                                new_content.append({"type": "text", "text": refused})
                             if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".txt":
@@ -3065,7 +3094,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                     if part.get("type") == "image_url":
                         url = part["image_url"]["url"]
                         try:
-                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            local_path, refused = _load_attachment(url, IMAGE_EXTS)
                             if local_path is not None:
                                 media_type = "image/jpeg" if local_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                                 img_bytes = local_path.read_bytes()
@@ -3074,6 +3103,8 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     "type": "image",
                                     "source": {"type": "base64", "media_type": media_type, "data": base64_image}
                                 })
+                            elif refused:
+                                new_content.append({"type": "text", "text": refused})
                         except Exception as e:
                             print(f"Could not process image for Anthropic streaming: {e}")
                     elif part.get("type") == "text":
@@ -5119,7 +5150,9 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                         media_key = part.get("type")
                         url = part[media_key]["url"]
                         try:
-                            local_path = _resolve_attachment(url, MEDIA_EXTS)
+                            local_path, refused = _load_attachment(url, MEDIA_EXTS, GEMINI_INLINE_MAX_BYTES)
+                            if refused:
+                                content_parts.append({"text": refused})
                             if local_path is not None:
                                 media_bytes = local_path.read_bytes()
                                 suffix = local_path.suffix.lower()
@@ -5840,7 +5873,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                             local_path = None
                             try:
                                 # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
-                                local_path = _resolve_attachment(url, IMAGE_EXTS)
+                                local_path, refused = _load_attachment(url, IMAGE_EXTS)
 
                                 if local_path is not None:
                                     suffix = local_path.suffix.lower()
@@ -5855,7 +5888,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                     })
                                 else:
                                     print(f"[XAI-STREAM] WARNING: File not found: {local_path}")
-                                    new_content.append({"type": "text", "text": "[Image could not be loaded]"})
+                                    new_content.append({"type": "text", "text": refused or "[Image could not be loaded]"})
                             except Exception as e:
                                 print(f"[XAI-STREAM] ERROR: {e}")
                                 new_content.append({"type": "text", "text": f"[Image error: {e}]"})
@@ -6391,7 +6424,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                             local_path = None
                             try:
                                 # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
-                                local_path = _resolve_attachment(url, IMAGE_EXTS)
+                                local_path, refused = _load_attachment(url, IMAGE_EXTS)
 
                                 if local_path is not None:
                                     suffix = local_path.suffix.lower()
@@ -6406,7 +6439,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                     })
                                 else:
                                     print(f"[CUSTOM-STREAM] WARNING: File not found: {local_path}")
-                                    new_content.append({"type": "text", "text": "[Image could not be loaded]"})
+                                    new_content.append({"type": "text", "text": refused or "[Image could not be loaded]"})
                             except Exception as e:
                                 print(f"[CUSTOM-STREAM] ERROR: {e}")
                                 new_content.append({"type": "text", "text": f"[Image error: {e}]"})

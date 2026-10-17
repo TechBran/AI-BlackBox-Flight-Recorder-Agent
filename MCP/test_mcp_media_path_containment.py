@@ -12,8 +12,8 @@ Now:
     BLACKBOX_ROOT/Portal/uploads (sessions/ and terminal/ included) is
     accepted, via the shared Orchestrator.utils.paths.resolve_upload_path.
   * stdio (the local, trusted CLI -- it already has filesystem access): any
-    local path is still accepted, but it must be a regular audio file under
-    the size cap.
+    local path is still accepted (absolute, or relative to its working
+    directory), but it must be a regular audio file under the size cap.
   * get_media resolves its url through the same guard (uploads only).
 
 RUN (the supported path -- MCP/venv, no pytest needed; mirrors
@@ -157,6 +157,43 @@ def test_stdio_keeps_local_paths_but_only_regular_audio_files():
                     str(box.root / "Manifest" / "mcp_tokens.json")):
             assert _is_error(box.stt(bad)), bad
         assert [body for _, body in _stt_calls(box)] == [WAV]
+
+
+class _InDir:
+    def __init__(self, path):
+        self.path, self.old = path, None
+
+    def __enter__(self):
+        self.old = os.getcwd()
+        os.chdir(self.path)
+
+    def __exit__(self, *a):
+        os.chdir(self.old)
+        return False
+
+
+def test_stdio_resolves_relative_paths_against_its_working_directory():
+    """A stdio caller's relative path means what Path(audio_path) always meant:
+    relative to the CLI's working directory. Uploads-relative spellings still
+    work when the working directory has no such file."""
+    with _Box() as box:
+        box.bind(None)
+        (box.tmp / "outside" / "notes.txt").write_bytes(SECRET)
+        with _InDir(box.tmp / "outside"):
+            for rel in ("local.wav", "./local.wav", "sessions/s1/clip.wav"):
+                res = box.stt(rel)
+                assert not _is_error(res), (rel, res)
+            assert _is_error(box.stt("notes.txt"))  # still a regular AUDIO file only
+        assert [body for _, body in _stt_calls(box)] == [WAV, WAV, WAV]
+
+
+def test_bound_operator_relative_paths_ignore_the_working_directory():
+    with _Box() as box:
+        box.bind("alice")
+        with _InDir(box.tmp / "outside"):
+            for rel in ("local.wav", "./secret.wav"):
+                assert _is_error(box.stt(rel)), rel
+        assert _stt_calls(box) == []
 
 
 def test_get_media_reads_only_uploads():

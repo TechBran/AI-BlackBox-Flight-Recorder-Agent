@@ -79,6 +79,9 @@ def _uploads(box):
     ("https://box.example.ts.net/ui/uploads/x.png?v=3#frag", "x.png"),
     ("x.png", "x.png"),
     ("Portal/uploads/x.png", "x.png"),
+    # A leading './' is a no-op (the stdio CLI and old CWD-relative callers).
+    ("./x.png", "x.png"),
+    ("./Portal/uploads/x.png", "x.png"),
     ("sessions/session-1/clip.wav", "sessions/session-1/clip.wav"),
     ("/ui/uploads/sessions/session-1/clip.wav", "sessions/session-1/clip.wav"),
     # The terminal attach route percent-quotes the URL it hands back.
@@ -122,6 +125,9 @@ TRAVERSAL = [
     "data:image/png;base64,AAAA",
     "https://evil.example/etc/passwd",
     "Portal/index.html",
+    "./../config.ini",
+    "./../../credentials/.env",
+    "./Portal/uploads/../../config.ini",
     "",
     "   ",
 ]
@@ -395,6 +401,134 @@ def test_inline_loaders_apply_the_inline_size_cap(in_box, monkeypatch):
     assert cr._resolve_attachment("/ui/uploads/x.png", paths.IMAGE_EXTS) is not None
     monkeypatch.setattr(cr, "INLINE_MAX_BYTES", 8)
     assert cr._resolve_attachment("/ui/uploads/x.png", paths.IMAGE_EXTS) is None
+
+
+# An upload refused for its size or type used to vanish with only a server
+# print, so the model answered as if nothing was attached (review finding).
+# Now such a part becomes a short text note; a missing file, an external URL
+# or a non-upload reference keeps the old pass-through / skip behaviour.
+
+def test_load_attachment_notes_only_size_and_type_refusals(in_box, monkeypatch):
+    import Orchestrator.routes.chat_routes as cr
+    path, note = cr._load_attachment("/ui/uploads/x.png", paths.IMAGE_EXTS)
+    assert path == _uploads(in_box) / "x.png" and note is None
+    path, note = cr._load_attachment("/ui/uploads/notes.txt", paths.IMAGE_EXTS)
+    assert path is None and "not loaded" in note and "notes.txt" in note
+    monkeypatch.setattr(cr, "INLINE_MAX_BYTES", 8)
+    path, note = cr._load_attachment("/ui/uploads/x.png", paths.IMAGE_EXTS)
+    assert path is None and "larger than" in note and "x.png" in note
+    assert str(in_box) not in note
+    for other in ("/ui/uploads/nope.png", "https://example.com/cat.png", "/ui/../.env",
+                  str(in_box / "config.ini")):
+        assert cr._load_attachment(other, paths.IMAGE_EXTS) == (None, None), other
+
+
+def _user_parts(payload_messages):
+    return [m for m in payload_messages if m.get("role") == "user"][-1]["content"]
+
+
+def test_openai_loader_reports_a_refused_attachment(in_box, monkeypatch):
+    import Orchestrator.routes.chat_routes as cr
+
+    payloads = []
+    monkeypatch.setattr(cr, "OPENAI_API_KEY", "fake")
+    monkeypatch.setattr(cr, "_get_tools", lambda *a, **k: [])
+    monkeypatch.setattr(cr.requests, "post",
+                        lambda url, **k: payloads.append(k["json"]) or _openai_ok())
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": "/ui/uploads/notes.txt"}},
+        {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+    ]}]
+    cr.call_openai(messages, "gpt-test", "Tester")
+    parts = _user_parts(payloads[0]["messages"])
+    notes = [p["text"] for p in parts if p.get("type") == "text" and "not loaded" in p["text"]]
+    assert len(notes) == 1 and "notes.txt" in notes[0]
+    # The refused upload's URL is no longer handed to OpenAI to fetch ...
+    assert all(p.get("image_url", {}).get("url") != "/ui/uploads/notes.txt" for p in parts)
+    # ... while an external image URL still passes through as before.
+    assert {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}} in parts
+
+
+def test_anthropic_loader_reports_audio_sent_as_an_image(in_box, monkeypatch):
+    """The Android app sends every attachment, audio included, as image_url."""
+    import Orchestrator.routes.chat_routes as cr
+
+    payloads = []
+    monkeypatch.setattr(cr, "ANTHROPIC_API_KEY", "fake")
+    monkeypatch.setattr(cr, "_get_tools", lambda *a, **k: [])
+
+    def _post(url, **k):
+        payloads.append(k.get("json"))
+        return _FakeResp({"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                          "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    monkeypatch.setattr(cr.requests, "post", _post)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": "/ui/uploads/sessions/session-1/clip.wav"}},
+    ]}]
+    try:
+        cr.call_anthropic(messages, "claude-test", "Tester")
+    except Exception:
+        pass  # response parsing is not what this test is about
+    assert payloads, "anthropic was never called"
+    parts = _user_parts(payloads[0]["messages"])
+    assert any(p.get("type") == "text" and "not loaded" in p["text"] and "clip.wav" in p["text"]
+               for p in parts), parts
+
+
+def _gemini_post(payloads):
+    def _post(url, **k):
+        payloads.append(k.get("json"))
+        return _FakeResp({"candidates": [{"content": {"parts": [{"text": "ok"}]},
+                                          "finishReason": "STOP"}], "usageMetadata": {}})
+    return _post
+
+
+def test_gemini_loader_reports_an_oversized_attachment(in_box, monkeypatch):
+    import Orchestrator.routes.chat_routes as cr
+
+    payloads = []
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "fake")
+    monkeypatch.setattr(cr, "_get_tools", lambda *a, **k: [])
+    monkeypatch.setattr(cr.requests, "post", _gemini_post(payloads))
+    monkeypatch.setattr(cr, "GEMINI_INLINE_MAX_BYTES", 8)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "listen"},
+        {"type": "audio_url", "audio_url": {"url": "/ui/uploads/sessions/session-1/clip.wav"}},
+    ]}]
+    try:
+        cr.call_gemini(messages, "gemini-test", "Tester")
+    except Exception:
+        pass
+    sent = repr(payloads[0])
+    assert base64.b64encode(WAV).decode() not in sent
+    assert "not loaded" in sent and "larger than" in sent
+
+
+def test_gemini_media_loaders_use_the_gemini_inline_limit(in_box, monkeypatch):
+    """Gemini takes up to 100 MB of base64 inline data per request (its file
+    input docs): the tighter generic cap must not drop media it accepts, such
+    as the Android overlay's screen recordings."""
+    import Orchestrator.routes.chat_routes as cr
+    assert paths.INLINE_MAX_BYTES < paths.GEMINI_INLINE_MAX_BYTES
+    assert paths.GEMINI_INLINE_MAX_BYTES * 4 / 3 <= 100 * 1000 * 1000
+
+    payloads = []
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "fake")
+    monkeypatch.setattr(cr, "_get_tools", lambda *a, **k: [])
+    monkeypatch.setattr(cr.requests, "post", _gemini_post(payloads))
+    monkeypatch.setattr(cr, "INLINE_MAX_BYTES", 8)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "listen"},
+        {"type": "audio_url", "audio_url": {"url": "/ui/uploads/sessions/session-1/clip.wav"}},
+    ]}]
+    try:
+        cr.call_gemini(messages, "gemini-test", "Tester")
+    except Exception:
+        pass
+    assert base64.b64encode(WAV).decode() in repr(payloads[0])
 
 
 def test_get_media_refuses_paths_outside_uploads(in_box):

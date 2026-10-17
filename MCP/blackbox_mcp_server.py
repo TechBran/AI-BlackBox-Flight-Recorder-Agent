@@ -521,14 +521,28 @@ def _error(code: str, tool: str, message: str) -> CallToolResult:
 def _local_audio_file(value) -> Path:
     """speech_to_text on stdio: an upload reference, or any regular local audio
     file (the stdio caller is the trusted local CLI with its own filesystem
-    access). Raises UploadPathError / UploadNotFoundError like
-    resolve_upload_path, which handles everything but an absolute path."""
-    if not isinstance(value, str) or not value.startswith("/") or value.startswith("/ui/"):
-        return resolve_upload_path(value, allowed_exts=AUDIO_EXTS,
-                                   root=BLACKBOX_ROOT / "Portal" / "uploads")
-    if "\x00" in value:
-        raise UploadPathError("NUL byte in audio path")
-    path = Path(value)
+    access). An absolute path is used as given and a relative one is resolved
+    against the working directory, as ``Path(audio_path)`` always did; a /ui/
+    or http(s) URL, or a relative path the working directory has no file for,
+    goes to resolve_upload_path. Raises UploadPathError / UploadNotFoundError
+    like resolve_upload_path."""
+    if (isinstance(value, str) and value and "\x00" not in value
+            and "://" not in value and not value.startswith("/ui/")):
+        path = Path(value)
+        if path.is_absolute():
+            return _checked_local_audio(path, value)
+        try:
+            in_cwd = path.exists()
+        except OSError:  # e.g. a name too long for the filesystem
+            in_cwd = False
+        if in_cwd:
+            return _checked_local_audio(path.absolute(), value)
+    return resolve_upload_path(value, allowed_exts=AUDIO_EXTS,
+                               root=BLACKBOX_ROOT / "Portal" / "uploads")
+
+
+def _checked_local_audio(path: Path, value: str) -> Path:
+    """A stdio-named local file: it must be a regular audio file under the cap."""
     try:
         st = path.stat()
     except FileNotFoundError:

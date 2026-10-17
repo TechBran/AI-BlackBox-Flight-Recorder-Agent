@@ -111,9 +111,13 @@ MEDIA_EXTS = IMAGE_EXTS | AUDIO_EXTS | VIDEO_EXTS | DOC_EXTS
 # file into memory.
 DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 # For loaders that base64 the file INTO a JSON request (chat attachments,
-# reference images, Veo's source image): well above every provider's inline
-# limit (~20 MB), far below what would balloon the worker's memory.
+# reference images, Veo's source image): above the inline limits of the
+# providers that use it, far below what would balloon the worker's memory.
 INLINE_MAX_BYTES = 50 * 1024 * 1024
+# Gemini's chat media loaders: its file input docs allow 100 MB of inline data
+# per request, counted on the base64 payload, so the largest raw file that can
+# fit is 3/4 of that (longer Android overlay screen recordings exceed 50 MB).
+GEMINI_INLINE_MAX_BYTES = 100 * 1000 * 1000 * 3 // 4
 _MAX_REFERENCE_CHARS = 4096
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _UI_UPLOADS = "/ui/uploads/"
@@ -129,6 +133,17 @@ class UploadPathError(ValueError):
 
 class UploadNotFoundError(UploadPathError):
     """The reference is well-formed and contained, but no such file exists."""
+
+
+class UploadNotAcceptedError(UploadPathError):
+    """A contained upload that exists, refused only because THIS caller cannot
+    take it: larger than its size cap, or an extension outside its allowlist.
+    Chat loaders tell the model about these instead of dropping them silently.
+    """
+
+
+def _megabytes(n: int) -> str:
+    return f"{n / (1024 * 1024):.0f} MB"
 
 
 def _describe(value) -> str:
@@ -161,6 +176,8 @@ def _relative_candidates(value: str, original) -> list:
         raw = value[len(_UI_UPLOADS):]
         decoded = unquote(urlsplit(value).path)[len(_UI_UPLOADS):]
         return [raw] if decoded == raw else [raw, decoded]
+    while value.startswith("./"):
+        value = value[2:]
     for prefix in ("Portal/uploads/", "uploads/"):
         if value.startswith(prefix):
             return [value[len(prefix):], value]
@@ -196,7 +213,8 @@ def resolve_upload_path(value, *, allowed_exts=None, max_bytes=None, root=None) 
     root, non-regular files, files over ``max_bytes`` (default
     :data:`DEFAULT_MAX_UPLOAD_BYTES`), and -- when ``allowed_exts`` is given --
     an extension of the RESOLVED file outside it. A contained reference to a
-    missing file raises the :class:`UploadNotFoundError` subclass.
+    missing file raises the :class:`UploadNotFoundError` subclass, and the
+    size and type refusals raise :class:`UploadNotAcceptedError`.
 
     Returns the fully resolved :class:`Path`; callers open that, not the input.
     ``root`` overrides the uploads root (the MCP server passes its own).
@@ -256,12 +274,13 @@ def resolve_upload_path(value, *, allowed_exts=None, max_bytes=None, root=None) 
         if not stat.S_ISREG(st.st_mode):
             raise UploadPathError(f"not a regular file: {_describe(original)}")
         if allowed_exts is not None and resolved.suffix.lower() not in allowed_exts:
-            raise UploadPathError(
+            raise UploadNotAcceptedError(
                 f"file type {resolved.suffix.lower() or '(none)'!r} is not allowed here: "
                 f"{_describe(original)}")
         cap = DEFAULT_MAX_UPLOAD_BYTES if max_bytes is None else max_bytes
         if st.st_size > cap:
-            raise UploadPathError(f"file is larger than {cap} bytes: {_describe(original)}")
+            raise UploadNotAcceptedError(
+                f"file is larger than the {_megabytes(cap)} limit: {_describe(original)}")
         return resolved
     raise missing or UploadPathError(f"not a BlackBox upload reference: {_describe(original)}")
 
