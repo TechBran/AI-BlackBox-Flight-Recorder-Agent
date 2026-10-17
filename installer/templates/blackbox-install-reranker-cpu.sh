@@ -10,7 +10,8 @@
 #
 # TIER GATE (via Orchestrator/hardware.py's probe() — the single source of truth
 # for LOW/MID/HIGH, reused rather than re-implemented in bash):
-#   GPU present            -> skip (that box uses the GPU vLLM reranker) + exit 0
+#   GPU present            -> skip (that box reranks on the GPU: the local model
+#                             stack, or the opt-in vLLM reranker) + exit 0
 #   no GPU, RAM >= 32 GB    -> MID: install the CPU reranker deps
 #   no GPU, RAM  < 32 GB    -> LOW: skip (cloud-only reranking) + exit 0
 # The CPU stack (torch + sentence-transformers) is a ~2 GB download; the gate
@@ -71,6 +72,16 @@ ORCH_VENV="$BLACKBOX_ROOT/Orchestrator/venv"
 ORCH_PY="$ORCH_VENV/bin/python"
 ORCH_PIP="$ORCH_VENV/bin/pip"
 TORCH_CPU_INDEX="https://download.pytorch.org/whl/cpu"
+# Exact versions (2026-10 audit rank 41): these land in the SHARED Orchestrator
+# venv, so an unpinned install pulled whatever PyPI served that day — a new
+# torch major or a transformers that moves huggingface_hub under the
+# Orchestrator. This set was verified together on 2026-10-17 (torch +cpu on
+# Python 3.12, CrossEncoder("Qwen/Qwen3-Reranker-0.6B") loads and ranks a
+# relevant passage above an irrelevant one); torch matches the build MS-02's
+# vLLM venv runs. Bump them together, after re-running that check.
+TORCH_PIN="2.11.0"
+SENTENCE_TRANSFORMERS_PIN="6.1.0"
+TRANSFORMERS_PIN="5.20.1"
 
 # The Orchestrator venv is created earlier in install.sh (Step 2). A missing one
 # means the main installer has not run — a precondition failure, not a skip.
@@ -95,8 +106,8 @@ if [[ -z "$TIER" ]]; then
     exit 0
 fi
 if [[ "$GPU_FLAG" == "1" ]]; then
-    echo "[install-reranker-cpu] NVIDIA GPU detected — this box uses the GPU vLLM reranker"
-    echo "[install-reranker-cpu] (blackbox-install-reranker.sh); skipping the CPU path."
+    echo "[install-reranker-cpu] NVIDIA GPU detected — this box reranks on the GPU (the local model"
+    echo "[install-reranker-cpu] stack, or the opt-in vLLM reranker); skipping the CPU path."
     exit 0
 fi
 if [[ "$TIER" != "MID" ]]; then
@@ -115,24 +126,26 @@ echo "[install-reranker-cpu] MID tier (${RAM_GB} GB RAM, no GPU) — installing 
 # +cpu build, avoiding the multi-GB CUDA wheels) is installed from the pytorch
 # index first, then sentence-transformers is pulled from PyPI (its torch dep is
 # already satisfied by the CPU build). Plain install (no --upgrade) is a cheap
-# no-op on re-run when the requirement is already satisfied.
+# no-op on re-run when the requirement is already satisfied. `==` matches the
+# index's local `+cpu` build (PEP 440 ignores the local label).
 # Both resolve UNDER THE LOCK'S PINS (-c requirements.txt, the hash-free
 # rendering of requirements.lock.txt): an unconstrained install moved
 # huggingface-hub past its pin for transformers, the next lock install (the
 # in-app updater) moved it back, and transformers stopped importing while pip
 # exited 0. The updater reinstalls sentence-transformers the same way after
-# every lock change (Orchestrator/update/runner.py LOCK_EXTRAS).
-echo "[install-reranker-cpu] Installing CPU-only torch from $TORCH_CPU_INDEX (large download on first install)..."
-if ! sudo -u "$REAL_USER" "$ORCH_PIP" install torch --index-url "$TORCH_CPU_INDEX" \
+# every lock change (Orchestrator/update/runner.py LOCK_EXTRAS). A pin that
+# contradicts the lock fails here, loudly, instead of moving a locked package.
+echo "[install-reranker-cpu] Installing CPU-only torch==$TORCH_PIN from $TORCH_CPU_INDEX (large download on first install)..."
+if ! sudo -u "$REAL_USER" "$ORCH_PIP" install "torch==$TORCH_PIN" --index-url "$TORCH_CPU_INDEX" \
         -c "$BLACKBOX_ROOT/requirements.txt"; then
     echo "[install-reranker-cpu] ERROR: pip install of CPU torch failed" >&2
     echo "[install-reranker-cpu] (Check network/disk, then re-run" >&2
     echo "[install-reranker-cpu]  sudo bash installer/templates/blackbox-install-reranker-cpu.sh)" >&2
     exit 4
 fi
-echo "[install-reranker-cpu] Installing sentence-transformers from PyPI..."
-if ! sudo -u "$REAL_USER" "$ORCH_PIP" install sentence-transformers \
-        -c "$BLACKBOX_ROOT/requirements.txt"; then
+echo "[install-reranker-cpu] Installing sentence-transformers==$SENTENCE_TRANSFORMERS_PIN from PyPI..."
+if ! sudo -u "$REAL_USER" "$ORCH_PIP" install "sentence-transformers==$SENTENCE_TRANSFORMERS_PIN" \
+        "transformers==$TRANSFORMERS_PIN" -c "$BLACKBOX_ROOT/requirements.txt"; then
     echo "[install-reranker-cpu] ERROR: pip install of sentence-transformers failed" >&2
     echo "[install-reranker-cpu] (Check network/disk, then re-run" >&2
     echo "[install-reranker-cpu]  sudo bash installer/templates/blackbox-install-reranker-cpu.sh)" >&2

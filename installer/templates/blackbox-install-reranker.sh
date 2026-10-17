@@ -10,22 +10,38 @@
 # rerank_enabled = true — see the rerank.py activation checklist); nothing
 # here writes config.ini.
 #
+# OPT-IN (2026-10 audit X06-ops-deploy-06): the on-box reranker is now the
+# local model stack's llama-swap member (blackbox-models.service, Step 2f), and
+# this vLLM path is the kept, explicitly chosen alternative. install.sh runs
+# this script on every install/update re-run, and it used to `pip install
+# --upgrade vllm` and enable + restart vllm-reranker.service each time on any
+# GPU box — resurrecting the service the local-stack migration had disabled and
+# re-pinning its VRAM beside llama-swap. It now provisions ONLY when asked:
+#   RERANK_PROVIDER=vllm in the environment, or --vllm on the command line
+# and never while blackbox-models.service is enabled (the two would share one
+# card; disable that unit first if vLLM is really wanted). Unrequested runs
+# exit 0 and leave an existing vllm-reranker.service exactly as it is.
+#
 # GPU GATE: requires nvidia-smi + >=8000 MB VRAM. CPU boxes get a clear skip
 # message and exit 0 — vLLM must never be installed on a CPU box.
 #
 # IDEMPOTENT / re-run safe:
-#   - venv exists  -> upgrade path (pip install --upgrade vllm)
+#   - venv exists  -> re-install at the pinned vllm version (a no-op when it
+#                     is already installed)
 #   - unit exists  -> re-written + daemon-reload (same sed-template flow as
 #                     install.sh's zellij-web.service step)
 #   - service already running -> restarted, then re-verified
 #
 # Usage (install.sh Step 2d passes all three; standalone auto-detects):
-#   sudo bash installer/templates/blackbox-install-reranker.sh \
+#   sudo RERANK_PROVIDER=vllm bash installer/templates/blackbox-install-reranker.sh \
 #       [real_user] [real_home] [blackbox_root]
+#   sudo bash installer/templates/blackbox-install-reranker.sh --vllm [...]
 #
 # Exit codes:
-#   0 — installed + serving (or clean CPU-box skip)
-#   2 — could not resolve user/home
+#   0 — installed + serving (or a clean skip: not requested, llama-swap
+#       enabled, CPU box)
+#   2 — could not resolve user/home, or the home/root is outside the
+#       installer charset
 #   4 — venv creation or vllm pip install failed
 #   6 — service failed to start / never answered on port 8091 in time
 #
@@ -33,6 +49,16 @@
 # un-reranked, and the wizard's Memory & Search step shows the remediation.
 
 set -euo pipefail
+
+# --vllm (any position) is the explicit request; the rest are positional.
+WANT_VLLM=0
+_rp="${RERANK_PROVIDER:-}"
+[[ "${_rp,,}" == "vllm" ]] && WANT_VLLM=1
+_args=()
+for _a in "$@"; do
+    if [[ "$_a" == "--vllm" ]]; then WANT_VLLM=1; else _args+=("$_a"); fi
+done
+set -- "${_args[@]+"${_args[@]}"}"
 
 REAL_USER="${1:-}"
 REAL_HOME="${2:-}"
@@ -57,15 +83,45 @@ if [[ -z "$BLACKBOX_ROOT" ]]; then
     # This script lives at $BLACKBOX_ROOT/installer/templates/ — two dirs up.
     BLACKBOX_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 fi
+# $REAL_HOME is templated into the unit's ExecStart=/WorkingDirectory= and the
+# start script. Same charset install.sh enforces (keep the two identical —
+# scripts/tests/test_install_root_charset.sh pins it).
+_path_ok_re='^/[A-Za-z0-9._/+@,~-]+$'
+for _p in "$REAL_HOME" "$BLACKBOX_ROOT"; do
+    if [[ ! "$_p" =~ $_path_ok_re ]]; then
+        echo "[install-reranker] ERROR: '$_p' contains characters unsafe to template into a systemd unit" >&2
+        echo "[install-reranker] (it must match ${_path_ok_re})." >&2
+        exit 2
+    fi
+done
 
 RERANK_PORT=8091   # MUST match Orchestrator/rerank.py DEFAULT_BASE_URL
 MODEL_ID="Qwen/Qwen3-Reranker-0.6B"
+# Exact vllm release (never `--upgrade`): the version that served this model
+# with the hf-overrides below on MS-02 Ultra (verified 2026-10-17). A newer
+# vLLM can change the Qwen3 sequence-classification overrides; bump this only
+# after re-verifying /score on a GPU box.
+VLLM_PIN="0.25.1"
 VENV_DIR="$REAL_HOME/rerank-venv"
 START_SCRIPT="$REAL_HOME/start-reranker.sh"
 UNIT_TEMPLATE="$BLACKBOX_ROOT/installer/templates/vllm-reranker.service"
 UNIT_DEST="/etc/systemd/system/vllm-reranker.service"
 VERIFY_TIMEOUT_S=600   # matches the unit's TimeoutStartSec (first start
                        # downloads ~1.2 GB of weights from Hugging Face)
+
+# ── Opt-in gate (see the header) ───────────────────────────────────────────
+if (( ! WANT_VLLM )); then
+    echo "[install-reranker] vLLM reranker not requested — skipping (the on-box reranker is the"
+    echo "[install-reranker] local model stack). To provision it, re-run with RERANK_PROVIDER=vllm"
+    echo "[install-reranker] or --vllm. An existing vllm-reranker.service is left as it is."
+    exit 0
+fi
+if systemctl is-enabled --quiet blackbox-models.service 2>/dev/null; then
+    echo "[install-reranker] blackbox-models.service (llama-swap) is enabled — skipping vLLM: the two"
+    echo "[install-reranker] would pin the same GPU. Disable blackbox-models.service first if the"
+    echo "[install-reranker] vLLM reranker is really wanted, then re-run with RERANK_PROVIDER=vllm."
+    exit 0
+fi
 
 # ── GPU gate: nvidia-smi present + >=8000 MB VRAM ──────────────────────────
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -91,7 +147,7 @@ if (( VRAM_MB < 8000 )); then
 fi
 echo "[install-reranker] GPU gate passed (${VRAM_MB} MB VRAM) — provisioning the vLLM reranker."
 
-# ── Rerank venv: create if missing, else upgrade path ──────────────────────
+# ── Rerank venv: create if missing, then the pinned vllm ───────────────────
 # python3.12 is a MUST_HAVE apt package (system-packages.txt) — prefer it to
 # match the proven Ultra setup; fall back to python3 for forward-compat.
 PYBIN="$(command -v python3.12 || command -v python3)"
@@ -103,10 +159,10 @@ if [[ ! -x "$VENV_DIR/bin/pip" ]]; then
         exit 4
     fi
 else
-    echo "[install-reranker] venv already at $VENV_DIR — taking the upgrade path."
+    echo "[install-reranker] venv already at $VENV_DIR — re-installing the pinned vllm."
 fi
-echo "[install-reranker] Installing/upgrading vllm (large download on first install)..."
-if ! sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install --upgrade vllm; then
+echo "[install-reranker] Installing vllm==$VLLM_PIN (large download on first install)..."
+if ! sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install "vllm==$VLLM_PIN"; then
     echo "[install-reranker] ERROR: pip install vllm failed" >&2
     echo "[install-reranker] (Check network/disk, then re-run" >&2
     echo "[install-reranker]  sudo bash installer/templates/blackbox-install-reranker.sh)" >&2
@@ -136,10 +192,14 @@ echo "[install-reranker] Wrote $START_SCRIPT"
 
 # ── Systemd unit: substitute placeholders, (re-)write, enable, restart ──────
 # Same sed-template flow as install.sh's zellij-web.service step; re-writing
-# an existing unit + daemon-reload is the idempotent path.
-sed -e "s/REAL_USER_PLACEHOLDER/$REAL_USER/g" \
-    -e "s|REAL_HOME_PLACEHOLDER|$REAL_HOME|g" \
-    "$UNIT_TEMPLATE" | sudo tee "$UNIT_DEST" > /dev/null
+# an existing unit + daemon-reload is the idempotent path. The render is a
+# function so scripts/tests/test_systemd_units_verify.sh can verify its output.
+render_vllm_reranker_unit() {
+    sed -e "s/REAL_USER_PLACEHOLDER/$REAL_USER/g" \
+        -e "s|REAL_HOME_PLACEHOLDER|$REAL_HOME|g" \
+        "$UNIT_TEMPLATE"
+}
+render_vllm_reranker_unit | sudo tee "$UNIT_DEST" > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable vllm-reranker.service > /dev/null 2>&1
 sudo systemctl restart vllm-reranker.service

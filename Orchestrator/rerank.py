@@ -55,9 +55,11 @@ never "does reranking work". GET /rerank/status surfaces both, plus the running
 un-reranked `fallthrough` record and the base_url scoring ACTUALLY uses.
 
 ── Post-GPU activation checklist (RTX 2000 Ada 16GB — for the operator) ──────
-1. Serve the reranker. On GPU boxes the installer provisions this (M13:
-   installer/templates/blackbox-install-reranker.sh writes ~/start-reranker.sh
-   + the vllm-reranker.service unit on port 8091 and starts it). The manual
+1. Serve the reranker. On GPU boxes the installer provisions this on request
+   (M13; opt-in since 2026-10 — `RERANK_PROVIDER=vllm bash Scripts/install.sh`
+   or `installer/templates/blackbox-install-reranker.sh --vllm`, refused while
+   blackbox-models.service is enabled: it writes ~/start-reranker.sh + the
+   vllm-reranker.service unit on port 8091 and starts it). The manual
    incantation, kept for reference — Qwen3-Reranker publishes CausalLM
    weights; vLLM needs the sequence-classification conversion overrides or
    /score will not exist:

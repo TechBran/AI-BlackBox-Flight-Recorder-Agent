@@ -13,7 +13,8 @@
 #
 # IDEMPOTENT / re-run safe:
 #   - llama-swap binary at pinned version -> skip download
-#   - llama-server marker == pinned tag   -> skip download
+#   - llama-server marker == pinned tag + backend (+ GPU arch for CUDA)
+#                                         -> skip download/build
 #   - venv exists                         -> pip --upgrade path
 #   - unit exists                         -> re-written + daemon-reload
 #   - service running                     -> restarted + re-verified
@@ -24,7 +25,8 @@
 #
 # Exit codes:
 #   0 — provisioned + llama-swap answering on :9098/health
-#   2 — could not resolve user/home
+#   2 — could not resolve user/home, or the home/root is outside the
+#       installer charset
 #   4 — download/verify or venv creation failed
 #   6 — blackbox-models.service never answered on :9098 in time
 #
@@ -55,6 +57,20 @@ fi
 if [[ -z "$BLACKBOX_ROOT" ]]; then
     BLACKBOX_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 fi
+# Both paths are templated, unquoted, into the llama-swap config (inside
+# single-quoted `sh -c '…'` strings, PYTHONPATH= among them) and the systemd
+# unit (2026-10 audit X04-security-clients-infra-14). The charset is the one
+# install.sh enforces — nothing in it means anything to sh, sed, systemd or a
+# path list, so the substitutions below need no escaping. Keep the two
+# identical (scripts/tests/test_install_root_charset.sh pins it).
+_path_ok_re='^/[A-Za-z0-9._/+@,~-]+$'
+for _p in "$REAL_HOME" "$BLACKBOX_ROOT"; do
+    if [[ ! "$_p" =~ $_path_ok_re ]]; then
+        echo "[install-localstack] ERROR: '$_p' contains characters unsafe to template into the" >&2
+        echo "[install-localstack] llama-swap config and systemd unit (it must match ${_path_ok_re})." >&2
+        exit 2
+    fi
+done
 
 TEMPLATE_DIR="$BLACKBOX_ROOT/installer/templates"
 LOCALSTACK_HOME="$REAL_HOME/.blackbox/localstack"
@@ -81,12 +97,21 @@ sudo -u "$REAL_USER" mkdir -p "$LOCALSTACK_BIN" "$LOCALSTACK_MODELS"
 # three-tier acquisition — llama.cpp no longer ships prebuilt Linux CUDA
 # binaries, so CUDA is compiled from source at the pinned tag.
 USE_CUDA=0
+# Compute capability of every NVIDIA GPU present ("89", or "86+89" on a mixed
+# box; "unknown" when the driver cannot report it). The CUDA build targets
+# `native` (whatever cards are installed); this records which those were, in
+# the build marker, so a GPU swap triggers a rebuild (2026-10 audit
+# X04-security-clients-infra-15 / X06-ops-deploy-16).
+LC_CUDA_ARCH="unknown"
 if command -v nvidia-smi >/dev/null 2>&1; then
     VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
         | sort -nr | head -n1 | tr -d '[:space:]' || true)"
     if [[ "$VRAM_MB" =~ ^[0-9]+$ ]] && (( VRAM_MB >= 8000 )); then
         USE_CUDA=1
-        echo "[install-localstack] GPU detected (${VRAM_MB} MB VRAM) — CUDA source build (Vulkan prebuilt fallback)."
+        _caps="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+            | tr -d ' .' | grep -E '^[0-9]+$' | sort -un | paste -sd+ - || true)"
+        if [[ "$_caps" =~ ^[0-9]+(\+[0-9]+)*$ ]]; then LC_CUDA_ARCH="$_caps"; fi
+        echo "[install-localstack] GPU detected (${VRAM_MB} MB VRAM, sm_${LC_CUDA_ARCH}) — CUDA source build (Vulkan prebuilt fallback)."
     else
         echo "[install-localstack] GPU present but VRAM <8000 MB (or unreadable) — CPU llama-server prebuilt."
     fi
@@ -139,8 +164,11 @@ fi
 # ── 2. llama.cpp llama-server (CUDA source build primary; Vulkan/CPU tar.gz
 #      prebuilt fallbacks) ──────────────────────────────────────────────────
 # llama.cpp stopped shipping prebuilt Linux CUDA binaries, so on a capable
-# NVIDIA box we BUILD llama-server from source with CUDA at the pinned tag
-# (sm_89 = RTX 2000 Ada). If that build cannot be produced we fall back to the
+# NVIDIA box we BUILD llama-server from source with CUDA at the pinned tag, for
+# the GPUs actually installed (CMAKE_CUDA_ARCHITECTURES=native — this used to
+# be hardcoded to 89, the RTX 2000 Ada, which builds fine everywhere and then
+# fails at first model load on any other generation with "no kernel image is
+# available"). If that build cannot be produced we fall back to the
 # Vulkan prebuilt; boxes with no capable GPU get the CPU prebuilt floor. The
 # two shas pin the .tar.gz prebuilt fallbacks (there is no CUDA prebuilt sha —
 # CUDA is compiled, not downloaded).
@@ -156,14 +184,25 @@ ASSET_VULKAN="llama-${LC_VER}-bin-ubuntu-vulkan-x64.tar.gz"
 
 # The backend we WANT: cuda on a capable NVIDIA box (Vulkan is only ever a
 # fallback), else the cpu prebuilt floor. The marker records what we actually
-# installed (e.g. b10084-cuda / b10084-vulkan / b10084-cpu).
-if (( USE_CUDA )); then LC_WANT_BACKEND="cuda"; else LC_WANT_BACKEND="cpu"; fi
+# installed, plus the GPU arch a CUDA build was compiled for (e.g.
+# b10084-cuda-sm89 / b10084-vulkan / b10084-cpu).
+if (( USE_CUDA )); then LC_WANT_MARKER="${LC_VER}-cuda-sm${LC_CUDA_ARCH}"; else LC_WANT_MARKER="${LC_VER}-cpu"; fi
 LC_MARKER="$LOCALSTACK_BIN/.llamacpp-version"
 need_lc=1
 if [[ -x "$LOCALSTACK_BIN/llama-server" && -f "$LC_MARKER" ]]; then
-    if [[ "$(cat "$LC_MARKER" 2>/dev/null)" == "${LC_VER}-${LC_WANT_BACKEND}" ]]; then
+    LC_HAVE_MARKER="$(cat "$LC_MARKER" 2>/dev/null || true)"
+    # A marker from before the arch was recorded (`<tag>-cuda`) is a build
+    # hardcoded for sm_89: still right on an sm_89-only box, so adopt it rather
+    # than spend a CUDA rebuild; anywhere else it is the wrong binary.
+    if [[ "$LC_HAVE_MARKER" == "${LC_VER}-cuda" && "$LC_WANT_MARKER" == "${LC_VER}-cuda-sm89" ]]; then
+        echo "$LC_WANT_MARKER" | sudo -u "$REAL_USER" tee "$LC_MARKER" >/dev/null
+        LC_HAVE_MARKER="$LC_WANT_MARKER"
+    fi
+    if [[ "$LC_HAVE_MARKER" == "$LC_WANT_MARKER" ]]; then
         need_lc=0
-        echo "[install-localstack] llama-server ${LC_VER} (${LC_WANT_BACKEND}) already installed, skipping."
+        echo "[install-localstack] llama-server ${LC_WANT_MARKER} already installed, skipping."
+    elif [[ -n "$LC_HAVE_MARKER" ]]; then
+        echo "[install-localstack] llama-server marker is ${LC_HAVE_MARKER}, want ${LC_WANT_MARKER} — reinstalling."
     fi
 fi
 if (( need_lc )); then
@@ -247,10 +286,12 @@ if (( need_lc )); then
         # Ubuntu 24.04.
         CUDA_HOST_CC="$(command -v gcc-12 || command -v gcc-11 || command -v gcc-10 || true)"
         CUDA_HOST_FLAG=(); [[ -n "$CUDA_HOST_CC" ]] && CUDA_HOST_FLAG=(-DCMAKE_CUDA_HOST_COMPILER="$CUDA_HOST_CC")
-        # Configure + build only the llama-server target. sm_89 = RTX 2000 Ada;
-        # LLAMA_CURL=OFF drops the libcurl build dependency.
+        # Configure + build only the llama-server target, for the installed
+        # GPUs (native — CMake asks the driver at configure time; the arch it
+        # finds is recorded in the marker below). LLAMA_CURL=OFF drops the
+        # libcurl build dependency.
         if (( CUDA_OK )) && { ! cmake -S "$TMP_LC/llama.cpp" -B "$TMP_LC/llama.cpp/build" \
-                    -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 \
+                    -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native \
                     -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release "${CUDA_HOST_FLAG[@]}" \
                 || ! cmake --build "$TMP_LC/llama.cpp/build" --target llama-server -j"$(nproc)"; }; then
             echo "[install-localstack] WARNING: CUDA build failed — falling back to the Vulkan prebuilt." >&2
@@ -279,7 +320,7 @@ if (( need_lc )); then
             sudo chown -R "$REAL_USER:$REAL_USER" "$LOCALSTACK_BIN"
             sudo -u "$REAL_USER" chmod +x "$LOCALSTACK_BIN/llama-server"
             LC_INSTALLED_BACKEND="cuda"
-            echo "[install-localstack] Installed $LOCALSTACK_BIN/llama-server ($LC_VER, CUDA source build, sm_89)"
+            echo "[install-localstack] Installed $LOCALSTACK_BIN/llama-server ($LC_VER, CUDA source build, sm_${LC_CUDA_ARCH})"
         fi
     fi
 
@@ -301,7 +342,9 @@ if (( need_lc )); then
         echo "[install-localstack] ERROR: llama-server could not be provisioned (CUDA build + prebuilt fallbacks all failed)." >&2
         exit 4
     fi
-    echo "${LC_VER}-${LC_INSTALLED_BACKEND}" | sudo -u "$REAL_USER" tee "$LC_MARKER" >/dev/null
+    LC_NEW_MARKER="${LC_VER}-${LC_INSTALLED_BACKEND}"
+    [[ "$LC_INSTALLED_BACKEND" == "cuda" ]] && LC_NEW_MARKER="${LC_NEW_MARKER}-sm${LC_CUDA_ARCH}"
+    echo "$LC_NEW_MARKER" | sudo -u "$REAL_USER" tee "$LC_MARKER" >/dev/null
     rm -rf "$TMP_LC"; trap - EXIT
 fi
 
@@ -395,11 +438,15 @@ rm -f "$TMP_CFG"
 echo "[install-localstack] Wrote $CONFIG_DEST"
 
 # ── 6. Install blackbox-models.service (sed-template flow like reranker) ────
-sed -e "s/REAL_USER_PLACEHOLDER/$REAL_USER/g" \
-    -e "s|REAL_HOME_PLACEHOLDER|$REAL_HOME|g" \
-    -e "s|LOCALSTACK_HOME_PLACEHOLDER|$LOCALSTACK_HOME|g" \
-    -e "s|LOCALSTACK_BIN_PLACEHOLDER|$LOCALSTACK_BIN|g" \
-    "$TEMPLATE_DIR/blackbox-models.service" | sudo tee /etc/systemd/system/blackbox-models.service >/dev/null
+# A function so scripts/tests/test_systemd_units_verify.sh can verify its output.
+render_models_unit() {
+    sed -e "s/REAL_USER_PLACEHOLDER/$REAL_USER/g" \
+        -e "s|REAL_HOME_PLACEHOLDER|$REAL_HOME|g" \
+        -e "s|LOCALSTACK_HOME_PLACEHOLDER|$LOCALSTACK_HOME|g" \
+        -e "s|LOCALSTACK_BIN_PLACEHOLDER|$LOCALSTACK_BIN|g" \
+        "$TEMPLATE_DIR/blackbox-models.service"
+}
+render_models_unit | sudo tee /etc/systemd/system/blackbox-models.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable blackbox-models.service >/dev/null 2>&1
 sudo systemctl restart blackbox-models.service

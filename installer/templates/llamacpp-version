@@ -6,7 +6,9 @@
 #   * NVIDIA GPU box (nvidia-smi >=8000 MB VRAM): BUILD llama.cpp from SOURCE
 #     with CUDA at the pinned tag (primary path). No prebuilt sha is needed for
 #     the CUDA path — the source is fetched via `git clone --branch <tag>`, and
-#     the compute capability is pinned in the installer (RTX 2000 Ada = sm_89).
+#     the build targets the installed GPUs (CMAKE_CUDA_ARCHITECTURES=native);
+#     their compute capability is recorded in the build marker, so a GPU swap
+#     rebuilds.
 #     If the source build fails (no CUDA toolkit installable, clone/compile
 #     error) the installer FALLS BACK to the Vulkan prebuilt below.
 #   * No GPU / VRAM <8000 MB: download the CPU prebuilt (the floor).
