@@ -440,6 +440,9 @@ from Orchestrator.utils.paths import (  # noqa: E402
     AUDIO_EXTS, DEFAULT_MAX_UPLOAD_BYTES, UploadNotFoundError, UploadPathError,
     resolve_upload_path,
 )
+# The per-boot /internal/reload secret (stdlib only), shared with the
+# Orchestrator caller (Orchestrator/routes/mcp_routes.py::_trigger_reload).
+from Orchestrator.utils import internal_secret  # noqa: E402
 
 # Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
@@ -1584,16 +1587,28 @@ BLACKBOX_MCP_RESOURCE_URL = BLACKBOX_MCP_PUBLIC_URL + BLACKBOX_MCP_HTTP_PATH
 _AUTH_MIDDLEWARE = {"instance": None}
 
 
+def _reload_secret_path():
+    return internal_secret.mcp_reload_secret_path(BLACKBOX_ROOT)
+
+
 async def _internal_reload_handler(request):
-    """POST /internal/reload (LOCALHOST-ONLY): re-read the runtime public URL + the
-    token map from disk and apply them IN PLACE, so a freshly minted token / a newly
-    set public URL goes live with no restart. The endpoint binds 127.0.0.1 (it is
-    NOT in the public route set reachable via Funnel); the host-check is
-    defense-in-depth. It only re-reads on-disk config -- it cannot set arbitrary
-    values."""
+    """POST /internal/reload: re-read the runtime public URL + the token map from
+    disk and apply them IN PLACE, so a freshly minted token / a newly set public
+    URL goes live with no restart. It only re-reads on-disk config -- it cannot
+    set arbitrary values.
+
+    It shares the one HTTP listener, and Tailscale Funnel forwards the INTERNET
+    to that listener from 127.0.0.1 (REMOTE_SETUP.md exposes the whole origin),
+    so the loopback check below is defense-in-depth only. The gate is the
+    per-boot reload secret in credentials/ (0600, readable only by the service
+    user), sent by the Orchestrator and compared in constant time (audit M3 U20,
+    O20-mcp-server-08)."""
     from starlette.responses import JSONResponse
     client = getattr(request, "client", None)
     if client is not None and client.host not in ("127.0.0.1", "::1", "localhost"):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    presented = request.headers.get(internal_secret.SECRET_HEADER, "")
+    if not internal_secret.verify(presented, _reload_secret_path()):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     global BLACKBOX_MCP_PUBLIC_URL, BLACKBOX_MCP_RESOURCE_URL
     BLACKBOX_MCP_PUBLIC_URL = _load_runtime_public_url()
@@ -2751,6 +2766,14 @@ def build_http_app(path: str = None):
     guarded_endpoint = BearerAuthMiddleware(_MCPASGIApp(session_manager), token_map)
     _AUTH_MIDDLEWARE["instance"] = guarded_endpoint   # for localhost /internal/reload
 
+    # Whichever side starts first writes this boot's reload secret (the
+    # Orchestrator also creates it on demand), so it exists before a reload.
+    try:
+        internal_secret.ensure_secret(_reload_secret_path())
+    except OSError as e:
+        logger.warning("internal/reload secret unavailable (%s); the Orchestrator "
+                       "writes it on its first reload", e)
+
     # CHUNK 6a: the PUBLIC OAuth bootstrap routes. These are plain function
     # endpoints (Starlette func(request)->Response), registered SEPARATELY from
     # the bearer-guarded /mcp endpoint -- so they are reachable WITHOUT a token.
@@ -2770,8 +2793,9 @@ def build_http_app(path: str = None):
               endpoint=_oauth_authorize_handler, methods=["GET", "POST"]),
         Route("/token",
               endpoint=_oauth_token_handler, methods=["POST"]),
-        # Localhost-only hot-reload: onboarding calls this after writing a token or
-        # the runtime public URL, so changes go live with no restart (bound 127.0.0.1).
+        # Hot-reload: onboarding calls this after writing a token or the runtime
+        # public URL, so changes go live with no restart. Funnel reaches this
+        # listener too, so it requires the per-boot reload secret (see handler).
         Route("/internal/reload",
               endpoint=_internal_reload_handler, methods=["POST"]),
     ]

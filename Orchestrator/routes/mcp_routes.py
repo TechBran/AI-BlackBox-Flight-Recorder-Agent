@@ -8,7 +8,8 @@ control + Funnel-up -- land in M7.4.)
 
 The token store Manifest/mcp_tokens.json is the SAME flat {token: operator} 0600
 file the MCP server loads. A fresh token / new public URL is made live via the MCP
-server's localhost /internal/reload (best-effort; else takes effect on next restart).
+server's localhost /internal/reload (best-effort; else takes effect on next restart),
+authenticated with the per-boot reload secret (Orchestrator/utils/internal_secret.py).
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from pydantic import BaseModel
 
 from Orchestrator.config import USERS_LIST
 from Orchestrator.onboarding import mcp_actuator
+from Orchestrator.utils import internal_secret
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +82,13 @@ def _write_tokens(tokens: dict) -> None:
 def _trigger_reload() -> bool:
     """Best-effort: ask the running MCP server to hot-reload its token map + URL.
     True if reloaded; False if the endpoint is not up yet (changes then take effect
-    on the next blackbox-mcp.service restart)."""
+    on the next blackbox-mcp.service restart). The call carries the per-boot
+    reload secret: the MCP listener is Funnel-exposed, so arriving from loopback
+    proves nothing (audit M3 U20)."""
     try:
-        r = httpx.post(f"{MCP_SERVER_URL}/internal/reload", timeout=5)
+        secret = internal_secret.ensure_secret(internal_secret.mcp_reload_secret_path())
+        r = httpx.post(f"{MCP_SERVER_URL}/internal/reload",
+                       headers={internal_secret.SECRET_HEADER: secret}, timeout=5)
         return r.status_code == 200
     except Exception:
         return False
