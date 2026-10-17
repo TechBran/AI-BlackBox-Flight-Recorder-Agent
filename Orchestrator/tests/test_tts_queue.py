@@ -306,16 +306,17 @@ def test_cancel_queued_job_immediate_and_terminal_idempotent(q, monkeypatch):
 # route layer (full app) — validation + inert-when-stack-off
 # ---------------------------------------------------------------------------
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
+def _fresh_tts_queue(tmp_path, monkeypatch):
     tts_queue._reset_for_tests()
     monkeypatch.setattr(tts_queue, "_uploads_dir", lambda: tmp_path)
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m_emb:
-        m_emb.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c
+    yield
     tts_queue._reset_for_tests()
+
+
+@pytest.fixture
+def client(_fresh_tts_queue, app_client):
+    # _fresh_tts_queue first: the queue is reset before the lifespan starts.
+    return app_client
 
 
 def test_queue_submit_non_qwen_400(client):

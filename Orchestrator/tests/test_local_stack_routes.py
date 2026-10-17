@@ -7,11 +7,10 @@ probe helper is monkeypatched so no real nvidia-smi runs."""
 import configparser
 
 import pytest
-from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch, app_client):
     from Orchestrator.onboarding import secrets_writer
     from Orchestrator.routes import local_stack_routes as lsr
     cfg = tmp_path / "config.ini"
@@ -20,10 +19,8 @@ def client(tmp_path, monkeypatch):
     env.write_text("")
     monkeypatch.setattr(lsr, "CONFIG_INI", cfg)
     monkeypatch.setattr(secrets_writer, "ENV_FILE", env)
-    from Orchestrator.app import app
-    with TestClient(app) as c:
-        c._cfg, c._env = cfg, env
-        yield c
+    app_client._cfg, app_client._env = cfg, env
+    return app_client
 
 
 def _flags(cfg):

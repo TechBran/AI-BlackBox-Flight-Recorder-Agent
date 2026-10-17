@@ -1,5 +1,13 @@
 import pytest
+from Orchestrator.elevenlabs import client as el_client
 from Orchestrator.elevenlabs import tts as el_tts
+
+
+@pytest.fixture(autouse=True)
+def _fake_key(monkeypatch):
+    """A fake key: requests.post is stubbed in every test, and the stream path
+    must not depend on (or need) a real ELEVENLABS_API_KEY on this box."""
+    monkeypatch.setattr(el_client, "resolve_api_key", lambda: "xi-test-key")
 
 
 class _FakeResp:

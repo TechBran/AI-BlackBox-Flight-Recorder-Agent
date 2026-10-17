@@ -1,4 +1,6 @@
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 import pytest
 
@@ -9,7 +11,20 @@ from Orchestrator.cli_agent.path_validator import PathValidator, WorkspaceViolat
 from Orchestrator.cli_agent.operator_config import OperatorConfig
 
 
-TMUX_TMP_SOCK = Path("/tmp/test-cli-agent-tmux.sock")
+# The tests that start a real tmux server (audit O21-python-tests-10).
+needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+
+
+@pytest.fixture
+def tmux_sock():
+    """A private tmux server socket per test: a fixed shared /tmp socket let two
+    concurrent runs kill each other's server. A short mkdtemp path, since a unix
+    socket path is capped near 108 bytes and tmp_path can exceed it."""
+    sock_dir = Path(tempfile.mkdtemp(prefix="bbx-tmux-"))
+    sock = sock_dir / "tmux.sock"
+    yield sock
+    subprocess.run(["tmux", "-S", str(sock), "kill-server"], capture_output=True)
+    shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -20,19 +35,12 @@ def workspace(tmp_path):
 
 
 @pytest.fixture
-def manager(workspace, tmp_path):
-    if TMUX_TMP_SOCK.exists():
-        subprocess.run(["tmux", "-S", str(TMUX_TMP_SOCK), "kill-server"],
-                       capture_output=True)
-        TMUX_TMP_SOCK.unlink(missing_ok=True)
+def manager(workspace, tmp_path, tmux_sock):
     pv = PathValidator(apps_root=workspace)
     oc = OperatorConfig(root=tmp_path / ".claude-bbox")
-    mgr = TmuxSessionManager(
-        path_validator=pv, operator_config=oc, tmux_socket=TMUX_TMP_SOCK
+    return TmuxSessionManager(
+        path_validator=pv, operator_config=oc, tmux_socket=tmux_sock
     )
-    yield mgr
-    subprocess.run(["tmux", "-S", str(TMUX_TMP_SOCK), "kill-server"],
-                   capture_output=True)
 
 
 def test_session_name_deterministic():
@@ -51,6 +59,7 @@ def test_parse_session_name_round_trips():
     assert (op, prov, app) == ("Brandon", "claude", "grocery-store")
 
 
+@needs_tmux
 def test_attach_or_create_creates_new(manager, workspace):
     info = manager.attach_or_create(
         operator="Brandon", provider="claude", app="grocery-store",
@@ -59,12 +68,13 @@ def test_attach_or_create_creates_new(manager, workspace):
     assert info.created is True
     assert info.name == "cli-agent-Brandon__claude__grocery-store"
     out = subprocess.run(
-        ["tmux", "-S", str(TMUX_TMP_SOCK), "has-session", "-t", info.name],
+        ["tmux", "-S", str(manager.socket), "has-session", "-t", info.name],
         capture_output=True
     )
     assert out.returncode == 0
 
 
+@needs_tmux
 def test_attach_or_create_idempotent(manager, workspace):
     a = manager.attach_or_create(
         operator="Brandon", provider="claude", app="grocery-store",
@@ -79,6 +89,7 @@ def test_attach_or_create_idempotent(manager, workspace):
     assert b.created is False
 
 
+@needs_tmux
 def test_kill_session_works(manager, workspace):
     manager.attach_or_create(
         operator="Brandon", provider="claude", app="grocery-store",
@@ -87,12 +98,13 @@ def test_kill_session_works(manager, workspace):
     name = "cli-agent-Brandon__claude__grocery-store"
     manager.kill(name)
     out = subprocess.run(
-        ["tmux", "-S", str(TMUX_TMP_SOCK), "has-session", "-t", name],
+        ["tmux", "-S", str(manager.socket), "has-session", "-t", name],
         capture_output=True
     )
     assert out.returncode != 0
 
 
+@needs_tmux
 def test_list_sessions_for_operator(manager, workspace):
     manager.attach_or_create(operator="Brandon", provider="claude",
                               app="grocery-store",

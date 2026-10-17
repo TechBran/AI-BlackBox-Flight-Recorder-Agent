@@ -27,7 +27,6 @@ spawns a daemon thread calling sync_embeddings, which would hit the network).
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from Orchestrator.local_provider import catalog as mirror
 
@@ -69,14 +68,10 @@ def patch_hf_fetchers(request, monkeypatch):
 
 
 @pytest.fixture
-def client():
-    """TestClient with the startup embedding-sync hook mocked (it spawns a
-    daemon thread calling sync_embeddings, which would hit the network)."""
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m_src:
-        m_src.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c
+def client(app_client):
+    """The shared app_client (Orchestrator/tests/conftest.py): lifespan side
+    effects off, ToolVault embedding sync mocked, stores in tmp_path."""
+    return app_client
 
 
 # ---------------------------------------------------------------------------

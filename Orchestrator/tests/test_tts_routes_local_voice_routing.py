@@ -15,18 +15,15 @@ id that the local voice catalog knows resolving to the local provider, not the c
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from Orchestrator.config import OPENAI_TTS_URL
 
 
 @pytest.fixture
-def client():
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m_emb:
-        m_emb.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c
+def client(app_client):
+    """The shared app_client (Orchestrator/tests/conftest.py): lifespan side
+    effects off, ToolVault embedding sync mocked, stores in tmp_path."""
+    return app_client
 
 
 class _Resp:

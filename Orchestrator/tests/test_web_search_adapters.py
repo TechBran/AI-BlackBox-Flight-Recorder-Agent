@@ -51,6 +51,7 @@ def test_gemini_adapter_parses_grounding(monkeypatch):
         text = ""
         def json(self): return payload
     monkeypatch.setattr(wt.requests, "post", lambda *a, **k: FakeResp())
+    monkeypatch.setattr(wt, "GEMINI_API_KEY", "test-gemini-key")  # never a real key
     r = wt._search_gemini("q", "month")
     assert "Gem answer" in r.answer
     assert any("redirect" in c for c in r.citations)

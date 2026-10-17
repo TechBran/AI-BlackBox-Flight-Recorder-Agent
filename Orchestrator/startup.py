@@ -35,6 +35,10 @@ from Orchestrator.utils.paths import portal_dir
 from Orchestrator.utils.static_guard import (
     PORTAL_MEDIA_DIRS, GuardedStaticFiles, drop_world_write, portal_refused_dirs,
 )
+# Every hook below that reaches outside this process registers through
+# boot_hook, which the app skips under BLACKBOX_TESTING=1 (the test suite);
+# startup_phone_pin_check only logs, so it stays a plain hook.
+from Orchestrator.utils.testing import boot_hook
 from Orchestrator.fossils import (
     load_snapshot_index, rebuild_snapshot_index, update_snapshot_index,
     read_schema_version, write_schema_version, CURRENT_SCHEMA_VERSION,
@@ -113,7 +117,7 @@ def _incremental_index_update(index, vol_bytes, scan_from_byte):
 
 
 # Startup: Initialize or rebuild snapshot index
-@app.on_event("startup")
+@boot_hook(app, "startup")
 def startup_check_index():
     """Check if snapshot index exists, rebuild if missing or stale. Also run cleanup."""
     logger.info("Checking snapshot index...")
@@ -239,7 +243,7 @@ def startup_check_index():
 
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def _cu_display_reaper():
     """CU virtual-display reaper (M9 §9). Sweeps restart-survivor children on our
     slot displays/ports once at boot (teardown-by-pid also runs at boot — the boot
@@ -294,7 +298,7 @@ async def _cu_display_reaper():
     asyncio.create_task(_loop())
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 def startup_embeddings_transcode():
     """One-time migration: inline index embeddings → binary vector store.
 
@@ -332,7 +336,7 @@ def startup_embeddings_transcode():
         )
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_embeddings_migration_resume():
     """Relaunch an embeddings migration that a restart interrupted (Task 8).
 
@@ -355,7 +359,7 @@ async def startup_embeddings_migration_resume():
         logger.error("[MIGRATE] startup resume check failed (non-fatal): %s", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_embeddings_watcher():
     """Schedule the daily embedding-model deprecation watcher (Task 9).
 
@@ -376,7 +380,7 @@ async def startup_embeddings_watcher():
         logger.error("[WATCHER] failed to schedule watcher (non-fatal): %s", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_notify_bridge():
     """Capture the main event loop for the sync→async notify() bridge (MN.7).
 
@@ -397,7 +401,7 @@ async def startup_notify_bridge():
         logger.error("[NOTIFY-BRIDGE] failed to capture main loop (non-fatal): %s", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_live_session_reaper():
     """Start the live voice-session reaper (memory-leak fix 2026-06-14).
 
@@ -518,7 +522,7 @@ def _drift_heal_from_store(kind: str, deployed: str, log_tag: str) -> None:
         logger.warning("[%s] drift-heal errored: %r", log_tag, e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 def startup_assert_sudoers_current():
     """Drift-heal /etc/sudoers.d/blackbox-system FROM the root-owned trusted
     store on every service start (install.sh-grant removal, 2026-07-27 / M3b).
@@ -542,7 +546,7 @@ def startup_assert_sudoers_current():
         "sudoers-system", "/etc/sudoers.d/blackbox-system", "sudoers")
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 def startup_assert_helpers_current():
     """Drift-heal the root-owned apt dispatch helper FROM the trusted store on
     every service start, so a deployed helper that drifts from the last human-
@@ -601,7 +605,7 @@ def startup_assert_helpers_current():
 # copies in sync on restart; unit drift-heals via the runner. No third hook.
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 def startup_assert_url_handlers():
     """Re-assert chromium-browser as the default URL handler for HTTP(S)
     and text/html every time the service starts. Brandon's MSO2 hit a
@@ -682,7 +686,7 @@ def startup_assert_url_handlers():
         logger.warning("[url-handlers] xdg-mime invocation errored: %r", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 def startup_toolvault_embedding_sync():
     """Sync ToolVault embeddings against the canonical module list, once, at boot.
 
@@ -722,7 +726,7 @@ def startup_toolvault_embedding_sync():
     ).start()
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_scheduler():
     """Start the cron job scheduler."""
     try:
@@ -733,7 +737,7 @@ async def startup_scheduler():
         logger.error("Cron scheduler failed to start: %s", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_cellular():
     """Initialize the cellular hotplug monitor (internet failover only).
 
@@ -756,7 +760,7 @@ async def startup_cellular():
         logger.error("Cellular hotplug monitor error: %s (non-fatal, continuing)", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_cellular_internet():
     """Initialize the cellular internet failover manager."""
     from Orchestrator.config import CELLULAR_INTERNET_ENABLED
@@ -789,7 +793,7 @@ async def startup_phone_pin_check():
         logger.warning("PHONE_PIN_ENABLED=false: inbound calls reach the AI with NO PIN")
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_asterisk():
     """Initialize Asterisk ARI connection and AudioSocket server."""
     from Orchestrator.config import ASTERISK_ENABLED
@@ -830,7 +834,7 @@ async def startup_asterisk():
         logger.error("Asterisk initialization error: %s (non-fatal, continuing)", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_sms():
     """Initialize the SMS system (AMI client + router)."""
     from Orchestrator.config import ASTERISK_ENABLED
@@ -846,7 +850,7 @@ async def startup_sms():
         logger.error("SMS system startup error: %s (non-fatal, continuing)", e)
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_cli_agent_zellij():
     """Initialize the Zellij subsystem for the CLI Agent (Phase 2 T7).
 
@@ -876,7 +880,7 @@ async def startup_cli_agent_zellij():
         )
 
 
-@app.on_event("startup")
+@boot_hook(app, "startup")
 async def startup_cli_agent_zellij_reaper():
     """Start the periodic zellij idle-session reaper (Phase 2 housekeeping).
 
@@ -911,7 +915,7 @@ async def startup_cli_agent_zellij_reaper():
         logger.error("[ZELLIJ-REAPER] failed to start reaper (non-fatal): %s", e)
 
 
-@app.on_event("shutdown")
+@boot_hook(app, "shutdown")
 async def shutdown_sms():
     """Stop the SMS system."""
     try:
@@ -922,7 +926,7 @@ async def shutdown_sms():
         pass
 
 
-@app.on_event("shutdown")
+@boot_hook(app, "shutdown")
 async def shutdown_asterisk():
     """Disconnect from Asterisk and stop AudioSocket server."""
     try:
@@ -943,7 +947,7 @@ async def shutdown_asterisk():
         pass
 
 
-@app.on_event("shutdown")
+@boot_hook(app, "shutdown")
 async def shutdown_cellular_internet():
     """Stop the cellular internet manager."""
     try:
@@ -954,7 +958,7 @@ async def shutdown_cellular_internet():
         pass
 
 
-@app.on_event("shutdown")
+@boot_hook(app, "shutdown")
 async def shutdown_cellular():
     """Stop the cellular hotplug monitor."""
     try:
@@ -965,7 +969,7 @@ async def shutdown_cellular():
         pass
 
 
-@app.on_event("shutdown")
+@boot_hook(app, "shutdown")
 async def shutdown_scheduler():
     """Stop the cron job scheduler."""
     try:

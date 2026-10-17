@@ -22,16 +22,13 @@ mocked before app construction so the startup hook spawns no network call
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def client():
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m_emb:
-        m_emb.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c
+def client(app_client):
+    """The shared app_client (Orchestrator/tests/conftest.py): lifespan side
+    effects off, ToolVault embedding sync mocked, stores in tmp_path."""
+    return app_client
 
 
 _FAKE_MP3 = b"ID3\x03\x00\x00\x00fake-mp3-frame-bytes"
@@ -91,8 +88,12 @@ def test_tts_provider_elevenlabs_without_prefix(client):
     m_syn.assert_called_once()
 
 
-def test_tts_openai_voice_untouched(client):
+def test_tts_openai_voice_untouched(client, monkeypatch):
     """openai voice STILL hits the OpenAI HTTP path; ElevenLabs synthesize NOT called."""
+    # The route reads the key at import; pin it so the test never depends on
+    # (or needs) a real key in this box's .env.
+    monkeypatch.setattr("Orchestrator.routes.tts_routes.OPENAI_API_KEY", "test-openai-key")
+
     class _FakeResp:
         status_code = 200
         content = b"openai-mp3-bytes"

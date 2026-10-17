@@ -17,7 +17,6 @@ network, no real Asterisk.
 from unittest.mock import patch, AsyncMock
 
 import pytest
-from fastapi.testclient import TestClient
 
 
 GW_ID = "leak1234"
@@ -65,17 +64,10 @@ def _fake_status():
 
 
 @pytest.fixture
-def client():
-    """TestClient against the real app.
-
-    The ToolVault startup hook spawns a thread calling ``sync_embeddings``;
-    mock it so app construction needs no network/credentials.
-    """
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m:
-        m.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c
+def client(app_client):
+    """The shared app_client (Orchestrator/tests/conftest.py): lifespan side
+    effects off, ToolVault embedding sync mocked, stores in tmp_path."""
+    return app_client
 
 
 def _assert_leak_free(body_text: str):

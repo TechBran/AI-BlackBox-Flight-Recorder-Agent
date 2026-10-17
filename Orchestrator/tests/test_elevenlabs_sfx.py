@@ -102,18 +102,6 @@ def test_non_json_error_body_tolerated(monkeypatch):
 
 from unittest.mock import patch  # noqa: E402
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-
-@pytest.fixture
-def app_client():
-    """TestClient with the embeddings startup hook stubbed (no network on boot)."""
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m_emb:
-        m_emb.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c
-
 
 def test_sfx_route_returns_success_audio_url(app_client):
     """200 -> {status:'success', audio_url, size_bytes}; sfx.generate is the source."""

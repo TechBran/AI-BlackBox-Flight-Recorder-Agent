@@ -6,10 +6,7 @@ hit: ``embeddings.sync_embeddings`` is mocked everywhere it's reachable (the
 network/credentials are required.
 """
 
-from unittest.mock import patch
-
 import pytest
-from fastapi.testclient import TestClient
 
 
 # Migration baseline — a FLOOR, not an exact count (tools get added over time).
@@ -17,15 +14,10 @@ BASELINE_TOOL_COUNT = 48
 
 
 @pytest.fixture
-def client():
-    """TestClient with sync_embeddings mocked before app construction triggers
-    the startup hook (which spawns a daemon thread calling sync_embeddings)."""
-    # Patch at both the source module and the names the route/startup imported.
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m_src:
-        m_src.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c, m_src
+def client(app_client, toolvault_embed_sync):
+    """(the shared app_client, the sync_embeddings mock it was built with):
+    /toolvault/reload calls the mocked sync, the lifespan runs no side effect."""
+    return app_client, toolvault_embed_sync
 
 
 def test_health_ok(client):
