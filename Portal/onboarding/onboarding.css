@@ -1,6 +1,6 @@
 /* onboarding.css
  * Production wizard SHELL — shared design system extracted from the
- * approved reference mocks at _mocks/welcome.html and _mocks/tailscale.html.
+ * approved reference mocks at Portal/dev/onboarding-mocks/{welcome,tailscale}.html.
  *
  * SCOPE: only chrome + primitives that EVERY step uses. Step-specific
  * styles (status badges, action cards, disclosures, code blocks, etc.)
@@ -625,7 +625,7 @@ body::after {
  * three primary render branches (A configured / B not-installed /
  * C not-authenticated) plus the always-rendered Branch D disclosure.
  *
- * Extracted from _mocks/tailscale.html with minor extensions:
+ * Extracted from the tailscale.html mock with minor extensions:
  *   - .ob-status-badge gets ‑success and ‑error variants (mock only
  *     showed the default warning treatment for Branch C).
  *   - .ob-cta-arrow rotation override targets the ↻ glyph on

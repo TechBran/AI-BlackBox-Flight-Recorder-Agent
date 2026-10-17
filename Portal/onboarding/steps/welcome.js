@@ -2,7 +2,7 @@
 // Renders the brand introduction + 4 feature highlights + primary CTA.
 // CTA wires to ctx.next() which POSTs /onboarding/step/complete and advances.
 //
-// Visual reference: Portal/onboarding/_mocks/welcome.html (Brandon-approved 2026-05-11).
+// Visual reference: Portal/dev/onboarding-mocks/welcome.html (Brandon-approved 2026-05-11).
 // All classes come from onboarding.css (extracted from the mock in T2.1.1).
 //
 // Pattern: subsequent step components (tailscale.js, api_keys.js, etc.) follow

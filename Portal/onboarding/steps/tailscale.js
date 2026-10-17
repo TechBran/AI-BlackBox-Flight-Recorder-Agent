@@ -18,7 +18,7 @@
 // in ALL branches as an always-visible <details> block. Default-open in B+C
 // (user likely needs an account); default-closed in A (user is already on tailnet).
 //
-// Visual reference: Portal/onboarding/_mocks/tailscale.html (shows Branch C
+// Visual reference: Portal/dev/onboarding-mocks/tailscale.html (shows Branch C
 // with the disclosure expanded).
 
 // Per-render state — module globals leaked across non-linear hub mounts.

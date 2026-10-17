@@ -19,7 +19,8 @@
   own clearPolicy/blend helpers — which is exactly what the registry refactor
   made possible, and it doubles as proof the descriptor contract is complete.
 
-  Not linked from the Portal: open it directly at /ui/fx-lab.html.
+  Not linked from the Portal and not served by default: set [debug]
+  serve_dev_pages = true in config.ini, restart, then open /ui/dev/fx-lab.html.
 -->
 <style>
   :root {
@@ -118,10 +119,10 @@
 import {
     effectList, loadEffect, createEnv,
     applyClearPolicy, applyBlend, resetBlend,
-} from './modules/fx/registry.js';
-import { ensureSprites } from './modules/fx/sprites.js';
-import { backingStore } from './modules/fx/sizing.js';
-import './modules/fx/effects/index.js';
+} from '../modules/fx/registry.js';
+import { ensureSprites } from '../modules/fx/sprites.js';
+import { backingStore } from '../modules/fx/sizing.js';
+import '../modules/fx/effects/index.js';
 
 const grid = document.getElementById('grid');
 const errBox = document.getElementById('err');

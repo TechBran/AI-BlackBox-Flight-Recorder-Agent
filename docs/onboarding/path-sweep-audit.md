@@ -72,7 +72,7 @@ grep -rnE "ai-black-box-fc|/home/ai-black-box-fc" \
 **Action:** Three sub-strategies:
 - **MCP / Gemini configs** → ship as `.example.json`; installer renders the real file with `${BLACKBOX_ROOT}` substituted. Today the `.example` exists alongside the real one for MCP — fix is to make the installer the single writer.
 - **`devices.json`** → first device entry is the localhost; runtime should auto-populate `tailscale_hostname` / `tailscale_dns` from `tailscale status --json`. Ship a stub with `<auto-discovered>` placeholders.
-- **`css_manifest.json`** → generated artifact from CSS build pipeline; rebuild on install (or convert to a relative path during generation).
+- **`css_manifest.json`** → RESOLVED 2026-10: deleted together with its generator `build_manifest.py` (stale, unconsumed, served at /ui; audit P07-html-css-06).
 
 | File | Line | Pattern | Action |
 |------|------|---------|--------|
@@ -84,7 +84,7 @@ grep -rnE "ai-black-box-fc|/home/ai-black-box-fc" \
 | `.gemini/settings.json` | 10 | Gemini CLI `BLACKBOX_ROOT` env | Render from `.gemini/settings.json.in` at install |
 | `Orchestrator/device_registry/devices.json` | 17 | `tailscale_hostname` literal | Stub `<auto-discovered>`; populate at first boot from `tailscale status --json` |
 | `Orchestrator/device_registry/devices.json` | 18 | `tailscale_dns` literal | Same — auto-discover |
-| `Portal/styles/css_manifest.json` | 5 | `source.file` absolute path in CSS pipeline manifest | Regenerate at install via the CSS build script (or change generator to emit relative path) |
+| `Portal/styles/css_manifest.json` | 5 | `source.file` absolute path in CSS pipeline manifest | RESOLVED 2026-10: file and generator deleted |
 
 ---
 

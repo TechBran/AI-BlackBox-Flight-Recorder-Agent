@@ -1,7 +1,8 @@
 /* Portal/styles/main.css - CSS Module Entry Point
  * Generated: 2026-01-04T14:27:28.662068
  * Source: Portal/style.css (preserved)
- * Rebuild: python3 build_manifest.py --extract
+ * The modules are hand-maintained (the one-shot build_manifest.py splitter was
+ * deleted 2026-10: its --extract mode would have wiped them).
  */
 
 
