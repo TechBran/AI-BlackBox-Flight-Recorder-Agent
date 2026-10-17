@@ -122,9 +122,16 @@ port (`http://<host>:{PORT}/`); the Orchestrator trusts that origin.
 ## Port Allocation
 
 Recommended port ranges:
-- `8060-8099`: User-created apps
+- `8060-8099`: User-created apps (except `8088`, Asterisk ARI, and `8091`, the vLLM reranker)
 - `8065`: Reserved for test/demo apps
 - `9091`: Reserved for the Orchestrator API
+
+Registration refuses BlackBox service ports (the Orchestrator, MCP, Chrome
+DevTools, the CU desktop's VNC/websockify bridges 5900-5999 and 6080-6199,
+telephony, Ollama, llama-swap, the reranker) with a 400 that names the port,
+and `/app-proxy` never serves them. The proxy also never forwards a cookie
+named `session_token` to an app (it is zellij's terminal credential), so an
+app must name its own session cookie something else.
 
 Before starting an app, check if the port is available:
 ```bash

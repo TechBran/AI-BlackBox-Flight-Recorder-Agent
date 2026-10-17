@@ -47,7 +47,7 @@ from Orchestrator.models import AGENT_AUTO_APPROVE_PATTERNS, AGENT_PERMISSION_PA
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.state import save_app_registry, save_operator_state, agent_lock, APP_REGISTRY, PERSISTED_AGENT_SESSIONS, AGENT_SESSIONS
 from Orchestrator.volume import now_utc_iso
-from Orchestrator.security.perimeter import ZELLIJ_WEB_PORT, proxy_port_allowed
+from Orchestrator.security.perimeter import ZELLIJ_WEB_PORT, proxy_port_allowed, reserved_port_reason
 from starlette.websockets import WebSocketState
 
 
@@ -1311,6 +1311,12 @@ async def register_app_manual(body: dict = Body(...)):
 
     if not port:
         raise HTTPException(400, "Port is required")
+    # Loopback infrastructure (CDP, MCP, the CU desktop bridges, telephony,
+    # local model servers) is never a user app: /app-proxy would refuse it
+    # anyway, so say why now instead of registering a dead entry.
+    reserved = reserved_port_reason(port)
+    if reserved:
+        raise HTTPException(400, reserved)
 
     app_id = str(uuid.uuid4())
     app = RegisteredApp(
@@ -1396,6 +1402,26 @@ _APP_STORAGE_STAND_IN = (
 # What the sandboxed app preview may send to its OWN app through the proxy.
 _APP_PREVIEW_CORS_METHODS = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
 
+# zellij-web's session cookie (zellij_client: `session_token=<uuid>; Path=/`)
+# is a terminal credential. The proxy injects the master one upstream for
+# 9097, so the browser never needs it: 9097 responses never hand it to the
+# browser, and one the browser still holds for the Portal origin (zellij's
+# own login page, the retired Portal cookie bridge) is never forwarded to a
+# user app. The name is reserved: a user app can't use its own cookie by it.
+_ZELLIJ_COOKIE_NAMES = frozenset({"session_token"})
+
+
+def _without_zellij_cookies(cookie_values) -> Optional[str]:
+    """Merge the client's Cookie header(s), minus zellij's session cookie;
+    None when nothing is left."""
+    kept = []
+    for value in cookie_values:
+        for pair in value.split(";"):
+            pair = pair.strip()
+            if pair and pair.split("=", 1)[0].strip() not in _ZELLIJ_COOKIE_NAMES:
+                kept.append(pair)
+    return "; ".join(kept) or None
+
 
 def _inject_app_storage_stand_in(html: str) -> str:
     """Insert the storage stand-in first in <head> (before any app script),
@@ -1445,7 +1471,7 @@ async def app_proxy(port: int, path: str, request: Request):
     # zellij-web and the registered user apps — never Chrome DevTools, MCP,
     # the Orchestrator itself or any other loopback listener.
     if not proxy_port_allowed(port):
-        raise HTTPException(403, "Port is not a registered app")
+        raise HTTPException(403, reserved_port_reason(port) or "Port is not a registered app")
     is_zellij = port == ZELLIJ_WEB_PORT
     origin = request.headers.get("origin")
 
@@ -1498,17 +1524,21 @@ async def app_proxy(port: int, path: str, request: Request):
             # client-supplied cookie with the orchestrator's master session
             # cookie. Strip any case-variant of the client's existing Cookie
             # header so our injection is the ONLY cookie that reaches
-            # upstream. User apps get the client's own cookies untouched and
-            # never see the master terminal credential.
+            # upstream. User apps get the client's own cookies minus zellij's
+            # session cookie, and never see the master terminal credential.
+            for k in list(headers.keys()):
+                if k.lower() == "cookie":
+                    del headers[k]
             if is_zellij:
-                for k in list(headers.keys()):
-                    if k.lower() == "cookie":
-                        del headers[k]
                 try:
                     from Orchestrator.cli_agent import zellij_client as _zc
                     headers["cookie"] = f"session_token={_zc.get_master_session_cookie()}"
                 except Exception as exc:  # noqa: BLE001
                     print(f"[APP-PROXY-HTTP] get_master_session_cookie failed: {exc} — proceeding without cookie")
+            else:
+                cookie = _without_zellij_cookies(request.headers.getlist("cookie"))
+                if cookie:
+                    headers["cookie"] = cookie
 
             # Body capture (so we can replay on 401 retry without re-reading).
             body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
@@ -1571,7 +1601,9 @@ async def app_proxy(port: int, path: str, request: Request):
             # like Zellij send DENY by default, which prevents the Portal
             # from rendering them inside an iframe regardless of same-origin.
             # The proxy is the security boundary; embedding decisions belong
-            # to the Portal layer.
+            # to the Portal layer. Set-Cookie is handled after the Response is
+            # built: dropped for zellij, one header per cookie for user apps
+            # (httpx's items() would comma-join them into one broken value).
             response_headers = {}
             for key, value in resp.headers.items():
                 if key.lower() not in (
@@ -1579,6 +1611,7 @@ async def app_proxy(port: int, path: str, request: Request):
                     'content-encoding',
                     'content-length',
                     'x-frame-options',
+                    'set-cookie',
                 ):
                     response_headers[key] = value
 
@@ -1601,12 +1634,16 @@ async def app_proxy(port: int, path: str, request: Request):
                         k.lower() == "access-control-allow-origin" for k in response_headers):
                     response_headers['Access-Control-Allow-Origin'] = '*'
 
-            return Response(
+            response = Response(
                 content=content,
                 status_code=resp.status_code,
                 headers=response_headers,
                 media_type=content_type
             )
+            if not is_zellij:
+                for set_cookie in resp.headers.get_list("set-cookie"):
+                    response.headers.append("set-cookie", set_cookie)
+            return response
 
     except httpx.ConnectError:
         raise HTTPException(503, f"Cannot connect to app on port {port}. Is it running?")
@@ -1625,7 +1662,8 @@ async def app_proxy(port: int, path: str, request: Request):
 async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     # Same allowlist as the HTTP proxy, enforced BEFORE accept.
     if port < 1024 or port > 65535 or not proxy_port_allowed(port):
-        await websocket.close(code=1008, reason="Port is not a registered app")
+        await websocket.close(code=1008, reason=(
+            "Port is reserved" if reserved_port_reason(port) else "Port is not a registered app"))
         return
     await websocket.accept()
     is_zellij = port == ZELLIJ_WEB_PORT
@@ -1639,7 +1677,8 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     # zellij auth via a long-lived master token; the app-proxy injects
     # the SESSION COOKIE (issued by zellij's /command/login) on every
     # zellij-web upstream forward — and ONLY there; user apps get the
-    # client's own Cookie. Clients (browser, Android) never need to know
+    # client's own Cookie minus zellij's session cookie (see
+    # _ZELLIJ_COOKIE_NAMES). Clients (browser, Android) never need to know
     # about zellij tokens — they just open WSes through us.
     #
     # Operator isolation (audit I8) still enforced at the route layer
@@ -1650,7 +1689,7 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
 
     def _build_forward_headers() -> dict:
         if not is_zellij:
-            cookie = websocket.headers.get("cookie")
+            cookie = _without_zellij_cookies(websocket.headers.getlist("cookie"))
             return {"cookie": cookie} if cookie else {}
         try:
             return {"cookie": f"session_token={_zc.get_master_session_cookie()}"}
