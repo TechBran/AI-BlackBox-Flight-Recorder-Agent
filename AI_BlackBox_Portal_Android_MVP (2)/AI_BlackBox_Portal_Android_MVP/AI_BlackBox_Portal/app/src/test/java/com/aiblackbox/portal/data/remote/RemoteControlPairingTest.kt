@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.remote
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -68,6 +69,19 @@ class RemoteControlPairingTest {
         assertEquals("ab".repeat(32), obj["secret"]!!.jsonPrimitive.content)
         assertEquals("Pixel \"Test\"", obj["display_name"]!!.jsonPrimitive.content)
         assertEquals("android", obj["device_kind"]!!.jsonPrimitive.content)
+        // An older box ignores it; a current one keeps whichever candidate is a tailnet node.
+        assertEquals(listOf("100.88.0.7"),
+            obj["tailnet_ips"]!!.jsonArray.map { it.jsonPrimitive.content })
+    }
+
+    @Test fun the_registration_body_offers_every_tailnet_candidate() {
+        val body = RemoteControlPairing.registrationBody(
+            deviceId = "android-id", tailnetIp = "100.88.0.7", secret = "ab".repeat(32),
+            displayName = "Pixel", tailnetIps = listOf("100.88.0.7", "100.70.3.9"))
+        val obj = Json.parseToJsonElement(body).jsonObject
+        assertEquals("100.88.0.7", obj["tailnet_ip"]!!.jsonPrimitive.content)
+        assertEquals(listOf("100.88.0.7", "100.70.3.9"),
+            obj["tailnet_ips"]!!.jsonArray.map { it.jsonPrimitive.content })
     }
 
     @Test fun registration_retries_back_off_and_are_capped() {

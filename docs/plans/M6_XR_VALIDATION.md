@@ -41,13 +41,15 @@ A11Y=com.aiblackbox.portal/com.aiblackbox.portal.overlay.BlackBoxA11yService
 PORT=8765                       # RemoteControlServer (NotificationListenerFgs owns it)
 OP=<your operator>              # must equal the device's bound operator (BlackBox settings)
 XR=<headset tailnet dns or ip>  # e.g. galaxy-xr.tailXXXX.ts.net  (tailscale status)
+XR_IP=<headset tailnet IPv4>    # its 100.x address in `tailscale status` (the pairing key)
+BOX=<the box's blackbox_poc checkout>
 ```
 
-The 8765 channel is **tailnet-gated** (`isTailnetSource`) and **operator-scoped**. Run the `curl`s either **from another tailnet node** using `$XR`, or **on the headset itself over loopback** via adb (loopback is allowed):
+The 8765 channel is **tailnet-gated**, **paired** and **operator-scoped**. Since the M2 pairing change (audit X02/X04) every route except `GET /healthz` needs the box's pairing secret, and the listener refuses **loopback and the headset's own addresses** outright, so the old `adb shell curl http://localhost:8765/...` variant no longer works. Open the BlackBox app on the headset once so it registers its secret (`curl -s http://localhost:9091/devices/pairing` on the box lists it, without the secret), then run the `curl`s **on the box, as the service user**, with:
 ```bash
-# loopback-on-device variant of any curl below:
-adb shell "curl -s http://localhost:$PORT/healthz"
+AUTH="Authorization: Bearer $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["devices"][sys.argv[2]]["secret"])' "$BOX/credentials/device_pairing.json" "$XR_IP")"
 ```
+Never paste the secret itself into a chat, ticket or log. A `401` means the headset holds a different secret than the box: open the app on it again.
 
 ---
 
@@ -83,9 +85,9 @@ Also open the BlackBox app once on the headset so `NotificationListenerFgs` bind
 
 Fetch one observation (SSE — one `data:` frame, then the stream closes):
 ```bash
-curl -sN "http://$XR:$PORT/stream/probe1?operator=$OP" | sed -n 's/^data: //p' | head -1 | python3 -m json.tool
+curl -sN -H "$AUTH" "http://$XR:$PORT/stream/probe1?operator=$OP" | sed -n 's/^data: //p' | head -1 | python3 -m json.tool
 ```
-Also check health (model-free, no operator needed):
+Also check health (model-free, no operator or secret needed; still tailnet-only):
 ```bash
 curl -s "http://$XR:$PORT/healthz"      # -> {"ok":true|false}
 ```
@@ -109,10 +111,10 @@ Open a simple 2D app in a spatial panel on the headset (e.g. Settings or a note 
 
 ```bash
 # 3a. read the tree, find a clickable node's resource_id / node_id
-curl -sN "http://$XR:$PORT/stream/probe2?operator=$OP" | sed -n 's/^data: //p' | head -1 | python3 -m json.tool
+curl -sN -H "$AUTH" "http://$XR:$PORT/stream/probe2?operator=$OP" | sed -n 's/^data: //p' | head -1 | python3 -m json.tool
 
 # 3b. drive an element_click on the chosen node (replace resource_id)
-curl -s -X POST "http://$XR:$PORT/action" -H 'Content-Type: application/json' -d '{
+curl -s -X POST -H "$AUTH" "http://$XR:$PORT/action" -H 'Content-Type: application/json' -d '{
   "msg":"action","task_id":"probe2","operator":"'"$OP"'",
   "type":"element_click","resource_id":"<paste resource_id>"
 }' | python3 -m json.tool
@@ -128,7 +130,7 @@ curl -s -X POST "http://$XR:$PORT/action" -H 'Content-Type: application/json' -d
 
 Send a **coordinate_tap** — the contract EXPECTS it to be skipped (coordinate-less device):
 ```bash
-curl -s -X POST "http://$XR:$PORT/action" -H 'Content-Type: application/json' -d '{
+curl -s -X POST -H "$AUTH" "http://$XR:$PORT/action" -H 'Content-Type: application/json' -d '{
   "msg":"action","task_id":"probe2","operator":"'"$OP"'",
   "type":"coordinate_tap","x":500,"y":900
 }' | python3 -m json.tool
@@ -163,7 +165,7 @@ For the definitive answer, use a **debug probe build** that calls `Accessibility
 ## Step 6 — Does an intent (`open_app`) land in a spatial panel?
 
 ```bash
-curl -s -X POST "http://$XR:$PORT/action" -H 'Content-Type: application/json' -d '{
+curl -s -X POST -H "$AUTH" "http://$XR:$PORT/action" -H 'Content-Type: application/json' -d '{
   "msg":"action","task_id":"probe3","operator":"'"$OP"'",
   "type":"open_app","package":"com.android.settings"
 }' | python3 -m json.tool

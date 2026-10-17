@@ -22,15 +22,32 @@ object TailnetAddress {
         return a == 100 && b in 64..127
     }
 
-    /** The device's tailnet IPv4 from its interfaces, or null. Best-effort: any failure
-     *  (no interfaces / security restriction) yields null and attest simply omits it. */
-    fun localTailnetIpv4(): String? = try {
-        NetworkInterface.getNetworkInterfaces().asSequence()
-            .flatMap { it.inetAddresses.asSequence() }
-            .filterIsInstance<Inet4Address>()
-            .mapNotNull { it.hostAddress }
-            .firstOrNull { isCgnatIpv4(it) }
+    /**
+     * PURE: the 100.64.0.0/10 addresses among `(interface name, IPv4)` pairs, the Tailscale VPN
+     * interface (`tun*`) first, otherwise in interface order, without duplicates. That range is
+     * also carrier-grade-NAT space, so a phone on a cellular network can hold a second address
+     * in it that is not its tailnet one.
+     */
+    fun orderCandidates(addresses: List<Pair<String, String>>): List<String> =
+        addresses.filter { isCgnatIpv4(it.second) }
+            .sortedBy { if (it.first.startsWith("tun", ignoreCase = true)) 0 else 1 }
+            .map { it.second.trim() }
+            .distinct()
+
+    /** Every candidate tailnet IPv4 on this device ([orderCandidates]). Best-effort: any
+     *  failure (no interfaces / security restriction) yields an empty list. */
+    fun localTailnetIpv4Candidates(): List<String> = try {
+        orderCandidates(NetworkInterface.getNetworkInterfaces().asSequence()
+            .flatMap { nif ->
+                nif.inetAddresses.asSequence().filterIsInstance<Inet4Address>()
+                    .mapNotNull { addr -> addr.hostAddress?.let { nif.name.orEmpty() to it } }
+            }
+            .toList())
     } catch (e: Exception) {
-        null
+        emptyList()
     }
+
+    /** The device's tailnet IPv4 from its interfaces (the Tailscale interface's when there is
+     *  one), or null. Best-effort: any failure yields null and attest simply omits it. */
+    fun localTailnetIpv4(): String? = localTailnetIpv4Candidates().firstOrNull()
 }

@@ -275,6 +275,12 @@ class PortalActivity : AppCompatActivity() {
         // the port for a .ts.net name), so the first page is recognized as the paired box.
         pairedOrigin = PortalWebGuard.originOf(normalizeOrigin(origin))
 
+        // The model-free control/notification listener, as NativeMainActivity starts it: its
+        // start registers this install's pairing secret with the box (audit X02/X04), so "open
+        // the app once to re-pair" works in the WebView UI too. Non-throwing; started from a
+        // foregrounded Activity so the FGS start is permitted.
+        NotificationListenerFgs.start(this)
+
         setContentView(R.layout.activity_portal)
 
         // (M5.5 / I1) Drive the foldable POSTURE monitor from repeatOnLifecycle(STARTED): the

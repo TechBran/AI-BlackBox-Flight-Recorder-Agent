@@ -252,16 +252,31 @@ class PairingBody(BaseModel):
     secret: str
     display_name: Optional[str] = ""
     device_kind: Optional[str] = ""
+    # Every 100.64/10 IPv4 the device holds, its Tailscale interface first. On a cellular
+    # network a carrier-NAT address can share that range, so the box keeps the one that is a
+    # node on its tailnet. Optional: an older app sends only tailnet_ip.
+    tailnet_ips: Optional[List[str]] = None
 
 
+# The pairing routes are plain ``def`` on purpose: the store write fsyncs under a lock, so
+# FastAPI runs them in its threadpool instead of on the event loop (phones call this on every
+# listener start).
 @router.post("/pairing")
-async def register_pairing(body: PairingBody):
+def register_pairing(body: PairingBody):
     """Record the secret a device's control listener requires (called by the device
-    itself whenever its listener starts). Re-registering replaces the previous secret."""
+    itself whenever its listener starts). Re-registering replaces the previous secret.
+    The address must be a node on this box's tailnet (503 while that cannot be read)."""
+    nodes = _get_tailnet_nodes()
+    if not nodes:
+        raise HTTPException(status_code=503, detail=(
+            "This BlackBox cannot read its tailnet right now (tailscale status failed), so "
+            "it cannot check the device's address. The device retries on its own."))
     try:
+        tailnet_ip = pairing.choose_tailnet_ip(
+            [body.tailnet_ip, *(body.tailnet_ips or [])], [n.ip for n in nodes])
         row = pairing.register(
             device_id=body.device_id,
-            tailnet_ip=body.tailnet_ip,
+            tailnet_ip=tailnet_ip,
             secret=body.secret,
             display_name=body.display_name or "",
             device_kind=body.device_kind or "",
@@ -272,13 +287,13 @@ async def register_pairing(body: PairingBody):
 
 
 @router.get("/pairing")
-async def list_pairings():
+def list_pairings():
     """Which devices have paired their control listener (metadata only, no secrets)."""
     return {"devices": pairing.public_rows()}
 
 
 @router.delete("/pairing/{tailnet_ip}")
-async def forget_pairing(tailnet_ip: str):
+def forget_pairing(tailnet_ip: str):
     """Forget a device's secret. The box refuses to call it until the app re-pairs."""
     if not pairing.forget(tailnet_ip):
         raise HTTPException(status_code=404, detail=f"No pairing recorded for {tailnet_ip}")

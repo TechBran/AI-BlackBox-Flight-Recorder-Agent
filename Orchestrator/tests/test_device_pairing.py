@@ -13,6 +13,8 @@ target node's tailnet IP. These tests pin the store's security contract:
 
 Hermetic: the store path is a tmp file, no tailscale, no network.
 """
+import asyncio
+import inspect
 import json
 import os
 import stat
@@ -260,3 +262,71 @@ def test_delete_pairing_forgets_the_device(client):
     assert r.status_code == 200
     assert pairing.secret_for_ip(PHONE_IP) is None
     assert client.delete(f"/devices/pairing/{PHONE_IP}").status_code == 404
+
+
+# ── registration is validated against the box's own tailnet ──────────────────────
+
+CARRIER_NAT_IP = "100.70.3.9"   # 100.64/10 too: a carrier-grade-NAT cellular address
+
+
+def test_choose_tailnet_ip_takes_the_first_candidate_that_is_a_node():
+    assert pairing.choose_tailnet_ip([CARRIER_NAT_IP, PHONE_IP], [PHONE_IP]) == PHONE_IP
+    assert pairing.choose_tailnet_ip([PHONE_IP, CARRIER_NAT_IP],
+                                     [CARRIER_NAT_IP, PHONE_IP]) == PHONE_IP
+
+
+@pytest.mark.parametrize("candidates", [[CARRIER_NAT_IP], ["192.168.1.5"], [], ["", None]])
+def test_choose_tailnet_ip_refuses_addresses_that_are_not_nodes(candidates):
+    with pytest.raises(ValueError):
+        pairing.choose_tailnet_ip(candidates, [PHONE_IP])
+
+
+def test_post_pairing_refuses_an_address_that_is_not_a_node_and_keeps_the_good_row(client):
+    """A phone on a carrier network that reports its cellular 100.64/10 address must not
+    replace (and so delete) the row the box reaches it by."""
+    assert client.post("/devices/pairing", json=_body()).status_code == 200
+    r = client.post("/devices/pairing", json=_body(tailnet_ip=CARRIER_NAT_IP))
+    assert r.status_code == 422, r.text
+    assert "tailnet" in r.json()["detail"]
+    assert SECRET not in r.text
+    assert pairing.secret_for_ip(PHONE_IP) == SECRET
+    assert pairing.secret_for_ip(CARRIER_NAT_IP) is None
+
+
+def test_post_pairing_picks_the_candidate_that_is_a_tailnet_node(client):
+    r = client.post("/devices/pairing",
+                    json=_body(tailnet_ip=CARRIER_NAT_IP, tailnet_ips=[CARRIER_NAT_IP, PHONE_IP]))
+    assert r.status_code == 200, r.text
+    assert r.json()["device"]["tailnet_ip"] == PHONE_IP
+    assert pairing.secret_for_ip(PHONE_IP) == SECRET
+    assert pairing.secret_for_ip(CARRIER_NAT_IP) is None
+
+
+def test_post_pairing_without_a_readable_tailnet_is_retryable_and_stores_nothing(client,
+                                                                                  monkeypatch):
+    import Orchestrator.routes.device_routes as dr
+    monkeypatch.setattr(dr, "_get_tailnet_nodes", lambda: [])
+    r = client.post("/devices/pairing", json=_body())
+    assert r.status_code == 503, r.text
+    assert pairing.secret_for_ip(PHONE_IP) is None
+
+
+def test_pairing_store_io_never_runs_on_the_event_loop(client, monkeypatch):
+    """The store write fsyncs under a lock; phones call this on every listener start. It must
+    run in the threadpool, never on the loop that serves every other request."""
+    import Orchestrator.routes.device_routes as dr
+    for route in (dr.register_pairing, dr.list_pairings, dr.forget_pairing):
+        assert not inspect.iscoroutinefunction(route), route.__name__
+    on_loop = []
+
+    def _register(**kwargs):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return {"tailnet_ip": PHONE_IP}
+
+    monkeypatch.setattr(pairing, "register", _register)
+    assert client.post("/devices/pairing", json=_body()).status_code == 200
+    assert on_loop == [False]

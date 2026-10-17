@@ -92,13 +92,22 @@ object RemoteControlPairing {
         val secret: String,
         @SerialName("display_name") val displayName: String,
         @SerialName("device_kind") val deviceKind: String = "android",
+        // Every tailnet-range candidate, Tailscale's interface first: the box keeps the one
+        // that is a node on its tailnet (a carrier-NAT address can share the range).
+        @SerialName("tailnet_ips") val tailnetIps: List<String> = emptyList(),
     )
 
     private val JSON = Json { encodeDefaults = true }
 
     /** The `POST /devices/pairing` body (serializer-built: the model name is OEM data). */
-    fun registrationBody(deviceId: String, tailnetIp: String, secret: String, displayName: String): String =
-        JSON.encodeToString(Registration(deviceId, tailnetIp, secret, displayName))
+    fun registrationBody(
+        deviceId: String,
+        tailnetIp: String,
+        secret: String,
+        displayName: String,
+        tailnetIps: List<String> = listOf(tailnetIp),
+    ): String = JSON.encodeToString(
+        Registration(deviceId, tailnetIp, secret, displayName, tailnetIps = tailnetIps))
 
     /**
      * Register this install's secret with the paired box. False when there is nothing to do
@@ -110,12 +119,14 @@ object RemoteControlPairing {
         val origin = app.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
             .getString(Constants.KEY_ORIGIN, "").orEmpty()
         if (origin.isBlank()) return false
-        val tailnetIp = TailnetAddress.localTailnetIpv4() ?: return false
+        val candidates = TailnetAddress.localTailnetIpv4Candidates()
+        val tailnetIp = candidates.firstOrNull() ?: return false
         val secret = secret(app) ?: return false
         return try {
             BlackBoxApi(normalizeApiOrigin(origin)).post(
                 "/devices/pairing",
-                registrationBody(DeviceId.stable(app), tailnetIp, secret, Build.MODEL ?: "Android device"),
+                registrationBody(DeviceId.stable(app), tailnetIp, secret,
+                    Build.MODEL ?: "Android device", tailnetIps = candidates),
             )
             Log.d(TAG, "pairing secret registered with the box")
             true

@@ -27,9 +27,12 @@ an existing secret at a different node. Secrets are never logged and never retur
 endpoint.
 
 Registration itself is open inside the Tailscale/LAN perimeter, like the rest of the box API
-(no app-layer auth, by design). The worst a hostile peer can do through it is overwrite a row,
-which makes the device refuse this box (401) until its app re-registers on the next launch; it
-can never read a secret back, so it can never drive the device.
+(no app-layer auth, by design). It only accepts an address that is a node on the box's own
+tailnet (:func:`choose_tailnet_ip`): 100.64.0.0/10 is also carrier-NAT space, and a phone on a
+cellular network can hold such an address besides its Tailscale one. The worst a hostile peer
+can do through it is overwrite a row, which makes the device refuse this box (401) until its
+app re-registers on the next launch; it can never read a secret back, so it can never drive
+the device.
 """
 from __future__ import annotations
 
@@ -70,6 +73,10 @@ _TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")  # Tailscale ULA
 _MAX_DEVICE_ID = 128
 _MAX_LABEL = 80
 _MAX_KIND = 32
+_MAX_CANDIDATES = 8
+
+_NOT_TAILSCALE_RANGE = ("tailnet_ip must be a Tailscale address (100.64.0.0/10 or "
+                        "fd7a:115c:a1e0::/48)")
 
 
 class DeviceNotPaired(Exception):
@@ -98,9 +105,36 @@ def normalize_tailnet_ip(value) -> str:
     except ValueError:
         raise ValueError("tailnet_ip must be the device's Tailscale IP address") from None
     if addr not in _TAILNET_V4 and addr not in _TAILNET_V6:
-        raise ValueError("tailnet_ip must be a Tailscale address (100.64.0.0/10 or "
-                         "fd7a:115c:a1e0::/48)")
+        raise ValueError(_NOT_TAILSCALE_RANGE)
     return str(addr)
+
+
+def choose_tailnet_ip(candidates, node_ips) -> str:
+    """The first of a device's reported addresses that is a node on this box's tailnet.
+
+    ``candidates`` come from the device (its Tailscale interface address first); ``node_ips``
+    are the addresses ``tailscale status`` lists, the same ones the box later calls
+    (``mesh.Node.ip``). Raises ValueError when none matches: storing an address the box never
+    calls would leave the device unpaired, and would drop the row it IS reached by."""
+    nodes = set()
+    for ip in node_ips or ():
+        try:
+            nodes.add(normalize_tailnet_ip(ip))
+        except ValueError:
+            continue
+    seen_tailnet_range = False
+    for raw in list(candidates or ())[:_MAX_CANDIDATES]:
+        try:
+            ip = normalize_tailnet_ip(raw)
+        except ValueError:
+            continue
+        seen_tailnet_range = True
+        if ip in nodes:
+            return ip
+    if not seen_tailnet_range:
+        raise ValueError(_NOT_TAILSCALE_RANGE)
+    raise ValueError("tailnet_ip is not a node on this BlackBox's tailnet (check that "
+                     "Tailscale is connected on the device)")
 
 
 def _quarantine(path: str) -> Optional[str]:
