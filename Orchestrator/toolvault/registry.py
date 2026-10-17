@@ -24,6 +24,7 @@ import copy
 import importlib.util
 import inspect
 import json
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -34,6 +35,10 @@ from . import resolvers, schema_spec
 # Where the modules live (overridable by tests — do not capture this at import).
 # ---------------------------------------------------------------------------
 TOOLS_DIR: Path = PROJECT_ROOT / "ToolVault" / "tools"
+
+# A tool name is a folder name under TOOLS_DIR; nothing else may reach the
+# executor loader (see get_executor).
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_]+")
 
 # ---------------------------------------------------------------------------
 # Alias maps carried over from the old tool_registry.py.
@@ -229,8 +234,23 @@ def get_executor(name: str) -> Optional[Callable]:
     on-disk edit (mtime bump) is picked up automatically; :func:`invalidate_cache`
     clears the cache outright.
     """
+    # The name comes straight from a model's tool call (every chat catch-all)
+    # and from the raw body of POST /local/tools/execute. Only a plain
+    # identifier may become a path component -- '../..' or an absolute name
+    # would otherwise import and run any executor.py on disk -- and the
+    # resolved file must still sit under TOOLS_DIR (no symlinked escape).
+    if not isinstance(name, str):
+        return None
     canonical = resolve_alias(name)
+    if not _TOOL_NAME_RE.fullmatch(canonical):
+        return None
     exec_path = TOOLS_DIR / canonical / "executor.py"
+    try:
+        if not exec_path.resolve().is_relative_to(Path(TOOLS_DIR).resolve()):
+            print(f"[toolvault.registry] WARNING: refused {canonical!r}: executor escapes TOOLS_DIR")
+            return None
+    except (OSError, RuntimeError):
+        return None
 
     # Legitimately absent executor.py: valid schema-only tool, not an error.
     try:
