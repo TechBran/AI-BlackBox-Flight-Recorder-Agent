@@ -6,6 +6,8 @@
  * Refactored: 2025-12-20
  */
 
+import { escapeHtml } from './core-utils.js';
+
 // =============================================================================
 // Slash Command Dropdown Class
 // =============================================================================
@@ -171,10 +173,10 @@ export class SlashCommandDropdown {
             <div class="slash-command-item ${idx === this.selectedIndex ? 'selected' : ''} ${hasOptions ? 'has-options' : ''}"
                  data-index="${idx}">
                 <div class="slash-command-header">
-                    <span class="slash-command-name">/${cmd.name}</span>
+                    <span class="slash-command-name">/${escapeHtml(cmd.name)}</span>
                     ${arrowIcon}
                 </div>
-                <span class="slash-command-desc">${cmd.description || ''}</span>
+                <span class="slash-command-desc">${escapeHtml(cmd.description || '')}</span>
             </div>
         `;
         }).join('');
@@ -202,13 +204,13 @@ export class SlashCommandDropdown {
         this.dropdown.innerHTML = `
             <div class="slash-command-back" data-action="back">
                 <span class="slash-back-arrow">◀</span>
-                <span class="slash-back-text">/${cmd.name}</span>
+                <span class="slash-back-text">/${escapeHtml(cmd.name)}</span>
             </div>
-            <div class="slash-command-submenu-title">${cmd.description || 'Select an option'}</div>
+            <div class="slash-command-submenu-title">${escapeHtml(cmd.description || 'Select an option')}</div>
             ${options.map((opt, idx) => `
                 <div class="slash-command-option-item ${idx === this.selectedIndex ? 'selected' : ''}"
                      data-index="${idx}">
-                    <span class="slash-option-value">${opt}</span>
+                    <span class="slash-option-value">${escapeHtml(opt)}</span>
                 </div>
             `).join('')}
         `;

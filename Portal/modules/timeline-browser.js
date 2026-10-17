@@ -6,7 +6,7 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, toastError } from './core-utils.js';
+import { $, toast, toastError, escapeHtml } from './core-utils.js';
 
 // Re-export applySyntaxHighlighting from markdown-renderer for convenience
 // (many modules import it from timeline-browser due to historical coupling)
@@ -225,13 +225,15 @@ export function renderTimelineList() {
         const date = new Date(snapshot.timestamp);
         const dateStr = date.toLocaleString();
 
+        // operator + preview are parsed out of the ledger, which chat, MCP, cron
+        // and inbound SMS all write to — escape every field (P04-media-tasks-fx-web-05).
         item.innerHTML = `
             <div class="timeline-item-header">
-                <span class="timeline-item-id">${snapshot.snapId}</span>
-                <span class="timeline-item-operator">${snapshot.operator}</span>
+                <span class="timeline-item-id">${escapeHtml(snapshot.snapId)}</span>
+                <span class="timeline-item-operator">${escapeHtml(snapshot.operator)}</span>
             </div>
-            <div class="timeline-item-time">${dateStr}</div>
-            <div class="timeline-item-preview">${snapshot.preview}</div>
+            <div class="timeline-item-time">${escapeHtml(dateStr)}</div>
+            <div class="timeline-item-preview">${escapeHtml(snapshot.preview)}</div>
         `;
 
         item.addEventListener('click', () => {
@@ -265,21 +267,18 @@ export function showTimelineDetail(snapshot) {
     const dateStr = date.toLocaleString();
 
     // Escape HTML in content
-    const escapedContent = snapshot.content
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    const escapedContent = escapeHtml(snapshot.content);
 
     popupBody.innerHTML = `
         <div class="detail-meta">
             <div class="detail-row">
-                <strong>Snapshot ID:</strong> <code>${snapshot.snapId}</code>
+                <strong>Snapshot ID:</strong> <code>${escapeHtml(snapshot.snapId)}</code>
             </div>
             <div class="detail-row">
-                <strong>Operator:</strong> ${snapshot.operator}
+                <strong>Operator:</strong> ${escapeHtml(snapshot.operator)}
             </div>
             <div class="detail-row">
-                <strong>Timestamp:</strong> ${dateStr}
+                <strong>Timestamp:</strong> ${escapeHtml(dateStr)}
             </div>
             <div class="detail-row">
                 <strong>Size:</strong> ${(snapshot.content.length / 1024).toFixed(2)} KB
@@ -294,7 +293,8 @@ export function showTimelineDetail(snapshot) {
     document.querySelectorAll('.timeline-item').forEach(item => {
         item.classList.remove('selected');
     });
-    const selectedItem = document.querySelector(`.timeline-item[data-snap-id="${snapshot.snapId}"]`);
+    const selectedItem = Array.from(document.querySelectorAll('.timeline-item'))
+        .find(item => item.dataset.snapId === snapshot.snapId);
     if (selectedItem) {
         selectedItem.classList.add('selected');
         currentSelectedSnapshotId = snapshot.snapId;

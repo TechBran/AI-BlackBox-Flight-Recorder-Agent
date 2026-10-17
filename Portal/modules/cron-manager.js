@@ -3,7 +3,7 @@
  * Cron Job Scheduler management interface
  */
 
-import { $, toast, toastSuccess, toastError } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr } from './core-utils.js';
 import { getOperator, fetchAvailableModels, getHydratedModels } from './state-management.js';
 
 // Cache server operator list (populated once on first modal open)
@@ -287,7 +287,7 @@ function renderJobList(jobs) {
         }[job.delivery] || job.delivery;
 
         return `
-        <div class="cron-job-card ${statusClass}" data-job-id="${job.id}">
+        <div class="cron-job-card ${statusClass}" data-job-id="${escapeAttr(job.id)}">
             <div class="cron-job-header">
                 <span class="cron-job-status-badge ${statusClass}">${statusLabel}</span>
                 <span class="cron-job-name">${escapeHtml(job.name)}</span>
@@ -297,17 +297,17 @@ function renderJobList(jobs) {
             <div class="cron-job-meta">
                 <span class="cron-job-model">${escapeHtml(friendlyModelName(job.provider || deriveProviderFromModel(job.model), job.model))}</span>
                 ${job.operator ? `<span class="cron-job-operator">${escapeHtml(job.operator)}</span>` : ''}
-                <span class="cron-job-delivery">${deliveryLabel}</span>
-                ${job.run_count ? `<span class="cron-job-runs">${job.run_count} runs</span>` : ''}
+                <span class="cron-job-delivery">${escapeHtml(deliveryLabel)}</span>
+                ${job.run_count ? `<span class="cron-job-runs">${escapeHtml(String(job.run_count))} runs</span>` : ''}
                 ${job.last_run_at ? `<span class="cron-job-lastrun">Last: ${formatTime(job.last_run_at)}</span>` : ''}
                 ${job.next_run_at ? `<span class="cron-job-nextrun">Next: ${formatTime(job.next_run_at)}</span>` : ''}
             </div>
             <div class="cron-job-actions">
-                <button class="cron-action-btn" data-action="run" data-job-id="${job.id}" title="Run Now">&#9654;</button>
-                <button class="cron-action-btn" data-action="${job.status === 'active' ? 'pause' : 'resume'}" data-job-id="${job.id}" title="${job.status === 'active' ? 'Pause' : 'Resume'}">${job.status === 'active' ? '&#9208;' : '&#9654;&#65039;'}</button>
-                <button class="cron-action-btn" data-action="edit" data-job-id="${job.id}" title="Edit">&#9998;</button>
-                <button class="cron-action-btn" data-action="history" data-job-id="${job.id}" title="History">&#128203;</button>
-                <button class="cron-action-btn cron-action-delete" data-action="delete" data-job-id="${job.id}" title="Delete">&#128465;</button>
+                <button class="cron-action-btn" data-action="run" data-job-id="${escapeAttr(job.id)}" title="Run Now">&#9654;</button>
+                <button class="cron-action-btn" data-action="${job.status === 'active' ? 'pause' : 'resume'}" data-job-id="${escapeAttr(job.id)}" title="${job.status === 'active' ? 'Pause' : 'Resume'}">${job.status === 'active' ? '&#9208;' : '&#9654;&#65039;'}</button>
+                <button class="cron-action-btn" data-action="edit" data-job-id="${escapeAttr(job.id)}" title="Edit">&#9998;</button>
+                <button class="cron-action-btn" data-action="history" data-job-id="${escapeAttr(job.id)}" title="History">&#128203;</button>
+                <button class="cron-action-btn cron-action-delete" data-action="delete" data-job-id="${escapeAttr(job.id)}" title="Delete">&#128465;</button>
             </div>
         </div>`;
     }).join('');
@@ -889,8 +889,8 @@ async function openHistoryModal(jobId) {
                 <div class="cron-history-time">${formatTime(h.run_at)}</div>
                 <div class="cron-history-meta">
                     <span class="cron-history-model">${escapeHtml(friendlyModelName(hProvider, h.model))}</span>
-                    <span class="cron-history-duration">${h.duration_ms}ms</span>
-                    <span class="cron-history-status">${h.delivery_status || 'completed'}</span>
+                    <span class="cron-history-duration">${escapeHtml(String(h.duration_ms))}ms</span>
+                    <span class="cron-history-status">${escapeHtml(h.delivery_status || 'completed')}</span>
                 </div>
                 ${h.result ? `<div class="cron-history-result">${escapeHtml(h.result.substring(0, 300))}${h.result.length > 300 ? '...' : ''}</div>` : ''}
                 ${h.error ? `<div class="cron-history-error-text">${escapeHtml(h.error)}</div>` : ''}
@@ -898,7 +898,7 @@ async function openHistoryModal(jobId) {
         `;
         }).join('');
     } catch (err) {
-        container.innerHTML = `<div class="cron-empty-state">Failed to load history: ${err.message}</div>`;
+        container.innerHTML = `<div class="cron-empty-state">Failed to load history: ${escapeHtml(err.message)}</div>`;
     }
 }
 
@@ -966,10 +966,9 @@ function handleDeliverySourceChange() {
 // =============================================================================
 
 function escapeHtml(str) {
+    // Shared helper: also escapes quotes
     if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
+    return sharedEscapeHtml(str);
 }
 
 function formatTime(isoStr) {

@@ -10,7 +10,7 @@
  *                                         PIN gate, with `pin` once when generated)
  */
 
-import { $, toast, toastSuccess, toastError } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml } from './core-utils.js';
 
 // =============================================================================
 // State (module-scope)
@@ -30,10 +30,8 @@ const STEPS = ['Identify', 'Validate', 'Configure', 'Done'];
 // =============================================================================
 
 function escapeHtml(str) {
-    if (str === null || str === undefined) return '';
-    const div = document.createElement('div');
-    div.textContent = String(str);
-    return div.innerHTML;
+    // Shared helper: also escapes quotes
+    return sharedEscapeHtml(str);
 }
 
 async function copyToClipboard(text, label) {

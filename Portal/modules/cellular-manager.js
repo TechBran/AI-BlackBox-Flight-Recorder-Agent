@@ -3,7 +3,7 @@
  * Cellular Internet Failover Manager — monitor, control, and debug cellular data connection
  */
 
-import { $, toast, toastSuccess, toastError } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr } from './core-utils.js';
 
 // =============================================================================
 // State
@@ -140,7 +140,7 @@ function renderStatusCard() {
     const lte = signal.lte || {};
     const validSig = (v) => v && v !== '--' && parseFloat(v) > -32000;
     const signalDetail = validSig(lte.rsrp)
-        ? `RSRP ${lte.rsrp} dBm | RSRQ ${validSig(lte.rsrq) ? lte.rsrq : '--'} dB | SNR ${validSig(lte.snr) ? lte.snr : '--'} dB`
+        ? `RSRP ${escapeHtml(lte.rsrp)} dBm | RSRQ ${validSig(lte.rsrq) ? escapeHtml(lte.rsrq) : '--'} dB | SNR ${validSig(lte.snr) ? escapeHtml(lte.snr) : '--'} dB`
         : `Quality: ${quality}%`;
 
     // Status label
@@ -153,21 +153,23 @@ function renderStatusCard() {
 
     const dotClass = isInitializing ? 'connecting' : state;
 
+    // Every value below comes from the modem / network (a carrier name is
+    // broadcast over the air by whatever cell the modem hears) — escape them all.
     container.innerHTML = `
         <div class="cell-signal-bars strength-${bars}">
             <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
         </div>
         <div class="cell-status-info">
             <div class="cell-status-row">
-                <span class="cell-operator-name">${modem.operator_name || 'No Carrier'}</span>
-                <span class="cell-band-tag">${tagStr}</span>
-                <span class="cell-access-tech" style="font-size:11px;color:var(--neutral-600)">${statusLabel}</span>
+                <span class="cell-operator-name">${escapeHtml(modem.operator_name || 'No Carrier')}</span>
+                <span class="cell-band-tag">${escapeHtml(tagStr)}</span>
+                <span class="cell-access-tech" style="font-size:11px;color:var(--neutral-600)">${escapeHtml(statusLabel)}</span>
             </div>
             <div class="cell-status-detail">
-                <code>${ip}</code> &middot; ${signalDetail} &middot; Up: ${uptimeStr}
+                <code>${escapeHtml(ip)}</code> &middot; ${signalDetail} &middot; Up: ${uptimeStr}
             </div>
         </div>
-        <div class="cell-status-dot ${dotClass}"></div>
+        <div class="cell-status-dot ${escapeAttr(dotClass)}"></div>
     `;
 }
 
@@ -193,7 +195,7 @@ function renderBackoffIndicator() {
     container.innerHTML = `
         <span class="backoff-label">${isThrottle ? 'PDN THROTTLE' : 'BACKOFF'}</span>
         <span class="backoff-detail">
-            ${isThrottle ? 'Carrier is throttling connections. Waiting before retry.' : `${bo.consecutive_failures} consecutive failures. Waiting before retry.`}
+            ${isThrottle ? 'Carrier is throttling connections. Waiting before retry.' : `${escapeHtml(bo.consecutive_failures)} consecutive failures. Waiting before retry.`}
         </span>
         <span class="backoff-countdown">${bo.active ? timeStr : 'ready'}</span>
     `;
@@ -225,7 +227,7 @@ function renderApnSection() {
     container.innerHTML = `
         <div class="cell-section-title">APN Configuration</div>
         <div class="cell-apn-row">
-            <input type="text" id="cellApnInput" value="${currentApn !== '--' ? currentApn : ''}" placeholder="e.g. vzwinternet">
+            <input type="text" id="cellApnInput" value="${escapeAttr(currentApn !== '--' ? currentApn : '')}" placeholder="e.g. vzwinternet">
             <button class="btn" data-action="set-apn">Set</button>
             <button class="btn" data-action="auto-apn">Auto-Detect</button>
         </div>
@@ -245,9 +247,9 @@ function renderFailoverStatus() {
         const isCellular = (r.interface || '').startsWith('wwan');
         const cls = isCellular ? 'cell-route-active' : '';
         rowsHtml += `<tr>
-            <td class="${cls}">${r.interface || '--'}</td>
-            <td class="${cls}">${r.gateway || '--'}</td>
-            <td class="${cls}">${r.metric || '--'}</td>
+            <td class="${cls}">${escapeHtml(r.interface || '--')}</td>
+            <td class="${cls}">${escapeHtml(r.gateway || '--')}</td>
+            <td class="${cls}">${escapeHtml(r.metric || '--')}</td>
         </tr>`;
     }
 
@@ -262,8 +264,8 @@ function renderFailoverStatus() {
             ${rowsHtml}
         </table>
         <div class="cell-status-detail" style="margin-top:8px">
-            Primary: <strong>${routing.primary_interface || '--'}</strong>
-            &middot; Cellular metric: ${conn.metric || '--'}
+            Primary: <strong>${escapeHtml(routing.primary_interface || '--')}</strong>
+            &middot; Cellular metric: ${escapeHtml(conn.metric || '--')}
         </div>
     `;
 }
@@ -285,15 +287,15 @@ function renderSpeedTestResults(data) {
 
     container.innerHTML = `
         <div class="cell-speed-metric">
-            <div class="cell-speed-value">${data.download_mbps != null ? data.download_mbps : '--'}</div>
+            <div class="cell-speed-value">${data.download_mbps != null ? escapeHtml(data.download_mbps) : '--'}</div>
             <div class="cell-speed-unit">Mbps Down</div>
         </div>
         <div class="cell-speed-metric">
-            <div class="cell-speed-value">${data.upload_mbps != null ? data.upload_mbps : '--'}</div>
+            <div class="cell-speed-value">${data.upload_mbps != null ? escapeHtml(data.upload_mbps) : '--'}</div>
             <div class="cell-speed-unit">Mbps Up</div>
         </div>
         <div class="cell-speed-metric">
-            <div class="cell-speed-value">${data.latency_ms != null ? data.latency_ms : '--'}</div>
+            <div class="cell-speed-value">${data.latency_ms != null ? escapeHtml(data.latency_ms) : '--'}</div>
             <div class="cell-speed-unit">ms Latency</div>
         </div>
     `;
@@ -320,12 +322,12 @@ function renderEventLog(events) {
     for (const ev of events) {
         const d = new Date(ev.time * 1000);
         const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        const typeClass = ev.type.replace(/_/g, '-');
+        const typeClass = String(ev.type || '').replace(/_/g, '-');
         html += `
             <div class="cell-event-item">
-                <span class="cell-event-time">${timeStr}</span>
-                <span class="cell-event-type ${typeClass}">${ev.type}</span>
-                <span class="cell-event-detail">${ev.detail || ''}</span>
+                <span class="cell-event-time">${escapeHtml(timeStr)}</span>
+                <span class="cell-event-type ${escapeAttr(typeClass)}">${escapeHtml(ev.type)}</span>
+                <span class="cell-event-detail">${escapeHtml(ev.detail || '')}</span>
             </div>`;
     }
     container.innerHTML = html;

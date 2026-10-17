@@ -7,7 +7,7 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast } from './core-utils.js';
+import { $, toast, escapeAttr } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory, loadHistory, getOperator } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
@@ -592,7 +592,7 @@ export function createBubbleWithThinking(content, thinking, cuLog) {
             <div class="cu-activity-header" onclick="window.toggleCUPanel(this)">
                 <span class="cu-live-dot">\u2713</span>
                 <span class="cu-activity-label">Computer Use Complete</span>
-                <span class="cu-step-counter">${lastStep ? 'Step ' + lastStep : ''}</span>
+                <span class="cu-step-counter">${lastStep ? 'Step ' + escapeHtml(lastStep) : ''}</span>
                 <span class="cu-activity-toggle">\u25B6</span>
             </div>
             <div class="cu-activity-body"></div>
@@ -640,7 +640,7 @@ export function createBubbleWithThinking(content, thinking, cuLog) {
                 block.innerHTML = `
                     <div class="cu-bash-header">
                         <span>$ ${escapeHtml(cmd.length > 120 ? cmd.slice(0, 120) + '...' : cmd)}</span>
-                        <span class="cu-bash-exit ${code === 0 ? 'success' : 'error'}">exit ${code}</span>
+                        <span class="cu-bash-exit ${code === 0 ? 'success' : 'error'}">exit ${escapeHtml(code)}</span>
                     </div>
                     <pre class="cu-bash-output">${escapeHtml(out.length > 1500 ? out.slice(0, 1500) + '\n... [truncated]' : out)}</pre>
                 `;
@@ -1336,7 +1336,7 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                                     block.innerHTML = `
                                         <div class="cu-bash-header">
                                             <span>$ ${escapeHtml(bashCmd.length > 120 ? bashCmd.slice(0, 120) + '...' : bashCmd)}</span>
-                                            <span class="cu-bash-exit ${bashCode === 0 ? 'success' : 'error'}">exit ${bashCode}</span>
+                                            <span class="cu-bash-exit ${bashCode === 0 ? 'success' : 'error'}">exit ${escapeHtml(bashCode)}</span>
                                         </div>
                                         <pre class="cu-bash-output">${escapeHtml(bashOut.length > 1500 ? bashOut.slice(0, 1500) + '\n... [truncated]' : bashOut)}</pre>
                                     `;
@@ -1648,7 +1648,7 @@ export async function pollVideoTasks() {
                 const currentOperator = getOperator() || window.__operator || 'Brandon';
                 const isOwnTask = !taskOperator || taskOperator === currentOperator;
 
-                const videoHTML = `<video src="${data.result_url}" controls preload="metadata" class="generated-video" style="max-width: 100%; border-radius: 8px; margin: 8px 0;">Your browser does not support the video tag.</video>`;
+                const videoHTML = `<video src="${escapeAttr(data.result_url)}" controls preload="metadata" class="generated-video" style="max-width: 100%; border-radius: 8px; margin: 8px 0;">Your browser does not support the video tag.</video>`;
                 placeholder.outerHTML = videoHTML;
                 console.log('[VIDEO] Video generation completed:', data.result_url);
 
@@ -1658,7 +1658,7 @@ export async function pollVideoTasks() {
 
                 updateHistoryWithMedia(parentBubble);
             } else if (data.status === 'failed') {
-                placeholder.innerHTML = `<span style="color: #ff6b6b;">\u274C Video generation failed: ${data.error_message || 'Unknown error'}</span>`;
+                placeholder.innerHTML = `<span style="color: #ff6b6b;">\u274C Video generation failed: ${escapeHtml(data.error_message || 'Unknown error')}</span>`;
                 placeholder.classList.remove('video-loading-placeholder');
             }
         } catch (error) {
@@ -1694,14 +1694,16 @@ export async function pollImageTasks() {
                 const currentOperator = getOperator() || window.__operator || 'Brandon';
                 const isOwnTask = !taskOperator || taskOperator === currentOperator;
 
-                const imageHTML = `<img src="${data.result_url}" alt="Generated image" class="generated-image" style="max-width: 100%; border-radius: 8px; margin: 8px 0;">`;
-                placeholder.outerHTML = imageHTML;
+                // Built with DOM APIs: the URL never becomes markup or a CSS selector.
+                const newImage = document.createElement('img');
+                newImage.setAttribute('src', data.result_url);
+                newImage.alt = 'Generated image';
+                newImage.className = 'generated-image';
+                newImage.style.cssText = 'max-width: 100%; border-radius: 8px; margin: 8px 0;';
+                placeholder.replaceWith(newImage);
 
                 if (parentElement) {
-                    const newImage = parentElement.querySelector(`img[src="${data.result_url}"]`);
-                    if (newImage) {
-                        addDownloadButtonToImage(newImage, parentElement);
-                    }
+                    addDownloadButtonToImage(newImage, parentElement);
                 }
 
                 console.log('[IMAGE] Image generation completed:', data.result_url);
@@ -1712,7 +1714,7 @@ export async function pollImageTasks() {
 
                 updateHistoryWithMedia(parentBubble);
             } else if (data.status === 'failed') {
-                placeholder.innerHTML = `<span style="color: #ff6b6b;">\u274C Image generation failed: ${data.error_message || 'Unknown error'}</span>`;
+                placeholder.innerHTML = `<span style="color: #ff6b6b;">\u274C Image generation failed: ${escapeHtml(data.error_message || 'Unknown error')}</span>`;
                 placeholder.classList.remove('image-loading-placeholder');
             }
         } catch (error) {
@@ -1745,7 +1747,7 @@ export async function pollMusicTasks() {
 
                 const audioHTML = `<div class="audio-result" style="margin: 8px 0;">
                     <span class="audio-label" style="font-size: 13px; font-weight: 600; color: #27d980;">\uD83C\uDFB5 Generated Music</span>
-                    <audio controls src="${data.result_url}" style="width: 100%; margin-top: 8px;"></audio>
+                    <audio controls src="${escapeAttr(data.result_url)}" style="width: 100%; margin-top: 8px;"></audio>
                 </div>`;
                 placeholder.outerHTML = audioHTML;
                 console.log('[MUSIC] Music generation completed:', data.result_url);
@@ -1756,7 +1758,7 @@ export async function pollMusicTasks() {
 
                 updateHistoryWithMedia(parentBubble);
             } else if (data.status === 'failed') {
-                placeholder.innerHTML = `<span style="color: #ff6b6b;">\u274C Music generation failed: ${data.error_message || 'Unknown error'}</span>`;
+                placeholder.innerHTML = `<span style="color: #ff6b6b;">\u274C Music generation failed: ${escapeHtml(data.error_message || 'Unknown error')}</span>`;
                 placeholder.classList.remove('music-loading-placeholder');
             }
         } catch (error) {
@@ -2572,7 +2574,7 @@ export async function send() {
 
         if (reply.inline_media && Array.isArray(reply.inline_media) && reply.inline_media.length > 0) {
             const mediaHTML = reply.inline_media.map(media => {
-                const url = media.url;
+                const url = escapeAttr(media.url);
                 const type = media.type;
 
                 if (type === 'image') {
@@ -3002,7 +3004,7 @@ function _showCUBackgroundBanner(status) {
     banner.innerHTML = `
         <span class="cu-bg-dot"></span>
         <span class="cu-bg-label">Computer Use running in background</span>
-        <span class="cu-bg-step">Step ${status.step}/${status.total}</span>
+        <span class="cu-bg-step">Step ${escapeHtml(status.step)}/${escapeHtml(status.total)}</span>
         <button class="cu-bg-view" onclick="window.__openCUBrowserView()">Live Browser</button>
         <button class="cu-bg-reconnect" onclick="window.__reconnectCU()">Reconnect</button>
     `;

@@ -7,7 +7,7 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast } from './core-utils.js';
+import { $, toast, escapeHtml } from './core-utils.js';
 import { scrollToBottomIfNeeded } from './ui-setup.js';
 
 // =============================================================================
@@ -62,7 +62,7 @@ export function renderPreviews() {
             // Document preview - show icon and filename
             previewEl = document.createElement("div");
             previewEl.className = "document-preview";
-            previewEl.innerHTML = `<span class="doc-icon">📄</span><span class="doc-name">${file.name}</span>`;
+            previewEl.innerHTML = `<span class="doc-icon">📄</span><span class="doc-name">${escapeHtml(file.name)}</span>`;
         }
 
         if (previewEl) item.appendChild(previewEl);
@@ -119,7 +119,7 @@ export async function handleFileUpload(file) {
             <div class="upload-progress-bar">
                 <div class="upload-progress-fill" style="width: 0%"></div>
             </div>
-            <span class="upload-progress-text">${file.name}: 0%</span>
+            <span class="upload-progress-text">${escapeHtml(file.name)}: 0%</span>
         `;
 
         const historyEl = $("history");
@@ -208,7 +208,7 @@ export async function handleSessionFileUpload(file, sessionId) {
             <div class="upload-progress-bar">
                 <div class="upload-progress-fill" style="width: 0%"></div>
             </div>
-            <span class="upload-progress-text">${file.name}: 0%</span>
+            <span class="upload-progress-text">${escapeHtml(file.name)}: 0%</span>
         `;
 
         const historyEl = $("history");

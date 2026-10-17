@@ -3,7 +3,7 @@
  * Contact Book — browse, search, add, edit, delete contacts
  * Follows telephony-manager.js and sms-inbox.js patterns
  */
-import { $, toast, toastSuccess, toastError } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr } from './core-utils.js';
 import { getOperator } from './state-management.js';
 
 // =============================================================================
@@ -17,12 +17,6 @@ let _editingContact = null;  // null = new, object = editing existing
 // =============================================================================
 // Helpers
 // =============================================================================
-
-function escapeHtml(text) {
-    const d = document.createElement('div');
-    d.textContent = text;
-    return d.innerHTML;
-}
 
 function truncate(str, len = 80) {
     if (!str) return '';
@@ -148,16 +142,17 @@ function renderContactList(contacts) {
             relationshipHtml = `<span class="contact-card-relationship">${relationship}</span>`;
         }
 
+        const idAttr = escapeAttr(String(c.id || ''));
         return `
-        <div class="contact-card" data-id="${escapeHtml(String(c.id || ''))}">
+        <div class="contact-card" data-id="${idAttr}">
             <div class="contact-card-header">
                 <div class="contact-card-info">
                     <span class="contact-card-name">${name}</span>
                     ${relationshipHtml}
                 </div>
                 <div class="contact-card-actions">
-                    <button class="btn btn-sm contact-edit-btn" data-id="${escapeHtml(String(c.id || ''))}" title="Edit">Edit</button>
-                    <button class="btn btn-sm btn-danger contact-delete-btn" data-id="${escapeHtml(String(c.id || ''))}" title="Delete">Delete</button>
+                    <button class="btn btn-sm contact-edit-btn" data-id="${idAttr}" title="Edit">Edit</button>
+                    <button class="btn btn-sm btn-danger contact-delete-btn" data-id="${idAttr}" title="Delete">Delete</button>
                 </div>
             </div>
             ${phone ? `<div class="contact-card-phone">${phone}</div>` : ''}
@@ -196,11 +191,14 @@ function showEditForm(contact) {
     const container = $('contactsEditForm');
     if (!container) return;
 
-    const name = _editingContact ? escapeHtml(_editingContact.name || '') : '';
-    const phone = _editingContact ? escapeHtml(_editingContact.phone || '') : '';
-    const email = _editingContact ? escapeHtml(_editingContact.email || '') : '';
-    const relationship = _editingContact ? escapeHtml(_editingContact.relationship || '') : '';
-    const notes = _editingContact ? escapeHtml(_editingContact.notes || '') : '';
+    // Raw values: they are assigned through the DOM (.value) after the static
+    // form markup is built, never interpolated into attribute strings. This also
+    // fixes notes being escaped twice and saved corrupted (P06-comms-web-07).
+    const name = _editingContact ? (_editingContact.name || '') : '';
+    const phone = _editingContact ? (_editingContact.phone || '') : '';
+    const email = _editingContact ? (_editingContact.email || '') : '';
+    const relationship = _editingContact ? (_editingContact.relationship || '') : '';
+    const notes = _editingContact ? (_editingContact.notes || '') : '';
     const tags = _editingContact && Array.isArray(_editingContact.tags)
         ? _editingContact.tags.join(', ')
         : '';
@@ -217,27 +215,27 @@ function showEditForm(contact) {
         <div class="contacts-edit-form">
             <div class="form-row">
                 <label class="form-label" for="contactName">Name *</label>
-                <input type="text" id="contactName" value="${name}" placeholder="Full name" required />
+                <input type="text" id="contactName" placeholder="Full name" required />
             </div>
             <div class="form-row">
                 <label class="form-label" for="contactPhone">Phone</label>
-                <input type="tel" id="contactPhone" value="${phone}" placeholder="+1 (555) 123-4567" />
+                <input type="tel" id="contactPhone" placeholder="+1 (555) 123-4567" />
             </div>
             <div class="form-row">
                 <label class="form-label" for="contactEmail">Email</label>
-                <input type="email" id="contactEmail" value="${email}" placeholder="name@example.com" />
+                <input type="email" id="contactEmail" placeholder="name@example.com" />
             </div>
             <div class="form-row">
                 <label class="form-label" for="contactRelationship">Relationship</label>
-                <input type="text" id="contactRelationship" value="${relationship}" placeholder="Friend, Family, Work..." />
+                <input type="text" id="contactRelationship" placeholder="Friend, Family, Work..." />
             </div>
             <div class="form-row">
                 <label class="form-label" for="contactNotes">Notes</label>
-                <textarea id="contactNotes" rows="3" placeholder="Optional notes...">${escapeHtml(notes)}</textarea>
+                <textarea id="contactNotes" rows="3" placeholder="Optional notes..."></textarea>
             </div>
             <div class="form-row">
                 <label class="form-label" for="contactTags">Tags (comma-separated)</label>
-                <input type="text" id="contactTags" value="${escapeHtml(tags)}" placeholder="vip, developer, nyc..." />
+                <input type="text" id="contactTags" placeholder="vip, developer, nyc..." />
             </div>
             <div class="form-row">
                 <label class="form-label" for="contactInboundAllowed" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -256,6 +254,20 @@ function showEditForm(contact) {
                 <button id="btnContactSave" class="btn btn-confirm">${_editingContact ? 'Update' : 'Save'}</button>
             </div>
         </div>`;
+
+    // Populate the fields through the DOM (no attribute-string interpolation)
+    const fieldValues = {
+        contactName: name,
+        contactPhone: phone,
+        contactEmail: email,
+        contactRelationship: relationship,
+        contactNotes: notes,
+        contactTags: tags,
+    };
+    Object.entries(fieldValues).forEach(([id, value]) => {
+        const field = $(id);
+        if (field) field.value = value;
+    });
 
     container.style.display = 'block';
 

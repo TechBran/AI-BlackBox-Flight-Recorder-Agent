@@ -13,7 +13,7 @@
  * Updated: 2026-01-04 - Added Nano Banana Pro full features
  */
 
-import { $, toast } from './core-utils.js';
+import { $, toast, escapeAttr } from './core-utils.js';
 import { generateImageAsync, generateVideoAsync, extendVideoAsync, generateMusicAsync } from './task-manager.js';
 import { toggleSTTFor } from './tts-stt.js';
 
@@ -538,7 +538,7 @@ export function setupGenerationModal() {
         referencePreview.classList.remove('hide');
         referencePreview.innerHTML = referenceImages.map((img, idx) => `
             <div class="reference-thumb" data-index="${idx}">
-                <img src="data:${img.mimeType};base64,${img.data}" alt="${img.name}">
+                <img src="data:${escapeAttr(img.mimeType)};base64,${escapeAttr(img.data)}" alt="${escapeAttr(img.name)}">
                 <button class="reference-remove" data-index="${idx}" title="Remove">×</button>
             </div>
         `).join('');

@@ -76,3 +76,23 @@ test("extractSpeakableText parses with DOMParser, not innerHTML on a live elemen
     assert.doesNotMatch(body, /innerHTML/);
     assert.match(body, /htmlToText\(/);
 });
+
+// Sinks the audit named (rank 26) that are not covered by a jsdom behaviour test.
+// Each pattern matches the field interpolated straight into MARKUP: right after a
+// tag's `>` (allowing a short literal prefix such as "/" or "• "), or as a quoted
+// attribute value. Plain-text uses (toasts, input.value, textContent) are fine.
+const RAW = (fields) => new RegExp(`(>|=["'])[^<"'\n]{0,3}\\$\\{(${fields})\\}`);
+const NAMED_RAW_SINKS = [
+    ["modules/grok-live.js", /<strong>You:<\/strong>\s*\$\{(?!escapeHtml\()/],
+    ["modules/slash-commands.js", RAW("cmd\\.name|cmd\\.description \\|\\| ''|opt")],
+    ["modules/cellular-manager.js", RAW("modem\\.operator_name \\|\\| 'No Carrier'|ev\\.detail \\|\\| ''|ev\\.type|tagStr|ip|r\\.interface \\|\\| '--'|r\\.gateway \\|\\| '--'")],
+    ["modules/cellular-manager.js", /value="\$\{currentApn/],
+    ["modules/media-manager.js", /onclick=|="\$\{file\.url\}"|\$\{err\.message\}/],
+    ["modules/task-manager.js", /\$\{resultText\}|onclick="window\.open|src="\$\{(imgUrl|url|finalScreenshot)\}"/],
+    ["modules/file-upload.js", RAW("file\\.name")],
+];
+for (const [file, pattern] of NAMED_RAW_SINKS) {
+    test(`${file}: no raw interpolation of model/device/user text into markup`, () => {
+        assert.doesNotMatch(stripComments(src(file)), pattern);
+    });
+}

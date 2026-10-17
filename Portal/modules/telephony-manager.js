@@ -3,7 +3,7 @@
  * Telephony Gateway Manager — discover, add, configure, and monitor Yeastar TG200 GSM-to-SIP gateways
  */
 
-import { $, toast, toastSuccess, toastError } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr } from './core-utils.js';
 import { getOperator } from './state-management.js';
 import { openWizard } from './telephony-wizard.js';
 
@@ -212,7 +212,7 @@ function renderGatewayCard(gw) {
                             </div>
                             <div class="sim-slot-carrier">${carrier}</div>
                             <div class="sim-slot-phone">${phone}</div>
-                            <div class="sim-slot-signal">${bars} <span class="sim-signal-pct">${signal}%</span></div>
+                            <div class="sim-slot-signal">${bars} <span class="sim-signal-pct">${escapeHtml(String(signal))}%</span></div>
                         </div>`;
                 }).join('')}
             </div>`;
@@ -230,7 +230,7 @@ function renderGatewayCard(gw) {
     }
 
     return `
-        <div class="gateway-card" data-gateway-id="${gw.id}">
+        <div class="gateway-card" data-gateway-id="${escapeAttr(gw.id)}">
             <div class="gateway-header">
                 <div class="gateway-info">
                     <span class="gateway-status-dot ${dotClass}"></span>
@@ -245,10 +245,10 @@ function renderGatewayCard(gw) {
             ${phoneHtml}
             ${simHtml}
             <div class="gateway-actions">
-                <button class="btn gw-action-btn" data-action="wizard" data-gw-id="${gw.id}" data-gw-name="${escapeHtml(gw.name || '')}">Setup</button>
-                <button class="btn gw-action-btn" data-action="test" data-gw-id="${gw.id}">Test</button>
-                <button class="btn gw-action-btn" data-action="edit" data-gw-id="${gw.id}">Edit</button>
-                <button class="btn gw-action-btn gw-action-remove" data-action="remove" data-gw-id="${gw.id}">Remove</button>
+                <button class="btn gw-action-btn" data-action="wizard" data-gw-id="${escapeAttr(gw.id)}" data-gw-name="${escapeHtml(gw.name || '')}">Setup</button>
+                <button class="btn gw-action-btn" data-action="test" data-gw-id="${escapeAttr(gw.id)}">Test</button>
+                <button class="btn gw-action-btn" data-action="edit" data-gw-id="${escapeAttr(gw.id)}">Edit</button>
+                <button class="btn gw-action-btn gw-action-remove" data-action="remove" data-gw-id="${escapeAttr(gw.id)}">Remove</button>
             </div>
         </div>`;
 }
@@ -364,7 +364,7 @@ function buildFormHtml(prefill = {}) {
 
     return `
         <h4 class="gateway-form-title">${title}</h4>
-        ${prefill.id ? `<input type="hidden" id="gwFormId" value="${prefill.id}">` : ''}
+        ${prefill.id ? `<input type="hidden" id="gwFormId" value="${escapeAttr(prefill.id)}">` : ''}
         <div class="gateway-form-row">
             <div>
                 <label for="gwFormName">Name</label>
@@ -609,10 +609,9 @@ function _stopPolling() {
 // =============================================================================
 
 function escapeHtml(str) {
+    // Shared helper: also escapes quotes (used in value= / data-* attributes)
     if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
+    return sharedEscapeHtml(str);
 }
 
 // =============================================================================

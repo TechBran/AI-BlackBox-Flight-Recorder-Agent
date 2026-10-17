@@ -3,7 +3,7 @@
  * Device Manager — browse, pair, connect, and control mesh devices
  */
 
-import { $, toast, toastSuccess, toastError } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr } from './core-utils.js';
 
 // =============================================================================
 // State
@@ -231,7 +231,7 @@ function renderDeviceList(devices) {
         const isAndroid = device.protocol === 'adb';
 
         // Determine card accent class
-        let accentClass = `dm-status-${status}`;
+        let accentClass = `dm-status-${escapeAttr(status)}`;
         if (connected) accentClass = 'dm-status-adb-connected';
 
         // Build metadata items
@@ -244,7 +244,7 @@ function renderDeviceList(devices) {
             metaItems.push(`<span class="dm-meta-item"><strong>Protocol:</strong> ${escapeHtml(device.protocol.toUpperCase())}</span>`);
         }
         if (isAndroid && device.adb_port) {
-            metaItems.push(`<span class="dm-meta-item"><strong>ADB Port:</strong> ${device.adb_port}</span>`);
+            metaItems.push(`<span class="dm-meta-item"><strong>ADB Port:</strong> ${escapeHtml(device.adb_port)}</span>`);
         }
         if (device.metadata) {
             if (device.metadata.model) {
@@ -262,23 +262,23 @@ function renderDeviceList(devices) {
         const actions = [];
         if (isAndroid) {
             if (connected) {
-                actions.push(`<button class="dm-action-btn dm-btn-disconnect" data-action="disconnect" data-device-id="${device.id}">Disconnect</button>`);
-                actions.push(`<button class="dm-action-btn" data-action="screenshot" data-device-id="${device.id}">Screenshot</button>`);
+                actions.push(`<button class="dm-action-btn dm-btn-disconnect" data-action="disconnect" data-device-id="${escapeAttr(device.id)}">Disconnect</button>`);
+                actions.push(`<button class="dm-action-btn" data-action="screenshot" data-device-id="${escapeAttr(device.id)}">Screenshot</button>`);
             } else {
-                actions.push(`<button class="dm-action-btn dm-btn-connect" data-action="connect" data-device-id="${device.id}">Connect</button>`);
-                actions.push(`<button class="dm-action-btn dm-btn-pair" data-action="pair" data-device-id="${device.id}">Pair</button>`);
+                actions.push(`<button class="dm-action-btn dm-btn-connect" data-action="connect" data-device-id="${escapeAttr(device.id)}">Connect</button>`);
+                actions.push(`<button class="dm-action-btn dm-btn-pair" data-action="pair" data-device-id="${escapeAttr(device.id)}">Pair</button>`);
             }
         }
-        actions.push(`<button class="dm-action-btn" data-action="health" data-device-id="${device.id}">Health</button>`);
-        actions.push(`<button class="dm-action-btn dm-btn-remove" data-action="remove" data-device-id="${device.id}">Remove</button>`);
+        actions.push(`<button class="dm-action-btn" data-action="health" data-device-id="${escapeAttr(device.id)}">Health</button>`);
+        actions.push(`<button class="dm-action-btn dm-btn-remove" data-action="remove" data-device-id="${escapeAttr(device.id)}">Remove</button>`);
 
         return `
-        <div class="dm-device-card ${accentClass}" data-device-id="${device.id}">
+        <div class="dm-device-card ${accentClass}" data-device-id="${escapeAttr(device.id)}">
             <div class="dm-card-header">
                 <span class="dm-device-icon">${getDeviceIcon(device.device_type)}</span>
                 <span class="dm-device-name">${escapeHtml(device.name)}</span>
                 ${connected ? '<span class="dm-adb-badge">ADB</span>' : ''}
-                <span class="dm-status-badge ${status}">${status}</span>
+                <span class="dm-status-badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
             </div>
             ${device.description ? `<div class="dm-device-desc">${escapeHtml(device.description)}</div>` : ''}
             <div class="dm-card-meta">${metaItems.join('')}</div>
@@ -776,8 +776,8 @@ async function openScreenshotModal(deviceId) {
         const result = await fetchScreenshot(deviceId);
         const screenSize = result.screen_size ? `${result.screen_size[0]}x${result.screen_size[1]}` : '';
         $('dmScreenshotContent').innerHTML = `
-            <img class="dm-screenshot-img" src="data:image/png;base64,${result.screenshot_base64}" alt="Device screenshot">
-            ${screenSize ? `<div class="dm-screenshot-meta">${screenSize}</div>` : ''}
+            <img class="dm-screenshot-img" src="data:image/png;base64,${escapeAttr(result.screenshot_base64)}" alt="Device screenshot">
+            ${screenSize ? `<div class="dm-screenshot-meta">${escapeHtml(screenSize)}</div>` : ''}
         `;
     } catch (err) {
         $('dmScreenshotContent').innerHTML = `<div class="dm-screenshot-loading">Failed: ${escapeHtml(err.message)}</div>`;
@@ -789,10 +789,9 @@ async function openScreenshotModal(deviceId) {
 // =============================================================================
 
 function escapeHtml(str) {
+    // Shared helper: also escapes quotes
     if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
+    return sharedEscapeHtml(str);
 }
 
 // =============================================================================

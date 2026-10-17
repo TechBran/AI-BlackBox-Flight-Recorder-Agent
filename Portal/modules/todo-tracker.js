@@ -6,7 +6,7 @@
  * Created: 2026-01-09
  */
 
-import { $ } from './core-utils.js';
+import { $, escapeHtml as sharedEscapeHtml, escapeAttr } from './core-utils.js';
 
 // =============================================================================
 // TodoTracker Class
@@ -125,17 +125,17 @@ export class TodoTracker {
         if (this.isCollapsed) {
             // Collapsed view - single line summary
             html = `
-                <div class="todo-collapsed" onclick="window.todoTracker?.toggleCollapse()">
+                <div class="todo-collapsed">
                     <span class="todo-summary-icon">${this.allCompleted ? '✅' : '📋'}</span>
                     <span class="todo-summary-text">${progress.completed}/${progress.total} completed</span>
-                    ${currentTask ? `<span class="todo-current-mini">• ${currentTask.activeForm || currentTask.content}</span>` : ''}
+                    ${currentTask ? `<span class="todo-current-mini">• ${this.escapeHtml(currentTask.activeForm || currentTask.content)}</span>` : ''}
                     <span class="todo-expand-btn">▼</span>
                 </div>
             `;
         } else {
             // Expanded view - full task list
             html = `
-                <div class="todo-header" onclick="window.todoTracker?.toggleCollapse()">
+                <div class="todo-header">
                     <span class="todo-title">📋 Tasks</span>
                     <span class="todo-progress">${progress.completed}/${progress.total}</span>
                     <div class="todo-progress-bar">
@@ -165,7 +165,7 @@ export class TodoTracker {
                     : todo.content;
 
                 html += `
-                    <div class="todo-item ${statusClass}">
+                    <div class="todo-item ${escapeAttr(statusClass)}">
                         <span class="todo-check">${icon}</span>
                         <span class="todo-content">${this.escapeHtml(content)}</span>
                     </div>
@@ -175,6 +175,10 @@ export class TodoTracker {
         }
 
         this.container.innerHTML = html;
+
+        // Toggle via a listener (no inline onclick string in the markup)
+        const toggle = this.container.querySelector('.todo-collapsed, .todo-header');
+        if (toggle) toggle.addEventListener('click', () => this.toggleCollapse());
     }
 
     /**
@@ -253,14 +257,12 @@ export class TodoTracker {
     }
 
     /**
-     * Escape HTML characters
+     * Escape HTML characters (shared core-utils helper; also escapes quotes)
      * @param {string} text - Text to escape
      * @returns {string} Escaped text
      */
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        return sharedEscapeHtml(text);
     }
 }
 
@@ -271,5 +273,5 @@ export class TodoTracker {
 /** Global todo tracker instance */
 export const todoTracker = new TodoTracker();
 
-// Make available globally for onclick handlers
+// Make available globally (console / legacy callers; the panel itself now binds listeners)
 window.todoTracker = todoTracker;

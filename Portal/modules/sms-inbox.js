@@ -3,7 +3,7 @@
  * SMS Inbox — thread list, conversation view, compose, unread badges
  * Works in both web (two-panel) and Android/mobile (full-screen) contexts
  */
-import { $, toast, toastSuccess, toastError } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml } from './core-utils.js';
 import { getOperator } from './state-management.js';
 
 let _pollTimer = null;
@@ -51,9 +51,8 @@ function truncate(str, len = 38) {
 }
 
 function escapeHtml(text) {
-    const d = document.createElement('div');
-    d.textContent = text;
-    return d.innerHTML;
+    // Shared helper: also escapes quotes (used in data-phone / value attributes)
+    return sharedEscapeHtml(text);
 }
 
 const SEND_ICON = `<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;

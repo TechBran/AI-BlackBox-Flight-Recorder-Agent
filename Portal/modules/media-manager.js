@@ -7,7 +7,7 @@
  * Redesigned: 2025-01-25
  */
 
-import { $, toast, toastError } from './core-utils.js';
+import { $, toast, toastError, escapeHtml, escapeAttr } from './core-utils.js';
 
 // =============================================================================
 // State
@@ -106,7 +106,7 @@ async function loadMediaFiles() {
 
     } catch (err) {
         console.error('[MediaManager] Error loading files:', err);
-        list.innerHTML = `<div class="media-error">Failed to load media: ${err.message}</div>`;
+        list.innerHTML = `<div class="media-error">Failed to load media: ${escapeHtml(err.message)}</div>`;
     }
 }
 
@@ -211,7 +211,7 @@ function createMediaListItem(file, index) {
     const icon = getFileIcon(file.type);
     const size = formatFileSize(file.size);
     const date = formatDate(file.modified);
-    const typeClass = `type-${file.type}`;
+    const typeClass = `type-${escapeAttr(file.type)}`;
 
     item.innerHTML = `
         <div class="media-list-header">
@@ -220,7 +220,7 @@ function createMediaListItem(file, index) {
                 <div class="media-list-name" title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</div>
                 <div class="media-list-meta">${size} • ${date}</div>
             </div>
-            <span class="media-list-type ${typeClass}">${file.type}</span>
+            <span class="media-list-type ${typeClass}">${escapeHtml(file.type)}</span>
             <span class="media-list-expand">▼</span>
         </div>
         <div class="media-list-content">
@@ -281,22 +281,17 @@ function toggleExpand(file, item) {
 function renderMediaContent(file, container) {
     container.innerHTML = '';
 
-    const downloadBtn = `<button class="media-download-btn" onclick="window.mediaManagerDownload('${escapeHtml(file.url)}', '${escapeHtml(file.filename)}')">⬇️ Download</button>`;
-
     if (file.type === 'image') {
         container.innerHTML = `
-            <img src="${file.url}" alt="${escapeHtml(file.filename)}" loading="lazy" />
-            ${downloadBtn}
+            <img src="${escapeAttr(file.url)}" alt="${escapeAttr(file.filename)}" loading="lazy" />
         `;
     } else if (file.type === 'video') {
         container.innerHTML = `
-            <video controls autoplay src="${file.url}"></video>
-            ${downloadBtn}
+            <video controls autoplay src="${escapeAttr(file.url)}"></video>
         `;
     } else if (file.type === 'audio') {
         container.innerHTML = `
-            <audio controls autoplay src="${file.url}"></audio>
-            ${downloadBtn}
+            <audio controls autoplay src="${escapeAttr(file.url)}"></audio>
         `;
     } else {
         container.innerHTML = `
@@ -304,9 +299,17 @@ function renderMediaContent(file, container) {
                 <span class="file-icon">📄</span>
                 <span>${escapeHtml(file.filename)}</span>
             </div>
-            ${downloadBtn}
         `;
     }
+
+    // Download button wired with a closure: the old inline onclick put the
+    // filename inside a JS string, where HTML escaping is the wrong context and
+    // a name like x');alert(1)// ran script (P04-media-tasks-fx-web-13).
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'media-download-btn';
+    downloadBtn.textContent = '⬇️ Download';
+    downloadBtn.addEventListener('click', () => downloadFile(file.url, file.filename));
+    container.appendChild(downloadBtn);
 }
 
 /**
@@ -358,9 +361,6 @@ function downloadFile(url, filename) {
     document.body.removeChild(link);
     toast(`Downloading ${filename}`);
 }
-
-// Expose download function globally for onclick handlers
-window.mediaManagerDownload = downloadFile;
 
 // =============================================================================
 // Utility Functions
@@ -418,21 +418,6 @@ function formatDate(timestamp) {
             year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
         });
     }
-}
-
-/**
- * Escape HTML special characters
- * @param {string} str - String to escape
- * @returns {string} Escaped string
- */
-function escapeHtml(str) {
-    if (!str) return '';
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
 }
 
 // =============================================================================

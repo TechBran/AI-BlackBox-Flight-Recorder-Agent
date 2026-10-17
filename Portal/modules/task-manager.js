@@ -7,10 +7,41 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast } from './core-utils.js';
+import { $, toast, escapeHtml, escapeAttr } from './core-utils.js';
 import { getOperator } from './state-management.js';
 import { notifyTaskComplete } from './notifications.js';
 import { taskTypeMeta, isAgentTaskType, truncateText } from './task-ui.js';
+
+// =============================================================================
+// Computer Use screenshot viewer (delegated)
+// =============================================================================
+
+/**
+ * Open a Computer Use result screenshot full-size in a new tab. Delegated on
+ * the document instead of an inline onclick, so it also works for results
+ * restored from history (their markup goes through the sanitizer, which strips
+ * handlers). Only http(s)/same-origin URLs are opened — never javascript:.
+ */
+function openBrowserScreenshot(e) {
+    const img = e.target && e.target.closest
+        ? e.target.closest('img.browser-screenshot, img.browser-gallery-thumb')
+        : null;
+    if (!img) return;
+    const src = img.getAttribute('src');
+    if (!src) return;
+    try {
+        const url = new URL(src, window.location.href);
+        if (url.protocol === 'http:' || url.protocol === 'https:') {
+            window.open(url.href, '_blank');
+        }
+    } catch (_) {
+        // unparseable URL: ignore the click
+    }
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('click', openBrowserScreenshot);
+}
 
 // =============================================================================
 // TaskManager Class
@@ -403,7 +434,7 @@ export class TaskManager {
         }
 
         const imageHtml = imageUrls.map(imgUrl =>
-            `<img src="${imgUrl}" alt="Generated Image" class="generated-image" style="max-width: 100%; border-radius: 8px; margin: 4px 0;">`
+            `<img src="${escapeAttr(imgUrl)}" alt="Generated Image" class="generated-image" style="max-width: 100%; border-radius: 8px; margin: 4px 0;">`
         ).join('\n');
 
         // Try to find and replace the placeholder bubble
@@ -449,7 +480,7 @@ export class TaskManager {
     displayVideoResult(url, taskId = null) {
         // Video HTML - preload metadata shows first frame as preview, no autoplay
         const videoHtml = `
-            <video controls preload="metadata" src="${url}" class="generated-video" style="max-width: 100%; border-radius: 8px; margin: 8px 0;"></video>
+            <video controls preload="metadata" src="${escapeAttr(url)}" class="generated-video" style="max-width: 100%; border-radius: 8px; margin: 8px 0;"></video>
         `;
 
         let targetBubble = null;
@@ -611,22 +642,24 @@ export class TaskManager {
         let html = `<div class="browser-result">`;
         html += `<div class="browser-result-header">`;
         html += `<span class="browser-badge"><svg class="browser-badge-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Computer Use</span>`;
-        html += `<span style="font-size:0.8rem;opacity:0.8">${steps} steps</span>`;
+        html += `<span style="font-size:0.8rem;opacity:0.8">${escapeHtml(steps)} steps</span>`;
         html += `</div>`;
 
-        // Final screenshot
+        // Final screenshot (opened full-size by openBrowserScreenshot, the
+        // delegated click handler at the top of this module — no inline onclick)
         if (finalScreenshot) {
-            html += `<img class="browser-screenshot" src="${finalScreenshot}" alt="Final browser screenshot" onclick="window.open('${finalScreenshot}', '_blank')" />`;
+            html += `<img class="browser-screenshot" src="${escapeAttr(finalScreenshot)}" alt="Final browser screenshot" />`;
         }
 
-        // Summary text
-        html += `<div class="browser-result-summary">${resultText}</div>`;
+        // Summary text — the CU model's free-text summary of whatever pages it
+        // visited: untrusted, so escaped (P04-media-tasks-fx-web-04)
+        html += `<div class="browser-result-summary">${escapeHtml(resultText)}</div>`;
 
         // Screenshot gallery (if more than 1)
         if (screenshots.length > 1) {
             html += `<div class="browser-gallery">`;
             screenshots.forEach((url, i) => {
-                html += `<img class="browser-gallery-thumb" src="${url}" alt="Step ${i}" onclick="window.open('${url}', '_blank')" />`;
+                html += `<img class="browser-gallery-thumb" src="${escapeAttr(url)}" alt="Step ${i}" />`;
             });
             html += `</div>`;
         }
@@ -635,7 +668,7 @@ export class TaskManager {
         html += `<div class="browser-steps-info">`;
         html += `<span>${screenshots.length} screenshot${screenshots.length !== 1 ? 's' : ''}</span>`;
         if (tokens.input || tokens.output) {
-            html += `<span>${(tokens.input || 0).toLocaleString()} in / ${(tokens.output || 0).toLocaleString()} out tokens</span>`;
+            html += `<span>${escapeHtml((tokens.input || 0).toLocaleString())} in / ${escapeHtml((tokens.output || 0).toLocaleString())} out tokens</span>`;
         }
         html += `</div>`;
         html += `</div>`;
@@ -952,7 +985,7 @@ function showVideoPlaceholder(taskId, prompt, options = {}) {
 
     const textSpan = document.createElement('span');
     textSpan.className = 'generating-message';
-    textSpan.innerHTML = `<span class="video-gen-icon">🎬</span> Generating video <span class="video-gen-info">(${infoStr})</span>`;
+    textSpan.innerHTML = `<span class="video-gen-icon">🎬</span> Generating video <span class="video-gen-info">(${escapeHtml(infoStr)})</span>`;
 
     const dots = document.createElement('span');
     dots.className = 'thinking-dots';
@@ -999,7 +1032,7 @@ function showMusicPlaceholder(taskId, prompt, sampleCount = 1) {
 
     const textSpan = document.createElement('span');
     textSpan.className = 'generating-message';
-    textSpan.innerHTML = `<span class="music-gen-icon">🎵</span> Generating music <span class="music-gen-info">(${variationsStr})</span>`;
+    textSpan.innerHTML = `<span class="music-gen-icon">🎵</span> Generating music <span class="music-gen-info">(${escapeHtml(variationsStr)})</span>`;
 
     const dots = document.createElement('span');
     dots.className = 'thinking-dots';

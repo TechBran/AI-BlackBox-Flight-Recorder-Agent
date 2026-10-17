@@ -16,7 +16,7 @@
  * - Session snapshot to BlackBox on disconnect
  */
 
-import { $, toast } from './core-utils.js';
+import { $, toast, escapeHtml } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
 import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
@@ -999,7 +999,7 @@ function handleMessage(msg) {
                 if (transcriptEl) {
                     const userEl = document.createElement('div');
                     userEl.className = 'user-turn';
-                    userEl.innerHTML = `<strong>You:</strong> ${userText}`;
+                    userEl.innerHTML = `<strong>You:</strong> ${escapeHtml(userText)}`;
                     transcriptEl.appendChild(userEl);
                     transcriptEl.scrollTop = transcriptEl.scrollHeight;
                 }
@@ -1459,7 +1459,7 @@ export function initGrokLiveUI(config) {
                 if (transcriptEl) {
                     const userEl = document.createElement('div');
                     userEl.className = 'user-turn';
-                    userEl.innerHTML = `<strong>You:</strong> ${text}`;
+                    userEl.innerHTML = `<strong>You:</strong> ${escapeHtml(text)}`;
                     transcriptEl.appendChild(userEl);
                     transcriptEl.scrollTop = transcriptEl.scrollHeight;
                 }
