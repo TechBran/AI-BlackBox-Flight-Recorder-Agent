@@ -18,6 +18,7 @@ import subprocess
 import time
 import uuid
 from datetime import datetime
+from html import escape as html_escape
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from urllib.parse import urlsplit
@@ -388,7 +389,13 @@ def register_agent_app(session_id: str, operator: str, app_info: Dict):
 
 
 def ansi_to_html(text: str) -> str:
-    """Convert ANSI escape codes to HTML spans with CSS classes."""
+    """Convert ANSI escape codes to HTML spans with CSS classes.
+
+    The PTY text is escaped FIRST (audit M3 U20): terminal output is whatever
+    the agent, a tool or a fetched file printed, and markup in it must reach
+    the browser as text. Escaping leaves ESC, '[', digits and letters alone,
+    so the SGR codes below still match; only they become markup.
+    """
     # Color mappings
     colors = {
         '30': 'black', '31': 'red', '32': 'green', '33': 'yellow',
@@ -398,7 +405,7 @@ def ansi_to_html(text: str) -> str:
         '96': 'bright-cyan', '97': 'bright-white'
     }
 
-    result = text
+    result = html_escape(text, quote=True)
     # Convert color codes to spans
     for code, color in colors.items():
         result = re.sub(rf'\x1b\[{code}m', f'<span class="ansi-{color}">', result)
