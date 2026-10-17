@@ -32,7 +32,7 @@ from fastapi import Depends, WebSocket, WebSocketDisconnect, Request, Form
 from fastapi.responses import Response, PlainTextResponse
 
 from Orchestrator.checkpoint import app
-from Orchestrator.utils.paths import resolve
+from Orchestrator.utils.paths import UploadNotFoundError, UploadPathError, resolve_upload_path
 from Orchestrator.volume import now_utc_iso
 from Orchestrator.config import (
     PHONE_ENABLED,
@@ -1739,14 +1739,15 @@ async def inject_audio_into_call(audio_request: InjectAudioRequest):
             if target_phone_session and target_phone_session.status == PhoneStatus.BRIDGED:
                 # Inject into CLI session
                 try:
-                    # Read audio file
-                    file_path = audio_request.file_path
-                    if not os.path.exists(file_path):
-                        # Try relative to working directory
-                        file_path = str(resolve(audio_request.file_path.lstrip('/')))
-
-                    if not os.path.exists(file_path):
+                    # Read audio file -- a WAV inside Portal/uploads only (the
+                    # request body names it, and its audio leaves on the call).
+                    try:
+                        file_path = str(resolve_upload_path(audio_request.file_path,
+                                                            allowed_exts={".wav"}))
+                    except UploadNotFoundError:
                         return {"error": f"Audio file not found: {audio_request.file_path}"}
+                    except UploadPathError as e:
+                        return {"error": f"Audio file refused: {e}"}
 
                     # Read WAV file
                     with wave.open(file_path, 'rb') as wav:

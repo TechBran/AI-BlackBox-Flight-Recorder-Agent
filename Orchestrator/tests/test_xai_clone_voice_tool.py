@@ -23,12 +23,25 @@ def _ctx():
     return ToolContext(operator="TestOp", base_url="http://localhost:9091")
 
 
+@pytest.fixture
+def uploads_root(tmp_path, monkeypatch):
+    """Audio paths are contained to Portal/uploads (audit rank 16): point
+    BLACKBOX_ROOT at a tmp box and return its uploads folder."""
+    from Orchestrator.utils import paths
+    uploads = tmp_path / "box" / "Portal" / "uploads"
+    uploads.mkdir(parents=True)
+    monkeypatch.setenv("BLACKBOX_ROOT", str(tmp_path / "box"))
+    paths.blackbox_root.cache_clear()
+    yield uploads
+    paths.blackbox_root.cache_clear()
+
+
 def test_tool_is_in_catalog():
     assert any(t["name"] == "xai_clone_voice" for t in registry.load_canonical())
 
 
-def test_refuses_without_consent_and_never_calls_provider(execute, monkeypatch, tmp_path):
-    sample = tmp_path / "s.mp3"
+def test_refuses_without_consent_and_never_calls_provider(execute, monkeypatch, uploads_root):
+    sample = uploads_root / "s.mp3"
     sample.write_bytes(b"ID3fakeaudio")
     monkeypatch.setattr(
         xv, "clone_voice",
@@ -39,18 +52,18 @@ def test_refuses_without_consent_and_never_calls_provider(execute, monkeypatch, 
     assert "confirm" in r.result.lower()
 
 
-def test_refuses_missing_audio_file(execute, monkeypatch):
+def test_refuses_missing_audio_file(execute, monkeypatch, uploads_root):
     monkeypatch.setattr(
         xv, "clone_voice",
         lambda *a, **k: pytest.fail("clone_voice called despite missing file"))
     r = asyncio.run(execute(
-        {"name": "V", "audio_path": "/nope/missing.mp3", "confirm_consent": True}, _ctx()))
+        {"name": "V", "audio_path": "/ui/uploads/missing.mp3", "confirm_consent": True}, _ctx()))
     assert r.success is False
     assert "not found" in r.result.lower()
 
 
-def test_clones_with_consent(execute, monkeypatch, tmp_path):
-    sample = tmp_path / "s.mp3"
+def test_clones_with_consent(execute, monkeypatch, uploads_root):
+    sample = uploads_root / "s.mp3"
     sample.write_bytes(b"ID3fakeaudio")
     seen = {}
 
@@ -68,8 +81,8 @@ def test_clones_with_consent(execute, monkeypatch, tmp_path):
     assert seen == {"name": "My Grok Voice", "audio_path": str(sample), "description": "warm"}
 
 
-def test_provider_error_returns_failure_not_exception(execute, monkeypatch, tmp_path):
-    sample = tmp_path / "s.mp3"
+def test_provider_error_returns_failure_not_exception(execute, monkeypatch, uploads_root):
+    sample = uploads_root / "s.mp3"
     sample.write_bytes(b"x")
 
     def boom(*a, **k):

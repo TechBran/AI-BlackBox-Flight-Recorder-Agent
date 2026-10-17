@@ -42,6 +42,9 @@ from Orchestrator.secret_redaction import response_error, upstream_error
 from Orchestrator.models import TaskType
 from Orchestrator.state import get_operator_preference, save_operator_preferences, set_operator_preference, OPERATOR_PREFERENCES
 from Orchestrator.tasks import create_task
+from Orchestrator.utils.paths import (
+    AUDIO_EXTS, IMAGE_EXTS, INLINE_MAX_BYTES, UploadNotFoundError, UploadPathError, resolve_upload_path,
+)
 
 
 @app.get("/operator/preferences/{operator}")
@@ -1068,7 +1071,6 @@ async def generate_video(inp: GenIn):
     - image_url: URL path like /ui/uploads/image.png (will be converted to base64)
     """
     import base64
-    from pathlib import Path
 
     try:
         # Prepare image data if provided
@@ -1086,44 +1088,37 @@ async def generate_video(inp: GenIn):
         elif inp.image_url:
             source_image_url = inp.image_url
 
-            # Clean URL - remove host prefix if present
-            clean_url = inp.image_url
-            if clean_url.startswith("http://") or clean_url.startswith("https://"):
-                from urllib.parse import urlparse
-                parsed = urlparse(clean_url)
-                clean_url = parsed.path
+            # Resolve /ui/uploads/file.png (any host) to Portal/uploads/file.png,
+            # contained: the bytes are uploaded to Veo, so '/ui/../.env' and
+            # friends must never be read.
+            try:
+                file_path = resolve_upload_path(inp.image_url, allowed_exts=IMAGE_EXTS,
+                                                max_bytes=INLINE_MAX_BYTES)
+            except UploadNotFoundError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            except UploadPathError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid image_url: {e}")
+            # Read and encode file
+            with open(file_path, "rb") as f:
+                image_bytes = f.read()
+            image_b64 = base64.b64encode(image_bytes).decode()
 
-            # Resolve to file path: /ui/uploads/file.png -> Portal/uploads/file.png
-            if clean_url.startswith("/ui/"):
-                relative_path = clean_url.replace("/ui/", "")
-                file_path = Path("Portal") / relative_path
+            # Determine MIME type from extension
+            ext = file_path.suffix.lower()
+            mime_map = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".webp": "image/webp"
+            }
+            mime_type = mime_map.get(ext, "image/jpeg")
 
-                if not file_path.exists():
-                    raise HTTPException(status_code=404, detail=f"Image file not found: {clean_url}")
-
-                # Read and encode file
-                with open(file_path, "rb") as f:
-                    image_bytes = f.read()
-                image_b64 = base64.b64encode(image_bytes).decode()
-
-                # Determine MIME type from extension
-                ext = file_path.suffix.lower()
-                mime_map = {
-                    ".png": "image/png",
-                    ".jpg": "image/jpeg",
-                    ".jpeg": "image/jpeg",
-                    ".gif": "image/gif",
-                    ".webp": "image/webp"
-                }
-                mime_type = mime_map.get(ext, "image/jpeg")
-
-                image_data = {
-                    "data": image_b64,
-                    "mime_type": mime_type
-                }
-                print(f"[VIDEO] Converted image_url to base64: {clean_url} ({len(image_bytes)} bytes, {mime_type})")
-            else:
-                raise HTTPException(status_code=400, detail=f"Invalid image_url format: {inp.image_url}")
+            image_data = {
+                "data": image_b64,
+                "mime_type": mime_type
+            }
+            print(f"[VIDEO] Converted image_url to base64: {inp.image_url} ({len(image_bytes)} bytes, {mime_type})")
 
         # Parse duration - support both 'duration' (int) and legacy 'durationSeconds' (str)
         duration = inp.duration or 8
@@ -2237,6 +2232,19 @@ async def generate_elevenlabs_sound_effect(body: dict = Body(...)):
     return {"status": "success", "audio_url": audio_url, "size_bytes": len(mp3_bytes)}
 
 
+def _contained_audio_path(audio_path: str) -> str:
+    """400 unless ``audio_path`` names an audio file inside Portal/uploads.
+
+    Both transform routes upload the file to ElevenLabs and are reachable from
+    the model (elevenlabs_voice_changer / elevenlabs_isolate_voice), so an
+    existence check alone let any readable file leave the box.
+    """
+    try:
+        return str(resolve_upload_path(audio_path, allowed_exts=AUDIO_EXTS))
+    except UploadPathError as e:
+        raise HTTPException(status_code=400, detail=f"Audio file refused: {e}")
+
+
 @app.post("/elevenlabs/voice-changer")
 async def elevenlabs_voice_changer(body: dict = Body(...)):
     """Re-voice an existing recording into a target ElevenLabs voice (speech-to-speech).
@@ -2255,8 +2263,7 @@ async def elevenlabs_voice_changer(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail="`audio_path` is required.")
     if not target_voice:
         raise HTTPException(status_code=400, detail="`target_voice` is required.")
-    if not os.path.exists(audio_path):
-        raise HTTPException(status_code=400, detail=f"Audio file not found: {audio_path}")
+    audio_path = _contained_audio_path(audio_path)
 
     try:
         audio_bytes = el_transform.change_voice(
@@ -2306,8 +2313,7 @@ async def elevenlabs_isolate(body: dict = Body(...)):
     audio_path = (body.get("audio_path") or "").strip()
     if not audio_path:
         raise HTTPException(status_code=400, detail="`audio_path` is required.")
-    if not os.path.exists(audio_path):
-        raise HTTPException(status_code=400, detail=f"Audio file not found: {audio_path}")
+    audio_path = _contained_audio_path(audio_path)
 
     try:
         audio_bytes = el_transform.isolate(audio_path)

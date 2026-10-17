@@ -8,6 +8,7 @@ prefix).
 import aiohttp
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.utils.paths import AUDIO_EXTS, UploadPathError, resolve_upload_path
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -18,6 +19,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(False, "`audio_path` is required (the recording to re-voice).")
     if not target_voice:
         return ToolResult(False, "`target_voice` is required (e.g. 'elevenlabs:<id>').")
+    # The recording is uploaded to ElevenLabs; refuse anything but an audio
+    # upload up front (the route re-checks).
+    try:
+        resolve_upload_path(audio_path, allowed_exts=AUDIO_EXTS)
+    except UploadPathError as e:
+        return ToolResult(False, f"Recording refused (must be an audio upload): {e}")
 
     payload = {
         "audio_path": audio_path,

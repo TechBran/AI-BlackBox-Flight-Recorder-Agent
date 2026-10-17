@@ -7,6 +7,7 @@ never call /mint afterward; that would duplicate). The plain Whisper path
 (no provider / no diarize / no mint) is byte-for-byte unchanged for existing callers.
 """
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.utils.paths import AUDIO_EXTS, UploadNotFoundError, UploadPathError, resolve_upload_path
 
 _CONTENT_TYPES = {
     ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
@@ -68,11 +69,16 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     if not audio_path:
         return ToolResult(False, "audio_path is required")
 
+    # The audio is uploaded to the STT provider: only an audio file inside
+    # Portal/uploads (a /ui/uploads URL or a session-upload path) is accepted.
     try:
-        from pathlib import Path
-        audio_file = Path(audio_path)
-        if not audio_file.exists():
-            return ToolResult(False, f"Audio file not found: {audio_path}")
+        audio_file = resolve_upload_path(audio_path, allowed_exts=AUDIO_EXTS)
+    except UploadNotFoundError:
+        return ToolResult(False, f"Audio file not found: {audio_path}")
+    except UploadPathError as e:
+        return ToolResult(False, f"Audio file refused (must be an audio upload): {e}")
+
+    try:
 
         provider = params.get("provider")
         diarize = params.get("diarize")

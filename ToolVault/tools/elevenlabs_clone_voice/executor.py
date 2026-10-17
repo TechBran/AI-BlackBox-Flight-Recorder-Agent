@@ -2,11 +2,12 @@
 
 Calls ``Orchestrator.elevenlabs.voices.clone_instant`` DIRECTLY (in-process, no
 HTTP). The consent gate lives here: without ``confirm_consent=true`` we refuse and
-no voice is ever created. Each ``audio_paths`` entry must exist on disk.
+no voice is ever created. Each ``audio_paths`` entry must be an audio file inside
+Portal/uploads (a /ui/uploads URL or a session-upload path): the samples are
+uploaded to ElevenLabs, so a model-supplied path may not name anything else.
 """
-import os
-
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.utils.paths import AUDIO_EXTS, UploadNotFoundError, UploadPathError, resolve_upload_path
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -28,15 +29,22 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             "right to use it. Please confirm.",
         )
 
-    # Every sample path must exist on disk.
+    # Every sample must be a contained audio upload.
+    if isinstance(audio_paths, str):
+        audio_paths = [audio_paths]
+    samples = []
     for path in audio_paths:
-        if not path or not os.path.exists(path):
+        try:
+            samples.append(str(resolve_upload_path(path, allowed_exts=AUDIO_EXTS)))
+        except UploadNotFoundError:
             return ToolResult(False, f"Audio file not found: {path}")
+        except UploadPathError as exc:
+            return ToolResult(False, f"Audio sample refused (must be an audio upload): {exc}")
 
     from Orchestrator.elevenlabs import voices
 
     try:
-        result = voices.clone_instant(name, audio_paths, description=description)
+        result = voices.clone_instant(name, samples, description=description)
     except RuntimeError as exc:
         return ToolResult(False, str(exc))
 

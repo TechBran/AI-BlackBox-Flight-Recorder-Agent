@@ -91,6 +91,7 @@ import json
 import logging
 import os
 import re
+import stat
 import sys
 import uuid
 from collections import OrderedDict
@@ -433,6 +434,13 @@ def _read_device_registry():
 # tools. Self-contained here so it works regardless of how the server is launched.
 sys.path.insert(0, str(BLACKBOX_ROOT))
 
+# Upload-path containment (stdlib only -- safe in the lean venv). Shared with
+# the Orchestrator so both sides refuse the same traversal spellings.
+from Orchestrator.utils.paths import (  # noqa: E402
+    AUDIO_EXTS, DEFAULT_MAX_UPLOAD_BYTES, UploadNotFoundError, UploadPathError,
+    resolve_upload_path,
+)
+
 # Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
 from web_tools import perform_web_fetch
@@ -508,6 +516,32 @@ def _error(code: str, tool: str, message: str) -> CallToolResult:
         content=[TextContent(type="text", text=json.dumps(body, indent=2))],
         isError=True,
     )
+
+
+def _local_audio_file(value) -> Path:
+    """speech_to_text on stdio: an upload reference, or any regular local audio
+    file (the stdio caller is the trusted local CLI with its own filesystem
+    access). Raises UploadPathError / UploadNotFoundError like
+    resolve_upload_path, which handles everything but an absolute path."""
+    if not isinstance(value, str) or not value.startswith("/") or value.startswith("/ui/"):
+        return resolve_upload_path(value, allowed_exts=AUDIO_EXTS,
+                                   root=BLACKBOX_ROOT / "Portal" / "uploads")
+    if "\x00" in value:
+        raise UploadPathError("NUL byte in audio path")
+    path = Path(value)
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        raise UploadNotFoundError(f"audio file not found: {value!r}") from None
+    except OSError:
+        raise UploadPathError(f"unreadable audio path: {value!r}") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise UploadPathError(f"not a regular file: {value!r}")
+    if path.suffix.lower() not in AUDIO_EXTS:
+        raise UploadPathError(f"not an audio file: {value!r}")
+    if st.st_size > DEFAULT_MAX_UPLOAD_BYTES:
+        raise UploadPathError(f"audio file is larger than {DEFAULT_MAX_UPLOAD_BYTES} bytes")
+    return path
 
 
 def load_snapshot_index(force_refresh: bool = False) -> Dict:
@@ -981,22 +1015,15 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             if ".." in url:
                 return _error("invalid_arguments", name, "Illegal path component in url")
 
-            # Resolve to file path
-            # URL format: /ui/uploads/filename.ext -> Portal/uploads/filename.ext
-            if url.startswith("/ui/"):
-                relative_path = url[len("/ui/"):]
-                file_path = (BLACKBOX_ROOT / "Portal" / relative_path).resolve()
-                # Defense in depth: the resolved path MUST stay under Portal/.
-                _portal_root = (BLACKBOX_ROOT / "Portal").resolve()
-                if _portal_root not in file_path.parents and file_path != _portal_root:
-                    return _error("invalid_arguments", name, "Resolved path escapes Portal/")
-            else:
-                return _error("invalid_arguments", name, f"Invalid URL format: {url}")
-
-            if not file_path.exists():
-                # #2A: never echo an absolute server path to a remote caller.
-                return _error("not_found", name,
-                              f"File not found: {url if _scope is not None else file_path}")
+            # Resolve to file path through the shared upload guard:
+            # /ui/uploads/filename.ext -> Portal/uploads/filename.ext, and it
+            # must stay there (no '..', no symlink escape, regular files only).
+            try:
+                file_path = resolve_upload_path(url, root=BLACKBOX_ROOT / "Portal" / "uploads")
+            except UploadNotFoundError:
+                return _error("not_found", name, f"File not found: {url}")
+            except UploadPathError as e:
+                return _error("invalid_arguments", name, f"Invalid URL: {e}")
 
             # Detect media type
             suffix = file_path.suffix.lower()
@@ -1198,9 +1225,23 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 # stream a local audio file -- so this stays a dedicated branch.
                 audio_path = arguments["audio_path"]
 
-                audio_file_path = Path(audio_path)
-                if not audio_file_path.exists():
+                # The file's bytes go to the STT provider. A token-bound (HTTP,
+                # Funnel-exposed) caller has no files of its own on this box, so
+                # it may only name an audio upload -- a /ui/uploads URL or a path
+                # inside Portal/uploads (sessions/ and terminal/ included). The
+                # stdio caller is the local, trusted CLI with its own filesystem
+                # access: any local path, but still a regular audio file.
+                try:
+                    if _current_bound_operator() is not None:
+                        audio_file_path = resolve_upload_path(
+                            audio_path, allowed_exts=AUDIO_EXTS,
+                            root=BLACKBOX_ROOT / "Portal" / "uploads")
+                    else:
+                        audio_file_path = _local_audio_file(audio_path)
+                except UploadNotFoundError:
                     return _error("not_found", name, f"Audio file not found: {audio_path}")
+                except UploadPathError as e:
+                    return _error("invalid_arguments", name, f"Audio file refused: {e}")
 
                 # Determine content type from extension
                 ext = audio_file_path.suffix.lower()

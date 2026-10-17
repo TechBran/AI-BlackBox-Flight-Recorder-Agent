@@ -1,5 +1,6 @@
 """Executor for analyze_audio (migrated from blackbox_tools._execute_analyze_audio)."""
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.utils.paths import AUDIO_EXTS, UploadPathError, resolve_upload_path
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -9,6 +10,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     if not file_path:
         return ToolResult(False, "file_path is required")
+    # The file is uploaded to Gemini; refuse anything but an audio upload up
+    # front (the route re-checks).
+    try:
+        resolve_upload_path(file_path, allowed_exts=AUDIO_EXTS)
+    except UploadPathError as e:
+        return ToolResult(False, f"Audio file refused (must be an audio upload): {e}")
 
     try:
         import aiohttp

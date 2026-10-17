@@ -2,12 +2,13 @@
 
 Calls ``Orchestrator.xai_voices.clone_voice`` DIRECTLY (in-process, no HTTP).
 The consent gate lives here: without ``confirm_consent=true`` we refuse and no
-voice is ever created. ``audio_path`` must exist on disk (ONE clip, <=120s —
-xAI enforces the duration server-side).
+voice is ever created. ``audio_path`` must be ONE audio clip inside
+Portal/uploads (a /ui/uploads URL or a session-upload path; <=120s — xAI
+enforces the duration server-side): the clip is uploaded to xAI, so a
+model-supplied path may not name anything else.
 """
-import os
-
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.utils.paths import AUDIO_EXTS, UploadNotFoundError, UploadPathError, resolve_upload_path
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -29,8 +30,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             "right to use it. Please confirm.",
         )
 
-    if not os.path.exists(audio_path):
+    try:
+        audio_path = str(resolve_upload_path(audio_path, allowed_exts=AUDIO_EXTS))
+    except UploadNotFoundError:
         return ToolResult(False, f"Audio file not found: {audio_path}")
+    except UploadPathError as exc:
+        return ToolResult(False, f"Audio sample refused (must be an audio upload): {exc}")
 
     import asyncio
 

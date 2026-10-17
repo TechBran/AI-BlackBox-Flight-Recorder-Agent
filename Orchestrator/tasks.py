@@ -50,6 +50,7 @@ from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator import tool_outcomes
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.secret_redaction import redact, response_error
+from Orchestrator.utils.paths import AUDIO_EXTS, IMAGE_EXTS, INLINE_MAX_BYTES, UploadPathError, resolve_upload_path
 # NOTE: call_imagen, call_google_tts_synthesize, call_gemini_tts, call_lyria_music
 # are imported lazily inside process_* functions to avoid circular imports
 # NOTE: call_openai, call_anthropic, call_gemini are imported lazily inside process_chat_task
@@ -1066,22 +1067,13 @@ def process_video_generation(task: Task):
         if image_url:
             print(f"[WORKER] Image-to-video mode via URL: {image_url}")
 
-            # Clean URL - remove host prefix if present
-            clean_url = image_url
-            if clean_url.startswith("http://") or clean_url.startswith("https://"):
-                from urllib.parse import urlparse
-                parsed = urlparse(clean_url)
-                clean_url = parsed.path
-
-            # Resolve to file path
-            if clean_url.startswith("/ui/"):
-                relative_path = clean_url.replace("/ui/", "")
-                file_path = Path("Portal") / relative_path
-            else:
-                raise Exception(f"Invalid image URL format: {image_url}")
-
-            if not file_path.exists():
-                raise Exception(f"Image file not found: {file_path}")
+            # Model-supplied: contain it to Portal/uploads before reading, since
+            # the bytes go to Veo ('/ui/../.env' used to ship the env file).
+            try:
+                file_path = resolve_upload_path(image_url, allowed_exts=IMAGE_EXTS,
+                                                max_bytes=INLINE_MAX_BYTES)
+            except UploadPathError as e:
+                raise Exception(f"Invalid image_url: {e}") from None
 
             # Read and encode image
             import base64
@@ -1301,10 +1293,13 @@ def process_audio_analysis(task: Task):
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=400, detail="GOOGLE_API_KEY not configured")
     
-    # Step 1: Upload audio file to Gemini Files API
-    file_path = Path(task.input_file)
-    if not file_path.exists():
-        raise Exception(f"Audio file not found: {task.input_file}")
+    # Step 1: Upload audio file to Gemini Files API. input_file came from a
+    # request body (/analyze/audio); re-contain it here too, since a queued row
+    # may predate the route-level check.
+    try:
+        file_path = resolve_upload_path(task.input_file, allowed_exts=AUDIO_EXTS)
+    except UploadPathError as e:
+        raise Exception(f"Audio file refused: {e}") from None
     
     print(f"[WORKER] Uploading audio file to Gemini Files API...")
     

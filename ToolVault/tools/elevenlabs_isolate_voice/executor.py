@@ -6,6 +6,7 @@ and saves the result in seconds, returning the audio_url directly.
 import aiohttp
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult
+from Orchestrator.utils.paths import AUDIO_EXTS, UploadPathError, resolve_upload_path
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -13,6 +14,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     audio_path = (params.get("audio_path") or "").strip()
     if not audio_path:
         return ToolResult(False, "`audio_path` is required (the recording to clean).")
+    # The recording is uploaded to ElevenLabs; refuse anything but an audio
+    # upload up front (the route re-checks).
+    try:
+        resolve_upload_path(audio_path, allowed_exts=AUDIO_EXTS)
+    except UploadPathError as e:
+        return ToolResult(False, f"Recording refused (must be an audio upload): {e}")
 
     payload = {"audio_path": audio_path, "operator": ctx.operator}
 

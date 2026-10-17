@@ -20,7 +20,10 @@ from typing import Dict, Any, Optional, List
 import requests
 
 from Orchestrator.utils.async_helpers import run_blocking
-from Orchestrator.utils.paths import blackbox_root
+from Orchestrator.utils.paths import (
+    DOC_EXTS, IMAGE_EXTS, INLINE_MAX_BYTES, MEDIA_EXTS, UploadNotFoundError, UploadPathError,
+    blackbox_root, resolve_upload_path,
+)
 
 # External library imports
 from fastapi import HTTPException, WebSocket, Body, UploadFile, File, Form, Request
@@ -132,6 +135,23 @@ def _take_turn_location(operator: str) -> Optional[dict]:
             return None
         return loc
     except Exception:
+        return None
+
+
+# -----------------------------------------------------------------------------
+# Containment for every path a chat message part or a model tool call names
+# (audit 2026-10-09 rank 16). Each attachment / reference-image loader below
+# used to join the value onto a CWD-relative Path("Portal") — or take an
+# absolute path verbatim — then base64 the bytes into a third-party request.
+# Now they all ask resolve_upload_path() and treat a refusal exactly like the
+# old "file does not exist" branch (pass the part through / skip it).
+# -----------------------------------------------------------------------------
+def _resolve_attachment(url, allowed_exts) -> Optional[Path]:
+    """The contained upload ``url`` names, or None (refused or missing)."""
+    try:
+        return resolve_upload_path(url, allowed_exts=allowed_exts, max_bytes=INLINE_MAX_BYTES)
+    except UploadPathError as e:
+        print(f"[ATTACH] Not loading {str(url)[:120]!r}: {e}")
         return None
 
 
@@ -342,9 +362,8 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                         # Handle images - convert local paths to base64 data URLs
                         url = part["image_url"]["url"]
                         try:
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 # Determine MIME type
                                 if suffix in [".jpg", ".jpeg"]:
@@ -386,9 +405,8 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                         # For OpenAI, extract text from documents and append as text
                         url = part["document_url"]["url"]
                         try:
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".txt":
                                     text_content = local_path.read_text(encoding='utf-8')
@@ -609,10 +627,8 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     elif part.get("type") == "image_url":
                         url = part["image_url"]["url"]
                         try:
-                            # Corrected path logic
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            if local_path is not None:
                                 media_type = "image/jpeg" if local_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                                 img_bytes = local_path.read_bytes()
                                 base64_image = base64.b64encode(img_bytes).decode("utf-8")
@@ -633,9 +649,8 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                         # Anthropic supports PDF documents
                         url = part["document_url"]["url"]
                         try:
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".pdf":
                                     doc_bytes = local_path.read_bytes()
@@ -755,11 +770,9 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     reference_image_data = []
                     if reference_images:
                         import base64 as b64
-                        from pathlib import Path as P
                         for img_url in reference_images[:14]:  # Max 14 images
-                            clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
-                            file_path = P("Portal") / clean_url
-                            if file_path.exists():
+                            file_path = _resolve_attachment(img_url, IMAGE_EXTS)
+                            if file_path is not None:
                                 with open(file_path, "rb") as f:
                                     img_b64 = b64.b64encode(f.read()).decode()
                                 ext = file_path.suffix.lower()
@@ -848,10 +861,8 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                         image_data = None
                         if image_url:
                             import base64 as b64
-                            from pathlib import Path
-                            clean_url = image_url.replace("/ui/", "") if image_url.startswith("/ui/") else image_url
-                            file_path = Path("Portal") / clean_url
-                            if file_path.exists():
+                            file_path = _resolve_attachment(image_url, IMAGE_EXTS)
+                            if file_path is not None:
                                 with open(file_path, "rb") as f:
                                     image_b64 = b64.b64encode(f.read()).decode()
                                 ext = file_path.suffix.lower()
@@ -1253,10 +1264,8 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                         media_key = part.get("type") # "image_url", "video_url", "audio_url", or "document_url"
                         url = part[media_key]["url"]
                         try:
-                            # Corrected path logic
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, MEDIA_EXTS)
+                            if local_path is not None:
                                 media_bytes = local_path.read_bytes()
 
                                 # --- NEW ROBUST MIME TYPE LOGIC ---
@@ -1407,11 +1416,9 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                     reference_image_data = []
                     if reference_images:
                         import base64 as b64
-                        from pathlib import Path as P
                         for img_url in reference_images[:14]:  # Max 14 images
-                            clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
-                            file_path = P("Portal") / clean_url
-                            if file_path.exists():
+                            file_path = _resolve_attachment(img_url, IMAGE_EXTS)
+                            if file_path is not None:
                                 with open(file_path, "rb") as f:
                                     img_b64 = b64.b64encode(f.read()).decode()
                                 ext = file_path.suffix.lower()
@@ -1494,10 +1501,8 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                         image_data = None
                         if image_url:
                             import base64 as b64
-                            from pathlib import Path
-                            clean_url = image_url.replace("/ui/", "") if image_url.startswith("/ui/") else image_url
-                            file_path = Path("Portal") / clean_url
-                            if file_path.exists():
+                            file_path = _resolve_attachment(image_url, IMAGE_EXTS)
+                            if file_path is not None:
                                 with open(file_path, "rb") as f:
                                     image_b64 = b64.b64encode(f.read()).decode()
                                 ext = file_path.suffix.lower()
@@ -1814,15 +1819,10 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                         # Try to load and convert to base64
                         local_path = None
                         try:
-                            # Handle /ui/ paths
-                            if "/ui/" in url:
-                                relative_path = url.split("/ui/", 1)[-1]
-                                local_path = Path("Portal") / relative_path
-                            # Handle absolute paths
-                            elif url.startswith("/"):
-                                local_path = Path(url)
+                            # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
+                            local_path = _resolve_attachment(url, IMAGE_EXTS)
 
-                            if local_path and local_path.exists():
+                            if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix in [".jpg", ".jpeg"]:
                                     mime_type = "image/jpeg"
@@ -1866,9 +1866,8 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                         # For xAI, extract text from documents and append as text
                         url = part["document_url"]["url"]
                         try:
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".txt":
                                     text_content = local_path.read_text(encoding='utf-8')
@@ -2103,15 +2102,10 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                         # Try to load and convert to base64
                         local_path = None
                         try:
-                            # Handle /ui/ paths
-                            if "/ui/" in url:
-                                relative_path = url.split("/ui/", 1)[-1]
-                                local_path = Path("Portal") / relative_path
-                            # Handle absolute paths
-                            elif url.startswith("/"):
-                                local_path = Path(url)
+                            # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
+                            local_path = _resolve_attachment(url, IMAGE_EXTS)
 
-                            if local_path and local_path.exists():
+                            if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix in [".jpg", ".jpeg"]:
                                     mime_type = "image/jpeg"
@@ -2167,9 +2161,8 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                         # Extract text from documents and append as text
                         url = part["document_url"]["url"]
                         try:
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, DOC_EXTS)
+                            if local_path is not None:
                                 suffix = local_path.suffix.lower()
                                 if suffix == ".txt":
                                     text_content = local_path.read_text(encoding='utf-8')
@@ -2523,11 +2516,9 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 reference_image_data = []
                                 if reference_images:
                                     import base64 as b64
-                                    from pathlib import Path as P
                                     for img_url in reference_images[:14]:  # Max 14 images
-                                        clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
-                                        file_path = P("Portal") / clean_url
-                                        if file_path.exists():
+                                        file_path = _resolve_attachment(img_url, IMAGE_EXTS)
+                                        if file_path is not None:
                                             with open(file_path, "rb") as f:
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
@@ -3060,9 +3051,8 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                     if part.get("type") == "image_url":
                         url = part["image_url"]["url"]
                         try:
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, IMAGE_EXTS)
+                            if local_path is not None:
                                 media_type = "image/jpeg" if local_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                                 img_bytes = local_path.read_bytes()
                                 base64_image = base64.b64encode(img_bytes).decode("utf-8")
@@ -3294,11 +3284,9 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 reference_image_data = []
                                 if reference_images:
                                     import base64 as b64
-                                    from pathlib import Path as P
                                     for img_url in reference_images[:14]:  # Max 14 images
-                                        clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
-                                        file_path = P("Portal") / clean_url
-                                        if file_path.exists():
+                                        file_path = _resolve_attachment(img_url, IMAGE_EXTS)
+                                        if file_path is not None:
                                             with open(file_path, "rb") as f:
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
@@ -5110,9 +5098,8 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                         media_key = part.get("type")
                         url = part[media_key]["url"]
                         try:
-                            relative_path = url.split("/ui/", 1)[-1]
-                            local_path = Path("Portal") / relative_path
-                            if local_path.exists():
+                            local_path = _resolve_attachment(url, MEDIA_EXTS)
+                            if local_path is not None:
                                 media_bytes = local_path.read_bytes()
                                 suffix = local_path.suffix.lower()
                                 mime_map = {
@@ -5320,11 +5307,9 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 reference_image_data = []
                                 if reference_images:
                                     import base64 as b64
-                                    from pathlib import Path as P
                                     for img_url in reference_images[:14]:  # Max 14 images
-                                        clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
-                                        file_path = P("Portal") / clean_url
-                                        if file_path.exists():
+                                        file_path = _resolve_attachment(img_url, IMAGE_EXTS)
+                                        if file_path is not None:
                                             with open(file_path, "rb") as f:
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
@@ -5833,13 +5818,10 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                             # Try to load and convert to base64
                             local_path = None
                             try:
-                                if "/ui/" in url:
-                                    relative_path = url.split("/ui/", 1)[-1]
-                                    local_path = Path("Portal") / relative_path
-                                elif url.startswith("/"):
-                                    local_path = Path(url)
+                                # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
+                                local_path = _resolve_attachment(url, IMAGE_EXTS)
 
-                                if local_path and local_path.exists():
+                                if local_path is not None:
                                     suffix = local_path.suffix.lower()
                                     mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
                                     mime_type = mime_map.get(suffix, "image/jpeg")
@@ -6029,11 +6011,9 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 reference_image_data = []
                                 if reference_images:
                                     import base64 as b64
-                                    from pathlib import Path as P
                                     for img_url in reference_images[:14]:  # Max 14 images
-                                        clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
-                                        file_path = P("Portal") / clean_url
-                                        if file_path.exists():
+                                        file_path = _resolve_attachment(img_url, IMAGE_EXTS)
+                                        if file_path is not None:
                                             with open(file_path, "rb") as f:
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
@@ -6389,13 +6369,10 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                             # Try to load and convert to base64
                             local_path = None
                             try:
-                                if "/ui/" in url:
-                                    relative_path = url.split("/ui/", 1)[-1]
-                                    local_path = Path("Portal") / relative_path
-                                elif url.startswith("/"):
-                                    local_path = Path(url)
+                                # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
+                                local_path = _resolve_attachment(url, IMAGE_EXTS)
 
-                                if local_path and local_path.exists():
+                                if local_path is not None:
                                     suffix = local_path.suffix.lower()
                                     mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
                                     mime_type = mime_map.get(suffix, "image/jpeg")
@@ -6614,11 +6591,9 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 reference_image_data = []
                                 if reference_images:
                                     import base64 as b64
-                                    from pathlib import Path as P
                                     for img_url in reference_images[:14]:  # Max 14 images
-                                        clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
-                                        file_path = P("Portal") / clean_url
-                                        if file_path.exists():
+                                        file_path = _resolve_attachment(img_url, IMAGE_EXTS)
+                                        if file_path is not None:
                                             with open(file_path, "rb") as f:
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
@@ -6915,8 +6890,6 @@ def execute_get_media(url: str = None, task_id: str = None) -> dict:
 
     Returns dict with file info, or error message.
     """
-    import base64
-    from pathlib import Path
     from Orchestrator.tasks import task_db
 
     # If task_id provided, look up URL from task
@@ -6930,22 +6903,19 @@ def execute_get_media(url: str = None, task_id: str = None) -> dict:
     if not url:
         return {"error": "No URL or task_id provided"}
 
-    # Clean URL - remove host prefix if present
-    clean_url = url
-    if clean_url.startswith("http://") or clean_url.startswith("https://"):
-        from urllib.parse import urlparse
-        parsed = urlparse(clean_url)
-        clean_url = parsed.path
-
-    # Resolve to file path
-    if clean_url.startswith("/ui/"):
-        relative_path = clean_url.replace("/ui/", "")
-        file_path = Path("Portal") / relative_path
-    else:
-        return {"error": f"Invalid URL format: {url}"}
-
-    if not file_path.exists():
-        return {"error": f"File not found: {url}", "expected_path": str(file_path)}
+    # The url is model-supplied (get_media on the chat, voice and CU surfaces):
+    # only media inside Portal/uploads may be looked up, so this cannot be used
+    # to probe the rest of the box.
+    try:
+        file_path = resolve_upload_path(url)
+    except UploadNotFoundError:
+        return {"error": f"File not found: {url}"}
+    except UploadPathError as e:
+        return {"error": f"Invalid URL: {e}"}
+    try:
+        shown_path = file_path.relative_to(blackbox_root().resolve()).as_posix()
+    except ValueError:
+        shown_path = file_path.name
 
     # Detect media type
     suffix = file_path.suffix.lower()
@@ -6963,7 +6933,7 @@ def execute_get_media(url: str = None, task_id: str = None) -> dict:
         "url": url,
         "media_type": media_type,
         "file_size_bytes": file_path.stat().st_size,
-        "file_path": str(file_path)
+        "file_path": shown_path
     }
 
     # Get metadata from task if task_id provided

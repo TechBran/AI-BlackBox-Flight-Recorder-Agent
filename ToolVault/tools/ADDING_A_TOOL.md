@@ -99,6 +99,7 @@ Rules:
 - Pull everything else via normal imports inside the file (e.g. `from Orchestrator.fossils import hybrid_retrieve`). Add the imports your body uses at the top of the file.
 - Return `ToolResult(success, result, data=None)`. On any error, return `ToolResult(success=False, result="...")` — don't let exceptions escape (the dispatcher catches them, but a clear message is better).
 - **Schema-only tools** (no `executor.py`) are valid — used for tools executed elsewhere (e.g. MCP-internal tools handled by the MCP server process). If your tool needs logic, it needs `executor.py`.
+- **A file path or media URL in `params` is model-supplied** (a prompt-injected page can steer it). Never `open()` it directly: pass it through `Orchestrator.utils.paths.resolve_upload_path(value, allowed_exts=...)`, which accepts only `/ui/uploads/...` URLs and paths inside `Portal/uploads` and raises `UploadPathError` for anything else — turn that into a failed `ToolResult`. Tool names are plain identifiers (`[A-Za-z0-9_]+`); the loader refuses anything else.
 
 ---
 

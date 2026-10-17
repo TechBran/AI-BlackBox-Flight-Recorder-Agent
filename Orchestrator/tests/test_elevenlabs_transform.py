@@ -30,9 +30,23 @@ def _stub_auth(monkeypatch):
 
 
 @pytest.fixture
-def sample_audio(tmp_path):
-    """A tiny on-disk .mp3 so change_voice/isolate can read real bytes."""
-    p = tmp_path / "clip.mp3"
+def uploads_root(tmp_path, monkeypatch):
+    """Audio paths are contained to Portal/uploads (audit rank 16): point
+    BLACKBOX_ROOT at a tmp box and return its uploads folder."""
+    from Orchestrator.utils import paths
+    uploads = tmp_path / "box" / "Portal" / "uploads"
+    uploads.mkdir(parents=True)
+    monkeypatch.setenv("BLACKBOX_ROOT", str(tmp_path / "box"))
+    paths.blackbox_root.cache_clear()
+    yield uploads
+    paths.blackbox_root.cache_clear()
+
+
+@pytest.fixture
+def sample_audio(uploads_root):
+    """A tiny .mp3 inside Portal/uploads so change_voice/isolate can read real
+    bytes and the routes' containment check passes."""
+    p = uploads_root / "clip.mp3"
     p.write_bytes(b"ID3\x03\x00\x00\x00fake-mp3")
     return str(p)
 
@@ -134,12 +148,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 @pytest.fixture
 def app_client():
-    """TestClient with the embeddings startup hook stubbed (no network on boot)."""
-    with patch("Orchestrator.toolvault.embeddings.sync_embeddings") as m_emb:
-        m_emb.return_value = {"x": {"vector": [0.1]}}
-        from Orchestrator.app import app
-        with TestClient(app) as c:
-            yield c
+    """TestClient over the shared app WITHOUT entering its lifespan: these
+    routes need no startup hook, and the production startup (sudoers drift
+    heal, cron scheduler, embeddings sync) must not run inside a unit test."""
+    from Orchestrator.app import app
+    return TestClient(app)
 
 
 def test_voice_changer_route_success(app_client, sample_audio):

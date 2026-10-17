@@ -45,9 +45,23 @@ _DIARIZED_RESPONSE = {
 
 
 @pytest.fixture
-def audio_file(tmp_path):
-    """A real (empty) file on disk so the executor's exists() check passes."""
-    p = tmp_path / "meeting.wav"
+def uploads_root(tmp_path, monkeypatch):
+    """Audio paths are contained to Portal/uploads (audit rank 16): point
+    BLACKBOX_ROOT at a tmp box and return its uploads folder."""
+    from Orchestrator.utils import paths
+    uploads = tmp_path / "box" / "Portal" / "uploads"
+    uploads.mkdir(parents=True)
+    monkeypatch.setenv("BLACKBOX_ROOT", str(tmp_path / "box"))
+    paths.blackbox_root.cache_clear()
+    yield uploads
+    paths.blackbox_root.cache_clear()
+
+
+@pytest.fixture
+def audio_file(uploads_root):
+    """A real file inside Portal/uploads so the executor's containment check passes."""
+    p = uploads_root / "sessions" / "session-1" / "meeting.wav"
+    p.parent.mkdir(parents=True)
     p.write_bytes(b"RIFFfake")
     return p
 
@@ -157,9 +171,9 @@ def test_missing_audio_path():
     assert "audio_path is required" in result.result
 
 
-def test_nonexistent_audio_file():
+def test_nonexistent_audio_file(uploads_root):
     ctx = ToolContext(operator="system")
-    result = _run(stt_exec.execute({"audio_path": "/nope/missing.wav"}, ctx))
+    result = _run(stt_exec.execute({"audio_path": "/ui/uploads/missing.wav"}, ctx))
     assert result.success is False
     assert "Audio file not found" in result.result
 

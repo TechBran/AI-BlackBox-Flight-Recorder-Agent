@@ -52,9 +52,22 @@ def ctx():
 
 
 @pytest.fixture
-def audio_file(tmp_path):
-    """A real file on disk so the executor's exists() check passes."""
-    p = tmp_path / "sample.mp3"
+def uploads_root(tmp_path, monkeypatch):
+    """Audio paths are contained to Portal/uploads (audit rank 16): point
+    BLACKBOX_ROOT at a tmp box and return its uploads folder."""
+    from Orchestrator.utils import paths
+    uploads = tmp_path / "box" / "Portal" / "uploads"
+    uploads.mkdir(parents=True)
+    monkeypatch.setenv("BLACKBOX_ROOT", str(tmp_path / "box"))
+    paths.blackbox_root.cache_clear()
+    yield uploads
+    paths.blackbox_root.cache_clear()
+
+
+@pytest.fixture
+def audio_file(uploads_root):
+    """A real file inside Portal/uploads so the executor's containment check passes."""
+    p = uploads_root / "sample.mp3"
     p.write_bytes(b"ID3fakeaudio")
     return str(p)
 
@@ -99,14 +112,14 @@ def test_clone_with_confirm_consent_calls_clone_instant(monkeypatch, ctx, audio_
     assert seen["description"] == "warm"
 
 
-def test_clone_missing_audio_file_blocked(monkeypatch, ctx):
+def test_clone_missing_audio_file_blocked(monkeypatch, ctx, uploads_root):
     """A nonexistent path -> failure BEFORE any provider call, even with consent."""
     monkeypatch.setattr(
         vox, "clone_instant",
         lambda *a, **k: pytest.fail("clone_instant called with a missing file"),
     )
     result = _run(clone_exec.execute(
-        {"name": "X", "audio_paths": ["/nope/missing.mp3"], "confirm_consent": True}, ctx
+        {"name": "X", "audio_paths": ["/ui/uploads/missing.mp3"], "confirm_consent": True}, ctx
     ))
     assert result.success is False
     assert "not found" in result.result.lower()

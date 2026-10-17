@@ -26,14 +26,8 @@ from Orchestrator.fossils import load_snapshot_index
 from Orchestrator.models import TaskType, TaskStatus
 from Orchestrator.retrieval import retrieve
 from Orchestrator.tasks import create_task, update_task
+from Orchestrator.utils.paths import AUDIO_EXTS, UploadPathError, resolve_upload_path
 from Orchestrator.volume import read_volume_bytes
-
-# Pydantic model for synchronous analysis
-class SyncAnalysisIn(BaseModel):
-    file_url: str  # URL like /ui/uploads/xyz.jpg
-    prompt: Optional[str] = None  # Optional custom prompt
-    media_type: Optional[str] = None  # Optional: image, video, audio (auto-detected if not provided)
-
 
 @app.get("/tasks/list")
 def list_tasks(operator: Optional[str] = None, all: bool = False):
@@ -340,11 +334,18 @@ def fossil_hybrid_search(q: str, operator: str = "", limit: int = 10):
 @app.post("/analyze/audio")
 async def analyze_audio(inp: AudioAnalysisIn):
     """Queue audio analysis task - Block 3"""
+    # file_path comes from the body (and from the model via analyze_audio); the
+    # worker uploads it to the Gemini Files API, so refuse anything that is not
+    # an audio file inside Portal/uploads before it is queued.
+    try:
+        audio_file = resolve_upload_path(inp.file_path, allowed_exts=AUDIO_EXTS)
+    except UploadPathError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     try:
         task = create_task(
             TaskType.AUDIO_ANALYSIS,
             operator=inp.operator,
-            input_file=inp.file_path,
+            input_file=str(audio_file),
             result_data={"prompt": inp.prompt}
         )
         return {
@@ -355,195 +356,3 @@ async def analyze_audio(inp: AudioAnalysisIn):
     except Exception as e:
         print(f"ERROR: Failed to queue audio analysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# -----------------------------------------------------------------------------
-# Synchronous Media Analysis Endpoint (for Agent Mode Attachments)
-# -----------------------------------------------------------------------------
-
-# MIME type mappings for Gemini Files API
-MIME_TYPE_MAP = {
-    # Images
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    # Videos
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mov": "video/quicktime",
-    ".avi": "video/x-msvideo",
-    ".mkv": "video/x-matroska",
-    # Audio
-    ".mp3": "audio/mpeg",
-    ".wav": "audio/wav",
-    ".m4a": "audio/aac",
-    ".aac": "audio/aac",
-    ".ogg": "audio/ogg",
-    ".flac": "audio/flac",
-    ".aiff": "audio/aiff",
-}
-
-# Media type detection from extension
-MEDIA_TYPE_FROM_EXT = {
-    ".jpg": "image", ".jpeg": "image", ".png": "image", ".gif": "image",
-    ".webp": "image", ".bmp": "image",
-    ".mp4": "video", ".webm": "video", ".mov": "video", ".avi": "video", ".mkv": "video",
-    ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".aac": "audio",
-    ".ogg": "audio", ".flac": "audio", ".aiff": "audio",
-}
-
-# Default prompts by media type
-DEFAULT_PROMPTS = {
-    "image": "Describe this image in detail. Include all visual elements, text, objects, people, colors, composition, and any notable features. Be comprehensive.",
-    "video": "Analyze this video. Describe the visual content, any actions or movements, the setting, and notable elements. Provide a detailed summary of what happens in the video.",
-    "audio": "Transcribe and analyze this audio. Include the spoken content (transcript), speaker identification if multiple voices, emotional tone, background sounds, and any other relevant audio details.",
-}
-
-
-def _upload_to_gemini_files(file_path: Path, mime_type: str) -> str:
-    """Upload a file to Gemini Files API and return the file URI."""
-    if not GOOGLE_API_KEY:
-        raise HTTPException(status_code=400, detail="GOOGLE_API_KEY not configured")
-
-    file_bytes = file_path.read_bytes()
-    num_bytes = len(file_bytes)
-
-    # Step 1: Initialize resumable upload
-    upload_url_response = requests.post(
-        "https://generativelanguage.googleapis.com/upload/v1beta/files",
-        headers={
-            "x-goog-api-key": GOOGLE_API_KEY,
-            "X-Goog-Upload-Protocol": "resumable",
-            "X-Goog-Upload-Command": "start",
-            "X-Goog-Upload-Header-Content-Length": str(num_bytes),
-            "X-Goog-Upload-Header-Content-Type": mime_type,
-            "Content-Type": "application/json"
-        },
-        json={"file": {"display_name": file_path.name}},
-        timeout=30
-    )
-    upload_url_response.raise_for_status()
-    upload_url = upload_url_response.headers.get("x-goog-upload-url")
-
-    if not upload_url:
-        raise Exception("No upload URL received from Gemini Files API")
-
-    # Step 2: Upload the actual bytes
-    upload_response = requests.post(
-        upload_url,
-        headers={
-            "Content-Length": str(num_bytes),
-            "X-Goog-Upload-Offset": "0",
-            "X-Goog-Upload-Command": "upload, finalize"
-        },
-        data=file_bytes,
-        timeout=300
-    )
-    upload_response.raise_for_status()
-    file_info = upload_response.json()
-    return file_info["file"]["uri"]
-
-
-def _analyze_with_gemini(file_uri: str, mime_type: str, prompt: str) -> str:
-    """Analyze a file using Gemini generateContent API."""
-    generate_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL_DEFAULT}:generateContent"
-    generate_payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"file_data": {"mime_type": mime_type, "file_uri": file_uri}}
-            ]
-        }]
-    }
-
-    generate_response = requests.post(
-        generate_url,
-        headers={
-            "x-goog-api-key": GOOGLE_API_KEY,
-            "Content-Type": "application/json"
-        },
-        json=generate_payload,
-        timeout=120
-    )
-    generate_response.raise_for_status()
-    result = generate_response.json()
-
-    # Extract text from response
-    try:
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-        return text
-    except (KeyError, IndexError) as e:
-        print(f"[SYNC_ANALYZE] Failed to extract text from Gemini response: {e}")
-        print(f"[SYNC_ANALYZE] Response: {result}")
-        raise Exception("Failed to extract analysis from Gemini response")
-
-
-@app.post("/analyze/sync")
-async def analyze_sync(inp: SyncAnalysisIn):
-    """Synchronous media analysis for agent mode attachments.
-
-    Takes a file URL (like /ui/uploads/xyz.jpg), analyzes it via Gemini,
-    and returns the analysis immediately. Supports images, videos, and audio.
-
-    This endpoint is designed for the agent mode attachment pipeline where
-    files need to be analyzed before being passed to the Claude Code CLI.
-    """
-    try:
-        print(f"[SYNC_ANALYZE] Starting analysis for: {inp.file_url}")
-
-        # Convert URL to local path
-        if inp.file_url.startswith("/ui/uploads/"):
-            filename = inp.file_url.replace("/ui/uploads/", "")
-            file_path = Path("Portal/uploads") / filename
-        elif inp.file_url.startswith("http"):
-            # Handle full URLs - extract filename
-            filename = inp.file_url.split("/")[-1]
-            file_path = Path("Portal/uploads") / filename
-        else:
-            file_path = Path(inp.file_url)
-
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-
-        # Detect media type and MIME type from extension
-        ext = file_path.suffix.lower()
-        mime_type = MIME_TYPE_MAP.get(ext, "application/octet-stream")
-        media_type = inp.media_type or MEDIA_TYPE_FROM_EXT.get(ext, "unknown")
-
-        if media_type == "unknown":
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
-
-        print(f"[SYNC_ANALYZE] Detected media_type={media_type}, mime_type={mime_type}")
-
-        # Use provided prompt or default
-        prompt = inp.prompt or DEFAULT_PROMPTS.get(media_type, "Describe this content in detail.")
-
-        # Upload to Gemini Files API
-        print(f"[SYNC_ANALYZE] Uploading to Gemini Files API...")
-        file_uri = _upload_to_gemini_files(file_path, mime_type)
-        print(f"[SYNC_ANALYZE] Uploaded: {file_uri}")
-
-        # Analyze with Gemini
-        print(f"[SYNC_ANALYZE] Analyzing with Gemini...")
-        analysis = _analyze_with_gemini(file_uri, mime_type, prompt)
-        print(f"[SYNC_ANALYZE] Analysis complete ({len(analysis)} chars)")
-
-        return {
-            "success": True,
-            "file_url": inp.file_url,
-            "media_type": media_type,
-            "analysis": analysis
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[SYNC_ANALYZE] Error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
