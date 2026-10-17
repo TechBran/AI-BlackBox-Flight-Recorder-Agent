@@ -23,6 +23,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+@pytest.fixture
+def require_pairing(monkeypatch):
+    """[devices] require_pairing = true: an unpaired device is refused, never called.
+    (The default during the rollout calls it without a header; see pairing.py.)"""
+    from Orchestrator import config
+    monkeypatch.setattr(config, "DEVICES_REQUIRE_PAIRING", True)
+
+
 from Orchestrator.device_registry import pairing
 from Orchestrator.local_provider.mesh import Node
 
@@ -162,6 +170,7 @@ def test_auth_headers_for_paired_node():
     assert pairing.auth_headers_for_node(NODE) == {"Authorization": f"Bearer {SECRET}"}
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_lookup_is_by_exact_ip_never_by_name():
     # A node that merely SHARES a hostname with the paired phone must not get its secret.
     _register()
@@ -171,6 +180,7 @@ def test_lookup_is_by_exact_ip_never_by_name():
         pairing.auth_headers_for_node(imposter)
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_unpaired_node_raises_actionable_error():
     with pytest.raises(pairing.DeviceNotPaired) as exc:
         pairing.auth_headers_for_node(NODE)
@@ -330,3 +340,29 @@ def test_pairing_store_io_never_runs_on_the_event_loop(client, monkeypatch):
     monkeypatch.setattr(pairing, "register", _register)
     assert client.post("/devices/pairing", json=_body()).status_code == 200
     assert on_loop == [False]
+
+
+# --- rollout default: [devices] require_pairing = false ----------------------
+
+def test_unpaired_device_gets_the_legacy_call_without_a_header(monkeypatch, caplog):
+    """An app older than the pairing release holds no secret: during the rollout the
+    box still reaches it (no Authorization header), warning once per device."""
+    from Orchestrator import config
+    from Orchestrator.device_registry import pairing
+    monkeypatch.setattr(config, "DEVICES_REQUIRE_PAIRING", False)
+    monkeypatch.setattr(pairing, "secret_for_ip", lambda ip: None)
+    monkeypatch.setattr(pairing, "_LEGACY_WARNED", set())
+    with caplog.at_level("WARNING"):
+        assert pairing.auth_headers_for_ip("100.64.0.7", "old-phone") == {}
+        assert pairing.auth_headers_for_ip("100.64.0.7", "old-phone") == {}
+    warnings = [r for r in caplog.records if "[PAIRING]" in r.getMessage()]
+    assert len(warnings) == 1 and "old-phone" in warnings[0].getMessage()
+
+
+def test_paired_device_always_gets_its_bearer_whatever_the_setting(monkeypatch):
+    from Orchestrator import config
+    from Orchestrator.device_registry import pairing
+    monkeypatch.setattr(pairing, "secret_for_ip", lambda ip: "s" * 64)
+    for flag in (False, True):
+        monkeypatch.setattr(config, "DEVICES_REQUIRE_PAIRING", flag)
+        assert pairing.auth_headers_for_ip("100.64.0.7") == {"Authorization": "Bearer " + "s" * 64}

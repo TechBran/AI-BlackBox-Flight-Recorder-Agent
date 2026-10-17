@@ -277,15 +277,42 @@ def secret_for_ip(ip: str) -> Optional[str]:
     return row.get("secret") if row else None
 
 
+# Devices already warned about calling without a pairing record (log once each).
+_LEGACY_WARNED: set = set()
+
+
+def _require_pairing() -> bool:
+    """[devices] require_pairing (read per call so tests and a config reload see it)."""
+    try:
+        from Orchestrator import config as _config
+        return bool(getattr(_config, "DEVICES_REQUIRE_PAIRING", False))
+    except Exception:  # noqa: BLE001 — a config problem must not break device calls
+        return False
+
+
 def auth_headers_for_ip(ip: str, device_label: str = "") -> Dict[str, str]:
     """``{"Authorization": "Bearer <secret>"}`` for the device at ``ip``.
 
-    Raises :class:`DeviceNotPaired` (with the user-facing message) when no secret is on
-    record — a caller must never fall back to an unauthenticated request."""
+    A device that HAS paired is never called without its secret. A device with no
+    pairing record is an app older than the pairing release (its listener takes
+    unauthenticated calls), so during the rollout it gets the legacy call with no
+    header and a once-per-device warning; refusing it would protect nothing (the
+    secret authenticates this box TO the device) and would cut notifications and
+    device control on a production box until every device updates. With
+    ``[devices] require_pairing = true`` the missing record raises
+    :class:`DeviceNotPaired` (with the user-facing message) instead."""
     secret = secret_for_ip(ip)
-    if not secret:
+    if secret:
+        return {"Authorization": f"Bearer {secret}"}
+    if _require_pairing():
         raise DeviceNotPaired(device_label or ip)
-    return {"Authorization": f"Bearer {secret}"}
+    key = device_label or ip
+    if key not in _LEGACY_WARNED:
+        _LEGACY_WARNED.add(key)
+        logger.warning("[PAIRING] %s has no pairing secret on record (an app older than "
+                       "the pairing release?); calling it without one. Update the BlackBox "
+                       "app on it and open it once to pair.", key)
+    return {}
 
 
 def auth_headers_for_node(node) -> Dict[str, str]:

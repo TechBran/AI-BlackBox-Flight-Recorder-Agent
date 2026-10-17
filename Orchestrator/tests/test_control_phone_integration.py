@@ -12,8 +12,18 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import pytest
+
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.local_provider.mesh import Node
+
+@pytest.fixture
+def require_pairing(monkeypatch):
+    """[devices] require_pairing = true: an unpaired device is refused, never called.
+    (The default during the rollout calls it without a header; see pairing.py.)"""
+    from Orchestrator import config
+    monkeypatch.setattr(config, "DEVICES_REQUIRE_PAIRING", True)
+
 
 _EXEC_PATH = (Path(__file__).resolve().parents[2]
               / "ToolVault" / "tools" / "control_phone" / "executor.py")
@@ -142,6 +152,7 @@ def test_no_device_when_unresolved(monkeypatch):
     assert res.data["error_kind"] == "no_device"
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_unpaired_device_is_never_called(monkeypatch):
     """No secret on record -> not_paired with the re-pair hint, and NO request on the wire
     (never a silent unauthenticated call the phone would refuse anyway)."""

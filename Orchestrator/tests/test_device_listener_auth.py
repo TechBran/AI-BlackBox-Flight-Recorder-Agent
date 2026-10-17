@@ -19,6 +19,14 @@ from pathlib import Path
 
 import pytest
 
+@pytest.fixture
+def require_pairing(monkeypatch):
+    """[devices] require_pairing = true: an unpaired device is refused, never called.
+    (The default during the rollout calls it without a header; see pairing.py.)"""
+    from Orchestrator import config
+    monkeypatch.setattr(config, "DEVICES_REQUIRE_PAIRING", True)
+
+
 from Orchestrator import frontier_agent_loop as fal
 from Orchestrator.device_registry import pairing
 from Orchestrator.frontier_agent_loop import Decision, FrontierResult
@@ -106,6 +114,7 @@ def test_control_phone_sends_the_secret_on_task_and_status(monkeypatch, paired):
     assert seen == [("task", BEARER), ("status", BEARER)]
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_control_phone_refuses_an_unpaired_device(monkeypatch):
     _resolve_to_node(monkeypatch, cp)
     monkeypatch.setattr(cp, "_post_task", _boom)
@@ -213,6 +222,7 @@ def test_stop_sends_the_secret(monkeypatch, paired):
     assert seen == {"path": "/kill-all", "headers": BEARER}
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_stop_refuses_an_unpaired_device(monkeypatch):
     _resolve_to_node(monkeypatch, stop_mod)
     monkeypatch.setattr(stop_mod, "_post_kill", _boom)
@@ -258,6 +268,7 @@ def test_navigate_sends_the_secret(monkeypatch, paired):
     assert seen["headers"] == BEARER
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_navigate_refuses_an_unpaired_device(monkeypatch):
     _resolve_to_node(monkeypatch, nd)
     monkeypatch.setattr(nd, "_post_intent", _boom)
@@ -295,6 +306,7 @@ def test_control_device_hands_the_secret_to_the_loop(monkeypatch, paired):
     assert seen["device_headers"] == BEARER
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_control_device_refuses_an_unpaired_device(monkeypatch):
     _resolve_to_node(monkeypatch, cd)
     monkeypatch.setattr(cd.mesh, "default_provider_for_node", lambda *a, **k: None)
@@ -452,6 +464,7 @@ def test_bus_sends_the_secret_to_a_paired_device(monkeypatch, paired):
     assert _FakeAioSession.calls == [("POST", f"http://{NODE.dns_name}:8765/notify", BEARER)]
 
 
+@pytest.mark.usefixtures("require_pairing")
 def test_bus_never_posts_to_an_unpaired_device(monkeypatch):
     _FakeAioSession.calls = []
     monkeypatch.setattr(bus_mod.aiohttp, "ClientSession", _FakeAioSession)

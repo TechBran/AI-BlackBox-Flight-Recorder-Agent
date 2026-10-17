@@ -191,3 +191,12 @@ provider = null
 # onboarding mocks) at /ui/dev/. Off, those pages 404 like any missing file.
 # Restart the service after changing it.
 serve_dev_pages = false
+
+[devices]
+# Phone / tablet / XR control listeners (port 8765) require a per-device pairing
+# secret that the BlackBox app registers when it starts. require_pairing = true
+# refuses to call a device with no secret on record; the default (false) still
+# reaches apps older than the pairing release, without a secret, during the
+# rollout. A paired device always gets its secret either way. Turn it on once
+# every device runs the current app.
+require_pairing = false

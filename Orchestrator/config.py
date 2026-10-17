@@ -154,6 +154,14 @@ LEGACY_TASKS_DB_PATH = _blackbox_root() / "Portal" / "tasks.db"  # pre-2026-10 l
 # onboarding mocks) is served at /ui/dev/ only when this is true.
 DEBUG_SERVE_DEV_PAGES = CFG.getboolean("debug", "serve_dev_pages", fallback=False)
 
+# [devices] require_pairing: refuse to call a device that has no pairing secret on
+# record (Orchestrator/device_registry/pairing.py). Default false during the
+# pairing rollout: apps older than the pairing release hold no secret and accept
+# unauthenticated calls, so refusing them would only cut notifications and device
+# control until every device runs the new app. A device that HAS paired always
+# gets its bearer either way. Set true once every device runs the new app.
+DEVICES_REQUIRE_PAIRING = CFG.getboolean("devices", "require_pairing", fallback=False)
+
 AUDIO_ENGINE  = CFG.get("audio","engine",fallback="auto").strip().lower()
 TTS_MODEL     = CFG.get("audio","model", fallback="tts-1").strip()
 TTS_VOICE     = CFG.get("audio","voice", fallback="alloy").strip()
