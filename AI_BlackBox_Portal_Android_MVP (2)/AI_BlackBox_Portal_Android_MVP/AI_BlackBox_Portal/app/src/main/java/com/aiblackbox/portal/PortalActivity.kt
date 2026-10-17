@@ -61,6 +61,7 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 class PortalActivity : AppCompatActivity() {
@@ -82,10 +83,13 @@ class PortalActivity : AppCompatActivity() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val TAG = "BlackBoxBridge"
 
-    // Audio streaming for Realtime API
-    private var audioRecord: AudioRecord? = null
-    private var isStreaming = false
-    private var streamingThread: Thread? = null
+    // Audio streaming for Realtime API. The streaming thread owns its AudioRecord outright (a local,
+    // released in its own finally); everything else holds only this session's stop signal — one per
+    // session, so a quick stop + start can never leave the old thread reading into the new session
+    // the way one shared flag would. Volatile: the JS bridge thread starts, the UI thread stops.
+    @Volatile private var isStreaming = false
+    @Volatile private var streamingLive: AtomicBoolean? = null
+    @Volatile private var streamingThread: Thread? = null
 
     // Track recording mode for Android 14+ MediaProjection refresh
     private var pendingRecordingMode = false
@@ -1165,6 +1169,9 @@ class PortalActivity : AppCompatActivity() {
                 stopRecordingInternal()
             }
 
+            // Held HERE until the streaming thread takes it, and released here (in the finally
+            // below) only if it never got that far — never read, so no read() can be in flight.
+            var notYetStreaming: AudioRecord? = null
             try {
                 // Configure AudioRecord for 24kHz mono PCM16 (OpenAI Realtime format)
                 val sampleRate = 24000
@@ -1174,25 +1181,26 @@ class PortalActivity : AppCompatActivity() {
 
                 Log.d(TAG, "Creating AudioRecord: sampleRate=$sampleRate, bufferSize=$bufferSize")
 
-                audioRecord = AudioRecord(
+                val record = AudioRecord(
                     MediaRecorder.AudioSource.MIC,
                     sampleRate,
                     channelConfig,
                     audioFormat,
                     bufferSize
                 )
+                notYetStreaming = record
 
-                if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                if (record.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord failed to initialize")
                     web.post {
                         web.evaluateJavascript("window.onNativeStreamError && window.onNativeStreamError('Failed to initialize audio capture');", null)
                     }
-                    audioRecord?.release()
-                    audioRecord = null
                     return
                 }
 
-                audioRecord?.startRecording()
+                record.startRecording()
+                val live = AtomicBoolean(true)
+                streamingLive = live
                 isStreaming = true
 
                 Log.d(TAG, "AudioRecord started, beginning streaming thread")
@@ -1203,41 +1211,57 @@ class PortalActivity : AppCompatActivity() {
                 }
 
                 // Start streaming thread
-                streamingThread = Thread {
+                val thread = Thread {
                     val buffer = ShortArray(bufferSize / 2)  // 16-bit samples
                     val byteBuffer = ByteArray(bufferSize)
 
-                    while (isStreaming && audioRecord != null) {
-                        try {
-                            val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                    try {
+                        while (live.get()) {
+                            try {
+                                // The LOCAL record, never a field a stop could null mid-read.
+                                val readCount = record.read(buffer, 0, buffer.size)
+                                // A stop that landed while this read was in flight ends the session
+                                // HERE: this chunk belongs to a session that is over.
+                                if (!live.get()) break
 
-                            if (readCount > 0) {
-                                // Convert shorts to bytes (little-endian PCM16)
-                                for (i in 0 until readCount) {
-                                    byteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
-                                    byteBuffer[i * 2 + 1] = (buffer[i].toInt() shr 8 and 0xFF).toByte()
+                                if (readCount > 0) {
+                                    // Convert shorts to bytes (little-endian PCM16)
+                                    for (i in 0 until readCount) {
+                                        byteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
+                                        byteBuffer[i * 2 + 1] = (buffer[i].toInt() shr 8 and 0xFF).toByte()
+                                    }
+
+                                    // Encode to base64
+                                    val base64Data = Base64.encodeToString(byteBuffer, 0, readCount * 2, Base64.NO_WRAP)
+
+                                    // Send to JavaScript — unless this session has ended by the time
+                                    // the UI thread gets to it: a chunk must not reach a newer
+                                    // session's handler, nor a WebView that onDestroy tore down.
+                                    runOnUiThread {
+                                        if (live.get()) {
+                                            web.evaluateJavascript(
+                                                "window.onNativeAudioChunk && window.onNativeAudioChunk('$base64Data');",
+                                                null
+                                            )
+                                        }
+                                    }
                                 }
-
-                                // Encode to base64
-                                val base64Data = Base64.encodeToString(byteBuffer, 0, readCount * 2, Base64.NO_WRAP)
-
-                                // Send to JavaScript
-                                runOnUiThread {
-                                    web.evaluateJavascript(
-                                        "window.onNativeAudioChunk && window.onNativeAudioChunk('$base64Data');",
-                                        null
-                                    )
-                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error reading audio: ${e.message}")
+                                break
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error reading audio: ${e.message}")
-                            break
                         }
+                    } finally {
+                        // Stopped and released HERE, on the SAME thread as read() — see
+                        // stopAudioStreamingInternal for why it must not happen anywhere else.
+                        try { record.stop() } catch (_: Exception) {}
+                        try { record.release() } catch (_: Exception) {}
+                        Log.d(TAG, "Streaming thread ended")
                     }
-
-                    Log.d(TAG, "Streaming thread ended")
                 }
-                streamingThread?.start()
+                streamingThread = thread
+                thread.start()
+                notYetStreaming = null
 
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting audio streaming: ${e.message}", e)
@@ -1248,6 +1272,8 @@ class PortalActivity : AppCompatActivity() {
                     )
                 }
                 stopAudioStreamingInternal()
+            } finally {
+                notYetStreaming?.let { r -> try { r.release() } catch (_: Exception) {} }
             }
         }
 
@@ -1334,32 +1360,33 @@ class PortalActivity : AppCompatActivity() {
     }
 
     /**
-     * Internal function to stop audio streaming
+     * Internal function to stop audio streaming.
+     *
+     * Only SIGNALS the streaming thread, then waits (bounded) for it: the thread stops and releases
+     * the AudioRecord in its own finally, on the thread that reads it. Releasing it here, on the UI
+     * thread, while that thread was blocked in read() — interrupt() does not unblock a native read —
+     * is the native abort in AudioRecord::releaseBuffer (feedback_android_audiorecord_race). The
+     * join keeps the release synchronous for the callers that need the mic free on return:
+     * startRecording's MediaRecorder, and releaseMic ahead of the WebView's getUserMedia.
      */
     private fun stopAudioStreamingInternal() {
         Log.d(TAG, "stopAudioStreamingInternal called")
         isStreaming = false
+        streamingLive?.set(false)
+        streamingLive = null
 
+        val thread = streamingThread ?: return
+        streamingThread = null
         try {
-            streamingThread?.interrupt()
-            streamingThread = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Error stopping streaming thread: ${e.message}")
+            // A read returns within one buffer period (getMinBufferSize samples — a fraction of
+            // this bound on any device), so 500 ms is the ceiling, not the expected wait.
+            thread.join(500)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
-
-        try {
-            audioRecord?.apply {
-                try { stop() } catch (e: IllegalStateException) {
-                    Log.w(TAG, "AudioRecord stop failed: ${e.message}")
-                }
-                try { release() } catch (e: Exception) {
-                    Log.w(TAG, "AudioRecord release failed: ${e.message}")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping AudioRecord: ${e.message}")
-        } finally {
-            audioRecord = null
+        if (thread.isAlive) {
+            Log.w(TAG, "Streaming thread still in read() after 500ms — it releases the mic when that read returns")
+        } else {
             Log.d(TAG, "Audio streaming stopped and resources released")
         }
     }
@@ -1575,6 +1602,10 @@ class PortalActivity : AppCompatActivity() {
         stopKeepAliveService()
         releaseWakeLock()
         stopRecordingInternal()
+        // Before the WebView goes: a streaming thread left running would hold the mic open and keep
+        // posting chunks to a destroyed WebView, and the recreated activity (Fold cover/main switch)
+        // could never stop it.
+        stopAudioStreamingInternal()
         web.destroy()
     }
 }

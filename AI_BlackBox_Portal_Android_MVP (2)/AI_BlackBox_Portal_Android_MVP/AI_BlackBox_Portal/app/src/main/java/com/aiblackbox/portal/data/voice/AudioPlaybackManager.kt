@@ -39,12 +39,21 @@ object AudioPlaybackManager {
     private var currentUrl: String? = null
     private var autoPlayOnPrepare = false
 
+    /**
+     * Decode-ahead, bounded. Every bar warms its own clip on composition, so by the time one is
+     * tapped its envelope is usually already here — which is what lets the ribbon start with real
+     * bands instead of a stand-in. See [EnvelopePrefetcher] for the three bounds that keep a long
+     * thread from starting dozens of concurrent decodes.
+     */
+    private val prefetcher = EnvelopePrefetcher(scope)
+
     // Decoded envelopes of the current clip (peak-normalized 0..1).
     @Volatile private var envelope: FloatArray? = null
     @Volatile private var bandEnvelope: Array<FloatArray> = emptyArray()
     @Volatile private var envWindowMs: Int = 20
     private var decodeJob: Job? = null
     private var ampJob: Job? = null
+    private var startJob: Job? = null
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
@@ -84,6 +93,15 @@ object AudioPlaybackManager {
     private val _amplitudeReady = MutableStateFlow(false)
     val amplitudeReady: StateFlow<Boolean> = _amplitudeReady.asStateFlow()
 
+    /**
+     * Warm [url]'s envelope without loading the player. Called by every player bar as it composes,
+     * so the decode lands before the operator can tap play. Cheap and idempotent: a cached url does
+     * nothing at all, and the prefetcher drops the request if too many are already in flight.
+     */
+    fun prefetch(url: String) {
+        prefetcher.prefetch(url)
+    }
+
     /** Load and prepare audio from URL. If already loaded, does nothing. */
     fun load(url: String) {
         if (url == currentUrl && mediaPlayer != null) return
@@ -103,9 +121,7 @@ object AudioPlaybackManager {
                 _isPrepared.value = true
                 if (autoPlayOnPrepare) {
                     autoPlayOnPrepare = false
-                    mp.start()
-                    _isPlaying.value = true
-                    startAmplitudeTick()
+                    startWhenEnvelopeReady(mp)
                 }
             }
             player.setOnCompletionListener {
@@ -148,18 +164,12 @@ object AudioPlaybackManager {
             autoPlayOnPrepare = true
             return
         }
-        try {
-            mp.start()
-            _isPlaying.value = true
-            startAmplitudeTick()
-        } catch (e: Exception) {
-            Log.e(TAG, "Play failed: ${e.message}")
-            _hasError.value = true
-        }
+        startWhenEnvelopeReady(mp)
     }
 
     fun pause() {
         autoPlayOnPrepare = false
+        startJob?.cancel(); startJob = null
         try { mediaPlayer?.pause() } catch (_: Exception) {}
         _isPlaying.value = false
         stopAmplitudeTick()
@@ -193,6 +203,7 @@ object AudioPlaybackManager {
 
     fun stop() {
         stopAmplitudeTick()
+        startJob?.cancel(); startJob = null
         decodeJob?.cancel(); decodeJob = null
         envelope = null
         bandEnvelope = emptyArray()
@@ -218,6 +229,10 @@ object AudioPlaybackManager {
     /** Call from Activity onDestroy */
     fun release() {
         stop()
+        // The one place decodes are actually abandoned. Everywhere else a running decode is left to
+        // finish and populate the cache — it is bounded, and the answer is wanted again the moment
+        // that bar scrolls back on screen.
+        prefetcher.cancelAll()
     }
 
     /** App backgrounded: stop the amplitude tick (no on-screen consumer). Playback continues. */
@@ -234,17 +249,64 @@ object AudioPlaybackManager {
 
     private fun decodeEnvelope(url: String) {
         decodeJob?.cancel()
+        decodeJob = null
         envelope = null
         bandEnvelope = emptyArray()
         _amplitudeReady.value = false
-        decodeJob = scope.launch(Dispatchers.IO) {
-            val result = AudioEnvelope.decode(url)
-            if (result != null && currentUrl == url) {
-                envelope = result.rms
-                bandEnvelope = result.bands
-                envWindowMs = result.windowMs
-                _amplitudeReady.value = true
+        // The prefetched case, and the common one: the bar warmed this clip when it composed, so
+        // there is nothing to wait for and no coroutine to launch.
+        prefetcher.cached(url)?.let { adoptEnvelopes(url, it); return }
+        decodeJob = scope.launch {
+            val result = prefetcher.await(url)
+            if (result != null) adoptEnvelopes(url, result)
+        }
+    }
+
+    /** Publish a decoded clip's envelopes, unless the player has moved on to another url. */
+    private fun adoptEnvelopes(url: String, result: AudioEnvelope.Envelopes) {
+        if (currentUrl != url) return
+        envelope = result.rms
+        bandEnvelope = result.bands
+        envWindowMs = result.windowMs
+        _amplitudeReady.value = true
+    }
+
+    /**
+     * Start [mp] once its waveform exists, or once [PlaybackStartGate.MAX_WAIT_MS] has passed —
+     * whichever comes first.
+     *
+     * This is the half of the milestone that makes deleting the synthetic tween an improvement
+     * rather than a downgrade: without it the ribbon would simply be FLAT over the first moment of
+     * audible speech instead of lying about it. In practice the wait is zero (the bar prefetches on
+     * composition); the deadline is there so a clip whose decode fails still plays.
+     */
+    private fun startWhenEnvelopeReady(mp: MediaPlayer) {
+        startJob?.cancel()
+        startJob = null
+        if (PlaybackStartGate.shouldStart(_amplitudeReady.value, 0)) {
+            startNow(mp)
+            return
+        }
+        startJob = scope.launch {
+            var waited = 0L
+            while (isActive && !PlaybackStartGate.shouldStart(_amplitudeReady.value, waited)) {
+                delay(PlaybackStartGate.POLL_MS)
+                waited += PlaybackStartGate.POLL_MS
             }
+            if (isActive) startNow(mp)
+        }
+    }
+
+    /** The actual start. Refuses a player that [stop] has already released out from under it. */
+    private fun startNow(mp: MediaPlayer) {
+        if (mediaPlayer !== mp) return
+        try {
+            mp.start()
+            _isPlaying.value = true
+            startAmplitudeTick()
+        } catch (e: Exception) {
+            Log.e(TAG, "Play failed: ${e.message}")
+            _hasError.value = true
         }
     }
 
@@ -274,6 +336,26 @@ object AudioPlaybackManager {
     private fun stopAmplitudeTick() {
         ampJob?.cancel(); ampJob = null
     }
+}
+
+/**
+ * When the first sample is allowed out.
+ *
+ * The bar no longer draws anything over audio it has not measured, so playback waits for the
+ * waveform — but only for as long as a tap can absorb. A decode that fails, or a remote clip whose
+ * bytes are still trickling in, must never leave the play button silent: audio that will not play
+ * is a worse bug than a ribbon that starts flat.
+ */
+internal object PlaybackStartGate {
+
+    /** The deadline. Short enough to read as "instant" on a tap. */
+    const val MAX_WAIT_MS = 250L
+
+    /** How often the wait re-checks. One frame at 60 Hz. */
+    const val POLL_MS = 16L
+
+    fun shouldStart(envelopeReady: Boolean, waitedMs: Long): Boolean =
+        envelopeReady || waitedMs >= MAX_WAIT_MS
 }
 
 // -----------------------------------------------------------------------------

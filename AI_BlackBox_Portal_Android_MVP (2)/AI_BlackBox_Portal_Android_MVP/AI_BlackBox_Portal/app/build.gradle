@@ -17,8 +17,13 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 31
-        versionName "1.9.1-aurora-mountains"
+        versionCode 37
+        // W10 mic A/B: `-PforceMicSource=VOICE_COMMUNICATION` builds a debug APK whose composer
+        // mic is pinned to that source (MicSourcePolicy.simplexChain), named so it cannot be
+        // mistaken for the shipping build. Empty, and pinned by MicSourcePolicyTest, otherwise.
+        def forceMicSource = (project.findProperty('forceMicSource') ?: '').toString().trim()
+        versionName "1.13.1-m1-hardening" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "")
+        buildConfigField "String", "FORCE_MIC_SOURCE", "\"${forceMicSource}\""
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }
@@ -90,6 +95,18 @@ android {
         // (e.g. RemoteTaskRunner's failure telemetry) be unit-tested. Only affects
         // calls that would otherwise throw, so currently-passing tests are unaffected.
         unitTests.returnDefaultValues = true
+
+        // The *Diagnostic classes under src/test are MEASUREMENT PRINTERS (noise floors, range
+        // budgets, candidate gates): they assert nothing and print reports for a human to read. They
+        // stay OUT of the default unit-test gate, where they cost about a third of its run time and
+        // printed "FAIL" verdicts into green builds. The invariants they leaned on are asserted by
+        // real tests (TapEquivalenceTest, WaveformDynamicsGatesTest, NoiseGateSimulationTest). Opt in:
+        //   ./gradlew :app:testDebugUnitTest --offline -PincludeDiagnostics --tests '*Diagnostic' -i
+        unitTests.all { test ->
+            if (!project.hasProperty('includeDiagnostics')) {
+                test.filter { excludeTestsMatching '*Diagnostic' }
+            }
+        }
     }
 }
 

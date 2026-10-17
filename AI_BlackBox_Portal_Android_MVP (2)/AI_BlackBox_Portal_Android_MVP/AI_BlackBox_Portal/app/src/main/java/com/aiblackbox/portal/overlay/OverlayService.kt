@@ -78,6 +78,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class OverlayService : Service() {
 
@@ -210,11 +211,6 @@ class OverlayService : Service() {
         }
     }
 
-    // STT via BlackBox (Whisper)
-    private var audioRecord: AudioRecord? = null
-    private var isListening = false
-    private var recordingJob: Job? = null
-
     // Chat state
     private val attachedScreenshots = mutableListOf<File>()
     private var attachedRecording: File? = null
@@ -267,9 +263,10 @@ class OverlayService : Service() {
     private var screenShareJob: Job? = null
     private val SCREEN_SHARE_INTERVAL_MS = 1000L  // 1 FPS
 
-    // Realtime audio streaming (separate from STT recording)
-    private var realtimeAudioRecord: AudioRecord? = null
-    private var realtimeAudioJob: Job? = null
+    // Realtime audio streaming (separate from STT recording). The capture loop owns its AudioRecord
+    // outright (a local, released in its own finally); everything else holds only this mic session's
+    // stop signal — one per session, so stopping one can never stop (or be undone by) a newer one.
+    private var realtimeCaptureLive: AtomicBoolean? = null
 
     // Audio playback for AI responses
     private var audioTrack: android.media.AudioTrack? = null
@@ -708,7 +705,6 @@ class OverlayService : Service() {
 
         // Cleanup resources
         stopRecording()
-        stopAudioRecording()
 
         // Cleanup realtime mode resources
         stopRealtimeAudioStreaming()
@@ -1372,336 +1368,7 @@ class OverlayService : Service() {
         }
     }
 
-    // ==================== Whisper STT via BlackBox ====================
-
-    // Store recorded audio data to transcribe after manual stop
-    private var pendingAudioData: ByteArray? = null
-
-    private fun toggleWhisperRecording() {
-        if (isListening) {
-            // Second press - stop recording and transcribe
-            stopAudioRecording(transcribe = true)
-        } else {
-            // First press - start recording
-            startAudioRecording()
-        }
-    }
-
-    private fun startAudioRecording() {
-        // Check permission
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED) {
-            showToast("Microphone permission required")
-            Log.e(TAG, "RECORD_AUDIO permission not granted")
-            return
-        }
-
-        try {
-            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-            Log.d(TAG, "AudioRecord minBufferSize: $bufferSize")
-
-            if (bufferSize == AudioRecord.ERROR || bufferSize == AudioRecord.ERROR_BAD_VALUE) {
-                Log.e(TAG, "Invalid buffer size: $bufferSize")
-                showToast("Audio config not supported")
-                return
-            }
-
-            // Release any existing AudioRecord
-            audioRecord?.release()
-            audioRecord = null
-
-            // Use VOICE_RECOGNITION source - optimized for speech recognition
-            // Also try DEFAULT if VOICE_RECOGNITION fails
-            audioRecord = try {
-                AudioRecord(
-                    android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                    SAMPLE_RATE,
-                    CHANNEL_CONFIG,
-                    AUDIO_FORMAT,
-                    bufferSize * 4
-                )
-            } catch (e: Exception) {
-                Log.w(TAG, "VOICE_RECOGNITION failed, trying MIC source", e)
-                AudioRecord(
-                    android.media.MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE,
-                    CHANNEL_CONFIG,
-                    AUDIO_FORMAT,
-                    bufferSize * 4
-                )
-            }
-
-            Log.d(TAG, "AudioRecord state: ${audioRecord?.state}, expected: ${AudioRecord.STATE_INITIALIZED}")
-
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord not initialized, state=${audioRecord?.state}")
-                showToast("Failed to initialize audio recording")
-                audioRecord?.release()
-                audioRecord = null
-                return
-            }
-
-            isListening = true
-            pendingAudioData = null
-
-            // Visual feedback - show recording state
-            updateStatus("Recording... Tap mic to stop")
-            showToast("Recording... Tap mic button to stop")
-
-            // Highlight mic button (full opacity, tinted red)
-            expandedPanel.findViewById<ImageButton>(R.id.btnMic)?.let { micBtn ->
-                micBtn.alpha = 1.0f
-                micBtn.setColorFilter(android.graphics.Color.RED)
-            }
-
-            audioRecord?.startRecording()
-
-            // Verify recording actually started
-            val recordingState = audioRecord?.recordingState
-            Log.d(TAG, "AudioRecord recordingState: $recordingState, expected: ${AudioRecord.RECORDSTATE_RECORDING}")
-
-            if (recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                Log.e(TAG, "AudioRecord failed to start recording")
-                showToast("Failed to start recording")
-                audioRecord?.release()
-                audioRecord = null
-                isListening = false
-                return
-            }
-
-            Log.d(TAG, "Audio recording started successfully - manual stop required")
-
-            // Start recording job - NO AUTO-STOP, records until user presses button again
-            recordingJob = coroutineScope.launch {
-                val audioData = ByteArrayOutputStream()
-                val buffer = ByteArray(bufferSize)
-                var totalBytesRead = 0
-
-                while (isActive && isListening) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
-                    if (read > 0) {
-                        audioData.write(buffer, 0, read)
-                        totalBytesRead += read
-                    } else if (read < 0) {
-                        Log.e(TAG, "AudioRecord read error: $read")
-                    }
-                }
-
-                // Save recorded data for transcription
-                pendingAudioData = audioData.toByteArray()
-                Log.d(TAG, "Recording loop ended, totalBytesRead=$totalBytesRead, pendingAudioData size=${pendingAudioData?.size ?: 0}")
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error starting audio recording", e)
-            showToast("Audio recording failed: ${e.message}")
-            isListening = false
-            audioRecord?.release()
-            audioRecord = null
-        }
-    }
-
-    private fun stopAudioRecording(transcribe: Boolean = false) {
-        Log.d(TAG, "stopAudioRecording called, transcribe=$transcribe, isListening=$isListening")
-        isListening = false
-
-        // Wait for recording job to save data - longer delay to ensure data is captured
-        handler.postDelayed({
-            Log.d(TAG, "Stop delay expired, cancelling recording job")
-
-            // Don't cancel the job - let it finish naturally (isListening=false will stop the loop)
-            // Just wait for it to complete
-            recordingJob = null
-
-            try {
-                Log.d(TAG, "Stopping AudioRecord...")
-                audioRecord?.stop()
-                audioRecord?.release()
-                Log.d(TAG, "AudioRecord stopped and released")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error stopping audio recording", e)
-            }
-            audioRecord = null
-
-            // Reset mic button appearance
-            expandedPanel.findViewById<ImageButton>(R.id.btnMic)?.let { micBtn ->
-                micBtn.alpha = 0.5f
-                micBtn.clearColorFilter()
-            }
-
-            Log.d(TAG, "pendingAudioData size=${pendingAudioData?.size ?: 0}")
-
-            if (transcribe && pendingAudioData != null && pendingAudioData!!.size > 1000) {
-                val dataSize = pendingAudioData!!.size
-                val durationSec = dataSize.toFloat() / (SAMPLE_RATE * 2)  // 16-bit = 2 bytes per sample
-
-                // Analyze audio level to check if we captured real audio
-                val audioLevel = analyzeAudioLevel(pendingAudioData!!)
-                Log.d(TAG, "Audio data: $dataSize bytes, ~${durationSec}s duration, level=$audioLevel")
-
-                if (audioLevel < 100) {
-                    Log.w(TAG, "Audio level very low - might be silence or capture issue")
-                    showToast("Warning: Audio level very low (${audioLevel})")
-                }
-
-                updateStatus("Processing speech...")
-                showToast("Processing ${durationSec.toInt()}s audio (level: $audioLevel)...")
-
-                // Transcribe the recorded audio
-                coroutineScope.launch {
-                    transcribeWithWhisper(pendingAudioData!!)
-                    pendingAudioData = null
-                }
-            } else if (transcribe) {
-                val size = pendingAudioData?.size ?: 0
-                Log.w(TAG, "Recording too short: $size bytes")
-                updateStatus("Recording too short")
-                showToast("Recording too short ($size bytes) - please speak longer")
-                pendingAudioData = null
-            } else {
-                updateStatus("Ready")
-                pendingAudioData = null
-            }
-        }, 300)  // Longer delay to ensure recording job finishes
-    }
-
-    private suspend fun transcribeWithWhisper(audioData: ByteArray) {
-        Log.d(TAG, "transcribeWithWhisper called, audioData size=${audioData.size}, serverUrl=$serverUrl")
-
-        if (serverUrl.isEmpty()) {
-            Log.e(TAG, "No server URL configured for STT")
-            withContext(Dispatchers.Main) {
-                updateStatus("No server configured")
-                showToast("No server configured for speech recognition")
-            }
-            return
-        }
-
-        try {
-            // Save audio to temp WAV file
-            val audioFile = File(cacheDir, "voice_input_${System.currentTimeMillis()}.wav")
-            writeWavFile(audioFile, audioData)
-            Log.d(TAG, "WAV file saved: ${audioFile.absolutePath}, size=${audioFile.length()}")
-
-            val client = OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(60, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .build()
-
-            val requestBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart(
-                    "file",
-                    audioFile.name,
-                    audioFile.asRequestBody("audio/wav".toMediaType())
-                )
-                .build()
-
-            Log.d(TAG, "Sending STT request to: $serverUrl/stt")
-
-            val request = Request.Builder()
-                .url("$serverUrl/stt")
-                .post(requestBody)
-                .build()
-
-            val response = client.newCall(request).execute()
-            Log.d(TAG, "STT response code: ${response.code}")
-
-            withContext(Dispatchers.Main) {
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: "{}"
-                    Log.d(TAG, "STT response body: $body")
-
-                    val json = JSONObject(body)
-                    val text = json.optString("text", "")
-                    Log.d(TAG, "Extracted text: '$text', length=${text.length}")
-
-                    if (text.isNotEmpty()) {
-                        Log.d(TAG, "Setting text to promptInput, promptInput=${promptInput != null}")
-
-                        // Extra safety - get promptInput reference again
-                        val input = promptInput ?: expandedPanel.findViewById<EditText>(R.id.promptInput)
-                        if (input != null) {
-                            input.setText(text)
-                            input.setSelection(text.length)
-                            Log.d(TAG, "Text set successfully to: '${input.text}'")
-                            showToast("Transcribed: ${text.take(30)}...")
-                        } else {
-                            Log.e(TAG, "promptInput is NULL - cannot set text!")
-                            showToast("Error: input field not found")
-                        }
-                        updateStatus("Ready")
-                    } else {
-                        Log.w(TAG, "STT returned empty text")
-                        updateStatus("No speech detected")
-                        showToast("No speech detected")
-                    }
-                } else {
-                    val errorBody = response.body?.string()
-                    Log.e(TAG, "STT failed: ${response.code}, body: $errorBody")
-                    updateStatus("Transcription failed")
-                    showToast("STT failed: ${response.code}")
-                }
-            }
-
-            // Cleanup
-            audioFile.delete()
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error transcribing audio", e)
-            withContext(Dispatchers.Main) {
-                updateStatus("Transcription error")
-                showToast("Transcription error: ${e.message}")
-            }
-        }
-    }
-
-    private fun analyzeAudioLevel(audioData: ByteArray): Int {
-        // Analyze 16-bit PCM audio to get average absolute amplitude
-        // This helps detect if we're capturing silence vs actual audio
-        if (audioData.size < 2) return 0
-
-        var sum: Long = 0
-        var count = 0
-
-        // Sample every 100th sample to speed up analysis
-        var i = 0
-        while (i < audioData.size - 1) {
-            // Convert 2 bytes to 16-bit signed sample (little-endian)
-            val sample = (audioData[i].toInt() and 0xFF) or
-                        ((audioData[i + 1].toInt()) shl 8)
-            sum += kotlin.math.abs(sample)
-            count++
-            i += 200  // Skip samples for faster analysis
-        }
-
-        return if (count > 0) (sum / count).toInt() else 0
-    }
-
-    private fun writeWavFile(file: File, pcmData: ByteArray) {
-        FileOutputStream(file).use { out ->
-            val totalDataLen = pcmData.size + 36
-            val byteRate = SAMPLE_RATE * 1 * 16 / 8  // mono, 16-bit
-
-            // WAV header
-            out.write("RIFF".toByteArray())
-            out.write(intToByteArray(totalDataLen))
-            out.write("WAVE".toByteArray())
-            out.write("fmt ".toByteArray())
-            out.write(intToByteArray(16))  // Subchunk1Size
-            out.write(shortToByteArray(1.toShort()))  // AudioFormat (PCM)
-            out.write(shortToByteArray(1.toShort()))  // NumChannels (mono)
-            out.write(intToByteArray(SAMPLE_RATE))  // SampleRate
-            out.write(intToByteArray(byteRate))  // ByteRate
-            out.write(shortToByteArray(2.toShort()))  // BlockAlign
-            out.write(shortToByteArray(16.toShort()))  // BitsPerSample
-            out.write("data".toByteArray())
-            out.write(intToByteArray(pcmData.size))
-            out.write(pcmData)
-        }
-    }
-
+    // Little-endian byte helpers for writeWavFileWithSampleRate's WAV header.
     private fun intToByteArray(value: Int): ByteArray {
         return byteArrayOf(
             (value and 0xff).toByte(),
@@ -4128,34 +3795,6 @@ class OverlayService : Service() {
         }
     }
 
-    // Pause mic temporarily while AI is speaking (auto-mute for feedback prevention)
-    private fun pauseMicForAI() {
-        if (!isRealtimeRecording) return
-
-        Log.d(TAG, "Auto-muting mic while AI speaks")
-        isAISpeaking = true
-
-        // Fully stop and release AudioRecord to prevent resource exhaustion
-        try {
-            realtimeAudioJob?.cancel()
-            realtimeAudioJob = null
-            realtimeAudioRecord?.stop()
-            realtimeAudioRecord?.release()
-            realtimeAudioRecord = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping audio record", e)
-        }
-
-        isRealtimeRecording = false
-        updateMicUI(false, aiSpeaking = true)
-
-        // Transcribe the buffered user audio with Whisper - ONLY for Gemini Live
-        // GPT Realtime already provides user_transcript via OpenAI's built-in Whisper
-        if (currentRealtimeModel == RealtimeModel.GEMINI_LIVE) {
-            transcribeRealtimeAudioBuffer()
-        }
-    }
-
     // Transcribe buffered realtime audio with Whisper and add to transcript
     private fun transcribeRealtimeAudioBuffer() {
         // Get current sample rate for the active model
@@ -4313,6 +3952,7 @@ class OverlayService : Service() {
         startRealtimeAudioStreaming()
     }
 
+    @OptIn(DelicateCoroutinesApi::class)
     private fun startRealtimeAudioStreaming() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
@@ -4320,18 +3960,12 @@ class OverlayService : Service() {
             return
         }
 
-        // Release existing AudioRecord if any (prevent resource leak)
-        if (realtimeAudioRecord != null) {
-            try {
-                realtimeAudioJob?.cancel()
-                realtimeAudioJob = null
-                realtimeAudioRecord?.stop()
-                realtimeAudioRecord?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error releasing old AudioRecord", e)
-            }
-            realtimeAudioRecord = null
-        }
+        // End any previous capture loop (so its AudioRecord cannot leak) by SIGNAL only: the loop
+        // stops and releases its own AudioRecord in its own finally, on the thread that reads it,
+        // within one read. Stopping/releasing it from here, on main, raced that loop's in-flight
+        // read() — the native abort in AudioRecord::releaseBuffer (feedback_android_audiorecord_race).
+        realtimeCaptureLive?.set(false)
+        realtimeCaptureLive = null
 
         // Sample rate depends on model
         val sampleRate = when (currentRealtimeModel) {
@@ -4346,21 +3980,25 @@ class OverlayService : Service() {
             AUDIO_FORMAT
         ) * 2
 
+        // Held HERE until the capture loop takes it, and released here (in the finally below) only
+        // if it never got that far — never read, so no read() can be in flight.
+        var notYetLooping: AudioRecord? = null
         try {
-            realtimeAudioRecord = AudioRecord(
+            val record = AudioRecord(
                 android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 sampleRate,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
                 bufferSize
             )
+            notYetLooping = record
 
-            if (realtimeAudioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
                 showToast("Failed to initialize audio")
                 return
             }
 
-            realtimeAudioRecord?.startRecording()
+            record.startRecording()
             isRealtimeRecording = true
             updateMicUI(true)
             updateBubbleGlow()  // Update bubble glow state (red for listening)
@@ -4370,65 +4008,83 @@ class OverlayService : Service() {
                 realtimeAudioBuffer.clear()
             }
 
-            realtimeAudioJob = coroutineScope.launch {
+            val live = AtomicBoolean(true)
+            realtimeCaptureLive = live
+            // ATOMIC: onDestroy cancels coroutineScope, and a launch cancelled before it is
+            // dispatched never runs its body — whose finally is the only release of [record].
+            coroutineScope.launch(start = CoroutineStart.ATOMIC) {
                 val buffer = ShortArray(bufferSize / 2)
-                while (isActive && isRealtimeRecording) {
-                    val readCount = realtimeAudioRecord?.read(buffer, 0, buffer.size) ?: 0
-                    if (readCount > 0) {
-                        // Auto-mute while AI is speaking AND for POST_SPEECH_DELAY_MS after (prevents feedback)
-                        val timeSinceAIStopped = System.currentTimeMillis() - aiStoppedSpeakingAt
-                        val inPostSpeechDelay = timeSinceAIStopped < POST_SPEECH_DELAY_MS
-                        if (isAISpeaking || inPostSpeechDelay) {
-                            // Don't send mic audio while AI is speaking or in post-speech delay
-                            continue
-                        }
-
-                        // Convert shorts to bytes (PCM16)
-                        val bytes = ByteArray(readCount * 2)
-                        for (i in 0 until readCount) {
-                            bytes[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
-                            bytes[i * 2 + 1] = (buffer[i].toInt() shr 8 and 0xFF).toByte()
-                        }
-
-                        // Buffer audio for Whisper transcription (with size limit)
-                        synchronized(realtimeAudioBufferLock) {
-                            if (realtimeAudioBuffer.size < MAX_AUDIO_BUFFER_SIZE) {
-                                realtimeAudioBuffer.add(bytes.copyOf())
-                            } else if (realtimeAudioBuffer.size == MAX_AUDIO_BUFFER_SIZE) {
-                                // Remove oldest chunk to make room (sliding window)
-                                realtimeAudioBuffer.removeAt(0)
-                                realtimeAudioBuffer.add(bytes.copyOf())
+                try {
+                    while (isActive && live.get()) {
+                        // The LOCAL record, never a field a re-entry could swap or null mid-read.
+                        val readCount = record.read(buffer, 0, buffer.size)
+                        // A stop that landed while this read was in flight ends the session HERE: its
+                        // audio_commit is already sent, so this chunk must not follow it.
+                        if (!live.get()) break
+                        if (readCount > 0) {
+                            // Auto-mute while AI is speaking AND for POST_SPEECH_DELAY_MS after (prevents feedback)
+                            val timeSinceAIStopped = System.currentTimeMillis() - aiStoppedSpeakingAt
+                            val inPostSpeechDelay = timeSinceAIStopped < POST_SPEECH_DELAY_MS
+                            if (isAISpeaking || inPostSpeechDelay) {
+                                // Don't send mic audio while AI is speaking or in post-speech delay
+                                continue
                             }
-                        }
 
-                        val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                            // Convert shorts to bytes (PCM16)
+                            val bytes = ByteArray(readCount * 2)
+                            for (i in 0 until readCount) {
+                                bytes[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
+                                bytes[i * 2 + 1] = (buffer[i].toInt() shr 8 and 0xFF).toByte()
+                            }
 
-                        // Send audio chunk to realtime API
-                        val audioMsg = JSONObject().apply {
-                            put("type", "audio_input")
-                            put("data", base64Audio)
+                            // Buffer audio for Whisper transcription (with size limit)
+                            synchronized(realtimeAudioBufferLock) {
+                                if (realtimeAudioBuffer.size < MAX_AUDIO_BUFFER_SIZE) {
+                                    realtimeAudioBuffer.add(bytes.copyOf())
+                                } else if (realtimeAudioBuffer.size == MAX_AUDIO_BUFFER_SIZE) {
+                                    // Remove oldest chunk to make room (sliding window)
+                                    realtimeAudioBuffer.removeAt(0)
+                                    realtimeAudioBuffer.add(bytes.copyOf())
+                                }
+                            }
+
+                            val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+                            // Send audio chunk to realtime API
+                            val audioMsg = JSONObject().apply {
+                                put("type", "audio_input")
+                                put("data", base64Audio)
+                            }
+                            realtimeWebSocket?.send(audioMsg.toString())
                         }
-                        realtimeWebSocket?.send(audioMsg.toString())
                     }
+                } finally {
+                    // Stopped and released HERE, on the SAME thread as read() — see the note at
+                    // the top of this function.
+                    try { record.stop() } catch (_: Exception) {}
+                    try { record.release() } catch (_: Exception) {}
                 }
             }
+            notYetLooping = null
 
             Log.d(TAG, "Realtime audio streaming started at ${sampleRate}Hz")
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start audio streaming", e)
             showToast("Failed to start microphone")
+        } finally {
+            notYetLooping?.let { r -> try { r.release() } catch (_: Exception) {} }
         }
     }
 
     private fun stopRealtimeAudioStreaming() {
         isRealtimeRecording = false
-        realtimeAudioJob?.cancel()
-        realtimeAudioJob = null
-
-        realtimeAudioRecord?.stop()
-        realtimeAudioRecord?.release()
-        realtimeAudioRecord = null
+        // Only SIGNAL the capture loop: it stops and releases the AudioRecord in its own finally, on
+        // the thread that reads it, within one read. Doing it here, on main, raced that loop's
+        // in-flight read() — the native abort in AudioRecord::releaseBuffer
+        // (feedback_android_audiorecord_race).
+        realtimeCaptureLive?.set(false)
+        realtimeCaptureLive = null
 
         updateMicUI(false)
         updateBubbleGlow()  // Update bubble glow state

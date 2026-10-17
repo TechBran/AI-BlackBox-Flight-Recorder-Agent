@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.PI
+import kotlin.math.pow
 import kotlin.math.sin
 
 /**
@@ -261,7 +262,7 @@ class AuroraAnalyserTest {
     // ------------------------------------------------------------- D4 seeding
 
     @Test
-    fun `the first chunk seeds the gain reference so quiet speech is already full scale`() {
+    fun `the first chunk seeds the gain reference so quiet speech is not further attenuated`() {
         val chunk = speechChunk()
         val raw = FloatArray(AuroraAnalyser.BANDS)
         val out = AuroraAnalyser(16000, FakeClock().supplier).analyze(chunk, chunk.size, raw)
@@ -272,10 +273,15 @@ class AuroraAnalyserTest {
         )
         assertTrue("guard: ...and above the noise floor", raw[1] > AuroraAnalyser.PEAK_FLOOR[1])
 
-        // Nothing but the warm-up ramp may attenuate the very first chunk. The original scaled
-        // this by raw/PEAK_INIT as well, which is where "it takes a few seconds to catch up"
-        // came from on top of the ramp.
-        assertEquals(AuroraAnalyser.WARM_FLOOR, out[1], 1e-4f)
+        // Seeding makes the reference == this chunk's own level, so the only things attenuating
+        // the very first chunk are the warm-up floor and the deliberate HEADROOM operating point
+        // (v/(ref*HEADROOM) == 1/HEADROOM when ref == v). The original ALSO scaled by
+        // raw/PEAK_INIT, which is where "it takes a few seconds to catch up" came from on top of
+        // the ramp — so this must read strictly hotter than that old converge-from-a-guess value.
+        val operatingPoint = AuroraAnalyser.softKnee(1f / AuroraAnalyser.HEADROOM)
+        assertEquals(operatingPoint * AuroraAnalyser.WARM_FLOOR, out[1], 1e-4f)
+        val oldConvergeBug = operatingPoint * AuroraAnalyser.WARM_FLOOR * (raw[1] / AuroraAnalyser.PEAK_INIT[1])
+        assertTrue("seeding must beat the converge-from-guess bug (${out[1]} vs $oldConvergeBug)", out[1] > oldConvergeBug)
     }
 
     @Test
@@ -313,9 +319,12 @@ class AuroraAnalyserTest {
             "still collapsed at the end of warm-up (${slammed[chunks - 1]} vs ${clean[chunks - 1]})",
             slammed[chunks - 1] >= clean[chunks - 1] * 0.9f,
         )
-        // The slam is loud, so it is entitled to peg the ribbon on its own frame — seeding
-        // means the reference is already right for it instead of lagging a few frames behind.
-        assertEquals("the slam itself must read hot", 1f, slammed[0], 1e-6f)
+        // The slam is loud, so it pegs the pre-warm ratio to the soft-knee ceiling on its own
+        // frame — seeding means the reference is already right for it instead of lagging a few
+        // frames behind. On the FIRST chunk that ceiling is then scaled by the warm-up floor
+        // (the soft-knee bounds the ratio BEFORE warmScale, so warmScale is a true attenuator),
+        // so it reads at WARM_FLOOR rather than 1.0.
+        assertEquals("the slam saturates the pre-warm ceiling", AuroraAnalyser.WARM_FLOOR, slammed[0], 1e-4f)
     }
 
     @Test
@@ -412,10 +421,15 @@ class AuroraAnalyserTest {
 
         val live = AuroraAnalyser(16000, FakeClock().supplier)
         val firstChunk = pcm.copyOfRange(0, 1024)
+        // The live path's first chunk is warm-floored (times the seeded HEADROOM operating point),
+        // well below full scale — that is the contrast with the offline path above, which opens
+        // already at 1.0.
+        val liveFirst = AuroraAnalyser.softKnee(1f / AuroraAnalyser.HEADROOM) * AuroraAnalyser.WARM_FLOOR
         assertEquals(
             "the live path ramps from the warm floor — that is the contrast",
-            AuroraAnalyser.WARM_FLOOR, live.analyze(firstChunk, firstChunk.size)[1], 1e-3f,
+            liveFirst, live.analyze(firstChunk, firstChunk.size)[1], 1e-3f,
         )
+        assertTrue("the live first chunk must be far below the offline full scale", liveFirst < 0.5f)
     }
 
     @Test

@@ -9,7 +9,6 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
-import android.media.MediaRecorder
 import android.util.Base64
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
@@ -69,6 +68,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.voice.MicBuffer
+import com.aiblackbox.portal.data.voice.MicSourcePolicy
 import com.aiblackbox.portal.data.voice.TranscriptEntry
 import com.aiblackbox.portal.data.voice.VoiceAgentPreset
 import com.aiblackbox.portal.data.voice.VoiceAgentPresets
@@ -89,9 +90,14 @@ import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.ui.components.ContextProvenance
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import com.aiblackbox.portal.ui.components.aurora.AURORA_SILENT_BANDS
-import com.aiblackbox.portal.ui.components.aurora.AuroraAnalyser
-import com.aiblackbox.portal.ui.components.aurora.AuroraWaveform
+import com.aiblackbox.portal.ui.components.aurora.AURORA_SILENT_BINS
+import com.aiblackbox.portal.ui.components.aurora.AnalysisFrame
+import com.aiblackbox.portal.ui.components.aurora.AudioAnalysisTap
+import com.aiblackbox.portal.ui.components.aurora.PlaybackDelayLine
+import com.aiblackbox.portal.ui.components.aurora.auroraBins
 import com.aiblackbox.portal.ui.components.aurora.auroraVoices
+import com.aiblackbox.portal.ui.components.wave.LocalWaveformStyle
+import com.aiblackbox.portal.ui.components.wave.VoiceVisualizer
 import android.view.HapticFeedbackConstants
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -230,6 +236,16 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val _aiBands = MutableStateFlow(AURORA_SILENT_BANDS)
     val aiBands: StateFlow<FloatArray> = _aiBands.asStateFlow()
 
+    // The same instants' log-frequency SPECTRUM — each tap's second channel, raw and uncompressed
+    // (see AudioAnalysisTap). Published beside the bands rather than folded into them: they are two
+    // readings of one hop, and a renderer that wants both must not have to align two cadences.
+
+    private val _micBins = MutableStateFlow(AURORA_SILENT_BINS)
+    val micBins: StateFlow<FloatArray> = _micBins.asStateFlow()
+
+    private val _aiBins = MutableStateFlow(AURORA_SILENT_BINS)
+    val aiBins: StateFlow<FloatArray> = _aiBins.asStateFlow()
+
     /**
      * Whether the model's audio is reaching the speaker right now — the AI ribbon's presence.
      *
@@ -247,6 +263,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private var audioTrack: AudioTrack? = null
     private val audioTrackLock = Object()
     @Volatile private var isRecordingAudio = false
+    // The live mic session's OWN stop signal, flipped by stopMic(). Per session and not only the
+    // shared flag above: a quick stopMic() + startMic() flips that flag straight back on while the
+    // old loop is still inside read(), and the old loop would carry on with the old mic open.
+    @Volatile private var micLive: java.util.concurrent.atomic.AtomicBoolean? = null
 
     /**
      * Guards the blue ribbon's (bands, audible, last-write-at) triple.
@@ -259,8 +279,22 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val aiVisualLock = Object()
 
-    /** elapsedRealtime of the last chunk handed to the AudioTrack. Guarded by [aiVisualLock]. */
+    /** elapsedRealtime of the last blue-ribbon publish. Guarded by [aiVisualLock]. */
     private var lastAiWriteAtMs = 0L
+
+    /**
+     * The AI playback stream's analysis, and the delay line that decides WHEN each frame is true.
+     *
+     * Both are created with the AudioTrack in [initAudioPlayback] and only ever touched under
+     * [audioTrackLock] — the drain thread writes and pumps them, [interrupt] rewinds them on a
+     * barge-in, [stopAudioPlayback] drops them, and that lock is what serialises the three. One tap
+     * per stream (D1): the mic's is a separate instance built at a different rate.
+     */
+    private var aiTap: AudioAnalysisTap? = null
+    private var aiDelayLine: PlaybackDelayLine? = null
+
+    /** Reused AudioTimestamp scratch. Only ever filled under [audioTrackLock], like the two above. */
+    private val aiTimestamp = android.media.AudioTimestamp()
 
     /**
      * True from the moment the drain takes a chunk off the queue until its write returns.
@@ -573,6 +607,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 audioTrack?.flush()
                 audioTrack?.play()
             } catch (_: Exception) {}
+            // flush() discards what the track was holding AND zeroes its playback position, so
+            // every pending frame describes audio nobody will hear and every offset still in
+            // flight is measured against a counter that no longer exists. Both sides of the
+            // presentation clock rewind here, together, or the next utterance publishes early.
+            aiTap?.reset()
+            aiDelayLine?.reset()
         }
         _amplitude.value = 0f
         // Barge-in flushed the queue, so the blue ribbon has to go with it — the point of a
@@ -585,17 +625,20 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Publish the blue ribbon's bands for a chunk just handed to the AudioTrack, and stamp WHEN.
+     * Publish the blue ribbon for a frame whose audio is AUDIBLE NOW, and stamp when that was.
      *
      * `AudioTrack.write` on a MODE_STREAM track blocks only until the bytes have been COPIED into
      * the track's own buffer; it says nothing about them having been played. That buffer holds
      * [aiTrackPlayoutMs] of audio, so the queue runs dry that long before the last sound leaves the
-     * speaker — which is why the retirement tick cannot key off an empty queue alone.
+     * speaker — which is why the retirement tick cannot key off an empty queue alone, and why this
+     * is no longer called from the write. [PlaybackDelayLine] holds each frame until the track's own
+     * position reaches it; what arrives here is the sound in the room.
      */
-    private fun markAiAudible(bands: FloatArray) {
+    private fun markAiAudible(frame: AnalysisFrame) {
         synchronized(aiVisualLock) {
             lastAiWriteAtMs = android.os.SystemClock.elapsedRealtime()
-            _aiBands.value = bands
+            _aiBands.value = frame.bands
+            _aiBins.value = frame.bins
             _aiAudible.value = true
         }
     }
@@ -605,8 +648,57 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         synchronized(aiVisualLock) {
             lastAiWriteAtMs = 0L
             _aiBands.value = AURORA_SILENT_BANDS
+            _aiBins.value = AURORA_SILENT_BINS
             _aiAudible.value = false
         }
+    }
+
+    /**
+     * Publish whichever analysed frame the speaker has reached, if any. Drain thread only.
+     *
+     * Called every drain iteration rather than only after a write, because the TAIL of an utterance
+     * is released long after the last write returned — the track is still playing a bufferful while
+     * the drain idles on an empty queue.
+     *
+     * Takes [audioTrackLock] to read the track's position, then [aiVisualLock] to publish: the
+     * documented order, and the same one the write path uses.
+     */
+    private fun publishAudibleAiFrame() {
+        val frame = synchronized(audioTrackLock) {
+            val line = aiDelayLine ?: return
+            val track = audioTrack ?: return
+            // Same guard the write path uses: asking an uninitialised track for its position is
+            // what throws, and nothing has been written to one anyway.
+            if (track.state != AudioTrack.STATE_INITIALIZED) return
+            line.release(renderedSamples(track))
+        } ?: return
+        markAiAudible(frame)
+    }
+
+    /**
+     * Frames the track has actually rendered, best source first, or null when it will not say —
+     * see [PlaybackDelayLine] for why null is a supported answer rather than a failure. Caller
+     * holds [audioTrackLock] (this fills the shared [aiTimestamp]).
+     *
+     * `getTimestamp` is preferred because it is corrected for the device's own output latency, so
+     * it answers "what the ear is hearing" rather than "what the mixer has consumed" — but it is
+     * documented best-effort and refuses right after `play()`. `getPlaybackHeadPosition` is the
+     * coarser rung that is always there. Both count from the same zero the delay line does: a
+     * `flush()` or `stop()` resets them, which is why [interrupt] rewinds the line with the track.
+     */
+    private fun renderedSamples(track: AudioTrack): Long? = try {
+        if (track.getTimestamp(aiTimestamp)) {
+            PlaybackDelayLine.renderedAt(
+                framePosition = aiTimestamp.framePosition,
+                timestampNs = aiTimestamp.nanoTime,
+                nowNs = System.nanoTime(),
+                sampleRate = VoiceSampleRates.AI_OUTPUT,
+            )
+        } else {
+            PlaybackDelayLine.headPositionFrames(track.playbackHeadPosition)
+        }
+    } catch (_: Exception) {
+        null
     }
 
     private fun addLocalEntry(entry: TranscriptEntry) {
@@ -631,6 +723,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     // -------------------------------------------------------------------------
     // Mic input — AudioRecord -> base64 PCM16 -> WebSocket
     // -------------------------------------------------------------------------
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     fun startMic() {
         val app = getApplication<Application>()
         if (ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO)
@@ -641,21 +734,29 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val sampleRate = VoiceSampleRates.mic(_backend.value)
+        // DUPLEX capture, and the reason this path does NOT follow the composer's simplex source
+        // chain: this mic is open while the model is speaking out of the same device's loudspeaker.
+        // VOICE_COMMUNICATION (and the AEC below) is what keeps the model from transcribing its own
+        // voice when the user barges in — dropping either is a functional regression, not a
+        // cleaner signal. See [MicSourcePolicy].
+        val micSource = MicSourcePolicy.DUPLEX_SOURCE
+        val micEffects = MicSourcePolicy.effectsFor(micSource)
         // Built HERE, from the rate the AudioRecord below is about to open at, and captured by this
         // session's capture loop. A field would have to be rebuilt whenever the backend changed
         // (16 kHz Gemini/Grok vs 24 kHz realtime); a per-session local cannot drift from its own
         // stream by construction, and each new session gets a fresh warm-up and gain seed for free.
-        val micAnalyser = AuroraAnalyser(sampleRate)
+        // ONE per stream (D1) — the AI playback tap runs concurrently and must not be this one.
+        val micTap = AudioAnalysisTap(sampleRate, calibration = micSource.calibration, label = "voice-mic/$micSource")
 
-        val bufferSize = AudioRecord.getMinBufferSize(
-            sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        ) * 2
+        val bufferSize = MicBuffer.recordBufferBytes(
+            AudioRecord.getMinBufferSize(
+                sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+            )
+        )
 
         try {
-            // Use VOICE_COMMUNICATION for stronger echo cancellation —
-            // it uses speaker output as AEC reference signal (critical for voice agent)
             val record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                micSource.androidSource,
                 sampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -670,16 +771,21 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
 
-            // Attach explicit AcousticEchoCanceler + NoiseSuppressor for devices
-            // where the platform doesn't enable them automatically
+            // Attach the explicit effects this path asks for, for devices where the platform does
+            // not enable them automatically. They are RETAINED and released with the record below:
+            // as unowned locals they outlived every reference to them, so the platform kept the
+            // effect attached to a dead session and the NEXT mic session inherited whatever state
+            // the garbage collector had left behind.
+            var aec: android.media.audiofx.AcousticEchoCanceler? = null
+            var ns: android.media.audiofx.NoiseSuppressor? = null
             try {
-                if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
-                    val aec = android.media.audiofx.AcousticEchoCanceler.create(record.audioSessionId)
+                if (micEffects.echoCanceler && android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                    aec = android.media.audiofx.AcousticEchoCanceler.create(record.audioSessionId)
                     aec?.enabled = true
                     android.util.Log.d("VoiceVM", "AcousticEchoCanceler enabled")
                 }
-                if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
-                    val ns = android.media.audiofx.NoiseSuppressor.create(record.audioSessionId)
+                if (micEffects.noiseSuppressor && android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                    ns = android.media.audiofx.NoiseSuppressor.create(record.audioSessionId)
                     ns?.enabled = true
                     android.util.Log.d("VoiceVM", "NoiseSuppressor enabled")
                 }
@@ -693,11 +799,26 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             _isMicActive.value = true
             android.util.Log.d("VoiceVM", "Mic started: ${sampleRate}Hz, buffer=$bufferSize")
 
-            viewModelScope.launch(Dispatchers.IO) {
+            // A startMic() over a live session ends the old loop rather than orphaning its signal
+            // where no stopMic() could ever reach it.
+            micLive?.set(false)
+            val live = java.util.concurrent.atomic.AtomicBoolean(true)
+            micLive = live
+            // ATOMIC: a launch cancelled before it is dispatched (onCleared) never runs its body,
+            // and the body's finally is the only place this record is released.
+            viewModelScope.launch(Dispatchers.IO, start = kotlinx.coroutines.CoroutineStart.ATOMIC) {
                 var wasSendingAudio = false
+                // Hoisted out of the read loop on purpose: the tap calls this synchronously, on
+                // this thread, once per completed hop — allocating a lambda per read would put a
+                // capture in the audio path for nothing. The frame's arrays are freshly built and
+                // belong to us, so they go straight into the flows with no copy.
+                val publishMic: (AnalysisFrame) -> Unit = { frame ->
+                    _micBands.value = frame.bands
+                    _micBins.value = frame.bins
+                }
                 try {
-                    val buffer = ShortArray(bufferSize / 2)
-                    while (isRecordingAudio) {
+                    val buffer = ShortArray(MicBuffer.readLengthSamples(bufferSize))
+                    while (live.get()) {
                         // Read via the LOCAL record (not the nullable field) so a
                         // concurrent stopMic() can never swap/null it mid-read.
                         val readCount = record.read(buffer, 0, buffer.size)
@@ -711,10 +832,16 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                                 val timeSinceStop = System.currentTimeMillis() - client.aiStoppedSpeakingAt
                                 if (shouldHoldMic(_backend.value, client.isAISpeaking.value, timeSinceStop)) {
                                     wasSendingAudio = false
-                                    // Grok's held mic stops feeding the analyser, so without this
-                                    // the red ribbon would freeze at the last syllable before the
-                                    // hold and sit there through the model's whole answer.
+                                    // Grok's held mic stops feeding the tap, so without this the
+                                    // red ribbon would freeze at the last syllable before the hold
+                                    // and sit there through the model's whole answer. The tap is
+                                    // deliberately NOT reset here: a hold is the same speaker
+                                    // pausing, and its own stall detection already re-anchors (and
+                                    // so starts a new analyser session) if the hold outlasts
+                                    // AuroraAnalyser.SESSION_GAP_NS — which is exactly what the
+                                    // analyser did on this path before.
                                     _micBands.value = AURORA_SILENT_BANDS
+                                    _micBins.value = AURORA_SILENT_BINS
                                     continue
                                 }
                             }
@@ -725,9 +852,11 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                                 bytes[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
                                 bytes[i * 2 + 1] = (buffer[i].toInt() shr 8 and 0xFF).toByte()
                             }
-                            // The mic's OWN analyser, at the mic's OWN rate — the AI's runs
-                            // concurrently at 24 kHz on the playback side.
-                            _micBands.value = micAnalyser.analyze(bytes, bytes.size)
+                            // The mic's OWN tap, at the mic's OWN rate — the AI's runs concurrently
+                            // at 24 kHz on the playback side. The tap decides the cadence now: a
+                            // read shorter than a hop publishes nothing and carries its audio
+                            // forward, a longer one publishes every hop it completes.
+                            micTap.offer(bytes, bytes.size, publishMic)
                             val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
                             try {
                                 voiceClient?.sendAudioChunk(base64)
@@ -756,6 +885,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     // it from stopMic() on the caller thread raced an in-flight
                     // read() and aborted natively in AudioRecord::releaseBuffer
                     // (SIGABRT crash on "start speaking", fixed 2026-06-06).
+                    // Effects first: they are attached to this record's audio session, so they
+                    // have to go before the session they are bound to does.
+                    try { aec?.release() } catch (_: Exception) {}
+                    try { ns?.release() } catch (_: Exception) {}
                     try { record.stop() } catch (_: Exception) {}
                     try { record.release() } catch (_: Exception) {}
                     if (audioRecord === record) audioRecord = null
@@ -773,9 +906,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         // the caller thread raced an in-flight read() and crashed natively in
         // AudioRecord::releaseBuffer (fixed 2026-06-06).
         isRecordingAudio = false
+        micLive?.set(false)
+        micLive = null
         _isMicActive.value = false
         _amplitude.value = 0f
         _micBands.value = AURORA_SILENT_BANDS
+        _micBins.value = AURORA_SILENT_BINS
         if (_waveSpeaker.value == WaveSpeaker.USER) _waveSpeaker.value = WaveSpeaker.IDLE
         android.util.Log.d("VoiceVM", "Mic stop requested")
     }
@@ -847,14 +983,18 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
             synchronized(audioTrackLock) {
                 audioTrack = track
+                // Built here, from the rate and the buffer THIS track was just opened with, and
+                // replaced wholesale with it: a stream's analysis, its presentation clock and the
+                // device it is measuring all begin and end together. A SEPARATE tap from the mic's
+                // — see the band flows' note.
+                aiTap = AudioAnalysisTap(outputSampleRate, label = "voice-ai")
+                aiDelayLine = PlaybackDelayLine(bufferSize / 2)  // bytes -> frames: mono PCM16
                 track.play()
             }
             android.util.Log.d("VoiceVM", "AudioTrack initialized: ${outputSampleRate}Hz, buffer=$bufferSize")
 
             // Start playback drain immediately — it gates on preBufferReady internally.
-            // Its analyser is built here, from the rate this AudioTrack was just opened at, and is
-            // a SEPARATE instance from the mic's — see the band flows' note.
-            startPlaybackDrain(AuroraAnalyser(outputSampleRate))
+            startPlaybackDrain()
 
             // Decoupled audio collector — receives chunks into queue (never blocks)
             audioCollectorJob?.cancel()
@@ -884,12 +1024,21 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     // Dedicated playback drain loop — writes to AudioTrack from queue
     // Starts immediately; gates on preBufferReady so short responses still play
-    private fun startPlaybackDrain(aiAnalyser: AuroraAnalyser) {
+    private fun startPlaybackDrain() {
         audioPlaybackJob?.cancel()
         audioPlaybackJob = viewModelScope.launch(Dispatchers.IO) {
             android.util.Log.d("VoiceVM", "Playback drain started")
+            // Hoisted out of the write path: the tap calls this synchronously, once per completed
+            // hop, while this thread holds audioTrackLock. Queueing is all it may do — publishing
+            // here would put the ribbon back ahead of the sound, which is the bug.
+            val queueFrame: (AnalysisFrame) -> Unit = { frame -> aiDelayLine?.offer(frame) }
             try {
                 while (isActive) {
+                    // Every iteration, not only after a write: the last bufferful of an utterance
+                    // becomes audible while this loop is idling on an empty queue, and those frames
+                    // are the model's closing word.
+                    publishAudibleAiFrame()
+
                     // Wait for pre-buffer threshold OR response_complete (queue has data but AI stopped)
                     if (!preBufferReady) {
                         val hasData = !audioPlaybackQueue.isEmpty()
@@ -913,7 +1062,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                             synchronized(audioTrackLock) {
                                 val track = audioTrack ?: return@synchronized
                                 if (track.state == AudioTrack.STATE_INITIALIZED) {
-                                    track.write(chunk, 0, chunk.size)
+                                    val wrote = track.write(chunk, 0, chunk.size)
                                     // Sample loudness at the moment the chunk is committed to the
                                     // audio device, so the waveform stays in sync with what's heard
                                     // (the ~12KB pre-buffer + drain otherwise lag enqueue by ~256ms).
@@ -921,10 +1070,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                                     // releases between chunks so quiet syllables + pauses show.
                                     _waveSpeaker.value = WaveSpeaker.AI
                                     _amplitude.value = maxOf(_amplitude.value, rmsAmplitudeFromBytes(chunk))
-                                    // Same instant, same reason: the bands are what the blue ribbon
-                                    // draws. No release loop for them — the renderer runs its own
-                                    // per-band decay, so all these have to do is stop (below).
-                                    markAiAudible(aiAnalyser.analyze(chunk, chunk.size))
+                                    // The bands are analysed here and published LATER, when the
+                                    // speaker reaches them — the two calls take the byte count the
+                                    // track ACCEPTED (never chunk.size) so the tap's offsets and
+                                    // the delay line's position stay one number. A negative return
+                                    // is an error code, not a length.
+                                    if (wrote > 0) {
+                                        aiDelayLine?.accepted(wrote)
+                                        aiTap?.offer(chunk, wrote, queueFrame)
+                                    }
                                 }
                             }
                         } finally {
@@ -971,28 +1125,31 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 // Three guards, all load bearing: the model has stopped generating, the queue is
                 // empty, and no chunk is mid-write; then the playout wait finishes the job.
                 //
-                // That wait is the buffer's FULL playout, i.e. an UPPER bound — the track may be
-                // holding less than a full buffer when the last write returns, so the ribbon can
-                // linger up to a third of a second past the true end. Deliberate: lingering is
-                // invisible (the sheets are already resting), retiring early cuts the model off
-                // mid-word. The exact answer is playbackHeadPosition vs frames written, which
-                // needs audioTrackLock — held across the blocking write, and this tick is on the
-                // main thread.
+                // That wait is the buffer's FULL playout, i.e. an UPPER bound, and it is now
+                // measured from the last AUDIBLE frame rather than the last write — the delay line
+                // moved the stamp, and the ribbon consequently lingers by up to one more buffer
+                // than it used to. Kept that way on purpose: the wait must never expire BEFORE the
+                // delay line's tail is published, because a retire followed by a straggling frame
+                // is a present->absent->present flip that costs a full retire/return of the ribbon,
+                // while lingering is invisible (the sheets are already resting on the renderer's
+                // own per-band decay). The exact answer is the track's position against frames
+                // written — which the drain now has, but reading it needs audioTrackLock, held
+                // across the blocking write, and this tick is on the main thread.
                 //
-                // Publishing the SHARED silent array is what stops this 30 Hz tick from
+                // Publishing the SHARED silent arrays is what stops this 30 Hz tick from
                 // recomposing the ribbon while nothing is happening.
                 if (voiceClient?.isAISpeaking?.value != true &&
                     audioPlaybackQueue.isEmpty() &&
                     !aiWriteInFlight
                 ) {
                     // Re-checked under the same lock the drain publishes on, so a chunk landing on
-                    // a tick boundary cannot be blanked by a decision taken just before it arrived
-                    // — that present->absent->present flip costs a full retire/return of the ribbon.
+                    // a tick boundary cannot be blanked by a decision taken just before it arrived.
                     synchronized(aiVisualLock) {
                         if (_aiAudible.value &&
                             android.os.SystemClock.elapsedRealtime() - lastAiWriteAtMs >= aiTrackPlayoutMs
                         ) {
                             _aiBands.value = AURORA_SILENT_BANDS
+                            _aiBins.value = AURORA_SILENT_BINS
                             _aiAudible.value = false
                         }
                     }
@@ -1019,17 +1176,22 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 audioTrack?.release()
             } catch (_: Exception) {}
             audioTrack = null
+            // Dropped WITH the track they measure: a frame still held here describes audio on a
+            // device that no longer exists, and the next session builds its own pair.
+            aiTap = null
+            aiDelayLine = null
         }
-        // Retired LAST, and the ORDER is the whole point: the drain can publish ONE MORE chunk
-        // while its cancel() is pending. Its publish site is plain blocking code inside
+        // Retired LAST, and the ORDER is the whole point: the drain can publish ONE MORE frame
+        // while its cancel() is pending. Both of its publish paths — the write, and
+        // publishAudibleAiFrame() at the top of the loop — are plain blocking code inside
         // synchronized(audioTrackLock) with no suspension point, so `audioPlaybackJob?.cancel()`
-        // above cannot interrupt a drain already sitting in `track.write` — that write finishes and
-        // calls markAiAudible() afterwards. Clearing FIRST therefore left _aiAudible=true with
+        // above cannot interrupt a drain already sitting in `track.write`; that write finishes and
+        // the next iteration publishes. Clearing FIRST therefore left _aiAudible=true with
         // aiEnvelopeJob already cancelled: nothing alive to retire it, so hanging up mid-utterance
         // (the common case) left the blue ribbon animating on the dead session's last spectrum.
-        // Once the block above has nulled audioTrack, the drain's `audioTrack ?: return@synchronized`
-        // guarantees no further markAiAudible and this clear is the last word. (No playout wait
-        // either — the track is stopped and released, so what it still held will never be heard.)
+        // Once the block above has nulled audioTrack, both paths bail on their
+        // `audioTrack ?: return` guard and this clear is the last word. (No playout wait either —
+        // the track is stopped and released, so what it still held will never be heard.)
         clearAiAudible()
         android.util.Log.d("VoiceVM", "AudioTrack stopped")
     }
@@ -1074,7 +1236,7 @@ private fun voiceLabel(backend: VoiceBackend, voice: String): String = when (bac
  * [VoiceScreen] they would recompose the transcript list, the settings panel, the controls and the
  * typed-input field on every single chunk. The composer's ribbon dodges the same trap by deferring
  * its read behind a `() -> FloatArray` lambda (Composer.kt's `recordingBands`); this screen has
- * three flows to read rather than one, so it takes the flows and collects them here.
+ * five flows to read rather than one, so it takes the flows and collects them here.
  *
  * [isMicActive] is a plain value on purpose- the status line and the mic button above already read
  * it, and it changes at human speed, so routing it through this scope would buy nothing.
@@ -1083,17 +1245,31 @@ private fun voiceLabel(backend: VoiceBackend, voice: String): String = when (bac
 private fun VoiceRibbon(
     micBands: StateFlow<FloatArray>,
     aiBands: StateFlow<FloatArray>,
+    micBins: StateFlow<FloatArray>,
+    aiBins: StateFlow<FloatArray>,
     aiAudible: StateFlow<Boolean>,
     isMicActive: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val mic by micBands.collectAsState()
     val ai by aiBands.collectAsState()
+    val micSpectrum by micBins.collectAsState()
+    val aiSpectrum by aiBins.collectAsState()
     val aiIsAudible by aiAudible.collectAsState()
-    AuroraWaveform(
+    VoiceVisualizer(
+        // The persisted global style (aurora by default); resolved + dispatched by
+        // VoiceVisualizer, unknown/absent → aurora, so this screen is unchanged until picked.
+        styleId = LocalWaveformStyle.current,
         voices = auroraVoices(
             human = mic.takeIf { isMicActive },
             ai = ai.takeIf { aiIsAudible },
+        ),
+        // The SAME tap's spectrum, gated by the SAME two conditions as the bands above and in the
+        // same order. Crossing them — a spectrum for a speaker whose voice is absent, or the other
+        // way round — would put one speaker's two channels out of step, and a style reads both.
+        spectra = auroraBins(
+            human = micSpectrum.takeIf { isMicActive },
+            ai = aiSpectrum.takeIf { aiIsAudible },
         ),
         // Never park while a voice is PRESENT here: this is a dedicated foreground surface whose
         // ribbon is the only sign the session is alive, and a frozen wave reads as a hung app. With
@@ -1539,6 +1715,8 @@ fun VoiceScreen(
             VoiceRibbon(
                 micBands = viewModel.micBands,
                 aiBands = viewModel.aiBands,
+                micBins = viewModel.micBins,
+                aiBins = viewModel.aiBins,
                 aiAudible = viewModel.aiAudible,
                 isMicActive = isMicActive,
                 modifier = Modifier.fillMaxWidth().height(140.dp),

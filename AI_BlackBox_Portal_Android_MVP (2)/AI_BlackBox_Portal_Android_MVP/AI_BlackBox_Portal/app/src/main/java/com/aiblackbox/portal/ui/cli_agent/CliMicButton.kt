@@ -75,6 +75,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.voice.MicSourcePolicy
 import com.aiblackbox.portal.data.voice.SttEvent
 import com.aiblackbox.portal.data.voice.SttStreamClient
 import com.aiblackbox.portal.ui.components.MicIcon
@@ -144,7 +145,11 @@ fun CliMicButton(
         val wsUrl = api.getBaseUrl()
             .replace("https://", "wss://")
             .replace("http://", "ws://")
-        SttStreamClient(api.getClient(), wsUrl)
+        SttStreamClient(
+            api.getClient(),
+            wsUrl,
+            MicSourcePolicy.supportsUnprocessed(context.applicationContext),
+        )
     }
 
     var state by remember { mutableStateOf(MicState.Idle) }

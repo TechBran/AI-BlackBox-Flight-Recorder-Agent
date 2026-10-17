@@ -63,6 +63,8 @@ import com.aiblackbox.portal.data.location.LocationProvider
 import com.aiblackbox.portal.data.notifications.NotificationPermissionUx
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.voice.AudioRecorderManager
+import com.aiblackbox.portal.data.voice.MicSourcePolicy
+import com.aiblackbox.portal.data.voice.PcmAudioRecorder
 import com.aiblackbox.portal.data.voice.SttEvent
 import com.aiblackbox.portal.data.voice.SttStreamClient
 import com.aiblackbox.portal.navigation.BlackBoxNavGraph
@@ -284,9 +286,16 @@ class NativeMainActivity : ComponentActivity() {
                 val particleQuality by store.particleQuality.collectAsState(
                     initial = com.aiblackbox.portal.ui.components.ParticleQuality.DEFAULT,
                 )
+                // Voice WAVEFORM style (aurora / classic / …) — provided to the tree
+                // below via LocalWaveformStyle so VoiceVisualizer picks the look, the
+                // exact twin of particleMode/LocalParticleMode above.
+                val waveformStyle by store.waveformStyle.collectAsState(
+                    initial = com.aiblackbox.portal.ui.components.wave.WaveformStyles.AURORA,
+                )
 
-                // Legacy audio recorder — still used by onRecordAudio (Gemini) and
-                // the CLI CliMicButton. onWhisper no longer drives it.
+                // Legacy audio recorder — MediaRecorder/.m4a, and SHARED with Voice Lab's
+                // ElevenLabs cloning, which is why it is left exactly as it is. onWhisper and
+                // onRecordAudio no longer drive it.
                 val audioRecorder = remember { AudioRecorderManager(applicationContext) }
                 var isWhisperRecording by remember { mutableStateOf(false) }
 
@@ -294,13 +303,21 @@ class NativeMainActivity : ComponentActivity() {
                 // Built once per origin, mirroring how VoiceScreen builds VoiceClient.
                 val sttClient = remember(origin) {
                     val wsUrl = origin.replace("https://", "wss://").replace("http://", "ws://")
-                    SttStreamClient(BlackBoxApi(origin).getClient(), wsUrl)
+                    SttStreamClient(
+                        BlackBoxApi(origin).getClient(),
+                        wsUrl,
+                        MicSourcePolicy.supportsUnprocessed(applicationContext),
+                    )
                 }
                 val isWhisperStreaming by sttClient.isStreaming.collectAsState()
                 // Collect the analyser's bands as Compose state so the waveform recomposes as
                 // they change. Reading sttClient.bands.value directly does NOT
                 // subscribe → the ribbon would freeze at one value (caught 2026-06-05).
                 val sttBands by sttClient.bands.collectAsState()
+                // The same tap's SECOND channel: the log-frequency spectrum six of the ten waveform
+                // styles draw from (the other four are band-driven). Collected, never read as
+                // .value, for exactly the subscription reason spelled out above.
+                val sttBins by sttClient.bins.collectAsState()
                 // Cumulative-delta applier holders: captured at stream start from the caret.
                 var sttBaseBefore by remember { mutableStateOf("") }
                 var sttBaseAfter by remember { mutableStateOf("") }
@@ -315,9 +332,23 @@ class NativeMainActivity : ComponentActivity() {
                 // sttDiscardTrailingFinal drops exactly that one late final.
                 var sttDiscardTrailingFinal by remember { mutableStateOf(false) }
 
-                // Raw audio recorder for Gemini audio analysis
-                val rawAudioRecorder = remember { AudioRecorderManager(applicationContext) }
+                // Raw audio recorder for Gemini audio analysis — AudioRecord, so there is real PCM
+                // to both upload and ANALYSE. Its ribbon used to be a single MediaRecorder peak
+                // read once, which is why it sat frozen for the whole recording.
+                val rawAudioRecorder = remember {
+                    PcmAudioRecorder(
+                        applicationContext.externalCacheDir ?: applicationContext.cacheDir,
+                        MicSourcePolicy.supportsUnprocessed(applicationContext),
+                    )
+                }
                 var isRawAudioRecording by remember { mutableStateOf(false) }
+                // Collected as state, not read from .value: reading the flow directly does NOT
+                // subscribe, which is the other half of why this ribbon never moved.
+                val rawAudioBands by rawAudioRecorder.bands.collectAsState()
+                val rawAudioBins by rawAudioRecorder.bins.collectAsState()
+                DisposableEffect(rawAudioRecorder) {
+                    onDispose { rawAudioRecorder.cancel() }
+                }
 
                 // ─────────────────────────────────────────────────────────────
                 // M1 (2026-07-24) — location permission, asked ONCE, ever.
@@ -683,6 +714,7 @@ class NativeMainActivity : ComponentActivity() {
                 androidx.compose.runtime.CompositionLocalProvider(
                     com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode,
                     com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode,
+                    com.aiblackbox.portal.ui.components.wave.LocalWaveformStyle provides waveformStyle,
                     com.aiblackbox.portal.ui.components.LocalParticleIntensity provides particleIntensity,
                     com.aiblackbox.portal.ui.components.LocalParticleQuality provides particleQuality,
                     com.aiblackbox.portal.ui.chat.LocalReturnToLiveHost provides returnToLiveHost,
@@ -720,7 +752,10 @@ class NativeMainActivity : ComponentActivity() {
                         currentModel = currentModel,
                         chatViewModel = chatViewModel,
                         updatesVm = updatesVm,
-                        onModelChange = { scope.launch { store.setModel(it) } },
+                        // W22: the CU + robotics screens' model pickers (NavGraph) take the
+                        // shared pick path too, so model_<provider> never goes stale for a
+                        // switch back to restore.
+                        onModelChange = { scope.launch { store.selectModel(provider, it) } },
                         bottomFocalGeometry = bottomFocalGeometry,
                         onSpeak = { text ->
                             scope.launch {
@@ -1213,7 +1248,7 @@ class NativeMainActivity : ComponentActivity() {
                                     isRawAudioRecording = false
                                     Toast.makeText(applicationContext, "Processing audio...", Toast.LENGTH_SHORT).show()
                                     scope.launch {
-                                        val file = rawAudioRecorder.stopRecording()
+                                        val file = rawAudioRecorder.stop()
                                         if (file != null) {
                                             val api = chatViewModel.getApi()
                                             if (api != null) {
@@ -1265,9 +1300,11 @@ class NativeMainActivity : ComponentActivity() {
                                     }
                                 } else {
                                     withMicPermission {
-                                        if (rawAudioRecorder.startRecording()) {
+                                        if (rawAudioRecorder.start()) {
                                             isRawAudioRecording = true
                                             Toast.makeText(applicationContext, "Recording audio...", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(applicationContext, "Microphone unavailable", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                                 }
@@ -1283,21 +1320,29 @@ class NativeMainActivity : ComponentActivity() {
                             isRecording = isWhisperStreaming,
                             isRecordingAudio = isRawAudioRecording,
                             recordingBands = {
-                                // The STT mic is analysed per chunk at its real 24 kHz. The
-                                // raw-audio recorder is a MediaRecorder — there is no PCM to probe,
-                                // only its peak level, so it hands over the one value it has and
-                                // every sheet follows it.
-                                if (isWhisperStreaming) sttBands
-                                else floatArrayOf(rawAudioRecorder.getMaxAmplitude() / 32767f)
+                                // Both recorders now publish real analysed bands from their own
+                                // AudioAnalysisTap — the dictation mic at 24 kHz, the raw recorder
+                                // at 16 kHz. Same channel, same shape, whichever is live.
+                                if (isWhisperStreaming) sttBands else rawAudioBands
+                            },
+                            recordingBins = {
+                                // The SAME tap's spectrum, from the SAME recorder the bands above
+                                // came from — the two channels are two readings of one hop and must
+                                // never be crossed between producers.
+                                if (isWhisperStreaming) sttBins else rawAudioBins
                             },
                             provider = provider,
                             model = currentModel,
                             onProviderChange = { newProvider ->
                                 scope.launch {
-                                    store.setProvider(newProvider)
                                     // Reset model to Auto when switching providers
-                                    // so we don't send e.g. claude-opus-4-6 to Gemini
-                                    store.setModel("")
+                                    // so we don't send e.g. claude-opus-4-6 to Gemini,
+                                    // then restore this provider's remembered pick only
+                                    // if its live list still offers it. W22: the SAME
+                                    // path as the Settings sheet's provider dropdown.
+                                    store.setProviderAndModel(newProvider) {
+                                        ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)
+                                    }
                                 }
                                 // Auto-navigate to dedicated screens for special providers
                                 val targetRoute = when (newProvider) {
@@ -1314,7 +1359,9 @@ class NativeMainActivity : ComponentActivity() {
                                     }
                                 }
                             },
-                            onModelChange = { scope.launch { store.setModel(it) } },
+                            // W22: remembered per provider too (model_<provider>), via the
+                            // shared pick path the Settings sheet uses.
+                            onModelChange = { scope.launch { store.selectModel(provider, it) } },
                             autoTtsEnabled = autoTtsEnabled,
                             onAutoTtsToggle = { scope.launch { store.setAutoTtsEnabled(!autoTtsEnabled) } },
                             providerLabel = chatViewModel.getProviderLabel(),

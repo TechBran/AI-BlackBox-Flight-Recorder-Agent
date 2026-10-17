@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -96,7 +97,10 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.navigation.Routes
 import com.aiblackbox.portal.ui.components.SuppressParticleField
+import com.aiblackbox.portal.ui.components.wave.WaveformStylePreview
+import com.aiblackbox.portal.ui.components.wave.WaveformStyles
 import com.aiblackbox.portal.ui.theme.BbxAccent
+import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.GlassBorder
@@ -153,6 +157,9 @@ fun SettingsSheet(
     val particleQuality by viewModel.store.particleQuality.collectAsState(
         initial = com.aiblackbox.portal.ui.components.ParticleQuality.DEFAULT,
     )
+    // Voice waveform style (aurora / classic / …) — the global look the picker below
+    // selects and the live preview animates. Default aurora until the operator picks.
+    val waveformStyle by viewModel.store.waveformStyle.collectAsState(initial = WaveformStyles.AURORA)
 
     // M1 — attach-location switch + the LIVE OS grant, so the caption can describe the
     // effective state rather than implying the toggle alone is enough. Re-read on every
@@ -171,9 +178,13 @@ fun SettingsSheet(
         com.aiblackbox.portal.data.notifications.readNotificationDeliveryState(context)
     }
 
-    val perProviderModel by viewModel.store.getString("model_$provider", "")
-        .collectAsState(initial = "")
-    val selectedModel = perProviderModel.ifBlank { currentModel }
+    // W22: show the GLOBAL model — the id ChatViewModel actually sends, not a per-provider
+    // memory that can drift from it. A provider switch resets it to Auto (or
+    // restores that provider's still-live pick); model_<provider> is only what a switch
+    // restores from. It can still hold an id this Constants-only list cannot name, shown
+    // as "Auto": a live-only pick, or a foreign id picked from the pill's previous-provider
+    // list in the moment before the new list arrives.
+    val selectedModel = currentModel
 
     LaunchedEffect(origin) {
         viewModel.initialize(origin)
@@ -698,7 +709,8 @@ fun SettingsSheet(
             // On-Device Model (Gemma) — Model Manager (Task 1.5)
             // Built lazily once the api + operator are ready; disposed on leave.
             // onModelSelected records the chosen slug under "model_local" so the
-            // picker (Task 1.6) can read the active on-device model.
+            // picker (Task 1.6) can read the active on-device model. setModel(_, "local")
+            // writes model_local ONLY, never the cloud request's global model (W22).
             // ══════════════════════════════════════════════════════════════
             val localApi = viewModel.api
             if (localApi != null) {
@@ -1163,6 +1175,84 @@ fun SettingsSheet(
             Spacer(Modifier.height(6.dp))
             Text(
                 "Low drops the particle count on weaker devices; Ultra pushes it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // Voice waveform — the single GLOBAL look for the voice layer (the
+            // composer mic strip, the audio player bar, the voice screen). Driven
+            // entirely by WaveformStyles.CATALOGUE (ui/components/wave); the first
+            // entry (aurora) is the default AND the fallback, exactly like the
+            // particle picker above and its FieldRegistry.
+            //
+            // IDIOM — a LIVE PREVIEW above a visible list, not a bare dropdown:
+            //   • The look is the whole point of the setting, so the preview is the
+            //     REAL VoiceVisualizer (WaveformStylePreview) fed the deterministic
+            //     demo conversation — what you preview is what the voice layer draws.
+            //   • A visible row list (not the collapsed dropdown the particle style
+            //     uses) because M4 is "Brandon WALKS the catalogue" — seeing all
+            //     styles at once, tapping to switch the preview live, beats
+            //     open→tap→close→reopen. Ten O(1) rows fit the scrolling sheet.
+            //   • parse()/resolve() first so the checked row and the preview always
+            //     agree even on a stale/garbage stored id.
+            // ══════════════════════════════════════════════════════════════
+            SectionHeader("Voice waveform", BbxAccent)
+
+            val currentWave = WaveformStyles.resolve(waveformStyle)
+            // The live preview pane — real renderer, on near-black so the additive
+            // glow reads, tall enough (120dp) that a style is legible, not a sliver.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(120.dp)
+                    .clip(RoundedCornerShape(RadiusMd))
+                    .background(BbxBlack),
+            ) {
+                WaveformStylePreview(
+                    styleId = currentWave.id,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // The style list — one row per catalogue entry, in display order.
+            Column(Modifier.fillMaxWidth()) {
+                WaveformStyles.CATALOGUE.forEach { entry ->
+                    val isSelected = currentWave.id == entry.id
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(RadiusMd))
+                            // Shape (the ✓) says the same as colour, so the choice
+                            // survives colour blindness / greyscale, and TalkBack
+                            // reads the row as "selected".
+                            .semantics { selected = isSelected }
+                            .clickFeedback(role = Role.RadioButton) {
+                                viewModel.setWaveformStyle(entry.id)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            entry.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isSelected) BbxAccent else BbxWhite,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (isSelected) Text("✓", color = BbxAccent)
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                // Catalogue-agnostic on purpose — naming styles here would rot as the
+                // list grows. Applies to every surface the voice layer draws on.
+                "Pick the look of the voice waveform. Applies everywhere it appears.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = BbxDim,
             )

@@ -10,10 +10,15 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.aiblackbox.portal.ui.components.ParticleQuality
 import com.aiblackbox.portal.ui.components.ParticleTuning
+import com.aiblackbox.portal.ui.components.wave.WaveformStyles
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "bbx_settings")
+private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "bbx_settings",
+    // W22: rewrite retired model ids once, before the first read (see ModelSelection).
+    produceMigrations = { listOf(RetiredModelIdMigration) },
+)
 
 class BlackBoxStore(private val context: Context) {
 
@@ -30,6 +35,7 @@ class BlackBoxStore(private val context: Context) {
         val KEY_PARTICLE_MODE = stringPreferencesKey("particle_mode")
         val KEY_PARTICLE_INTENSITY = floatPreferencesKey("particle_intensity")
         val KEY_PARTICLE_QUALITY = stringPreferencesKey("particle_quality")
+        val KEY_WAVEFORM_STYLE = stringPreferencesKey("waveform_style")
         val KEY_LOCATION_ATTACH = booleanPreferencesKey("location_attach")
         val KEY_LOCATION_ASKED = booleanPreferencesKey("location_permission_asked")
         val KEY_NOTIFICATION_ASKED = booleanPreferencesKey("notification_permission_asked")
@@ -71,6 +77,19 @@ class BlackBoxStore(private val context: Context) {
         context.dataStore.data.map { ParticleQuality.parse(it[KEY_PARTICLE_QUALITY]) }
     suspend fun setParticleQuality(value: String) {
         context.dataStore.edit { it[KEY_PARTICLE_QUALITY] = ParticleQuality.parse(value) }
+    }
+
+    // Voice WAVEFORM style — the single GLOBAL look for the voice layer (default
+    // "aurora" = today's ribbon). Byte-identical persisted ids live in
+    // WaveformStyles; both read and write go through WaveformStyles.parse so an
+    // absent key, a legacy value or a newer-build/garbage id resolves to the
+    // default (aurora) and can never reach VoiceVisualizer as an unknown style.
+    // Threaded to the three call sites via LocalWaveformStyle exactly like
+    // particleMode reaches the field via LocalParticleMode.
+    val waveformStyle: Flow<String> =
+        context.dataStore.data.map { WaveformStyles.parse(it[KEY_WAVEFORM_STYLE]) }
+    suspend fun setWaveformStyle(value: String) {
+        context.dataStore.edit { it[KEY_WAVEFORM_STYLE] = WaveformStyles.parse(value) }
     }
 
     // M1 — ATTACH LOCATION to the prompt (default ON, but inert until the OS permission
@@ -117,6 +136,18 @@ class BlackBoxStore(private val context: Context) {
     // Model
     val model: Flow<String> = context.dataStore.data.map { it[KEY_MODEL] ?: "" }
     suspend fun setModel(value: String) { context.dataStore.edit { it[KEY_MODEL] = value } }
+
+    // Provider + model — ONE path for the composer pill, the Settings sheet and the CU +
+    // robotics screens' pickers (W22): a switch lands on Auto, then restores model_<provider>
+    // only if the provider's live list ([liveModelIds], null = unknown) still offers it; a
+    // pick writes the global key (for the active provider) and model_<provider> together;
+    // on-device writes model_local only. Rules and reasons in ModelSelection.
+    suspend fun setProviderAndModel(provider: String, liveModelIds: suspend (String) -> Collection<String>?) {
+        ModelSelection.setProviderAndModel(context.dataStore, provider, liveModelIds)
+    }
+    suspend fun selectModel(provider: String, model: String) {
+        ModelSelection.selectModel(context.dataStore, provider, model)
+    }
 
     // Streaming
     val streamingEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_STREAMING] ?: true }

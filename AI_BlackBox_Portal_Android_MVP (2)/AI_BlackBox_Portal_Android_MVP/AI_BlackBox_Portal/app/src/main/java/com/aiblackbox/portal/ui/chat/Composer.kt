@@ -59,8 +59,10 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import com.aiblackbox.portal.ui.components.SpeakerIcon
-import com.aiblackbox.portal.ui.components.aurora.AuroraWaveform
+import com.aiblackbox.portal.ui.components.aurora.auroraBins
 import com.aiblackbox.portal.ui.components.aurora.auroraVoices
+import com.aiblackbox.portal.ui.components.wave.LocalWaveformStyle
+import com.aiblackbox.portal.ui.components.wave.VoiceVisualizer
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.GlassBorder
@@ -114,10 +116,14 @@ fun Composer(
     isRecording: Boolean = false,
     isRecordingAudio: Boolean = false,
     // Band energies for the recording ribbon, deferred so a 30 Hz mic feed invalidates only the
-    // ribbon's own read and not everything above it. Four values from the live STT analyser; the
-    // raw-audio recorder has no PCM tap and passes its single peak level, which AuroraVoice.band
-    // spreads across all four sheets.
+    // ribbon's own read and not everything above it. Four values from whichever recorder is live —
+    // both the dictation mic and the raw-audio recorder run their own AudioAnalysisTap.
     recordingBands: () -> FloatArray = { FloatArray(0) },
+    // The SAME instants' log-frequency spectrum, from the same tap, deferred for the same reason.
+    // Six of the ten styles read this channel and fall back to the four bands without it, so the
+    // empty default is not a silent spectrum but NO spectrum — auroraBins takes an array too short
+    // to be one as absence, which is what keeps a not-yet-started producer on the band fallback.
+    recordingBins: () -> FloatArray = { FloatArray(0) },
     provider: String = "gemini",
     model: String = "",
     onProviderChange: (String) -> Unit = {},
@@ -210,8 +216,13 @@ fun Composer(
                 // more: the analyser's per-band auto-gain normalises each speaker's own dynamics to
                 // the full 0..1 range, which is what the old 3.0x lift was compensating for by hand
                 // (and what made it pin at full on a loud device).
-                AuroraWaveform(
+                VoiceVisualizer(
+                    // The persisted global style (aurora by default) — VoiceVisualizer resolves it
+                    // and dispatches; unknown/absent falls back to aurora, so this is exactly the
+                    // ribbon that shipped until the operator picks another look.
+                    styleId = LocalWaveformStyle.current,
                     voices = auroraVoices(human = recordingBands()),
+                    spectra = auroraBins(human = recordingBins()),
                     // pauseWhenIdle is OFF, unlike the player bar's: this ribbon is composed only
                     // while recording, so there is no idle to save, and a mic that goes quiet
                     // between words must keep flowing rather than freeze mid-wave.

@@ -41,13 +41,14 @@ class AuroraVoicesTest {
     }
 
     @Test
-    fun `two live speakers draw in different colours`() {
-        // Brandon's locked decision- RED is the human, BLUE is the AI. If these ever collapse to
-        // one colour the simultaneous case above becomes unreadable no matter how the phases weave.
-        assertNotEquals(
-            auroraSpeakerColor(AuroraSpeaker.HUMAN),
-            auroraSpeakerColor(AuroraSpeaker.AI),
-        )
+    fun `the four bands draw in four different colours`() {
+        // Brandon's locked decision (2026-07-27)- hue names the BAND, not the speaker, so the two
+        // simultaneous speakers above are told apart by which way their ribbons travel instead.
+        // Four distinct hues is what makes the spectrum readable; collapsing any pair turns two
+        // bands into one ribbon.
+        val colours = (0 until Aurora.SHEETS).map { auroraBandColor(it) }
+        assertEquals(Aurora.SHEETS, colours.toSet().size)
+        assertNotEquals(colours[0], colours[1])
     }
 
     @Test

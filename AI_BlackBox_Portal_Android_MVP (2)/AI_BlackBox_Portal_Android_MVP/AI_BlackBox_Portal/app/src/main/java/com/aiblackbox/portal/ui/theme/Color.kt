@@ -72,13 +72,19 @@ val GlowBlue   = Color(0x404A9EFF)  // --shadow-glow-blue @ 25% alpha
 val GlowGreen  = Color(0x4027D980)  // --shadow-glow-green @ 25% alpha
 val SolidGreen  = Color(0xFF27D980)
 
-// Full-alpha sibling of GlowBlue (0x404A9EFF) — the brand's only blue, opened up
-// from its 25% glow alpha so it can be painted as an IDENTITY rather than a halo.
-// Added 2026-07-26 for the Aurora waveform, where blue means "the AI is speaking"
-// opposite BbxAccent's red for the human (Brandon's call: solid colour per speaker,
-// no gradient). Alpha there comes from the per-sheet ladder, so the token itself
-// must stay opaque — do not "fix" it back to the 0x40 glow value.
-val WaveBlue   = Color(0xFF4A9EFF)
+// The Aurora waveform's four BAND identities — one solid colour per frequency band,
+// shared by every speaker (Brandon, 2026-07-27). They were per-SPEAKER until then
+// (red human / blue AI); the speakers are told apart by which way their ribbons
+// TRAVEL now, which freed the hue to carry the spectrum instead.
+//
+// WaveBlue is the full-alpha sibling of GlowBlue (0x404A9EFF), the brand's only blue,
+// opened up from its 25% glow alpha so it can be painted as an IDENTITY, not a halo.
+// Alpha in the ribbon comes from the renderer's per-sheet ladder, so all three tokens
+// must stay OPAQUE — do not "fix" WaveBlue back to the 0x40 glow value.
+val WaveBlue   = Color(0xFF4A9EFF)  // band 1 — vowel      500 Hz - 800 Hz
+val WaveGreen  = Color(0xFF39FF6A)  // band 2 — formant    1.6 kHz - 2.6 kHz
+val WaveAmber  = Color(0xFFFFB300)  // band 3 — sibilance  5 kHz - 6.8 kHz
+// (band 0, voicing 120 Hz - 220 Hz, is BbxAccent — the brand red, already defined above.)
 
 // Ember palette — the 5 cinematic-particle colors from the website ember system
 // (Apps/landing-page/app.js initCinematicParticles('embers')). RGB → hex:

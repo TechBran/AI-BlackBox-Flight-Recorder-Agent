@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.ui.chat.ChatViewModel
 import com.aiblackbox.portal.ui.chat.ProviderPickerViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -186,15 +187,19 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         providerPicker?.refresh()
     }
 
+    // W22: the SAME switch the composer pill makes (BlackBoxStore.setProviderAndModel) —
+    // Auto at once, so the previous provider's id is never sent to this one, then this
+    // provider's remembered pick only if its live list still offers it.
     fun setProvider(provider: String) {
-        viewModelScope.launch { store.setProvider(provider) }
+        viewModelScope.launch {
+            store.setProviderAndModel(provider) { ChatViewModel.fetchLiveModelIds(api, it) }
+        }
     }
 
+    // W22: the shared pick path — global key (active provider) + model_<provider> together;
+    // the on-device Model Manager's "Use" (provider "local") writes model_local ONLY.
     fun setModel(model: String, provider: String) {
-        viewModelScope.launch {
-            store.setModel(model)
-            store.setString("model_$provider", model)
-        }
+        viewModelScope.launch { store.selectModel(provider, model) }
     }
 
     fun setOperator(operator: String) {
@@ -221,6 +226,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setParticleIntensity(value: Float) { viewModelScope.launch { store.setParticleIntensity(value) } }
 
     fun setParticleQuality(value: String) { viewModelScope.launch { store.setParticleQuality(value) } }
+
+    // Voice WAVEFORM style — the single GLOBAL look for the voice layer. Persists
+    // immediately; NativeMainActivity's LocalWaveformStyle collector then repaints
+    // all three call sites (composer, player bar, voice screen) live. Value is
+    // normalised in the store (WaveformStyles.parse), so an unknown id can never land.
+    fun setWaveformStyle(value: String) { viewModelScope.launch { store.setWaveformStyle(value) } }
 
     fun setOperatorVoice(operator: String, voiceValue: String) {
         viewModelScope.launch { store.setOperatorVoice(operator, voiceValue) }

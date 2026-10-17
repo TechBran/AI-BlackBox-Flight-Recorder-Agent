@@ -2,16 +2,19 @@ package com.aiblackbox.portal.data.voice
 
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.util.Base64
 import com.aiblackbox.portal.data.api.WebSocketClient
 import com.aiblackbox.portal.data.api.WsMessage
 import com.aiblackbox.portal.ui.components.aurora.AURORA_SILENT_BANDS
-import com.aiblackbox.portal.ui.components.aurora.AuroraAnalyser
+import com.aiblackbox.portal.ui.components.aurora.AURORA_SILENT_BINS
+import com.aiblackbox.portal.ui.components.aurora.AnalysisFrame
+import com.aiblackbox.portal.ui.components.aurora.AudioAnalysisTap
 import com.aiblackbox.portal.ui.voice.rmsAmplitude
 import com.aiblackbox.portal.util.Constants
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +35,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Live multi-provider transcription client for the backend's `/ws/stt` WebSocket.
@@ -68,8 +72,35 @@ import okhttp3.OkHttpClient
  *
  * Requires RECORD_AUDIO permission; the CALLER is expected to gate that (existing
  * mic handlers use withMicPermission). This client does not request permission.
+ *
+ * @param unprocessedSupported the device's answer to
+ *   `AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED`, from
+ *   [MicSourcePolicy.supportsUnprocessed]. Passed in rather than read here because this client
+ *   holds no Context on purpose — and because the capability is the ONLY thing that may decide
+ *   whether the unprocessed source is opened (see [MicSourcePolicy]).
+ * @param wsFactory opens one socket per reconnect leg. Testability seam, as in [VoiceClient]:
+ *   production uses the real [WebSocketClient]; unit tests inject a fake.
+ * @param recordFactory builds the mono PCM16 `AudioRecord` for one source, rate and buffer size.
+ *   Production always takes the default (the platform constructor); it is a seam so a JVM test can
+ *   hand the capture loop a recorder that actually delivers audio and reports which thread stopped
+ *   and released it.
  */
-class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: String) {
+class SttStreamClient(
+    private val client: OkHttpClient,
+    private val baseWsUrl: String,
+    private val unprocessedSupported: Boolean,
+    private val wsFactory: (OkHttpClient) -> WebSocketClient = { WebSocketClient(it) },
+    private val recordFactory: (androidSource: Int, sampleRate: Int, bufferBytes: Int) -> AudioRecord =
+        { androidSource, sampleRate, bufferBytes ->
+            AudioRecord(
+                androidSource,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferBytes,
+            )
+        },
+) {
 
     // Per-session socket client: each start() gets its OWN instance so an old
     // session's socket lifecycle can never touch a newer session's (closes I2).
@@ -83,7 +114,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     val amplitude: StateFlow<Float> = _amplitude.asStateFlow()
 
     /**
-     * Aurora band energies for the composer's ribbon, from THIS client's own analyser.
+     * Aurora band energies for the composer's ribbon, from THIS client's own tap.
      *
      * Its own, not a shared one: the app can have this mic and the voice screen's AI playback live
      * at the same moment, and a shared auto-gain reference would let one stream rescale the other's
@@ -93,16 +124,29 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     val bands: StateFlow<FloatArray> = _bands.asStateFlow()
 
     /**
-     * Replaced (not reset()) per start(), and read ONCE per socket leg into a capture-loop local.
-     *
-     * An analyser belongs to one thread. start() runs on the caller's while the previous session's
-     * capture loop may still be draining an in-flight AudioRecord.read(), so resetting in place
-     * would let that straggler chunk interleave with the reset and leave the new session's warm-up
-     * mid-write. Handing the new session a NEW object means the straggler scribbles harmlessly on
-     * an orphan instead. The reconnect legs of ONE session deliberately share it — same speaker,
-     * same room, so the gain reference should survive the drop rather than re-seed on every leg.
+     * The same instants' log-frequency SPECTRUM — the tap's second channel, raw and uncompressed
+     * (see [AudioAnalysisTap]). Published beside the bands rather than instead of them: they are two
+     * readings of one hop and a renderer that wants both must not have to align two cadences.
      */
-    @Volatile private var analyser = AuroraAnalyser(SAMPLE_RATE)
+    private val _bins = MutableStateFlow(AURORA_SILENT_BINS)
+    val bins: StateFlow<FloatArray> = _bins.asStateFlow()
+
+    /**
+     * Dropped (not reset()) per start(), then built by the first leg that actually opens a mic, and
+     * read ONCE per socket leg into a capture-loop local.
+     *
+     * A tap belongs to one thread (it owns a PCM ring and a stateful analyser). start() runs on the
+     * caller's while the previous session's capture loop may still be draining an in-flight
+     * AudioRecord.read(), so resetting in place would let that straggler chunk interleave with the
+     * reset and leave the new session's warm-up mid-write. Handing the new session a NEW object
+     * means the straggler scribbles harmlessly on an orphan instead. The reconnect legs of ONE
+     * session deliberately share it — same speaker, same room, so the gain reference should survive
+     * the drop rather than re-seed on every leg.
+     *
+     * Built LATE, in [startCapture], because its calibration belongs to the source that opened
+     * ([MicSource.calibration]) — which is not known until the AudioRecord is up.
+     */
+    @Volatile private var tap: AudioAnalysisTap? = null
 
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
@@ -135,8 +179,15 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     // completion can never satisfy a future stop() instantly.
     @Volatile private var doneSignal = CompletableDeferred<Unit>()
 
+    // The current leg's recorder, for identity only: its capture loop reads, stops and releases it
+    // through a local, and clears this only while it still names that leg (see [startCapture]).
     @Volatile
     private var audioRecord: AudioRecord? = null
+
+    // The current capture leg's stop signal — one per leg, flipped (the recorder itself never
+    // touched) by whoever ends that leg. See [startCapture] for why a leg needs its OWN signal.
+    @Volatile
+    private var captureLive: AtomicBoolean? = null
 
     companion object {
         // FIXED — do NOT branch by backend. OpenAI realtime transcription rejects
@@ -169,9 +220,9 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         val epoch = ++sessionEpoch
         _isStreaming.value = true
         silenceRibbon()
-        // A new press is a new speaker, a new distance and a new room: a fresh analyser re-seeds
-        // the gain and re-runs the warm-up rather than inheriting the last press's.
-        analyser = AuroraAnalyser(SAMPLE_RATE)
+        // A new press is a new speaker, a new distance and a new room: a fresh tap re-seeds the
+        // gain and re-runs the warm-up rather than inheriting the last press's.
+        tap = null
         userStopped = false
         reconnectAttempts = 0
         lastInterim = ""
@@ -191,12 +242,16 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         }.toString()
 
         connectionJob = newScope.launch {
+            // The current leg's capture signal, as startCapture handed it back. This loop ends ITS
+            // leg through this local, never through the shared field, which by then may name a
+            // newer session's leg.
+            var legCapture: AtomicBoolean? = null
             // Reconnect loop: hold ONE logical STT session across transient WS drops
             // (the ~30s Tailscale idle-reap) for as long as the user holds the mic.
             // Each iteration is one physical socket; a drop mid-recording reconnects
             // and resumes rather than ending the session.
             while (isActive && _isStreaming.value && epoch == sessionEpoch) {
-                val sessionWs = WebSocketClient(client)
+                val sessionWs = wsFactory(client)
                 wsClient = sessionWs
                 try {
                     sessionWs.connect(url).collect { msg ->
@@ -204,7 +259,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                             is WsMessage.Connected -> {
                                 sessionWs.send(startMsgText)
                                 android.util.Log.d(TAG, "Sent stt_start (provider='$provider', lang='$lang', target='$target')")
-                                startCapture(newScope, sessionWs)
+                                legCapture = startCapture(newScope, sessionWs)
                             }
                             is WsMessage.Text -> parseMessage(msg.text, epoch)
                             is WsMessage.Closing ->
@@ -219,8 +274,10 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                     android.util.Log.e(TAG, "Connection loop error: ${e.message}", e)
                 }
                 // The collect returned = THIS socket closed. Stop this leg's capture
-                // so a fresh AudioRecord binds to the next socket.
-                releaseAudioRecord()
+                // so a fresh AudioRecord binds to the next socket — by SIGNAL only: the
+                // leg's capture loop releases its own recorder, on its own thread, within
+                // one read. Releasing it from here raced that loop's in-flight read().
+                legCapture?.set(false)
                 // User stop(), a newer session, or a clean end after our stt_stop →
                 // end the logical session WITHOUT reconnecting.
                 if (userStopped || !_isStreaming.value || epoch != sessionEpoch) break
@@ -251,7 +308,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                 delay(200)  // brief backoff; _isStreaming stays TRUE so the mic stays lit
             }
             // Logical session over — flip to idle ONCE (do not cancel our own job here).
-            releaseAudioRecord()
+            legCapture?.set(false)
             silenceRibbon()
             if (epoch == sessionEpoch) {
                 // Socket + reconnect loop are done: nothing further can arrive, so
@@ -263,7 +320,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     }
 
     /**
-     * Stop capture and end the session: send stt_stop, release the mic, then
+     * Stop capture and end the session: send stt_stop, signal the mic off, then
      * wait (bounded by [STOP_BACKSTOP_MS]) for the server's terminal `stt_done`
      * — which arrives right after the trailing stt_final — before tearing the
      * WS down. If stt_stop can't be delivered (socket dead) the wait is skipped
@@ -280,8 +337,11 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         userStopped = true
         _isStreaming.value = false
 
-        // Stop + release the mic immediately (signals capture loop to exit too).
-        releaseAudioRecord()
+        // End the capture leg by SIGNAL only: its loop stops and releases the mic itself, in its
+        // own finally, within one read. Releasing it here, on the caller's thread (the CLI mic tap,
+        // on main), raced that loop's in-flight read() — the native abort in
+        // AudioRecord::releaseBuffer (feedback_android_audiorecord_race).
+        signalCaptureStop()
         silenceRibbon()
 
         val s = scope
@@ -333,56 +393,103 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     // -------------------------------------------------------------------------
     // Mic capture — AudioRecord @24kHz -> base64 PCM16 -> WebSocket
     // -------------------------------------------------------------------------
-    private fun startCapture(s: CoroutineScope, ws: WebSocketClient) {
+    /**
+     * Open this leg's mic and start its capture loop. Returns the leg's stop signal, or null when no
+     * mic started.
+     *
+     * The loop OWNS the recorder from here: it reads, stops and releases it through a LOCAL, on its
+     * one thread, and everything else only flips the returned signal. Releasing it from any other
+     * thread — stop() on main, the connection loop at a leg's end, shutdown() on a re-press, or an
+     * older leg's loop releasing the shared field — raced an in-flight read() and aborts natively in
+     * AudioRecord::releaseBuffer (feedback_android_audiorecord_race).
+     *
+     * The signal is per LEG rather than the shared [_isStreaming] alone: a quick stop() + start()
+     * flips that straight back on while the old loop is still inside read(), and the old loop would
+     * carry on. It is started ATOMIC because [teardownSession] and [shutdown] cancel the scope — a
+     * launch cancelled before it is dispatched never runs its body, and the body's finally is the
+     * only place this leg's recorder is released.
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun startCapture(s: CoroutineScope, ws: WebSocketClient): AtomicBoolean? {
         captureJob?.cancel()
-        // Read the analyser ONCE, here, so the loop below owns one instance for its whole life and
-        // a start() racing it can only swap what the NEXT leg picks up.
-        val sessionAnalyser = analyser
-        val bufferSize = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        ) * 2
-
-        val record = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
+        signalCaptureStop()
+        val bufferSize = MicBuffer.recordBufferBytes(
+            AudioRecord.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
             )
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "AudioRecord construct failed: ${e.message}", e)
-            s.launch { _events.emit(SttEvent.Error("Mic start failed: ${e.message}")) }
-            stop()
-            return
+        )
+
+        // SIMPLEX capture: this mic is the composer's, and nothing of ours is playing while it is
+        // open, so there is no echo to cancel and no reason to pay VOICE_COMMUNICATION's processing
+        // for one. The chain (and the fact that UNPROCESSED is only ever in it when the DEVICE says
+        // so) is [MicSourcePolicy]'s; falling past an entry here means that source would not open
+        // AT ALL, which is a different failure from the silent degrade the policy guards.
+        val opened = MicSourcePolicy.openFirst(
+            MicSourcePolicy.simplexChain(unprocessedSupported)
+        ) { source ->
+            try {
+                val candidate = recordFactory(source.androidSource, SAMPLE_RATE, bufferSize)
+                if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                    candidate
+                } else {
+                    android.util.Log.w(TAG, "${source.name} did not initialize — trying the next source")
+                    try { candidate.release() } catch (_: Exception) {}
+                    null
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "${source.name} construct failed: ${e.message}", e)
+                null
+            }
         }
 
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            android.util.Log.e(TAG, "AudioRecord failed to initialize")
-            try { record.release() } catch (_: Exception) {}
+        if (opened == null) {
+            android.util.Log.e(TAG, "No mic source could be opened")
             s.launch { _events.emit(SttEvent.Error("Microphone initialization failed")) }
             stop()
-            return
+            return null
         }
+        val record = opened.record
 
-        audioRecord = record
+        // Built here, on the FIRST leg that gets a mic, from the calibration of the source that
+        // actually opened — the analyser's constants describe a stream shape, and this is where the
+        // stream's shape is finally known. Later legs of the same session reuse it (same speaker,
+        // same room); read ONCE into a local so a start() racing this loop can only swap what the
+        // NEXT leg picks up.
+        val sessionTap = tap
+            ?: AudioAnalysisTap(SAMPLE_RATE, calibration = opened.source.calibration, label = "stt-mic/${opened.source}").also { tap = it }
+        android.util.Log.d(TAG, "Mic source: ${opened.source.name}")
+
         try {
             record.startRecording()
         } catch (e: Exception) {
             android.util.Log.e(TAG, "startRecording failed: ${e.message}", e)
-            releaseAudioRecord()
+            // Never handed to a loop, so nothing can be reading it: releasing it here is safe.
+            try { record.release() } catch (_: Exception) {}
             s.launch { _events.emit(SttEvent.Error("Mic start failed: ${e.message}")) }
             stop()
-            return
+            return null
         }
         android.util.Log.d(TAG, "Mic started: ${SAMPLE_RATE}Hz, buffer=$bufferSize")
 
-        captureJob = s.launch {
+        val live = AtomicBoolean(true)
+        audioRecord = record
+        captureLive = live
+        captureJob = s.launch(start = CoroutineStart.ATOMIC) {
+            // Hoisted out of the read loop on purpose: the tap calls this synchronously, on this
+            // thread, once per completed hop — allocating a lambda per read would put a capture in
+            // the audio path for nothing. The frame's arrays are freshly built and belong to us, so
+            // they go straight into the flows with no copy.
+            val publish: (AnalysisFrame) -> Unit = { frame ->
+                _bands.value = frame.bands
+                _bins.value = frame.bins
+            }
             try {
-                val buffer = ShortArray(bufferSize / 2)
-                while (_isStreaming.value) {
-                    val rec = audioRecord ?: break
-                    val readCount = rec.read(buffer, 0, buffer.size)
+                val buffer = ShortArray(MicBuffer.readLengthSamples(bufferSize))
+                while (isActive && live.get() && _isStreaming.value) {
+                    val readCount = record.read(buffer, 0, buffer.size)
+                    // A stop that landed while this read was in flight ends the leg HERE: the chunk
+                    // belongs to a leg that is over, and stt_stop may already be on the wire.
+                    if (!live.get()) break
                     if (readCount > 0) {
                         _amplitude.value = rmsAmplitude(buffer, readCount)
                         // Convert shorts to little-endian PCM16 bytes.
@@ -393,8 +500,10 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                         }
                         // Analysed BEFORE the send, on the same bytes the server gets: the ribbon
                         // reports the microphone, so it keeps moving through a transport drop
-                        // while the reconnect loop resumes underneath it.
-                        _bands.value = sessionAnalyser.analyze(bytes, bytes.size)
+                        // while the reconnect loop resumes underneath it. The tap decides the
+                        // cadence now — a read shorter than a hop publishes nothing and carries its
+                        // audio forward, a longer one publishes every hop it completes.
+                        sessionTap.offer(bytes, bytes.size, publish)
                         val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
                         val audioMsg = buildJsonObject {
                             put("type", "stt_audio")
@@ -409,10 +518,16 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Capture loop error: ${e.message}", e)
             } finally {
-                releaseAudioRecord()
+                // Stopped and released HERE, on the SAME thread as read() — see the KDoc above.
+                try { record.stop() } catch (_: Exception) {}
+                try { record.release() } catch (_: Exception) {}
+                // Only while the field still names this leg: after a reconnect or a re-press it
+                // names a newer leg's recorder, which is that leg's loop's alone to release.
+                if (audioRecord === record) audioRecord = null
                 silenceRibbon()
             }
         }
+        return live
     }
 
     private suspend fun parseMessage(raw: String, epoch: Int) {
@@ -450,21 +565,22 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     }
 
     /**
-     * The ribbon inputs for "nothing is being captured", in one place because the two must always
-     * fall together — a teardown that zeroed the amplitude but left the bands at their last value
-     * would park a frozen ribbon on the composer for as long as the screen stayed open.
+     * The ribbon inputs for "nothing is being captured", in one place because they must always fall
+     * together — a teardown that zeroed the amplitude but left the bands at their last value would
+     * park a frozen ribbon on the composer for as long as the screen stayed open.
      */
     private fun silenceRibbon() {
         _amplitude.value = 0f
         _bands.value = AURORA_SILENT_BANDS
+        _bins.value = AURORA_SILENT_BINS
     }
 
-    /** Stop + release the mic in a single guarded path used everywhere. */
-    private fun releaseAudioRecord() {
-        val rec = audioRecord ?: return
-        audioRecord = null
-        try { rec.stop() } catch (_: Exception) {}
-        try { rec.release() } catch (_: Exception) {}
+    /**
+     * End the current capture leg by SIGNAL only. Its loop stops and releases the recorder itself,
+     * on its own thread, within one read — see [startCapture] for why nothing else may.
+     */
+    private fun signalCaptureStop() {
+        captureLive?.set(false)
     }
 
     /** Tear down the WS + coroutine scope. Used after the stop() grace period. */
@@ -474,7 +590,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         connectionJob?.cancel()
         connectionJob = null
         wsClient.close()
-        releaseAudioRecord()
+        signalCaptureStop()
         silenceRibbon()
         _isStreaming.value = false
         scope?.cancel()
@@ -511,15 +627,6 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                 silenceRibbon()
             }
         }
-    }
-
-    /** Cleanup on unexpected WS termination (error/closing/disconnected). */
-    private fun cleanup() {
-        _isStreaming.value = false
-        releaseAudioRecord()
-        silenceRibbon()
-        captureJob?.cancel()
-        captureJob = null
     }
 }
 

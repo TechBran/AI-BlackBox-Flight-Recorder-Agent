@@ -3253,6 +3253,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         /**
+         * W22: the ids on [provider]'s LIVE model list — the same GET /models/{apiProvider}
+         * the pill's dropdown hydrates from — for the provider-switch restore
+         * (BlackBoxStore.setProviderAndModel). The composer pill and the Settings sheet both
+         * pass this. Null when the list is not known (no api yet, no model endpoint for the
+         * provider, request or parse failure), so the switch stays on Auto.
+         */
+        internal suspend fun fetchLiveModelIds(api: BlackBoxApi?, provider: String): List<String>? {
+            val apiProvider = mapProviderForApi(provider) ?: return null
+            val currentApi = api ?: return null
+            return try {
+                val models = Json.parseToJsonElement(currentApi.get("/models/$apiProvider"))
+                    .jsonObject["models"]?.jsonArray ?: return null
+                models.mapNotNull { (it as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.d(TAG, "Live model ids unavailable for $provider: ${e.message}")
+                null
+            }
+        }
+
+        /**
          * The on-device placeholder copy shown until the Phase 2 engine lands.
          * Centralised so the UI test can assert it.
          */

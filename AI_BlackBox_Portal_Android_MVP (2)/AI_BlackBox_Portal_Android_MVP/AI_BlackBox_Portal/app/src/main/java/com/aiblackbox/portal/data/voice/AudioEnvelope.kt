@@ -6,7 +6,6 @@ import android.media.MediaFormat
 import android.util.Log
 import com.aiblackbox.portal.ui.components.aurora.AuroraOfflineBands
 import java.nio.ByteOrder
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -23,12 +22,27 @@ import kotlin.math.sqrt
 object AudioEnvelope {
     private const val TAG = "AudioEnvelope"
 
-    // Shape the RMS envelope: a small noise GATE keeps true silence/hum FLAT,
-    // then a LIFT (gamma < 1) raises everything above it so quiet-but-present
-    // speech jumps up too — lots of movement on words, not just loud peaks.
-    // (the offline band pass applies the same two constants to the bands, for the same reason.)
+    // Shape the RMS envelope: a small noise GATE keeps true silence/hum FLAT, and nothing else.
     private const val GATE = 0.05f   // below this (normalized) -> flat
-    private const val LIFT = 0.55f   // <1 lifts the speech range up
+
+    /**
+     * Gate the peak-normalised RMS level and re-span the survivors over 0..1. LINEAR above the
+     * gate, deliberately.
+     *
+     * THE THIRD COPY OF THE PERCEPTUAL CURVE USED TO LIVE HERE, and it was the easiest of the three
+     * to miss: this envelope reaches the screen only when the band pass could not run (a container
+     * with no usable sample rate), at which point [AudioPlaybackManager] hands this one number to
+     * AuroraVoice, which spreads it across all four sheets — and the renderer then applies
+     * [com.aiblackbox.portal.ui.components.aurora.Aurora.DISPLAY_GAMMA] to it like anything else. A
+     * `pow(0.55)` here therefore made the DEGRADED player bar compress at 0.275 while the healthy
+     * one compressed at 0.50: the same clip drawn on two different curves depending on whether its
+     * header parsed. The curve belongs to the renderer and to nothing else; the gate stays, because
+     * a threshold that keeps silence flat is not a curve.
+     */
+    internal fun shapeRms(normalised: Float): Float {
+        val v = normalised.coerceIn(0f, 1f)
+        return if (v <= GATE) 0f else (v - GATE) / (1f - GATE)
+    }
 
     /**
      * Both envelopes one decode produced, sampled together at the playback position.
@@ -56,11 +70,27 @@ object AudioEnvelope {
         val windowMs: Int,
     )
 
-    /** Decode [path] into its envelopes. Null on failure. Blocking — call off the main thread. */
-    fun decode(path: String, windowMs: Int = 20): Envelopes? {
+    /**
+     * Decode [path] into its envelopes. Null on failure OR on cancellation. Blocking — call off the
+     * main thread.
+     *
+     * @param isActive polled once per decoded buffer; the moment it says no, the decode abandons the
+     *   clip and returns null. This is the ONLY way to stop it: the loop below is a blocking
+     *   MediaCodec pump, so cancelling the coroutine that called this does not interrupt it, and an
+     *   abandoned decode that keeps running holds a HARDWARE decoder — a resource some devices have
+     *   a global handful of. Wrapped in [DecodeCancellation] so the answer latches.
+     *
+     * EVERY exit from the body below is `return null` from INSIDE the `try`, which is what routes it
+     * through the `finally` that stops and releases the codec and the extractor. A `return` placed
+     * above the `try` (or a check between constructing the extractor and entering it) would skip
+     * that release, which is exactly the leak this parameter exists to prevent.
+     */
+    fun decode(path: String, windowMs: Int = 20, isActive: () -> Boolean = { true }): Envelopes? {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
+        val cancelled = DecodeCancellation(isActive)
         return try {
+            if (cancelled.isCancelled()) return null
             extractor.setDataSource(path)
             var track = -1
             var format: MediaFormat? = null
@@ -102,6 +132,7 @@ object AudioEnvelope {
             var outEos = false
 
             while (!outEos) {
+                if (cancelled.isCancelled()) return null
                 if (!inEos) {
                     val inIdx = codec.dequeueInputBuffer(10_000)
                     if (inIdx >= 0) {
@@ -166,10 +197,7 @@ object AudioEnvelope {
             // regardless of the clip's absolute volume).
             val peak = env.maxOrNull() ?: 0f
             val norm = if (peak > 0.001f) 1.0f / peak else 1f
-            val rms = FloatArray(env.size) {
-                val v = (env[it] * norm).coerceIn(0f, 1f)
-                if (v <= GATE) 0f else ((v - GATE) / (1f - GATE)).pow(LIFT)
-            }
+            val rms = FloatArray(env.size) { shapeRms(env[it] * norm) }
             Envelopes(rms = rms, bands = pass?.finish() ?: emptyArray(), windowMs = windowMs)
         } catch (e: Exception) {
             Log.w(TAG, "decode failed for $path: ${e.message}")
@@ -190,6 +218,29 @@ object AudioEnvelope {
      */
     internal fun bandStream(sampleRate: Int, windowMs: Int): AuroraOfflineBands? =
         if (sampleRate > 0) AuroraOfflineBands(sampleRate, windowMs) else null
+}
+
+/**
+ * "Is this decode still wanted?", asked repeatedly and answered once.
+ *
+ * THE LATCH IS THE POINT. The live predicate is "is [path] still the clip the player wants", and
+ * tapping reply A, then B, then A again flips that back to true — with a SECOND decode already
+ * running for the second A. Without the latch the first, abandoned decode would come back to life
+ * mid-clip and both would write one clip's envelope. Once abandoned, always abandoned.
+ *
+ * Cheap by construction: the predicate is never consulted again after it says no, and the decode
+ * loop asks once per output buffer rather than once per sample.
+ *
+ * NOT thread-safe — one instance belongs to one decode, like everything else on this path.
+ */
+internal class DecodeCancellation(private val isActive: () -> Boolean) {
+
+    private var cancelled = false
+
+    fun isCancelled(): Boolean {
+        if (!cancelled && !isActive()) cancelled = true
+        return cancelled
+    }
 }
 
 /**

@@ -53,9 +53,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.aiblackbox.portal.ui.components.aurora.AURORA_SILENT_BANDS
-import com.aiblackbox.portal.ui.components.aurora.AuroraWaveform
 import com.aiblackbox.portal.ui.components.aurora.auroraVoices
+import com.aiblackbox.portal.ui.components.wave.LocalWaveformStyle
+import com.aiblackbox.portal.ui.components.wave.VoiceVisualizer
 import com.aiblackbox.portal.ui.theme.RadiusMd
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -78,6 +78,7 @@ private val WaveRed = Color(0xFFEF4444)
 private val WaveRedGlow = Color(0x40EF4444)
 private val WaveUnplayed = Color(0xFF2A2A2A)
 private val TimeColor = Color(0xCCEF4444)
+private val StatusColor = Color(0x99EF4444)
 
 @Composable
 fun AudioPlayerBar(
@@ -104,23 +105,28 @@ fun AudioPlayerBar(
     val displayPosition = if (isSeeking) seekPosition else if (isThisActive) position else 0f
     val displayDuration = if (isThisActive) duration else 0L
 
+    // Decode-ahead. Warming here rather than on tap is what lets the ribbon open with REAL bands:
+    // by the time the operator reaches the play button the envelope is usually already cached. The
+    // prefetcher bounds this — a thread full of bars cannot start a thread full of decodes.
+    LaunchedEffect(audioUrl) { mgr.prefetch(audioUrl) }
+
+    // What the bar is allowed to say while it has nothing to draw. It replaces the synthetic
+    // breathing tween that used to fill the gap between "audio started" and "waveform decoded" —
+    // a ribbon animated to audio it had never measured.
+    val status = playerBarStatus(
+        active = isThisActive,
+        remote = isRemoteAudio(audioUrl),
+        prepared = isPrepared,
+        envelopeReady = amplitudeReady,
+        playing = isPlaying,
+        error = hasError,
+    )
+
     // Smooth animated position for fluid playhead movement
     val animatedPosition by animateFloatAsState(
         targetValue = displayPosition,
         animationSpec = spring(dampingRatio = 0.8f, stiffness = 300f),
         label = "wavePos"
-    )
-
-    // Subtle breathing animation when playing
-    val infiniteTransition = rememberInfiniteTransition(label = "wavePulse")
-    val breathe by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "breathe"
     )
 
     // Position polling
@@ -173,9 +179,10 @@ fun AudioPlayerBar(
         var canvasWidth by remember { mutableFloatStateOf(1f) }
 
         // Drive the ribbon from the REAL audio output — AudioPlaybackManager samples the decoded
-        // envelopes at the live playback position, so it dances with the actual speech. Until that
-        // decode lands there is nothing to sample, so a gentle synthetic pulse stands in (one value
-        // drives all four sheets) rather than showing a dead ribbon over audible audio.
+        // envelopes at the live playback position, so it dances with the actual speech. And ONLY
+        // from that: the ribbon draws measured bands or it draws nothing. There is no gap left to
+        // fill, because playback itself waits for the envelope (PlaybackStartGate) and the bar
+        // prefetches it on composition, so by the time audio is audible the bands exist.
         //
         // NEVER absent. This bar's voice is always PRESENT — all-zero bands when the clip is
         // silent for a moment AND when nothing is playing at all — so the ribbon rests FLAT
@@ -186,11 +193,7 @@ fun AudioPlayerBar(
         // a silent passage mid-clip would blink the ribbon out and back. It costs nothing either
         // — a present, silent, settled voice stops asking for frames exactly as an absent one does
         // (see AuroraEngine.needsFrames), which is what `pauseWhenIdle` below is for.
-        val ribbonBands: FloatArray = when {
-            !thisPlaying -> AURORA_SILENT_BANDS
-            amplitudeReady -> outputBands
-            else -> floatArrayOf(0.12f + breathe * 0.18f)
-        }
+        val ribbonBands: FloatArray = playerRibbonBands(status, outputBands)
 
         Box(
             modifier = Modifier
@@ -231,8 +234,19 @@ fun AudioPlayerBar(
             // No sensitivity knob either: the offline analyser normalises each band against that
             // band's own peak over the whole clip, so a quiet TTS reply and a loud one both use the
             // full ribbon without a per-call-site gain to keep in sync with the audio pipeline.
-            AuroraWaveform(
+            VoiceVisualizer(
+                // The persisted global style (aurora by default); resolved + dispatched by
+                // VoiceVisualizer, unknown/absent → aurora, so the bar is unchanged until picked.
+                styleId = LocalWaveformStyle.current,
                 voices = auroraVoices(ai = ribbonBands),
+                // NO `spectra`, and that is the honest answer rather than an omission. This is the
+                // one surface fed by the OFFLINE path: AudioPlaybackManager samples a decoded
+                // four-band envelope at the playback position, and AudioEnvelope's decode runs no
+                // transform at all, so there is no spectrum in existence to pass. The six spectral
+                // styles therefore run their four-band fallback here — which is the case that
+                // fallback was built for. Producing one would mean an FFT pass over every decoded
+                // clip; if that is ever wanted it belongs in AudioEnvelope beside the band pass,
+                // not manufactured at this call site.
                 modifier = Modifier.fillMaxSize(),
                 // A message list can hold dozens of these; every one that is not playing must stop
                 // asking for frames. The bar is the one surface where this genuinely idles.
@@ -288,6 +302,15 @@ fun AudioPlayerBar(
                     center = Offset(px, trackY)
                 )
             }
+
+            // Status layer, ON TOP of the untouched scrub geometry rather than in place of it —
+            // the track, the playhead and both gesture handlers keep working while it shows.
+            when (status) {
+                PlayerBarStatus.DOWNLOADING -> BusyTrack("Loading audio")
+                PlayerBarStatus.PREPARING -> BusyTrack("Reading waveform")
+                PlayerBarStatus.ERROR -> StatusCaption("Playback failed", WaveRed)
+                PlayerBarStatus.PLAYING, PlayerBarStatus.IDLE -> Unit
+            }
         }
 
         // ── Time ──
@@ -299,6 +322,65 @@ fun AudioPlayerBar(
             fontWeight = FontWeight.Medium,
             color = TimeColor,
             maxLines = 1
+        )
+    }
+}
+
+// =============================================================================
+// Status layer
+// =============================================================================
+
+/**
+ * A caption plus an indeterminate sweep along the track, for the two states where the bar is
+ * working and cannot say how far along it is.
+ *
+ * The infinite transition lives HERE, in a composable that only exists while the bar is busy,
+ * rather than at the top of [AudioPlayerBar]: a transition created up there would animate for
+ * every bar in the thread forever, and a message list holds dozens of them.
+ */
+@Composable
+private fun BusyTrack(label: String) {
+    val transition = rememberInfiniteTransition(label = "busy")
+    val sweep by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "sweep",
+    )
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val trackY = size.height * 0.92f
+        val runW = size.width * 0.28f
+        // Travels the full width plus its own length, so it enters and leaves cleanly.
+        val x = sweep * (size.width + runW) - runW
+        drawLine(
+            brush = Brush.horizontalGradient(
+                colors = listOf(Color.Transparent, WaveRedGlow, Color.Transparent),
+                startX = x,
+                endX = x + runW,
+            ),
+            start = Offset(x.coerceAtLeast(0f), trackY),
+            end = Offset((x + runW).coerceAtMost(size.width), trackY),
+            strokeWidth = 2.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
+    }
+    StatusCaption(label, StatusColor)
+}
+
+/** Centred one-line note over the ribbon. Non-interactive — the scrub gestures own the surface. */
+@Composable
+private fun StatusCaption(label: String, color: Color) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+            color = color,
+            maxLines = 1,
         )
     }
 }
