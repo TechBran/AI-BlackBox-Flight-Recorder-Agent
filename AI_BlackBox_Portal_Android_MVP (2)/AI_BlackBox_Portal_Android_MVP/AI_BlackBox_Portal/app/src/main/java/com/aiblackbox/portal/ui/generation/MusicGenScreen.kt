@@ -519,6 +519,7 @@ fun MusicGenScreen(
                         GenState.POLLING -> "Generating..."
                         GenState.COMPLETED -> "Done!"
                         GenState.FAILED -> "Retry"
+                        GenState.CANCELLED -> "Cancelled"
                     },
                     style = MaterialTheme.typography.labelLarge.copy(
                         fontWeight = FontWeight.Bold,

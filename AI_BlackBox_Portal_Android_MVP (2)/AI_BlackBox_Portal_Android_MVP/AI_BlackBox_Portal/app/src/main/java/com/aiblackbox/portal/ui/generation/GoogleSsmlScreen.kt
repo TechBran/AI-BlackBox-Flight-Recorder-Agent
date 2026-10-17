@@ -54,6 +54,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.repository.LOST_CONNECTION_MESSAGE
+import com.aiblackbox.portal.data.repository.TaskPollOutcome
+import com.aiblackbox.portal.data.repository.TaskRepository
+import com.aiblackbox.portal.data.repository.isTerminalTaskStatus
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.ui.components.AudioPlayerBar
 import com.aiblackbox.portal.ui.components.EmberBackdrop
@@ -72,7 +76,6 @@ import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.theme.RadiusSm
 import com.aiblackbox.portal.ui.theme.SolidGreen
 import com.aiblackbox.portal.ui.theme.glassSurface
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -239,39 +242,26 @@ class GoogleSsmlViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Poll through the shared poller (A11-settings-generation-01/-02): a network blip
+     * is retried instead of ending the wait, and 'cancelled' is terminal — before, it
+     * fell into the else branch and polled every second forever.
+     */
     private suspend fun pollTask(taskId: String) {
         val api = api ?: return
-        while (true) {
-            try {
-                val response = api.get("/tasks/status/$taskId")
-                val statusObj = json.parseToJsonElement(response).jsonObject
-                val taskStatus = statusObj["status"]?.jsonPrimitive?.content ?: ""
-
-                when (taskStatus.uppercase()) {
-                    "COMPLETED" -> {
-                        val resultUrl = statusObj["result_url"]?.jsonPrimitive?.content
-                        _audioUrl.value = resultUrl
-                        _status.value = "Audio ready"
-                        _isGenerating.value = false
-                        return
-                    }
-                    "FAILED" -> {
-                        val error = statusObj["error"]?.jsonPrimitive?.content ?: "Generation failed"
-                        _status.value = "Error: $error"
-                        _isGenerating.value = false
-                        return
-                    }
-                    else -> {
-                        _status.value = "Generating... ($taskStatus)"
-                    }
-                }
-            } catch (e: Exception) {
-                _status.value = "Poll error: ${e.message}"
-                _isGenerating.value = false
-                return
-            }
-            delay(1000)
+        val outcome = TaskRepository(api).awaitTask(taskId, intervalMs = 1000) { s ->
+            if (!isTerminalTaskStatus(s.status)) _status.value = "Generating... (${s.status})"
         }
+        _status.value = when (outcome) {
+            is TaskPollOutcome.Completed -> {
+                _audioUrl.value = outcome.status.resultUrl
+                "Audio ready"
+            }
+            is TaskPollOutcome.Failed -> "Error: ${outcome.message}"
+            TaskPollOutcome.Cancelled -> "Cancelled"
+            TaskPollOutcome.LostConnection -> LOST_CONNECTION_MESSAGE
+        }
+        _isGenerating.value = false
     }
 }
 

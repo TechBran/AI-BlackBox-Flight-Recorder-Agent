@@ -6,10 +6,15 @@ import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.TaskResponse
 import com.aiblackbox.portal.data.model.TaskStatus
+import com.aiblackbox.portal.data.repository.LOST_CONNECTION_MESSAGE
+import com.aiblackbox.portal.data.repository.TaskPollOutcome
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.repository.ImageCatalogProvider
 import com.aiblackbox.portal.data.repository.ImageCatalogRepository
+import com.aiblackbox.portal.data.repository.awaitTaskOutcome
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,7 +24,9 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
 
 enum class GenType { IMAGE, VIDEO, MUSIC }
-enum class GenState { IDLE, SUBMITTING, POLLING, COMPLETED, FAILED }
+// CANCELLED is terminal (A11-settings-generation-02): Settings > Cancel Tasks or a
+// per-task cancel marks the row cancelled, and the screen must stop spinning.
+enum class GenState { IDLE, SUBMITTING, POLLING, COMPLETED, FAILED, CANCELLED }
 
 class GenerationViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
@@ -54,6 +61,10 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
     val imageParamValues: StateFlow<Map<String, String>> = _imageParamValues.asStateFlow()
 
     private var currentOperator = "Brandon"
+
+    // The running task poll. Kept so reset() and the next submit cancel it — before,
+    // an abandoned poll kept writing its late result over the fresh screen.
+    private var pollJob: Job? = null
 
     init {
         viewModelScope.launch { store.operator.collect { currentOperator = it } }
@@ -249,31 +260,50 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Poll [taskId] to its end. A dropped connection no longer escapes this launch
+     * (A11-settings-generation-01 — it killed the process): the shared poller retries
+     * transient failures and ends every poll as an outcome, mapped by [genResultFor].
+     */
     private fun pollTask(taskId: String) {
         val repo = taskRepo ?: return
+        pollJob?.cancel()
         _state.value = GenState.POLLING
-        viewModelScope.launch {
-            repo.pollTask(taskId).collect { status ->
-                _taskStatus.value = status
-                when (status.status.uppercase()) {
-                    "COMPLETED" -> {
-                        _state.value = GenState.COMPLETED
-                        _resultUrl.value = status.resultUrl
-                    }
-                    "FAILED" -> {
-                        _state.value = GenState.FAILED
-                        _error.value = status.error ?: "Generation failed"
-                    }
-                }
-            }
+        pollJob = viewModelScope.launch {
+            val result = pollToResult(repo.pollTask(taskId)) { status -> _taskStatus.value = status }
+            _state.value = result.state
+            if (result.resultUrl != null) _resultUrl.value = result.resultUrl
+            _error.value = result.error
         }
     }
 
     fun reset() {
+        pollJob?.cancel()
+        pollJob = null
         _state.value = GenState.IDLE
         _taskStatus.value = null
         _resultUrl.value = null
         _resultUrls.value = emptyList()
         _error.value = null
+    }
+
+    /** What a finished poll leaves on screen. */
+    data class GenResult(val state: GenState, val resultUrl: String?, val error: String?)
+
+    companion object {
+        /** Collect [poll] to its end (statuses to [onStatus]) and map it — the poller's pure core. */
+        internal suspend fun pollToResult(
+            poll: Flow<TaskStatus>,
+            onStatus: (TaskStatus) -> Unit = {},
+        ): GenResult = genResultFor(awaitTaskOutcome(poll, onStatus))
+
+        internal fun genResultFor(outcome: TaskPollOutcome): GenResult = when (outcome) {
+            is TaskPollOutcome.Completed -> GenResult(GenState.COMPLETED, outcome.status.resultUrl, null)
+            is TaskPollOutcome.Failed -> GenResult(GenState.FAILED, null, outcome.message)
+            TaskPollOutcome.Cancelled -> GenResult(GenState.CANCELLED, null, null)
+            // Only the connection was lost; the task keeps running on the box and its
+            // result still lands there (the media library lists it).
+            TaskPollOutcome.LostConnection -> GenResult(GenState.FAILED, null, LOST_CONNECTION_MESSAGE)
+        }
     }
 }

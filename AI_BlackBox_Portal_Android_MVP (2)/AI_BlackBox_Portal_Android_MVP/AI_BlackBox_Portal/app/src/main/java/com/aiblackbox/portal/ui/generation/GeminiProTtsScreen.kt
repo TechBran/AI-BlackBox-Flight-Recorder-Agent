@@ -60,6 +60,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.repository.LOST_CONNECTION_MESSAGE
+import com.aiblackbox.portal.data.repository.TaskPollOutcome
+import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.ui.components.AudioPlayerBar
 import com.aiblackbox.portal.ui.components.EmberBackdrop
@@ -82,7 +85,7 @@ import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.theme.RadiusSm
 import com.aiblackbox.portal.ui.theme.SolidGreen
 import com.aiblackbox.portal.ui.theme.glassSurface
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -93,6 +96,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlin.coroutines.cancellation.CancellationException
 
 // =============================================================================
 // Gemini Pro TTS Voice Data
@@ -129,6 +133,10 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
     private var currentOperator = "Brandon"
     private var originBase = ""
 
+    // The running submit + poll, so reset() stops it instead of letting a late
+    // result land on the cleared screen.
+    private var genJob: Job? = null
+
     init {
         viewModelScope.launch { store.operator.collect { currentOperator = it } }
     }
@@ -158,7 +166,8 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
         _status.value = "Submitting..."
         _audioUrl.value = null
 
-        viewModelScope.launch {
+        genJob?.cancel()
+        genJob = viewModelScope.launch {
             try {
                 val body = if (isMulti) {
                     buildJsonObject {
@@ -194,39 +203,29 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
 
                 _status.value = "Generating... (task ${taskId.take(8)})"
 
-                // Poll until complete
-                while (true) {
-                    delay(1000)
-                    val statusResponse = api.get("/tasks/status/$taskId")
-                    val statusObj = api.json.parseToJsonElement(statusResponse).jsonObject
-                    val taskStatus = statusObj["status"]?.jsonPrimitive?.content ?: "pending"
-
-                    when {
-                        taskStatus.equals("completed", ignoreCase = true) -> {
-                            val resultUrl = statusObj["result_url"]?.jsonPrimitive?.content
-                            if (resultUrl != null) {
-                                _audioUrl.value = if (resultUrl.startsWith("http")) {
-                                    resultUrl
-                                } else {
-                                    "$originBase$resultUrl"
-                                }
+                // Poll until complete — the shared poller (A11-settings-generation-01/-02):
+                // a network blip is retried, and 'cancelled' ends the wait instead of
+                // polling every second forever.
+                val outcome = TaskRepository(api).awaitTask(taskId, intervalMs = 1000)
+                _status.value = when (outcome) {
+                    is TaskPollOutcome.Completed -> {
+                        val resultUrl = outcome.status.resultUrl
+                        if (resultUrl != null) {
+                            _audioUrl.value = if (resultUrl.startsWith("http")) {
+                                resultUrl
+                            } else {
+                                "$originBase$resultUrl"
                             }
-                            _status.value = "Audio ready"
-                            _isGenerating.value = false
-                            return@launch
                         }
-                        taskStatus.equals("failed", ignoreCase = true) -> {
-                            val errorMsg = statusObj["error_message"]?.jsonPrimitive?.content
-                                ?: "Generation failed"
-                            _status.value = "Error: $errorMsg"
-                            _isGenerating.value = false
-                            return@launch
-                        }
-                        else -> {
-                            _status.value = "Generating... (task ${taskId.take(8)})"
-                        }
+                        "Audio ready"
                     }
+                    is TaskPollOutcome.Failed -> "Error: ${outcome.message}"
+                    TaskPollOutcome.Cancelled -> "Cancelled"
+                    TaskPollOutcome.LostConnection -> LOST_CONNECTION_MESSAGE
                 }
+                _isGenerating.value = false
+            } catch (e: CancellationException) {
+                throw e // reset() cancelled this generation; it owns the screen state now
             } catch (e: Exception) {
                 _status.value = "Error: ${e.message}"
                 _isGenerating.value = false
@@ -235,6 +234,8 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun reset() {
+        genJob?.cancel()
+        genJob = null
         _isGenerating.value = false
         _status.value = ""
         _audioUrl.value = null

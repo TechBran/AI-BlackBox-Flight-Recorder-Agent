@@ -354,6 +354,7 @@ fun VideoGenScreen(
                         GenState.POLLING -> "Generating... ${taskStatus?.progress ?: 0}%"
                         GenState.COMPLETED -> "Done!"
                         GenState.FAILED -> "Retry"
+                        GenState.CANCELLED -> "Cancelled"
                     },
                     style = MaterialTheme.typography.labelLarge.copy(
                         fontWeight = FontWeight.Bold,
