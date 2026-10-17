@@ -66,6 +66,17 @@ def _no_network_reach(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_dotenv(tmp_path, monkeypatch):
+    """rerank reads bearer keys .env-first (O16-onboarding-update-04). Point
+    that read at an EMPTY tmp .env so the box's real keys never leak into a
+    test; the os.environ fallback is what setenv/delenv in these tests drive."""
+    from Orchestrator.onboarding import secrets_writer
+    env = tmp_path / "isolated.env"
+    env.write_text("")
+    monkeypatch.setattr(secrets_writer, "ENV_FILE", env)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_rerank_sidecar(tmp_path, monkeypatch):
     """M4: get_settings()/is_enabled() now read the rerank.json sidecar under
     config.EMBEDDINGS_STORES_DIR. Point every test at an EMPTY tmp stores dir so

@@ -268,8 +268,8 @@ RERANK_MODELS = {
     # are the box's current GA/flash/mini tiers, sourced from the fallback model
     # catalog (routes/admin_routes.py) + config.py — the cheap fast path, never a
     # date-pinned preview where a stable id exists. Cloud → no local footprint
-    # (no vram_gb/ram_gb). Key resolved FRESH via os.getenv(key_env) at score
-    # time (M4), so a wizard-mirrored paste takes effect with no restart.
+    # (no vram_gb/ram_gb). Key resolved FRESH via _env_key(key_env) (.env first)
+    # at score time (M4), so a wizard paste takes effect with no restart.
     "llm-rerank-gemini-flash": {
         "provider": "llm",
         "model_id": "gemini-2.5-flash",   # GA flash text tier (web_tools/tasks)
@@ -331,8 +331,8 @@ RERANK_MODELS = {
     },
     # ── Dedicated cloud cross-encoders (M7): the PRIMARY quality cloud path.
     # Unlike the LLM fallback above these are PURPOSE-TRAINED rerankers, reached
-    # over raw REST (no SDK deps). Bearer key read FRESH via os.getenv(key_env)
-    # at score time (M4) so a wizard-mirrored paste needs no restart. NO
+    # over raw REST (no SDK deps). Bearer key read FRESH via _env_key(key_env)
+    # (.env first) at score time (M4) so a wizard paste needs no restart. NO
     # query_instruction — the Qwen instruct prefix INVERTS non-Qwen rankers
     # (RERANK_MODELS discipline). Cloud → no local vram_gb/ram_gb footprint.
     # Voyage is the recommended cloud DEFAULT; Cohere is the enterprise reference.
@@ -435,6 +435,18 @@ _EVIDENCE_OK_TTL_S = 600.0
 _PROBE_PASSAGE = "preflight probe passage"
 
 
+def _env_key(key_env: "str | None") -> str:
+    """A bearer key read FRESH: .env first, os.environ fallback (audit
+    O16-onboarding-update-04). The wizard's API Keys step saves through
+    POST /onboarding/save, which writes .env and never os.environ, so an
+    os.getenv-only read showed a freshly pasted Voyage/Cohere key as missing
+    until an unrelated restart. Same order as elevenlabs.client."""
+    if not key_env:
+        return ""
+    from Orchestrator.onboarding.providers import read_env_value
+    return read_env_value(key_env)
+
+
 def _key_present_for(auth_kind: "str | None", key_env: "str | None") -> bool:
     """Whether the credential a model needs is configured, read FRESH (M4).
 
@@ -446,7 +458,7 @@ def _key_present_for(auth_kind: "str | None", key_env: "str | None") -> bool:
     as unselectable (key_present was always False for a None key_env)."""
     if auth_kind == "gcp_service_account":
         return bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-    return bool(key_env and os.getenv(key_env))
+    return bool(_env_key(key_env))
 
 # One-time-per-process preflight cache (audit A9). Guarded because retrieve()
 # runs from FastAPI's threadpool — two first-uses must not double-probe.
@@ -664,7 +676,7 @@ def reachable(settings: dict | None = None, timeout_s: float = 1.0) -> bool:
       cloud (voyage/cohere/vertex/llm) → key/creds PRESENT — a config/env read,
                               NEVER a paid network poll (actual cloud
                               reachability is proven once by preflight()).
-    Cloud key resolution is the forward-compatible os.getenv(key_env) floor;
+    Cloud key resolution is the _env_key(key_env) floor (.env, then os.environ);
     M4 refines the full sidecar>config>env order but the env read is stable."""
     s = settings or get_settings()
     p = s["provider"]
@@ -679,13 +691,12 @@ def reachable(settings: dict | None = None, timeout_s: float = 1.0) -> bool:
         # instead (still a pure env read, NEVER a paid network poll).
         if s.get("auth_kind") == "gcp_service_account":
             return bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-        # key/creds present — the fresh os.getenv read get_settings already did
+        # key/creds present — the fresh _env_key read get_settings already did
         # (M4); NEVER a paid network poll. (settings dicts always carry it;
         # fall back to a fresh read if an external caller hand-built one.)
         if "key_present" in s:
             return bool(s["key_present"])
-        key_env = s.get("key_env")
-        return bool(key_env and os.getenv(key_env))
+        return bool(_env_key(s.get("key_env")))
     return _probe_localhost(s["base_url"], timeout_s)
 
 
@@ -841,8 +852,9 @@ def get_settings() -> dict:
     and the auth descriptor (auth_kind / key_env) are resolved FROM the selected
     model's RERANK_MODELS entry (M3.1); a [rerank] preflight_ceiling_ms in
     config still overrides the registry ceiling. `key_present` reads the key_env
-    FRESH via os.getenv at call time (M4) — never config.py's frozen import-time
-    constants — so a wizard-mirrored os.environ write is visible immediately.
+    FRESH via _env_key at call time (M4: .env first, then os.environ — never
+    config.py's frozen import-time constants), so a wizard save is visible
+    immediately.
     Numeric reads are malformed-config-resilient (a bad value falls back, logged
     once) so get_settings() — and thus score()/status() — never raise (A9)."""
     sel = _load_sidecar()
@@ -904,9 +916,9 @@ def get_settings() -> dict:
         "auth_kind": entry.get("auth_kind", "none") if entry else "none",
         "key_env": key_env,
         # Key resolved FRESH (M4): the selected model's key_env read via
-        # os.getenv at THIS call — not config.py's frozen constants. This is the
-        # single live-read the reachable()/status() key checks consume, so a
-        # newly-pasted key mirrored into os.environ is seen with no restart.
+        # _env_key at THIS call (.env first, then os.environ) — not config.py's
+        # frozen constants. This is the single live-read the reachable()/status()
+        # key checks consume, so a newly-pasted key is seen with no restart.
         # Vertex (gcp_service_account) resolves from GOOGLE_APPLICATION_CREDENTIALS.
         "key_present": _key_present_for(
             entry.get("auth_kind") if entry else None, key_env),
@@ -1041,7 +1053,7 @@ def _score_cpu(query: str, passages: list[str],
 # passage positions so the returned vector is positionally aligned. The array
 # KEY differs by provider (live-verified): Voyage nests rows under `data` (its
 # envelope is {"object":"list","data":[...],"model":...,"usage":...}), Cohere
-# under `results`. Bearer key read FRESH via os.getenv(key_env) at score time
+# under `results`. Bearer key read FRESH via _env_key(key_env) at score time
 # (M4). None on missing key / non-200 / count-or-index anomaly; transport
 # blow-ups are backstopped by the dispatcher's never-raise (audit A9). NO Qwen
 # instruct prefix (it inverts non-Qwen rankers) — the raw query goes on the wire.
@@ -1086,7 +1098,7 @@ def _score_voyage(query: str, passages: list[str],
     key_env = settings.get("key_env")
     if not key_env:
         return None
-    api_key = os.getenv(key_env)
+    api_key = _env_key(key_env)
     if not api_key:
         return None
     resp = requests.post(
@@ -1112,7 +1124,7 @@ def _score_cohere(query: str, passages: list[str],
     key_env = settings.get("key_env")
     if not key_env:
         return None
-    api_key = os.getenv(key_env)
+    api_key = _env_key(key_env)
     if not api_key:
         return None
     resp = requests.post(
@@ -1496,7 +1508,7 @@ def _score_llm(query: str, passages: list[str],
     """Listwise LLM-as-reranker (M6) — the cheap cloud fallback tier.
 
     Resolves the frontier family from the selected model's key_env, reads the key
-    FRESH via os.getenv (M4), builds a snippet-truncated listwise prompt, and runs
+    FRESH via _env_key (M4), builds a snippet-truncated listwise prompt, and runs
     ONE non-streaming completion asking for a JSON permutation of the candidate
     indices. The returned order maps to synthetic descending scores (1/(1+rank))
     positionally aligned to `passages`. This is NOT a purpose-trained
@@ -1510,7 +1522,7 @@ def _score_llm(query: str, passages: list[str],
     key_env = settings.get("key_env")
     if not key_env:
         return None
-    api_key = os.getenv(key_env)
+    api_key = _env_key(key_env)
     if not api_key:
         return None
     complete = _LLM_COMPLETERS.get(key_env)
@@ -1845,8 +1857,8 @@ def model_catalog() -> list[dict]:
     The flat `models` slug list in status() carries no per-model provider/tiers/
     key_present, so a tier-driven, key-gated selector can't be built from it.
     This exposes exactly what the selector needs, additively. `key_present` is
-    resolved FRESH via os.getenv(key_env) per model (M4 pattern) so a wizard-
-    mirrored paste gates selectability with no restart. Sorted by slug to match
+    resolved FRESH via _env_key(key_env) per model (M4 pattern, .env first) so a
+    wizard paste gates selectability with no restart. Sorted by slug to match
     `models`. Never raises."""
     out = []
     for slug in sorted(RERANK_MODELS):
@@ -1988,7 +2000,7 @@ def status() -> dict:
         "ram_mb": hw.get("ram_mb"),
         "reachable": reachable(s),
         "auth_kind": s["auth_kind"],
-        # Single fresh os.getenv read, resolved in get_settings (M4).
+        # Single fresh _env_key read, resolved in get_settings (M4).
         "key_present": s["key_present"],
         "preflight_ceiling_ms": s["preflight_ceiling_ms"],
     }
