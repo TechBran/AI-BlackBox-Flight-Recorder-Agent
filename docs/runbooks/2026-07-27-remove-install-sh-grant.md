@@ -39,7 +39,7 @@ A normal in-app / Portal update applies all of this with **no operator action**:
 | Change in the pushed commit        | How it applies                                             |
 | ---------------------------------- | ---------------------------------------------------------- |
 | Application code (Python, Portal)  | `git reset --hard` to the target commit                    |
-| Orchestrator / MCP pip deps        | `pip install -r requirements.txt` in each venv             |
+| Orchestrator / MCP pip deps        | Orchestrator: `pip install --require-hashes -r requirements.lock.txt`; MCP: `pip install -r MCP/requirements.txt` |
 | systemd **units already present**  | `blackbox-write-systemd <unit>` per changed template + `daemon-reload` |
 | sudoers (`blackbox-system`)        | `blackbox-write-systemd sudoers-system` (visudo-gated)     |
 | dispatch helpers (apt / write)     | `blackbox-write-systemd apt-install-helper` / `write-systemd-helper` |

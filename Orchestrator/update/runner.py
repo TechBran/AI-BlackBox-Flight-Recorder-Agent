@@ -83,6 +83,13 @@ BUCKET_SHOULD_HAVE = "SHOULD_HAVE"
 
 APT_HELPER = "/usr/local/sbin/blackbox-apt-install"
 
+# The Orchestrator venv installs from this hashed lock (compiled from
+# requirements.in by scripts/compile_python_lock.sh) with --require-hashes:
+# every package pinned and its download checked (X01-deps-python-02/-05). A
+# failed lock install fails the update; there is no fallback to an unhashed or
+# unpinned file — that is a manual, operator-run step (see requirements.in).
+PIP_LOCK_FILE = "requirements.lock.txt"
+
 # blackbox-apt-install exit codes we react to specifically (its header is the
 # contract): 4 = allowlist file unreadable, 5 = package not in the allowlist.
 APT_HELPER_RC_ALLOWLIST_UNREADABLE = 4
@@ -247,7 +254,7 @@ class UpdateRunner:
         # helper install) write to /usr/local/sbin/ and /etc/systemd/
         # system/ — they can't easily run against a worktree path. The
         # worktree pattern is reserved for code-only validation (pip install
-        # against the new code's requirements.txt before swapping).
+        # against the new code's requirements.lock.txt before swapping).
         #
         # Trade-off: brief window where new Python files are on disk but
         # service hasn't restarted yet. uvicorn workers re-importing a
@@ -350,20 +357,38 @@ class UpdateRunner:
                 yield self._log(PHASE_APT_INSTALL, f"{pkg} OK")
 
         # PHASE: pip_install (conditional)
+        # Installs the hashed lock, not requirements.txt: a plain `pip install
+        # -r requirements.txt` never moved a satisfied floor and resolved the
+        # transitive closure fresh on every box (X01-deps-python-02/-05).
         if buckets["pip"]:
             self._write_state(PHASE_PIP_INSTALL)
             yield self._phase_event(PHASE_PIP_INSTALL)
-            rc, out = await self._run([
-                str(self.root / "Orchestrator/venv/bin/pip"),
-                "install", "-r", str(self.root / "requirements.txt"),
-                "--quiet", "--disable-pip-version-check",
-            ], timeout=600.0)
+            pip = self.root / "Orchestrator/venv/bin/pip"
+            lock = self.root / PIP_LOCK_FILE
+            if not lock.is_file():
+                # Nothing touched the venv yet: put the code back only.
+                yield self._fail(PHASE_PIP_INSTALL,
+                                 f"{PIP_LOCK_FILE} is missing from {self.root}; "
+                                 f"refusing to install Python packages without it. "
+                                 f"The update was rolled back.")
+                await self._rollback_code()
+                return
+            cmd = [str(pip), "install", "--require-hashes", "-r", str(lock),
+                   "--quiet", "--disable-pip-version-check"]
+            rc, out = await self._run(cmd, timeout=600.0)
             if rc != 0:
                 yield self._fail(PHASE_PIP_INSTALL,
-                                 f"pip install failed (rc={rc}): {_tail(out)}")
+                                 f"pip install --require-hashes -r {PIP_LOCK_FILE} "
+                                 f"failed (rc={rc}): {_tail(out)}\n"
+                                 f"The update was rolled back and the venv restored "
+                                 f"from Manifest/pre_update_pip_freeze.txt; nothing "
+                                 f"was installed unpinned. Re-run `{pip} install "
+                                 f"--require-hashes -r {lock}` to see the full error "
+                                 f"(requirements.in documents the manual fallback).")
                 await self._rollback_pip_and_code()
                 return
-            yield self._log(PHASE_PIP_INSTALL, "Orchestrator venv updated.")
+            yield self._log(PHASE_PIP_INSTALL,
+                            f"Orchestrator venv updated from {PIP_LOCK_FILE} (hash-checked).")
 
         # PHASE: mcp_install (conditional)
         if buckets["mcp_pip"]:

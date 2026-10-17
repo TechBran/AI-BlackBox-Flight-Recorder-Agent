@@ -32,6 +32,15 @@ def test_pip_bucket_triggered_by_root_requirements_only():
     assert result["mcp_pip"] is False
 
 
+def test_pip_bucket_triggered_by_hashed_lock():
+    """The pip phase installs requirements.lock.txt (--require-hashes), so a
+    change to the lock alone must re-run it, or a box never picks up a raised
+    security floor (X01-deps-python-02/-05)."""
+    result = categorize(["requirements.lock.txt"])
+    assert result["pip"] is True
+    assert result["mcp_pip"] is False
+
+
 def test_mcp_pip_bucket_triggered_by_mcp_requirements():
     result = categorize(["MCP/requirements.txt"])
     assert result["mcp_pip"] is True

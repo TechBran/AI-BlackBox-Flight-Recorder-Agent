@@ -574,7 +574,7 @@ backend:
 - `Orchestrator/device_registry/devices.json` — paired tailnet devices
 - `Manifest/paired_devices.json` — paired Android devices
 - `Apps/` — customer-created sub-apps
-- `Orchestrator/venv/`, `MCP/venv/` — Python environments (rebuilt only if requirements.txt changed)
+- `Orchestrator/venv/`, `MCP/venv/` — Python environments (re-installed only when `requirements.lock.txt` / `MCP/requirements.txt` changed; the Orchestrator venv installs the hashed lock with `--require-hashes`)
 - `.onboarding_state.json`, `.onboarding_complete` — wizard state
 
 **Security perimeter** — `apt` install + sudoers + systemd writes go

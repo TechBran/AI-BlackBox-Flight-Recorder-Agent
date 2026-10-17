@@ -9,7 +9,9 @@ bucket changed — code-only updates land in seconds.
 Bucket semantics:
   - apt         : Scripts/onboarding/system-packages.txt changed → re-run
                   blackbox-apt-install for each new MUST_HAVE/SHOULD_HAVE
-  - pip         : requirements.txt changed → re-pip-install in Orchestrator venv
+  - pip         : requirements.lock.txt (or requirements.txt, its hash-free
+                  rendering) changed → re-install the hashed lock in the
+                  Orchestrator venv
   - mcp_pip     : MCP/requirements.txt changed → re-pip-install in MCP venv
   - systemd     : Scripts/install.sh changed (heuristic — any install.sh edit
                   may have touched a heredoc that regenerates a systemd unit
@@ -35,7 +37,10 @@ from typing import Iterable
 # documentation — the categorize() function checks all patterns.
 _PATTERNS = {
     "apt":         ("Scripts/onboarding/system-packages.txt",),
-    "pip":         ("requirements.txt",),
+    # The pip phase installs the hashed lock, so a lock-only change (a raised
+    # security floor) must trigger it. requirements.txt stays: it is what an
+    # updater older than the lock installs, and it changes with the lock.
+    "pip":         ("requirements.lock.txt", "requirements.txt"),
     "mcp_pip":     ("MCP/requirements.txt",),
     "sudoers":     ("installer/templates/sudoers-blackbox-system",),
     "helpers":     ("installer/templates/blackbox-apt-install.sh",

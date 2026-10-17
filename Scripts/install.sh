@@ -504,7 +504,20 @@ sudo -u "$REAL_USER" bash -c '
 echo "[install] Creating Python venv..."
 sudo -u "$REAL_USER" python3.12 -m venv "$BLACKBOX_ROOT/Orchestrator/venv"
 sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install --upgrade pip
-sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install -r "$BLACKBOX_ROOT/requirements.txt"
+# Install the hashed lock (compiled from requirements.in by
+# scripts/compile_python_lock.sh): every package pinned, every download checked
+# against its sha256 (audit X01-deps-python-02). A failure stops the install;
+# it never falls back to unpinned versions on its own.
+if ! sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install \
+        --require-hashes -r "$BLACKBOX_ROOT/requirements.lock.txt"; then
+    echo "[install] ERROR: pip install --require-hashes -r requirements.lock.txt failed (output above)." >&2
+    echo "[install]   A hash mismatch means a download did not match the lock: check for a proxy" >&2
+    echo "[install]   rewriting PyPI traffic, then re-run this installer. If this box cannot use the" >&2
+    echo "[install]   lock (no wheel for its platform), the manual fallback installs the same pins" >&2
+    echo "[install]   without the hash check:" >&2
+    echo "[install]     sudo -u $REAL_USER $BLACKBOX_ROOT/Orchestrator/venv/bin/pip install -r $BLACKBOX_ROOT/requirements.txt" >&2
+    exit 1
+fi
 
 # ── Step 2b: BlackBox MCP server venv + per-CLI registration (audit E21) ──
 # MCP server lives in a SEPARATE venv from the Orchestrator because mcp's
