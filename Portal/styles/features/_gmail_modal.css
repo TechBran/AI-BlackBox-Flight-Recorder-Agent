@@ -42,6 +42,12 @@
     color: var(--neutral-700, #888);
 }
 
+/* Saved sign-in rejected by Google (revoked/expired grant): a warning, not a
+ * neutral "not connected" — the operator has to act (Reconnect). */
+.gmail-status-value.gmail-needs-reauth {
+    color: var(--highlight-header, #ffa726);
+}
+
 .gmail-controls {
     display: flex;
     gap: 8px;

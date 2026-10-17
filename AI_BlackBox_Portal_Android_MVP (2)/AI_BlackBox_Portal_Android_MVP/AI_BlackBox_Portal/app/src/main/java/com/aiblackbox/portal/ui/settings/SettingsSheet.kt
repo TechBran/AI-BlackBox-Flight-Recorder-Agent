@@ -104,6 +104,7 @@ import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.GlassBorder
+import com.aiblackbox.portal.ui.theme.HighlightHeader
 import com.aiblackbox.portal.ui.theme.Neutral100
 import com.aiblackbox.portal.ui.theme.Neutral200
 import com.aiblackbox.portal.ui.theme.Neutral300
@@ -113,8 +114,6 @@ import com.aiblackbox.portal.ui.theme.RadiusLg
 import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.theme.SolidGreen
 import com.aiblackbox.portal.util.Constants
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 // =============================================================================
 // SettingsSheet — aligned with Portal #menuModal
@@ -394,36 +393,79 @@ fun SettingsSheet(
             // ══════════════════════════════════════════════════════════════
             // Gmail — per-operator OAuth connection
             // ══════════════════════════════════════════════════════════════
-            var gmailStatus by remember { mutableStateOf<String?>(null) }
-            var gmailEmail by remember { mutableStateOf("") }
+            // The backend proves the stored grant with a live Google call, so a
+            // revoked/expired sign-in arrives as NEEDS_REAUTH (Reconnect), not
+            // "Connected" (audit W15). See GmailLinkStatus.
+            var gmailLink by remember { mutableStateOf<GmailLinkStatus?>(null) }
             var gmailLoading by remember { mutableStateOf(true) }
             var gmailCheckTrigger by remember { mutableIntStateOf(0) }
 
             // Check Gmail connection status — re-checks when trigger increments
             LaunchedEffect(operator, gmailCheckTrigger) {
                 gmailLoading = true
-                try {
-                    val response = viewModel.api?.get("/gmail/status/$operator")
-                    if (response != null) {
-                        val obj = kotlinx.serialization.json.Json.parseToJsonElement(response).jsonObject
-                        val connected = obj["connected"]?.jsonPrimitive?.content == "true"
-                        gmailEmail = obj["email"]?.jsonPrimitive?.content ?: ""
-                        gmailStatus = if (connected) "connected" else "disconnected"
-                    }
+                gmailLink = try {
+                    viewModel.api?.get("/gmail/status/$operator")?.let { GmailLinkStatus.parse(it) }
+                        ?: GmailLinkStatus(GmailLinkStatus.State.NOT_CONNECTED)
                 } catch (_: Exception) {
-                    gmailStatus = "disconnected"
+                    GmailLinkStatus(GmailLinkStatus.State.NOT_CONNECTED)
                 }
                 gmailLoading = false
             }
 
+            val openGmailSignIn: () -> Unit = {
+                try {
+                    val authUrl = gmailLink?.authorizeUrl(origin, operator)
+                        ?: GmailLinkStatus.authorizeUrl(origin, operator)
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, authUrl.toUri())
+                    )
+                } catch (_: Exception) {}
+            }
+            val gmailEmail = gmailLink?.email.orEmpty()
+
             CollapsibleSection(
                 title = "📧 Google Workspace",
                 accent = Color(0xFF4A9EFF),
-                subtitle = gmailEmail.takeIf { gmailStatus == "connected" && it.isNotBlank() },
+                subtitle = when {
+                    gmailLink?.state == GmailLinkStatus.State.NEEDS_REAUTH -> "Reconnect needed"
+                    gmailLink?.isConnected == true && gmailEmail.isNotBlank() -> gmailEmail
+                    else -> null
+                },
             ) {
             if (gmailLoading) {
                 Text("Checking Google Workspace...", style = MaterialTheme.typography.bodySmall, color = Neutral500)
-            } else if (gmailStatus == "connected") {
+            } else if (gmailLink?.state == GmailLinkStatus.State.NEEDS_REAUTH) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(8.dp).clip(RoundedCornerShape(50))
+                            .background(HighlightHeader)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Reconnect needed: Google rejected the saved sign-in" +
+                            (gmailLink?.error?.let { " ($it)" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                        color = HighlightHeader
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    MenuButton("🔄 Reconnect", onClick = openGmailSignIn)
+                    MenuButton("🔗 Disconnect") {
+                        viewModel.disconnectGmail(operator)
+                        gmailLink = GmailLinkStatus(GmailLinkStatus.State.NOT_CONNECTED)
+                    }
+                    MenuButton("🔄 Refresh") {
+                        gmailCheckTrigger++
+                    }
+                }
+            } else if (gmailLink?.isConnected == true) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -441,19 +483,11 @@ fun SettingsSheet(
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MenuButton("\uD83D\uDD17 Disconnect") {
+                    MenuButton("🔗 Disconnect") {
                         viewModel.disconnectGmail(operator)
-                        gmailStatus = "disconnected"
-                        gmailEmail = ""
+                        gmailLink = GmailLinkStatus(GmailLinkStatus.State.NOT_CONNECTED)
                     }
-                    MenuButton("\uD83D\uDD04 Reconnect") {
-                        try {
-                            val authUrl = "$origin/auth/gmail/authorize?operator=$operator"
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, authUrl.toUri())
-                            )
-                        } catch (_: Exception) {}
-                    }
+                    MenuButton("🔄 Reconnect", onClick = openGmailSignIn)
                 }
             } else {
                 Text(
@@ -463,15 +497,8 @@ fun SettingsSheet(
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MenuButton("\uD83D\uDCE7 Connect Google Workspace") {
-                        try {
-                            val authUrl = "$origin/auth/gmail/authorize?operator=$operator"
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, authUrl.toUri())
-                            )
-                        } catch (_: Exception) {}
-                    }
-                    MenuButton("\uD83D\uDD04 Refresh") {
+                    MenuButton("📧 Connect Google Workspace", onClick = openGmailSignIn)
+                    MenuButton("🔄 Refresh") {
                         gmailCheckTrigger++
                     }
                 }
