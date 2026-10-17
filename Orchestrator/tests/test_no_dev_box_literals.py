@@ -144,6 +144,11 @@ def test_allowlist_entries_exist_and_say_why():
     for key, reason in ALLOWLIST.items():
         assert (REPO / key).exists(), f"stale ALLOWLIST entry: {key}"
         assert len(reason) > 20, f"ALLOWLIST entry {key} needs a real reason"
+        if not key.endswith("/"):
+            # A file entry must still hold what it excuses; drop it once fixed.
+            text = (REPO / key).read_text(encoding="utf-8", errors="replace")
+            assert (OPERATOR_LITERAL_RX.search(text) or _LOOPBACK_RX.search(text)
+                    or _phone_hits(text) or _email_hits(text)), f"stale ALLOWLIST entry: {key}"
 
 
 # ── the guards ───────────────────────────────────────────────────────────────

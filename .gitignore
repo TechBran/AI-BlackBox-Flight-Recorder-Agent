@@ -269,6 +269,9 @@ installer/dist/.cache/
 config.ini
 # Contacts directory holds personal contact data — never ship in customer ZIPs.
 Contacts/contacts.json
+# ...nor its migration backups and atomic-write temp files (contacts.py).
+Contacts/contacts.json.bak-*
+Contacts/.contacts.json.*.tmp
 # Per-install device registry state (template at devices.json.template) —
 # customer's tailnet devices populate via /devices/sync-tailscale on first use.
 Orchestrator/device_registry/devices.json

@@ -392,6 +392,24 @@ def test_worker_media_auto_route_runs_the_new_providers_default(monkeypatch):
     assert "model" not in recorded
 
 
+@pytest.mark.parametrize("cfg_model, expected", [
+    ("", None), ("Auto", None), ("claude-opus-4-1", "claude-opus-5-5"),
+])
+def test_flight_recorder_provider_without_a_model_runs_its_default(monkeypatch, cfg_model, expected):
+    import configparser
+    import Orchestrator.oversight as oversight
+    import Orchestrator.routes.chat_routes as cr
+
+    cp = configparser.ConfigParser()
+    cp.read_dict({"flight_recorder": {"provider": "anthropic", "model": cfg_model}})
+    monkeypatch.setattr(oversight, "CFG", cp)
+    seen = []
+    monkeypatch.setattr(cr, "call_anthropic",
+                        lambda messages, model, operator: seen.append(model) or ("report", {}, "", []))
+    assert oversight._synthesize("digest") == "report"
+    assert seen == [expected or config.ANTHROPIC_MODEL_DEFAULT]
+
+
 # ── 6. SMS: router + /sms/preferences ────────────────────────────────────────
 
 class _Resp:

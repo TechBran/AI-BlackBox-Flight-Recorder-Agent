@@ -409,7 +409,8 @@ def _synthesize(prompt: str) -> Optional[str]:
 
     candidates: List[tuple] = []
     if cfg_provider:
-        candidates.append((cfg_provider, cfg_model or ""))
+        # An empty/"Auto" [flight_recorder] model runs that provider's default.
+        candidates.append((cfg_provider, _cfg.resolve_default_model(cfg_provider, cfg_model)))
     if getattr(_cfg, "GOOGLE_API_KEY", ""):
         candidates.append(("google", _cfg.GEMINI_MODEL_DEFAULT))
     if getattr(_cfg, "ANTHROPIC_API_KEY", ""):
