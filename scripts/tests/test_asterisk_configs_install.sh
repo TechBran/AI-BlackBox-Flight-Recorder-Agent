@@ -29,12 +29,18 @@ done
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Sandbox BlackBox root: the real env_key.py helper + a template-style .env.
-mkdir -p "$WORK/root/Scripts" "$WORK/etc/asterisk" "$WORK/bin"
+# Sandbox BlackBox root: copies of the two scripts + the real env_key.py helper,
+# a template-style .env, and a per-box pjsip.conf next to the scripts (a full
+# install copies it; an ARI rotation must not).
+CONFIGS="$WORK/root/Orchestrator/asterisk/configs"
+mkdir -p "$WORK/root/Scripts" "$CONFIGS" "$WORK/etc/asterisk" "$WORK/bin"
 cp "$REPO_ROOT/Scripts/env_key.py" "$WORK/root/Scripts/env_key.py"
+cp "$SCRIPT" "$SETUP" "$CONFIGS/"
+SCRIPT="$CONFIGS/install.sh"
+SETUP="$CONFIGS/setup.sh"
 printf 'ASTERISK_ARI_USER=blackbox\nASTERISK_ARI_PASSWORD=\nOTHER=keep\n' > "$WORK/root/.env"
 chmod 600 "$WORK/root/.env"
-printf '[general]\nenabled=yes\n' > "$WORK/etc/asterisk/http.conf.seed"
+printf '; repo pjsip\n' > "$CONFIGS/pjsip.conf"
 
 # Stubs: record curl's argv and stdin; the rest succeed silently.
 for cmd in systemctl asterisk chown journalctl; do
@@ -67,14 +73,21 @@ grep -qF "$PW1" "$WORK/out.log" && fail "the ARI password was printed"
 grep -qF "$PW1" "$WORK/curl.argv" && fail "the ARI password was on curl's command line"
 grep -qF "$PW1" "$WORK/curl.stdin" || fail "curl did not get the credentials on stdin"
 grep -q "ARI is responding" "$WORK/out.log" || fail "verification step did not run"
+[[ "$(cat "$WORK/etc/asterisk/pjsip.conf")" == "; repo pjsip" ]] || fail "full install did not copy pjsip.conf"
 
 # ── Run 2: existing password is kept ──────────────────────────────────────────
 run || fail "install.sh failed on second run"
 [[ "$(env_val ASTERISK_ARI_PASSWORD)" == "$PW1" ]] || fail "an existing ARI password was replaced"
 
 # ── Run 3: --rotate-ari-password replaces it (setup.sh delegates) ────────────
+printf '; installed pjsip\n' > "$WORK/etc/asterisk/pjsip.conf"
+BAKS_BEFORE="$(ls "$WORK/etc/asterisk/" | grep -c '^pjsip.conf.bak')"
 PATH="$WORK/bin:$PATH" ASTERISK_ETC="$WORK/etc/asterisk" BLACKBOX_ROOT="$WORK/root" \
     bash "$SETUP" --rotate-ari-password > "$WORK/out.log" 2>&1 || fail "setup.sh --rotate-ari-password failed"
+[[ "$(cat "$WORK/etc/asterisk/pjsip.conf")" == "; installed pjsip" ]] \
+    || fail "--rotate-ari-password overwrote pjsip.conf (rotation must touch ari.conf only)"
+[[ "$(ls "$WORK/etc/asterisk/" | grep -c '^pjsip.conf.bak')" == "$BAKS_BEFORE" ]] \
+    || fail "rotation backed up a conf it does not touch"
 PW2="$(env_val ASTERISK_ARI_PASSWORD)"
 [[ -n "$PW2" && "$PW2" != "$PW1" ]] || fail "--rotate-ari-password did not rotate"
 grep -qx "password=$PW2" "$WORK/etc/asterisk/ari.conf" || fail "ari.conf not re-rendered after rotation"

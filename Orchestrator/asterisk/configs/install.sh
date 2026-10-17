@@ -9,7 +9,8 @@
 # with). It is generated there when empty, or replaced with
 # --rotate-ari-password, and /etc/asterisk/ari.conf is rendered from it so the
 # two cannot drift. pjsip.conf, extensions.conf and http.conf are per-box
-# (gitignored) and are copied from this directory when present.
+# (gitignored) and are copied from this directory when present, except on
+# --rotate-ari-password, which touches ari.conf only.
 # =============================================================================
 
 set -e
@@ -34,9 +35,18 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
+# ARI rotation touches ari.conf only; a full install also copies the per-box confs.
+if [ -n "$ROTATE" ]; then
+    CONFS="ari.conf"
+    PER_BOX=""
+else
+    CONFS="pjsip.conf extensions.conf ari.conf http.conf"
+    PER_BOX="pjsip.conf extensions.conf http.conf"
+fi
+
 # Backup existing configs
 echo "[1/5] Backing up existing configs..."
-for f in pjsip.conf extensions.conf ari.conf http.conf; do
+for f in $CONFS; do
     if [ -f "$ASTERISK_DIR/$f" ]; then
         cp "$ASTERISK_DIR/$f" "$ASTERISK_DIR/$f.bak.$(date +%Y%m%d%H%M%S)"
         echo "  Backed up: $f"
@@ -45,7 +55,7 @@ done
 
 # Copy per-box configs; render ari.conf from .env
 echo "[2/5] Installing new configs..."
-for f in pjsip.conf extensions.conf http.conf; do
+for f in $PER_BOX; do
     if [ -f "$SCRIPT_DIR/$f" ]; then
         cp "$SCRIPT_DIR/$f" "$ASTERISK_DIR/$f"
     else
@@ -81,7 +91,7 @@ echo "  Rendered ari.conf for ARI user '$ARI_USER' (password from .env)"
 
 # Fix ownership
 echo "[3/5] Setting permissions..."
-for f in pjsip.conf extensions.conf ari.conf http.conf; do
+for f in $CONFS; do
     if [ -f "$ASTERISK_DIR/$f" ]; then
         chown asterisk:asterisk "$ASTERISK_DIR/$f"
         chmod 640 "$ASTERISK_DIR/$f"
