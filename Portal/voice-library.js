@@ -20,6 +20,8 @@
 
 import { escapeHtml, toastSuccess, toastError } from './modules/core-utils.js';
 import { populateVoiceCatalog } from './modules/tts-stt.js';
+import { toastSuccess, toastError } from './modules/core-utils.js';
+import { populateVoiceCatalog, trackDetachedPlayer } from './modules/tts-stt.js';
 
 const MODAL_ID = 'voiceLibraryModal';
 const SEARCH_DEBOUNCE_MS = 350;
@@ -182,7 +184,8 @@ function togglePreview(url, btn) {
     }
     stopPreview();  // stop whatever else was playing first
 
-    if (!previewAudio) previewAudio = new Audio();
+    // Joins tts-stt.js's one-player guard: starting a preview pauses chat audio.
+    if (!previewAudio) previewAudio = trackDetachedPlayer(new Audio());
     previewAudio.src = url;
     previewAudio.currentTime = 0;
     playingBtn = btn;

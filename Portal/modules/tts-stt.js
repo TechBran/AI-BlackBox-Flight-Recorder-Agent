@@ -16,9 +16,12 @@ import { htmlToText } from './sanitize.js';
 // TTS Constants
 // =============================================================================
 
-const TTS_MODEL = (window.PORTAL && window.PORTAL.audio_model) || "tts-1";
-const TTS_FMT = (window.PORTAL && window.PORTAL.audio_format) || "mp3";
-const TTS_DEFAULT_VOICE = "gemini-pro:Charon";  // Default: Gemini Pro with Charon voice
+// No client-side TTS model, format or default voice. GET /tts/catalog publishes
+// the box default ("default") and each group's model, and the server speaks a
+// request that names no voice with that default and its configured model and
+// format (config.ini [audio]). The old constants read window.PORTAL, which
+// nothing ever set, so "tts-1"/"mp3"/"gemini-pro:Charon" overrode config on
+// every box (audit P02-voice-web-08/-09).
 
 // OpenAI TTS has a 4,096 character limit per request
 // Using 4000 as max to leave buffer for any encoding overhead
@@ -28,11 +31,73 @@ const TTS_MAX_CHARS = 4000;
 const OPERATOR_VOICE_STORE = "bb_operator_voices";
 
 // =============================================================================
+// One player at a time
+//
+// Bubble players, auto-TTS, the voice preview and generated media in chat each
+// pause every other audible player when they start, so two streams never
+// overlap (CLAUDE.md "Preventing Audio Overlap"; audit P02-voice-web-10). ONE
+// capture-phase 'play' listener on document sees every <audio>/<video> in the
+// page ('play' does not bubble, but the capture phase still passes document).
+// Players built with new Audio() never enter the DOM, so their events never
+// reach document: they register with trackDetachedPlayer() and run the same
+// guard from their own 'play' event. Muted or silent media (a looping muted
+// video) neither pauses others nor is paused. A paused player keeps its
+// position, exactly as if the user had pressed pause.
+// =============================================================================
+
+/** Detached players (trackDetachedPlayer) that are playing right now. */
+const _playingDetached = new Set();
+
+function _isAudible(el) {
+    return !!el && !el.muted && el.volume !== 0;
+}
+
+/**
+ * Pause every audible player other than `active`: the in-page <audio>/<video>
+ * elements plus the playing detached players. Returns how many it paused.
+ * @param {HTMLMediaElement} active - the player that just started
+ */
+export function pauseOtherPlayers(active) {
+    if (!_isAudible(active)) return 0;
+    const others = new Set(_playingDetached);
+    if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+        for (const el of document.querySelectorAll('audio, video')) others.add(el);
+    }
+    let paused = 0;
+    for (const el of others) {
+        if (el === active || el.paused || !_isAudible(el)) continue;
+        try { el.pause(); paused++; } catch (e) { /* detached or torn down */ }
+    }
+    return paused;
+}
+
+/**
+ * Enrol a player that never enters the DOM (new Audio()) in the one-player
+ * guard. Idempotent; returns the element so callers can wrap the constructor.
+ * @param {HTMLMediaElement} el
+ */
+export function trackDetachedPlayer(el) {
+    if (!el || typeof el.addEventListener !== 'function' || el.__bbxOnePlayer) return el;
+    el.__bbxOnePlayer = true;
+    el.addEventListener('play', () => { _playingDetached.add(el); pauseOtherPlayers(el); });
+    el.addEventListener('pause', () => _playingDetached.delete(el));
+    el.addEventListener('ended', () => _playingDetached.delete(el));
+    return el;
+}
+
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('play', (e) => {
+        const t = e && e.target;
+        if (t && (t.tagName === 'AUDIO' || t.tagName === 'VIDEO')) pauseOtherPlayers(t);
+    }, true);
+}
+
+// =============================================================================
 // TTS State
 // =============================================================================
 
 /** Audio player instance */
-let ttsPlayer = new Audio();
+let ttsPlayer = trackDetachedPlayer(new Audio());
 
 /** TTS state flags */
 let ttsState = { isFetching: false, isPlaying: false };
@@ -49,6 +114,20 @@ let activeTTSAbort = null;
  * static grouped fallback) when it is null.
  */
 let _ttsCatalogGroups = null;
+
+/**
+ * The box default voice id from the last /tts/catalog (catalogDefaultVoice of
+ * its `default`), or null before the first successful fetch. Operators with no
+ * saved voice speak with it; with neither, requests name no voice and the
+ * server applies its own default.
+ */
+let _ttsCatalogDefault = null;
+
+/** In-flight first catalog fetch (ensureTtsCatalog), shared by its callers. */
+let _ttsCatalogLoad = null;
+
+/** Voice selects populateVoiceCatalog has filled at least once. */
+const _filledVoiceSelects = new WeakSet();
 
 /** Cancel any in-flight TTS request */
 function cancelActiveTTS() {
@@ -678,8 +757,6 @@ class StreamingTTSQueue {
                     text: speakableText,
                     provider: this.voiceConfig.provider,
                     voice: this.voiceConfig.voice,
-                    model: ttsModelForProvider(this.voiceConfig.provider),
-                    format: TTS_FMT,
                     operator: operator
                 })
             });
@@ -720,7 +797,7 @@ class StreamingTTSQueue {
         }
 
         const url = this.audioUrls[this.currentPlayIndex];
-        this.playbackAudio = new Audio(url);
+        this.playbackAudio = trackDetachedPlayer(new Audio(url));
 
         this.playbackAudio.onended = () => {
             this.currentPlayIndex++;
@@ -931,17 +1008,20 @@ class StreamingTTSQueue {
             return;
         }
 
-        const isGemini = isGeminiProvider(this.voiceConfig.provider);
-        const audioFormat = isGemini ? "wav" : TTS_FMT;
+        // The server picks the format (config [audio] format; WAV for Gemini and
+        // on-box), so read it off the audio that came back.
+        const blobType = (this.audioBlobs[0] && this.audioBlobs[0].type)
+            || (isGeminiProvider(this.voiceConfig.provider) ? "audio/wav" : "audio/mpeg");
+        const isWav = blobType.includes("wav");
 
         let audioDataURL;
 
         if (this.audioBlobs.length === 1) {
             // Single chunk — no stitching needed
             audioDataURL = await blobToDataURL(this.audioBlobs[0]);
-        } else if (!isGemini) {
+        } else if (!isWav) {
             // MP3 — frame-based, naive concatenation works fine
-            const combinedBlob = new Blob(this.audioBlobs, { type: `audio/${audioFormat}` });
+            const combinedBlob = new Blob(this.audioBlobs, { type: blobType });
             audioDataURL = await blobToDataURL(combinedBlob);
         } else {
             // WAV — use backend stitch endpoint for proper header handling
@@ -957,12 +1037,12 @@ class StreamingTTSQueue {
                     audioDataURL = await blobToDataURL(stitchedBlob);
                 } else {
                     console.warn('[StreamingTTS] Stitch endpoint failed, using naive concat');
-                    const combinedBlob = new Blob(this.audioBlobs, { type: `audio/${audioFormat}` });
+                    const combinedBlob = new Blob(this.audioBlobs, { type: blobType });
                     audioDataURL = await blobToDataURL(combinedBlob);
                 }
             } catch (e) {
                 console.warn('[StreamingTTS] Stitch error, fallback:', e);
-                const combinedBlob = new Blob(this.audioBlobs, { type: `audio/${audioFormat}` });
+                const combinedBlob = new Blob(this.audioBlobs, { type: blobType });
                 audioDataURL = await blobToDataURL(combinedBlob);
             }
         }
@@ -1113,35 +1193,40 @@ export async function fetchOperatorVoiceFromServer(operator) {
     } catch (err) {
         console.warn("[PREFS] Failed to fetch voice from server:", err);
     }
-    // Fallback to localStorage
+    // Fallback to localStorage, then the box default
     const voices = getOperatorVoices();
-    return voices[operator] || TTS_DEFAULT_VOICE;
+    return voices[operator] || _ttsCatalogDefault || "";
 }
 
 /**
- * Get current voice preference for active operator
+ * Get current voice preference for active operator: the saved voice, else the
+ * box default from /tts/catalog, else "" (the server then picks its default).
  * @returns {string} Voice value
  */
 export function getCurrentVoice() {
     const operator = (localStorage.getItem("bbx_operator") || "").trim();
-    if (!operator) return TTS_DEFAULT_VOICE;
-    const voices = getOperatorVoices();
-    return voices[operator] || TTS_DEFAULT_VOICE;
+    const saved = operator ? getOperatorVoices()[operator] : "";
+    return saved || _ttsCatalogDefault || "";
 }
 
 /**
  * Parse voice value into provider and voice name
- * Format: "provider:voice" e.g., "openai:alloy", "gemini-pro:Charon"
+ * Format: "provider:voice" e.g., "openai:alloy", "gemini-pro:Charon"; split on
+ * the FIRST colon (as Android's parseVoice does). An empty value parses to
+ * {provider:"", voice:""}: the request names nothing and the server speaks
+ * with the box default.
  * @param {string} voiceValue - Voice value string
  * @returns {Object} {provider, voice}
  */
 export function parseVoiceValue(voiceValue) {
-    const parts = (voiceValue || TTS_DEFAULT_VOICE).split(":");
-    if (parts.length === 2) {
-        return { provider: parts[0], voice: parts[1] };
+    const value = (voiceValue || "").trim();
+    if (!value) return { provider: "", voice: "" };
+    const i = value.indexOf(":");
+    if (i > 0) {
+        return { provider: value.slice(0, i), voice: value.slice(i + 1) };
     }
     // Legacy format (just voice name) - assume OpenAI
-    return { provider: "openai", voice: voiceValue || "onyx" };
+    return { provider: "openai", voice: value };
 }
 
 /**
@@ -1153,13 +1238,15 @@ export function getTTSVoice() {
 }
 
 /**
- * Get Gemini model name based on provider
- * @param {string} provider - Provider name
- * @returns {string} Model name
+ * The model the box synthesises a catalog group with (its /tts/catalog `model`),
+ * or "" before the catalog loads. Only the legacy /generate/gemini_tts path
+ * needs it; /tts and /tts/batch pick the group's model themselves.
+ * @param {string} provider - Catalog group id
+ * @returns {string} Model id or ""
  */
 export function getGeminiModel(provider) {
-    if (provider === "gemini-flash") return "gemini-2.5-flash-tts";
-    return "gemini-2.5-pro-tts";  // Default to pro
+    const g = (_ttsCatalogGroups || []).find(x => x.id === provider);
+    return (g && g.model) || "";
 }
 
 /**
@@ -1174,16 +1261,27 @@ export function isGeminiProvider(provider) {
 }
 
 /**
- * Resolve the `model` field for a /tts/batch request. Gemini providers get a
- * Gemini TTS model; ElevenLabs sends "" (backend defaults to eleven_v3); OpenAI
- * gets the OpenAI TTS model.
- * @param {string} provider - Provider name
- * @returns {string} Model name ("" for ElevenLabs)
+ * Fetch /tts/catalog once so the box default voice is known before the first
+ * speak of a page load (auto-TTS can fire before the picker has loaded). Never
+ * throws: a failed fetch leaves the default empty -- the server then applies
+ * its own -- and the next call retries.
  */
-export function ttsModelForProvider(provider) {
-    if (isGeminiProvider(provider)) return getGeminiModel(provider);
-    if (provider === "elevenlabs") return "";
-    return TTS_MODEL;
+export async function ensureTtsCatalog() {
+    if (_ttsCatalogGroups) return;
+    if (!_ttsCatalogLoad) {
+        _ttsCatalogLoad = fetch("/tts/catalog")
+            .then(r => (r.ok ? r.json() : null))
+            .then(data => { if (data && data.groups && data.groups.length) _rememberTtsCatalog(data); })
+            .catch(e => console.warn("[TTS] voice catalog fetch failed:", e))
+            .finally(() => { _ttsCatalogLoad = null; });
+    }
+    await _ttsCatalogLoad;
+}
+
+/** Cache a fetched /tts/catalog body (groups + the box default voice id). */
+function _rememberTtsCatalog(data) {
+    _ttsCatalogGroups = data.groups;
+    _ttsCatalogDefault = catalogDefaultVoice(data.groups, data.default);
 }
 
 /**
@@ -1194,6 +1292,8 @@ export async function syncVoiceDropdown() {
     if (!voiceSelect) return;
     const operator = (localStorage.getItem("bbx_operator") || "").trim();
     const value = operator ? await fetchOperatorVoiceFromServer(operator) : getCurrentVoice();
+    // No saved voice and no catalog: keep whatever the select already shows.
+    if (!value) return;
     // Route through applyVoiceValue so the provider select switches + the voice
     // select refills to expose the saved voice even when it belongs to a
     // provider other than the one currently shown (two-step picker, D1).
@@ -1420,71 +1520,40 @@ export async function generateTTSAudio(text) {
  * @returns {Promise<string|null>} Blob URL or null
  */
 export async function generateTTSAudioWithVoice(text, voiceConfig) {
-    const operator = (localStorage.getItem("bbx_operator") || "").trim();
-
-    // OpenAI, ElevenLabs, local (custom-server Kokoro), AND on-box Qwen are
-    // single-call /tts providers (audio stream). Gemini falls through below.
-    if (voiceConfig.provider === "openai" || voiceConfig.provider === "elevenlabs"
-        || voiceConfig.provider === "local" || voiceConfig.provider === "qwen") {
-        const isEleven = voiceConfig.provider === "elevenlabs";
-        const isLocal = voiceConfig.provider === "local";
-        const isQwen = voiceConfig.provider === "qwen";
-        // D10 affordance: an on-box request may be queued behind a GPU group
-        // swap (~6-10s cold). If the first byte is slow, tell the user we're
-        // loading models rather than leaving a dead button. Cleared on return.
-        let slowTimer = null;
-        if (isQwen) slowTimer = setTimeout(() => toast("Loading on-box voice models…"), 1500);
-        try {
-            const r = await fetch("/tts", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    text: text,
-                    // ElevenLabs/local/qwen: no OpenAI model; backend resolves it.
-                    ...(isEleven || isLocal || isQwen ? {} : { model: TTS_MODEL }),
-                    provider: voiceConfig.provider,
-                    // Preserve the provider prefix so the backend detects the
-                    // provider (elevenlabs:/local:/qwen: each trigger their branch).
-                    voice: isEleven ? `elevenlabs:${voiceConfig.voice}`
-                         : isLocal ? `local:${voiceConfig.voice}`
-                         : isQwen ? `qwen:${voiceConfig.voice}`
-                         : voiceConfig.voice,
-                    format: TTS_FMT
-                })
-            });
-            if (r.ok) {
-                const blob = await r.blob();
-                return URL.createObjectURL(blob);
-            }
-            console.error(`${voiceConfig.provider} TTS failed:`, r.status, await r.text());
-            return null;
-        } finally {
-            if (slowTimer) clearTimeout(slowTimer);
-        }
-    } else {
-        // Gemini TTS
-        const model = getGeminiModel(voiceConfig.provider);
-
-        const r = await fetch("/generate/gemini_tts", {
+    // Every catalog provider is a single-call /tts provider (audio stream):
+    // OpenAI, ElevenLabs, local (custom-server Kokoro), on-box Qwen and Gemini.
+    // The voice keeps its provider prefix so the backend picks the branch; no
+    // model or format is sent, so the box's configured ones apply. With no voice
+    // at all the request names nothing and the server speaks its default.
+    const provider = voiceConfig.provider || "";
+    const isQwen = provider === "qwen";
+    const body = { text: text };
+    if (provider) {
+        body.provider = provider;
+        body.voice = `${provider}:${voiceConfig.voice}`;
+    }
+    // D10 affordance: an on-box request may be queued behind a GPU group
+    // swap (~6-10s cold). If the first byte is slow, tell the user we're
+    // loading models rather than leaving a dead button. Cleared on return.
+    let slowTimer = null;
+    if (isQwen) slowTimer = setTimeout(() => toast("Loading on-box voice models…"), 1500);
+    try {
+        const r = await fetch("/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                text: text,
-                voice_name: voiceConfig.voice,
-                model: model,
-                operator: operator
-            })
+            body: JSON.stringify(body)
         });
-
-        if (!r.ok) {
-            console.error("Gemini TTS queue failed:", r.status);
-            return null;
+        // A failed synthesis is an HTTP-200 {"status":"fallback"} JSON envelope,
+        // not audio: report it instead of handing the player a JSON blob.
+        const ctype = (r.headers && r.headers.get && r.headers.get("content-type")) || "";
+        if (r.ok && !ctype.includes("application/json")) {
+            const blob = await r.blob();
+            return URL.createObjectURL(blob);
         }
-
-        const data = await r.json();
-        const taskId = data.task_id;
-
-        return await pollGeminiTTSTask(taskId);
+        console.error(`${provider || "default"} TTS failed:`, r.status, await r.text());
+        return null;
+    } finally {
+        if (slowTimer) clearTimeout(slowTimer);
     }
 }
 
@@ -1625,6 +1694,7 @@ export async function speak(text, btn) {
         ttsState.isFetching = true;
         setBubbleState(btn, true);
 
+        await ensureTtsCatalog();
         const voiceConfig = getTTSVoice();
         const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
@@ -1637,8 +1707,6 @@ export async function speak(text, btn) {
                 text: text,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: ttsModelForProvider(voiceConfig.provider),
-                format: TTS_FMT,
                 operator: operator
             })
         });
@@ -1653,7 +1721,13 @@ export async function speak(text, btn) {
             const url = URL.createObjectURL(blob);
             ttsPlayer.src = url;
             await ttsPlayer.play();
-            await new Promise(resolve => ttsPlayer.onended = () => { URL.revokeObjectURL(url); resolve(); });
+            // Done when it ends OR is paused (another player started: the
+            // one-player guard pauses it, and 'ended' would then never come).
+            await new Promise(resolve => {
+                const done = () => { ttsPlayer.onended = ttsPlayer.onpause = null; URL.revokeObjectURL(url); resolve(); };
+                ttsPlayer.onended = done;
+                ttsPlayer.onpause = done;
+            });
         }
     } catch (e) {
         console.error("Speak error:", e);
@@ -1786,6 +1860,9 @@ export async function speakToBubble(text, bubbleElement, btn) {
             return;
         }
 
+        // The first speak of a page load may beat the picker to the catalog:
+        // make sure the box default voice is known before reading the voice.
+        await ensureTtsCatalog();
         const voiceConfig = getTTSVoice();
 
         // Voice-aware cache key so switching voices regenerates audio
@@ -1839,8 +1916,6 @@ export async function speakToBubble(text, bubbleElement, btn) {
                 text: speakableText,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: ttsModelForProvider(voiceConfig.provider),
-                format: TTS_FMT,
                 operator: localStorage.getItem("bbx_operator") || ""
             })
         });
@@ -2051,6 +2126,8 @@ export function attachAudioPlayer(bubbleElement, audioDataURL, autoplay = false,
         playIcon.style.display = 'block';
         pauseIcon.style.display = 'none';
         playBtn.classList.remove('playing');
+        // Paused by the user or by another player starting: not playing now.
+        if (ttsBtn) ttsBtn.classList.remove('bubble-btn-playing');
     };
 
     audio.onended = () => {
@@ -2232,6 +2309,7 @@ export async function speakThinkingContent(btn) {
         toast("Generating reasoning audio...");
 
         const speakableText = text.trim();
+        await ensureTtsCatalog();
         const voiceConfig = getTTSVoice();
         const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
@@ -2247,8 +2325,6 @@ export async function speakThinkingContent(btn) {
                 text: speakableText,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: ttsModelForProvider(voiceConfig.provider),
-                format: TTS_FMT,
                 operator: operator
             })
         });
@@ -2411,8 +2487,27 @@ export function attachThinkingAudioPlayer(panel, audioDataURL, btn, autoplay = f
 export function providerOptionsFromGroups(groups) {
     return (groups || []).map(g => ({
         value: g.id,
-        label: `${g.label} (${(g.voices || []).length} voices)`,
+        // `available` is false when the box has no key for the provider: still
+        // listed (so the operator sees what a key unlocks) but marked.
+        label: `${g.label} (${(g.voices || []).length} voices)`
+            + (g.available === false ? " — not configured" : ""),
     }));
+}
+
+/**
+ * The box default `provider:voice` id for a /tts/catalog body: the server's
+ * `default.id` when it names a listed voice, else the first voice of the first
+ * available group, else the first voice listed. Null for an empty catalog.
+ * @param {Array} groups - /tts/catalog groups
+ * @param {Object|null} defaultEntry - /tts/catalog `default`
+ */
+export function catalogDefaultVoice(groups, defaultEntry) {
+    const list = groups || [];
+    const want = defaultEntry && defaultEntry.id;
+    if (want && list.some(g => (g.voices || []).some(v => v.id === want))) return want;
+    const g = list.find(x => x.available !== false && (x.voices || []).length)
+        || list.find(x => (x.voices || []).length);
+    return g ? g.voices[0].id : null;
 }
 
 /** Voice <select> options for ONE provider group (empty if the group is absent). */
@@ -2438,15 +2533,14 @@ export function providerOfVoiceId(groups, voiceId) {
 /**
  * Resolve which {providerId, voiceId} the two selects should show, given the
  * previously-wanted value. Order: the wanted value if it exists in the catalog →
- * TTS_DEFAULT_VOICE if it exists → the first voice of the first group. Returns
- * {providerId:null, voiceId:null} for an empty catalog (caller keeps static).
+ * `defaultVoice` (the box default from /tts/catalog) if it exists → the first
+ * voice of the first available group. Returns {providerId:null, voiceId:null}
+ * for an empty catalog (caller keeps static).
  */
-export function resolveVoiceSelection(groups, wantValue, defaultVoice = TTS_DEFAULT_VOICE) {
-    const has = (val) => (groups || []).some(g => (g.voices || []).some(v => v.id === val));
+export function resolveVoiceSelection(groups, wantValue, defaultVoice = _ttsCatalogDefault) {
+    const has = (val) => !!val && (groups || []).some(g => (g.voices || []).some(v => v.id === val));
     let voiceId = has(wantValue) ? wantValue : (has(defaultVoice) ? defaultVoice : null);
-    if (!voiceId && groups && groups.length && (groups[0].voices || []).length) {
-        voiceId = groups[0].voices[0].id;
-    }
+    if (!voiceId) voiceId = catalogDefaultVoice(groups, null);
     const providerId = voiceId
         ? providerOfVoiceId(groups, voiceId)
         : ((groups && groups[0] && groups[0].id) || null);
@@ -2516,11 +2610,16 @@ export async function populateVoiceCatalog(selectId = null) {
     try {
         const res = await fetch("/tts/catalog");
         if (!res.ok) throw new Error("HTTP " + res.status);
-        const { groups } = await res.json();
+        const data = await res.json();
+        const groups = data && data.groups;
         if (!groups || !groups.length) return;  // keep static fallback (both selects)
-        _ttsCatalogGroups = groups;
+        // On a select's first fill it still shows the static HTML fallback,
+        // which is not a choice: start from the box default instead.
+        const firstLoad = !_filledVoiceSelects.has(voiceSel);
+        _filledVoiceSelects.add(voiceSel);
+        _rememberTtsCatalog(data);
 
-        const prev = voiceSel.value || TTS_DEFAULT_VOICE;
+        const prev = (!firstLoad && voiceSel.value) || _ttsCatalogDefault;
         const selectIdIsReal = selectId
             && groups.some(g => (g.voices || []).some(v => v.id === selectId));
         const wantValue = selectIdIsReal ? selectId : prev;
@@ -2541,7 +2640,7 @@ export async function populateVoiceCatalog(selectId = null) {
                 voiceSel.appendChild(og);
             }
             voiceSel.value = [...voiceSel.options].some(o => o.value === voiceId)
-                ? voiceId : TTS_DEFAULT_VOICE;
+                ? voiceId : (_ttsCatalogDefault || "");
         } else {
             // Two-step: provider select drives the voice select.
             fillSelect(providerSel, providerOptionsFromGroups(groups), providerId);
@@ -2684,7 +2783,7 @@ export function initVoiceSelector() {
 
                 const audioUrl = await generateTTSAudioWithVoice(previewText, voiceConfig);
                 if (audioUrl) {
-                    const audio = new Audio(audioUrl);
+                    const audio = trackDetachedPlayer(new Audio(audioUrl));
                     audio.play();
                     audio.onended = () => {
                         if (audioUrl.startsWith('blob:')) URL.revokeObjectURL(audioUrl);

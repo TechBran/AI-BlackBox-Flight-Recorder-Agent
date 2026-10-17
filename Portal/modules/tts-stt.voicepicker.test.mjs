@@ -10,7 +10,8 @@
 //   2. selecting a provider fills the voice <select> with ONLY that provider's
 //      voices;
 //   3. the emitted value stays `provider:voice`;
-//   4. the default resolves to TTS_DEFAULT_VOICE's provider + voice;
+//   4. the default resolves to the catalog's `default` provider + voice
+//      (the box default GET /tts/catalog publishes -- no client-side pin);
 //   5. an unreachable catalog keeps the static fallback (both selects untouched).
 //
 // Run: node --test Portal/modules/tts-stt.voicepicker.test.mjs
@@ -43,7 +44,7 @@ const {
     resolveVoiceSelection, applyVoiceValue, populateVoiceCatalog,
 } = mod;
 
-const TTS_DEFAULT_VOICE = "gemini-pro:Charon";  // mirrors the module constant
+const CATALOG_DEFAULT = "gemini-pro:Charon";  // the server's /tts/catalog "default"
 
 // Catalog: cloud groups first (openai, gemini-flash, gemini-pro), on-box (qwen)
 // + elevenlabs appended after — the server order the picker must preserve.
@@ -101,8 +102,9 @@ function installDom({ withProvider = true, voiceStatic = [] } = {}) {
     };
     return { voiceSel, providerSel };
 }
-function stubCatalog(groups) {
-    globalThis.fetch = async () => ({ ok: true, json: async () => ({ groups }) });
+function stubCatalog(groups, defaultId = CATALOG_DEFAULT) {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({
+        groups, default: defaultId ? { id: defaultId } : undefined }) });
 }
 
 // ── pure helpers ────────────────────────────────────────────────────────────
@@ -133,19 +135,19 @@ test("providerOfVoiceId resolves by exact match then colon-prefix fallback", () 
 test("resolveVoiceSelection: wanted value wins, else default, else first voice", () => {
     assert.deepEqual(resolveVoiceSelection(CATALOG, "openai:nova"),
         { providerId: "openai", voiceId: "openai:nova" });
-    // wanted absent → falls back to TTS_DEFAULT_VOICE
-    assert.deepEqual(resolveVoiceSelection(CATALOG, "bogus:x"),
-        { providerId: "gemini-pro", voiceId: TTS_DEFAULT_VOICE });
+    // wanted absent → falls back to the box default
+    assert.deepEqual(resolveVoiceSelection(CATALOG, "bogus:x", CATALOG_DEFAULT),
+        { providerId: "gemini-pro", voiceId: CATALOG_DEFAULT });
     // default also absent → first group's first voice
     const noDefault = [{ id: "openai", label: "OpenAI", voices: [{ id: "openai:alloy", name: "Alloy", description: "d" }] }];
-    assert.deepEqual(resolveVoiceSelection(noDefault, "bogus:x"),
+    assert.deepEqual(resolveVoiceSelection(noDefault, "bogus:x", CATALOG_DEFAULT),
         { providerId: "openai", voiceId: "openai:alloy" });
     // empty catalog → nulls (caller keeps static fallback)
     assert.deepEqual(resolveVoiceSelection([], "x"), { providerId: null, voiceId: null });
 });
 
 // ── DOM-driving populateVoiceCatalog ─────────────────────────────────────────
-test("populateVoiceCatalog builds a two-step picker defaulting to TTS_DEFAULT_VOICE", async () => {
+test("populateVoiceCatalog builds a two-step picker defaulting to the catalog default", async () => {
     const { voiceSel, providerSel } = installDom();
     stubCatalog(CATALOG);
     await populateVoiceCatalog();
@@ -153,9 +155,9 @@ test("populateVoiceCatalog builds a two-step picker defaulting to TTS_DEFAULT_VO
     // (1) provider select lists all N providers
     assert.deepEqual(providerSel.options.map(o => o.value),
         ["openai", "gemini-flash", "gemini-pro", "qwen", "elevenlabs"]);
-    // (4) default resolves to TTS_DEFAULT_VOICE provider + voice
+    // (4) default resolves to the catalog default's provider + voice
     assert.equal(providerSel.value, "gemini-pro");
-    assert.equal(voiceSel.value, TTS_DEFAULT_VOICE);
+    assert.equal(voiceSel.value, CATALOG_DEFAULT);
     // (2)+(3) voice select shows ONLY gemini-pro voices, all provider:voice
     assert.deepEqual(voiceSel.options.map(o => o.value), ["gemini-pro:Zephyr", "gemini-pro:Charon"]);
     assert.ok(voiceSel.options.every(o => o.value.startsWith("gemini-pro:")));
@@ -233,5 +235,23 @@ test("degrades to grouped single-select when #ttsProviderSelect is absent", asyn
     const vals = voiceSel.options.map(o => o.value);
     assert.ok(vals.includes("openai:alloy") && vals.includes("gemini-pro:Charon") && vals.includes("qwen:default"),
         "legacy path keeps every group's voices in the single select");
-    assert.equal(voiceSel.value, TTS_DEFAULT_VOICE);
+    assert.equal(voiceSel.value, CATALOG_DEFAULT);
+});
+
+// ── the default comes from the catalog, not a client constant ────────────────
+test("a catalog without a default starts on the first available group", async () => {
+    const { voiceSel, providerSel } = installDom();
+    const groups = CATALOG.map(g => g.id === "openai" ? { ...g, available: false } : g);
+    stubCatalog(groups, null);
+    await populateVoiceCatalog();
+    assert.equal(providerSel.value, "gemini-flash", "unavailable OpenAI is skipped");
+    assert.equal(voiceSel.value, "gemini-flash:Zephyr");
+});
+
+test("the catalog default replaces the static HTML selection on first load", async () => {
+    const { voiceSel, providerSel } = installDom({ voiceStatic: ["gemini-pro:Charon"] });
+    stubCatalog(CATALOG, "openai:nova");
+    await populateVoiceCatalog();
+    assert.equal(providerSel.value, "openai");
+    assert.equal(voiceSel.value, "openai:nova");
 });
