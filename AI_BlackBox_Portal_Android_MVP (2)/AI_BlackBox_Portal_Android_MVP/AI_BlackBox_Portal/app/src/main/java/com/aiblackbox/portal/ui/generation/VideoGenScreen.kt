@@ -314,7 +314,8 @@ fun VideoGenScreen(
             label = "btnScale"
         )
         val isGenerating = state == GenState.SUBMITTING || state == GenState.POLLING
-        val btnEnabled = prompt.isNotBlank() && !isGenerating
+        // LOST: "Check again" polls the task the box is still running (no prompt needed).
+        val btnEnabled = (prompt.isNotBlank() || state == GenState.LOST) && !isGenerating
 
         Box(
             modifier = Modifier
@@ -330,7 +331,8 @@ fun VideoGenScreen(
                     indication = null,
                     enabled = btnEnabled
                 ) {
-                    viewModel.generateVideo(prompt, selectedRatio, selectedDuration)
+                    if (state == GenState.LOST) viewModel.resumePolling()
+                    else viewModel.generateVideo(prompt, selectedRatio, selectedDuration)
                 }
                 .padding(vertical = 14.dp),
             contentAlignment = Alignment.Center
@@ -355,6 +357,7 @@ fun VideoGenScreen(
                         GenState.COMPLETED -> "Done!"
                         GenState.FAILED -> "Retry"
                         GenState.CANCELLED -> "Cancelled"
+                        GenState.LOST -> "Check again"
                     },
                     style = MaterialTheme.typography.labelLarge.copy(
                         fontWeight = FontWeight.Bold,
@@ -381,7 +384,21 @@ fun VideoGenScreen(
                         .border(1.dp, BbxAccent.copy(alpha = 0.3f), RoundedCornerShape(RadiusMd))
                         .padding(12.dp)
                 ) {
-                    Text(it, color = BbxAccent, style = MaterialTheme.typography.bodySmall)
+                    Column {
+                        Text(it, color = BbxAccent, style = MaterialTheme.typography.bodySmall)
+                        // LOST: the button above re-polls the same task; this is the way
+                        // out to a fresh prompt without waiting on the box.
+                        if (state == GenState.LOST) {
+                            Text(
+                                "Start over",
+                                color = BbxWhite,
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                                modifier = Modifier
+                                    .padding(top = 8.dp)
+                                    .clickFeedback { viewModel.reset() }
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -226,7 +226,9 @@ fun ImageGenScreen(
             label = "btnScale"
         )
         val isGenerating = state == GenState.SUBMITTING || state == GenState.POLLING
-        val btnEnabled = prompt.isNotBlank() && selectedProvider != null && !isGenerating
+        // LOST: "Check again" polls the task the box is still running (no prompt needed).
+        val btnEnabled = ((prompt.isNotBlank() && selectedProvider != null) || state == GenState.LOST) &&
+            !isGenerating
 
         Box(
             modifier = Modifier
@@ -242,6 +244,10 @@ fun ImageGenScreen(
                     indication = null,
                     enabled = btnEnabled
                 ) {
+                    if (state == GenState.LOST) {
+                        viewModel.resumePolling()
+                        return@clickFeedback
+                    }
                     val provider = selectedProvider ?: return@clickFeedback
                     val intNames = params.filter { it.type == "int" }.map { it.name }.toSet()
                     viewModel.generateImageForProvider(
@@ -274,6 +280,7 @@ fun ImageGenScreen(
                         GenState.COMPLETED -> "Done!"
                         GenState.FAILED -> "Retry"
                         GenState.CANCELLED -> "Cancelled"
+                        GenState.LOST -> "Check again"
                     },
                     style = MaterialTheme.typography.labelLarge.copy(
                         fontWeight = FontWeight.Bold,
@@ -300,7 +307,21 @@ fun ImageGenScreen(
                         .border(1.dp, BbxAccent.copy(alpha = 0.3f), RoundedCornerShape(RadiusMd))
                         .padding(12.dp)
                 ) {
-                    Text(it, color = BbxAccent, style = MaterialTheme.typography.bodySmall)
+                    Column {
+                        Text(it, color = BbxAccent, style = MaterialTheme.typography.bodySmall)
+                        // LOST: the button above re-polls the same task; this is the way
+                        // out to a fresh prompt without waiting on the box.
+                        if (state == GenState.LOST) {
+                            Text(
+                                "Start over",
+                                color = BbxWhite,
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                                modifier = Modifier
+                                    .padding(top = 8.dp)
+                                    .clickFeedback { viewModel.reset() }
+                            )
+                        }
+                    }
                 }
             }
         }

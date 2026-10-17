@@ -32,7 +32,10 @@ class GenerationPollTest {
 
         val result = GenerationViewModel.pollToResult(poll) { seen += it.status }
 
-        assertEquals(GenState.FAILED, result.state)
+        // LOST, not FAILED: the task is still running on the box (review of
+        // A11-settings-generation-01 — FAILED put "Retry" on the button, which
+        // submits a NEW paid generation).
+        assertEquals(GenState.LOST, result.state)
         assertEquals(LOST_CONNECTION_MESSAGE, result.error)
         assertNull(result.resultUrl)
         assertEquals(listOf("processing"), seen)
@@ -65,7 +68,17 @@ class GenerationPollTest {
         // spinner stops and Generate comes back instead of "Generating... N%" forever.
         assertEquals(GenerationViewModel.GenResult(GenState.CANCELLED, null, null),
             GenerationViewModel.genResultFor(TaskPollOutcome.Cancelled))
-        assertEquals(GenerationViewModel.GenResult(GenState.FAILED, null, LOST_CONNECTION_MESSAGE),
+        assertEquals(GenerationViewModel.GenResult(GenState.LOST, null, LOST_CONNECTION_MESSAGE),
             GenerationViewModel.genResultFor(TaskPollOutcome.LostConnection))
+    }
+
+    @Test fun `only a lost poll is resumed, and it resumes the same task`() {
+        // "Check again" re-polls the task the box is still running; every other state's
+        // button submits (or is disabled), so it never resumes anything.
+        assertEquals("t-video-1", GenerationViewModel.resumableTaskId(GenState.LOST, "t-video-1"))
+        for (s in GenState.values().filter { it != GenState.LOST }) {
+            assertNull(s.name, GenerationViewModel.resumableTaskId(s, "t-video-1"))
+        }
+        assertNull(GenerationViewModel.resumableTaskId(GenState.LOST, null))
     }
 }

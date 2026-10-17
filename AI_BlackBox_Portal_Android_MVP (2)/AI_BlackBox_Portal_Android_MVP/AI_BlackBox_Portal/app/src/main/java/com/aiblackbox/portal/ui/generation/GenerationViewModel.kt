@@ -26,7 +26,10 @@ import kotlinx.serialization.json.JsonPrimitive
 enum class GenType { IMAGE, VIDEO, MUSIC }
 // CANCELLED is terminal (A11-settings-generation-02): Settings > Cancel Tasks or a
 // per-task cancel marks the row cancelled, and the screen must stop spinning.
-enum class GenState { IDLE, SUBMITTING, POLLING, COMPLETED, FAILED, CANCELLED }
+// LOST: the poll ran out of retries but the task keeps running on the box. Its button
+// is "Check again" (GenerationViewModel.resumePolling, the same task id), never the
+// FAILED "Retry", which submits a new, paid generation.
+enum class GenState { IDLE, SUBMITTING, POLLING, COMPLETED, FAILED, CANCELLED, LOST }
 
 class GenerationViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
@@ -65,6 +68,8 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
     // The running task poll. Kept so reset() and the next submit cancel it — before,
     // an abandoned poll kept writing its late result over the fresh screen.
     private var pollJob: Job? = null
+    // The task [pollJob] polls (or last polled), for "Check again" after a LOST poll.
+    private var polledTaskId: String? = null
 
     init {
         viewModelScope.launch { store.operator.collect { currentOperator = it } }
@@ -268,7 +273,9 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
     private fun pollTask(taskId: String) {
         val repo = taskRepo ?: return
         pollJob?.cancel()
+        polledTaskId = taskId
         _state.value = GenState.POLLING
+        _error.value = null
         pollJob = viewModelScope.launch {
             val result = pollToResult(repo.pollTask(taskId)) { status -> _taskStatus.value = status }
             _state.value = result.state
@@ -277,9 +284,19 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * "Check again" after a LOST poll: poll the SAME task again — the box kept running
+     * it, and its result may be ready — instead of submitting a new generation.
+     */
+    fun resumePolling() {
+        val taskId = resumableTaskId(_state.value, polledTaskId) ?: return
+        pollTask(taskId)
+    }
+
     fun reset() {
         pollJob?.cancel()
         pollJob = null
+        polledTaskId = null
         _state.value = GenState.IDLE
         _taskStatus.value = null
         _resultUrl.value = null
@@ -303,7 +320,11 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
             TaskPollOutcome.Cancelled -> GenResult(GenState.CANCELLED, null, null)
             // Only the connection was lost; the task keeps running on the box and its
             // result still lands there (the media library lists it).
-            TaskPollOutcome.LostConnection -> GenResult(GenState.FAILED, null, LOST_CONNECTION_MESSAGE)
+            TaskPollOutcome.LostConnection -> GenResult(GenState.LOST, null, LOST_CONNECTION_MESSAGE)
         }
+
+        /** The task "Check again" re-polls: only a LOST poll's, else null. */
+        internal fun resumableTaskId(state: GenState, taskId: String?): String? =
+            if (state == GenState.LOST) taskId else null
     }
 }
