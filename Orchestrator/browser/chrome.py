@@ -30,6 +30,7 @@ class ChromeInstance:
         self.profile_dir = PROFILE_BASE / operator
         self.process = None
         self.cdp_ws_url = None  # WebSocket URL for CDP
+        self.cdp_port = CDP_PORT  # set per launch: the desktop's own port
 
     def start(self, url: str = "about:blank", handle=None) -> bool:
         """Launch Chrome on the session's virtual display with CDP.
@@ -48,18 +49,26 @@ class ChromeInstance:
         if handle is not None:
             env = handle.get_env()
             win_w, win_h = handle.width, handle.height
+            self.cdp_port = handle.cdp_port
         else:
             # No per-session handle: launch on the box's default/native display.
             env = _active_display_env()
             win_w, win_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
+            self.cdp_port = CDP_PORT
 
         cmd = [
             CHROME_PATH,
             f"--user-data-dir={self.profile_dir}",
             f"--window-size={win_w},{win_h}",
             "--window-position=0,0",
-            f"--remote-debugging-port={CDP_PORT}",
-            "--remote-allow-origins=*",
+            # CDP on this desktop's OWN port, accepting only the Origin our own
+            # client sends (websocket-client defaults it to http://<host>:<port>;
+            # the HTTP /json lookups carry none). Never "*": the wildcard turns
+            # off Chrome's CDP Origin check, so script on any page the agent
+            # visits could open ws://127.0.0.1:<port> and drive the profile —
+            # cookies, downloads, navigation (audit O13-computer-use-10).
+            f"--remote-debugging-port={self.cdp_port}",
+            f"--remote-allow-origins=http://127.0.0.1:{self.cdp_port}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-infobars",
@@ -117,7 +126,7 @@ class ChromeInstance:
         import urllib.request
         for attempt in range(5):
             try:
-                req = urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=2)
+                req = urllib.request.urlopen(f"http://127.0.0.1:{self.cdp_port}/json/version", timeout=2)
                 data = json.loads(req.read().decode())
                 self.cdp_ws_url = data.get("webSocketDebuggerUrl")
                 if self.cdp_ws_url:
@@ -130,7 +139,7 @@ class ChromeInstance:
         """Get the CDP WebSocket URL for the first browser page/tab."""
         import urllib.request
         try:
-            req = urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json", timeout=2)
+            req = urllib.request.urlopen(f"http://127.0.0.1:{self.cdp_port}/json", timeout=2)
             pages = json.loads(req.read().decode())
             for page in pages:
                 if page.get("type") == "page":

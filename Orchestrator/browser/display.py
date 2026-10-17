@@ -24,6 +24,7 @@ from Orchestrator.browser.config import (
 DISPLAY_BASE = 100            # Xvfb :100, :101, :102
 VNC_BASE_PORT = 5901         # x11vnc RFB per session
 WEBSOCKIFY_BASE_PORT = 6101  # websockify WS bridge per session
+CDP_BASE_PORT = 9223         # Chrome DevTools per session (9222 = the default-display Chrome)
 MAX_VIRTUAL_SESSIONS = 3     # concurrency cap (§9)
 VIRTUAL_DISPLAY_TTL = 1800.0 # idle seconds before the TTL reaper (reap_idle) tears a session down
 _STARTUP_WAIT = 1.0          # seconds to let Xvfb come up before openbox/x11vnc
@@ -152,6 +153,13 @@ class DisplayHandle:
     @property
     def display(self) -> str:
         return f":{self.display_num}"
+
+    @property
+    def cdp_port(self) -> int:
+        """This desktop's own Chrome DevTools port. A shared port meant the
+        second desktop's Chrome could not bind it and every CDP lookup reached
+        the FIRST desktop's browser (audit O13-computer-use-10)."""
+        return CDP_BASE_PORT + self.slot
 
     def get_env(self) -> dict:
         env = os.environ.copy()

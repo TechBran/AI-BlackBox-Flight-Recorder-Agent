@@ -136,16 +136,18 @@ def capture_screenshot_display(display_number: int = ACTIVE_DISPLAY,
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def capture_screenshot_cdp(page_ws_url: str = "") -> bytes:
+def capture_screenshot_cdp(page_ws_url: str = "", cdp_port: int = CDP_PORT) -> bytes:
     """Capture screenshot via Chrome DevTools Protocol. Returns PNG bytes.
 
     Only captures Chrome's viewport — NOT the full display.
-    Used as fallback when scrot is unavailable.
+    Used as fallback when scrot is unavailable. ``cdp_port`` defaults to the
+    default-display Chrome; a per-session Chrome listens on its desktop's own
+    port (DisplayHandle.cdp_port).
     """
     import websocket
 
     if not page_ws_url:
-        page_ws_url = _get_page_ws_url()
+        page_ws_url = _get_page_ws_url(cdp_port)
     if not page_ws_url:
         raise RuntimeError("No CDP page WebSocket URL available")
 
@@ -255,11 +257,11 @@ def save_screenshot_to_uploads(png_bytes: bytes, task_id: str, step: int) -> str
     return url
 
 
-def _get_page_ws_url() -> str:
+def _get_page_ws_url(cdp_port: int = CDP_PORT) -> str:
     """Discover the WebSocket URL for the first Chrome page tab via CDP."""
     import urllib.request
     try:
-        req = urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json", timeout=2)
+        req = urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json", timeout=2)
         pages = json.loads(req.read().decode())
         for page in pages:
             if page.get("type") == "page":
