@@ -17,7 +17,12 @@ StreamableHTTPSessionManager, and backend HTTP calls go to a fake client.
   (4) list_devices     -- bound: own devices only, no IPs/ports/DNS metadata,
       and the backend's devices.json is never rewritten by this process.
   (5) get_media        -- bound: task_id required, ownership from the task's
-      operator, the url must be the task's own media, no server paths.
+      operator, the url must be one of the task's own outputs (any of its
+      all_urls), no server paths; tools/list says so.
+  (6) toolvault read   -- the proxied meta-tool's schema read names only the
+      bound operator (the roster must not leak around tools/list).
+  (7) get_task_status  -- bound: only the caller's own tasks.
+  (8) volume/info      -- bound: no absolute server paths.
 
 RUN (supported path -- the lean MCP venv, no pytest needed):
     cd MCP && BLACKBOX_ROOT=<repo-root> venv/bin/python test_mcp_remote_scoping.py
@@ -30,6 +35,7 @@ import atexit
 import base64
 import contextlib
 import importlib.util as _ilu
+import inspect
 import json
 import os
 import shutil
@@ -183,13 +189,16 @@ class _FakeClient:
     async def __aexit__(self, *a):
         return False
 
+    async def _route(self, method, url, kw):
+        self.calls.append((method, url, kw))
+        res = self._router(method, url, kw)
+        return (await res) if inspect.isawaitable(res) else res
+
     async def get(self, url, **kw):
-        self.calls.append(("GET", url, kw))
-        return self._router("GET", url, kw)
+        return await self._route("GET", url, kw)
 
     async def post(self, url, **kw):
-        self.calls.append(("POST", url, kw))
-        return self._router("POST", url, kw)
+        return await self._route("POST", url, kw)
 
 
 @contextlib.contextmanager
@@ -553,6 +562,166 @@ def test_stdio_get_media_by_url_still_works():
     assert not err, body
     assert body["file_path"] == str((root / "Portal" / "uploads" / "bob.png").resolve())
     assert calls == []
+
+
+# A numberOfImages=2 generation (tasks.py stores every output in result_data and
+# its artifact) and a Lyria-style task whose extra outputs live in the artifact.
+_TASKS["T-ALICE-MULTI"] = {
+    "task_id": "T-ALICE-MULTI", "task_type": "image", "status": "completed",
+    "result_url": "/ui/uploads/alice.png",
+    "result_data": {"all_urls": ["/ui/uploads/alice.png", "/ui/uploads/alice2.png"],
+                    "artifact": {"type": "image", "url": "/ui/uploads/alice.png",
+                                 "all_urls": ["/ui/uploads/alice.png", "/ui/uploads/alice2.png"]}},
+    "operator": OP_A, "created_at": "2026-10-01T00:00:00Z"}
+_TASKS["T-ALICE-ART"] = {
+    "task_id": "T-ALICE-ART", "task_type": "music", "status": "completed",
+    "result_url": "/ui/uploads/alice.png",
+    "result_data": {"artifact": {"type": "music", "all_urls": ["/ui/uploads/alice.png",
+                                                              "/ui/uploads/alice3.png"]}},
+    "operator": OP_A, "created_at": "2026-10-01T00:00:00Z"}
+
+
+def _get_media_multi(args, operator):
+    with _portal_root() as root, _fake_backend(_task_router) as calls:
+        (root / "Portal" / "uploads" / "alice2.png").write_bytes(_PNG)
+        (root / "Portal" / "uploads" / "alice3.png").write_bytes(_PNG)
+        with _bound(operator):
+            res = asyncio.run(srv.call_tool("get_media", args))
+    err, body = _payload(res)
+    return err, body, calls
+
+
+def test_bound_get_media_serves_every_output_of_an_own_multi_output_task():
+    for task_id, url in (("T-ALICE-MULTI", "/ui/uploads/alice2.png"),
+                         ("T-ALICE-MULTI", "https://box.example.ts.net/ui/uploads/alice2.png"),
+                         ("T-ALICE-ART", "/ui/uploads/alice3.png")):
+        err, body, _ = _get_media_multi({"task_id": task_id, "url": url}, OP_A)
+        assert not err, f"owner refused its own output {url} of {task_id}: {body}"
+        assert body["url"] == "/ui/uploads/" + url.rsplit("/", 1)[-1]
+        assert base64.b64decode(body["base64"]) == _PNG
+    # No url still means the primary output.
+    err, body, _ = _get_media_multi({"task_id": "T-ALICE-MULTI"}, OP_A)
+    assert not err and body["url"] == "/ui/uploads/alice.png", body
+
+
+def test_bound_get_media_multi_output_task_still_refuses_foreign_urls():
+    for url in ("/ui/uploads/bob.png", "/ui/uploads/alice3.png"):
+        err, body, _ = _get_media_multi({"task_id": "T-ALICE-MULTI", "url": url}, OP_A)
+        assert err and body["error"]["code"] == "not_found", (url, body)
+    # Another operator cannot reach alice's extra outputs either.
+    err, body, _ = _get_media_multi({"task_id": "T-ALICE-MULTI", "url": "/ui/uploads/alice2.png"}, OP_B)
+    assert err and body["error"]["code"] == "not_found", body
+
+
+def test_bound_get_media_refuses_a_malformed_task_id_without_a_lookup():
+    for task_id in ("../agent/apps", "T-ALICE/../T-BOB", "a b", "x" * 200):
+        err, body, calls, _ = _get_media({"task_id": task_id}, operator=OP_A)
+        assert err and body["error"]["code"] == "invalid_arguments", (task_id, body)
+        assert calls == [], f"a malformed task_id must never steer a backend request: {calls}"
+
+
+def test_bound_tools_list_tells_remote_callers_get_media_needs_task_id():
+    stdio = {t.name: t for t in asyncio.run(srv.list_tools())}["get_media"]
+    with _bound(OP_A):
+        remote = {t.name: t for t in asyncio.run(srv.list_tools())}["get_media"]
+    assert "task_id" in (remote.inputSchema.get("required") or []), remote.inputSchema
+    assert "task_id" in remote.description and remote.description != stdio.description
+    assert "task_id" not in (stdio.inputSchema.get("required") or []), "stdio schema must be unchanged"
+    after = {t.name: t for t in asyncio.run(srv.list_tools())}["get_media"]
+    assert after.description == stdio.description and after.inputSchema == stdio.inputSchema, \
+        "the bound edit must not leak into a later stdio listing"
+
+
+# ===========================================================================
+# (6) toolvault read through the proxy (O20-mcp-server-15)
+# ===========================================================================
+async def _local_tools_execute(method, url, kw):
+    """Exactly what POST /local/tools/execute runs (Orchestrator/routes/local_routes.py)."""
+    from Orchestrator.tools.blackbox_tools import execute_tool
+    assert method == "POST" and url.endswith("/local/tools/execute"), url
+    body = kw["json"]
+    operator = body.get("operator") or "system"
+    params = dict(body.get("params") or {})
+    params["operator"] = operator
+    caller = (kw.get("headers") or {}).get("X-BlackBox-Caller")
+    r = await execute_tool(body["tool"], params, operator, caller=caller or "local")
+    return _FakeResponse(200, {"success": bool(r.success), "result": r.result})
+
+
+def test_bound_toolvault_read_names_only_the_bound_operator():
+    roster = [OP_A, OP_B, "carol-secret"]
+    with _roster(roster), _bound(OP_A), _fake_backend(_local_tools_execute) as calls:
+        res = asyncio.run(srv.call_tool("toolvault", {"action": "read", "tool_name": "search_snapshots"}))
+    err, body = _payload(res)
+    text = body if isinstance(body, str) else json.dumps(body)
+    assert not err and "search_snapshots" in text, text[:300]
+    assert calls and calls[0][2]["json"]["operator"] == OP_A
+    leaked = [n for n in (OP_B, "carol-secret") if n in text]
+    assert not leaked, f"toolvault read leaked the roster to a bound caller: {leaked}"
+    assert f"enum: ['{OP_A}']" in text, text[:600]
+
+
+# ===========================================================================
+# (7) get_task_status (O20-mcp-server-03 follow-up: /tasks/{id} now names its owner)
+# ===========================================================================
+def _status_router(method, url, kw):
+    if method == "POST" and url.endswith("/local/tools/execute"):
+        tid = kw["json"]["params"]["task_id"]
+        return _FakeResponse(200, {"success": True,
+                                   "result": "Task completed!\n\n" + json.dumps(_TASKS[tid])})
+    return _task_router(method, url, kw)
+
+
+def _get_task_status(args, operator=None):
+    with _fake_backend(_status_router) as calls:
+        if operator is None:
+            res = asyncio.run(srv.call_tool("get_task_status", args))
+        else:
+            with _bound(operator):
+                res = asyncio.run(srv.call_tool("get_task_status", args))
+    err, body = _payload(res)
+    return err, body, calls
+
+
+def test_bound_get_task_status_serves_own_task():
+    err, body, calls = _get_task_status({"task_id": "T-ALICE"}, operator=OP_A)
+    assert not err and "alice.png" in str(body), body
+    assert [c[0] for c in calls] == ["GET", "POST"], calls
+
+
+def test_bound_get_task_status_refuses_other_and_ownerless_tasks():
+    for task_id in ("T-BOB", "T-NOOWNER", "T-MISSING"):
+        err, body, calls = _get_task_status({"task_id": task_id}, operator=OP_A)
+        assert err and body["error"]["code"] == "not_found", (task_id, body)
+        assert OP_B not in json.dumps(body) and "bob.png" not in json.dumps(body), body
+        assert not [c for c in calls if c[0] == "POST"], f"{task_id}: refused call was proxied: {calls}"
+
+
+def test_bound_get_task_status_refuses_a_malformed_task_id_without_a_lookup():
+    for args in ({"task_id": "../agent/apps"}, {}):
+        err, body, calls = _get_task_status(args, operator=OP_A)
+        assert err and body["error"]["code"] == "invalid_arguments", (args, body)
+        assert calls == [], calls
+
+
+def test_stdio_get_task_status_is_unchanged():
+    err, body, calls = _get_task_status({"task_id": "T-BOB"})
+    assert not err and "bob.png" in str(body), body
+    assert not [c for c in calls if "/tasks/" in c[1]], f"stdio must not add an ownership lookup: {calls}"
+    assert [c for c in calls if c[0] == "POST"], calls
+
+
+# ===========================================================================
+# (8) blackbox://volume/info (O20-mcp-server-07 sibling)
+# ===========================================================================
+def test_bound_volume_info_hides_server_paths():
+    with _bound(OP_A):
+        bound = json.loads(asyncio.run(srv.read_resource("blackbox://volume/info")).text)
+    stdio = json.loads(asyncio.run(srv.read_resource("blackbox://volume/info")).text)
+    assert "volume_path" not in bound and "index_path" not in bound, bound
+    assert str(srv.BLACKBOX_ROOT) not in json.dumps(bound), bound
+    assert "exists" in bound and "index_exists" in bound, bound
+    assert stdio["volume_path"] == str(srv.VOLUME_FILE) and stdio["index_path"] == str(srv.SNAPSHOT_INDEX)
 
 
 # ---------------------------------------------------------------------------

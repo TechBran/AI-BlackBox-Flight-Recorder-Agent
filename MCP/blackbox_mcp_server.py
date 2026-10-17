@@ -90,6 +90,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from collections import OrderedDict
@@ -345,6 +346,63 @@ def _deny_if_not_owned(metadata) -> Optional[str]:
 # the control ports and the metadata block (Tailscale DNS name + hostname).
 _REMOTE_DEVICE_HIDDEN_FIELDS = frozenset(
     {"tailscale_ip", "adb_port", "vnc_port", "rdp_port", "metadata"})
+
+
+# #2A: what a remote (bound) caller may put in a /tasks/{task_id} path. Every id
+# the backend issues (uuid4, "ttsq-<hex>", "update-<ts>-<hex>", ...) fits; a
+# "../" id would otherwise steer the ownership lookup to another backend route.
+_TASK_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _media_url_path(u):
+    """A media url as its /ui/... path (drops any scheme + host prefix)."""
+    if isinstance(u, str) and (u.startswith("http://") or u.startswith("https://")):
+        from urllib.parse import urlparse
+        return urlparse(u).path
+    return u
+
+
+def _task_media_urls(task_data) -> list:
+    """Every media path a task produced, primary (result_url) first.
+
+    Multi-output tasks (numberOfImages 2-4, Lyria variations) keep their other
+    outputs only in result_data.all_urls and result_data.artifact.all_urls
+    (Orchestrator/tasks.py), so the owner of the task owns all of them.
+    """
+    rd = task_data.get("result_data")
+    rd = rd if isinstance(rd, dict) else {}
+    artifact = rd.get("artifact")
+    candidates = [task_data.get("result_url")]
+    for source in (rd, artifact):
+        if isinstance(source, dict) and isinstance(source.get("all_urls"), list):
+            candidates.extend(source["all_urls"])
+    out = []
+    for u in candidates:
+        if isinstance(u, str) and u:
+            path = _media_url_path(u)
+            if path not in out:
+                out.append(path)
+    return out
+
+
+async def _owned_task(client, task_id: str, scope: str):
+    """GET /tasks/{task_id} for a bound caller: the task dict iff `scope` owns it.
+
+    None for a missing task, a task of another operator and a task with no
+    recorded operator alike, so a denial never confirms that the task exists.
+    """
+    resp = await client.get(f"{BLACKBOX_URL}/tasks/{task_id}")
+    if resp.status_code != 200:
+        return None
+    task_data = resp.json() or {}
+    owner = task_data.get("operator")
+    if not owner:
+        logger.warning("rid=%s /tasks/%s returned no operator -- denying "
+                       "(the ownership gate cannot be enforced without it)",
+                       _REQUEST_ID.get(), task_id)
+    if owner != scope:
+        return None
+    return task_data
 
 
 def _read_device_registry():
@@ -603,6 +661,22 @@ def _scope_operator_enums(tools: list, bound: str) -> list:
     return tools
 
 
+# What a remote caller's get_media accepts (the bound branch in call_tool).
+_REMOTE_GET_MEDIA_NOTE = (
+    " Remote callers fetch media by task_id (required); url is optional and must"
+    " be one of that task's own outputs (its result_url or any of its all_urls).")
+
+
+def _scope_remote_get_media(tools: list) -> list:
+    """Advertise the bound get_media contract: task_id is required (HTTP only)."""
+    for tool in tools:
+        if tool.name == "get_media":
+            tool.description = (tool.description or "") + _REMOTE_GET_MEDIA_NOTE
+            schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+            schema["required"] = sorted(set(schema.get("required") or []) | {"task_id"})
+    return tools
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List all available BlackBox tools -- generated from tool_registry.py."""
@@ -610,6 +684,7 @@ async def list_tools() -> list[Tool]:
     bound = _current_bound_operator()
     if bound is not None:
         tools = _scope_operator_enums(tools, bound)
+        tools = _scope_remote_get_media(tools)
     return tools
 
 
@@ -629,7 +704,8 @@ async def call_tool(name: str, arguments: dict[str, Any]):
          current_operator/refresh + web_fetch + get_media + list_devices.)
       2. SPECIAL HTTP tools -- genuine logic the generic proxy does NOT replicate
          (search/get_context -> /fossil/hybrid; chat_with_context -> /chat poll;
-         mint_snapshot -> /chat/save; speech_to_text -> multipart upload).
+         mint_snapshot -> /chat/save; speech_to_text -> multipart upload;
+         get_task_status when bound -> /tasks ownership check, then the proxy).
       3. UNIFORM PROXY -- every other registry tool -> _proxy_tool (gmail/generic).
 
     Returns a list[TextContent] on success, or a structured CallToolResult
@@ -837,52 +913,45 @@ async def call_tool(name: str, arguments: dict[str, Any]):
         elif name == "get_media":
             import base64
             import mimetypes
-            from urllib.parse import urlparse
 
             url = arguments.get("url")
             task_id = arguments.get("task_id")
             include_base64 = arguments.get("include_base64", True)
             include_metadata = arguments.get("include_metadata", True)
 
-            def _url_path(u):
-                # Clean URL - remove host prefix if present
-                if u and (u.startswith("http://") or u.startswith("https://")):
-                    return urlparse(u).path
-                return u
-
-            # ONE task lookup serves the url, the ownership gate and the metadata.
-            task_data = None
-            if task_id:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    task_response = await client.get(f"{BLACKBOX_URL}/tasks/{task_id}")
-                if task_response.status_code == 200:
-                    task_data = task_response.json() or {}
-
             # #2A: a bound (HTTP) caller reaches media ONLY through a task it
             # owns -- a bare url would serve any file under Portal/ (other
             # operators' uploads and generations). The url, if given, must be
-            # that task's own result. Every denial is not_found (never confirm
-            # that another operator's task exists).
+            # one of that task's own outputs. Every denial is not_found (never
+            # confirm that another operator's task exists).
             _scope = _current_bound_operator()
             if _scope is not None:
                 if not task_id:
                     return _error("invalid_arguments", name,
                                   "task_id is required: remote callers fetch media by the task that produced it")
+                if not isinstance(task_id, str) or not _TASK_ID_RE.fullmatch(task_id):
+                    return _error("invalid_arguments", name, "Malformed task_id")
+
+            # ONE task lookup serves the url, the ownership gate and the metadata.
+            task_data = None
+            if task_id:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    if _scope is not None:
+                        task_data = await _owned_task(client, task_id, _scope)
+                    else:
+                        task_response = await client.get(f"{BLACKBOX_URL}/tasks/{task_id}")
+                        if task_response.status_code == 200:
+                            task_data = task_response.json() or {}
+
+            if _scope is not None:
                 if task_data is None:
                     return _error("not_found", name, f"Task {task_id} not found")
-                _owner = task_data.get("operator")
-                if not _owner:
-                    logger.warning("rid=%s get_media: /tasks/%s returned no operator -- denying "
-                                   "(the ownership gate cannot be enforced without it)",
-                                   _REQUEST_ID.get(), task_id)
-                if _owner != _scope:
-                    return _error("not_found", name, f"Task {task_id} not found")
-                task_url = _url_path(task_data.get("result_url"))
-                if not task_url:
+                task_urls = _task_media_urls(task_data)
+                if not task_urls:
                     return _error("not_found", name, f"Task {task_id} has no result_url")
-                if url and _url_path(url) != task_url:
+                if url and _media_url_path(url) not in task_urls:
                     return _error("not_found", name, f"Task {task_id} has no media at that url")
-                url = task_url
+                url = _media_url_path(url) if url else task_urls[0]
             elif task_id and not url:
                 # If task_id provided, look up URL from task
                 if task_data is None:
@@ -894,7 +963,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             if not url:
                 return _error("invalid_arguments", name, "No URL or task_id provided")
 
-            url = _url_path(url)
+            url = _media_url_path(url)
 
             # #2A: reject path traversal BEFORE the /ui/->Portal join. A `..`
             # anywhere in the url could escape Portal/ and read arbitrary files.
@@ -1150,6 +1219,17 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                     "details": result
                 }, indent=2))]
 
+            elif name == "get_task_status" and _current_bound_operator() is not None:
+                # #2A: a remote caller polls only its OWN tasks -- the full task
+                # JSON carries result urls, result_data, reasoning and the owner.
+                # Denials are not_found, exactly like get_media's.
+                task_id = arguments.get("task_id")
+                if not task_id or not isinstance(task_id, str) or not _TASK_ID_RE.fullmatch(task_id):
+                    return _error("invalid_arguments", name, "A well-formed task_id is required")
+                if await _owned_task(client, task_id, _current_bound_operator()) is None:
+                    return _error("not_found", name, f"Task not found: {task_id}")
+                return await _proxy_tool(name, arguments, client)
+
             # === UNIFORM PROXY DISPATCHER ===
             # Every other registry tool (multimodal generation/analysis, Workspace,
             # web search, gmail_*, status/util, roll_dice, toolvault, control_*,
@@ -1295,6 +1375,11 @@ async def read_resource(uri: str) -> ResourceContents:
                 "index_path": str(SNAPSHOT_INDEX),
                 "index_exists": SNAPSHOT_INDEX.exists()
             }
+            # #2A: absolute server paths are for the trusted stdio caller only
+            # (get_index_stats and get_media withhold them the same way).
+            if scope is not None:
+                info.pop("volume_path")
+                info.pop("index_path")
             return TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(info, indent=2))
 
         else:
