@@ -110,6 +110,15 @@ Once registered, the app is accessible via:
 2. **Direct Proxy URL**: `http://localhost:9091/app-proxy/{PORT}/`
 3. **Via Tailscale**: `https://{tailscale-hostname}/app-proxy/{PORT}/`
 
+**Proxied apps are sandboxed.** `/app-proxy/{PORT}/` only serves registered
+ports (anything else is 403) and sends `Content-Security-Policy: sandbox`, so
+the app runs in an opaque origin wherever it is opened through the proxy. It
+can still call its OWN server with relative URLs and load media from absolute
+`http://localhost:9091/ui/uploads/...` URLs, but it cannot call BlackBox APIs
+(`/chat`, `/tts`, `/ws/...`), and `localStorage` is an in-memory stand-in that
+clears on reload. An app that needs the BlackBox API must be opened on its own
+port (`http://<host>:{PORT}/`); the Orchestrator trusts that origin.
+
 ## Port Allocation
 
 Recommended port ranges:

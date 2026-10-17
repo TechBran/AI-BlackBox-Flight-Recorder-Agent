@@ -697,6 +697,8 @@ curl -X POST http://localhost:9091/agent/apps/register \
 curl http://localhost:9091/agent/apps
 ```
 
+**Sandboxed preview:** `/app-proxy/{PORT}/` serves registered ports only and runs the app in an opaque origin (CSP sandbox): it can reach its own server and load media by absolute URL, but not BlackBox APIs, and `localStorage` is in-memory. Apps that call the BlackBox API must be opened on their own port.
+
 **See `/register-app` command for complete documentation.**
 
 ## API Endpoints

@@ -976,7 +976,10 @@
               <h3 id="appPreviewTitle">🚀 App Preview</h3>
               <button id="btnCloseAppPreview" class="btn">✕</button>
           </div>
-          <iframe id="appPreviewFrame" class="app-preview-frame" sandbox="allow-scripts allow-forms allow-same-origin"></iframe>
+          <!-- No allow-same-origin: apps are proxied under the Portal origin
+               (/app-proxy/{port}/), so the frame must stay an opaque origin or app
+               code gets the Portal DOM, storage and API (audit P07-html-css-13). -->
+          <iframe id="appPreviewFrame" class="app-preview-frame" sandbox="allow-scripts allow-forms"></iframe>
       </div>
   </div>
 

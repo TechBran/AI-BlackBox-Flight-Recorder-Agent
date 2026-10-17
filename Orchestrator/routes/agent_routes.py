@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from urllib.parse import urlsplit
 
 # External library imports
 import httpx
@@ -46,6 +47,7 @@ from Orchestrator.models import AGENT_AUTO_APPROVE_PATTERNS, AGENT_PERMISSION_PA
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.state import save_app_registry, save_operator_state, agent_lock, APP_REGISTRY, PERSISTED_AGENT_SESSIONS, AGENT_SESSIONS
 from Orchestrator.volume import now_utc_iso
+from Orchestrator.security.perimeter import ZELLIJ_WEB_PORT, proxy_port_allowed
 from starlette.websockets import WebSocketState
 
 
@@ -1361,6 +1363,76 @@ _ZELLIJ_WEBGL_STUB_JS = (
 )
 
 
+# User apps are LLM-written code proxied under the Portal's OWN origin. This
+# CSP sandbox (no allow-same-origin) gives every proxied app document an
+# opaque origin on every surface — the Portal's #appPreviewFrame, Android's
+# external-browser open, a pasted URL — so app code can't read Portal storage
+# or drive the Orchestrator API (audit P07-html-css-13). Never sent for
+# zellij: its iframe needs same-origin (extra-keys reaches contentWindow.term).
+_APP_SANDBOX_CSP = (
+    "sandbox allow-scripts allow-forms allow-popups allow-modals "
+    "allow-downloads allow-pointer-lock"
+)
+
+# An opaque-origin document throws SecurityError on localStorage /
+# sessionStorage, and apps that read storage at top level (grocery-store,
+# pacman) would die on load. Give them an in-memory stand-in instead; state
+# lasts for the page view.
+_APP_STORAGE_STAND_IN = (
+    "<script data-blackbox-app-proxy>(function(){"
+    "function mk(){var d=Object.create(null);return{"
+    "get length(){return Object.keys(d).length},"
+    "key:function(i){var k=Object.keys(d);return i<k.length?k[i]:null},"
+    "getItem:function(k){k=String(k);return k in d?d[k]:null},"
+    "setItem:function(k,v){d[String(k)]=String(v)},"
+    "removeItem:function(k){delete d[String(k)]},"
+    "clear:function(){d=Object.create(null)}}}"
+    "[\"localStorage\",\"sessionStorage\"].forEach(function(n){"
+    "try{window[n].length}catch(e){"
+    "try{Object.defineProperty(window,n,{value:mk(),configurable:true})}catch(_){}}});"
+    "})();</script>"
+)
+
+# What the sandboxed app preview may send to its OWN app through the proxy.
+_APP_PREVIEW_CORS_METHODS = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+
+
+def _inject_app_storage_stand_in(html: str) -> str:
+    """Insert the storage stand-in first in <head> (before any app script),
+    never ahead of the doctype (that would flip the page into quirks mode)."""
+    m = re.search(r"<head\b[^>]*>", html, re.I) or re.search(r"<html\b[^>]*>", html, re.I)
+    if m is None:
+        m = re.match(r"\s*<!doctype[^>]*>", html, re.I)
+    if m is None:
+        return _APP_STORAGE_STAND_IN + html
+    return html[:m.end()] + _APP_STORAGE_STAND_IN + html[m.end():]
+
+
+def _proxy_location(location: str, port: int) -> str:
+    """Re-root an upstream redirect under /app-proxy/{port}/ when it points at
+    the upstream itself (absolute loopback URL or root-relative path).
+    Anything else is the browser's to follow — the proxy never follows it."""
+    prefix = f"/app-proxy/{port}/"
+    if location.startswith(prefix):
+        return location
+    parts = urlsplit(location)
+    if parts.scheme in ("http", "https") and parts.netloc:
+        try:
+            upstream_port = parts.port
+        except ValueError:
+            return location
+        if parts.hostname not in ("localhost", "127.0.0.1", "::1") or upstream_port != port:
+            return location
+    elif parts.scheme or parts.netloc or not location.startswith("/"):
+        return location
+    out = prefix + parts.path.lstrip("/")
+    if parts.query:
+        out += "?" + parts.query
+    if parts.fragment:
+        out += "#" + parts.fragment
+    return out
+
+
 @app.api_route("/app-proxy/{port}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def app_proxy(port: int, path: str, request: Request):
     """Reverse proxy to locally running apps created by Claude Code.
@@ -1369,10 +1441,32 @@ async def app_proxy(port: int, path: str, request: Request):
     # Validate port is reasonable
     if port < 1024 or port > 65535:
         raise HTTPException(400, "Invalid port number")
+    # Allowlist (audit X05-architecture-01 / X03-security-backend-16): only
+    # zellij-web and the registered user apps — never Chrome DevTools, MCP,
+    # the Orchestrator itself or any other loopback listener.
+    if not proxy_port_allowed(port):
+        raise HTTPException(403, "Port is not a registered app")
+    is_zellij = port == ZELLIJ_WEB_PORT
+    origin = request.headers.get("origin")
+
+    # The sandboxed app preview (Origin: null) preflighting a call to its own
+    # app: answer here, since simple app servers don't implement OPTIONS.
+    # The Origin guard already limited null origins to registered-app paths.
+    if (not is_zellij and origin == "null" and request.method == "OPTIONS"
+            and "access-control-request-method" in request.headers):
+        preflight_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": _APP_PREVIEW_CORS_METHODS,
+            "Access-Control-Max-Age": "600",
+        }
+        requested = request.headers.get("access-control-request-headers")
+        if requested:
+            preflight_headers["Access-Control-Allow-Headers"] = requested
+        return Response(status_code=204, headers=preflight_headers)
 
     # Intercept Zellij's addon-webgl.js request — serve our no-op stub
     # instead of the real WebGL renderer (see _ZELLIJ_WEBGL_STUB_JS).
-    if port == 9097 and path.endswith("assets/addon-webgl.js"):
+    if is_zellij and path.endswith("assets/addon-webgl.js"):
         return Response(
             content=_ZELLIJ_WEBGL_STUB_JS,
             media_type="application/javascript",
@@ -1390,25 +1484,31 @@ async def app_proxy(port: int, path: str, request: Request):
         target_url += f"?{request.url.query}"
 
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        # follow_redirects=False: an upstream redirect goes back to the
+        # browser (Location re-rooted below), never followed by the proxy to
+        # an arbitrary LAN / metadata URL.
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             # Build headers (exclude hop-by-hop headers)
             headers = {}
             for key, value in request.headers.items():
                 if key.lower() not in ('host', 'content-length', 'transfer-encoding', 'connection'):
                     headers[key] = value
 
-            # Phase 5 master-token model: override any client-supplied
-            # cookie with the orchestrator's master session cookie. Strip
-            # any case-variant of the client's existing Cookie header so
-            # our injection is the ONLY cookie that reaches upstream.
-            for k in list(headers.keys()):
-                if k.lower() == "cookie":
-                    del headers[k]
-            try:
-                from Orchestrator.cli_agent import zellij_client as _zc
-                headers["cookie"] = f"session_token={_zc.get_master_session_cookie()}"
-            except Exception as exc:  # noqa: BLE001
-                print(f"[APP-PROXY-HTTP] get_master_session_cookie failed: {exc} — proceeding without cookie")
+            # Phase 5 master-token model (zellij-web ONLY): override any
+            # client-supplied cookie with the orchestrator's master session
+            # cookie. Strip any case-variant of the client's existing Cookie
+            # header so our injection is the ONLY cookie that reaches
+            # upstream. User apps get the client's own cookies untouched and
+            # never see the master terminal credential.
+            if is_zellij:
+                for k in list(headers.keys()):
+                    if k.lower() == "cookie":
+                        del headers[k]
+                try:
+                    from Orchestrator.cli_agent import zellij_client as _zc
+                    headers["cookie"] = f"session_token={_zc.get_master_session_cookie()}"
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[APP-PROXY-HTTP] get_master_session_cookie failed: {exc} — proceeding without cookie")
 
             # Body capture (so we can replay on 401 retry without re-reading).
             body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
@@ -1437,7 +1537,7 @@ async def app_proxy(port: int, path: str, request: Request):
             # schedule; this self-heals so the customer never sees the 401.
             # Guard on the zellij-web port (the only upstream that uses
             # session_token); other proxied services don't care.
-            if resp.status_code == 401 and port == 9097:
+            if resp.status_code == 401 and is_zellij:
                 try:
                     from Orchestrator.cli_agent import zellij_client as _zc
                     fresh = _zc.refresh_master_session_cookie()
@@ -1456,6 +1556,8 @@ async def app_proxy(port: int, path: str, request: Request):
                     html = content.decode('utf-8', errors='replace')
                     # Rewrite href, src, action attributes that start with /
                     html = re.sub(r'(href|src|action)=["\']/', f'\\1="/app-proxy/{port}/', html)
+                    if not is_zellij:
+                        html = _inject_app_storage_stand_in(html)
                     # WebGL addon: handled separately by intercepting the
                     # asset request (see ZELLIJ_WEBGL_STUB_JS below).
                     # CSP default-src 'self' blocks inline scripts, so we
@@ -1485,6 +1587,20 @@ async def app_proxy(port: int, path: str, request: Request):
             response_headers['Pragma'] = 'no-cache'
             response_headers['Expires'] = '0'
 
+            if 300 <= resp.status_code < 400:
+                for key in list(response_headers):
+                    if key.lower() == "location":
+                        response_headers[key] = _proxy_location(response_headers[key], port)
+
+            if not is_zellij:
+                response_headers['Content-Security-Policy'] = _APP_SANDBOX_CSP
+                # The sandboxed preview's own fetch() is cross-origin (opaque
+                # origin); most app servers already send ACAO *, add it when
+                # one doesn't. Never a second copy.
+                if origin == "null" and not any(
+                        k.lower() == "access-control-allow-origin" for k in response_headers):
+                    response_headers['Access-Control-Allow-Origin'] = '*'
+
             return Response(
                 content=content,
                 status_code=resp.status_code,
@@ -1507,10 +1623,12 @@ async def app_proxy(port: int, path: str, request: Request):
 # loads via the HTTP handler above.
 @app.websocket("/app-proxy/{port}/{path:path}")
 async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
-    await websocket.accept()
-    if port < 1024 or port > 65535:
-        await websocket.close(code=1008, reason="Invalid port")
+    # Same allowlist as the HTTP proxy, enforced BEFORE accept.
+    if port < 1024 or port > 65535 or not proxy_port_allowed(port):
+        await websocket.close(code=1008, reason="Port is not a registered app")
         return
+    await websocket.accept()
+    is_zellij = port == ZELLIJ_WEB_PORT
 
     query = websocket.scope.get("query_string", b"").decode("latin-1")
     target_uri = f"ws://127.0.0.1:{port}/{path}"
@@ -1520,7 +1638,8 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     # Phase 5 master-token model (2026-05-26): the orchestrator owns
     # zellij auth via a long-lived master token; the app-proxy injects
     # the SESSION COOKIE (issued by zellij's /command/login) on every
-    # upstream forward. Clients (browser, Android) never need to know
+    # zellij-web upstream forward — and ONLY there; user apps get the
+    # client's own Cookie. Clients (browser, Android) never need to know
     # about zellij tokens — they just open WSes through us.
     #
     # Operator isolation (audit I8) still enforced at the route layer
@@ -1530,6 +1649,9 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     from Orchestrator.cli_agent import zellij_client as _zc
 
     def _build_forward_headers() -> dict:
+        if not is_zellij:
+            cookie = websocket.headers.get("cookie")
+            return {"cookie": cookie} if cookie else {}
         try:
             return {"cookie": f"session_token={_zc.get_master_session_cookie()}"}
         except Exception as exc:  # noqa: BLE001
@@ -1554,7 +1676,7 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
         # Refresh and retry once. This makes the customer-facing
         # connection resilient to zellij invalidating session cookies
         # on its own schedule.
-        if e.response.status_code == 401 and port == 9097:
+        if e.response.status_code == 401 and is_zellij:
             try:
                 _zc.refresh_master_session_cookie()
                 forward_headers = _build_forward_headers()
