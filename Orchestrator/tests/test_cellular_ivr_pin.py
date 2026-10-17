@@ -26,7 +26,7 @@ def pin_env(tmp_path, monkeypatch):
     monkeypatch.setattr(pin_gate, "LOCKOUT_PATH", tmp_path / "phone_pin_lockout.json")
 
 
-def _make_ivr(entries, caller=CALLER):
+def _make_ivr(entries, caller=CALLER, on_prompt=None):
     ivr = ivr_mod.CellularIVR(send_audio=None, caller_id=caller, timeout_ms=2000)
     ivr.played = []
     script = list(entries)
@@ -36,6 +36,8 @@ def _make_ivr(entries, caller=CALLER):
         ivr._dtmf_buffer = ""
         ivr._dtmf_event.clear()
         if "access code" in text or "incorrect. Please try again" in text:
+            if on_prompt:
+                on_prompt(text)
             if script:
                 digits = script.pop(0)
 
@@ -85,3 +87,19 @@ def test_lockout_carries_into_next_call(capsys):
     nxt = _make_ivr([PIN])
     assert asyncio.run(nxt.run_pin_verification()) is False
     assert len(nxt.played) == 1 and "try again later" in nxt.played[0].lower()
+
+
+def test_lock_tripped_by_a_concurrent_call_stops_this_call():
+    """Each attempt re-checks the stored lockout (see the Asterisk twin test)."""
+    rounds = []
+
+    def other_call_locks_us(text):
+        rounds.append(text)
+        if len(rounds) == 2:
+            for _ in range(pin_gate.max_attempts()):
+                pin_gate.record_failure(CALLER)
+
+    ivr = _make_ivr([WRONG, WRONG, WRONG], on_prompt=other_call_locks_us)
+    assert asyncio.run(ivr.run_pin_verification()) is False
+    assert len(rounds) == 2, "no further PIN prompt once the number is locked"
+    assert "try again later" in ivr.played[-1].lower()

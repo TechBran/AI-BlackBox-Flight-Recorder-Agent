@@ -98,3 +98,16 @@ def test_status_endpoint_never_reveals_pin(monkeypatch):
     body = asyncio.run(phone_routes.phone_pin_status())
     assert body["configured"] is True and body["length"] == 8
     assert "73910482" not in repr(body)
+
+
+def test_lockout_reset_endpoint_clears_locks(tmp_path, monkeypatch):
+    """The operator's way out when guessers have tripped the global backstop."""
+    monkeypatch.setattr(config, "PHONE_PIN_CODE", "73910482")
+    monkeypatch.setattr(pin_gate, "LOCKOUT_PATH", tmp_path / "phone_pin_lockout.json")
+    for _ in range(pin_gate.max_attempts()):
+        pin_gate.record_failure("+15555550142")
+    assert pin_gate.lockout_remaining("+15555550142") > 0
+    body = asyncio.run(phone_routes.phone_pin_lockout_reset())
+    assert body["cleared"] >= 1
+    assert pin_gate.lockout_remaining("+15555550142") == 0
+    assert "73910482" not in repr(body)

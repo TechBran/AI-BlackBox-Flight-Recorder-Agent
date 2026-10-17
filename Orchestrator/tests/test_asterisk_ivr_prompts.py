@@ -353,8 +353,7 @@ def test_a_fresh_install_can_speak_every_prompt_the_ivr_plays(sound_env):
 def test_optional_prompts_are_gitignored_and_fallbacks_are_not():
     """Optional prompts are made per box; tracking them would let a later
     commit collide with a box's own copy on `git pull`."""
-    if not shutil.which("git"):
-        pytest.skip("git not available")
+    tracked = {p.name for p in _tracked_wavs()}  # skips outside a git checkout
 
     def ignored(name):
         return _git(["git", "check-ignore", "-q", str(TRACKED_CACHE / name)],
@@ -363,7 +362,6 @@ def test_optional_prompts_are_gitignored_and_fallbacks_are_not():
     for name in ("pin_prompt_6digit.wav", "pin_locked.wav", "pin_unavailable.wav",
                  "operator_menu_0123abcd.wav"):
         assert ignored(name), name
-    tracked = {p.name for p in _tracked_wavs()}
     for name in ("pin_entry.wav", "pin_prompt_4digit.wav", "pin_failed.wav", "goodbye.wav", "greeting.wav"):
         assert name in tracked and not ignored(name), name
 

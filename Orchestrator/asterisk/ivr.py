@@ -268,12 +268,20 @@ class AsteriskIVR:
         await asyncio.sleep(0.5)
 
         for attempt in range(attempts):
+            # Re-check before each retry and before judging each entry: a
+            # parallel call from the same number (or the global backstop) may
+            # have locked it while this call was waiting.
+            if attempt and await self._refuse_if_locked():
+                return False
             self._dtmf_buffer = ""
             self._dtmf_event.clear()
 
             digits = await self._play_and_wait(
                 get_prompt_uri(prompt if attempt == 0 else "pin_retry"),
                 num_digits=pin_len, timeout_s=15.0)
+
+            if await self._refuse_if_locked():
+                return False
 
             if pin_gate.check_pin(digits):
                 pin_gate.record_success(self._caller_id)

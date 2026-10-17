@@ -28,16 +28,20 @@ CALLER = "+15555550142"
 
 
 class FakeARI:
-    """Plays nothing; 'presses' the next scripted entry when a PIN prompt plays."""
+    """Plays nothing; 'presses' the next scripted entry when a PIN prompt plays.
+    ``on_prompt`` runs before each PIN prompt (to simulate a concurrent call)."""
 
-    def __init__(self, entries):
+    def __init__(self, entries, on_prompt=None):
         self.entries = list(entries)
         self.played = []
         self.on_dtmf = None
+        self.on_prompt = on_prompt
 
     async def play_sound(self, channel_id, media):
         self.played.append(media)
         if "pin_prompt" in media or "pin_retry" in media:
+            if self.on_prompt:
+                self.on_prompt(media)
             if self.entries:
                 digits = self.entries.pop(0)
 
@@ -82,8 +86,8 @@ async def _fast_sleep(delay, *a, **kw):
     await _real_sleep(0)
 
 
-def _run_pin(entries, caller=CALLER):
-    fake = FakeARI(entries)
+def _run_pin(entries, caller=CALLER, on_prompt=None):
+    fake = FakeARI(entries, on_prompt=on_prompt)
     ivr = ivr_mod.AsteriskIVR(ari_client=fake, channel_id=CHANNEL, caller_id=caller)
     fake.on_dtmf = ivr._on_dtmf
     ok = asyncio.run(ivr._run_pin())
@@ -174,3 +178,47 @@ def test_ari_client_does_not_log_dtmf_digits(capsys):
     assert "".join(seen) == PIN, "digits must still be delivered to the IVR"
     assert "digit=" not in out
     _assert_no_secrets(out, PIN)
+
+
+def test_lock_tripped_by_a_concurrent_call_stops_this_call(capsys):
+    """Each attempt re-checks the lockout: three parallel calls from one number
+    must not each get max_attempts guesses (record_failure resets the count
+    when it locks, so only the stored lock reveals the other call's lock)."""
+    rounds = []
+
+    def other_call_locks_us(media):
+        rounds.append(media)
+        if len(rounds) == 2:  # while this call is on its second attempt
+            for _ in range(pin_gate.max_attempts()):
+                pin_gate.record_failure(CALLER)
+
+    ok, fake = _run_pin([WRONG, WRONG, WRONG], on_prompt=other_call_locks_us)
+    assert ok is False
+    assert len(rounds) == 2, "no further PIN prompt once the number is locked"
+    assert fake.played[-1] == "sound:custom/ivr/pin_locked"
+    _assert_no_secrets(capsys.readouterr().out, PIN, WRONG)
+
+
+def test_parallel_calls_from_one_number_get_max_attempts_guesses_in_total(monkeypatch):
+    """Three simultaneous calls from one number: entries already typed when the
+    lock trips are refused, never judged, so at most max_attempts are checked."""
+    judged = []
+    real_check = pin_gate.check_pin
+
+    def counting_check(entered):
+        judged.append(entered)
+        return real_check(entered)
+
+    monkeypatch.setattr(ivr_mod.pin_gate, "check_pin", counting_check)
+
+    async def three_calls():
+        ivrs = []
+        for ch in ("a", "b", "c"):
+            fake = FakeARI([WRONG, WRONG, WRONG])
+            ivr = ivr_mod.AsteriskIVR(ari_client=fake, channel_id=ch, caller_id=CALLER)
+            fake.on_dtmf = ivr._on_dtmf
+            ivrs.append(ivr)
+        return await asyncio.gather(*(ivr._run_pin() for ivr in ivrs))
+
+    assert asyncio.run(three_calls()) == [False, False, False]
+    assert len(judged) <= pin_gate.max_attempts()

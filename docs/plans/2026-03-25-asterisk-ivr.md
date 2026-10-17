@@ -27,7 +27,7 @@
 ### IVR Flow
 ```
 Call arrives → Stasis(blackbox,inbound)
-  → PIN verification (4 digits: 6157, 3 attempts)
+  → PIN verification (PHONE_PIN_CODE digits, 3 attempts)
   → Operator selection (dynamic from /operators API)
   → Backend selection (1=Claude, 2=Gemini, 3=GPT, 4=Grok)
   → Confirmation ("Welcome, Brandon. Connecting you to GPT.")
@@ -94,7 +94,7 @@ The IVR engine manages the call flow while the channel is in ARI Stasis. Uses AR
 # ivr.py — Asterisk IVR Engine
 #
 # Runs the IVR flow while channel is in ARI Stasis:
-#   1. PIN verification (6157, 3 attempts)
+#   1. PIN verification (PHONE_PIN_CODE, 3 attempts)
 #   2. Operator selection (dynamic from USERS_LIST)
 #   3. Backend selection (1=Claude, 2=Gemini, 3=GPT, 4=Grok)
 #
@@ -235,7 +235,7 @@ This runs once at startup. Cached files persist across restarts. New operator na
 4. Verify flow:
    - Hear "Thank you for calling AI BlackBox"
    - Hear "Please enter your 4-digit access code"
-   - Enter 6157
+   - Enter the PIN (PHONE_PIN_CODE in .env)
    - Hear "Access granted"
    - Hear operator menu (if multiple operators)
    - Select operator

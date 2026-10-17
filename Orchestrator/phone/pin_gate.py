@@ -14,7 +14,9 @@ gate fails CLOSED:
   * Wrong PINs feed a per-caller lockout that persists across calls (JSON
     store under credentials/, 0600, atomic writes) and backs off
     exponentially. A global backstop bounds guessing from rotating
-    (spoofed) caller IDs.
+    (spoofed) caller IDs. A number that entered the right PIN recently is
+    exempt from the global lock (never from its own), so a guesser cannot
+    lock the owner out; reset_lockouts() is the operator's reset.
   * ensure_pin() is the onboarding hook: when telephony is configured and no
     PIN is set it generates a random one into .env and makes it live in the
     running process. It never rotates an existing PIN.
@@ -48,6 +50,7 @@ LOCKOUT_MAX_S = 24 * 3600           # backoff cap
 LOCKOUT_FORGET_S = 24 * 3600        # quiet period before a caller's history is dropped
 GLOBAL_KEY = "*"                    # all callers together (caller-ID rotation backstop)
 GLOBAL_THRESHOLD_FACTOR = 10        # global lock after 10x the per-caller threshold
+TRUST_S = 30 * 24 * 3600            # a right PIN exempts that number from the global lock this long
 
 # Serializes read-modify-write of the lockout store within this process; the
 # Orchestrator is the store's only writer.
@@ -194,6 +197,8 @@ def _write_store(data: dict) -> None:
 def _prune(callers: dict, now: float) -> None:
     for key in list(callers):
         entry = callers[key]
+        if float(entry.get("trusted_until", 0)) > now:
+            continue
         last = max(float(entry.get("updated", 0)), float(entry.get("locked_until", 0)))
         if now - last > LOCKOUT_FORGET_S:
             del callers[key]
@@ -201,12 +206,18 @@ def _prune(callers: dict, now: float) -> None:
 
 def lockout_remaining(caller_id, now: float | None = None) -> int:
     """Seconds until this caller may try a PIN again (0 = not locked).
-    Includes the global backstop."""
+
+    Includes the global backstop, except for a number that entered the right
+    PIN within TRUST_S (its own lock still applies)."""
     now = time.time() if now is None else now
     with _LOCK:
         callers = _read_store()["callers"]
+    own = callers.get(caller_key(caller_id)) or {}
+    keys = [caller_key(caller_id)]
+    if float(own.get("trusted_until", 0)) <= now:
+        keys.append(GLOBAL_KEY)
     remaining = 0.0
-    for key in (caller_key(caller_id), GLOBAL_KEY):
+    for key in keys:
         entry = callers.get(key) or {}
         remaining = max(remaining, float(entry.get("locked_until", 0)) - now)
     return math.ceil(remaining) if remaining > 0 else 0
@@ -230,6 +241,8 @@ def record_failure(caller_id, now: float | None = None) -> int:
         _prune(callers, now)
         for key, threshold in thresholds:
             entry = callers.setdefault(key, {"failures": 0, "lockouts": 0, "locked_until": 0})
+            entry.setdefault("lockouts", 0)
+            entry.setdefault("locked_until", 0)
             entry["failures"] = int(entry.get("failures", 0)) + 1
             entry["updated"] = now
             if entry["failures"] >= threshold:
@@ -245,18 +258,47 @@ def record_failure(caller_id, now: float | None = None) -> int:
     return locked_for
 
 
-def record_success(caller_id) -> None:
-    """A correct PIN clears the caller's history and the global failure run."""
+def record_success(caller_id, now: float | None = None) -> None:
+    """A correct PIN clears the caller's history and the global failure run,
+    and trusts the number (not a withheld one) past the global lock."""
+    now = time.time() if now is None else now
+    key = caller_key(caller_id)
     with _LOCK:
         data = _read_store()
         callers = data["callers"]
-        changed = callers.pop(caller_key(caller_id), None) is not None
+        changed = callers.pop(key, None) is not None
+        if key != "anonymous":
+            callers[key] = {"failures": 0, "updated": now, "trusted_until": now + TRUST_S}
+            changed = True
         glob = callers.get(GLOBAL_KEY)
         if glob and glob.get("failures"):
             glob["failures"] = 0
             changed = True
         if changed:
             _write_store(data)
+
+
+def reset_lockouts() -> int:
+    """Clear every lockout and failure count (the operator's reset). Returns
+    how many locked or failing entries were cleared; trust is kept."""
+    with _LOCK:
+        data = _read_store()
+        callers = data["callers"]
+        cleared = 0
+        for key in list(callers):
+            entry = callers[key]
+            if float(entry.get("locked_until", 0)) or int(entry.get("failures", 0)):
+                cleared += 1
+            if float(entry.get("trusted_until", 0)):
+                callers[key] = {"failures": 0, "updated": entry.get("updated", 0),
+                                "trusted_until": entry["trusted_until"]}
+            else:
+                del callers[key]
+        if cleared:
+            _write_store(data)
+    if cleared:
+        print(f"[PHONE-PIN] Operator reset cleared {cleared} lockout entr{'y' if cleared == 1 else 'ies'}")
+    return cleared
 
 
 # ---------------------------------------------------------------------------

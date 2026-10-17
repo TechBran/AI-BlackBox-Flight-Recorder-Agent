@@ -339,7 +339,7 @@ Document `ASTERISK_ENABLED`, `ASTERISK_ARI_*`, `ASTERISK_AMI_*`, `TELEPHONY_SECR
 - Dispatch the final code-reviewer subagent over the whole branch.
 
 ### Task 7.3: Merge + snapshot
-- Secret-scan the full diff (`git diff main... | grep -niE "secret|password|6157|api[_-]key"` → only masked/var refs).
+- Secret-scan the full diff (`git diff main... | grep -niE "secret|password|pin_code|api[_-]key"` → only masked/var refs).
 - On user's go: merge to `main`, push, delete branch.
 - `/snapshot-dev` documenting the production pass (search hints: "TG200 production pass", "NeoGate multi-gateway", "AMI per-gateway manager", "telephony wizard").
 

@@ -829,7 +829,9 @@ IVR_INTER_DIGIT_TIMEOUT_MS = int(os.getenv("IVR_INTER_DIGIT_TIMEOUT_MS", "3000")
 # malformed PIN fails CLOSED (every IVR refuses the call). The telephony
 # wizard's Apply step / POST /phone/pin/generate writes a random one into .env.
 # Gate logic + the cross-call lockout live in Orchestrator/phone/pin_gate.py.
-PHONE_PIN_ENABLED = os.getenv("PHONE_PIN_ENABLED", "true").lower() == "true"
+# Only an explicit false value turns the gate off; anything else (a typo, "1",
+# "yes") keeps the PIN required.
+PHONE_PIN_ENABLED = os.getenv("PHONE_PIN_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 PHONE_PIN_CODE = os.getenv("PHONE_PIN_CODE", "")                  # 4-12 digits
 PHONE_PIN_MAX_ATTEMPTS = int(os.getenv("PHONE_PIN_MAX_ATTEMPTS", "3"))  # Wrong attempts per call (and per caller before lockout)
 

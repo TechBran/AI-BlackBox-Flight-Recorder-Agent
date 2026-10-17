@@ -1,5 +1,7 @@
+import ast
 import asyncio
 import inspect
+import textwrap
 import urllib.parse
 
 from Orchestrator.sms.ami_client import (
@@ -10,9 +12,13 @@ from Orchestrator.sms.ami_client import (
 
 
 def test_no_hardcoded_secret_in_source():
-    src = inspect.getsource(AMISMSClient.__init__)
-    assert "6157Ego8" not in src, "hardcoded AMI secret must be removed"
-    assert "192.168.1.200" not in src, "hardcoded default host must be removed"
+    """No credential or host literal in the constructor. The AMI secret that
+    used to be hard-coded here is public in git history: rotate it, and never
+    write it (or a fragment of it) into source again, tests included."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(AMISMSClient.__init__)))
+    literals = [n.value for n in ast.walk(tree)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    assert all(v == "" for v in literals), "hardcoded host/credential in AMISMSClient.__init__"
 
 
 def test_defaults_are_empty():

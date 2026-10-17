@@ -39,7 +39,9 @@ def gate_env(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("PHONE_PIN_ENABLED=true\nPHONE_PIN_CODE=\n")
     monkeypatch.setattr(secrets_writer, "ENV_FILE", env_file)
-    monkeypatch.delenv("PHONE_PIN_CODE", raising=False)
+    # setenv, not delenv(raising=False): delenv records no undo when the
+    # variable is absent, so a PIN set_pin() writes would leak into later tests.
+    monkeypatch.setenv("PHONE_PIN_CODE", "")
     return tmp_path
 
 
@@ -84,6 +86,37 @@ def test_disabled_gate_is_explicit(monkeypatch):
     monkeypatch.setattr(config, "PHONE_PIN_ENABLED", False)
     monkeypatch.setattr(config, "PHONE_PIN_CODE", "")
     assert pin_gate.gate_status() == "disabled"
+
+
+def _pin_enabled_for(raw):
+    """Evaluate config.py's PHONE_PIN_ENABLED expression with PHONE_PIN_ENABLED=raw."""
+    tree = ast.parse(CONFIG_PY.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "PHONE_PIN_ENABLED" for t in node.targets):
+            expr = ast.Expression(node.value)
+            break
+    else:
+        raise AssertionError("PHONE_PIN_ENABLED is not assigned in config.py")
+
+    class FakeOS:
+        @staticmethod
+        def getenv(name, default=None):
+            assert name == "PHONE_PIN_ENABLED"
+            return default if raw is None else raw
+
+    return eval(compile(expr, str(CONFIG_PY), "eval"), {"os": FakeOS})
+
+
+@pytest.mark.parametrize("raw", [None, "", "true", "TRUE", "1", "yes", "on", "enabled", "flase", " true "])
+def test_pin_enabled_unless_explicitly_false(raw):
+    """Only an explicit false value turns the gate off; typos keep the PIN on."""
+    assert _pin_enabled_for(raw) is True
+
+
+@pytest.mark.parametrize("raw", ["false", "False", "FALSE", "0", "no", "off", " false "])
+def test_explicit_false_disables_the_gate(raw):
+    assert _pin_enabled_for(raw) is False
 
 
 def test_unconfigured_log_is_actionable_and_secret_free(capsys, monkeypatch):
@@ -164,6 +197,53 @@ def test_global_backstop_against_caller_id_rotation(gate_env):
         locked = pin_gate.record_failure(caller, now=now)
     assert locked > 0
     assert pin_gate.lockout_remaining("+15555550999", now=now) > 0
+
+
+def _lock_globally(now, prefix="+1555666"):
+    """Wrong guesses from rotating (spoofed) numbers until the global backstop trips."""
+    threshold = pin_gate.max_attempts() * pin_gate.GLOBAL_THRESHOLD_FACTOR
+    for i in range(threshold):
+        pin_gate.record_failure(f"{prefix}{i // 2:04d}", now=now)
+    assert pin_gate.lockout_remaining("+15555550999", now=now) > 0
+
+
+def test_trusted_caller_is_not_locked_out_by_the_global_backstop(gate_env):
+    """Rotating spoofed IDs must not lock out a number that has proved the PIN."""
+    now = 6_000_000.0
+    pin_gate.record_success(CALLER, now=now)
+    _lock_globally(now + 10)
+    assert pin_gate.lockout_remaining(CALLER, now=now + 10) == 0
+    # ...but trust is earned per number, and it expires.
+    assert pin_gate.lockout_remaining("+15555550199", now=now + 10) > 0
+    later = now + pin_gate.TRUST_S + 60
+    _lock_globally(later)
+    assert pin_gate.lockout_remaining(CALLER, now=later) > 0
+
+
+def test_trusted_caller_still_faces_the_per_caller_lock(gate_env):
+    now = 7_000_000.0
+    pin_gate.record_success(CALLER, now=now)
+    for _ in range(pin_gate.max_attempts()):
+        pin_gate.record_failure(CALLER, now=now)
+    assert pin_gate.lockout_remaining(CALLER, now=now) == pin_gate.LOCKOUT_BASE_S
+
+
+def test_withheld_numbers_are_never_trusted(gate_env):
+    now = 8_000_000.0
+    pin_gate.record_success("", now=now)
+    _lock_globally(now)
+    assert pin_gate.lockout_remaining("", now=now) > 0
+
+
+def test_reset_lockouts_clears_every_lock(gate_env):
+    now = 9_000_000.0
+    for _ in range(pin_gate.max_attempts()):
+        pin_gate.record_failure(CALLER, now=now)
+    _lock_globally(now)
+    assert pin_gate.reset_lockouts() > 0
+    assert pin_gate.lockout_remaining(CALLER, now=now) == 0
+    assert pin_gate.lockout_remaining("+15555550999", now=now) == 0
+    assert pin_gate.reset_lockouts() == 0
 
 
 def test_anonymous_callers_share_one_bucket():

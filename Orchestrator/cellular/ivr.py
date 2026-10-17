@@ -327,6 +327,16 @@ class CellularIVR:
             print(f"[CELLULAR-IVR] TTS generation error: {e}")
             return None
 
+    async def _refuse_if_locked(self) -> bool:
+        """Refuse when this caller (or every caller) is locked out right now."""
+        locked_for = pin_gate.lockout_remaining(self.caller_id)
+        if not locked_for:
+            return False
+        print(f"[CELLULAR-IVR] Caller {pin_gate.mask_caller(self.caller_id)} "
+              f"is locked out ({locked_for}s left), refusing")
+        await self._play_prompt(IVR_PIN_LOCKED, allow_barge_in=False)
+        return True
+
     async def run_pin_verification(self) -> bool:
         """Run PIN verification stage. Fails closed; never logs the PIN or digits."""
         status = pin_gate.gate_status()
@@ -338,11 +348,7 @@ class CellularIVR:
             await self._play_prompt(IVR_PIN_UNAVAILABLE, allow_barge_in=False)
             return False
 
-        locked_for = pin_gate.lockout_remaining(self.caller_id)
-        if locked_for:
-            print(f"[CELLULAR-IVR] Caller {pin_gate.mask_caller(self.caller_id)} "
-                  f"is locked out ({locked_for}s left), refusing")
-            await self._play_prompt(IVR_PIN_LOCKED, allow_barge_in=False)
+        if await self._refuse_if_locked():
             return False
 
         pin_len = pin_gate.pin_length()
@@ -355,6 +361,11 @@ class CellularIVR:
         for attempt in range(attempts):
             if not self._check_call():
                 return False
+            # Re-check before each retry and before judging each entry: a
+            # parallel call from the same number (or the global backstop) may
+            # have locked it while this call was waiting.
+            if attempt and await self._refuse_if_locked():
+                return False
 
             if attempt == 0:
                 await self._play_prompt(get_pin_prompt(pin_len))
@@ -362,6 +373,9 @@ class CellularIVR:
                 await self._play_prompt(IVR_PIN_RETRY)
 
             digits = await self._wait_for_dtmf(num_digits=pin_len)
+
+            if await self._refuse_if_locked():
+                return False
 
             if pin_gate.check_pin(digits):
                 pin_gate.record_success(self.caller_id)

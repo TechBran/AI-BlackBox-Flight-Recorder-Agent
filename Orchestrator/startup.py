@@ -769,6 +769,9 @@ async def startup_phone_pin_check():
     if not (config.ASTERISK_ENABLED or config.PHONE_ENABLED or config.CELLULAR_ENABLED):
         return
     from Orchestrator.phone import pin_gate
+    raw = os.getenv("PHONE_PIN_ENABLED")
+    if raw is not None and raw.strip().lower() not in ("", "true", "false", "1", "0", "yes", "no", "on", "off"):
+        logger.warning("PHONE_PIN_ENABLED=%r is not true/false: treating it as true (PIN required)", raw)
     status = pin_gate.gate_status()
     if status == "unconfigured":
         pin_gate.log_unconfigured("PHONE-PIN")

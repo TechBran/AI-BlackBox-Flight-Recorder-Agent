@@ -11,6 +11,7 @@ Provides REST and WebSocket endpoints for phone call management:
 - POST /phone/webhook/3cx - 3CX event webhooks
 - GET /phone/pin - Inbound-call PIN gate status (never the PIN)
 - POST /phone/pin/generate - Generate the phone PIN when none is set
+- POST /phone/pin/lockout/reset - Clear the PIN lockouts (callers and the global backstop)
 - WS /ws/phone/{session_id} - Audio bridge WebSocket
 """
 
@@ -167,6 +168,17 @@ async def phone_pin_generate() -> Dict[str, Any]:
     if pin_gate.pin_configured():
         raise HTTPException(status_code=409, detail="A phone PIN is already set (PHONE_PIN_CODE in .env)")
     return pin_gate.ensure_pin()
+
+
+@app.post("/phone/pin/lockout/reset")
+async def phone_pin_lockout_reset() -> Dict[str, Any]:
+    """Clear every PIN lockout, including the global backstop.
+
+    For the operator when wrong guesses (for example from rotating caller
+    IDs) have locked callers out. Numbers that entered the right PIN recently
+    are already exempt from the global lock; this clears the rest.
+    """
+    return {"cleared": pin_gate.reset_lockouts()}
 
 
 @app.get("/phone/sessions")
