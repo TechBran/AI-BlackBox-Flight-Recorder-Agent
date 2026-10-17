@@ -72,6 +72,11 @@ PW1="$(env_val ASTERISK_ARI_PASSWORD)"
 [[ ${#PW1} -ge 32 ]] || fail "no strong ARI password generated in .env"
 grep -qx "password=$PW1" "$WORK/etc/asterisk/ari.conf" || fail "ari.conf does not carry the .env password"
 grep -qx "\[blackbox\]" "$WORK/etc/asterisk/ari.conf" || fail "ari.conf user section missing"
+# ARI is server-to-server on loopback (the Orchestrator's aiohttp client sends
+# no Origin): no browser origin may get CORS on it (audit M3 U20 item 7).
+grep -qiE '^[[:space:]]*allowed_origins[[:space:]]*=' "$WORK/etc/asterisk/ari.conf" \
+    && fail "ari.conf grants CORS to browser origins (ARI must stay server-to-server)"
+grep -qx "enabled=yes" "$WORK/etc/asterisk/ari.conf" || fail "ari.conf no longer enables ARI"
 [[ "$(env_val OTHER)" == "keep" ]] || fail ".env lost other keys"
 [[ "$(stat -c %a "$WORK/root/.env")" == "600" ]] || fail ".env mode changed"
 grep -qF "$PW1" "$WORK/out.log" && fail "the ARI password was printed"

@@ -80,7 +80,9 @@ ARI_PASSWORD="$(python3 -I "$ENV_KEY" get "$ENV_FILE" ASTERISK_ARI_PASSWORD)"
 [general]
 enabled=yes
 pretty=yes
-allowed_origins=*
+; No allowed_origins: ARI is loopback, server-to-server only (the Orchestrator's
+; client sends no Origin). Granting CORS would let any page in a browser on
+; this box read ARI and drive calls once it holds the credentials.
 
 [$ARI_USER]
 type=user
