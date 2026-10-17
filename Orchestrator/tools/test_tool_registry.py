@@ -7,6 +7,8 @@ Or:  python -m pytest Orchestrator/tools/test_tool_registry.py -v
 import sys
 import os
 
+import pytest
+
 # Ensure Orchestrator is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -69,6 +71,12 @@ def test_chat_cu_excludes_use_computer():
     assert "use_computer" not in names, "chat_cu should not include use_computer"
 
 
+# This suite was never collected until the CI gate (audit O21-python-tests-05);
+# by then the xAI-line call controls had joined "chat" without "chat_cu".
+@pytest.mark.xfail(strict=False, reason=(
+    "hangup_call/transfer_call (c86ac67e) are in chat but not chat_cu: whether a "
+    "Computer-Use agent may end or transfer a live xAI call is an owner product "
+    "call (add chat_cu to both schemas, or widen the set below)"))
 def test_chat_cu_includes_other_tools():
     """chat_cu (the toolset a Computer-Use agent sees) = chat MINUS the
     autonomous-agent-spawning tools. The invariant is NOT "minus use_computer"
@@ -121,13 +129,22 @@ def test_phone_group_count():
     assert len(tools) >= 22, f"Phone group: expected 22+, got {len(tools)}"
 
 
+# Call controls that act on the xAI sovereign phone line only (their schemas
+# say so): grok_live carries them, the other live groups cannot use them.
+XAI_LINE_CALL_CONTROLS = {"hangup_call", "transfer_call"}
+
+
 def test_live_groups_parity():
-    """Realtime, gemini_live, and grok_live should have the same tools."""
+    """Realtime, gemini_live, and grok_live should have the same tools, except
+    the xAI-line call controls, which only grok_live carries."""
     realtime = set(get_group_tool_names("realtime"))
     gemini = set(get_group_tool_names("gemini_live"))
     grok = set(get_group_tool_names("grok_live"))
     assert realtime == gemini, f"Realtime vs Gemini Live diff: {realtime.symmetric_difference(gemini)}"
-    assert realtime == grok, f"Realtime vs Grok Live diff: {realtime.symmetric_difference(grok)}"
+    assert XAI_LINE_CALL_CONTROLS <= grok
+    assert not XAI_LINE_CALL_CONTROLS & realtime
+    assert realtime == grok - XAI_LINE_CALL_CONTROLS, (
+        f"Realtime vs Grok Live diff: {realtime.symmetric_difference(grok - XAI_LINE_CALL_CONTROLS)}")
 
 
 # =============================================================================

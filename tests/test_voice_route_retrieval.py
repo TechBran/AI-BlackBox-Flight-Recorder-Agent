@@ -8,9 +8,14 @@ when given a non-empty user_text.
 This protects against the original regression where each voice route only
 fetched 1 checkpoint + 2 recent snapshots and silently dropped keyword/semantic.
 """
+import pytest
+
 from Orchestrator.routes.gemini_live_routes import build_context_for_operator as build_gemini_ctx
 from Orchestrator.routes.realtime_routes import build_context_for_operator as build_realtime_ctx
 from Orchestrator.routes.grok_live_routes import build_context_for_operator as build_grok_ctx
+
+# Retrieval quality over this box's real ledger.
+pytestmark = pytest.mark.live_store
 
 
 def _assert_context_quality(fn, name):

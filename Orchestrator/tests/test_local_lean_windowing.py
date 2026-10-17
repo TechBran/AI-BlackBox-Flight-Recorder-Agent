@@ -493,6 +493,7 @@ def _require_live_store():
     return store
 
 
+@pytest.mark.live_store
 def test_live_lean_windowed_delivery_under_budget():
     """LIVE: the lean profile's semantic delivery fits the per-snapshot budget
     with ranking untouched — every text <= budget, same ids as the whole-text

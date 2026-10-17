@@ -20,6 +20,11 @@ import hashlib
 import sys
 from pathlib import Path
 
+import pytest
+
+# Reads this box's ledger, snapshot index and Manifest/code_*.json.
+pytestmark = pytest.mark.live_store
+
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 

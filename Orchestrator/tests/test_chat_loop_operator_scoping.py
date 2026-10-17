@@ -267,6 +267,7 @@ def _require_live_store():
         pytest.skip("active store empty")
 
 
+@pytest.mark.live_store
 def test_hybrid_retrieval_live_scoped_to_operator():
     """With a real operator: results come back, ONLY that operator's snapshots
     rank, and the keyword channel is populated (it is silently empty for '').

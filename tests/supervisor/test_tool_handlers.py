@@ -1,6 +1,9 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
+# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
+pytestmark = pytest.mark.ugv
+
 from ugv_tools_api.supervisor.tool_handlers import (
     exec_get_robot_state,
     exec_dispatch_er_mission,

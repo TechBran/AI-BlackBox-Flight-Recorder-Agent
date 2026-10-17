@@ -17,9 +17,9 @@ app-level cap is needed). The mirror truncation in tasks.py is removed too, and 
 provider alias is normalized to gemini so the system-prompt tool instructions are
 formatted for the right provider.
 
-These tests exercise the REAL injector (the local embedding model is offline-
-usable here, ~1s/query), plus a deterministic ``_last_user_msg`` assertion that
-holds even if the embedder is unavailable.
+These tests exercise the REAL injector over this box's ToolVault embedding
+cache and active embedder (marker live_store), plus a deterministic
+``_last_user_msg`` assertion that holds even if the embedder is unavailable.
 """
 
 import pytest
@@ -88,6 +88,7 @@ def _real_injector_or_skip():
         pytest.skip(f"real injector/embedding model unavailable: {e}")
 
 
+@pytest.mark.live_store
 def test_full_cron_prompt_selects_send_sms_real_injector():
     """The FULL cron-shaped prompt selects send_sms via the real hybrid search
     (threshold 0.5). This is what the fix delivers to cron jobs."""
@@ -99,6 +100,7 @@ def test_full_cron_prompt_selects_send_sms_real_injector():
     )
 
 
+@pytest.mark.live_store
 def test_truncated_cron_prompt_drops_send_sms_real_injector():
     """Demonstrates the ROOT CAUSE: the OLD [:500] truncation drops the SMS tail
     so send_sms is NOT selected. This is the behavior the fix removes."""

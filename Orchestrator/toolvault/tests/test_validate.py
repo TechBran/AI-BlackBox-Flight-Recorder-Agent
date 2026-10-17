@@ -3,8 +3,9 @@
 Two layers:
 
 * **Real tree** — ``validate_all()`` against the actual ``ToolVault/tools`` must
-  report ``ok=True``, at least 48 tools, no errors, and full embedding coverage
-  (embeddings.json ships with the repo).
+  report ``ok=True``, at least 48 tools and no errors. Full embedding coverage
+  is a property of this box's embeddings.json, a gitignored cache that a fresh
+  checkout does not have, so that check is a live_store test.
 * **Hermetic** — point ``registry.TOOLS_DIR`` at a tmp dir with one invalid
   module and confirm ``ok=False`` and the folder appears in ``errors``.
 """
@@ -25,7 +26,7 @@ BASELINE_TOOL_COUNT = 48
 # ---------------------------------------------------------------------------
 
 def test_validate_all_real_tree_ok():
-    """The shipping module tree validates clean with 48 tools, full coverage."""
+    """The shipping module tree validates clean with at least 48 tools."""
     report = validate.validate_all()
 
     assert report["ok"] is True, f"unexpected errors: {report['errors']}"
@@ -34,13 +35,20 @@ def test_validate_all_real_tree_ok():
 
     cov = report["embedding_coverage"]
     assert cov["total"] >= BASELINE_TOOL_COUNT
-    assert cov["embedded"] == cov["total"]  # full coverage (count-agnostic)
+    assert 0 <= cov["embedded"] <= cov["total"]
 
     # schema_only is a sorted list of valid no-executor tools (the mcp-internal
     # ones). It must be a subset of all tools and contain no error folders.
     assert isinstance(report["schema_only"], list)
     assert report["schema_only"] == sorted(report["schema_only"])
     assert len(report["schema_only"]) <= report["tool_count"]
+
+
+@pytest.mark.live_store
+def test_real_tree_embedding_coverage_is_full():
+    """This box's ToolVault embedding cache covers every shipping tool."""
+    cov = validate.validate_all()["embedding_coverage"]
+    assert cov["embedded"] == cov["total"]  # full coverage (count-agnostic)
 
 
 def test_cli_main_real_tree_exits_zero():

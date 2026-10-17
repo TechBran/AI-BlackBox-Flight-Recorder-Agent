@@ -256,6 +256,7 @@ def _claude_binary():
     return path if os.path.exists(path) else shutil.which("claude")
 
 
+@pytest.mark.live_service
 @pytest.mark.skipif(os.environ.get("BLACKBOX_LIVE_CLAUDE_PROBE") != "1" or not _claude_binary(),
                     reason="live Claude CLI probe (network + a signed-in CLI): set "
                            "BLACKBOX_LIVE_CLAUDE_PROBE=1 to run")

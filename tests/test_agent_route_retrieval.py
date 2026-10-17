@@ -30,10 +30,14 @@ def _service_up(host: str = "127.0.0.1", port: int = 9091, timeout: float = 0.5)
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _service_up(),
-    reason="Orchestrator service is not running on localhost:9091 — skip live WS probes",
-)
+pytestmark = pytest.mark.live_service
+
+
+@pytest.fixture(autouse=True)
+def _require_service():
+    # Probed per test, not at import, so collecting this module opens no socket.
+    if not _service_up():
+        pytest.skip("Orchestrator service is not running on localhost:9091 — skip live WS probes")
 
 
 def _import_websockets():

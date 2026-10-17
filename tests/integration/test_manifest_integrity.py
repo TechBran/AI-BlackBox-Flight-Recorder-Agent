@@ -13,6 +13,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
+# Reads this box's Manifest/code_manifest.json (gitignored runtime data).
+pytestmark = pytest.mark.live_store
+
 # Paths
 BLACKBOX_ROOT = Path(__file__).parent.parent.parent
 MANIFEST_PATH = BLACKBOX_ROOT / "Manifest" / "code_manifest.json"

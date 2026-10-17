@@ -261,8 +261,9 @@ def test_retrieve_empty_keyword_channel_behaves_semantic_only(hermetic_protect):
     assert [sid for sid, _ in results] == ["S1", "S4", "S2"]
 
 
-# ── live integration (skipped when store/provider unavailable) ────────────────
+# ── live integration (marker live_store; skipped when store/provider unavailable)
 
+@pytest.mark.live_store
 def test_retrieve_live_returns_recent_snapshots():
     try:
         from Orchestrator.embeddings.search import get_active_store
@@ -278,13 +279,15 @@ def test_retrieve_live_returns_recent_snapshots():
 
     assert len(results) <= 10
     assert all(isinstance(sid, str) and isinstance(score, float) for sid, score in results)
-    # The recency tie-break should surface recent (June 2026) work near the top.
-    top_ids = [sid for sid, _ in results]
-    assert any(sid.startswith("SNAP-202606") for sid in top_ids), top_ids
+    # The recency tie-break should surface recent work near the top ("recent"
+    # measured from the newest snapshot, not the calendar).
+    from Orchestrator.tests.live_store import assert_has_recent
+    assert_has_recent([sid for sid, _ in results])
 
 
 # ── opt-in provenance logging (Phase 5.1) ─────────────────────────────────────
 
+@pytest.mark.live_store
 def test_provenance_log_emitted_only_when_flag_enabled(capsys):
     """[retrieval] debug_log gates a structured [RETRIEVAL] line per result.
 

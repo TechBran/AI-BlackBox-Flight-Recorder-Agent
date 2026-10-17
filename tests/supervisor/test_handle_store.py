@@ -1,4 +1,9 @@
+import pytest
+
 from ugv_tools_api.supervisor.handle_store import HandleStore
+
+# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
+pytestmark = pytest.mark.ugv
 
 
 def test_set_and_get(tmp_path):

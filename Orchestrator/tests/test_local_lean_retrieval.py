@@ -9,11 +9,15 @@ combine to filter EVERYTHING out for representative recent queries.
 We assert only that the lean path returns NON-EMPTY results (>=1) for several
 representative recent queries -- not specific ids -- because the failure mode
 being guarded is "empty", and ranking is validated separately by the golden
-set. Hits the LIVE store/provider; skips (never fake-passes) when unavailable.
+set. Hits the LIVE store/provider (marker live_store); skips (never
+fake-passes) when the store or the query embedder is unavailable.
 """
 import pytest
 
 from Orchestrator.retrieval import retrieve
+from Orchestrator.tests.live_store import require_query_embedder
+
+pytestmark = pytest.mark.live_store
 
 
 # Representative recent queries the on-device agent would realistically ask.
@@ -32,6 +36,7 @@ def _require_live_store():
         pytest.skip(f"active store/provider unavailable: {e}")
     if store.count == 0:
         pytest.skip("active store empty")
+    require_query_embedder()
 
 
 @pytest.mark.parametrize("query", LEAN_QUERIES)

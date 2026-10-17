@@ -8,6 +8,8 @@ that leading envelope, returning from the first content marker
 ("Raw Session Log", else "SNAPSHOT BODY") onward; a snapshot without either
 marker (or non-snapshot text) is returned unchanged, never reduced to empty.
 """
+import pytest
+
 from Orchestrator.fossils import extract_snapshot_content, format_snapshot_for_delivery
 
 
@@ -148,6 +150,7 @@ def test_marker_line_with_leading_whitespace_snaps_to_line_start():
     assert "- [1] user: hi" in result
 
 
+@pytest.mark.live_store
 def test_real_decoded_snapshot_drops_envelope_keeps_turns():
     # End-to-end against a real decoded snapshot from the live volume (skipped
     # on a fresh box with no index / no snapshots).

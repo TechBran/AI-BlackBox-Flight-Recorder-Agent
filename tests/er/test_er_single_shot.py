@@ -24,10 +24,16 @@ def _er_reachable() -> bool:
         return False
 
 
-# Skip the whole module if ER isn't reachable (e.g., running on a laptop).
-pytestmark = pytest.mark.skipif(
-    not _er_reachable(), reason=f"ugv-er not reachable at {ER_URL}",
-)
+# UGV robot hardware (ugv-er.service on the Jetson): opt-in only.
+pytestmark = [pytest.mark.ugv, pytest.mark.live_service]
+
+
+@pytest.fixture(autouse=True)
+def _require_er():
+    # Skip if ER isn't reachable (e.g., running on a laptop). Probed per test,
+    # not at import, so collecting this module opens no socket.
+    if not _er_reachable():
+        pytest.skip(f"ugv-er not reachable at {ER_URL}")
 
 
 def test_single_shot_mission():

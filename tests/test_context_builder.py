@@ -10,6 +10,8 @@ import pytest
 
 from Orchestrator.context_builder import build_fossil_context
 
+pytestmark = pytest.mark.live_store
+
 
 def test_build_fossil_context_populates_all_four_sources():
     # Uses the real volume; this is an integration probe

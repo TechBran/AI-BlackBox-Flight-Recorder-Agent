@@ -4,7 +4,12 @@ here, by design, so the unit suite stays fast and CI-portable.
 """
 import struct
 
+import pytest
+
 from ugv_tools_api.supervisor.audio_io import make_chime
+
+# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
+pytestmark = pytest.mark.ugv
 
 
 def test_chime_is_pcm_s16le_and_not_empty():

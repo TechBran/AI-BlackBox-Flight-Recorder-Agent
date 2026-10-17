@@ -6,8 +6,11 @@ test_install_asterisk_block.sh. Nothing invoked those automatically, and an
 un-run test is exactly how the stale-helper class rotted back in
 (customer, 2026-07-27) — so `pytest Orchestrator/tests/` runs them too.
 
-Both scripts sandbox themselves into mktemp dirs and never touch the real
-/usr/local/sbin, /etc, or apt.
+Every scripts/tests/test_*.sh is collected by name (audit
+O21-python-tests-14: a hand-kept list had fallen to 6 of 11), the same set
+scripts/tests/run_all.sh runs in the CI shell job. Each script sandboxes
+itself into mktemp dirs and never touches the real /usr/local/sbin, /etc, or
+apt.
 """
 import shutil
 import subprocess
@@ -19,15 +22,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SHELL_TESTS = REPO_ROOT / "scripts" / "tests"
 
 
+SUITES = sorted(p.name for p in SHELL_TESTS.glob("test_*.sh"))
+
+
+def test_shell_suites_are_found():
+    assert len(SUITES) >= 11, SUITES
+
+
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-@pytest.mark.parametrize("script", [
-    "test_install_update_helpers.sh",         # install.sh templates the real root
-    "test_apt_helper_root_resolution.sh",     # env -> pointer -> templated default
-    "test_install_perimeter_invariants.sh",   # /etc/blackbox, restart guard, ordering
-    "test_sudoers_template_perimeter.sh",     # visudo, no globs/shells, golden grants
-    "test_cellular_polkit_rule.sh",           # no systemd1, network-control only
-    "test_install_journald_retention.sh",     # persistent journal, journal group
-])
+@pytest.mark.parametrize("script", SUITES)
 def test_shell_suite(script):
     path = SHELL_TESTS / script
     assert path.is_file(), f"missing shell test {path}"
@@ -36,4 +39,6 @@ def test_shell_suite(script):
     assert result.returncode == 0, (
         f"{script} failed (rc={result.returncode}):\n"
         f"{result.stdout}\n{result.stderr}")
-    assert "ALL TESTS PASSED" in result.stdout
+    # A suite that exits 0 before its checks prints neither banner.
+    assert ("ALL TESTS PASSED" in result.stdout
+            or f"PASS: {script}" in result.stdout), result.stdout

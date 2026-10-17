@@ -4,9 +4,10 @@ Two complementary guards against the two opposite failure modes of the
 recency tie-break:
 
   Half A — RECURRING topics: recent active work must NOT be buried. For each
-  query, at least one top-5 result must be a 2026-06 snapshot (the recent
-  active period). Catches "recency_weight too low / relevance overwhelms recent
-  duplicates" regressions.
+  query, at least one top-5 result must be a recent snapshot: dated within
+  RECENT_WINDOW_DAYS of the newest snapshot in the index (live_store.py; this
+  used to pin 2026-06 and went red when the ledger moved on). Catches
+  "recency_weight too low / relevance overwhelms recent duplicates" regressions.
 
   Half B — SINGLE-EVENT facts: a specific older snapshot that documents one
   discrete fix must NOT be buried by recency. The gold snap_ids below were
@@ -15,17 +16,21 @@ recency tie-break:
   the fix (commit SHAs cited in the snapshot body). Catches "recency_weight too
   high / over-correction drowns canonical older facts" regressions.
 
-These tests hit the LIVE active store + embedding provider; they skip (never
-fake-pass) when the store/provider is unavailable. They assert ONLY ranking
+These tests hit the LIVE active store + embedding provider (marker live_store:
+BLACKBOX_TEST_LIVE=1 pytest -m live_store); they skip (never fake-pass) when the
+store/provider is unavailable. They assert ONLY ranking
 outcomes — they do not change retrieval behavior or the locked [retrieval]
 defaults.
 """
 import pytest
 
 from Orchestrator.retrieval import retrieve
+from Orchestrator.tests.live_store import assert_has_recent
+
+pytestmark = pytest.mark.live_store
 
 
-# -- Half-A: recurring topics -- recent work must surface (>=1 of top-5 is 2026-06)
+# -- Half-A: recurring topics -- recent work must surface (>=1 of top-5 is recent)
 RECURRING_QUERIES = [
     "pluggable embeddings model migration reembed",
     "control_phone delegate device task tailscale",
@@ -74,15 +79,13 @@ def _require_live_store():
 
 @pytest.mark.parametrize("query", RECURRING_QUERIES)
 def test_recurring_topic_surfaces_recent_snapshot(query):
-    """Half A: >=1 of the top-5 results is a 2026-06 snapshot (recency not buried)."""
+    """Half A: >=1 of the top-5 results is a recent snapshot (recency not buried)."""
     _require_live_store()
     results = retrieve(query, "system", k=5)
     if not results:
         pytest.skip(f"retrieve returned nothing for {query!r} (query embed unavailable)")
     top_ids = [sid for sid, _ in results]
-    assert any(sid.startswith("SNAP-202606") for sid in top_ids), (
-        f"no 2026-06 snapshot in top-5 for {query!r}: {top_ids}"
-    )
+    assert_has_recent(top_ids, f" for {query!r}")
 
 
 @pytest.mark.parametrize("query,gold_id", SINGLE_EVENT_GOLD)

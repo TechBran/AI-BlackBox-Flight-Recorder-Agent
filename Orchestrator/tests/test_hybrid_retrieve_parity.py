@@ -17,6 +17,9 @@ on top of the keyword scan inside retrieve().
 
 The earlier Phase-2 PARITY history (pre-change baseline ids) is intentionally not
 preserved here — see git history of this file for the old pinned baseline.
+
+The behavioral and peak tests read this box's ledger (marker live_store) and skip
+on a box without one.
 """
 import gc
 import tracemalloc
@@ -30,9 +33,12 @@ from Orchestrator.fossils import (
     keyword_retrieve_for_operator,
 )
 from Orchestrator.config import VOL_PATH
+from Orchestrator.tests.live_store import assert_has_recent
 
 
 def _vol():
+    if not VOL_PATH.exists():
+        pytest.skip("no ledger on this box (fresh box)")
     return read_volume_bytes(VOL_PATH).decode("utf-8", "replace")
 
 
@@ -44,6 +50,7 @@ QUERIES = [
 ]
 
 
+@pytest.mark.live_store
 def test_hybrid_retrieve_returns_bounded_real_snapshots():
     """Every query returns <=k real, non-empty, START-marked, de-duplicated snaps."""
     vol = _vol()
@@ -65,15 +72,13 @@ def test_hybrid_retrieve_returns_bounded_real_snapshots():
         assert len(ids) == len(set(ids)), f"{q!r}: duplicate snap_ids in output: {ids}"
 
 
+@pytest.mark.live_store
 def test_hybrid_retrieve_surfaces_recent_work():
-    """(c) Recency tie-break: a recent 2026-06 snapshot appears in the top-k for a
-    topic with recent activity (the recency fix is the point of Phase 3b)."""
+    """(c) Recency tie-break: a recent snapshot appears in the top-k for a topic
+    with recent activity (the recency fix is the point of Phase 3b)."""
     vol = _vol()
     results = hybrid_retrieve(vol, "embeddings model switch reembed", k=5, operator="system")
-    ids = extract_snap_ids(results)
-    assert any(sid.startswith("SNAP-202606") for sid in ids), (
-        f"expected a recent 2026-06 snapshot in the top-k, got: {ids}"
-    )
+    assert_has_recent(extract_snap_ids(results))
 
 
 HYBRID_PEAK_FACTOR = 1.5
@@ -93,6 +98,7 @@ def test_hybrid_peak_ceiling_still_catches_a_full_volume_decode():
         assert _hybrid_peak_ceiling_bytes(vol_bytes) < 7 * vol_bytes
 
 
+@pytest.mark.live_store
 def test_hybrid_retrieve_peak_is_bounded():
     """hybrid_retrieve's per-call peak stays BOUNDED (no unbounded / O(n^2) blowup).
 

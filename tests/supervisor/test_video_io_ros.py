@@ -11,6 +11,9 @@ import pytest
 
 rclpy = pytest.importorskip("rclpy", reason="ROS2 rclpy not available")
 
+# UGV Beast sub-project on the Jetson (ROS2 + cameras): opt-in, -m ugv.
+pytestmark = pytest.mark.ugv
+
 
 def test_camera_subscriber_captures_frames():
     from ugv_tools_api.supervisor.video_io import RosCamera

@@ -2,6 +2,9 @@ import pytest
 
 from ugv_tools_api.supervisor import config as cfg
 
+# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
+pytestmark = pytest.mark.ugv
+
 
 def test_defaults(monkeypatch):
     for v in ("SUPERVISOR_MODEL", "SUPERVISOR_VOICE", "SUPERVISOR_LANG",
@@ -11,11 +14,11 @@ def test_defaults(monkeypatch):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
     s = cfg.load()
-    assert s.model == "gemini-3.1-flash-live-preview"
+    assert s.model == "gemini-2.5-flash-native-audio-latest"
     assert s.voice == "Orus"
     assert s.language_code == "en-US"
-    assert s.mic_device == "plughw:CARD=Camera,DEV=0"
-    assert s.spk_device == "plughw:CARD=Device,DEV=0"
+    assert s.mic_device == "pulse"
+    assert s.spk_device == "pulse"
     assert s.tools_api_url == "http://localhost:8080"
     assert s.er_url == "http://localhost:8082"
     assert s.camera_topic == "/camera/image/compressed"

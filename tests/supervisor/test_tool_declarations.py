@@ -1,8 +1,14 @@
+import pytest
+
 from ugv_tools_api.supervisor.tool_declarations import ALL_TOOLS, tool_names
+
+# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
+pytestmark = pytest.mark.ugv
 
 
 EXPECTED = {
-    "get_robot_state", "get_camera_view", "get_costmap_view",
+    "get_robot_state", "get_camera_view", "get_slam_map_view",
+    "get_costmap_view", "set_watch_mode",
     "dispatch_er_mission", "cancel_er_mission", "get_er_mission_status",
     "emergency_stop", "lights_on", "lights_off", "gimbal_look_at",
 }
@@ -23,10 +29,10 @@ def test_dispatch_er_mission_schema_has_required_mission_param():
     assert "mission" in (d.parameters.required or [])
 
 
-def test_dispatch_er_mission_replace_current_defaults_false():
+def test_dispatch_er_mission_replace_current_defaults_true():
     d = next(t for t in ALL_TOOLS if t.name == "dispatch_er_mission")
     rc = d.parameters.properties["replace_current"]
-    assert rc.default is False
+    assert rc.default is True
 
 
 def test_cancel_er_mission_reason_is_required():

@@ -283,6 +283,7 @@ def test_peak_ceiling_still_catches_the_pre_2b_regression():
         assert _peak_ceiling_bytes(vol_bytes) < 3.4 * vol_bytes
 
 
+@pytest.mark.live_store
 def test_keyword_scorer_peak_ceiling():
     """Per-call tracemalloc PEAK of the operator scorer must sit below the ceiling.
 

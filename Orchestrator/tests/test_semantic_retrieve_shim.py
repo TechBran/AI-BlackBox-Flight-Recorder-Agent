@@ -11,10 +11,12 @@ Because the ranking changed BY DESIGN (no more hard-threshold filter), the old
 threshold-based assertions no longer apply. Instead we assert the BEHAVIORS the new
 pipeline must exhibit: the SAME return type (list of decoded snapshot texts, each
 carrying a SNAP- START marker), bounded by k, no duplicate ids, and recency
-surfacing recent work. Hits the LIVE store/provider; skips (never fake-passes)
-when unavailable so the suite stays green offline.
+surfacing recent work. Hits the LIVE store/provider (marker live_store); skips
+(never fake-passes) when unavailable so the suite stays green offline.
 """
 import pytest
+
+from Orchestrator.tests.live_store import assert_has_recent
 
 from Orchestrator.config import VOL_PATH
 from Orchestrator.fossils import (
@@ -44,6 +46,7 @@ QUERIES = [
 ]
 
 
+@pytest.mark.live_store
 @pytest.mark.parametrize("query", QUERIES)
 def test_semantic_retrieve_returns_bounded_real_snapshots(query):
     """SAME return type: <=k real, non-empty, START-marked, de-duplicated texts."""
@@ -65,19 +68,18 @@ def test_semantic_retrieve_returns_bounded_real_snapshots(query):
     assert len(ids) == len(set(ids)), f"{query!r}: duplicate snap_ids: {ids}"
 
 
+@pytest.mark.live_store
 def test_semantic_retrieve_surfaces_recent_work():
-    """Recency tie-break: a recent 2026-06 snapshot appears in the top-k for a topic
-    with recent activity (the recency-aware per-turn context is the point of 3b-2)."""
+    """Recency tie-break: a recent snapshot appears in the top-k for a topic with
+    recent activity (the recency-aware per-turn context is the point of 3b-2)."""
     _require_live_store()
     results = semantic_retrieve(
         "pluggable embeddings model migration", operator="system", k=8
     )
-    ids = extract_snap_ids(results)
-    assert any(sid.startswith("SNAP-202606") for sid in ids), (
-        f"expected a recent 2026-06 snapshot in the top-k, got: {ids}"
-    )
+    assert_has_recent(extract_snap_ids(results))
 
 
+@pytest.mark.live_store
 def test_semantic_retrieve_threshold_arg_is_vestigial():
     """The threshold arg is retained for signature compat but is now UNUSED:
     passing an absurdly high threshold no longer empties the result set (retrieve()

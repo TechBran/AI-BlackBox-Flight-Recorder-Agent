@@ -8,6 +8,10 @@ shared `build_fossil_context` it now delegates to) has regressed.
 import httpx
 import json
 
+import pytest
+
+pytestmark = pytest.mark.live_service
+
 
 def test_chat_stream_emits_populated_provenance():
     body = {
