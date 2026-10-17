@@ -129,7 +129,7 @@ class _RegenTarget:
     ABSENT: it needs REAL_HOME / LOCALSTACK_* substitutions the runner does not
     have, so rendering it here would dispatch a unit full of literal
     PLACEHOLDER strings. The inline-heredoc units in install.sh (blackbox.service,
-    override, cli-agent-overrides, mcp, ydotoold, time-sync, logrotate) are the
+    override, cli-agent-overrides, mcp, ydotoold, time-sync) are the
     documented residual — an operator step (`sudo bash install.sh`), never a
     fragile heredoc reimplementation here.
     """
@@ -554,7 +554,7 @@ class UpdateRunner:
 
         # Residual (install.sh-grant removal, 2026-07-27): the always-on units are
         # inline heredocs in install.sh (blackbox.service, override,
-        # cli-agent-overrides, mcp, ydotoold, time-sync, logrotate), not standalone
+        # cli-agent-overrides, mcp, ydotoold, time-sync), not standalone
         # templates — the runner cannot re-template them without a fragile
         # reimplementation. Most install.sh edits are user-session config, not unit
         # changes, so this is an informational note (not a failure) whenever the

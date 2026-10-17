@@ -1,7 +1,9 @@
 # Pinned Zellij version for the CLI Agent terminal bridge.
 # install.sh reads this to download the matching x86_64-unknown-linux-musl
-# build; the update pipeline (Phase 5) watches this file for bumps and
-# triggers a download+zellij-web.service restart on customer machines.
+# build. A bump reaches a customer machine only through the human-run
+# `sudo bash install.sh` (Step 2c): the service-side zellij binary helper
+# that once trusted this service-writable file is deleted (2026-10 audit
+# X04-security-clients-infra-01).
 #
 # Validated in Phase 0 spike: claude, gemini, codex, agy all render with
 # native scrollback on 0.44.3. Do not bump without re-validating the spike.

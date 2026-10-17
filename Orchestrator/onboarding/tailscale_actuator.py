@@ -9,6 +9,11 @@
    - M6 (auth timeout): 15s timeout waiting for Login URL line
    - E1 (T3 skipped): Tailscale pre-installed by install.sh; no install
      stream endpoint needed.
+   - 2026-10 audit X04-security-clients-infra-02: the `up` and `cert` grants
+     are anchored `^…$` regexes, not trailing globs, so the argv built here
+     must stay exactly `up --accept-dns=true --hostname=<one DNS label>` and
+     `cert <labels>.ts.net` (Orchestrator/tests/
+     test_privileged_argv_matches_sudoers.py checks it against the template).
 """
 import asyncio
 import json
@@ -29,6 +34,12 @@ _active_up_process: subprocess.Popen | None = None
 _active_up_login_url: str | None = None
 
 LOGIN_URL_PATTERN = re.compile(r"https://login\.tailscale\.com/a/[a-zA-Z0-9]+")
+
+# The DNS-label / *.ts.net shapes the anchored sudoers grants accept
+# (installer/templates/sudoers-blackbox-system). Anything else would only earn
+# a sudo refusal, so it is rejected here with a readable error instead.
+_DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_TS_CERT_DOMAIN = re.compile(rf"{_DNS_LABEL}(?:\.{_DNS_LABEL})*\.ts\.net")
 
 
 def _poll_response(state: str, *, detail=None, backend_state: str | None = None,
@@ -57,9 +68,11 @@ async def operation_lock(lock: asyncio.Lock, name: str):
 
 def _safe_hostname() -> str:
     """Return a sanitized hostname suitable for --hostname= flag.
-    Audit C4: only [a-z0-9-] allowed."""
+    Audit C4: only [a-z0-9-] allowed. Capped at one 63-char DNS label (a
+    Linux hostname can be 64) and never starting/ending with `-`, which is
+    exactly what the anchored `tailscale up` sudoers grant matches."""
     raw = socket.gethostname().lower()
-    safe = re.sub(r"[^a-z0-9-]", "-", raw).strip("-")
+    safe = re.sub(r"[^a-z0-9-]", "-", raw).strip("-")[:63].strip("-")
     return safe or "blackbox"
 
 
@@ -234,6 +247,12 @@ async def request_cert() -> dict:
             return {"ok": False, "error": "no hostname assigned by Tailscale"}
     except Exception as e:
         return {"ok": False, "error": f"status probe failed: {e}"}
+    # The sudoers grant is `cert <labels>.ts.net` and nothing else; a value
+    # outside that shape (never a real MagicDNS name) must not reach sudo.
+    if not _TS_CERT_DOMAIN.fullmatch(hostname):
+        return {"ok": False,
+                "error": f"unexpected Tailscale DNS name {hostname[:100]!r} "
+                         f"(expected <machine>.<tailnet>.ts.net)"}
 
     proc = await asyncio.create_subprocess_exec(
         "sudo", "-n", "/usr/bin/tailscale", "cert", hostname,

@@ -17,12 +17,29 @@
 #            via /usr/local/sbin/blackbox-* dispatch helpers (T2). Audit
 #            C3 + C4 ruled out wildcard `apt-get install -y *` and
 #            `tee /etc/sudoers.d/*` as priv-esc primitives.
+#   - 2026-10 audit rank 17 (X04-security-clients-infra-02): NO grant ends in
+#            a glob. sudoers matches the arguments as ONE space-joined string,
+#            so a trailing `*` also matched any extra root-run flags. Every
+#            grant is now exact arguments or an anchored `^…$` regex
+#            (sudo >= 1.9.10; install-preflight.sh pins Ubuntu 24.04 = 1.9.15.
+#            An older sudo either rejects this file at visudo -c or never
+#            matches those grants: both fail closed, and install.sh warns).
+#            The journalctl grant is gone (the service reads
+#            its journal as a systemd-journal member) and so is the unused
+#            zellij binary helper. Pinned by
+#            scripts/tests/test_sudoers_template_perimeter.sh (golden list).
 
 # ── Tailscale wizard actuator (E1) ──────────────────────────────────────
+# `up` and `cert` carry one variable token each, so they are anchored regexes
+# over the WHOLE argument string — exactly the shape tailscale_actuator.py
+# builds and nothing more (no --login-server / --ssh / --auth-key on `up`, no
+# --cert-file / --key-file output paths on `cert`):
+#   up --accept-dns=true --hostname=<_safe_hostname(): one DNS label>
+#   cert <Self.DNSName: dot-separated labels ending in .ts.net>
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/apt-get install -y tailscale
-REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale up --accept-dns=true --hostname=*
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale ^up --accept-dns=true --hostname=[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale set --accept-dns=true
-REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale cert *
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale ^cert [a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.ts\.net$
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale serve --bg --https=443 9091
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale serve status --json
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale serve reset
@@ -30,9 +47,12 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale logout
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl start tailscaled
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl enable tailscaled
 
-# ── Service control + logs (E22a) ───────────────────────────────────────
+# ── Service control (E22a) ──────────────────────────────────────────────
+# The former `journalctl -u blackbox.service *` grant ran journalctl as root
+# with ANY extra arguments (--vacuum-*, --rotate, --file/--directory reads).
+# install.sh now adds the service user to the systemd-journal group, and
+# /onboarding/logs/stream runs plain `journalctl` — no root involved.
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl restart blackbox.service
-REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/journalctl -u blackbox.service *
 
 # ── MCP remote server one-click onboarding (M7.4) ───────────────────────
 # Funnel-up exposes the local MCP HTTP server (127.0.0.1:9093) on the PUBLIC
@@ -68,13 +88,24 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl stop blackbox-mcp.
 #     - destination is HARDCODED per target_kind (caller cannot pick path)
 #     - sudoers-* targets validated by `visudo -c` BEFORE copy
 #     - systemd targets trigger daemon-reload after write
-#     - a legacy second argument is accepted-and-ignored (never read)
 #
 # A prompt-injection RCE cannot abuse these to install arbitrary packages,
 # write arbitrary sudoers rules, or escalate beyond the dispatcher's
 # narrow purpose. That's the design intent — the helpers ARE the policy.
-REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-apt-install *
-REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd *
+#
+# The grants no longer end in `*` (2026-10 audit rank 17): sudo itself bounds
+# the arguments before the helper sees them. apt-install takes exactly ONE
+# package-name token that cannot start with `-` (no option injection); the
+# allowlist check stays in the helper. write-systemd is granted ONLY the kinds
+# install.sh publishes to the trusted store (publish_template_store's
+# STORE_MANIFEST) — every other kind would fail closed (exit 6) anyway — and
+# with exactly one argument, so the legacy ignored second argument is refused.
+# Adding a store kind means adding its grant line here in the same commit.
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-apt-install ^[a-z0-9][a-z0-9.+-]*$
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd sudoers-system
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd apt-install-helper
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd write-systemd-helper
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd zellij-web-unit
 
 # ── Update-pipeline systemd regen (install.sh-grant removal, 2026-07-27) ─
 # The former `NOPASSWD: /usr/bin/bash <root>/Scripts/install.sh` grant lived
@@ -91,7 +122,7 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-system
 # Grants required by the Zellij rewrite of the CLI Agent terminal stack.
 # Plan: docs/plans/2026-05-24-zellij-cli-agent-rewrite.md (Track A).
 #
-# Why three grants and not just `restart`:
+# Why two grants and not just `restart`:
 #   - `systemctl restart zellij-web.service` — normal lifecycle (rotate
 #     binary, recover from a hung session, post-update bounce).
 #   - `systemctl daemon-reload` — REQUIRED whenever the unit file content
@@ -102,21 +133,16 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-system
 #     NOTE: this grant is general-purpose — any future unit added via
 #     blackbox-write-systemd benefits from it; do NOT duplicate this rule
 #     in future sections (e.g. a hypothetical worker.service grant block).
-#   - `/usr/local/sbin/blackbox-install-zellij-binary *` — dispatcher
-#     script (written by Track A T4.5) that drops the pinned zellij
-#     binary into /usr/local/bin/. The orchestrator namespace runs with
-#     ProtectSystem=strict (see MEMORY: protectsystem_strict_blast_radius),
-#     so writes to /usr/local/bin/ are blocked even via sudo from inside
-#     the service. The dispatcher does the bounded root operation,
-#     mirroring blackbox-write-systemd + blackbox-apt-install: it
-#     validates the version arg against an allowlist, verifies the
-#     downloaded artifact's checksum, then performs the atomic install.
-#     The wildcard `*` follows the same pattern as the existing
-#     blackbox-apt-install / blackbox-write-systemd grants — argument
-#     validation lives inside the helper, not in the sudoers rule.
+#
+# The former `/usr/local/sbin/blackbox-install-zellij-binary *` grant is
+# DELETED (2026-10 audit X04-security-clients-infra-01): nothing called it,
+# and it compared the caller's version against a pin file inside the
+# service-writable repo, fetched the expected sha256 from the download origin,
+# then ran the result as root. The zellij binary is installed (and a pin bump
+# applied) only by the human-run `sudo bash install.sh` (Step 2c), which also
+# removes the deployed helper.
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl restart zellij-web.service
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
-REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-install-zellij-binary *
 
 # ── Local model stack (local-model-stack M2) ────────────────────────────
 # blackbox-models.service is the llama-swap front door (:9098) supervising

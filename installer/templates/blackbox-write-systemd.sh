@@ -26,8 +26,9 @@
 # running service cannot rewrite the store. The one repo→store bridge —
 # install.sh — is no longer service-runnable once its NOPASSWD grant is removed.
 #
-# Invoked via NOPASSWD sudoers grant:
-#   bbx ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd *
+# Invoked via NOPASSWD sudoers grants, one per published kind and with exactly
+# that one argument (2026-10 audit rank 17 — no trailing `*`), e.g.:
+#   bbx ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd sudoers-system
 #
 # Usage:
 #   sudo blackbox-write-systemd <target_kind>
@@ -36,7 +37,9 @@
 # update runner and the startup hooks) passed a rendered <source_file> as $2.
 # It is never read — the source of truth is the root-owned store above. Ignoring
 # it keeps those callers working across the M0→M3 transition; once they are
-# reworked to the no-source shape the extra arg simply stops being sent.
+# reworked to the no-source shape the extra arg simply stops being sent. (They
+# have been, and the per-kind sudoers grants now refuse a second argument
+# before this script runs.)
 #
 # NO INSTALL ROOT IS BAKED IN HERE, deliberately: the store path is a FIXED
 # /etc path and every destination is hardcoded per target_kind. If a future
@@ -63,7 +66,8 @@
 # step: kinds backed by a git-tracked template (sudoers-system,
 # apt-install-helper, write-systemd-helper, zellij-web-unit) are published;
 # the inline-heredoc units in install.sh (blackbox.service, override,
-# cli-agent-overrides, mcp, ydotoold, time-sync, logrotate) and the
+# cli-agent-overrides, mcp, ydotoold, time-sync), the retired logrotate rule
+# (install.sh no longer writes it; journald holds the logs) and the
 # asterisk-* kinds are NOT — dispatching one of those FAILS CLOSED (exit 6)
 # naming `sudo bash install.sh`, which writes them directly as root. That is
 # the accepted operator-step trade, not a regression: nothing dispatches those

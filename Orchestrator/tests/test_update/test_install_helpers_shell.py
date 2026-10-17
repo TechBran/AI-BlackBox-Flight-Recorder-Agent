@@ -24,6 +24,9 @@ SHELL_TESTS = REPO_ROOT / "scripts" / "tests"
     "test_install_update_helpers.sh",         # install.sh templates the real root
     "test_apt_helper_root_resolution.sh",     # env -> pointer -> templated default
     "test_install_perimeter_invariants.sh",   # /etc/blackbox, restart guard, ordering
+    "test_sudoers_template_perimeter.sh",     # visudo, no globs/shells, golden grants
+    "test_cellular_polkit_rule.sh",           # no systemd1, network-control only
+    "test_install_journald_retention.sh",     # persistent journal, journal group
 ])
 def test_shell_suite(script):
     path = SHELL_TESTS / script

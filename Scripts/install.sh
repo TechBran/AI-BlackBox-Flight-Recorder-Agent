@@ -134,7 +134,7 @@ install_update_helpers() {
         # root-executed sudo helper is therefore not negotiable via env: an
         # exported INSTALL_OWNER would hand the service user write access to the
         # very file the perimeter exists to contain (root runs it through the
-        # `NOPASSWD: /usr/local/sbin/blackbox-apt-install *` grant). Pin owner,
+        # `NOPASSWD: /usr/local/sbin/blackbox-apt-install <pkg>` grant). Pin owner,
         # group and escalation whenever a production destination is in play.
         OWNER=root; GROUP=root; SUDO=sudo
     else
@@ -207,7 +207,7 @@ install_update_helpers
 #
 # Store contents = the four kinds backed by a git-tracked template. The inline-
 # heredoc units in this script (blackbox.service, override, cli-agent-overrides,
-# mcp, ydotoold, time-sync, logrotate) and the asterisk-* files are written
+# mcp, ydotoold, time-sync) and the asterisk-* files are written
 # DIRECTLY by install.sh (below, as root) and are NOT part of the store — the
 # runner documents them as the operator-step residual, and write-systemd fails
 # closed (exit 6) if ever asked for one. The apt allowlist
@@ -266,6 +266,158 @@ zellij-web-unit       installer/templates/zellij-web.service       0644
 STORE_MANIFEST
 }
 publish_template_store
+
+# ── Step 0d: privilege-perimeter migrations + journal retention (2026-10 ──────
+#             audit ranks 12 + 17) ─────────────────────────────────────────────
+# Runs right after the store publish and BEFORE Step 1, for the same reason
+# Step 0b does: under `set -e` a later failure (an apt package that cannot be
+# located, the Tailscale `exit 1`) aborts the installer — MS02's Aug 10 re-run
+# aborted before reaching Step 4e. Nothing here depends on a later step, so an
+# operator re-run that fails further down still closes these root paths and
+# still keeps the journal.
+#   1. delete the retired zellij binary dispatcher;
+#   2. rewrite an already-installed cellular polkit rule;
+#   3. give the service user journal read access via systemd-journal (this
+#      replaces the root `journalctl -u blackbox.service *` sudo grant);
+#   4. persistent journald retention sized to the disk, and retire the dead
+#      /var/log/blackbox logrotate rule.
+
+# 1. The zellij binary dispatcher compared the caller's version against a pin
+#    file in the service-writable repo, fetched the expected sha256 from the
+#    download origin and ran the result as root — and nothing ever called it
+#    (audit X04-security-clients-infra-01). Its grant is gone from the sudoers
+#    template; deleting the deployed copy also defuses the old grant on a box
+#    whose previous sudoers file is still installed until Step 4e replaces it.
+#    Step 2c is the one zellij binary install path.
+if [[ -e /usr/local/sbin/blackbox-install-zellij-binary ]]; then
+    sudo rm -f /usr/local/sbin/blackbox-install-zellij-binary
+    echo "[install] Removed retired /usr/local/sbin/blackbox-install-zellij-binary (its sudoers grant is gone)"
+fi
+
+# 2. The opt-in cellular polkit rule (Scripts/setup-cellular-polkit.sh) used to
+#    grant systemd manage-units — start/stop ANY unit, transient units included,
+#    i.e. root via systemd-run — plus every NetworkManager action (audit
+#    X06-ops-deploy-09 / O22-06). A box that ran the old script keeps that rule
+#    until something rewrites it, so re-run the fixed script whenever the rule
+#    is present. A box that never opted in is left alone.
+#    POLKIT_RULES_DIR / INSTALL_SUDO are overridable ONLY so
+#    scripts/tests/test_cellular_polkit_rule.sh can run this in a mktemp
+#    sandbox; production always uses sudo on the real rules.d.
+rewrite_installed_cellular_polkit_rule() {
+    local POLKIT_RULES_DIR="${POLKIT_RULES_DIR:-/etc/polkit-1/rules.d}"
+    local RULE="$POLKIT_RULES_DIR/10-blackbox-networkmanager.rules"
+    local SUDO
+    if [[ "$POLKIT_RULES_DIR" == "/etc/polkit-1/rules.d" ]]; then
+        SUDO=sudo
+    else
+        SUDO="${INSTALL_SUDO-sudo}"
+    fi
+    # rules.d is readable by root/polkitd only, so probe it through sudo.
+    if ! $SUDO test -f "$RULE"; then
+        echo "[install] Cellular polkit rule not installed (opt-in) — nothing to rewrite"
+        return 0
+    fi
+    if $SUDO env POLKIT_RULES_DIR="$POLKIT_RULES_DIR" \
+            bash "$BLACKBOX_ROOT/Scripts/setup-cellular-polkit.sh" "$REAL_USER"; then
+        echo "[install] Rewrote $RULE (NetworkManager network-control only; no systemd manage-units)"
+    else
+        # Never leave the broad rule in place. Removing it costs only the
+        # cellular deep-reconnect's `nmcli connection down` until the operator
+        # re-runs the setup script.
+        $SUDO rm -f "$RULE"
+        echo "[install] WARN: could not rewrite $RULE — removed it rather than keep the broad grant." >&2
+        echo "[install]       Restore cellular deep-reconnect with: sudo bash $BLACKBOX_ROOT/Scripts/setup-cellular-polkit.sh $REAL_USER" >&2
+    fi
+}
+rewrite_installed_cellular_polkit_rule
+
+# 3. Journal read access without root. /onboarding/logs/stream runs plain
+#    `journalctl -u blackbox.service`; members of systemd-journal read the
+#    whole system journal. Supplementary groups apply from the service's next
+#    start (Step 7 restarts it).
+grant_journal_read_access() {
+    if ! getent group systemd-journal >/dev/null 2>&1; then
+        echo "[install] WARN: no systemd-journal group on this box — the Portal log viewer shows only what $REAL_USER may read" >&2
+        return 0
+    fi
+    local groups
+    groups=" $(id -nG "$REAL_USER" 2>/dev/null || true) "
+    if [[ "$groups" == *" systemd-journal "* ]]; then
+        echo "[install] $REAL_USER is already in systemd-journal"
+        return 0
+    fi
+    sudo usermod -aG systemd-journal "$REAL_USER"
+    echo "[install] Added $REAL_USER to systemd-journal (journal read without a root grant)"
+}
+grant_journal_read_access
+
+# 4. Persistent journal retention (audit W16 / X06-ops-deploy-05). The service
+#    logs ONLY to the journal, and the distro default (10 % of the filesystem,
+#    capped at 4 GiB) is what vacuumed MS02's Aug 7-12 outage record. SystemMaxUse
+#    = 10 % of the journal filesystem, clamped to [1 GiB, 16 GiB]; journald's
+#    SystemKeepFree default still holds free disk in reserve. Garbage input
+#    (df failed) falls back to the 1 GiB floor rather than failing the install.
+journald_system_max_use_mb() {  # <filesystem size in KiB> → MiB
+    local fs_kb="${1:-0}" mb
+    [[ "$fs_kb" =~ ^[0-9]+$ ]] || fs_kb=0
+    mb=$(( fs_kb / 10 / 1024 ))
+    if (( mb < 1024 )); then mb=1024; fi
+    if (( mb > 16384 )); then mb=16384; fi
+    echo "$mb"
+}
+
+# JOURNALD_DROPIN_DIR / JOURNAL_FS_PATH / INSTALL_SUDO are overridable ONLY so
+# scripts/tests/test_install_journald_retention.sh can run this in a mktemp
+# sandbox; only the real drop-in dir gets sudo and a journald restart.
+install_journald_retention() {
+    local JOURNALD_DROPIN_DIR="${JOURNALD_DROPIN_DIR:-/etc/systemd/journald.conf.d}"
+    local JOURNAL_FS_PATH="${JOURNAL_FS_PATH:-/var/log}"
+    local SUDO
+    if [[ "$JOURNALD_DROPIN_DIR" == "/etc/systemd/journald.conf.d" ]]; then
+        SUDO=sudo
+    else
+        SUDO="${INSTALL_SUDO-sudo}"
+    fi
+    local fs_kb max_mb dropin tmp
+    fs_kb="$(df -Pk "$JOURNAL_FS_PATH" 2>/dev/null | awk 'NR==2 {print $2}' || true)"
+    max_mb="$(journald_system_max_use_mb "$fs_kb")"
+    dropin="$JOURNALD_DROPIN_DIR/blackbox.conf"
+    tmp="$(mktemp)"
+    cat > "$tmp" <<JOURNALD_EOF
+# BlackBox journal retention. DO NOT EDIT — install.sh manages this file.
+# blackbox.service logs only to the journal, so this is the incident-evidence
+# horizon: persistent storage, SystemMaxUse = 10 % of the journal filesystem
+# within [1 GiB, 16 GiB]. No MaxRetentionSec on purpose — it is a ceiling that
+# deletes older entries, never a retention floor.
+[Journal]
+Storage=persistent
+SystemMaxUse=${max_mb}M
+JOURNALD_EOF
+    if $SUDO test -f "$dropin" && $SUDO cmp -s "$tmp" "$dropin"; then
+        rm -f "$tmp"
+        echo "[install] journald retention already current: $dropin (SystemMaxUse=${max_mb}M)"
+        return 0
+    fi
+    $SUDO mkdir -p "$JOURNALD_DROPIN_DIR"
+    $SUDO install -m 0644 "$tmp" "$dropin"
+    rm -f "$tmp"
+    echo "[install] Wrote $dropin (Storage=persistent, SystemMaxUse=${max_mb}M)"
+    if [[ "$JOURNALD_DROPIN_DIR" == "/etc/systemd/journald.conf.d" ]]; then
+        # Safe for running services: journald keeps their stdout streams in
+        # its fd store across a restart (Ubuntu 24.04 ships systemd 255).
+        sudo systemctl restart systemd-journald
+        echo "[install] systemd-journald restarted (persistent journal in /var/log/journal)"
+    fi
+}
+install_journald_retention
+
+# The pre-2026-10 installer wrote a logrotate rule for /var/log/blackbox/*.log,
+# a directory nothing writes. Retire it (only our own rule) so the journald
+# drop-in above is the one, real retention policy.
+if [[ -f /etc/logrotate.d/blackbox ]] && grep -q '/var/log/blackbox/' /etc/logrotate.d/blackbox; then
+    sudo rm -f /etc/logrotate.d/blackbox
+    echo "[install] Removed dead /etc/logrotate.d/blackbox (/var/log/blackbox is never written)"
+fi
 
 # ── Step 1: apt deps (audit C1 — corrected pipeline) ──
 # E16 fix: install MUST_HAVE + SHOULD_HAVE buckets. SHOULD_HAVE packages
@@ -427,7 +579,7 @@ sudo -u "$REAL_USER" bash -c "
 
 # ── Step 2c: install zellij (Phase 1 T3 + T1.5 fused) ──
 # Stands up the Zellij web client daemon that backs the CLI Agent terminal
-# bridge. Eight ordered sub-steps inside step_2c_install_zellij():
+# bridge. Seven ordered sub-steps inside step_2c_install_zellij():
 #   1. Read pinned version from installer/templates/zellij-version
 #   2. Generate TLS cert at /etc/blackbox/zellij/{cert,key}.pem (T1.5 fused —
 #      idempotent skip if present+valid+non-expired; refuse to leave HTTPS
@@ -435,14 +587,16 @@ sudo -u "$REAL_USER" bash -c "
 #   3. Reconcile ~/.local/share/zellij/tokens.db against orchestrator session
 #      state file (audit C3 — wipe both if one-sided, leave alone otherwise)
 #   4. Download + sha256-verify + atomic-install zellij binary (extract-then-
-#      verify per Phase 0 finding #4; skip download if already at pinned ver)
-#   5. Install the dispatcher script at /usr/local/sbin/blackbox-install-zellij-binary
-#      for future updates (sudoers grant points at this exact path)
-#   6. Write ~/.config/zellij/config.kdl (port 9097, enforce_https=true,
+#      verify per Phase 0 finding #4; skip download if already at pinned ver).
+#      This is the ONLY zellij binary install path: a pin bump is applied by
+#      re-running this script. The former service-invokable dispatcher
+#      (/usr/local/sbin/blackbox-install-zellij-binary) is deleted — Step 0d
+#      removes a deployed copy (2026-10 audit X04-security-clients-infra-01).
+#   5. Write ~/.config/zellij/config.kdl (port 9097, enforce_https=true,
 #      cert paths pointing at step 2's artifacts)
-#   7. Install + daemon-reload + enable + restart zellij-web.service (template
+#   6. Install + daemon-reload + enable + restart zellij-web.service (template
 #      lives at installer/templates/zellij-web.service; substitute REAL_USER)
-#   8. HTTP sanity check via curl (warning-only — T5 catches
+#   7. HTTP sanity check via curl (warning-only — T5 catches
 #      persistent issues)
 step_2c_install_zellij() {
     # Requires from install.sh preamble:
@@ -576,15 +730,7 @@ step_2c_install_zellij() {
         rm -rf "$TMPDIR"
     fi
 
-    # ─── 5. Install the dispatcher script (for future updates) ───
-    # Sudoers grant authorizes `/usr/local/sbin/blackbox-install-zellij-binary *`
-    # (no .sh extension — see installer/templates/sudoers-blackbox-system).
-    sudo install -m 0755 -o root -g root \
-        "$ZELLIJ_TEMPLATE_DIR/blackbox-install-zellij-binary.sh" \
-        "/usr/local/sbin/blackbox-install-zellij-binary"
-    echo "[install] Installed dispatcher: /usr/local/sbin/blackbox-install-zellij-binary"
-
-    # ─── 6. Write ~/.config/zellij/config.kdl ───
+    # ─── 5. Write ~/.config/zellij/config.kdl ───
     # Port 9097 hardcoded here (matches comment in installer/templates/zellij-version).
     # Idempotent: skip write if file is byte-identical to what we'd emit.
     local ZELLIJ_CFG_DIR="$REAL_HOME/.config/zellij"
@@ -649,7 +795,7 @@ KDL_EOF
         echo "[install] Wrote $ZELLIJ_CFG (port $ZELLIJ_PORT, HTTP localhost)"
     fi
 
-    # ─── 7. Install zellij-web.service unit ───
+    # ─── 6. Install zellij-web.service unit ───
     # Substitute REAL_USER_PLACEHOLDER at install time. daemon-reload first
     # so systemd notices the new unit, then enable + restart (restart handles
     # both "not running yet" and "already running" cases).
@@ -671,7 +817,7 @@ KDL_EOF
     fi
     echo "[install] zellij-web.service installed + active"
 
-    # ─── 8. HTTP sanity check ───
+    # ─── 7. HTTP sanity check ───
     # --insecure: self-signed cert, expected. Warning only — T5 smoke-test
     # catches persistent issues; transient timing on first start shouldn't
     # block the rest of install.sh.
@@ -833,7 +979,7 @@ MemoryHigh=70%
 # this unit or its drop-ins. It holds /etc/blackbox/system-packages.txt — the
 # root-owned apt allowlist that blackbox-apt-install trusts as its SOLE source.
 # A service that could write it could append any package and turn the bounded
-# `NOPASSWD: /usr/local/sbin/blackbox-apt-install *` grant into
+# `NOPASSWD: /usr/local/sbin/blackbox-apt-install <pkg>` grant into
 # `apt-get install -y <anything>` as root. The directory already holds
 # service-user-owned files (zellij cert/key), so a future "let the service
 # rotate its own certs" change is the plausible way this gets breached — add a
@@ -1015,19 +1161,12 @@ After=time-sync.target
 Wants=systemd-timesyncd
 EOF
 
-# ── Step 4c: log rotation (audit M3 carry-forward) ──
-sudo tee /etc/logrotate.d/blackbox > /dev/null <<EOF
-/var/log/blackbox/*.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 $REAL_USER $REAL_USER
-    sharedscripts
-}
-EOF
+# ── Step 4c: log retention — MOVED to Step 0d (2026-10 audit rank 12) ──
+# This used to write /etc/logrotate.d/blackbox for /var/log/blackbox/*.log, a
+# directory nothing ever writes: blackbox.service logs only to the journal
+# (StandardOutput=journal above). Retention is now the journald drop-in
+# install_journald_retention() writes at Step 0d, which also retires that
+# dead logrotate rule on boxes that have it.
 
 # ── Step 4d: helper script (T3 — now sourced from tracked file) ──
 # Previously emitted inline via heredoc (audit M3 flagged the resulting
@@ -1042,14 +1181,25 @@ echo "[install] Symlinked blackbox-status.sh → Scripts/blackbox-status.sh"
 
 # ── Step 4e: sudoers grant for runtime BlackBox operations (T5) ──
 # Bounded NOPASSWD entries covering: Tailscale wizard actuator, service
-# restart + journal access, update-pipeline dispatch helpers. install -m
-# 0440 atomic-replaces existing file; visudo-check aborts if syntax broken.
+# restart, update-pipeline dispatch helpers (journal access is the
+# systemd-journal group from Step 0d, not a grant). install -m 0440
+# atomic-replaces existing file; visudo-check aborts if syntax broken.
 #
 # Renamed from blackbox-tailscale → blackbox-system in T5 (scope grew
 # beyond tailscale). Remove the old file if it exists (upgrade-in-place).
 if [[ -f /etc/sudoers.d/blackbox-tailscale ]]; then
     sudo rm -f /etc/sudoers.d/blackbox-tailscale
     echo "[install] Removed legacy /etc/sudoers.d/blackbox-tailscale (renamed to -system)"
+fi
+# The template's anchored `^…$` argument regexes (tailscale up/cert, apt-install)
+# need sudo >= 1.9.10; Ubuntu 24.04 (pinned by install-preflight.sh) ships
+# 1.9.15. An older sudo either rejects the file at the visudo check below or
+# never matches those grants — both fail closed — so say why up front instead
+# of leaving it to a cryptic sudo error.
+SUDO_VERSION="$(sudo -V 2>/dev/null | awk 'NR==1 {print $3}' || true)"
+if [[ -n "$SUDO_VERSION" && "$(printf '%s\n' 1.9.10 "$SUDO_VERSION" | sort -V | head -n 1)" != "1.9.10" ]]; then
+    echo "[install] WARN: sudo $SUDO_VERSION predates 1.9.10, which the anchored ^…\$ sudoers grants need:" >&2
+    echo "[install]       Tailscale connect/cert and updater apt installs will be refused (fail closed)." >&2
 fi
 # $BLACKBOX_ROOT_SED_ESC (not the raw root) — a `&`/`|`/`\` in the path would
 # otherwise corrupt this grant exactly as it corrupted the apt helper's baked

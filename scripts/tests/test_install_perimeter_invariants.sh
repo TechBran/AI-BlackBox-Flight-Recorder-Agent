@@ -19,7 +19,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # root-owned apt allowlist blackbox-apt-install trusts as its SOLE source (it
 # replaced the former /etc/blackbox/root pointer). A service that could write it
 # would append any package and turn the bounded
-# `NOPASSWD: /usr/local/sbin/blackbox-apt-install *` grant into
+# `NOPASSWD: /usr/local/sbin/blackbox-apt-install <pkg>` grant into
 # `apt-get install -y <anything>` as root. The directory already holds
 # service-user-owned zellij cert/key files, so "let the service rotate its own
 # certs" is the plausible way a future change breaches this by accident.
@@ -72,7 +72,7 @@ bash -n "$INSTALL_SH" || fail "install.sh does not parse"
 # ── 5. the write-systemd apt-install-helper target hardcodes its destination ──
 # I3(b): startup_assert_helpers_current() re-templates the root-owned apt helper
 # on an existing box via a NEW blackbox-write-systemd target_kind. The whole
-# security model of that wildcard-granted helper is that the DESTINATION is
+# security model of that sudo-granted helper is that the DESTINATION is
 # hardcoded per target_kind — the caller supplies a source file and a kind,
 # never a path. A target that derived its /usr/local/sbin dest from an argument
 # would be a root-write primitive. Anchor on the case arm, not on prose.
@@ -100,7 +100,7 @@ grep -qF '"apt-install-helper"' "$STARTUP" \
 #      destination — never derives it from a caller argument ─────────────────────
 # install.sh-grant removal, 2026-07-27: the decomposed update regen dispatches
 # a bounded write-systemd kind per changed artifact instead of re-running
-# install.sh as root. The whole security model of the wildcard-granted helper is
+# install.sh as root. The whole security model of the sudo-granted helper is
 # that the DESTINATION is hardcoded per kind — a caller of the sudo grant picks a
 # kind and supplies a source file, NEVER a path. A kind that read its dest from
 # $1/$2 would be an arbitrary-root-write primitive. Assert each new kind's

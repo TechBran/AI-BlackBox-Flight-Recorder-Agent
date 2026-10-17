@@ -1451,14 +1451,47 @@ def xdg_open_shim_log(tail: int = 100) -> dict:
         return {"exists": True, "error": str(e), "lines": []}
 
 
+def _journal_access_hint() -> str | None:
+    """Explain the fix when this process cannot read the system journal.
+
+    journalctl only shows other users' and systemd's own entries to root and
+    to members of systemd-journal (systemd's journal ACLs also admit adm and
+    wheel). install.sh adds the service user to systemd-journal; a box that has
+    not re-run it since the root journalctl grant was removed would otherwise
+    show a near-empty log with no explanation. Returns None when access is fine
+    or cannot be determined."""
+    try:
+        if os.geteuid() == 0:
+            return None
+        import grp
+
+        gids = set(os.getgroups()) | {os.getegid()}
+        for name in ("systemd-journal", "adm", "wheel"):
+            try:
+                if grp.getgrnam(name).gr_gid in gids:
+                    return None
+            except KeyError:
+                continue
+    except Exception:  # noqa: BLE001 — a hint must never break the stream
+        return None
+    root = Path(__file__).resolve().parents[2]
+    return ("[logs] This service user is not in the systemd-journal group, so "
+            "system entries for blackbox.service are hidden. Run "
+            f"`sudo bash {root}/Scripts/install.sh` once (it adds the group), "
+            "then restart the service.")
+
+
 @router.get("/logs/stream")
 async def logs_stream(lines: int = 200):
     """Stream blackbox.service logs as Server-Sent Events for the wizard's
     'View Logs' modal. Initial backfill of N lines + follow forward.
 
-    The journalctl -u blackbox.service * sudoers grant allows passwordless
-    invocation. The lines parameter is bounded server-side (max 1000) to
-    prevent runaway backfill on a long-running service.
+    Runs plain `journalctl` as the service user, which reads the system
+    journal as a member of systemd-journal (install.sh Step 0d). The former
+    `journalctl -u blackbox.service *` sudoers grant ran it as root with any
+    extra arguments (2026-10 audit rank 17) and is gone. The lines parameter is
+    bounded server-side (max 1000) to prevent runaway backfill on a
+    long-running service.
 
     E10 (Brandon's MSO2 Ultra design 2026-05-17): pairs with E9's Restart
     Service button on the done step. Advanced users + customer-support
@@ -1470,7 +1503,7 @@ async def logs_stream(lines: int = 200):
     async def gen():
         # Initial backfill: last N lines, then follow forward
         cmd = [
-            "sudo", "-n", "/usr/bin/journalctl",
+            "/usr/bin/journalctl",
             "-u", "blackbox.service",
             "--lines", str(safe_lines),
             "--no-pager",
@@ -1484,6 +1517,9 @@ async def logs_stream(lines: int = 200):
         )
         try:
             yield b"event: start\ndata: streaming logs\n\n"
+            hint = _journal_access_hint()
+            if hint:
+                yield f"data: {hint}\n\n".encode("utf-8")
             while True:
                 line = await proc.stdout.readline()
                 if not line:

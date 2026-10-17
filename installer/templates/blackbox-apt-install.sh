@@ -35,8 +35,10 @@
 # walk). Do NOT reintroduce a fallback to the repo-relative allowlist; that
 # fallback WAS the escalation.
 #
-# Invoked via NOPASSWD sudoers grant:
-#   bbx ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-apt-install *
+# Invoked via NOPASSWD sudoers grant (2026-10 audit rank 17: an anchored
+# regex, so sudo itself admits exactly one package-name token that cannot
+# start with `-`; the checks below still run):
+#   bbx ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-apt-install ^[a-z0-9][a-z0-9.+-]*$
 #
 # Usage:
 #   sudo blackbox-apt-install <package-name>
