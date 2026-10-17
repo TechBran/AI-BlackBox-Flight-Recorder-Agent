@@ -28,8 +28,12 @@ from Orchestrator.gmail.service import (
     token_data_from_credentials,
 )
 
-# Allow HTTP for local dev (OAuth library requires HTTPS by default)
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+# No OAUTHLIB_INSECURE_TRANSPORT (audit O12-messaging-22): it switched off
+# oauthlib's https check for every OAuth endpoint in the process. The flow never
+# needed it -- oauthlib checks the transport of Google's (https) authorization
+# and token endpoints, and only checks the redirect URI when it parses an
+# authorization_response URL; the callback passes the code itself, so plain-http
+# localhost and the https tailnet name both work.
 
 # Google auto-grants openid + userinfo.email + userinfo.profile alongside any
 # Workspace/Gmail scopes, so the returned scope set never matches the requested
