@@ -52,7 +52,18 @@ def _list_operators(ctx: ToolContext) -> list[str]:
 
 
 def _resolve_operators(ctx: ToolContext) -> dict:
-    """Resolver for ``x-source: operators`` → constrain the field to live operators."""
+    """Resolver for ``x-source: operators`` → constrain the field to live operators.
+
+    A schema resolved for a REAL session operator offers only that operator:
+    BlackBoxToolExecutor refuses a call that names any other (O18-06), and a
+    remote MCP caller reading a schema through toolvault(action='read') must
+    never learn the box's roster (O20-mcp-server-15). The "system" context
+    (static tool arrays, the MCP stdio catalog, a ctx-less caller) still gets
+    the live roster.
+    """
+    operator = ctx.operator if ctx is not None else None
+    if operator and str(operator).strip() and operator != "system":
+        return {"enum": [operator]}
     operators = _list_operators(ctx)
     return {"enum": operators}
 

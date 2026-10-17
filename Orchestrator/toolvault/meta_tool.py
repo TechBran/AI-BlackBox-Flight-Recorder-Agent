@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 from . import registry, embeddings, resolvers
 from .config import SIMILARITY_THRESHOLD, DEFAULT_SEARCH_LIMIT
+from .context import ToolContext
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ class MetaToolResult:
     data: Optional[Dict[str, Any]] = None
 
 
-def execute(action: str, **params) -> MetaToolResult:
+def execute(action: str, ctx: Optional[ToolContext] = None, **params) -> MetaToolResult:
     """Execute a meta-tool action.
 
     This is the entry point that blackbox_tools.py will call when
@@ -89,6 +90,9 @@ def execute(action: str, **params) -> MetaToolResult:
 
     Args:
         action: One of "search", "read", "list", "mint"
+        ctx: The calling session's context (the toolvault module executor
+            passes the dispatcher's). ``read`` resolves x-source markers with
+            it, so a session only ever sees its own operator. None = "system".
         **params: Action-specific parameters
 
     Returns:
@@ -106,7 +110,7 @@ def execute(action: str, **params) -> MetaToolResult:
                 print(f"{Y}[TOOLVAULT-TOOL]   ├─ {m['name']:30s} score={m['score']:.3f}{R}")
         return result
     elif action == "read":
-        result = _action_read(params.get("tool_name", ""))
+        result = _action_read(params.get("tool_name", ""), ctx)
         print(f"{Y}[TOOLVAULT-TOOL]   └─ Read: {params.get('tool_name', '?')} → {'found' if result.success else 'not found'}{R}")
         return result
     elif action == "list":
@@ -176,11 +180,12 @@ def _action_search(query: str) -> MetaToolResult:
     )
 
 
-def _action_read(tool_name: str) -> MetaToolResult:
+def _action_read(tool_name: str, ctx: Optional[ToolContext] = None) -> MetaToolResult:
     """Read a tool's full specification by name.
 
     Returns the complete tool block including parameters and JSON schema.
-    This is what the model needs to actually use the tool.
+    This is what the model needs to actually use the tool. ``ctx`` scopes the
+    x-source resolution to the calling session (see resolvers._resolve_operators).
     """
     if not tool_name:
         return MetaToolResult(success=False, result="Missing 'tool_name' parameter for read action.")
@@ -194,7 +199,7 @@ def _action_read(tool_name: str) -> MetaToolResult:
 
     # Resolve any x-source markers (e.g. operators enum) so the schema we surface
     # reflects live sources, then expose the resolved parameters block.
-    resolved = resolvers.resolve_schema(entry)
+    resolved = resolvers.resolve_schema(entry, ctx)
     schema = resolved.get("parameters", {})
     tier = entry.get("tier", 2)
 

@@ -131,29 +131,38 @@ def _stamp_session_operator(tool_name, tool_input, operator):
     /local/tools/execute and /gmail/execute already overwrite the param for the
     MCP and phone surfaces; this is the one dispatcher every surface shares.
 
-    Only a real operator is stamped. "system" (and an unset operator) is the
+    Returns ``(tool_input, refused)``. A blank or missing operator, or the
+    session operator itself (any case or padding), runs as the session
+    operator. Any OTHER operator is refused, never silently re-pointed:
+    "send this from B's account" run as A would send from the wrong account
+    and report success (and edit_cron_job's reassign would claim an update
+    that never happened). ``refused`` is then the operator the call named.
+
+    Only a real operator is enforced. "system" (and an unset operator) is the
     trusted internal scope with no session operator to protect, so it keeps
-    honouring an explicit operator argument. The Flight Recorder IS stamped:
+    honouring an explicit operator argument. The Flight Recorder IS enforced:
     its read-all capability is config.reads_all_operators() on ctx.operator,
     never a model-supplied argument. ("system" is spelled out rather than
     imported from config: this module is on the lean MCP venv's import path.)
 
-    Returns a copy; the caller's dict (often the model's own tool-call
-    arguments, echoed back into the conversation) is left untouched.
+    The stamped dict is a copy; the caller's dict (often the model's own
+    tool-call arguments, echoed back into the conversation) is left untouched.
     """
     if not isinstance(tool_input, dict):
-        return tool_input
+        return tool_input, None
     if not operator or not str(operator).strip() or operator == "system":
-        return tool_input
+        return tool_input, None
     asserted = tool_input.get("operator")
     if asserted == operator:
-        return tool_input
-    if asserted:
-        print(f"[TOOL-OPERATOR] {tool_name}: ignoring model-supplied operator "
-              f"{asserted!r}; the session operator is {operator!r}")
+        return tool_input, None
+    if asserted is not None and str(asserted).strip():
+        if str(asserted).strip().casefold() != str(operator).strip().casefold():
+            print(f"[TOOL-OPERATOR] {tool_name}: refused model-supplied operator "
+                  f"{asserted!r}; the session operator is {operator!r}")
+            return tool_input, asserted
     stamped = dict(tool_input)
     stamped["operator"] = operator
-    return stamped
+    return stamped, None
 
 
 class BlackBoxToolExecutor:
@@ -217,7 +226,14 @@ class BlackBoxToolExecutor:
         # Models sometimes emit array/object params as JSON strings; parse back.
         tool_input = _coerce_stringified_json_args(tool_name, tool_input)
         # A model-supplied operator never overrides the session operator.
-        tool_input = _stamp_session_operator(tool_name, tool_input, self.operator)
+        tool_input, refused = _stamp_session_operator(tool_name, tool_input, self.operator)
+        if refused is not None:
+            return ToolResult(
+                success=False,
+                result=(f"{tool_name} was not run: this session acts only as operator "
+                        f"{self.operator!r} and cannot act as {refused!r}. Call it "
+                        f"again without the operator argument to run it as {self.operator!r}.")
+            )
 
         try:
             return await ex(
