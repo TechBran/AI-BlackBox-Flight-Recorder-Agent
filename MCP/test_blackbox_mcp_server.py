@@ -224,6 +224,38 @@ def test_local_tool_does_not_proxy():
     assert ops == {"alice": 1, "bob": 1}
 
 
+def test_web_fetch_refuses_loopback_and_private_targets():
+    """web_fetch runs IN this process and the server is Funnel-exposed, so a
+    remote caller must not be able to read the box's own API (key reveal,
+    other operators' snapshots) or the LAN/tailnet through it (audit
+    O20-mcp-server-01). The guard lives in perform_web_fetch -> safe_fetch.
+    Booby-trapped so no request can leave this process even if it regresses."""
+    import requests as _requests
+    import web_tools as _wt
+    from Orchestrator.utils import safe_fetch as _sf
+
+    def _boom(*a, **k):
+        raise AssertionError("web_fetch opened a connection for a refused URL")
+
+    saved = (_requests.get, _sf._open_pinned, _sf._resolve)
+    _requests.get = _boom
+    _sf._open_pinned = _boom
+    _sf._resolve = _boom
+    _wt.clear_cache()
+    try:
+        for url in ("http://127.0.0.1:9091/onboarding/config/ANTHROPIC_API_KEY?reveal=true",
+                    "http://[::1]:9091/fossil/hybrid?q=x&operator=system",
+                    "http://0x7f000001:9093/internal/reload",
+                    "http://169.254.169.254/latest/meta-data/",
+                    "http://192.168.1.10:9098/v1/models",
+                    "http://100.101.102.103:9091/operators"):
+            res = asyncio.run(srv.call_tool("web_fetch", {"url": url}))
+            text = _text(res)
+            assert "Refused" in text, f"{url}: {text[:200]}"
+    finally:
+        _requests.get, _sf._open_pinned, _sf._resolve = saved
+
+
 def test_mint_snapshot_posts_to_chat_save_and_returns_snap_id():
     """mint_snapshot must POST /chat/save (not /chat) and return the real snap_id."""
     _stub_operator("alice")

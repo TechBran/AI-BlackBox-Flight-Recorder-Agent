@@ -907,7 +907,11 @@ async def call_tool(name: str, arguments: dict[str, Any]):
         elif name == "web_fetch":
             url = arguments["url"]
             max_chars = arguments.get("max_chars", 80000)
-            result = perform_web_fetch(url, max_chars)
+            # perform_web_fetch is the SSRF-guarded fetch (Orchestrator/utils/
+            # safe_fetch.py): this runs in-process for Funnel callers, so a
+            # loopback/LAN/tailnet URL is refused, never fetched. Blocking I/O,
+            # so it runs off the event loop.
+            result = await asyncio.to_thread(perform_web_fetch, url, max_chars)
             return [TextContent(type="text", text=result)]
 
         elif name == "get_media":

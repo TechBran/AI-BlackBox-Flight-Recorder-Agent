@@ -19,6 +19,10 @@ Both functions include:
 - Rate limiting (to prevent abuse)
 - Error handling with graceful fallbacks
 - Clean, LLM-friendly output formatting
+
+perform_web_fetch fetches ONLY through Orchestrator/utils/safe_fetch.py (the
+SSRF guard): the URL comes from a model or a remote MCP caller, so loopback,
+LAN, tailnet and link-local targets are refused, including via redirects.
 """
 
 import sys
@@ -26,7 +30,15 @@ import time
 import requests
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any, Tuple
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, FeatureNotFound
+
+# SSRF guard for every web_fetch surface (chat, live voice, phone, CU driver,
+# ToolVault executor, MCP). Same dual import as config below: the MCP server
+# puts both the repo root and Orchestrator/ on sys.path.
+try:
+    from Orchestrator.utils import safe_fetch
+except ImportError:
+    from utils import safe_fetch
 
 # Provider API configuration
 # Handles both Orchestrator context (from Orchestrator.config) and MCP context (from config directly)
@@ -74,8 +86,9 @@ FETCH_CACHE_TTL = 1800  # 30 minutes
 MAX_CACHE_SIZE = 1000
 
 # Fetch settings
-FETCH_TIMEOUT = 25  # seconds (allows time for larger pages)
-MAX_FETCH_SIZE = 1000000  # 1MB raw HTML download limit
+FETCH_TIMEOUT = 25  # seconds, total budget incl. redirects (allows time for larger pages)
+MAX_FETCH_SIZE = 1000000  # 1MB HTML download limit
+FETCH_MAX_REDIRECTS = 3   # each hop is re-vetted by safe_fetch
 MAX_CONTENT_CHARS = 80000  # Return max 80K chars (models have 128K+ token context windows)
 
 # =============================================================================
@@ -423,6 +436,16 @@ def perform_web_search(query: str, max_results: int = 5, use_cache: bool = True,
 # Web Fetch Function (URL content extraction)
 # =============================================================================
 
+def _make_soup(html: str) -> BeautifulSoup:
+    """Parse with lxml when it is installed, else the stdlib html.parser. The
+    lean MCP venv does not ship lxml, and bs4 raises FeatureNotFound for a
+    missing builder, which used to fail every MCP web_fetch on a fresh box."""
+    try:
+        return BeautifulSoup(html, 'lxml')
+    except FeatureNotFound:
+        return BeautifulSoup(html, 'html.parser')
+
+
 def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: bool = True) -> str:
     """
     Fetch and extract clean content from a web URL.
@@ -459,7 +482,13 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
         }
 
         print(f"[WEB_FETCH] Fetching URL: {url}")
-        response = requests.get(url, headers=headers, timeout=FETCH_TIMEOUT, stream=True)
+        # safe_get resolves + vets the host, pins the connection to the vetted
+        # address, re-vets every redirect hop and caps size/time. The URL is
+        # model- or caller-supplied: never hand it to a bare requests.get.
+        response = safe_fetch.safe_get(
+            url, headers=headers, timeout=FETCH_TIMEOUT,
+            max_bytes=MAX_FETCH_SIZE, max_redirects=FETCH_MAX_REDIRECTS,
+        )
 
         if response.status_code != 200:
             return (
@@ -470,32 +499,10 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
                 f"3. Try searching for the same information using a web search tool instead"
             )
 
-        # Check content size
-        content_length = response.headers.get('content-length')
-        if content_length and int(content_length) > MAX_FETCH_SIZE:
-            return (
-                f"⚠️ Page too large to fetch ({int(content_length)} bytes): {url}\n\n"
-                f"The page exceeds the download limit. Try:\n"
-                f"1. Search for the specific information you need using a web search tool instead\n"
-                f"2. Try a different, more focused page on the same topic"
-            )
-
-        # Read content with size limit
-        content = b''
-        for chunk in response.iter_content(chunk_size=8192):
-            content += chunk
-            if len(content) > MAX_FETCH_SIZE:
-                return (
-                    f"⚠️ Page too large to fetch (exceeded {MAX_FETCH_SIZE} bytes): {url}\n\n"
-                    f"The page exceeds the download limit. Try:\n"
-                    f"1. Search for the specific information you need using a web search tool instead\n"
-                    f"2. Try a different, more focused page on the same topic"
-                )
-
-        html = content.decode('utf-8', errors='ignore')
+        html = response.content.decode('utf-8', errors='ignore')
 
         # Parse HTML with BeautifulSoup
-        soup = BeautifulSoup(html, 'lxml')
+        soup = _make_soup(html)
 
         # Extract title
         title = soup.title.string if soup.title else "No title"
@@ -548,14 +555,31 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
         print(f"[WEB_FETCH] Successfully fetched {len(clean_text)} chars from {url}")
         return formatted_result
 
-    except requests.Timeout:
+    except safe_fetch.UnsafeURLError as e:
+        print(f"[WEB_FETCH] Refused {url}: {e}")
+        return (
+            f"⚠️ Refused to fetch URL: {url}\nReason: {e}\n\n"
+            f"web_fetch only reaches public internet hosts. Loopback, private-network (LAN), "
+            f"tailnet and link-local addresses are blocked, including through redirects.\n"
+            f"IMPORTANT: Do NOT retry this URL or another address for the same host. "
+            f"If the user needs content from a local service, tell them web_fetch cannot reach it."
+        )
+    except safe_fetch.ResponseTooLarge as e:
+        size = f"{e.size} bytes" if e.size else f"exceeded {MAX_FETCH_SIZE} bytes"
+        return (
+            f"⚠️ Page too large to fetch ({size}): {url}\n\n"
+            f"The page exceeds the download limit. Try:\n"
+            f"1. Search for the specific information you need using a web search tool instead\n"
+            f"2. Try a different, more focused page on the same topic"
+        )
+    except safe_fetch.FetchTimeout:
         return (
             f"⚠️ Timeout fetching URL (>{FETCH_TIMEOUT}s): {url}\n\n"
             f"IMPORTANT: Do NOT retry the same URL. The page is too slow to respond. Instead:\n"
             f"1. Try a different URL from your search results\n"
             f"2. Use a web search tool to find the information from a different source"
         )
-    except requests.RequestException as e:
+    except safe_fetch.FetchError as e:
         return (
             f"⚠️ Network error fetching URL: {url}\nError: {str(e)}\n\n"
             f"IMPORTANT: Do NOT retry the same URL. Instead:\n"
