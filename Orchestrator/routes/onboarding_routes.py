@@ -1223,9 +1223,12 @@ def cli_agent_claude_doctor() -> dict:
         out["error"] = "claude binary not resolvable"
         return out
 
-    # Build same augmented PATH as the bridge would
+    # Build same augmented PATH + scrubbed env as the bridge would (shared
+    # env_scrub table) — the `claude --print` probe below must not bill an
+    # inherited ANTHROPIC_API_KEY or see the server's other credentials.
+    from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
     aug_path = os.pathsep.join([os.environ.get("PATH", ""), *extended_path_dirs()])
-    env = {**os.environ, "PATH": aug_path}
+    env = {**scrubbed_child_env(), "PATH": aug_path}
 
     def run(cmd: list[str], timeout: float = 4.0) -> dict:
         try:
@@ -1713,10 +1716,15 @@ def _build_user_env() -> dict:
     in the GNOME session from blackbox.service's systemd cgroup.
     Mirrors the env-rebuild done in /open-url; factored here so the
     /spawn-terminal endpoint can reuse it without duplicating.
+
+    Starts from the scrubbed env (shared env_scrub table): the terminal runs a
+    CLI's install/login command, and neither it nor the operator's shell in it
+    may inherit the server's credentials (audit O14-cli-agents-devices-02).
     """
     import glob
+    from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
     uid = os.getuid()
-    env = os.environ.copy()
+    env = scrubbed_child_env()
     env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
     env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
     env.setdefault("DISPLAY", ":0")

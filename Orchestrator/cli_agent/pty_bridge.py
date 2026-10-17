@@ -5,6 +5,8 @@ from typing import Optional, Sequence
 
 import ptyprocess
 
+from .env_scrub import scrubbed_child_env
+
 
 def _read_with_select(fd: int, timeout: float, chunk_size: int) -> bytes:
     """Block in select() up to `timeout` seconds, then read available data.
@@ -45,7 +47,10 @@ class PtyBridge:
               cols: int = 80, rows: int = 24) -> "PtyBridge":
         proc = ptyprocess.PtyProcess.spawn(
             list(command),
-            env=env or os.environ.copy(),
+            # Default to the scrubbed env (shared env_scrub table), never the
+            # raw os.environ: whatever this PTY runs must not inherit the
+            # server's credentials.
+            env=env or scrubbed_child_env(),
             cwd=cwd,
             dimensions=(rows, cols),
         )

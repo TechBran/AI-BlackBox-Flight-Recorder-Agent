@@ -234,17 +234,20 @@ def test_claude_env_strip_child_cannot_see_anthropic_key():
     assert "ANTHROPIC_API_KEY" not in out
 
 
-def test_env_strip_is_scoped_per_provider():
-    """claude strips only ANTHROPIC; gemini's GOOGLE key survives in claude's env
-    (each provider strips only what IT would bill on)."""
+def test_env_strip_drops_every_server_secret_for_every_provider():
+    """Audit O14-cli-agents-devices-03: the old per-provider-only strip left a
+    YOLO claude agent holding the Google/OpenAI/xAI/Twilio secrets. Every
+    provider now loses EVERY server credential (shared env_scrub table), not
+    just the one it would bill on."""
     base = dict(os.environ)
-    base["ANTHROPIC_API_KEY"] = "A"
-    base["GOOGLE_API_KEY"] = "G"
-    base["OPENAI_API_KEY"] = "O"
-    claude_env = headless.build_child_env("claude", base_env=base)
-    assert "ANTHROPIC_API_KEY" not in claude_env
-    assert claude_env.get("GOOGLE_API_KEY") == "G"
-    assert claude_env.get("OPENAI_API_KEY") == "O"
+    base.update({"ANTHROPIC_API_KEY": "A", "GOOGLE_API_KEY": "G",
+                 "OPENAI_API_KEY": "O", "XAI_API_KEY": "X",
+                 "TWILIO_AUTH_TOKEN": "T", "ASTERISK_AMI_SECRET": "S"})
+    for prov in headless.SUPPORTED_PROVIDERS:
+        env = headless.build_child_env(prov, base_env=base)
+        for k in ("ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY",
+                  "XAI_API_KEY", "TWILIO_AUTH_TOKEN", "ASTERISK_AMI_SECRET"):
+            assert k not in env, f"{prov}: {k} survived build_child_env"
 
 
 def test_child_env_has_augmented_path():

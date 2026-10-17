@@ -37,6 +37,8 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,22 +58,15 @@ _DEFAULT_ZELLIJ_WEB_PORT = 9097
 
 _ZELLIJ_BIN = "/usr/local/bin/zellij"
 
-# Env vars stripped from the child environment when spawning a Zellij
-# session.
-#
-# ANTHROPIC_API_KEY (added 2026-05-25 — Brandon MSO2 report): the
-# orchestrator's server-side key from .env propagates into the claude
-# pane and triggers claude's "both a token and an API key are set"
-# warning at the top of every session — the user's cached OAuth token
-# (or Vertex auth via CLAUDE_CODE_USE_VERTEX=1) is ambiguous with the
-# leaked env var. Strip it so each pane's claude falls back to its own
-# user-side auth without warnings. Other CLI providers (gemini, codex,
-# agy) don't read ANTHROPIC_API_KEY, so stripping is safe globally.
-# GOOGLE_APPLICATION_CREDENTIALS is intentionally NOT stripped —
-# claude needs it for Vertex AI auth and gemini may use it too.
-_ENV_DENYLIST_FOR_PANES = frozenset({
-    "ANTHROPIC_API_KEY",
-})
+# The child environment for every zellij invocation comes from the shared
+# Orchestrator.cli_agent.env_scrub table (audit O14-cli-agents-devices-02).
+# This module used to strip ONLY ANTHROPIC_API_KEY (added 2026-05-25 for the
+# claude "both a token and an API key are set" warning), which left every
+# other server credential from .env — Google/OpenAI/xAI/ElevenLabs keys,
+# Twilio, the AMI/ARI secrets — readable with `env` in any pane and by any
+# YOLO agent launched there. The shared scrub drops every credential-shaped
+# name plus ZELLIJ*, and still keeps GOOGLE_APPLICATION_CREDENTIALS (claude
+# needs it for Vertex AI auth and gemini may use it too).
 
 # Path to the user-level config file we manage. install.sh seeds the
 # initial file; ensure_config() refreshes it at orchestrator startup so
@@ -150,10 +145,14 @@ def _run(
       "install.sh" hint rather than a cryptic Python traceback.
     """
     logger.debug("zellij_client._run: %s", args)
-    # Scrub ZELLIJ* vars unconditionally: the orchestrator can itself run
-    # inside a zellij pane, and an inherited ZELLIJ_SESSION_NAME makes a
-    # bare action target the USER'S live session (probe 2026-07-20).
-    env = {k: v for k, v in os.environ.items() if not k.startswith("ZELLIJ")}
+    # Scrub unconditionally (shared env_scrub table):
+    # - ZELLIJ* vars: the orchestrator can itself run inside a zellij pane,
+    #   and an inherited ZELLIJ_SESSION_NAME makes a bare action target the
+    #   USER'S live session (probe 2026-07-20).
+    # - server credentials: ANY zellij CLI call can start a session server
+    #   (`action paste` against an exited session resurrects it), and that
+    #   server hands its env to every pane it ever opens.
+    env = scrubbed_child_env()
     try:
         result = subprocess.run(
             args,
@@ -829,11 +828,11 @@ def launch_session(
     proc: Optional[subprocess.Popen] = None
     # Build the child env for the Zellij session backend (and thereby every
     # bash + CLI agent the user spawns in a pane):
-    # 1. Strip orchestrator API/auth keys (denylist). They'd leak server-side
-    #    credentials into user-interactive contexts AND, in claude's case,
-    #    silently hang the auth handshake when the key isn't claude-code-
-    #    scoped. Each CLI must fall back to its own user-side OAuth/cached
-    #    session — the desired UX.
+    # 1. Strip every orchestrator credential (shared env_scrub table). They'd
+    #    leak server-side credentials into user-interactive contexts AND, in
+    #    claude's case, silently hang the auth handshake when the key isn't
+    #    claude-code-scoped. Each CLI must fall back to its own user-side
+    #    OAuth/cached session — the desired UX.
     # 2. Inject DBUS_SESSION_BUS_ADDRESS if absent. Claude reads the OS
     #    keychain (libsecret/GNOME-Keyring over DBus) during interactive
     #    startup; with no bus address set, the DBus connect hangs forever.
@@ -844,10 +843,7 @@ def launch_session(
     #    orchestrator itself runs inside a zellij pane, an inherited
     #    ZELLIJ_SESSION_NAME/ZELLIJ makes tools inside the NEW session
     #    think they're nested in (and target) the parent session.
-    child_env = {
-        k: v for k, v in os.environ.items()
-        if k not in _ENV_DENYLIST_FOR_PANES and not k.startswith("ZELLIJ")
-    }
+    child_env = scrubbed_child_env()
     if "DBUS_SESSION_BUS_ADDRESS" not in child_env:
         bus_path = f"/run/user/{os.getuid()}/bus"
         if os.path.exists(bus_path):

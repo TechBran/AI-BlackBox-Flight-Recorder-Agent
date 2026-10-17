@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from .env_scrub import scrubbed_child_env
 from .path_validator import PathValidator
 from .operator_config import OperatorConfig
 
@@ -130,7 +131,36 @@ class TmuxSessionManager:
         return cmd + list(args)
 
     def _tmux(self, *args) -> subprocess.CompletedProcess:
-        return subprocess.run(self._tmux_cmd(*args), capture_output=True, text=True)
+        # Scrubbed env (shared env_scrub table) on EVERY tmux client call:
+        # whichever call happens to start the tmux server hands its env to the
+        # server's global environment, and from there to every pane.
+        return subprocess.run(self._tmux_cmd(*args), capture_output=True,
+                              text=True, env=scrubbed_child_env())
+
+    def _purge_stale_server_secrets(self) -> None:
+        """Unset credential-shaped names from a RUNNING tmux server's global
+        environment before we open a new session on it.
+
+        A tmux server copies its starting environment into its global
+        environment and merges that into every window it creates. The server
+        outlives blackbox.service restarts (KillMode=process), so one started
+        by the pre-scrub code keeps handing the old .env secrets to every NEW
+        pane (audit O14-cli-agents-devices-03). Purging here makes new panes
+        clean immediately; panes that already exist keep their environment
+        until they are restarted (the post-deploy ops step kills the server).
+        No-op when no server is running (the next new-session starts one from
+        the scrubbed env).
+        """
+        result = self._tmux("show-environment", "-g")
+        if result.returncode != 0:
+            return
+        for line in result.stdout.splitlines():
+            # Rows are NAME=value, or -NAME for a variable already removed.
+            name, sep, _ = line.partition("=")
+            if not sep or not name.isidentifier():
+                continue
+            if name not in scrubbed_child_env({name: ""}):
+                self._tmux("set-environment", "-g", "-u", name)
 
     def has_session(self, name: str) -> bool:
         return self._tmux("has-session", "-t", name).returncode == 0
@@ -269,7 +299,11 @@ class TmuxSessionManager:
         # Ink-based TUIs (Claude Code's slash menu, in particular). The
         # `env` binary forces TERM at exec-time, after tmux's wrapper.
         prefixed_command = ["env", f"TERM={self._DEFAULT_TERM}", *command]
-        full_env = {**os.environ, **env}
+        # Never the raw os.environ: when this call starts the tmux server, the
+        # server's global environment (and every pane it ever creates) is this
+        # env — the shared scrub keeps every server credential out of it.
+        full_env = {**scrubbed_child_env(), **env}
+        self._purge_stale_server_secrets()
         result = subprocess.run(
             self._new_session_cmd(name, str(cwd), env_args, prefixed_command),
             capture_output=True, text=True, env=full_env
@@ -335,6 +369,7 @@ class TmuxSessionManager:
                 time.sleep(delay_s)
                 subprocess.run(
                     cmd, capture_output=True, text=True, timeout=5,
+                    env=scrubbed_child_env(),
                 )
             except Exception:
                 pass

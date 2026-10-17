@@ -6,9 +6,10 @@ three voice agents, spawned YOLO fully open. This module owns exactly four
 things and no more (T11 owns progress_text; T10 owns the tools):
 
   1. build_argv        — per-provider argv, every flag verified from --help.
-  2. build_child_env   — a REAL per-provider environment strip so an agent uses
-                         the operator's *subscription* auth, never a leaked
-                         server-side API key that silently bills.
+  2. build_child_env   — a REAL environment strip (the shared env_scrub table,
+                         plus each provider's own billing keys) so an agent
+                         uses the operator's *subscription* auth, never a
+                         leaked server-side API key that silently bills.
   3. _resolve_bin      — absolute path to the CLI (systemd PATH omits nvm dirs).
   4. run_cli_agent     — spawn (own process group), read stdout JSONL, keep a
                          bounded poll-visible tail, honor cancel + timeout via a
@@ -34,9 +35,9 @@ Auth routing (why the strip matters — verified on this box 2026-07-10):
   * gemini reads GOOGLE_API_KEY / GEMINI_API_KEY; with either present it bills
     the API key. Strip both. GOOGLE_APPLICATION_CREDENTIALS is deliberately KEPT
     — a distinct Vertex/ADC service-account path, not the pay-per-call key we
-    avoid; the zellij denylist keeps it for the same reason. NOTE: on this box
-    gemini is NOT OAuth-authenticated (no ~/.gemini/oauth_creds.json), so with
-    the keys stripped it does NOT fall back to a subscription — it errors:
+    avoid; the shared env_scrub keep-list keeps it for the same reason. NOTE: on
+    this box gemini is NOT OAuth-authenticated (no ~/.gemini/oauth_creds.json),
+    so with the keys stripped it does NOT fall back to a subscription — it errors:
     "When using Gemini API, you must specify the GEMINI_API_KEY ...". That is
     the CORRECT failure: silently billing the API key while the operator
     believes he is on a subscription is the worse outcome and is exactly what
@@ -96,16 +97,20 @@ CLAUDE_MODEL_CLASSES: tuple[str, ...] = ("fable", "opus", "sonnet", "haiku")
 # Per-provider env strip. Each provider strips its own billing KEY plus its
 # redirect vars (BASE_URL / AUTH_TOKEN) — defense-in-depth (M5): a YOLO coding
 # agent has no reason to inherit the Orchestrator's provider-proxy config, and
-# an inherited *_BASE_URL could silently re-point the agent at our proxy. Minimal
-# blast radius otherwise — we do NOT use a strict allowlist, because a coding
-# agent legitimately needs the operator's broad shell/toolchain env.
+# an inherited *_BASE_URL could silently re-point the agent at our proxy.
+# build_child_env applies these ON TOP of the shared env_scrub table, which
+# already drops every credential-shaped name for every provider (audit
+# O14-cli-agents-devices-03: this table alone left a claude agent holding the
+# Google/OpenAI/xAI/Twilio secrets). We still do NOT use a strict allowlist,
+# because a coding agent legitimately needs the operator's broad shell/toolchain
+# env.
 _ENV_STRIP: dict[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "codex": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
 }
 # NOTE: GOOGLE_APPLICATION_CREDENTIALS is intentionally NOT in gemini's list —
-# see the module docstring (Vertex/ADC, kept in lock-step with the zellij denylist).
+# see the module docstring (Vertex/ADC, kept by the shared env_scrub keep-list).
 
 SUPPORTED_PROVIDERS: tuple[str, ...] = tuple(_PROVIDER_BINARY_NAMES.keys())
 
@@ -223,15 +228,17 @@ def build_argv(provider: str, prompt: str, model: Optional[str], cwd: str,
 
 
 def build_child_env(provider: str, base_env: Optional[dict] = None) -> dict:
-    """Return the environment for the spawned CLI: the base env with the
-    provider's billing keys stripped and the PATH augmented so an nvm-installed
-    CLI's `#!/usr/bin/env node` shebang resolves.
+    """Return the environment for the spawned CLI: the base env scrubbed of
+    every server credential (env_scrub), the provider's billing keys stripped,
+    and the PATH augmented so an nvm-installed CLI's `#!/usr/bin/env node`
+    shebang resolves.
 
     The strip is the whole point of the feature — see the module docstring.
     """
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported CLI-agent provider: {provider!r}")
-    env = dict(os.environ if base_env is None else base_env)
+    from .env_scrub import scrubbed_child_env
+    env = scrubbed_child_env(base_env)
 
     for key in _ENV_STRIP.get(provider, ()):  # <-- the environment strip
         env.pop(key, None)

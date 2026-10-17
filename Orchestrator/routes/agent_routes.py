@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse, Response
 
 # Local imports
 from Orchestrator.checkpoint import app
+from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
 from Orchestrator.startup import GenIn, ImageData, VideoExtensionIn
 from Orchestrator.utils.paths import blackbox_root
 
@@ -145,8 +146,12 @@ def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: st
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=working_dir,
+        # Scrubbed env (shared env_scrub table): claude must authenticate with
+        # the operator's subscription login, never bill an inherited
+        # ANTHROPIC_API_KEY, and a YOLO agent must not hold the server's other
+        # credentials (audit O14-cli-agents-devices-02/-03).
         env={
-            **os.environ,
+            **scrubbed_child_env(),
             "PATH": os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
         },
         start_new_session=True
@@ -193,7 +198,7 @@ def create_claude_pty(working_dir: str) -> Tuple[Any, int]:
         stderr=slave_fd,
         cwd=working_dir,
         env={
-            **os.environ,
+            **scrubbed_child_env(),  # same rule as create_claude_streaming
             "TERM": "xterm-256color",
             "COLUMNS": str(cols),
             "LINES": str(rows),

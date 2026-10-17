@@ -28,6 +28,7 @@ from Orchestrator.agent_context import (
     retrieve_for_agent,
 )
 from Orchestrator.checkpoint import app
+from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
 from Orchestrator.config import GEMINI_API_KEY, current_default
 from Orchestrator.utils.paths import blackbox_root
 from Orchestrator.volume import now_utc_iso
@@ -149,15 +150,20 @@ def create_gemini_streaming(
 
     print(f"[GEMINI-AGENT] Command: {' '.join(cmd[:6])}... (yolo={yolo_mode})")
 
-    # Environment with nvm
-    env = os.environ.copy()
+    # Environment with nvm. Scrubbed (shared env_scrub table) so the YOLO
+    # agent never inherits the server's other credentials (Anthropic/OpenAI/
+    # xAI/Twilio/AMI — audit O14-cli-agents-devices-02/-03).
+    env = scrubbed_child_env()
     nvm_dir = os.path.expanduser("~/.nvm")
     if os.path.exists(nvm_dir):
         node_path = os.path.expanduser("~/.nvm/versions/node/v20.19.6/bin")
         env["PATH"] = node_path + ":" + env.get("PATH", "")
         env["NVM_DIR"] = nvm_dir
 
-    # Add API key (central config falls back from GEMINI_API_KEY to GOOGLE_API_KEY)
+    # Add API key (central config falls back from GEMINI_API_KEY to GOOGLE_API_KEY).
+    # The ONE deliberate exception to the scrub: this legacy agent-mode route has
+    # always authenticated the gemini CLI with the server's configured key (it
+    # does not rely on a gemini sign-in), so it re-adds exactly that variable.
     env["GEMINI_API_KEY"] = GEMINI_API_KEY
 
     process = subprocess.Popen(

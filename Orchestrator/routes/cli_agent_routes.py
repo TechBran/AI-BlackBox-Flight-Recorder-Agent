@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from Orchestrator.cli_agent import get_backend
 from Orchestrator.cli_agent import terminal_uploads, zellij_client, zellij_state
+from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
 from Orchestrator.cli_agent.operator_config import OperatorConfig
 from Orchestrator.cli_agent.path_validator import PathValidator, WorkspaceViolation
 from Orchestrator.cli_agent.session_manager import (
@@ -129,6 +130,21 @@ def _manager() -> TmuxSessionManager:
     return TmuxSessionManager(path_validator=pv, operator_config=oc)
 
 
+def _attach_pty_env(op: str) -> dict:
+    """Env for the WS bridge's `tmux attach` client PTY.
+
+    Scrubbed (shared env_scrub table): tmux copies selected client vars into
+    the session on attach, and the client must never carry the server's
+    credentials anyway. TERM must be set on the *attaching* PTY too, otherwise
+    tmux logs "open terminal failed: terminal does not support clear" and exits.
+    """
+    return {
+        **scrubbed_child_env(),
+        **OperatorConfig(root=CLAUDE_CFG_ROOT).env_for(op),
+        "TERM": os.environ.get("TERM") or "xterm-256color",
+    }
+
+
 def _clamp_dim(n: int, default: int) -> int:
     try:
         v = int(n)
@@ -206,16 +222,9 @@ async def ws_cli_agent(
         "state": "created" if info.created else "attaching",
     }))
 
-    # TERM must be set on the *attaching* PTY too, otherwise tmux logs
-    # "open terminal failed: terminal does not support clear" and exits.
-    env = {
-        **os.environ,
-        **OperatorConfig(root=CLAUDE_CFG_ROOT).env_for(op),
-        "TERM": os.environ.get("TERM") or "xterm-256color",
-    }
     bridge = PtyBridge.spawn(
         ["tmux", "attach", "-t", session_id],
-        env=env, cols=cols, rows=rows,
+        env=_attach_pty_env(op), cols=cols, rows=rows,
     )
 
     # OAuth URL scraper: extract auth URLs from PTY output BEFORE xterm.js

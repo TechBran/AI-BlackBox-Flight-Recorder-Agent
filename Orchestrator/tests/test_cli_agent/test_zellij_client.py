@@ -199,8 +199,9 @@ def test_launch_session_kdl_includes_args_block_when_args_supplied():
 
 def test_launch_session_child_env_scrubs_zellij_and_denylist(monkeypatch):
     """The session-backend child env must drop ZELLIJ* vars (nested-pane
-    leak — same rationale as _run's scrub) AND the pane denylist keys
-    (ANTHROPIC_API_KEY), while keeping ordinary vars like PATH."""
+    leak — same rationale as _run's scrub) AND every server credential (the
+    shared env_scrub table — audit O14-cli-agents-devices-02), while keeping
+    ordinary vars like PATH and the Vertex/ADC credentials path."""
     captured = {}
 
     def fake_popen(argv, **kwargs):
@@ -210,7 +211,11 @@ def test_launch_session_child_env_scrubs_zellij_and_denylist(monkeypatch):
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "someones-live-session")
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_PANE_ID", "1")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-server-side-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-server-side-secret")
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake-google")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "fake-twilio")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/vertex.json")
 
     with patch.object(zellij_client.subprocess, "Popen", side_effect=fake_popen):
         with patch.object(zellij_client.pty, "openpty", return_value=(40, 41)):
@@ -220,8 +225,11 @@ def test_launch_session_child_env_scrubs_zellij_and_denylist(monkeypatch):
     env = captured["env"]
     assert env is not None
     assert not any(k.startswith("ZELLIJ") for k in env)
-    assert "ANTHROPIC_API_KEY" not in env
+    for secret in ("ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY",
+                   "TWILIO_AUTH_TOKEN"):
+        assert secret not in env, f"{secret} leaked into the pane env"
     assert "PATH" in env
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/tmp/vertex.json"
 
 
 # --- kill_session idempotency -------------------------------------------
