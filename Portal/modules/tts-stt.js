@@ -59,6 +59,19 @@ function _isAudible(el) {
  */
 export function pauseOtherPlayers(active) {
     if (!_isAudible(active)) return 0;
+    return _pauseAudibleExcept(active);
+}
+
+/**
+ * Pause every audible player, for audio the guard cannot see: the live voice
+ * agents play through an AudioContext, which never fires 'play', so each one
+ * calls this when its session connects. Returns how many it paused.
+ */
+export function pauseAllPlayers() {
+    return _pauseAudibleExcept(null);
+}
+
+function _pauseAudibleExcept(active) {
     const others = new Set(_playingDetached);
     if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
         for (const el of document.querySelectorAll('audio, video')) others.add(el);
@@ -539,6 +552,15 @@ class StreamingTTSQueue {
         this.audioPlayer = null;
         this.playbackAudio = null;
 
+        // One-player guard: another player starting pauses the chunk player
+        // (_playNext). `interrupted` then keeps playback from restarting over
+        // it; `generationDone` says finalize() has every chunk in, so a later
+        // interruption builds the replay player itself; `stopped` marks
+        // stop()'s own pause, which is not an interruption.
+        this.interrupted = false;
+        this.generationDone = false;
+        this.stopped = false;
+
         // On-box (qwen) queue state (B2): one /tts/queue job per response.
         this.queueAbort = null;
         this.queueTaskId = null;
@@ -772,7 +794,7 @@ class StreamingTTSQueue {
      * Start audio playback
      */
     _startPlayback() {
-        if (this.isPlaying || this.audioUrls.length === 0) return;
+        if (this.isPlaying || this.interrupted || this.audioUrls.length === 0) return;
 
         this.isPlaying = true;
         this._updateIndicator('Playing audio...');
@@ -797,11 +819,21 @@ class StreamingTTSQueue {
         }
 
         const url = this.audioUrls[this.currentPlayIndex];
-        this.playbackAudio = trackDetachedPlayer(new Audio(url));
+        const audio = trackDetachedPlayer(new Audio(url));
+        this.playbackAudio = audio;
 
         this.playbackAudio.onended = () => {
             this.currentPlayIndex++;
             this._playNext();
+        };
+
+        // Paused from outside: another player started (the one-player guard)
+        // and nothing resumes a detached chunk, so the listener has taken over.
+        // A natural end also fires 'pause' (with `ended` set) and stop()
+        // pauses on teardown; neither is an interruption.
+        audio.onpause = () => {
+            if (this.stopped || audio.ended || audio !== this.playbackAudio) return;
+            this._interrupt();
         };
 
         this.playbackAudio.onerror = (e) => {
@@ -816,6 +848,24 @@ class StreamingTTSQueue {
             this.currentPlayIndex++;
             this._playNext();
         });
+    }
+
+    /**
+     * Another player took over (see _playNext): stop reading this reply aloud
+     * and never restart over the listener's choice. The reply still gets its
+     * replay player: built here when finalize() already has every chunk in,
+     * else by finalize() once it does.
+     */
+    _interrupt() {
+        if (this.interrupted) return;
+        this.interrupted = true;
+        this.isPlaying = false;
+        console.log('[StreamingTTS] Interrupted by another player');
+        if (this.generationDone) {
+            this._createFinalPlayer();
+        } else {
+            this._updateIndicator('Paused (another player started)');
+        }
     }
 
     /**
@@ -859,8 +909,13 @@ class StreamingTTSQueue {
             }
         }
 
-        // Resume playback if paused waiting for more audio
-        if (!this.isPlaying && this.currentPlayIndex < this.audioUrls.length) {
+        // Every chunk is in: an interruption from here on builds the replay
+        // player itself (_interrupt).
+        this.generationDone = true;
+
+        // Resume playback if paused waiting for more audio, unless another
+        // player has taken over (then straight to the replay player)
+        if (!this.isPlaying && !this.interrupted && this.currentPlayIndex < this.audioUrls.length) {
             this._startPlayback();
         } else if (!this.isPlaying) {
             this._createFinalPlayer();
@@ -1062,6 +1117,7 @@ class StreamingTTSQueue {
      * Stop and cleanup
      */
     stop() {
+        this.stopped = true;
         this.finalized = true;
         // Abort any on-box queue polling; the abort listener POSTs the
         // server-side /tts/task/{id}/cancel (cooperative, sub-batch boundary).

@@ -16,6 +16,7 @@
 import { $, toast } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
+import { pauseAllPlayers } from './tts-stt.js';
 import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
 
 // =============================================================================
@@ -1175,6 +1176,10 @@ export async function connect(operator) {
         toast('Select an operator first');
         return;
     }
+
+    // Bubble audio and auto-TTS stop as the session starts: it plays through an
+    // AudioContext, which tts-stt.js's one-player guard cannot see.
+    pauseAllPlayers();
 
     // Reset session state for new connection
     sessionConversation = [];

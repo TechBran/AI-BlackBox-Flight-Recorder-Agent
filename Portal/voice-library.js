@@ -197,6 +197,15 @@ function togglePreview(url, btn) {
         btn.textContent = '▶';
         if (playingBtn === btn) playingBtn = null;
     };
+    // Paused by another player starting (the one-player guard): show ▶ again.
+    // A stale pause from stopPreview() arrives after the next play() began
+    // (paused is false by then) and is ignored.
+    previewAudio.onpause = () => {
+        if (!previewAudio.paused || previewAudio.ended || playingBtn !== btn) return;
+        btn.classList.remove('playing');
+        btn.textContent = '▶';
+        playingBtn = null;
+    };
     // User-initiated, so WebKitGTK autoplay policy is satisfied.
     previewAudio.play().catch((e) => {
         console.error('preview play failed', e);

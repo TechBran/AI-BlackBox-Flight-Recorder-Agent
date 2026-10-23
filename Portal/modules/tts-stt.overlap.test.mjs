@@ -34,7 +34,7 @@ globalThis.document = {
 };
 globalThis.fetch = () => Promise.reject(new Error("no network in unit test"));
 
-const { pauseOtherPlayers, trackDetachedPlayer } = await import("./tts-stt.js");
+const { pauseOtherPlayers, pauseAllPlayers, trackDetachedPlayer } = await import("./tts-stt.js");
 
 /** A media element: play()/pause() flip `paused` and fire their events. */
 class FakeMedia {
@@ -124,4 +124,18 @@ test("pauseOtherPlayers returns how many it paused", () => {
     docMedia = [a, b, c];
     assert.equal(pauseOtherPlayers(a), 2);
     assert.equal(a.paused, false);
+});
+
+test("pauseAllPlayers (a live voice agent connecting) pauses every audible player", () => {
+    const bubble = new FakeMedia("AUDIO", { playing: true });
+    const loop = new FakeMedia("VIDEO", { muted: true, playing: true });
+    docMedia = [bubble, loop];
+    assert.equal(pauseAllPlayers(), 1);
+    assert.equal(bubble.paused, true, "the in-page bubble player is paused");
+    assert.equal(loop.paused, false, "muted media is left alone");
+
+    const preview = trackDetachedPlayer(new FakeMedia("AUDIO"));
+    preview.play();
+    assert.equal(pauseAllPlayers(), 1);
+    assert.equal(preview.paused, true, "a playing detached player is paused too");
 });
