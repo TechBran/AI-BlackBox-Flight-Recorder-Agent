@@ -42,7 +42,8 @@ chmod 600 "$WORK/root/.env"
 run_block || { cat "$WORK/out.log"; fail "block failed on a fresh .env"; }
 K1="$(key)"
 [[ ${#K1} -eq 44 ]] || fail "no Fernet-shaped TELEPHONY_SECRET_KEY generated"
-grep -qF "$K1" "$WORK/out.log" && fail "the generated key was printed"
+# -- : a generated key may start with "-", which grep would take as an option.
+grep -qF -- "$K1" "$WORK/out.log" && fail "the generated key was printed"
 [[ "$(grep -c '^TELEPHONY_SECRET_KEY=' "$WORK/root/.env")" == "1" ]] || fail "duplicate TELEPHONY_SECRET_KEY lines"
 
 # ── re-run: a set key is never replaced ───────────────────────────────────────

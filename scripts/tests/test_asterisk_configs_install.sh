@@ -79,9 +79,10 @@ grep -qiE '^[[:space:]]*allowed_origins[[:space:]]*=' "$WORK/etc/asterisk/ari.co
 grep -qx "enabled=yes" "$WORK/etc/asterisk/ari.conf" || fail "ari.conf no longer enables ARI"
 [[ "$(env_val OTHER)" == "keep" ]] || fail ".env lost other keys"
 [[ "$(stat -c %a "$WORK/root/.env")" == "600" ]] || fail ".env mode changed"
-grep -qF "$PW1" "$WORK/out.log" && fail "the ARI password was printed"
-grep -qF "$PW1" "$WORK/curl.argv" && fail "the ARI password was on curl's command line"
-grep -qF "$PW1" "$WORK/curl.stdin" || fail "curl did not get the credentials on stdin"
+# -- : a generated password may start with "-", which grep would take as an option.
+grep -qF -- "$PW1" "$WORK/out.log" && fail "the ARI password was printed"
+grep -qF -- "$PW1" "$WORK/curl.argv" && fail "the ARI password was on curl's command line"
+grep -qF -- "$PW1" "$WORK/curl.stdin" || fail "curl did not get the credentials on stdin"
 grep -q "ARI is responding" "$WORK/out.log" || fail "verification step did not run"
 [[ "$(cat "$WORK/etc/asterisk/pjsip.conf")" == "; repo pjsip" ]] || fail "full install did not copy pjsip.conf"
 cmp -s "$WORK/root/Orchestrator/asterisk/ivr_cache/greeting.wav" "$WORK/sounds/ivr/greeting.wav" \
@@ -106,7 +107,7 @@ PATH="$WORK/bin:$PATH" ASTERISK_ETC="$WORK/etc/asterisk" BLACKBOX_ROOT="$WORK/ro
 PW2="$(env_val ASTERISK_ARI_PASSWORD)"
 [[ -n "$PW2" && "$PW2" != "$PW1" ]] || fail "--rotate-ari-password did not rotate"
 grep -qx "password=$PW2" "$WORK/etc/asterisk/ari.conf" || fail "ari.conf not re-rendered after rotation"
-grep -qF "$PW2" "$WORK/out.log" && fail "the rotated ARI password was printed"
+grep -qF -- "$PW2" "$WORK/out.log" && fail "the rotated ARI password was printed"
 
 # ── Missing .env fails loudly ─────────────────────────────────────────────────
 rm "$WORK/root/.env"

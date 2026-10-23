@@ -3,11 +3,16 @@
 #   pip install -r requirements.txt -r requirements.dev.txt
 #
 # Production deployments should NOT install this file.
+#
+# Exact pins (audit O21-python-tests-18): an upstream release must not turn the
+# CI gate red with no change in this repo. pytest and pytest-asyncio match
+# requirements.lock.txt, so CI and a box venv run the same test tools; bump
+# them together.
 
 # Test Framework
-pytest>=9.0.3
-pytest-asyncio>=1.3.0
-pytest-timeout>=2.4.0   # pytest.ini timeout: no single test can hang the CI gate
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0   # pytest.ini timeout: no single test can hang the CI gate
 
 # Test-only libraries
-jsonschema>=4.26.0      # test_android_control_schemas validates the device-control contract
+jsonschema==4.26.0      # test_android_control_schemas validates the device-control contract

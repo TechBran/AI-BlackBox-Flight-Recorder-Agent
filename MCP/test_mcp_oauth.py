@@ -99,8 +99,8 @@ def _wait_for_http(url: str, timeout: float = 25.0) -> bool:
 # VALID BlackBox token at the consent form, and the issued code/access token
 # binds to THAT token's operator -- NOT a fixed env operator. So the default
 # server's OAuth bindings resolve to the token map's operator (VALID_OPERATOR =
-# "alice"), which the (6b-store)/(k) assertions key on. (The legacy env knob
-# BLACKBOX_MCP_OAUTH_OPERATOR no longer drives the binding on the consent path.)
+# "alice"), which the (6b-store)/(k) assertions key on. (The server reads no
+# operator from the environment for OAuth, so the harness sets none.)
 TEST_OAUTH_OPERATOR = VALID_OPERATOR
 
 
@@ -116,9 +116,8 @@ def _start_http_server(port: int, clients_file: Path,
     # Never write the real OAuth client store; deterministic public URL.
     env["BLACKBOX_MCP_OAUTH_CLIENTS_FILE"] = str(clients_file)
     env["BLACKBOX_MCP_PUBLIC_URL"] = TEST_PUBLIC_URL
-    # CHUNK 6b: pin the OAuth operator + point the access-token store at a TEMP
-    # file so the test never writes the real Manifest/mcp_oauth_tokens.json.
-    env["BLACKBOX_MCP_OAUTH_OPERATOR"] = TEST_OAUTH_OPERATOR
+    # CHUNK 6b: point the access-token store at a TEMP file so the test never
+    # writes the real Manifest/mcp_oauth_tokens.json.
     if tokens_file is not None:
         env["BLACKBOX_MCP_OAUTH_TOKENS_FILE"] = str(tokens_file)
     # alice/bob are synthetic test operators absent from the real box roster ->
@@ -344,8 +343,8 @@ def _run_oauth_isolation(failures: list) -> None:
     # Start the seeded server with the OAuth operator pinned to "bob" and its OWN
     # public URL (origin) so /authorize's exact redirect_uri match works.
     proc = _start_http_server(port, iso_clients, iso_tokens)
-    # _start_http_server pins BLACKBOX_MCP_OAUTH_OPERATOR=oauth-op + a fixed
-    # public URL; override BOTH plus BLACKBOX_ROOT for this seeded/isolated run.
+    # _start_http_server seeds alice's token map + a fixed public URL; override
+    # both plus BLACKBOX_ROOT for this seeded/isolated run.
     # (We relaunch with a tailored env rather than thread params through.)
     proc.terminate()
     try:
@@ -912,14 +911,15 @@ def main() -> int:
 
         # =====================================================================
         # CHUNK 6c (against this default server -- full repo root, so ToolVault/
-        # is present and the canonical 74-tool count holds; no backend needed):
+        # is present and the full catalog count, EXPECTED_TOOLS, holds; no
+        # backend needed):
         #   (k) end-to-end: the OAuth access token minted in 6b-e opens /mcp ->
-        #       initialize + list_tools = 74 (gate accepts a REAL OAuth credential
+        #       initialize + list_tools = EXPECTED_TOOLS (gate accepts a REAL OAuth credential
         #       and routes it through the SAME path as a static bearer).
         #   (m) an EXPIRED or BOGUS OAuth access token on /mcp -> 401.
         #   (n) the STATIC-bearer path STILL works on /mcp (regression).
         # =====================================================================
-        # ---- (k) OAuth token (from 6b-e) opens /mcp -> initialize + 74 tools ----
+        # ---- (k) OAuth token (from 6b-e) opens /mcp -> initialize + every tool ----
         if access_token:
             ck = httpx.Client(timeout=15)
             sid_oauth = _raw_init(ck, mcp_url, access_token)
