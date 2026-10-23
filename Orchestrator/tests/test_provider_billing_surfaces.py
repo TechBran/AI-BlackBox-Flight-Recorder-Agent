@@ -18,9 +18,11 @@ wiring, one surface at a time, using the REAL Anthropic body journald recorded
     row, and preflight (reports the recorded failure without a provider call);
   * cron: the run record (history ``error`` column) starts with
     ``credits_exhausted:`` for chat jobs and for CU jobs;
-  * CLI agents: a failed run whose output carries the billing text is
-    classified under the CLI's own account, a successful one never is;
-  * frontier device control and the OpenAI realtime STT error frame.
+  * CLI agents: a failed run whose CLI error carries the billing text is
+    classified under the CLI's own account; a successful run, a timed-out run
+    and the agent's own work (assistant text, tool calls) never are;
+  * frontier device control (an SDK refusal is billing, the model's own text
+    is not) and the OpenAI realtime STT error frame.
 
 Hermetic: httpx/requests/aiohttp/SDK clients are fakes, the billing state
 file is a tmp path and the push seam is a recorder.
@@ -70,7 +72,7 @@ MSGS = [{"role": "user", "content": "hi"}]
 def ledger(tmp_path, monkeypatch):
     pushes = []
 
-    def fake_push(title, body, dedup_key):
+    def fake_push(title, body, dedup_key, on_result=None):
         pushes.append({"title": title, "body": body})
         return True
 
@@ -773,10 +775,43 @@ def test_cron_history_row_carries_the_kind(monkeypatch, tmp_path):
     asyncio.run(mgr._execute_job(job["id"]))
 
     history = mgr.get_job_history(job["id"])
-    assert history and all(r["error"].startswith("credits_exhausted: ") for r in history)
-    assert all(r["delivery_status"] == "error" for r in history)
+    # Not retried: credits do not come back within the 5 s / 30 s backoff, so a
+    # retry only repeats the refusal (and, for a CU job, the desktop launch).
+    assert len(history) == 1
+    assert history[0]["error"].startswith("credits_exhausted: ")
+    assert history[0]["delivery_status"] == "error"
     cron_alerts = [a for a in alerts if a.get("category") == "alert"]
-    assert cron_alerts and cron_alerts[0]["body"].startswith("credits_exhausted: ")
+    assert len(cron_alerts) == 1 and cron_alerts[0]["body"].startswith("credits_exhausted: ")
+    after = mgr.get_job(job["id"])
+    assert after["last_run_result"] == "error" and after["error_count"] == 1
+    assert after["status"] == "active"      # a billing refusal is not a ran-turn pause
+
+
+def test_cron_one_shot_refused_for_billing_is_kept_armed_not_paused(monkeypatch, tmp_path):
+    from Orchestrator.scheduler import executor as executor_mod
+    from Orchestrator.scheduler import manager as manager_mod
+    from Orchestrator.scheduler.manager import CronJobManager
+
+    err = pb.classify("anthropic", 400, ANTHROPIC_CREDIT_400)
+    monkeypatch.setattr(manager_mod, "DB_PATH", tmp_path / "cron_bill1.db")
+    monkeypatch.setattr(manager_mod, "RETRY_BACKOFF_SECONDS", [0] * (manager_mod.MAX_RETRIES + 1))
+
+    async def rec(*a, **k):
+        pass
+    monkeypatch.setattr(manager_mod, "notify", rec)
+    monkeypatch.setattr(executor_mod, "_POLL_INTERVAL_SECS", 0)
+    monkeypatch.setattr(executor_mod.aiohttp, "ClientSession", _failed_task_session(err))
+
+    mgr = CronJobManager()
+    job = mgr.create_job(name="Once", prompt="brief me", schedule="0 9 * * *",
+                         operator="BillingTester", model="claude-test", provider="anthropic",
+                         one_shot=True)
+    asyncio.run(mgr._execute_job(job["id"]))
+    after = mgr.get_job(job["id"])
+    # The turn never ran: like any failed one-shot it survives (M2.6), and it is
+    # not paused the way a turn whose tool calls failed is (W15).
+    assert after is not None and after["status"] == "active"
+    assert len(mgr.get_job_history(job["id"])) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -838,6 +873,152 @@ def test_cli_agent_billing_failure_is_classified_under_its_own_login(ledger, cli
     assert pb.last_failure("anthropic") is None, "the CLI login is not the box's API key"
 
 
+# Real stream-json shapes (claude -p --output-format stream-json): the agent's
+# work arrives as assistant/user events; the CLI's own failure as the final
+# result event with is_error (claude), an error / turn.failed event (codex) or
+# a result with status "error" (gemini).
+def _claude_stream(*events):
+    return "\n".join(json.dumps(e) for e in events)
+
+
+_CLAUDE_INIT = {"type": "system", "subtype": "init", "session_id": "s1", "model": "m"}
+
+
+def _claude_write(content):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_1", "name": "Write",
+         "input": {"file_path": "/tmp/x/budget.py", "content": content}}]}}
+
+
+def _claude_text(text):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": text}]}}
+
+
+def _cut_tail(fragment):
+    """A tail exactly at the 4000-char window whose first line is a cut fragment."""
+    from Orchestrator.cli_agent import headless
+
+    tail = fragment + "\n" + "z" * (headless.TAIL_MAX_CHARS - len(fragment) - 1)
+    assert len(tail) == headless.TAIL_MAX_CHARS
+    return tail
+
+
+def _run_cli(cli_db, monkeypatch, task_id, provider, tail, *, exit_code=1, timed_out=False):
+    import requests
+
+    import Orchestrator.tasks as tasks
+    from Orchestrator.cli_agent import headless
+
+    store, seed = cli_db
+    task = seed(task_id, provider)
+    monkeypatch.setattr(headless, "run_cli_agent", lambda **kw: {
+        "success": False, "exit_code": None if timed_out else exit_code, "cancelled": False,
+        "timed_out": timed_out, "result_text": tail, "tail": tail, "events": 3,
+        "provider": provider})
+    monkeypatch.setattr(requests, "post", lambda *a, **k: pytest.fail("a failed run never mints"))
+    tasks.process_cli_agent(task)
+    return store[task_id]
+
+
+def test_cli_agent_stream_json_billing_result_is_classified(ledger, cli_db, monkeypatch):
+    tail = _claude_stream(
+        _CLAUDE_INIT,
+        {"type": "assistant", "message": {"model": "<synthetic>", "role": "assistant",
+                                          "content": [{"type": "text",
+                                                       "text": "Credit balance is too low"}]},
+         "error": "billing_error"},
+        {"type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
+         "result": "Credit balance is too low", "session_id": "s1"})
+    row = _run_cli(cli_db, monkeypatch, "cli-json", "claude", tail)
+    assert row.result_data["error_kind"] == "credits_exhausted"
+    assert row.error_message.startswith("CLI agent claude failed (exit code 1): Anthropic "
+                                        "account is out of credits")
+    assert '"is_error": true' in row.error_message, "the CLI's own output is kept beside it"
+    assert len(ledger) == 1 and pb.last_failure("anthropic") is None
+
+
+def test_cli_agent_codex_quota_error_event_is_classified(ledger, cli_db, monkeypatch):
+    tail = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "t1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "error",
+                    "message": "Quota exceeded. Check your plan and billing details."}),
+        json.dumps({"type": "turn.failed",
+                    "error": {"message": "Quota exceeded. Check your plan and billing details."}}),
+    ])
+    row = _run_cli(cli_db, monkeypatch, "cli-codex", "codex", tail)
+    assert row.result_data["error_kind"] == "credits_exhausted"
+    assert "OpenAI account is out of credits" in row.error_message
+    assert len(ledger) == 1
+
+
+def test_cli_agent_timed_out_run_is_never_classified(ledger, cli_db, monkeypatch):
+    # The regression reviewer's exploit: an agent writing budget code times out.
+    # A billing refusal exits at once; it never times out.
+    tail = _claude_stream(
+        _CLAUDE_INIT,
+        _claude_write("# block purchases over the monthly spending limit\n"
+                      "if total > limit: raise ValueError('over spend cap')\n"),
+        {"type": "result", "subtype": "error_during_execution", "is_error": True,
+         "result": "Your credit balance is too low (quoted from the spec)"})
+    row = _run_cli(cli_db, monkeypatch, "cli-timeout", "claude", tail, timed_out=True)
+    assert row.status == "failed"
+    assert row.error_message.startswith("CLI agent claude failed (timed out): ")
+    assert "account" not in row.error_message.split(": ", 1)[1][:40]
+    assert "error_kind" not in row.result_data
+    assert ledger == []
+
+
+@pytest.mark.parametrize("provider,tail", [
+    # The agent's own work names the phrases: a Write tool call, assistant text,
+    # a tool result. None of it is the CLI's error.
+    ("claude", _claude_stream(
+        _CLAUDE_INIT,
+        _claude_write("raise BillingError('Your credit balance is too low')  # insufficient_quota"),
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
+             "content": "credit balance is too low; billing_hard_limit_reached"}]}},
+        _claude_text("Next: wire the spend limit validation and the out of credits banner."),
+        {"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 30})),
+    ("codex", "\n".join([
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message",
+            "text": "Updated README: the game shows 'Out of credits' when the player "
+                    "loses all coins. Also handled insufficient_quota."}}),
+        json.dumps({"type": "turn.failed", "error": {"message": "stream disconnected"}})])),
+    # A first line cut by the 4000-char tail window is a fragment of the agent's
+    # output, not a stderr line.
+    ("claude", _cut_tail('the banner says Credit balance is too low"}]}}')),
+])
+def test_cli_agent_failed_run_working_on_billing_text_is_not_classified(
+        ledger, cli_db, monkeypatch, provider, tail):
+    row = _run_cli(cli_db, monkeypatch, "cli-work", provider, tail)
+    assert row.status == "failed"
+    assert "error_kind" not in row.result_data
+    assert "out of credits -" not in row.error_message
+    assert ledger == []
+
+
+def test_cli_failure_text_reads_only_the_clis_own_errors():
+    from Orchestrator.cli_agent import headless
+
+    tail = "\n".join([
+        "Loaded cached credentials.",                              # stderr, plain text
+        json.dumps(_claude_text("the spend limit is 5 USD")),     # agent text: skipped
+        json.dumps({"type": "result", "status": "error",           # gemini
+                    "error": {"type": "FatalError", "message": "API key not valid"}}),
+        json.dumps({"type": "error", "severity": "error", "message": "boom"}),
+        '{"type": "assistant", "message": {"content": "truncated',  # clamped event: skipped
+    ])
+    text = headless.failure_text(tail)
+    assert text.splitlines() == ["Loaded cached credentials.", "API key not valid", "boom"]
+    assert headless.failure_text("") == ""
+    ok = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                     "result": "Credit balance is too low"})
+    assert headless.failure_text(ok) == ""
+
+
 def test_cli_agent_success_mentioning_the_phrase_is_not_classified(ledger, cli_db, monkeypatch):
     import requests
 
@@ -893,6 +1074,43 @@ def test_frontier_loop_ends_with_credits_exhausted(ledger, monkeypatch):
     assert res.error_kind == "credits_exhausted"
     assert res.message.startswith("Anthropic account is out of credits")
     assert len(ledger) == 1
+
+
+def test_frontier_model_text_is_never_a_billing_refusal(ledger, monkeypatch):
+    # The bypass reviewer's exploit: Claude stops for max_tokens/refusal and the
+    # driver raises a RuntimeError carrying the MODEL's text.
+    from Orchestrator import frontier_agent_loop as fal
+    from Orchestrator.browser import preflight
+
+    obs = {"msg": "observation", "ui_tree": [], "device_capability": {
+        "formFactor": "phone", "hasScreenshot": True, "supportsCoordinateGesture": True,
+        "displayId": 0}, "timestamp": 1}
+
+    class _Driver:
+        async def next_action(self, observation, last_result):
+            raise RuntimeError("Claude stopped without an action (stop_reason=refusal): "
+                               "I can't change the spending limit on your card; the app "
+                               "says your credit balance is too low.")
+
+    async def fake_pull(base_url, task_id, operator, timeout, headers=None):
+        return obs
+
+    for name, val in (("_retry_max", 0), ("_retry_backoff_secs", 0.0), ("_per_action_secs", 5.0),
+                      ("_per_turn_secs", 5.0), ("_session_base_secs", 300.0),
+                      ("_session_max_secs", 600.0), ("_max_steps", 5)):
+        monkeypatch.setattr(fal, name, lambda _v=val: _v)
+    monkeypatch.setattr(fal, "_pull_observation", fake_pull)
+    monkeypatch.setattr(fal, "_make_driver", lambda *a, **k: _Driver())
+    monkeypatch.setattr(preflight, "ANTHROPIC_API_KEY", "a-key")
+    monkeypatch.setattr(preflight, "GOOGLE_API_KEY", "")
+    monkeypatch.setattr(preflight, "OPENAI_API_KEY", "")
+
+    res = asyncio.run(fal.run_frontier_loop("http://phone:8765", "lower my card limit",
+                                            "BillingTester", provider="anthropic"))
+    assert res.success is False and res.error_kind == "model_error"
+    assert ledger == []
+    assert pb.last_failure("anthropic") is None
+    assert preflight.check_billing()["status"] == "ok"
 
 
 def test_realtime_stt_error_frame_names_the_billing_failure(ledger):

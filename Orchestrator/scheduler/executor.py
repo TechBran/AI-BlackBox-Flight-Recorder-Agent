@@ -98,6 +98,8 @@ class CronCreditsExhausted(RuntimeError):
     history ``error`` column) and the cron failure alert name the kind, and
     ``error_kind`` carries it for code. The box-wide billing push was already
     sent (at most one per provider per hour) where the refusal was classified.
+    The manager does not retry it: credits do not come back within the
+    backoff, so a retry would only repeat the refusal.
     """
 
     error_kind = CREDITS_EXHAUSTED

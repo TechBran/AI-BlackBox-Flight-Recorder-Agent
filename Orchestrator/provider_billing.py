@@ -18,6 +18,7 @@ it at the point where it has the provider's status and body:
     with ``last_failure``; a later successful call clears it with ``note_ok``)
     and sends ONE box-wide push per provider per hour through the
     notifications bus, deduped across restarts by a stamp in the state file.
+    A push that reached no device does not use up the hour.
   * ``check`` / ``check_exception`` / ``raise_if_exhausted`` are the one-line
     call-site forms of classify + report.
 
@@ -81,18 +82,26 @@ _TITLES = {
     "billing_inactive": "{label} billing is not active",
 }
 
-# Matched against the lowercased body text, in this order (a spend-limit body
-# from OpenAI also says insufficient_quota, so spend_limit is checked before
-# no_credits). Phrases are the providers' own codes and sentences; a generic
-# word like "quota" or "billing" alone is never enough. Gemini's free-tier
-# per-minute 429 says "check your plan and billing details" and is a RATE
-# limit, so that sentence is deliberately not a needle.
+# Matched against the lowercased body text, reason by reason in this order (a
+# spend-limit body from OpenAI also says insufficient_quota, so spend_limit is
+# checked before no_credits). Each reason has two lists:
+#   * codes and the providers' own full sentences, trusted in any text;
+#   * plain-English phrases ("spend limit", "out of credits") that a model, an
+#     agent or a file can just as well write. They count only on a real
+#     provider refusal status (_REFUSAL_STATUSES): a frontier driver's
+#     RuntimeError or a CLI's output has no status, and the model's own words
+#     must never read as a billing refusal.
+# A generic word like "quota" or "billing" alone is never enough. Gemini's
+# free-tier per-minute 429 says "check your plan and billing details" and is a
+# RATE limit, so that sentence is deliberately not a needle.
 _NEEDLES = (
     ("billing_inactive", (
         "billing_not_active",                       # OpenAI
         "billing_disabled",                         # Google ErrorInfo reason
         "requires billing to be enabled",           # Google
         "billing_error",                            # Anthropic 402 type
+    ), (
+        "please enable billing",                    # Google 400 FAILED_PRECONDITION
     )),
     ("spend_limit", (
         "enforced_spend_limit_reached",             # Anthropic tier spend cap (429)
@@ -103,6 +112,7 @@ _NEEDLES = (
         "organization_spend_limit_exceeded",
         "project_spend_limit_exceeded",
         "organization_usage_limit_exceeded",
+    ), (
         "spend limit", "spending limit", "spend cap", "spending cap",
     )),
     ("no_credits", (
@@ -110,15 +120,22 @@ _NEEDLES = (
         "credit_balance_exhausted",                 # OpenAI
         "no prepaid credits remaining",
         "insufficient_quota",
+        # The Codex CLI's own text for insufficient_quota (the code never
+        # reaches its output).
+        "quota exceeded. check your plan and billing details",
         "prepayment credits",                       # Google prepay
         "credits are depleted",
         "doesn't have any credits",                 # xAI
         "does not have any credits",
         "used all available credits",
+    ), (
         "out of credits",
         "insufficient credits",
     )),
 )
+# The statuses a provider refuses a call with for billing (Anthropic 400/402/
+# 429, OpenAI 400/429, Google 400/402/403/429, xAI 403/429).
+_REFUSAL_STATUSES = frozenset({400, 402, 403, 429})
 
 _DETAIL_MAX_CHARS = 300
 _MESSAGE_RX = re.compile(r"""['"](?:message|error)['"]\s*:\s*(['"])(.+?)\1\s*[,}]""", re.S)
@@ -253,8 +270,11 @@ def _provider_message(body: Any, text: str) -> str:
 
 
 def _reason_for(lowered: str, status: Optional[int]) -> Optional[str]:
-    for reason, needles in _NEEDLES:
+    refused = status in _REFUSAL_STATUSES
+    for reason, needles, phrases in _NEEDLES:
         if any(n in lowered for n in needles):
+            return reason
+        if refused and any(p in lowered for p in phrases):
             return reason
     if status == 402:   # Payment Required with no known phrase
         return "no_credits"
@@ -265,7 +285,9 @@ def classify(provider: Optional[str], status: Optional[int], body: Any) -> Optio
     """A BillingError when ``body``/``status`` is a billing refusal, else None.
 
     ``body`` may be bytes, a JSON or Python-repr string (with or without a
-    "400: "/"API error 400: " prefix), or an already-parsed dict. Never raises.
+    "400: "/"API error 400: " prefix), or an already-parsed dict. With no
+    status (a CLI's error line, a realtime error event) only provider codes
+    and sentences match, never the plain-English phrases. Never raises.
     """
     try:
         canon = canonical_provider(provider)
@@ -293,10 +315,20 @@ def classify(provider: Optional[str], status: Optional[int], body: Any) -> Optio
 
 def classify_exception(provider: Optional[str], exc: BaseException) -> Optional[BillingError]:
     """classify() for an SDK exception (openai/anthropic APIStatusError,
-    google-genai APIError): reads its status and body attributes and its text."""
+    google-genai APIError, httpx HTTPStatusError): reads its status and body
+    attributes and its text.
+
+    An exception with no provider HTTP status is never a billing refusal: a
+    driver's own RuntimeError (frontier_agent_loop raises one when Claude stops
+    for max_tokens or refusal) carries the MODEL's text, which may say anything.
+    """
     status = getattr(exc, "status_code", None)
     if status is None and isinstance(getattr(exc, "code", None), int):
         status = exc.code
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if not isinstance(status, int):
+        return None
     parts = [str(exc)]
     for attr in ("body", "details"):
         val = getattr(exc, attr, None)
@@ -393,10 +425,29 @@ def note_ok(provider: str) -> None:
         logger.warning("[BILLING] note_ok failed (non-fatal): %r", e)
 
 
-def _push(title: str, body: str, dedup_key: str) -> bool:
-    """Schedule one box-wide push. Seam; True when it was actually scheduled."""
+def _push(title: str, body: str, dedup_key: str, on_result=None) -> bool:
+    """Schedule one box-wide push. Seam; True when it was actually scheduled.
+    ``on_result`` gets the push's NotifyResult (None if it failed) once sent."""
     from Orchestrator.notifications.bridge import notify_box_in_background
-    return notify_box_in_background(title, body, category="alert", dedup_key=dedup_key)
+    return notify_box_in_background(title, body, category="alert", dedup_key=dedup_key,
+                                    on_result=on_result)
+
+
+def _give_back_hour(key: str, claimed: float, previous: Any) -> None:
+    """Un-claim the hour ``report`` stamped at ``claimed``, so the next failure
+    pushes again. A newer claim (a later hour) is left alone. Never raises."""
+    try:
+        with _lock:
+            data = _load()
+            if data["notified"].get(key) != claimed:
+                return
+            if isinstance(previous, (int, float)):
+                data["notified"][key] = previous
+            else:
+                data["notified"].pop(key, None)
+            _save(data)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[BILLING] hour give-back failed (non-fatal): %r", e)
 
 
 def report(err: BillingError, *, surface: str, scope: str = "api") -> bool:
@@ -428,20 +479,22 @@ def report(err: BillingError, *, surface: str, scope: str = "api") -> bool:
         if not due:
             return False
         body = f"{err.message}. Seen on {surface}."
+
+        def _delivered(result) -> None:
+            # A push no device received (the audit's NOTIFY delivered=0/0: every
+            # phone offline) must not use up the hour: give it back, so the next
+            # refusal tries again once a device is reachable.
+            if not getattr(result, "delivered", None):
+                _give_back_hour(key, now, previous)
+
         sent = False
         try:
-            sent = bool(_push(err.title, body, f"billing:{key}:{int(now // NOTIFY_INTERVAL_S)}"))
+            sent = bool(_push(err.title, body, f"billing:{key}:{int(now // NOTIFY_INTERVAL_S)}",
+                              on_result=_delivered))
         except Exception as e:  # noqa: BLE001
             logger.warning("[BILLING] push failed (non-fatal): %r", e)
         if not sent:
-            with _lock:   # give the hour back so the next failure tries again
-                data = _load()
-                if data["notified"].get(key) == now:
-                    if isinstance(previous, (int, float)):
-                        data["notified"][key] = previous
-                    else:
-                        data["notified"].pop(key, None)
-                    _save(data)
+            _give_back_hour(key, now, previous)   # dropped (no loop): try again next time
         return sent
     except Exception as e:  # noqa: BLE001 — never mask the caller's real error
         logger.warning("[BILLING] report failed (non-fatal): %r", e)

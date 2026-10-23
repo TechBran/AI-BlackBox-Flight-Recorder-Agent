@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 
 import pytest
@@ -538,6 +539,28 @@ def _box_stores_off_the_checkout(tmp_path_factory):
         finally:
             box_stores.session_root = None
 
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_billing_state(tmp_path_factory, monkeypatch):
+    """Point the billing state file (W09) at a per-test temp path.
+
+    Every successful provider response calls provider_billing.note_ok, which
+    rewrites <BLACKBOX_ROOT>/Manifest/provider_billing_state.json when a flag
+    is set. BLACKBOX_ROOT is this checkout, and the main checkout is the LIVE
+    serving tree, so an ordinary success-path test run there would erase a
+    real recorded refusal. Tests that need a state file patch STATE_PATH
+    themselves on top of this. The path is only created if a test writes it.
+    """
+    try:
+        from Orchestrator import provider_billing
+    except ImportError:   # a lean venv without the Orchestrator deps (MCP)
+        yield
+        return
+    path = tmp_path_factory.getbasetemp() / "provider_billing" / f"{uuid.uuid4().hex}.json"
+    monkeypatch.setattr(provider_billing, "STATE_PATH", path)
+    provider_billing._reset_cache()
+    yield
+    provider_billing._reset_cache()
 
 # ---------------------------------------------------------------------------
 # Cross-suite settle: live-service tests (chat stream regression, agent WS)

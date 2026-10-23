@@ -24,7 +24,8 @@ This module packages that for notifications as a fire-and-forget helper:
     scheduled future's exception is retrieved in a done-callback so it neither
     leaks as an unretrieved-exception warning nor surfaces anywhere.
   * ``notify_box_in_background(...)`` — the same for the box-wide ``notify_box``;
-    returns whether the push was scheduled.
+    returns whether the push was scheduled, and can hand the finished push's
+    result to an ``on_result`` callback.
 
 If no loop has been captured (or it is closed), the helper degrades to a logged
 no-op — a producer must still finish its own work on a box where the loop was
@@ -34,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from Orchestrator.notifications.bus import notify, notify_box
 
@@ -108,19 +109,39 @@ def notify_in_background(
         logger.warning("[NOTIFY-BRIDGE] failed to schedule notify (non-fatal): %r", e)
 
 
+def _result_callback(on_result: Callable) -> Callable:
+    """Done-callback: swallow the future's exception, then hand ``on_result``
+    the NotifyResult (None when the push raised or was cancelled). Runs on the
+    loop thread; ``on_result`` raising is logged, never propagated."""
+    def _done(future) -> None:
+        _swallow_future_exception(future)
+        try:
+            result = None if future.cancelled() or future.exception() else future.result()
+        except Exception:  # noqa: BLE001
+            result = None
+        try:
+            on_result(result)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[NOTIFY-BRIDGE] box notify on_result failed: %r", e)
+    return _done
+
+
 def notify_box_in_background(
     title: str,
     body: str,
     category: str = "alert",
     *,
     dedup_key: Optional[str] = None,
+    on_result: Optional[Callable] = None,
 ) -> bool:
     """Fire-and-forget ``notify_box(...)`` (a box-wide alert) from sync code.
 
     Same contract as ``notify_in_background`` (returns immediately, NEVER
     raises), except it reports whether the push was scheduled: a caller that
     sends at most one alert per window (provider_billing) must not count a
-    push it dropped for lack of a loop as sent.
+    push it dropped for lack of a loop as sent. ``on_result``, when given, is
+    called with the push's NotifyResult once it finishes, so the same caller
+    can tell a push no device received from one that landed.
     """
     loop = _MAIN_LOOP
     if loop is None or loop.is_closed():
@@ -135,7 +156,8 @@ def notify_box_in_background(
             notify_box(title, body, category=category, dedup_key=dedup_key),
             loop,
         )
-        future.add_done_callback(_swallow_future_exception)
+        future.add_done_callback(_result_callback(on_result) if on_result is not None
+                                 else _swallow_future_exception)
         return True
     except Exception as e:  # noqa: BLE001 — scheduling itself must never break the producer
         logger.warning("[NOTIFY-BRIDGE] failed to schedule box notify (non-fatal): %r", e)

@@ -668,7 +668,9 @@ async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
                     False, f"The model did not respond within {int(_per_turn_secs())}s (step {steps}).",
                     error_kind="timeout", device=base_url, steps=steps)
             except Exception as e:
-                # W09: the provider refused for billing — say so, with the remedy.
+                # W09: the provider refused for billing — say so, with the remedy. Only
+                # an SDK error with a provider status can be one: the driver's own
+                # RuntimeError (max_tokens/refusal stop) carries the model's text.
                 billing = provider_billing.check_exception(provider, e, surface="device control")
                 if billing:
                     return FrontierResult(False, billing.text, error_kind=billing.kind,

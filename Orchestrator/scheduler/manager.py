@@ -29,6 +29,9 @@ from apscheduler.triggers.cron import CronTrigger
 # can never break a job's own error bookkeeping. Imported at module scope so
 # tests can monkeypatch `manager.notify`.
 from Orchestrator.notifications.bus import notify
+# W09: a run the provider refused for billing (executor.CronCreditsExhausted)
+# carries this error_kind and is not retried.
+from Orchestrator.provider_billing import CREDITS_EXHAUSTED
 
 logger = logging.getLogger(__name__)
 
@@ -1157,7 +1160,7 @@ class CronJobManager:
 
         for attempt in range(MAX_RETRIES + 1):
             (result_text, error_text, duration_ms, attempt_run_at,
-             delivery_status, retryable) = await self._attempt_once(job)
+             delivery_status, retryable, turn_ran) = await self._attempt_once(job)
             last_duration_ms = duration_ms
             last_run_at = attempt_run_at
 
@@ -1175,12 +1178,15 @@ class CronJobManager:
             final_error = error_text
             final_status = delivery_status
             if not retryable:
-                turn_completed = True
-                failed_turn_reply = result_text
-                logger.warning(
-                    "Cron job %s finished with failed tool calls (%s); not retrying",
-                    job_id, error_text,
-                )
+                if turn_ran:
+                    turn_completed = True
+                    failed_turn_reply = result_text
+                    logger.warning(
+                        "Cron job %s finished with failed tool calls (%s); not retrying",
+                        job_id, error_text,
+                    )
+                else:
+                    logger.warning("Cron job %s: %s; not retrying", job_id, error_text)
                 break
             # More attempts remain → back off, then retry within the lock.
             if attempt < MAX_RETRIES:
@@ -1390,14 +1396,22 @@ class CronJobManager:
         """Run the executor once and write THIS attempt's history row.
 
         Returns ``(result_text, error_text, duration_ms, run_at,
-        delivery_status, retryable)``. A non-None error_text means the attempt
-        failed; delivery_status is 'delivered', 'error' or 'partial'.
+        delivery_status, retryable, turn_ran)``. A non-None error_text means
+        the attempt failed; delivery_status is 'delivered', 'error' or
+        'partial'.
 
         W15: an executor.CronToolFailure (the turn completed but its tool calls
         failed) is recorded with the reply AND the tool error, as 'error' or
-        'partial', and is not retryable. It is recognised by its attributes
-        rather than by class so the except clause never depends on the lazy
-        import below having succeeded.
+        'partial', and is not retryable (``turn_ran`` True). It is recognised
+        by its attributes rather than by class so the except clause never
+        depends on the lazy import below having succeeded.
+
+        W09: an executor.CronCreditsExhausted (the provider refused the turn
+        for billing, ``error_kind`` credits_exhausted) is not retryable either:
+        credits do not come back within the backoff, so a retry only repeats
+        the refusal (and, for a CU job, the desktop launch). The turn never
+        ran, so ``turn_ran`` is False and the run is an ordinary failure (a
+        one-shot survives armed, M2.6, instead of being paused).
         """
         job_id = job["id"]
         run_at = datetime.now(timezone.utc)
@@ -1406,6 +1420,7 @@ class CronJobManager:
         error_text: Optional[str] = None
         delivery_status: str = "pending"
         retryable = True
+        turn_ran = False
 
         try:
             # Lazy import to avoid circular dependencies. executor.py always
@@ -1418,8 +1433,12 @@ class CronJobManager:
             delivery_status = "error"
             if hasattr(exc, "delivery_status") and getattr(exc, "retryable", True) is False:
                 retryable = False
+                turn_ran = True
                 result_text = getattr(exc, "result_text", None) or None
                 delivery_status = getattr(exc, "delivery_status", "error")
+                logger.warning("Cron job %s: %s", job_id, error_text)
+            elif getattr(exc, "error_kind", None) == CREDITS_EXHAUSTED:
+                retryable = False
                 logger.warning("Cron job %s: %s", job_id, error_text)
             else:
                 logger.exception("Error executing cron job %s", job_id)
@@ -1451,7 +1470,7 @@ class CronJobManager:
         finally:
             conn.close()
 
-        return result_text, error_text, duration_ms, run_at, delivery_status, retryable
+        return result_text, error_text, duration_ms, run_at, delivery_status, retryable, turn_ran
 
     def _record_skipped_run(self, job_id: str) -> None:
         """Write a history row noting a run was skipped because the job was

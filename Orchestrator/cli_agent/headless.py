@@ -263,6 +263,72 @@ def _extract_result_text(events: list) -> str:
     return text
 
 
+def _event_failure_text(ev: dict) -> str:
+    """The CLI's own error message carried by one top-level stream event, or "".
+
+    Error-bearing events: claude's final ``result`` with is_error (its text is
+    the API error, e.g. "Credit balance is too low"), gemini's ``result`` with
+    status "error", and the ``error`` / ``turn.failed`` events codex and gemini
+    emit. Every other event (assistant text, tool calls, tool results, even a
+    tool_result with is_error) is the agent's work and is never read here.
+    """
+    etype = ev.get("type")
+    if etype == "result":
+        failed = (ev.get("is_error") is True or ev.get("status") == "error"
+                  or str(ev.get("subtype") or "").startswith("error"))
+        if not failed:
+            return ""
+        parts = [ev.get("result"), ev.get("error")]
+        errors = ev.get("errors")
+        if isinstance(errors, list):
+            parts.extend(errors)
+    elif etype in ("error", "turn.failed"):
+        parts = [ev.get("message"), ev.get("error")]
+    else:
+        return ""
+    texts = []
+    for part in parts:
+        if isinstance(part, dict):
+            part = part.get("message")
+        if isinstance(part, str) and part.strip():
+            texts.append(" ".join(part.split()))
+    return " ".join(texts)
+
+
+def failure_text(tail: str) -> str:
+    """The CLI's own error text in a failed run's tail, "" when it printed none.
+
+    W09: what the billing classifier reads for a failed CLI-agent run. It is
+    the error-bearing stream events (see _event_failure_text) plus the plain,
+    non-JSON lines stderr folded into the stream, one per line. Never the
+    agent's own output: an agent that was writing billing code, or a README
+    about a game's credits, must not read as a billing refusal. A line that
+    starts like JSON but does not parse (an event clamped on ingest) and a
+    first line cut by the TAIL_MAX_CHARS window are fragments of unknown
+    origin and are skipped too.
+    """
+    tail = tail or ""
+    lines = tail.splitlines()
+    if len(tail) >= TAIL_MAX_CHARS:
+        lines = lines[1:]
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except (ValueError, TypeError):
+            if not line.startswith(("{", "[")):
+                out.append(line)
+            continue
+        if isinstance(ev, dict):
+            msg = _event_failure_text(ev)
+            if msg:
+                out.append(msg)
+    return "\n".join(out)
+
+
 def _read_stream(stream, raw_lines: collections.deque, events: collections.deque,
                  lock: threading.Lock) -> None:
     """Reader thread: pull lines off the child's stdout until EOF (blocking

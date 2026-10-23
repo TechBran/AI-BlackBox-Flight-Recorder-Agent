@@ -14,7 +14,9 @@ Pinned here:
   * Each target gets exactly one POST with the full body and operator 'system'.
     The text names a provider and a console, never an operator's content.
   * The sync bridge reports whether the push was actually scheduled, so a
-    caller that dedupes can tell a sent alert from a dropped one.
+    caller that dedupes can tell a sent alert from a dropped one, and hands
+    the finished push's result to ``on_result``, so it can also tell a push
+    that reached no device (None when the push raised).
 
 Hermetic: tailscale status is a canned JSON string, the store is a tmp file and
 the per-device POST is a fake.
@@ -166,3 +168,66 @@ def test_bridge_schedules_a_box_push_on_the_main_loop(no_loop, monkeypatch):
         t.join(5)
         loop.close()
     assert received == [("T", "B", "alert", "k")]
+
+
+@pytest.mark.parametrize("outcome", ["delivered", "nobody", "raises"])
+def test_bridge_hands_the_finished_push_to_on_result(no_loop, monkeypatch, outcome):
+    # provider_billing gives its hourly slot back when a push reached no device,
+    # so the bridge must report what the push actually did, not just that it
+    # was scheduled.
+    got = []
+    done = threading.Event()
+
+    async def fake_notify_box(title, body, category="general", dedup_key=None):
+        if outcome == "raises":
+            raise RuntimeError("bus bug")
+        return bus_mod.NotifyResult(notif_id="n",
+                                    delivered=["dev-all"] if outcome == "delivered" else [])
+
+    def on_result(result):
+        got.append(result)
+        done.set()
+
+    monkeypatch.setattr(bridge, "notify_box", fake_notify_box)
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        bridge.set_main_loop(loop)
+        assert bridge.notify_box_in_background("T", "B", on_result=on_result) is True
+        assert done.wait(5)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(5)
+        loop.close()
+    if outcome == "raises":
+        assert got == [None]
+    else:
+        assert len(got) == 1 and got[0].delivered == (["dev-all"] if outcome == "delivered" else [])
+
+
+def test_bridge_on_result_raising_never_escapes(no_loop, monkeypatch):
+    done = threading.Event()
+
+    async def fake_notify_box(*a, **k):
+        return bus_mod.NotifyResult(notif_id="n")
+
+    def bad(result):
+        done.set()
+        raise ValueError("caller bug")
+
+    monkeypatch.setattr(bridge, "notify_box", fake_notify_box)
+    loop = asyncio.new_event_loop()
+    errors = []
+    loop.set_exception_handler(lambda lp, ctx: errors.append(ctx))
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        bridge.set_main_loop(loop)
+        assert bridge.notify_box_in_background("T", "B", on_result=bad) is True
+        assert done.wait(5)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(5)
+        loop.close()
+    assert errors == []

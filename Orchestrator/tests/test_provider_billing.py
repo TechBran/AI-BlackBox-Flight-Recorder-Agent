@@ -20,10 +20,17 @@ surface calls. These tests pin it against REAL error bodies:
     NOT match (it says "check your plan and billing details" too).
   * xAI: the team-credits messages xAI users report (xAI documents no exact
     shape), matched by phrase.
+  * The CLI agents' own renderings: Claude Code's "Credit balance is too low"
+    and Codex's "Quota exceeded. Check your plan and billing details."
+
+Plain-English phrases ("spending limit", "out of credits") count only on a
+real provider refusal status, and an exception without a provider status is
+never billing: a model's or an agent's own words must not read as a refusal.
 
 Plus the record/notify side: one push per provider per hour (deduped, also
-across a restart), a successful call clears the flag preflight reads, and a
-CLI agent's own login never sets the API-key flag.
+across a restart; a push that reached no device gives the hour back), a
+successful call clears the flag preflight reads, a CLI agent's own login never
+sets the API-key flag, and tests never touch the live state file.
 
 Hermetic: no network; the push seam is a recorder and the state file is a tmp
 path.
@@ -129,6 +136,16 @@ GEMINI_FREE_TIER_429 = json.dumps({"error": {
         "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
                      "reason": "BILLING_DISABLED", "domain": "googleapis.com"}]}}),
      "billing_inactive"),
+    # Gemini's documented 400 FAILED_PRECONDITION (ai.google.dev/gemini-api/docs/
+    # troubleshooting): no free tier in the caller's region, billing not enabled.
+    ("google", 400, json.dumps({"error": {
+        "code": 400,
+        "message": "Gemini API free tier is not available in your country. Please enable "
+                   "billing on your project in Google AI Studio.",
+        "status": "FAILED_PRECONDITION"}}), "billing_inactive"),
+    # The Codex CLI's own rendering of insufficient_quota (its binary's QuotaExceeded
+    # text): the code itself never reaches the CLI's output.
+    ("codex", None, "Quota exceeded. Check your plan and billing details.", "no_credits"),
     # xAI (phrases xAI users report; there is no documented body).
     ("xai", 403, json.dumps({
         "code": "The caller does not have permission to execute the specified operation",
@@ -178,6 +195,32 @@ def test_billing_bodies_classify_as_credits_exhausted(provider, status, body, re
 ])
 def test_other_errors_are_not_billing(provider, status, body):
     assert pb.classify(provider, status, body) is None
+
+
+@pytest.mark.parametrize("provider,status,body", [
+    # Ordinary English anyone (a model, an agent, a file) may write. With no
+    # provider refusal status these are never a billing refusal.
+    ("anthropic", None, "Next I will open Settings > Cards and lower the spending limit"),
+    ("anthropic", None, "# block purchases over the monthly spending limit"),
+    ("codex", None, "Updated README: the game shows 'Out of credits' when the player "
+                    "loses all coins."),
+    ("claude", None, "I've added the `spend_limit` column and the spend cap validation."),
+    ("xai", None, "Your team has reached its monthly spending limit."),
+    ("openai", None, "insufficient credits for this purchase"),
+    # A success or a server error is not a refusal either.
+    ("xai", 200, "Your team has reached its monthly spending limit."),
+    ("openai", 500, "upstream said: out of credits"),
+])
+def test_plain_english_phrases_need_a_provider_refusal_status(provider, status, body):
+    assert pb.classify(provider, status, body) is None
+
+
+def test_the_same_phrases_on_a_provider_refusal_still_classify():
+    body = json.dumps({"code": "Some resource has been exhausted",
+                       "error": "Your team has reached its monthly spending limit."})
+    for status in (400, 402, 403, 429):
+        err = pb.classify("xai", status, body)
+        assert err is not None and err.reason == "spend_limit", status
 
 
 def test_message_follows_the_house_template_and_keeps_the_provider_text():
@@ -238,6 +281,28 @@ def test_sdk_exceptions_classify_with_their_status_and_message():
     assert pb.classify_exception("anthropic", RuntimeError("connection reset")) is None
 
 
+def test_an_exception_without_a_provider_status_is_never_billing():
+    # A driver's own RuntimeError carries the MODEL's text (frontier_agent_loop
+    # raises one when Claude stops for max_tokens/refusal): whatever it says, it
+    # is not a provider refusal.
+    for text in ("Claude stopped without an action (stop_reason=refusal): I can't "
+                 "change the spending limit on your card",
+                 "Claude stopped without an action (stop_reason=max_tokens): the "
+                 "banner says 'Your credit balance is too low' so I will top up",
+                 "400: " + ANTHROPIC_CREDIT_400):
+        assert pb.classify_exception("anthropic", RuntimeError(text)) is None
+
+    class _HTTPStatusError(Exception):   # httpx.HTTPStatusError: status on .response
+        def __init__(self):
+            super().__init__("Client error '400 Bad Request' for url 'https://api'")
+            self.response = type("R", (), {"status_code": 400})()
+
+    exc = _HTTPStatusError()
+    exc.body = json.loads(ANTHROPIC_CREDIT_400)
+    err = pb.classify_exception("anthropic", exc)
+    assert err is not None and err.status == 400 and err.reason == "no_credits"
+
+
 def test_events_carry_the_kind_beside_a_plain_string_message():
     err = pb.classify("anthropic", 400, ANTHROPIC_CREDIT_400)
     ev = err.event()
@@ -269,8 +334,9 @@ def ledger(tmp_path, monkeypatch):
     clock = {"t": 1_800_000_000.0}
     pushes = []
 
-    def fake_push(title, body, dedup_key):
-        pushes.append({"title": title, "body": body, "dedup_key": dedup_key})
+    def fake_push(title, body, dedup_key, on_result=None):
+        pushes.append({"title": title, "body": body, "dedup_key": dedup_key,
+                       "on_result": on_result})
         return True
 
     monkeypatch.setattr(pb, "STATE_PATH", tmp_path / "provider_billing_state.json")
@@ -323,10 +389,63 @@ def test_a_dropped_push_is_not_counted_as_sent(ledger, monkeypatch):
     err = pb.classify("anthropic", 400, ANTHROPIC_CREDIT_400)
     assert pb.report(err, surface="chat") is False
 
-    monkeypatch.setattr(pb, "_push", lambda t, b, k: pushes.append(t) or True)
+    monkeypatch.setattr(pb, "_push", lambda t, b, k, on_result=None: pushes.append(t) or True)
     clock["t"] += 5
     assert pb.report(err, surface="chat") is True
     assert pushes == ["Anthropic is out of credits"]
+
+
+def test_a_push_that_reached_no_device_gives_the_hour_back(ledger):
+    # The audit's evidence was literally NOTIFY delivered=0/0: a push no device
+    # received must not use up the hour, or a phone that comes back online
+    # minutes later never hears about it.
+    from Orchestrator.notifications.bus import NotifyResult
+
+    clock, pushes, _ = ledger
+    err = pb.classify("anthropic", 400, ANTHROPIC_CREDIT_400)
+    assert pb.report(err, surface="chat") is True
+    pushes[-1]["on_result"](NotifyResult(notif_id="n1", delivered=[], unreachable=["d1"]))
+
+    clock["t"] += 120
+    assert pb.report(err, surface="chat") is True          # tried again
+    pushes[-1]["on_result"](NotifyResult(notif_id="n2", delivered=["d1"]))
+
+    clock["t"] += 120
+    assert pb.report(err, surface="chat") is False         # this one landed: deduped
+    assert len(pushes) == 2
+
+    # A push whose coroutine failed (no result) is not counted as sent either.
+    o = pb.classify("openai", None, OPENAI_REALTIME_QUOTA_EVENT)
+    assert pb.report(o, surface="speech-to-text") is True
+    pushes[-1]["on_result"](None)
+    clock["t"] += 60
+    assert pb.report(o, surface="speech-to-text") is True
+    assert len(pushes) == 4
+
+
+def test_a_late_give_back_never_undoes_a_newer_claim(ledger):
+    from Orchestrator.notifications.bus import NotifyResult
+
+    clock, pushes, _ = ledger
+    err = pb.classify("anthropic", 400, ANTHROPIC_CREDIT_400)
+    pb.report(err, surface="chat")
+    first = pushes[-1]["on_result"]
+    clock["t"] += 4000                                      # next hour: a new claim
+    assert pb.report(err, surface="chat") is True
+    first(NotifyResult(notif_id="old", delivered=[]))       # the old push's result arrives late
+    clock["t"] += 60
+    assert pb.report(err, surface="chat") is False          # the new hour still stands
+
+
+def test_tests_never_touch_the_live_state_file():
+    # The root conftest points STATE_PATH at a temp file for every test: success
+    # paths call note_ok on every response, and from the main checkout (the live
+    # serving tree) an unpatched run would erase a real recorded refusal.
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    path = pb._state_path().resolve()
+    assert repo / "Manifest" not in path.parents, path
 
 
 def test_last_failure_is_what_preflight_reads_and_a_success_clears_it(ledger):

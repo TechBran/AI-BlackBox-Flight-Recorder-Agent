@@ -1955,12 +1955,19 @@ def process_cli_agent(task: Task):
             msg = f"{msg}: {snippet}"
         # W09: the CLI ran on its OWN login (API keys are stripped), so a
         # billing refusal here is that account's, scope "cli": its own hourly
-        # push, never the box key's preflight flag. Only a FAILED run's tail
-        # is classified: a successful agent may well print the phrase.
-        billing = provider_billing.check(provider, None, snippet, scope="cli",
-                                         surface=f"CLI agent ({provider})")
+        # push, never the box key's preflight flag. Only the CLI's own error
+        # text is classified (headless.failure_text: its error events and
+        # stderr lines, never the agent's work), and only for a run that
+        # FAILED without timing out: a billing refusal exits at once, while a
+        # timed-out agent may have spent half an hour writing billing code.
+        billing = None
+        if not result.get("timed_out"):
+            billing = provider_billing.check(provider, None, headless.failure_text(tail),
+                                             scope="cli", surface=f"CLI agent ({provider})")
         if billing:
             msg = f"CLI agent {provider} failed ({err}): {billing.text}"
+            if snippet:
+                msg = f"{msg} Last output: {snippet}"
         update_task(
             task.task_id,
             status=TaskStatus.FAILED,
