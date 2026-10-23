@@ -152,14 +152,33 @@ def test_default_model_payload_is_valid(monkeypatch, stream):
     ("claude-3-sonnet-20240229", "claude-sonnet-5-5"),
     ("claude-3-5-haiku-20241022", "claude-haiku-5-5"),
     ("claude-3-haiku-20240307", "claude-haiku-5-5"),
-    # No family in the id: instant was the fast tier; Claude 2 the flagship.
-    ("claude-instant-1.2", "claude-haiku-5-5"),
-    ("claude-2.1", "claude-opus-5-5"),
-    ("claude-2.0", "claude-opus-5-5"),
 ])
 def test_successor_for_retired_ids(retired, successor):
     assert config.anthropic_model_retired(retired)
     assert config.successor_for(retired) == successor
+
+
+@pytest.mark.parametrize("retired", ["claude-instant-1.2", "claude-2.1", "claude-2.0"])
+def test_a_retired_id_without_a_family_runs_what_auto_runs(monkeypatch, retired):
+    # The Android app rewrites a family-less retired id to Auto (""), which the
+    # server runs as ANTHROPIC_MODEL_DEFAULT; the server's own mapping agrees.
+    assert config.anthropic_model_retired(retired)
+    assert config.successor_for(retired) == config.ANTHROPIC_MODEL_DEFAULT
+    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", "claude-sonnet-5-5")
+    assert config.successor_for(retired) == "claude-sonnet-5-5"
+    assert config.resolve_default_model("anthropic", retired) == config.resolve_default_model("anthropic", "")
+    # A retired configured default is never what runs.
+    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", "claude-2.1")
+    assert config.successor_for(retired) == "claude-opus-5-5"
+    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", "claude-3-haiku-20240307")
+    assert config.successor_for(retired) == "claude-haiku-5-5"
+
+
+def test_a_retired_configured_default_runs_its_successor(monkeypatch):
+    # ANTHROPIC_MODEL pinned before Anthropic retired that id: Auto must not 404.
+    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", "claude-sonnet-4-20250514")
+    for model in (None, "", "Auto"):
+        assert config.resolve_default_model("anthropic", model) == "claude-sonnet-5-5"
 
 
 @pytest.mark.parametrize("model", LIVE_IDS + (

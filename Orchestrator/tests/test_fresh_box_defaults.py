@@ -215,6 +215,37 @@ def test_toolvault_enabled_unless_switched_off(monkeypatch, value, expected):
     assert config._env_flag("TOOLVAULT_ENABLED", True) is expected
 
 
+def test_fresh_box_chat_tools_come_from_the_toolvault_injector(monkeypatch):
+    """A box whose .env never mentions TOOLVAULT_ENABLED (install.sh copies
+    .env.template) boots with ToolVault on, so chat tools come from
+    inject_for_prompt, not the frozen static arrays."""
+    import subprocess
+    import sys
+    from Orchestrator.routes import chat_routes
+    from Orchestrator.toolvault import injector
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(os.environ, PYTHONPATH=root)
+    # Empty = unset for _env_flag, and load_dotenv never overrides a set
+    # variable, so this box's own .env cannot leak into the fresh-box boot.
+    env["TOOLVAULT_ENABLED"] = ""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from Orchestrator import config; print('TOOLVAULT=%s' % config.TOOLVAULT_ENABLED)"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert "TOOLVAULT=True" in out.stdout, out.stdout[-800:] + out.stderr[-800:]
+
+    calls = []
+    def fake_inject(prompt, provider, group=None, **kw):
+        calls.append((prompt, provider, group))
+        return [{"name": "send_sms"}], ""
+    monkeypatch.setattr(chat_routes, "TOOLVAULT_ENABLED", True)
+    monkeypatch.setattr(injector, "inject_for_prompt", fake_inject)
+    assert chat_routes._get_tools("anthropic", "text Alice I'm late") == [{"name": "send_sms"}]
+    assert calls == [("text Alice I'm late", "anthropic", "chat")]
+
+
 def test_env_template_does_not_switch_toolvault_off():
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     text = open(os.path.join(root, ".env.template"), encoding="utf-8").read()

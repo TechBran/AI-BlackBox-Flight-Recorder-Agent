@@ -1021,11 +1021,13 @@ ANTHROPIC_MODEL_DEFAULT = _anthropic_model_default()
 # Haiku 4.5 is deliberately omitted — it doesn't support effort or adaptive thinking.
 # Claude 5.x (added 2026-10-07): Opus 5.5/5, Sonnet 5.5/5, Haiku 5.5, Fable/Mythos 5.1
 # all accept {type: "adaptive", display: "summarized"} and every effort level.
-# Opus 5.5 (the built-in default since 2026-10-17), Sonnet 5.5, Haiku 5.5 and
-# Fable 5.1 reject {type: "disabled"}, budget_tokens, sampling params and
-# forced tool_choice (any/tool); every chat payload here sends adaptive thinking
-# and tool_choice auto (or none), so none of those go out. 1M context, 128K
-# output each — context_builder's anthropic window guard budgets for that.
+# Opus 5.5 (the built-in default since 2026-10-17), Sonnet 5.5 and Fable 5.1
+# reject {type: "disabled"}, budget_tokens, sampling params and forced
+# tool_choice (any/tool); Haiku 5.5 rejects budget_tokens and sampling params
+# (it takes "disabled" only at effort high or below). Every chat payload here
+# sends adaptive thinking and never forces a tool, so none of those go out.
+# 1M context, 128K output each — context_builder's anthropic window guard
+# budgets for that.
 ANTHROPIC_THINKING_MODELS = {
     "claude-fable-5-1", "claude-mythos-5-1",
     "claude-fable-5",   # Mythos-class: thinking always on; explicit {type: "adaptive"} accepted
@@ -1094,8 +1096,8 @@ DEFAULT_PROVIDER        = (os.getenv("DEFAULT_PROVIDER") or "google").strip().lo
 # at dispatch instead. Owner decision 2026-10-17; the Android app carries the
 # identical table, so change both together. Retired: Claude 4.0 (claude-{opus,
 # sonnet}-4, -4-0, -4-YYYYMMDD), Opus 4.1 (dated or not) and every claude-3*,
-# claude-2* and claude-instant* id. A family-less id maps by tier: instant was
-# the fast tier (-> haiku), Claude 2 the flagship (-> opus).
+# claude-2* and claude-instant* id. A family-less id (claude-2*, claude-instant*)
+# runs what "Auto" runs, ANTHROPIC_MODEL_DEFAULT, as Android rewrites it to Auto.
 ANTHROPIC_RETIRED_SUCCESSORS = {
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
@@ -1116,18 +1118,23 @@ def anthropic_model_retired(model_id: Optional[str]) -> bool:
     return _ANTHROPIC_RETIRED_ID_RX.fullmatch((model_id or "").strip()) is not None
 
 
+def _claude_family(model_id: str) -> Optional[str]:
+    return next((f for f in ANTHROPIC_RETIRED_SUCCESSORS if f in model_id), None)
+
+
 def successor_for(model_id: str) -> str:
     """``model_id`` unchanged, unless it is a retired Claude id: then the newest
-    live model of its family (ANTHROPIC_RETIRED_SUCCESSORS)."""
+    live model of its family (ANTHROPIC_RETIRED_SUCCESSORS), or for an id with no
+    family, the model "Auto" runs (ANTHROPIC_MODEL_DEFAULT; its own successor if
+    that is retired too, the flagship Opus if it has no family either)."""
     if not anthropic_model_retired(model_id):
         return model_id
-    mid = model_id.strip()
-    for family in ("opus", "sonnet", "haiku"):
-        if family in mid:
-            return ANTHROPIC_RETIRED_SUCCESSORS[family]
-    if "instant" in mid:
-        return ANTHROPIC_RETIRED_SUCCESSORS["haiku"]
-    return ANTHROPIC_RETIRED_SUCCESSORS["opus"]
+    family = _claude_family(model_id.strip())
+    if family:
+        return ANTHROPIC_RETIRED_SUCCESSORS[family]
+    if not anthropic_model_retired(ANTHROPIC_MODEL_DEFAULT):
+        return ANTHROPIC_MODEL_DEFAULT
+    return ANTHROPIC_RETIRED_SUCCESSORS[_claude_family(ANTHROPIC_MODEL_DEFAULT) or "opus"]
 
 
 _PROVIDER_ALIASES = {"gemini": "google", "claude": "anthropic", "gpt": "openai",
@@ -1141,11 +1148,13 @@ def resolve_default_model(provider: Optional[str] = None, model: Optional[str] =
     worker that serves /chat, cron and SMS, the SMS router and /sms/preferences):
       * an empty provider is DEFAULT_PROVIDER;
       * an empty, whitespace or "Auto" model (the Portal's "(Auto - Latest)"
-        option sends "") is that provider's configured *_MODEL_DEFAULT, read at
-        call time so the env overrides (ANTHROPIC_MODEL, GOOGLE_GEMINI_MODEL,
-        OPENAI_MODEL, XAI_MODEL) apply everywhere;
-      * a concrete model passes through, except that an anthropic dispatch of a
-        retired Claude id gets successor_for()'s live model;
+        option sends "") is that provider's configured *_MODEL_DEFAULT (the
+        module constant, looked up per call), so the env overrides
+        (ANTHROPIC_MODEL, GOOGLE_GEMINI_MODEL, OPENAI_MODEL, XAI_MODEL) apply
+        on every path;
+      * a concrete model passes through;
+      * an anthropic dispatch of a retired Claude id, requested or configured,
+        gets successor_for()'s live model instead;
       * provider "custom" is returned untouched: its default is the registry's
         first discovered model, which the custom branches resolve themselves.
     An unknown provider resolves like Gemini (the /chat/stream fallthrough).
@@ -1155,14 +1164,14 @@ def resolve_default_model(provider: Optional[str] = None, model: Optional[str] =
     if key == "custom":
         return model or ""
     requested = (model or "").strip()
-    if requested and requested.lower() != "auto":
-        return successor_for(requested) if key == "anthropic" else requested
-    return {
-        "anthropic": ANTHROPIC_MODEL_DEFAULT,
-        "openai": OPENAI_MODEL_DEFAULT,
-        "xai": XAI_MODEL_DEFAULT,
-        "computer-use": CU_MODEL_DEFAULT,
-    }.get(key, GEMINI_MODEL_DEFAULT)
+    if not requested or requested.lower() == "auto":
+        requested = {
+            "anthropic": ANTHROPIC_MODEL_DEFAULT,
+            "openai": OPENAI_MODEL_DEFAULT,
+            "xai": XAI_MODEL_DEFAULT,
+            "computer-use": CU_MODEL_DEFAULT,
+        }.get(key, GEMINI_MODEL_DEFAULT)
+    return successor_for(requested) if key == "anthropic" else requested
 
 
 STT_MODEL       = os.getenv("STT_MODEL","whisper-1").strip()

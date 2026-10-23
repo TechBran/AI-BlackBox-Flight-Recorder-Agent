@@ -2,17 +2,21 @@
 
 Fails when shipped code contains
   * the dev box's operator name as a string literal ('Brandon', 'Brandon-DEV')
-    — a fresh box has no such operator, so the literal silently routes memory,
-    Gmail tokens or pairing to a phantom (resolve the operator instead:
-    config.current_default(), pairing_operator(), or require it);
+    anywhere but a full-line comment — a fresh box has no such operator, so the
+    literal silently routes memory, Gmail tokens or pairing to a phantom
+    (resolve the operator instead: config.current_default(), pairing_operator(),
+    or require it);
   * the vendor's phone number or email in any format — it used to be seeded as
     every box's "self" contact. It is matched by SHA-256 so it never appears
     in this public repo, not even here;
   * a hard-coded loopback URL for the Orchestrator port in Python (use
     config.orchestrator_url(), which follows ORCHESTRATOR_PORT).
 
-Scope: Orchestrator/, ToolVault/, MCP/ (server) and Portal/modules + the Android
-app's src/main (clients). Tests, docs (.md) and vendored data are out of scope.
+Scope: Orchestrator/, ToolVault/, MCP/ and the install/ops scripts (Scripts/,
+scripts/, installer/) on the server side; the Portal (modules, onboarding, the
+page shell) and the Android app's src/main on the client side. Tests, docs (.md),
+git-ignored files (Portal/uploads, build output) and vendored data are out of
+scope.
 A justified exception goes in ALLOWLIST with its reason; stale entries fail.
 """
 import ast
@@ -27,8 +31,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 ANDROID_MAIN = ("AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/"
                 "AI_BlackBox_Portal/app/src/main")
-SERVER_ROOTS = ("Orchestrator", "ToolVault", "MCP")
-CLIENT_ROOTS = ("Portal/modules", ANDROID_MAIN)
+SERVER_ROOTS = ("Orchestrator", "ToolVault", "MCP", "Scripts", "scripts", "installer")
+CLIENT_ROOTS = ("Portal", ANDROID_MAIN)
 
 SCAN_SUFFIXES = {
     ".py", ".js", ".mjs", ".cjs", ".ts", ".kt", ".kts", ".java", ".html", ".sh",
@@ -106,11 +110,36 @@ def _email_hits(text: str):
             if _sha(m.group().lower()) == VENDOR_EMAIL_SHA256]
 
 
+# Full-line comment openers by file type. A comment cannot route memory, tokens
+# or a pairing anywhere, so a quoted name in one (an example, a history note) is
+# not an offender; one in code, a string, a docstring or markup is.
+_HASH_COMMENT_SUFFIXES = {".py", ".sh", ".ini", ".toml", ".yaml", ".yml", ".conf",
+                          ".service", ".template"}
+_SLASH_COMMENT_SUFFIXES = {".js", ".mjs", ".cjs", ".ts", ".kt", ".kts", ".java"}
+
+
+def _is_comment_line(suffix: str, line: str) -> bool:
+    stripped = line.lstrip()
+    if suffix in _HASH_COMMENT_SUFFIXES:
+        return stripped.startswith("#")
+    if suffix in _SLASH_COMMENT_SUFFIXES:
+        return stripped.startswith(("//", "/*", "*"))
+    if suffix in (".html", ".xml"):
+        return stripped.startswith("<!--")
+    return False
+
+
+def _operator_hits(rel: str, text: str):
+    """Line numbers of a quoted dev-box operator name outside full-line comments."""
+    suffix = Path(rel).suffix
+    return [n for n, line in enumerate(text.splitlines(), 1)
+            if OPERATOR_LITERAL_RX.search(line) and not _is_comment_line(suffix, line)]
+
+
 def _offenders(roots):
     found = []
     for rel, text in _scoped_files(roots):
-        for m in OPERATOR_LITERAL_RX.finditer(text):
-            found.append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}: operator literal {m.group()}")
+        found += [f"{rel}:{n}: operator literal" for n in _operator_hits(rel, text)]
         found += [f"{rel}:{n}: vendor phone number" for n in _phone_hits(text)]
         found += [f"{rel}:{n}: vendor email" for n in _email_hits(text)]
     return found
@@ -133,6 +162,20 @@ def test_operator_matcher():
     assert OPERATOR_LITERAL_RX.search('body.get("operator", "Brandon-DEV")')
     assert not OPERATOR_LITERAL_RX.search("# Brandon's directive 2026-05-20")
     assert not OPERATOR_LITERAL_RX.search('"Brandon WALKS the catalogue"')
+
+
+@pytest.mark.parametrize("rel, src, lines", [
+    # A full-line comment cannot route anything; code, strings and markup can.
+    ("a.kt", ' * returns {"operators":["Brandon","Anna"]}\nval op = "Brandon"\n', [2]),
+    ("a.js", '    // e.g. "Brandon-DEV"\nconst op = x || \'Brandon\';\n', [2]),
+    ("a.js", 'class A {\n    #op = "Brandon";\n}\n', [2]),  # a private field, not a comment
+    ("a.py", '# e.g. "Brandon"\nOP = "Brandon"\n', [2]),
+    ("a.py", 'def f():\n    """Run as "Brandon"."""\n', [2]),  # a docstring is still code text
+    ("a.html", '<!-- "Brandon" -->\n<option>"Brandon"</option>\n', [2]),
+    ("a.kt", '# not a Kotlin comment: "Brandon"\n', [1]),
+])
+def test_operator_hits_skip_full_line_comments(rel, src, lines):
+    assert _operator_hits(rel, src) == lines
 
 
 def test_vendor_phone_digest_is_the_retired_seed_digest():
@@ -163,8 +206,8 @@ def test_server_code_has_no_dev_box_identity():
 
 @pytest.mark.xfail(strict=False, reason=(
     "TODO(U16): the Portal modules and the Android app still default the operator "
-    "to the dev-box name; U16 (client operator + models) removes them in parallel. "
-    "Drop this mark once it is merged."))
+    "to the dev-box name; U16 (client operator + models) removes them in parallel "
+    "(its branch scans clean). Drop this mark once it is merged."))
 def test_client_code_has_no_dev_box_identity():
     offenders = _offenders(CLIENT_ROOTS)
     assert not offenders, "Dev-box identity in client code:\n  " + "\n  ".join(offenders)

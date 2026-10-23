@@ -247,5 +247,6 @@ if _os.path.isdir(_novnc_dir):
 
 if __name__ == "__main__":
     import uvicorn
+    from Orchestrator.config import ORCHESTRATOR_PORT
     print(f"Starting BlackBox Orchestrator with {len(app.routes)} routes...")
-    uvicorn.run(app, host="0.0.0.0", port=9091)
+    uvicorn.run(app, host="0.0.0.0", port=ORCHESTRATOR_PORT)
