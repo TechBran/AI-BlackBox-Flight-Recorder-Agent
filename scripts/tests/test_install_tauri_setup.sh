@@ -17,8 +17,10 @@
 #   4. a package renamed by the productName change replaces the old one
 #      (both ship /usr/bin/blackbox-setup, which dpkg refuses to overwrite);
 #   5. build artifacts owned by someone else (an old root build) are reported,
-#      not built over; a failed rebuild keeps the installed app, and only a box
-#      with no setup app at all fails the install.
+#      not built over — at any depth: an old root build leaves root-owned
+#      release/deps/ and bundle/deb/<pkg>/ entries under a target/ that is
+#      itself user-owned; a failed rebuild keeps the installed app, and only a
+#      box with no setup app at all fails the install.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -137,8 +139,18 @@ rc="$(STUB_DPKG_OWNER=black-box-setup STUB_DPKG_VERSION=0.0.1 STUB_DEB_PACKAGE=b
 stub_log_has '^apt-get remove' && fail "4: a same-name upgrade removed the installed package"
 
 # 5. artifacts owned by someone else / failed builds
-mkdir -p "$ROOT/installer/src-tauri/target"
-rc="$(REAL_USER=root STUB_DPKG_OWNER=black-box-setup STUB_DPKG_VERSION=0.0.1 BLACKBOX_BUILD_TAURI='' run5 foreign-target)"
+# The ownership guard must walk the whole tree. A test cannot create a file
+# owned by another uid, so pin the walk itself: no depth limit on the find.
+GUARD="$(sed -n '/^build_tauri_setup()[[:space:]]*{/,/^}/p' "$INSTALL_SH" | grep -E 'find .*! -user "\$REAL_USER"' || true)"
+[[ -n "$GUARD" ]] || fail "5: build_tauri_setup no longer checks build-tree ownership with find ! -user"
+[[ "$GUARD" == *maxdepth* ]] \
+    && fail "5: the ownership guard stops at a fixed depth and misses root-owned release/deps/ and bundle/deb/<pkg>/: $GUARD"
+# Everything the test creates is owned by the invoking user, so make the real
+# user someone else — never the invoking user (root in a CI container).
+FOREIGN_USER=root
+[[ "$(id -u)" -eq 0 ]] && FOREIGN_USER=nobody
+mkdir -p "$ROOT/installer/src-tauri/target/release/deps"
+rc="$(REAL_USER="$FOREIGN_USER" STUB_DPKG_OWNER=black-box-setup STUB_DPKG_VERSION=0.0.1 BLACKBOX_BUILD_TAURI='' run5 foreign-target)"
 [[ "$rc" == 0 ]] || fail "5: a foreign-owned target/ with an installed app must not fail the install (rc=$rc)"
 built && fail "5: built over a target/ owned by another user"
 grep -q 'chown -R' "$WORK/foreign-target.log" || fail "5: the foreign-owned target/ is not reported with the chown remedy"

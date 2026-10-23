@@ -25,6 +25,16 @@ if ! [[ "$REAL_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     echo "[install] ERROR: REAL_USER='$REAL_USER' contains invalid characters (POSIX usernames only)" >&2
     exit 1
 fi
+# ...and is never root. `sudo bash install.sh` from a root shell (sudo -i, a
+# provisioning tool) sets SUDO_USER=root, which the name check above accepts;
+# every as-the-user step (the venvs, rustup/cargo/npm for the setup app, the
+# units' User=) would then run as root and leave root-owned trees in the
+# checkout (2026-10 audit O22-03).
+if [[ "$REAL_USER" == root ]] || [[ "$(id -u "$REAL_USER" 2>/dev/null || true)" == 0 ]]; then
+    echo "[install] ERROR: the real user resolved to root (SUDO_USER=${SUDO_USER:-unset}). Run as your user:" >&2
+    echo "[install]        log in as the BlackBox service user and run: bash Scripts/install.sh" >&2
+    exit 1
+fi
 
 # Audit (customer, 2026-07-27 — stale helper after commit 5eabbe45): $BLACKBOX_ROOT
 # is templated into the root-owned dispatch helpers, the sudoers file, the
@@ -1659,11 +1669,13 @@ build_tauri_setup() {
         libssl-dev libayatana-appindicator3-dev pkg-config build-essential || return 1
     # A pre-2026-10 build ran as root and left these root-owned; the user build
     # cannot write them. Report it rather than chown a service-writable tree as
-    # root.
+    # root. Walk the whole tree: a later user build re-owns target/ and
+    # release/ but leaves the old root-owned release/deps/ and
+    # bundle/deb/<pkg>/ entries deeper down (-quit stops at the first one).
     local d foreign
     for d in "$BLACKBOX_ROOT/installer/src-tauri/target" "$BLACKBOX_ROOT/installer/node_modules"; do
         [[ -e "$d" ]] || continue
-        foreign="$(find "$d" -maxdepth 2 ! -user "$REAL_USER" -print -quit 2>/dev/null || true)"
+        foreign="$(find "$d" ! -user "$REAL_USER" -print -quit 2>/dev/null || true)"
         if [[ -n "$foreign" ]]; then
             echo "[install] ERROR: $foreign is not owned by $REAL_USER (left by an old root build)." >&2
             echo "[install]        Fix with: sudo chown -R $REAL_USER: '$d'  — then re-run install.sh." >&2
