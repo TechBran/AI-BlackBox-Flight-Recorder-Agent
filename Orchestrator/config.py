@@ -819,6 +819,14 @@ GEMINI_TTS_MODELS: Dict[str, str] = {
     "gemini-flash": "gemini-2.5-flash-tts",
     "gemini-pro": "gemini-2.5-pro-tts",
 }
+# The AI Studio (API-key) id of each GA model above: call_gemini_tts_preview
+# calls these when no service account is configured. Every GEMINI_TTS_MODELS
+# value needs an entry; an id in neither table is refused with a 400
+# (tts_routes.resolve_gemini_tts_model), never swapped for Pro.
+GEMINI_TTS_PREVIEW_IDS: Dict[str, str] = {
+    "gemini-2.5-flash-tts": "gemini-2.5-flash-preview-tts",
+    "gemini-2.5-pro-tts": "gemini-2.5-pro-preview-tts",
+}
 # The Gemini voice a Gemini group speaks with when it becomes the box default and
 # [audio] voice names no Gemini voice. A choice, not a provider fact.
 GEMINI_TTS_DEFAULT_VOICE = "Charon"
@@ -830,26 +838,35 @@ TTS_DEFAULT_GROUP_ORDER = ("openai", "gemini-pro", "elevenlabs", "gemini-flash",
 
 
 def _tts_credentials() -> Dict[str, bool]:
-    """Which cloud TTS providers have credentials RIGHT NOW: {"openai", "google"}.
-    Read fresh from .env (then os.environ), the mechanism
-    stt.resolve.stt_availability uses, so a key saved in the wizard shows as
-    available with no restart. Google TTS works with GOOGLE_API_KEY (AI Studio)
-    or a service-account file (Cloud TTS) -- call_gemini_tts takes either. Never
-    raises."""
+    """Which cloud TTS providers THIS PROCESS can synthesise with: {"openai",
+    "google"}. The import-time values the synth paths read (tts_routes'
+    OPENAI_API_KEY and GOOGLE_API_KEY, call_gemini_tts's USE_CLOUD_TTS), so the
+    catalog never advertises, or defaults to, a provider /tts cannot use. Google
+    TTS works with GOOGLE_API_KEY (AI Studio) or a service account (Cloud TTS).
+    A key saved in the wizard counts after the restart
+    /onboarding/restart-status asks for (_tts_saved_keys names it meanwhile)."""
+    return {"openai": bool((OPENAI_API_KEY or "").strip()),
+            "google": bool((GOOGLE_API_KEY or "").strip())
+            or bool(USE_CLOUD_TTS and GOOGLE_AUTH_AVAILABLE)}
+
+
+def _tts_saved_keys() -> Dict[str, bool]:
+    """Which cloud TTS providers have a key in .env on disk (read fresh): a key
+    the wizard saved that the running process has not loaded yet. Only used to
+    say "restart" instead of "add a key". Never raises."""
     try:
         from dotenv import dotenv_values
         from Orchestrator.onboarding.secrets_writer import ENV_FILE
         env = dotenv_values(str(ENV_FILE))
     except Exception:
-        env = {}
+        return {"openai": False, "google": False}
 
     def _val(key: str) -> str:
-        return (env.get(key) or os.getenv(key) or "").strip()
+        return (env.get(key) or "").strip()
 
     creds = _val("GOOGLE_APPLICATION_CREDENTIALS")
-    service_account_ok = bool(GOOGLE_AUTH_AVAILABLE and creds and os.path.exists(creds))
     return {"openai": bool(_val("OPENAI_API_KEY")),
-            "google": bool(_val("GOOGLE_API_KEY")) or service_account_ok}
+            "google": bool(_val("GOOGLE_API_KEY")) or bool(creds and os.path.exists(creds))}
 
 
 def _tts_group_status(group: dict, available: bool, reason: str) -> dict:
@@ -863,11 +880,28 @@ def build_tts_catalog() -> list:
     """Grouped TTS voice catalog -- the single source of truth for the picker.
     Returns [{id,label,voices:[{id,name,description}],available,model}]. Gemini
     ids are 'gemini-flash:<Name>' / 'gemini-pro:<Name>'; OpenAI 'openai:<id>'.
-    `available` says whether the group's provider has credentials right now (read
-    fresh; `unavailable_reason` names what is missing) and `model` is the model the
-    box synthesises that group with when a caller names none. Both are additive:
-    every group is still listed, so a picker can show what a key would unlock."""
+    `available` says whether the running process can synthesise with the group's
+    provider (`unavailable_reason` names the missing key, or the restart a saved
+    key still needs) and `model` is the model the box synthesises that group with
+    when a caller names none. Both are additive: every group is still listed, so
+    a picker can show what a key would unlock. A bare [audio] voice the static
+    OpenAI list lacks (e.g. a gpt-4o-mini-tts voice) is listed too, so the
+    configured default is a voice the picker can show."""
     creds = _tts_credentials()
+    saved = _tts_saved_keys() if not all(creds.values()) else {}
+
+    def reason(provider: str, missing: str) -> str:
+        if saved.get(provider):
+            return "Key saved: restart the BlackBox service to use it"
+        return missing
+
+    openai_voices = [{"id": f"openai:{vid}", "name": nm, "description": ds}
+                     for vid, nm, ds in OPENAI_TTS_VOICES]
+    configured = (TTS_VOICE or "").strip()
+    if configured and ":" not in configured \
+            and all(v["id"] != f"openai:{configured}" for v in openai_voices):
+        openai_voices.append({"id": f"openai:{configured}", "name": configured.capitalize(),
+                              "description": "Configured in config.ini [audio]"})
 
     def gemini_group(provider: str, label: str) -> dict:
         return _tts_group_status({
@@ -876,15 +910,12 @@ def build_tts_catalog() -> list:
                 for n in GEMINI_LIVE_VOICES
             ],
             "model": GEMINI_TTS_MODELS[provider],
-        }, creds["google"], "Needs GOOGLE_API_KEY or a Google service-account credential")
+        }, creds["google"], reason("google", "Needs GOOGLE_API_KEY or a Google service-account credential"))
     return [
         _tts_group_status({
-            "id": "openai", "label": "OpenAI TTS HD", "voices": [
-                {"id": f"openai:{vid}", "name": nm, "description": ds}
-                for vid, nm, ds in OPENAI_TTS_VOICES
-            ],
+            "id": "openai", "label": "OpenAI TTS HD", "voices": openai_voices,
             "model": TTS_MODEL,
-        }, creds["openai"], "Needs OPENAI_API_KEY"),
+        }, creds["openai"], reason("openai", "Needs OPENAI_API_KEY")),
         gemini_group("gemini-flash", "Gemini Flash TTS"),
         gemini_group("gemini-pro", "Gemini Pro TTS"),
     ]

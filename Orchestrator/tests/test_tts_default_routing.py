@@ -54,6 +54,9 @@ def routes(monkeypatch):
 def _creds(monkeypatch, openai=False, google=False):
     monkeypatch.setattr(config, "_tts_credentials",
                         lambda: {"openai": openai, "google": google})
+    # Hermetic: never consult this box's real .env for the "restart" reason.
+    monkeypatch.setattr(config, "_tts_saved_keys",
+                        lambda: {"openai": False, "google": False})
 
 
 def _wav(frames=b"\x00\x00" * 240):
@@ -211,3 +214,46 @@ def test_batch_prefixed_voice_is_sent_bare(client, routes, monkeypatch):
                                            "voice": "gemini-pro:Charon"})
     assert resp.status_code == 200
     assert seen[0]["voice"] == "Charon"
+
+
+# ── An unknown Gemini model is refused up front (O07-tts-voice-06) ───────────
+def test_tts_refuses_an_unknown_gemini_model(client, routes, monkeypatch):
+    seen = _capture_gemini(monkeypatch, routes)
+    resp = client.post("/tts", json={"text": "Hi.", "voice": "gemini-pro:Charon",
+                                     "model": "tts-1-hd"})
+    assert resp.status_code == 400
+    assert "tts-1-hd" in resp.json()["detail"]
+    assert seen == [], "nothing may be synthesised (or billed) as Pro"
+
+
+def test_batch_refuses_an_unknown_gemini_model_with_a_400_not_a_502(client, routes, monkeypatch):
+    seen = _capture_gemini(monkeypatch, routes)
+    resp = client.post("/tts/batch", json={"text": "Hi.", "provider": "gemini-flash",
+                                           "voice": "Kore", "model": "gemini-9-tts"})
+    assert resp.status_code == 400
+    assert seen == []
+
+
+def test_generate_gemini_tts_refuses_an_unknown_model_before_queueing(client, routes, monkeypatch):
+    queued = []
+    monkeypatch.setattr(routes, "create_task", lambda *a, **k: queued.append(k))
+    resp = client.post("/generate/gemini_tts", json={"text": "Hi.", "model": "gemini-9-tts"})
+    assert resp.status_code == 400
+    assert queued == [], "a request that can only fail is never queued"
+
+
+# ── A configured OpenAI voice the static list lacks is kept ─────────────────
+def test_bare_tts_keeps_a_configured_openai_voice_the_static_list_lacks(client, routes, monkeypatch):
+    """[audio] voice = marin (a gpt-4o-mini-tts voice): the base code sent it; the
+    default resolver must not swap it for the list's first voice (alloy)."""
+    monkeypatch.setattr(config, "TTS_VOICE", "marin")
+    monkeypatch.setattr(routes, "TTS_VOICE", "marin")
+    _creds(monkeypatch, openai=True)
+    with patch("Orchestrator.routes.tts_routes.requests.post",
+               return_value=_Resp()) as m:
+        resp = client.post("/tts", json={"text": "Hello there."})
+        assert resp.status_code == 200
+        assert m.call_args[1]["json"]["voice"] == "marin"
+        resp = client.post("/tts/batch", json={"text": "Hello there."})
+        assert resp.status_code == 200
+        assert m.call_args[1]["json"]["voice"] == "marin"

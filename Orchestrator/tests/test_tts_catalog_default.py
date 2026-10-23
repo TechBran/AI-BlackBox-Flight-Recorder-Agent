@@ -5,8 +5,9 @@ catalog returned the three static groups whatever keys the box had and said
 nothing about a default, so every client pinned its own -- the Portal
 "gemini-pro:Charon", Android "openai:onyx", the text_to_speech tool
 "onyx"/"tts-1-hd" -- and a fresh box with one provider spoke through a provider
-it had no key for. Now each group carries `available` (credentials present, read
-fresh) and `model` (what the box synthesises that group with), and the catalog
+it had no key for. Now each group carries `available` (the running process holds
+the provider's credentials; a key saved but not loaded yet asks for a restart)
+and `model` (what the box synthesises that group with), and the catalog
 carries `default`: the [audio] voice when its provider is usable, else the first
 usable group. All additive: existing readers ignore the new keys.
 
@@ -25,6 +26,9 @@ from Orchestrator.config import (
 def _creds(monkeypatch, openai=False, google=False):
     monkeypatch.setattr(config, "_tts_credentials",
                         lambda: {"openai": openai, "google": google})
+    # Hermetic: never consult this box's real .env for the "restart" reason.
+    monkeypatch.setattr(config, "_tts_saved_keys",
+                        lambda: {"openai": False, "google": False})
 
 
 @pytest.fixture
@@ -53,18 +57,75 @@ def test_group_order_and_voices_unchanged_by_the_new_fields(monkeypatch):
     assert all(v["id"].startswith(x["id"] + ":") for x in groups for v in x["voices"])
 
 
-def test_credentials_are_read_fresh_from_dotenv(monkeypatch, tmp_path):
-    """A key saved by the wizard shows up with no restart (same mechanism as
-    stt.resolve.stt_availability)."""
+def _process_keys(monkeypatch, tmp_path, openai="", google="", service_account=False,
+                  dotenv=""):
+    """The keys the RUNNING process holds (frozen at import, what the synth
+    paths use) and what .env on disk holds (what the wizard just saved)."""
     from Orchestrator.onboarding import secrets_writer
+    monkeypatch.setattr(config, "OPENAI_API_KEY", openai)
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", google)
+    monkeypatch.setattr(config, "USE_CLOUD_TTS", service_account)
+    monkeypatch.setattr(config, "GOOGLE_AUTH_AVAILABLE", service_account)
     env = tmp_path / ".env"
-    env.write_text("OPENAI_API_KEY=sk-test-fresh\n")
+    env.write_text(dotenv)
     monkeypatch.setattr(secrets_writer, "ENV_FILE", env)
     for k in ("OPENAI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"):
         monkeypatch.delenv(k, raising=False)
+
+
+def test_availability_follows_the_keys_the_running_process_synthesises_with(monkeypatch, tmp_path):
+    """`available` must match what /tts can speak NOW: tts_routes synthesises with
+    the import-time keys, so a key only on disk does not count yet."""
+    _process_keys(monkeypatch, tmp_path, openai="sk-test-running")
     assert config._tts_credentials() == {"openai": True, "google": False}
-    env.write_text("GOOGLE_API_KEY=g-test-fresh\n")
+    _process_keys(monkeypatch, tmp_path, google="g-test-running")
     assert config._tts_credentials() == {"openai": False, "google": True}
+    _process_keys(monkeypatch, tmp_path, service_account=True)
+    assert config._tts_credentials() == {"openai": False, "google": True}
+    _process_keys(monkeypatch, tmp_path, dotenv="OPENAI_API_KEY=sk-test-saved\n")
+    assert config._tts_credentials() == {"openai": False, "google": False}
+
+
+def test_a_key_saved_but_not_yet_loaded_asks_for_a_restart(monkeypatch, tmp_path):
+    """Wizard saved an OpenAI key on a Google-only box: until the restart that
+    /onboarding/restart-status asks for, OpenAI stays unavailable (the process
+    cannot use it) and the default stays a Gemini voice the box can speak."""
+    _process_keys(monkeypatch, tmp_path, google="g-test-running",
+                  dotenv="OPENAI_API_KEY=sk-test-saved\n")
+    monkeypatch.setattr(config, "TTS_VOICE", "onyx")
+    groups = build_tts_catalog()
+    openai = next(g for g in groups if g["id"] == "openai")
+    assert openai["available"] is False
+    assert "restart" in openai["unavailable_reason"].lower()
+    gemini = next(g for g in groups if g["id"] == "gemini-pro")
+    assert gemini["available"] is True and "unavailable_reason" not in gemini
+    assert resolve_tts_default(groups)["provider"] == "gemini-pro"
+
+
+def test_a_missing_key_names_the_key(monkeypatch, tmp_path):
+    _process_keys(monkeypatch, tmp_path)
+    groups = {g["id"]: g for g in build_tts_catalog()}
+    assert groups["openai"]["unavailable_reason"] == "Needs OPENAI_API_KEY"
+    assert "GOOGLE_API_KEY" in groups["gemini-flash"]["unavailable_reason"]
+
+
+def test_a_configured_openai_voice_the_static_list_lacks_is_listed_and_is_the_default(monkeypatch):
+    """[audio] voice = marin (gpt-4o-mini-tts): listed in the OpenAI group so the
+    picker can show it, and kept as the default instead of a silent swap to alloy."""
+    _creds(monkeypatch, openai=True, google=True)
+    monkeypatch.setattr(config, "TTS_VOICE", "marin")
+    groups = build_tts_catalog()
+    openai = next(g for g in groups if g["id"] == "openai")
+    assert [v["id"] for v in openai["voices"]].count("openai:marin") == 1
+    d = resolve_tts_default(groups)
+    assert (d["id"], d["source"]) == ("openai:marin", "config")
+
+
+def test_a_listed_configured_voice_is_not_duplicated(monkeypatch, onyx):
+    _creds(monkeypatch, openai=True)
+    openai = next(g for g in build_tts_catalog() if g["id"] == "openai")
+    assert [v["id"] for v in openai["voices"]].count("openai:onyx") == 1
+    assert len(openai["voices"]) == len(config.OPENAI_TTS_VOICES)
 
 
 # ── resolve_tts_default ──────────────────────────────────────────────────────
