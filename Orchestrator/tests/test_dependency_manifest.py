@@ -272,11 +272,11 @@ def test_every_direct_dependency_is_capped():
 # the venv this lock replaces (requirements.in names the CVEs).
 SECURITY_FLOORS = {
     "aiohttp": "3.14.3", "urllib3": "2.8.0", "protobuf": "5.29.6",
-    "pillow": "12.3.0", "pyasn1": "0.6.4", "cryptography": "50.0.0",
+    "pillow": "13.0.0", "pyasn1": "0.6.4", "cryptography": "50.0.0",
     "requests": "2.33.0", "python-multipart": "0.0.31", "python-dotenv": "1.2.2",
     "lxml": "6.1.0", "idna": "3.15", "h11": "0.16.0", "anyio": "4.14.2",
     "httplib2": "0.32.0", "multidict": "6.9.1", "oauthlib": "4.0.0",
-    "soupsieve": "2.9.0", "certifi": "2026.7.22",
+    "soupsieve": "2.9.0", "certifi": "2026.10.19",
 }
 
 

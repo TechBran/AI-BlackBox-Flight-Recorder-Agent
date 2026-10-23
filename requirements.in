@@ -51,7 +51,7 @@ requests>=2.33.0,<3             # CVE-2024-47081 (2.32.4), CVE-2026-25645 (2.33.
 httpx>=0.28.1,<0.29             # 0.28 removed `proxies=`/`app=`; a minor can break us
 aiohttp>=3.14.3,<4              # client path of the provider calls; CVE-2026-34518, -47265 (credentials kept across redirects), -54275 (SNI bypass), decompression bombs
 urllib3>=2.8.0,<3               # imported by utils/safe_fetch.py; CVE-2025-66418, -66471, CVE-2026-21441, -97689
-certifi>=2026.7.22              # safe_fetch.py's CA bundle; calendar-versioned CA data, so no cap
+certifi>=2026.10.19             # safe_fetch.py's CA bundle; calendar-versioned CA data, so no cap; PYSEC-2026-4320 (emSign ECC Root CA - G3 pulled from the bundle)
 
 # === WebSockets ===
 websockets>=13.0,<16            # provider realtime/STT bridges; validated on 15.x
@@ -87,7 +87,7 @@ imageio-ffmpeg==0.6.0           # bundled ffmpeg for clone-reference transcode-t
 # === HTML / documents / images ===
 beautifulsoup4>=4.14.0,<5
 lxml>=6.1.3,<7                  # [runtime] bs4 parser backend, selected by name ("lxml"); CVE-2026-41066 (6.1.0)
-pillow>=12.3.0,<13              # CVE-2026-25990 (PSD out-of-bounds write) and later fixes
+pillow>=13.0.0,<14              # CVE-2026-25990 (12.3.0), then the 2026-10 batch fixed only in 13.0.0 (CVE-2026-96636..96644, -96778, -112390..112406, -112891..112901, GHSA-78g4-xqwv-q3g8: decoder heap overflows, decompression-bomb bypasses, Ghostscript argument injection); we only Image.open/new/convert/resize/crop/save, validated in the lock venv
 qrcode[pil]>=7.4.0,<9           # pairing QR codes
 reportlab>=4.4.5,<5
 python-docx>=1.2.0,<2
