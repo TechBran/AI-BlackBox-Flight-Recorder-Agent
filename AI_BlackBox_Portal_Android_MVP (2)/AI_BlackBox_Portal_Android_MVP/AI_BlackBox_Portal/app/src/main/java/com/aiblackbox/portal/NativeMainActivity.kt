@@ -102,15 +102,19 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 
-/** Build a properly JSON-serialized TTS batch request body. No manual string escaping. */
-private fun buildTtsBatchBody(
-    text: String, voice: String, model: String, format: String, provider: String, operator: String
+/**
+ * Build a properly JSON-serialized TTS batch request body. No manual string escaping.
+ * No model travels: /tts/batch synthesises each provider with its own model (the
+ * `model` GET /tts/catalog publishes per group), so this path keeps no copy of a
+ * provider's model ids to go stale (audit O07-tts-voice-06).
+ */
+internal fun buildTtsBatchBody(
+    text: String, voice: String, format: String, provider: String, operator: String
 ): String = buildJsonObject {
     // §3.5: strip non-speakable content (artifacts/media-urls/fenced-code/
     // {ui_reply} envelope) before TTS -- mirrors Portal stripNonSpeakable.
     put("text", com.aiblackbox.portal.util.SpeakableText.stripNonSpeakable(text))
     put("voice", voice)
-    put("model", model)
     put("format", format)
     put("provider", provider)
     put("operator", operator)
@@ -687,7 +691,7 @@ class NativeMainActivity : ComponentActivity() {
                             ) {
                                 return@collect
                             }
-                            val body = buildTtsBatchBody(text, config.voice, config.model, "mp3", config.provider, operator)
+                            val body = buildTtsBatchBody(text, config.voice, "mp3", config.provider, operator)
                             val request = okhttp3.Request.Builder()
                                 .url("${api.getBaseUrl()}/tts/batch")
                                 .post(body.toRequestBody("application/json".toMediaType()))
@@ -802,7 +806,7 @@ class NativeMainActivity : ComponentActivity() {
                                             return@launch
                                         }
                                     }
-                                    val body = buildTtsBatchBody(text, config.voice, config.model, "mp3", config.provider, operator)
+                                    val body = buildTtsBatchBody(text, config.voice, "mp3", config.provider, operator)
                                     val request = okhttp3.Request.Builder()
                                         .url("${api.getBaseUrl()}/tts/batch")
                                         .post(body.toRequestBody("application/json".toMediaType()))
@@ -873,7 +877,7 @@ class NativeMainActivity : ComponentActivity() {
                                             onSlow = { Toast.makeText(applicationContext, "Loading on-box voice models…", Toast.LENGTH_SHORT).show() },
                                         )
                                     } else null
-                                    val body = buildTtsBatchBody(text, config.voice, config.model, "mp3", config.provider, operator)
+                                    val body = buildTtsBatchBody(text, config.voice, "mp3", config.provider, operator)
                                     val request = okhttp3.Request.Builder()
                                         .url("${api.getBaseUrl()}/tts/batch")
                                         .post(body.toRequestBody("application/json".toMediaType()))
