@@ -15,4 +15,6 @@ pytest-asyncio==1.3.0
 pytest-timeout==2.4.0   # pytest.ini timeout: no single test can hang the CI gate
 
 # Test-only libraries
-jsonschema==4.26.0      # test_android_control_schemas validates the device-control contract
+# jsonschema: the full-validation layer of Orchestrator/tests/test_android_control_schemas.py
+# (referencing.Registry API, needs >= 4.18); the runtime lock never ships it.
+jsonschema==4.26.0

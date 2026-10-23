@@ -7,15 +7,15 @@ layers, so this test is meaningful whether or not `jsonschema` is installed:
    load-bearing invariants (the `msg` message-kind discriminator, the password-redaction
    if/then, the XR no-screenshot rule, the element_ref anyOf, the enum floors, and the two
    new `open_app` / `scroll` action variants).
-2. FULL VALIDATION (runs only when `jsonschema` is importable — e.g. system python3;
-   the Orchestrator venv does NOT ship it, so these are SKIPPED there). Asserts a sample of
+2. FULL VALIDATION (runs only when `jsonschema` is importable: requirements.dev.txt
+   declares it, so a dev venv or CI runs this layer; the runtime venv built from
+   requirements.lock.txt does NOT ship it, so these are SKIPPED there). Asserts a sample of
    EACH message + EACH action variant VALIDATES, and that the load-bearing NEGATIVES REJECT.
 
 NOTE: full JSON-Schema (2020-12) validation of the positive/negative samples requires the
-`jsonschema` package (with cross-file `$ref` resolution). It is intentionally NOT added to
-the Orchestrator venv here (pip install is out of scope for M0). Run these under a
-`jsonschema`-equipped interpreter (`python3 -m pytest ...`) to exercise the FULL path; the
-STRUCTURAL layer still guards the contract in the venv.
+`jsonschema` package (with cross-file `$ref` resolution). It is a dev-only dependency
+(requirements.dev.txt), never part of the runtime lock; the STRUCTURAL layer still guards
+the contract in a venv without it.
 """
 
 import glob
