@@ -250,7 +250,9 @@ class TestAnthropicHistoryGuard:
 
 class TestSearchSnapshotsExecutorUncapped:
 
-    def test_over_10k_result_delivered_whole(self, monkeypatch):
+    def test_over_10k_result_delivered_whole(self, monkeypatch, isolated_stores):
+        # isolated_stores: the executor reads the ledger; an empty one here,
+        # never the box's.
         repo = Path(__file__).resolve().parents[2]
         spec = importlib.util.spec_from_file_location(
             "search_snapshots_executor",

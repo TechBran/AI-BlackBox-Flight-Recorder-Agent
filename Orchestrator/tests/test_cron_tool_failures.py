@@ -695,7 +695,8 @@ def test_transport_failures_are_still_retried(temp_manager, monkeypatch):
 # 5. The Flight Recorder's health digest counts partial runs as failures
 # ---------------------------------------------------------------------------
 
-def test_oversight_counts_partial_runs(monkeypatch):
+def test_oversight_counts_partial_runs(monkeypatch, isolated_stores):
+    # isolated_stores: the oversight sweep also reads the ledger's index.
     import Orchestrator.scheduler as scheduler_pkg
     from Orchestrator import oversight
 

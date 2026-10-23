@@ -23,7 +23,8 @@ def tmux_sock():
     sock_dir = Path(tempfile.mkdtemp(prefix="bbx-tmux-"))
     sock = sock_dir / "tmux.sock"
     yield sock
-    subprocess.run(["tmux", "-S", str(sock), "kill-server"], capture_output=True)
+    if shutil.which("tmux"):  # the tmux-free tests take this fixture too
+        subprocess.run(["tmux", "-S", str(sock), "kill-server"], capture_output=True)
     shutil.rmtree(sock_dir, ignore_errors=True)
 
 
@@ -63,7 +64,7 @@ def test_parse_session_name_round_trips():
 def test_attach_or_create_creates_new(manager, workspace):
     info = manager.attach_or_create(
         operator="Brandon", provider="claude", app="grocery-store",
-        command=["bash", "-c", "echo hello; sleep 600"]
+        command=["bash", "-c", "echo hello; sleep 30"]
     )
     assert info.created is True
     assert info.name == "cli-agent-Brandon__claude__grocery-store"
@@ -78,11 +79,11 @@ def test_attach_or_create_creates_new(manager, workspace):
 def test_attach_or_create_idempotent(manager, workspace):
     a = manager.attach_or_create(
         operator="Brandon", provider="claude", app="grocery-store",
-        command=["bash", "-c", "sleep 600"]
+        command=["bash", "-c", "sleep 30"]
     )
     b = manager.attach_or_create(
         operator="Brandon", provider="claude", app="grocery-store",
-        command=["bash", "-c", "sleep 600"]
+        command=["bash", "-c", "sleep 30"]
     )
     assert a.name == b.name
     assert a.created is True
@@ -93,7 +94,7 @@ def test_attach_or_create_idempotent(manager, workspace):
 def test_kill_session_works(manager, workspace):
     manager.attach_or_create(
         operator="Brandon", provider="claude", app="grocery-store",
-        command=["bash", "-c", "sleep 600"]
+        command=["bash", "-c", "sleep 30"]
     )
     name = "cli-agent-Brandon__claude__grocery-store"
     manager.kill(name)
@@ -108,7 +109,7 @@ def test_kill_session_works(manager, workspace):
 def test_list_sessions_for_operator(manager, workspace):
     manager.attach_or_create(operator="Brandon", provider="claude",
                               app="grocery-store",
-                              command=["bash", "-c", "sleep 600"])
+                              command=["bash", "-c", "sleep 30"])
     sessions = manager.list_for_operator("Brandon")
     names = [s.name for s in sessions]
     assert "cli-agent-Brandon__claude__grocery-store" in names

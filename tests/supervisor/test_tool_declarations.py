@@ -1,9 +1,4 @@
-import pytest
-
 from ugv_tools_api.supervisor.tool_declarations import ALL_TOOLS, tool_names
-
-# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
-pytestmark = pytest.mark.ugv
 
 
 EXPECTED = {

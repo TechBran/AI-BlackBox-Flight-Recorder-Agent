@@ -324,7 +324,8 @@ def test_semantic_retrieve_windows_only_when_budget_passed(monkeypatch):
     assert extract_snap_ids(windowed) == extract_snap_ids(whole)
 
 
-def test_hybrid_retrieve_requests_provenance_only_with_budget(monkeypatch):
+def test_hybrid_retrieve_requests_provenance_only_with_budget(monkeypatch, isolated_stores):
+    # isolated_stores: hybrid_retrieve reads the snapshot index (an empty one).
     calls = []
 
     def _fake_retrieve(query, operator="", k=10, *, include_keyword=True,
@@ -483,13 +484,13 @@ def test_local_tools_execute_stamps_on_device_caller():
 # ── 6. live lean profile (skip-guarded, mirrors test_local_lean_retrieval) ───
 
 def _require_live_store():
-    try:
-        from Orchestrator.embeddings.search import get_active_store
-        store = get_active_store()
-    except Exception as e:  # noqa: BLE001 - provider/store unavailable in test env
-        pytest.skip(f"active store/provider unavailable: {e}")
-    if store.count == 0:
-        pytest.skip("active store empty")
+    # A store whose provider cannot embed the query returns nothing: skip, so
+    # the starvation check below fails only on a real delivery result (audit
+    # O21-python-tests-08).
+    from Orchestrator.tests.live_store import require_live_store, require_query_embedder
+
+    store = require_live_store()
+    require_query_embedder()
     return store
 
 
@@ -513,3 +514,20 @@ def test_live_lean_windowed_delivery_under_budget():
     for text in windowed:
         assert len(text) <= budget
         assert "=== START SNAPSHOT" in text
+
+
+def test_live_windowing_check_skips_when_the_query_cannot_be_embedded(monkeypatch):
+    """Audit O21-python-tests-08: a live store whose provider refuses the query
+    embed delivers nothing; the live check skips on that instead of reporting
+    starvation."""
+    import Orchestrator.embeddings.search as search
+
+    def refuse(*_a, **_k):
+        raise RuntimeError("provider unreachable")
+
+    monkeypatch.setattr(search, "get_active_store",
+                        lambda: mock.Mock(count=1234, schema=2))
+    monkeypatch.setattr(search, "generate_embedding_sync", refuse)
+    monkeypatch.setattr(fossils, "semantic_retrieve", lambda *_a, **_k: [])
+    with pytest.raises(pytest.skip.Exception, match="query embedding unavailable"):
+        test_live_lean_windowed_delivery_under_budget()

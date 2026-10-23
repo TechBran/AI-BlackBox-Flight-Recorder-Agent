@@ -2,9 +2,6 @@ import pytest
 
 from ugv_tools_api.supervisor import config as cfg
 
-# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
-pytestmark = pytest.mark.ugv
-
 
 def test_defaults(monkeypatch):
     for v in ("SUPERVISOR_MODEL", "SUPERVISOR_VOICE", "SUPERVISOR_LANG",

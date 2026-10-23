@@ -94,8 +94,9 @@ def test_semantic_retrieve_threshold_arg_is_vestigial():
     assert extract_snap_ids(with_high) == extract_snap_ids(default)
 
 
-def test_semantic_retrieve_empty_query_returns_empty():
+def test_semantic_retrieve_empty_query_returns_empty(isolated_stores):
     """retrieve() short-circuits a blank query to [] — the shim must propagate that
-    (no decode, no crash). No live store needed for this contract."""
+    (no decode, no crash). No live store needed for this contract (isolated_stores:
+    an empty ledger, never the box's)."""
     assert semantic_retrieve("", operator="system", k=5) == []
     assert semantic_retrieve("   ", operator="system", k=5) == []

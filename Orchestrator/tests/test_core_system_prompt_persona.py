@@ -29,7 +29,8 @@ def test_fallback_path_also_uses_operator_persona(monkeypatch):
     out = tasks.build_core_system_prompt("", operator="Brandon")
     assert "FALLBACK-CUSTOM" in out
 
-def test_cu_context_excludes_persona(monkeypatch):
+def test_cu_context_excludes_persona(monkeypatch, isolated_stores):
+    # isolated_stores: build_cu_context reads the ledger (an empty one here).
     from Orchestrator.routes import chat_routes
     monkeypatch.setattr(state, "OPERATOR_PREFERENCES",
                         {"Brandon": {"tts_voice": "openai:onyx", "persona": "SECRET-CU"}})

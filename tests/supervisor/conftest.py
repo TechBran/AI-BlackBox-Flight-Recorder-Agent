@@ -1,5 +1,6 @@
-"""tests/supervisor: the UGV Beast Gemini Live supervisor (marker ugv, excluded
-by default; run with `pytest -m ugv tests/supervisor`).
+"""tests/supervisor: the UGV Beast Gemini Live supervisor. The hermetic modules
+run in the default selection; test_video_io_ros.py needs ROS2 and carries the
+ugv marker (excluded by default; run with `pytest -m ugv tests/supervisor`).
 
 The package under test lives in the UGV sub-project
 (docs/ugv-beast/setup/ugv_tools_api), whose own tests/supervisor suite is the

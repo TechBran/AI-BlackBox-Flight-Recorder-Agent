@@ -4,9 +4,6 @@ import pytest
 
 from ugv_tools_api.supervisor.video_io import FrameCache, render_costmap_png
 
-# UGV Beast sub-project (tests/supervisor/conftest.py): opt-in, -m ugv.
-pytestmark = pytest.mark.ugv
-
 
 def test_get_empty():
     c = FrameCache()

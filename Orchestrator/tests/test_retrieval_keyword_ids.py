@@ -4,52 +4,67 @@ These retrievers return ranked snap_ids instead of decoded snapshot text, so the
 hybrid fuser can fuse keyword + semantic results BY snap_id (no O(n^2) text-equality
 reverse-map, no full snap_to_text rebuild). The text-returning wrappers must stay
 behaviorally identical to before.
+
+They run over the fixed synthetic corpus of test_keyword_scorer_parity, not the
+box's ledger: over an empty ledger (a fresh tree, CI) every assertion here held
+for an empty result, and on a box they scanned its whole volume.
 """
+import pytest
+
+import Orchestrator.fossils as fossils
 from Orchestrator.fossils import (
     keyword_retrieve_ids,
     keyword_retrieve_ids_for_operator,
     keyword_retrieve,
     keyword_retrieve_for_operator,
-    load_snapshot_index,
-    read_volume_bytes,
     extract_snap_ids,
 )
-from Orchestrator.config import VOL_PATH
+from Orchestrator.tests.test_keyword_scorer_parity import (
+    SYNTH_QUERY,
+    _build_synthetic_corpus,
+)
+
+OFF_TOPIC_QUERY = "control phone on-device gemma"
 
 
-def _vol():
-    return read_volume_bytes(VOL_PATH).decode("utf-8", "replace")
+@pytest.fixture
+def corpus(monkeypatch):
+    """The synthetic volume text, with the operator scorer's index and volume
+    reads pointed at the same corpus."""
+    vol_txt, vol_bytes, index = _build_synthetic_corpus()
+    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: index)
+    monkeypatch.setattr(fossils, "read_volume_bytes", lambda _path: vol_bytes)
+    return vol_txt, index
 
 
-def test_keyword_retrieve_ids_returns_valid_snap_ids():
-    idx = load_snapshot_index()
-    vol = _vol()
-    ids = keyword_retrieve_ids(vol, "embeddings model switch reembed", k=5)
-    assert isinstance(ids, list) and len(ids) <= 5
+def test_keyword_retrieve_ids_returns_valid_snap_ids(corpus):
+    vol, idx = corpus
+    ids = keyword_retrieve_ids(vol, SYNTH_QUERY, k=3)
+    assert ids and len(ids) <= 3
     assert all(sid in idx for sid in ids)
 
 
-def test_keyword_retrieve_ids_for_operator_returns_valid_snap_ids():
-    idx = load_snapshot_index()
-    vol = _vol()
-    ids = keyword_retrieve_ids_for_operator(vol, "embeddings model switch reembed", 5, "system")
-    assert isinstance(ids, list) and len(ids) <= 5
+def test_keyword_retrieve_ids_for_operator_returns_valid_snap_ids(corpus):
+    vol, idx = corpus
+    ids = keyword_retrieve_ids_for_operator(vol, SYNTH_QUERY, 3, "system")
+    assert ids and len(ids) <= 3
     assert all(sid in idx for sid in ids)
 
 
-def test_text_wrapper_matches_id_version_order_nonoperator():
+def test_text_wrapper_matches_id_version_order_nonoperator(corpus):
     """The text-returning keyword_retrieve must rank identically to the id version
     (it is now a thin wrapper that maps ids -> text)."""
-    vol = _vol()
-    q = "embeddings model switch reembed"
-    ids = keyword_retrieve_ids(vol, q, k=8)
-    texts = keyword_retrieve(vol, q, k=8)
+    vol, _idx = corpus
+    ids = keyword_retrieve_ids(vol, SYNTH_QUERY, k=8)
+    texts = keyword_retrieve(vol, SYNTH_QUERY, k=8)
+    assert len(ids) >= 2
     assert extract_snap_ids(texts) == ids
 
 
-def test_text_wrapper_matches_id_version_order_operator():
-    vol = _vol()
-    q = "control phone on-device gemma"
-    ids = keyword_retrieve_ids_for_operator(vol, q, 8, "system")
-    texts = keyword_retrieve_for_operator(vol, q, 8, "system")
+@pytest.mark.parametrize("query,op", [(SYNTH_QUERY, "system"), (OFF_TOPIC_QUERY, "Brandon")])
+def test_text_wrapper_matches_id_version_order_operator(corpus, query, op):
+    vol, _idx = corpus
+    ids = keyword_retrieve_ids_for_operator(vol, query, 8, op)
+    texts = keyword_retrieve_for_operator(vol, query, 8, op)
+    assert ids
     assert extract_snap_ids(texts) == ids
