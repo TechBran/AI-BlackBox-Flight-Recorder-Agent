@@ -156,3 +156,19 @@ test("a fallback envelope from /tts is a failed preview, not audio", async () =>
     const url = await generateTTSAudioWithVoice("Hi", { provider: "gemini-pro", voice: "Charon" });
     assert.equal(url, null);
 });
+
+test("the static picker fallback (catalog unreachable) selects the box default, not a pinned voice", () => {
+    // With no catalog, getCurrentVoice() is "" and the speak paths name no
+    // voice, so the select must not show (and preview) a pinned Charon.
+    const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+    const selectBody = (id) => {
+        const m = html.match(new RegExp(`<select id="${id}"[^>]*>([\\s\\S]*?)</select>`));
+        assert.ok(m, `#${id} is in index.html`);
+        return m[1];
+    };
+    for (const id of ["ttsProviderSelect", "ttsVoiceSelect"]) {
+        const selected = [...selectBody(id).matchAll(/<option value="([^"]*)"[^>]*\bselected\b/g)]
+            .map(m => m[1]);
+        assert.deepEqual(selected, [""], `#${id}: only the "" (box default) option is selected`);
+    }
+});

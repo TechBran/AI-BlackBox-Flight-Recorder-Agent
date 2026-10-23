@@ -562,21 +562,25 @@
                `provider:voice` value holder every downstream reader uses.
                populateVoiceCatalog() (tts-stt.js) rebuilds both selects from
                /tts/catalog at runtime; the static markup below is the fail-open
-               fallback for BOTH selects (default provider Gemini Pro + Charon)
-               when the catalog is unreachable. -->
+               fallback for BOTH selects when the catalog is unreachable. It
+               selects "Box default" (value ""): requests then name no voice and
+               the server speaks its own default, so the picker never shows or
+               previews a voice that is not the one spoken. -->
           <div class="voice-selector-row" style="flex-wrap: wrap;">
             <label for="ttsProviderSelect">Provider:</label>
             <select id="ttsProviderSelect" style="background: var(--neutral-150); color: #fff; border: 1px solid var(--neutral-400); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; cursor: pointer;">
+              <option value="" selected>Box default</option>
               <option value="openai">OpenAI TTS HD</option>
               <option value="gemini-flash">Gemini Flash TTS</option>
-              <option value="gemini-pro" selected>Gemini Pro TTS</option>
+              <option value="gemini-pro">Gemini Pro TTS</option>
             </select>
             <label for="ttsVoiceSelect">Voice:</label>
             <select id="ttsVoiceSelect">
-              <!-- Fallback = the default provider's (gemini-pro) voices, Charon selected. -->
+              <!-- Fallback = the box default, then the Gemini Pro voices. -->
+              <option value="" selected>Box default</option>
               <option value="gemini-pro:Zephyr">Zephyr - Bright, cheerful</option>
               <option value="gemini-pro:Puck">Puck - Playful, mischievous</option>
-              <option value="gemini-pro:Charon" selected>Charon - Calm, informative</option>
+              <option value="gemini-pro:Charon">Charon - Calm, informative</option>
               <option value="gemini-pro:Kore">Kore - Clear, versatile</option>
               <option value="gemini-pro:Fenrir">Fenrir - Bold, confident</option>
               <option value="gemini-pro:Leda">Leda - Warm, youthful</option>
