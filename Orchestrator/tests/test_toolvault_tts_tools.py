@@ -173,3 +173,35 @@ def test_list_tts_voices_reports_an_unreachable_catalog(monkeypatch):
     res = _run(voices_exec.execute({}, CTX))
     assert res.success is False
     assert "connection refused" in res.result
+
+
+# ── gemini_pro_tts ───────────────────────────────────────────────────────────
+# The executor pinned voice_name "Charon" and model "gemini-2.5-pro-tts" on
+# every POST /generate/gemini_tts (O18-toolvault-modules-14) although the
+# route's GeminiProTTSIn already carries both defaults: two copies of one
+# choice, and the tool's copy is the one that rots when the id moves.
+
+import ToolVault.tools.gemini_pro_tts.executor as gemini_exec
+
+
+def test_gemini_pro_tts_names_no_voice_or_model_unless_supplied(session):
+    session.body = {"task_id": "t-1"}
+    res = _run(gemini_exec.execute({"text": "hi"}, CTX))
+    assert res.success, res.result
+    _, url, payload = session.calls[0]
+    assert url == "http://box:9091/generate/gemini_tts"
+    assert payload["text"] == "hi"
+    assert payload["operator"] == "tester"
+    assert "voice_name" not in payload, payload
+    assert "model" not in payload, payload
+    assert res.data["task_id"] == "t-1"
+
+
+def test_gemini_pro_tts_forwards_a_supplied_voice(session):
+    session.body = {"task_id": "t-2"}
+    res = _run(gemini_exec.execute({"text": "hi", "voice": "Kore"}, CTX))
+    assert res.success, res.result
+    _, _, payload = session.calls[0]
+    assert payload["voice_name"] == "Kore"
+    assert "model" not in payload, payload
+    assert res.data["voice"] == "Kore"
