@@ -82,3 +82,37 @@ test("switching provider saves Auto, not the previous provider's model", async (
         assert.equal(document.getElementById("smsModelInput").value, "");
     });
 });
+
+// The box treats "google" and "gemini" as the same provider; the Portal's select
+// names it "google" and the Android app used to save "gemini". A provider id the
+// select does not list must not load as a blank select, and a model edit must never
+// silently switch the reply provider to Anthropic (A14-ui-misc-14).
+test("an Android-saved 'gemini' provider loads as Google and stays Google", async () => {
+    state.setOperator("Ana");
+    const posts = serve({ sms_provider: "gemini", sms_model: "" });
+    await openAndClose(async () => {
+        const sel = document.getElementById("smsProviderSelect");
+        assert.equal(sel.value, "google");
+        const input = document.getElementById("smsModelInput");
+        input.value = "gemini-2.5-pro";
+        input.dispatchEvent(new Event("change"));
+        await settle();
+        const saved = posts.find((p) => p.url === "/sms/preferences");
+        assert.deepEqual(saved && saved.body, { operator: "Ana", sms_provider: "google", sms_model: "gemini-2.5-pro" });
+    });
+});
+
+test("a provider the select does not list is kept, not replaced by Anthropic", async () => {
+    state.setOperator("Ana");
+    const posts = serve({ sms_provider: "custom", sms_model: "gemma-box::gemma-26b" });
+    await openAndClose(async () => {
+        const sel = document.getElementById("smsProviderSelect");
+        assert.equal(sel.value, "custom", "the stored provider is shown");
+        const input = document.getElementById("smsModelInput");
+        input.value = "gemma-box::gemma-31b";
+        input.dispatchEvent(new Event("change"));
+        await settle();
+        const saved = posts.find((p) => p.url === "/sms/preferences");
+        assert.equal(saved && saved.body.sms_provider, "custom");
+    });
+});

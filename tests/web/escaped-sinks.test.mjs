@@ -97,6 +97,8 @@ test("contact cards and the edit form keep contact fields as text/values", async
         relationship: XSS, notes: `Tom & Jerry <3 ${XSS}`, tags: [XSS, ATTR_BREAK],
     };
     globalThis.fetch = (url) => jsonResponse(String(url).startsWith("/contacts?") ? { contacts: [contact] } : {});
+    // A contact book is always some operator's: with none resolved the modal shows guidance instead.
+    localStorage.setItem("bbx_operator", "Ana");
     try {
         const cm = await import("../../Portal/modules/contacts-manager.js");
         cm.initContactsManager();
@@ -120,6 +122,7 @@ test("contact cards and the edit form keep contact fields as text/values", async
         assert.equal(document.getElementById("contactTags").value, contact.tags.join(", "));
     } finally {
         globalThis.fetch = () => Promise.reject(new Error("no network in unit test"));
+        localStorage.removeItem("bbx_operator");
     }
 });
 

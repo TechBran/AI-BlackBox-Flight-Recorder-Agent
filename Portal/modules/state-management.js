@@ -766,7 +766,9 @@ function abbreviateOperator(name) {
  * Initialize operator selector dropdown from GET /operators, resolving the active
  * operator with [chooseOperator]. Several people and no valid pick leave the operator
  * unresolved ("") behind a "Select operator…" placeholder until the operator picks;
- * sends and session starts refuse meanwhile. An unreachable box keeps the persisted pick.
+ * sends and session starts refuse meanwhile. An unreachable box keeps the persisted pick,
+ * and so does a reply that is not a roster (an error body has no operators array; read
+ * as an empty box it would clear a valid pick and claim the box has nobody).
  * Note: This function doesn't handle session switching to avoid circular dependencies;
  * a pick dispatches `bbx:operator-changed` (detail.operator) for modules that care.
  * @returns {Promise<string>} the active operator ("" while unresolved)
@@ -775,9 +777,8 @@ export async function initOperatorSelector() {
     try {
         const r = await fetch("/operators");
         const j = await r.json();
-        const serverOps = Array.isArray(j.operators)
-            ? j.operators.filter(n => typeof n === "string" && n.trim())
-            : [];
+        if (!r.ok || !j || !Array.isArray(j.operators)) return getOperator();
+        const serverOps = j.operators.filter(n => typeof n === "string" && n.trim());
 
         // Reserved operators (Flight Recorder) — additive `reserved` key on
         // GET /operators (design 2026-07-23 §10). Never hardcode the name;

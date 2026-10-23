@@ -1,13 +1,16 @@
-// Grep-level scanners for Portal HTML sinks, shared by html-sinks-guard.test.mjs.
-// Comment-aware (a small tokenizer for strings, templates and regex literals),
-// so commented-out code and `//` inside URLs never confuse the guards.
+// Grep-level scanners for Portal HTML sinks, shared by html-sinks-guard.test.mjs
+// (stripComments also by client-literals-guard.test.mjs). Comment-aware (a small
+// tokenizer for strings, templates and regex literals), so commented-out code and
+// `//` inside URLs never confuse the guards.
 
 /**
  * Strip // and /* *\/ comments. A small tokenizer that understands strings,
  * template literals (with nested ${...} expressions) and regex literals, so
  * a `//` inside a URL string or a quote inside a regex never derails it.
+ * With `keepNewlines`, a block comment leaves its line breaks behind, so line
+ * numbers in the result still match the source.
  */
-export function stripComments(code) {
+export function stripComments(code, { keepNewlines = false } = {}) {
     let out = "";
     let i = 0;
     // Stack of contexts: "code" (with brace depth) or "template".
@@ -29,7 +32,13 @@ export function stripComments(code) {
         }
         // code context
         if (c === "/" && n === "/") { while (i < code.length && code[i] !== "\n") i++; continue; }
-        if (c === "/" && n === "*") { i = code.indexOf("*/", i + 2); i = i < 0 ? code.length : i + 2; continue; }
+        if (c === "/" && n === "*") {
+            const end = code.indexOf("*/", i + 2);
+            const stop = end < 0 ? code.length : end + 2;
+            if (keepNewlines) out += code.slice(i, stop).replace(/[^\n]/g, "");
+            i = stop;
+            continue;
+        }
         if (c === "'" || c === '"') {
             let j = i + 1;
             while (j < code.length && code[j] !== c && code[j] !== "\n") { if (code[j] === "\\") j++; j++; }

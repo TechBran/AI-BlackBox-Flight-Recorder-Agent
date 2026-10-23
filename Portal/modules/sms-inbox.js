@@ -4,7 +4,7 @@
  * Works in both web (two-panel) and Android/mobile (full-screen) contexts
  */
 import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml } from './core-utils.js';
-import { getOperator } from './state-management.js';
+import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 
 let _pollTimer = null;
 let _currentPhone = null;
@@ -57,12 +57,38 @@ function escapeHtml(text) {
 
 const SEND_ICON = `<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
 
+/**
+ * The SMS reply provider as the inbox's select names it. The box treats "google" and
+ * "gemini" alike and the Android app used to save "gemini", which this select does not
+ * list; "" (nothing stored) is the box's own default, Anthropic.
+ */
+function smsProviderId(raw) {
+    const id = String(raw || '').trim();
+    if (id === 'gemini') return 'google';
+    return id || 'anthropic';
+}
+
+/** Show [id] in the provider select, adding an option for one it does not list, so a
+ *  stored provider is never shown blank (and then saved back as another one). */
+function showProvider(sel, id) {
+    if (!Array.from(sel.options).some(o => o.value === id)) {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = id;
+        sel.appendChild(opt);
+    }
+    sel.value = id;
+}
+
 // ============================================================================
 // API calls
 // ============================================================================
 
+// Reads with no operator resolved return nothing: there is nobody's inbox to read
+// (and `operator=` would only 422). Writes refuse with OPERATOR_REQUIRED_MESSAGE.
 async function fetchThreads() {
     const op = getOperator();
+    if (!op) return [];
     const res = await fetch(`/sms/threads?operator=${encodeURIComponent(op)}`);
     if (!res.ok) throw new Error(`Failed to fetch threads: ${res.status}`);
     const data = await res.json();
@@ -71,6 +97,7 @@ async function fetchThreads() {
 
 async function fetchMessages(phone) {
     const op = getOperator();
+    if (!op) return [];
     const res = await fetch(`/sms/messages?operator=${encodeURIComponent(op)}&phone=${encodeURIComponent(phone)}&limit=100`);
     if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`);
     const data = await res.json();
@@ -90,6 +117,8 @@ function markThreadRead(op, phone) {
 
 async function sendMessage(to, message) {
     const op = getOperator();
+    // Never as "": the SMS would really go out, filed in no operator's inbox.
+    if (!op) throw new Error(OPERATOR_REQUIRED_MESSAGE);
     const body = { operator: op, to, message };
     // Only include from_number when a specific line is selected (omit → backend default)
     if (_selectedFromNumber) body.from_number = _selectedFromNumber;
@@ -133,6 +162,7 @@ async function fetchLines() {
 async function fetchUnreadCount() {
     try {
         const op = getOperator();
+        if (!op) return 0;
         const res = await fetch(`/sms/unread?operator=${encodeURIComponent(op)}`);
         if (!res.ok) return 0;
         const data = await res.json();
@@ -146,18 +176,25 @@ async function fetchUnreadCount() {
 // the provider, so the inbox never pins a model id that later retires.
 async function fetchPreferences() {
     const op = getOperator();
+    if (!op) return { sms_provider: 'anthropic', sms_model: '' };
     const res = await fetch(`/sms/preferences?operator=${encodeURIComponent(op)}`);
     if (!res.ok) return { sms_provider: 'anthropic', sms_model: '' };
     return await res.json();
 }
 
+/** @returns {Promise<boolean>} false when nothing was saved (no operator resolved) */
 async function savePreferences(provider, model) {
     const op = getOperator();
+    if (!op) {
+        toastError(OPERATOR_REQUIRED_MESSAGE);
+        return false;
+    }
     await fetch('/sms/preferences', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ operator: op, sms_provider: provider, sms_model: model })
     });
+    return true;
 }
 
 // ============================================================================
@@ -256,15 +293,16 @@ function _wireThreadListEvents(el) {
             // foreign to it (a Claude id sent to OpenAI fails every reply).
             const field = $('smsModelInput');
             if (field) field.value = '';
-            await savePreferences(provSel.value, '');
-            toastSuccess('SMS provider updated');
+            if (await savePreferences(provSel.value, '')) toastSuccess('SMS provider updated');
         });
     }
     if (modInput) {
         modInput.addEventListener('change', async () => {
-            const prov = $('smsProviderSelect')?.value || 'anthropic';
-            await savePreferences(prov, modInput.value);
-            toastSuccess('SMS model updated');
+            // The provider the select shows (showProvider keeps a stored one listed);
+            // never a fallback that would switch the reply provider behind the model.
+            const prov = $('smsProviderSelect')?.value;
+            if (!prov) return;
+            if (await savePreferences(prov, modInput.value)) toastSuccess('SMS model updated');
         });
     }
 }
@@ -274,6 +312,10 @@ function _startNewConversation() {
     if (!phoneInput) return;
     const val = phoneInput.value.trim();
     if (!val) return;
+    if (!getOperator()) {
+        toastError(OPERATOR_REQUIRED_MESSAGE);
+        return;
+    }
     selectThread(val);
     const newArea = $('smsNewMsg');
     if (newArea) newArea.style.display = 'none';
@@ -580,13 +622,14 @@ export async function openSMSInbox() {
     if (conv) conv.classList.remove('sms-conv-visible');
 
     await refreshThreads();
+    if (!getOperator()) toastError(OPERATOR_REQUIRED_MESSAGE);
 
     // Load and display SMS preferences
     try {
         const prefs = await fetchPreferences();
         const provSel = $('smsProviderSelect');
         const modInput = $('smsModelInput');
-        if (provSel) provSel.value = prefs.sms_provider || 'anthropic';
+        if (provSel) showProvider(provSel, smsProviderId(prefs.sms_provider));
         if (modInput) modInput.value = prefs.sms_model || '';
     } catch (_) {}
 

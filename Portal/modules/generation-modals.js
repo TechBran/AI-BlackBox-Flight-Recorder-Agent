@@ -16,6 +16,7 @@
 import { $, toast, escapeAttr } from './core-utils.js';
 import { generateImageAsync, generateVideoAsync, extendVideoAsync, generateMusicAsync } from './task-manager.js';
 import { toggleSTTFor } from './tts-stt.js';
+import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 
 // =============================================================================
 // State
@@ -923,7 +924,13 @@ export function setupGoogleSSMLModal() {
 
             const pitch = parseFloat(pitchSlider?.value || '0');
             const rate = parseFloat(rateSlider?.value || '1');
-            const operator = localStorage.getItem('bbx_operator') || 'system';
+            // The resolved operator, never a stand-in name ('system' is the box's shared
+            // scope, not a person on the roster); none resolved -> nothing is generated.
+            const operator = getOperator();
+            if (!operator) {
+                toast(OPERATOR_REQUIRED_MESSAGE);
+                return;
+            }
 
             // Determine if input is SSML or plain text
             const isSSML = text.trim().startsWith('<speak');
@@ -1048,7 +1055,11 @@ export function setupGeminiProTTSModal() {
                 return;
             }
 
-            const operator = localStorage.getItem('bbx_operator') || 'system';
+            const operator = getOperator();
+            if (!operator) {
+                toast(OPERATOR_REQUIRED_MESSAGE);
+                return;
+            }
             const isMultiSpeaker = multiSpeakerToggle?.checked || false;
 
             try {

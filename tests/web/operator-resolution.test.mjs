@@ -119,6 +119,20 @@ test("an unreachable box keeps the persisted pick", async () => {
     assert.equal(state.getOperator(), "Ana");
 });
 
+test("a reply that is not a roster keeps the persisted pick (an error is not an empty box)", async () => {
+    // A JSON error body (a 5xx, or the origin guard's 403) has no operators array:
+    // reading it as "nobody on the box" would clear a valid pick.
+    for (const [body, status] of [[{ detail: "boom" }, 500], [{ detail: "Forbidden origin" }, 403], [{ status: "ok" }, 200]]) {
+        localStorage.setItem(state.OP_STORE, "Ana");
+        document.getElementById("toast").textContent = "";
+        globalThis.fetch = () => json(body, status);
+        const active = await state.initOperatorSelector();
+        assert.equal(active, "Ana", `status ${status}`);
+        assert.equal(state.getOperator(), "Ana", `status ${status}: the pick is kept`);
+        assert.doesNotMatch(toastText(), /no operators/i, `status ${status}: no false guidance`);
+    }
+});
+
 test("switching operator in the selector is visible to every reader at once", async () => {
     localStorage.clear();
     serveOperators({ operators: ["Ana", "Ben"], default: "Ana", reserved: [] });

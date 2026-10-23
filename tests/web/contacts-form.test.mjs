@@ -19,6 +19,8 @@ const json = (b) => Promise.resolve({ ok: true, status: 200, json: () => Promise
 
 const { appendBubble } = await import("../../Portal/modules/chat-bubbles.js");
 const contacts = await import("../../Portal/modules/contacts-manager.js");
+// A contact book is always some operator's: with none resolved nothing is read or saved.
+(await import("../../Portal/modules/state-management.js")).setOperator("Ana");
 
 document.body.insertAdjacentHTML("beforeend",
     `<button id="btnContactsManager"></button>`

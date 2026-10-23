@@ -7,7 +7,7 @@
  */
 
 import { $, toast, toastError } from './core-utils.js';
-import { getOperator } from './state-management.js';
+import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { loadTimelineData, showTimelineDetail } from './timeline-browser.js';
 import { taskTypeMeta, isAgentTaskType, canShowLiveView, truncateText } from './task-ui.js';
 
@@ -1087,14 +1087,26 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
     });
     safeSetOnClick("btnCloseManifest", () => manifestModal && manifestModal.classList.add("hide"));
 
-    // Pairing modal
+    // Pairing modal. The QR names the operator the phone starts as, so the token is
+    // minted for the operator who opened this dialog (POST /pair/start {operator}),
+    // never the box default: on a box with several people that would silently make
+    // every phone the default's. None resolved yet -> pick one first.
     safeSetOnClick("ctlPair", async () => {
+        const operator = getOperator();
+        if (!operator) {
+            toast(OPERATOR_REQUIRED_MESSAGE);
+            return;
+        }
         try {
-            const r = await fetch("/pair/start", { method: "POST" });
+            const r = await fetch("/pair/start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ operator })
+            });
             const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || `/pair/start returned ${r.status}`);
             const pairing = (await (await fetch("/health")).json()).pairing || {};
             const origin = pairing.default_origin || (window.location.origin + "/ui");
-            const operator = pairing.default_operator || getOperator() || "";
             // Display payload for reference; QR is rendered server-side from the same token
             // so phone scans encode whatever URL the Portal was loaded from (Tailscale, LAN, localhost).
             const payload = { type: "pair", exp: j.exp, origin, operator, token: j.token };

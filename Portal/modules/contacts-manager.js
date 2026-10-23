@@ -4,7 +4,7 @@
  * Follows telephony-manager.js and sms-inbox.js patterns
  */
 import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr } from './core-utils.js';
-import { getOperator } from './state-management.js';
+import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 
 // =============================================================================
 // State
@@ -41,9 +41,26 @@ function formField(id) {
 // API Functions
 // =============================================================================
 
+// Every request names the operator whose book it is. With none resolved there is no
+// book: reads show the guidance, writes refuse (never a contact book for "").
+function renderOperatorRequired() {
+    allContacts = [];
+    const container = $('contactsList');
+    if (!container) return;
+    const empty = document.createElement('div');
+    empty.className = 'contacts-empty';
+    empty.textContent = `${OPERATOR_REQUIRED_MESSAGE}.`;
+    container.replaceChildren(empty);
+}
+
 async function fetchContacts() {
     try {
         const op = getOperator();
+        if (!op) {
+            renderOperatorRequired();
+            toastError(OPERATOR_REQUIRED_MESSAGE);
+            return;
+        }
         const res = await fetch(`/contacts?operator=${encodeURIComponent(op)}`);
         if (!res.ok) throw new Error('Failed to fetch contacts');
         const data = await res.json();
@@ -58,6 +75,7 @@ async function fetchContacts() {
 async function searchContacts(query) {
     try {
         const op = getOperator();
+        if (!op) { renderOperatorRequired(); return; }
         const res = await fetch(
             `/contacts/search?operator=${encodeURIComponent(op)}&query=${encodeURIComponent(query)}`
         );
@@ -74,6 +92,10 @@ async function searchContacts(query) {
 async function saveContact(data) {
     try {
         const op = getOperator();
+        if (!op) {
+            toastError(OPERATOR_REQUIRED_MESSAGE);
+            return;
+        }
         const body = { operator: op, ...data };
         const res = await fetch('/contacts', {
             method: 'POST',
@@ -101,6 +123,10 @@ async function saveContact(data) {
 }
 
 async function deleteContact(id) {
+    if (!getOperator()) {
+        toastError(OPERATOR_REQUIRED_MESSAGE);
+        return;
+    }
     if (!confirm('Delete contact?')) return;
     try {
         const op = getOperator();
