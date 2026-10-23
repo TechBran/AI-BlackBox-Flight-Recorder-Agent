@@ -17,7 +17,6 @@ pytest hands both fixtures the same instance.
 """
 from __future__ import annotations
 
-import importlib
 import os
 import shutil
 import tempfile
@@ -27,37 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
-# (module, attribute, path under the tmp box root). Each attribute is the
-# module-level path a store reads at call time; a renamed attribute fails the
-# fixture loudly instead of silently leaving the store on the box.
-_STORE_PATHS = [
-    ("Orchestrator.config", "BLACKBOX_DATA_DIR", "data"),
-    ("Orchestrator.config", "TASKS_DB_PATH", "data/tasks.db"),
-    ("Orchestrator.models", "TASKS_DB_PATH", "data/tasks.db"),
-    ("Orchestrator.contacts", "CONTACTS_DIR", "Contacts"),
-    ("Orchestrator.contacts", "CONTACTS_FILE", "Contacts/contacts.json"),
-    ("Orchestrator.device_registry.registry", "DEVICES_FILE", "devices/devices.json"),
-    ("Orchestrator.device_registry.registry", "_LEGACY_DEVICES_FILE", "devices/legacy-devices.json"),
-    ("Orchestrator.device_registry.pairing", "PAIRING_PATH", "credentials/device_pairing.json"),
-    ("Orchestrator.routes.pairing_routes", "PAIRED_DEVICES_FILE", "Manifest/paired_devices.json"),
-    ("Orchestrator.local_provider.registry", "STORE_FILE", "local_provider/local_devices.json"),
-    ("Orchestrator.scheduler.manager", "DB_PATH", "cron_jobs.db"),
-    ("Orchestrator.sms.message_store", "DB_PATH", "Manifest/sms_messages.db"),
-    ("Orchestrator.notifications.subscriptions", "DEFAULT_SUBS_FILE",
-     "Manifest/device_notification_subs.json"),
-    ("Orchestrator.voice_agents.registry", "REGISTRY_PATH", "credentials/voice_agents.json"),
-    ("Orchestrator.onboarding.custom_servers", "REGISTRY_PATH", "credentials/custom_models.json"),
-    ("Orchestrator.phone.pin_gate", "LOCKOUT_PATH", "credentials/phone_pin_lockout.json"),
-]
-
-# Singletons that captured a store path at construction: reset so the next
-# get_*() builds a fresh one on the tmp path.
-_SINGLETONS = [
-    ("Orchestrator.device_registry.registry", "_registry"),
-    ("Orchestrator.local_provider.registry", "_registry"),
-    ("Orchestrator.scheduler.manager", "_manager_instance"),
-]
-
+from Orchestrator.tests import box_stores
 
 # cwd-relative in config.py: Volumes/, Manifest/, Archive/, Portal/uploads,
 # Portal/artifacts.
@@ -69,12 +38,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 def _already_isolated(value) -> bool:
     """A store the test itself already pointed into a temp dir (its own
     autouse fixture ran first) is left alone. Every box default lives under the
-    checkout, which may itself sit in a temp dir."""
+    checkout, which may itself sit in a temp dir, and the session sandbox is
+    shared, so neither counts."""
     try:
         path = Path(str(value)).resolve()
     except (OSError, ValueError):
         return False
     if path.is_relative_to(_REPO_ROOT):
+        return False
+    if box_stores.session_root and path.is_relative_to(box_stores.session_root.resolve()):
         return False
     return path.is_relative_to(Path(tempfile.gettempdir()).resolve())
 
@@ -83,30 +55,19 @@ def _already_isolated(value) -> bool:
 def isolated_stores(tmp_path, monkeypatch):
     """Point the box's runtime stores at a fresh tree under tmp_path.
 
-    Covers the task DB (TASKS_DB_PATH and the open task_db singleton),
-    contacts, the device registry and pairing stores, the local-provider
-    registry, cron, SMS, notification subscriptions, voice-agent presets,
-    custom model servers and the phone PIN lockout. The ledger paths
-    (Volumes/, Manifest/, Portal/uploads, config.ini) are cwd-relative in
-    config.py, so the test runs from the tmp root, which starts with a copy of
-    this checkout's config.ini.
+    Covers every store in box_stores.STORE_PATHS: the task DB (TASKS_DB_PATH
+    and the open task_db singleton), contacts, the device registry and pairing
+    stores, the local-provider registry, cron, SMS, notification
+    subscriptions, voice-agent presets, custom model servers, the phone PIN
+    lockout, the wizard's .env, onboarding state and local-model download
+    state. The ledger paths (Volumes/, Manifest/, Portal/uploads, config.ini)
+    are cwd-relative in config.py, so the test runs from the tmp root, which
+    starts with a copy of this checkout's config.ini.
     """
     root = tmp_path / "box"
     root.mkdir()
-    for module_name, attr, rel in _STORE_PATHS:
-        module = importlib.import_module(module_name)
-        if _already_isolated(getattr(module, attr)):
-            continue
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr(module, attr, target)
-    for module_name, attr in _SINGLETONS:
-        monkeypatch.setattr(importlib.import_module(module_name), attr, None)
-
+    box_stores.point_at(root, monkeypatch, keep=_already_isolated)
     from Orchestrator import models
-    if not _already_isolated(models.task_db.db_path):
-        monkeypatch.setattr(models.task_db, "db_path", str(root / "data" / "tasks.db"))
-        models.task_db._init_db()
 
     # The runtime dirs a box always has, so generated media and Manifest
     # writes land here instead of in the checkout.

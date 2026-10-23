@@ -35,7 +35,7 @@ def uploads_root(tmp_path, monkeypatch):
     BLACKBOX_ROOT at a tmp box and return its uploads folder."""
     from Orchestrator.utils import paths
     uploads = tmp_path / "box" / "Portal" / "uploads"
-    uploads.mkdir(parents=True)
+    uploads.mkdir(parents=True, exist_ok=True)  # isolated_stores may have made it
     monkeypatch.setenv("BLACKBOX_ROOT", str(tmp_path / "box"))
     paths.blackbox_root.cache_clear()
     yield uploads
@@ -147,10 +147,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 
 @pytest.fixture
-def app_client():
+def app_client(isolated_stores):
     """TestClient over the shared app WITHOUT entering its lifespan: these
     routes need no startup hook, and the production startup (sudoers drift
-    heal, cron scheduler, embeddings sync) must not run inside a unit test."""
+    heal, cron scheduler, embeddings sync) must not run inside a unit test.
+    isolated_stores runs the routes from a tmp box root, so the rendered audio
+    (cwd-relative Portal/uploads) lands there, not in the checkout."""
     from Orchestrator.app import app
     return TestClient(app)
 

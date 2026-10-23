@@ -101,3 +101,118 @@ def test_a_route_write_lands_in_tmp_not_in_the_checkout(app_client, isolated_sto
 def test_app_client_task_db_starts_empty(app_client):
     resp = app_client.get("/tasks/status/task-that-does-not-exist")
     assert resp.status_code == 404
+
+
+# ── no test writes into the checkout (root conftest.py write guard) ──────────
+#
+# Run from the serving tree, the suite used to rewrite that box's state: the
+# telephony wizard test generated a phone PIN into its .env (the credential
+# strip leaves the gate unconfigured), the onboarding tests rewrote
+# .onboarding_state.json, a re-embed test replaced ToolVault/embeddings.json,
+# and the worker tests wrote task rows into data/tasks.db. A write into the
+# checkout is now refused when it is attempted, and fails the test.
+
+_PROBE = ".u13-checkout-write-probe"
+
+
+def _cleanup(path):
+    # Only finds something on a tree without the guard, where the write went
+    # through.
+    if path.exists():
+        path.unlink()
+
+
+def test_writing_a_file_into_the_checkout_is_refused(request):
+    probe = REPO_ROOT / _PROBE
+    try:
+        with pytest.raises(OSError, match="into the checkout"):
+            probe.write_text("x")
+        assert not probe.exists()
+    finally:
+        _cleanup(probe)
+    refused = request.getfixturevalue("checkout_guard").take()
+    assert [v.path for v in refused] == [str(probe)]
+
+
+def test_replacing_a_checkout_file_is_refused(request, tmp_path):
+    staged = tmp_path / "embeddings.json"
+    staged.write_text("{}")
+    target = REPO_ROOT / _PROBE
+    try:
+        with pytest.raises(OSError, match="into the checkout"):
+            os.replace(staged, target)
+        assert staged.exists() and not target.exists()
+    finally:
+        _cleanup(target)
+    assert request.getfixturevalue("checkout_guard").take()
+
+
+def test_deleting_a_checkout_file_is_refused(request):
+    # A name that does not exist: without the guard this is FileNotFoundError.
+    with pytest.raises(OSError, match="into the checkout"):
+        os.remove(REPO_ROOT / "pytest.ini.u13-never-there")
+    assert request.getfixturevalue("checkout_guard").take()
+
+
+def test_opening_a_sqlite_database_in_the_checkout_is_refused(request):
+    import sqlite3
+
+    db = REPO_ROOT / (_PROBE + ".db")
+    try:
+        with pytest.raises(OSError, match="into the checkout"):
+            sqlite3.connect(db).close()
+        assert not db.exists()
+    finally:
+        _cleanup(db)
+    assert request.getfixturevalue("checkout_guard").take()
+
+
+def test_a_refused_write_the_code_swallows_is_still_recorded(checkout_guard):
+    """Product code that catches OSError (best-effort writes) hides the
+    refusal; the guard keeps the record, and its teardown fails the test."""
+    probe = REPO_ROOT / _PROBE
+    try:
+        probe.write_text("x")
+    except OSError:
+        pass
+    refused = checkout_guard.take()
+    assert [v.path for v in refused] == [str(probe)]
+    assert "test_suite_isolation.py" in refused[0].where
+
+
+def test_writes_outside_the_checkout_and_bytecode_caches_are_allowed(checkout_guard, tmp_path):
+    (tmp_path / "ok.txt").write_text("ok")
+    cache = REPO_ROOT / "Orchestrator" / "tests" / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    probe = cache / (_PROBE + ".pyc")
+    probe.write_bytes(b"")
+    probe.unlink()
+    assert checkout_guard.take() == []
+
+
+# ── the box's stores are off the checkout for EVERY test (session sandbox) ───
+
+def test_box_stores_point_off_the_checkout_without_app_client():
+    """Not only app_client tests: for the whole session the task DB, cron DB,
+    contacts, .env, onboarding, operator and local-model download state and
+    the media index live in a sandbox, so a worker or route call in any test
+    cannot reach the box's."""
+    from Orchestrator import contacts, local_stack, media_index, models
+    from Orchestrator import state as operator_state
+    from Orchestrator.onboarding import secrets_writer, state
+    from Orchestrator.scheduler import manager
+
+    stores = {
+        "task_db": models.task_db.db_path,
+        "cron": manager.DB_PATH,
+        "contacts": contacts.CONTACTS_FILE,
+        ".env": secrets_writer.ENV_FILE,
+        "onboarding": state.STATE_FILE,
+        "onboarding_complete": state.COMPLETE_SENTINEL,
+        "downloads": local_stack.DOWNLOAD_STATE_PATH,
+        "operator_state": operator_state.OPERATOR_STATE_FILE,
+        "media_index": media_index.MEDIA_INDEX_FILE,
+    }
+    in_checkout = {name: str(p) for name, p in stores.items()
+                   if Path(p).resolve().is_relative_to(REPO_ROOT)}
+    assert in_checkout == {}

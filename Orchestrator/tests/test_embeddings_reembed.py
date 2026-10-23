@@ -7,9 +7,13 @@ from fastapi.testclient import TestClient
 
 from Orchestrator.embeddings import migrate
 from Orchestrator.embeddings.store import get_store, set_active_slug, get_active_slug
+# toolvault_hook and health_refresh are autouse there, and an autouse fixture
+# only applies where it is imported: without them every cutover here ran the
+# real ToolVault precompute + promote and wrote the checkout's
+# ToolVault/embeddings.json (the conftest.py write guard now refuses it).
 from Orchestrator.tests.test_embeddings_migrate_v2 import (   # noqa: F401 — pytest fixtures + helpers
-    env, fake_provider, cutover_spies, app, _build_volume, _wait_for_state,
-    TARGET, TARGET_DIMS, OLD_SLUG,
+    env, fake_provider, cutover_spies, app, toolvault_hook, health_refresh,
+    _build_volume, _wait_for_state, TARGET, TARGET_DIMS, OLD_SLUG,
 )
 
 

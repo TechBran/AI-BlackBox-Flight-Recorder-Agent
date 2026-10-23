@@ -134,7 +134,9 @@ def test_tasks_db_path_is_defined_once_outside_the_served_tree():
 def test_task_db_singleton_opens_the_configured_path():
     from Orchestrator import config, models
 
-    assert Path(models.task_db.db_path) == config.TASKS_DB_PATH
+    # The path the import-time singleton opened: the suite's store sandbox
+    # (conftest.py) repoints the live singleton for the session afterwards.
+    assert Path(models._tasks_db_path) == config.TASKS_DB_PATH
     assert _mode(config.TASKS_DB_PATH) == 0o600
     assert _mode(config.BLACKBOX_DATA_DIR) == 0o700
 
