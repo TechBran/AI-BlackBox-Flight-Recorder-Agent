@@ -28,7 +28,17 @@ def _client():
 
 
 @pytest.fixture
-def roster(monkeypatch):
+def env_file(tmp_path, monkeypatch):
+    """An empty .env standing in for the wizard's (never this box's own)."""
+    from Orchestrator.onboarding import secrets_writer
+    path = tmp_path / ".env"
+    path.write_text("")
+    monkeypatch.setattr(secrets_writer, "ENV_FILE", path)
+    return path
+
+
+@pytest.fixture
+def roster(monkeypatch, env_file):
     """A box whose roster is Default + Alice + Bob, default Default, nothing in
     .env and no [pairing] default_operator."""
     monkeypatch.setattr(config, "USERS_LIST", ["Default", "Alice", "Bob"])
@@ -52,6 +62,17 @@ def test_pairing_operator_resolution(roster, monkeypatch):
     monkeypatch.setattr(config, "_pairing_config_operator", lambda: "AlsoGone")
     assert config.pairing_operator() == "Default"
     assert config.pairing_operator("Mallory") == "Default"
+
+
+def test_pairing_operator_reads_the_wizards_env_file_fresh(roster, env_file, monkeypatch):
+    # The operator step writes DEFAULT_OPERATOR to .env; no restart needed.
+    assert config.pairing_operator() == "Default"
+    env_file.write_text("DEFAULT_OPERATOR=Bob\n")
+    assert config.pairing_operator() == "Bob"
+    monkeypatch.setenv("DEFAULT_OPERATOR", "Alice")     # the file wins over the process env
+    assert config.pairing_operator() == "Bob"
+    env_file.write_text("DEFAULT_OPERATOR=Gone\n")      # off the roster: skipped
+    assert config.pairing_operator() == "Default"
 
 
 @pytest.fixture

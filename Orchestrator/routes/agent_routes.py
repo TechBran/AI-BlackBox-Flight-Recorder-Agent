@@ -43,7 +43,7 @@ from Orchestrator.agent_context import (
     resolve_operator,
     retrieve_for_agent,
 )
-from Orchestrator.config import current_default
+from Orchestrator.config import ORCHESTRATOR_PORT, current_default
 from Orchestrator.models import AGENT_AUTO_APPROVE_PATTERNS, AGENT_PERMISSION_PATTERNS, AgentSession, RegisteredApp
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.state import save_app_registry, save_operator_state, agent_lock, APP_REGISTRY, PERSISTED_AGENT_SESSIONS, AGENT_SESSIONS
@@ -340,7 +340,7 @@ def detect_app_startup(text: str) -> Optional[Dict]:
     """
     # Ports to exclude (system services)
     EXCLUDED_PORTS = {
-        9091,  # AI BlackBox Orchestrator
+        ORCHESTRATOR_PORT,  # AI BlackBox Orchestrator
         8080,  # Tailscale
         80,    # Standard HTTP
         443,   # Standard HTTPS

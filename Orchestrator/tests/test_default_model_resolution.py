@@ -200,13 +200,72 @@ def test_successors_are_live_ids():
 @pytest.mark.parametrize("model", [None, "", "   ", "Auto", "auto", "AUTO"])
 def test_auto_resolves_to_each_providers_configured_default(model):
     assert config.resolve_default_model("anthropic", model) == config.ANTHROPIC_MODEL_DEFAULT
-    assert config.resolve_default_model("claude", model) == config.ANTHROPIC_MODEL_DEFAULT
     assert config.resolve_default_model("google", model) == config.GEMINI_MODEL_DEFAULT
     assert config.resolve_default_model("gemini", model) == config.GEMINI_MODEL_DEFAULT
     assert config.resolve_default_model("openai", model) == config.OPENAI_MODEL_DEFAULT
     assert config.resolve_default_model("xai", model) == config.XAI_MODEL_DEFAULT
-    assert config.resolve_default_model("grok", model) == config.XAI_MODEL_DEFAULT
     assert config.resolve_default_model("computer-use", model) == config.CU_MODEL_DEFAULT
+
+
+@pytest.mark.parametrize("alias", ["claude", "gpt", "grok", "cu", "mistral"])
+def test_a_provider_no_dispatch_knows_resolves_like_its_gemini_fallthrough(alias):
+    # /chat/stream sends any provider it does not know to Gemini; another
+    # provider's model id must not go with it.
+    assert config.resolve_default_model(alias, "") == config.GEMINI_MODEL_DEFAULT
+
+
+@pytest.fixture
+def keys(monkeypatch):
+    """Set exactly the chat keys named (the rest empty) and unset DEFAULT_PROVIDER."""
+    monkeypatch.delenv("DEFAULT_PROVIDER", raising=False)
+
+    def _set(**present):
+        for name in ("GOOGLE", "ANTHROPIC", "OPENAI", "XAI"):
+            monkeypatch.setattr(config, f"{name}_API_KEY", present.get(name.lower(), ""))
+    return _set
+
+
+@pytest.mark.parametrize("present, expected", [
+    ({"google": "g", "anthropic": "a"}, "google"),
+    ({"anthropic": "a"}, "anthropic"),
+    ({"anthropic": "a", "openai": "o"}, "anthropic"),
+    ({"openai": "o", "xai": "x"}, "openai"),
+    ({"xai": "x"}, "xai"),
+    ({}, "google"),          # no key at all: the historical default
+])
+def test_default_provider_is_the_first_keyed_provider(keys, present, expected):
+    keys(**present)
+    assert config._default_provider() == expected
+
+
+def test_an_explicit_default_provider_wins(keys, monkeypatch):
+    keys(google="g")
+    monkeypatch.setenv("DEFAULT_PROVIDER", " OpenAI ")
+    assert config._default_provider() == "openai"
+
+
+def test_an_anthropic_only_box_boots_with_anthropic_as_its_default_provider():
+    """A fresh BYOK box with only an Anthropic key (onboarding never writes
+    DEFAULT_PROVIDER): provider-less turns run Anthropic's default, not a
+    Gemini that has no key."""
+    import os
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(os.environ, PYTHONPATH=root)
+    # Empty = unset for these reads, and load_dotenv never overrides a set
+    # variable, so this box's own .env cannot leak into the fresh-box boot.
+    env.update({"DEFAULT_PROVIDER": "", "GOOGLE_API_KEY": "", "GEMINI_API_KEY": "",
+                "OPENAI_API_KEY": "", "XAI_API_KEY": "", "ANTHROPIC_API_KEY": "test-anthropic",
+                "ANTHROPIC_MODEL": ""})
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from Orchestrator import config; print('PROVIDER=%s MODEL=%s' % ("
+         "config.DEFAULT_PROVIDER, config.resolve_default_model('', '')))"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert "PROVIDER=anthropic MODEL=claude-opus-5-5" in out.stdout, out.stdout[-800:] + out.stderr[-800:]
 
 
 def test_empty_provider_uses_default_provider(monkeypatch):
@@ -245,6 +304,14 @@ def test_scheduler_default_map_is_the_config_resolver():
 
 # ── 4. /chat/stream GET + POST: anthropic + empty model dispatches the default ─
 
+def _get_stream_route_exists():
+    # U20 (M3) deletes the GET twin; its tests skip once that is merged.
+    from Orchestrator.checkpoint import app
+    import Orchestrator.app  # noqa: F401 — registers routes on the shared app
+    return any(getattr(r, "path", None) == "/chat/stream" and "GET" in (getattr(r, "methods", None) or ())
+               for r in app.routes)
+
+
 def _client():
     import Orchestrator.app  # noqa: F401 — registers routes on the shared app
     from fastapi.testclient import TestClient
@@ -281,6 +348,8 @@ _MSGS = [{"role": "user", "content": "hi"}]
 
 @pytest.mark.parametrize("model", [None, "", "Auto"])
 def test_get_stream_anthropic_auto_dispatches_configured_default(stream_fakes, model):
+    if not _get_stream_route_exists():
+        pytest.skip("no GET /chat/stream on this tree")
     params = {"messages": json.dumps(_MSGS), "provider": "anthropic", "operator": "TestOp"}
     if model is not None:
         params["model"] = model
@@ -315,6 +384,14 @@ def test_stream_routes_resolve_every_provider_from_config(stream_fakes):
         assert (stream_fakes["stream"], stream_fakes["model"]) == (stream, default)
 
 
+@pytest.mark.parametrize("alias", ["claude", "gpt", "grok", "cu"])
+def test_stream_routes_send_an_unknown_provider_gemini_with_geminis_model(stream_fakes, alias):
+    r = _client().post("/chat/stream", json={"messages": _MSGS, "provider": alias,
+                                             "model": "", "operator": "TestOp"})
+    assert r.status_code == 200
+    assert (stream_fakes["stream"], stream_fakes["model"]) == ("gemini", config.GEMINI_MODEL_DEFAULT)
+
+
 def test_stream_routes_map_a_retired_claude_id_to_its_successor(stream_fakes):
     r = _client().post("/chat/stream", json={"messages": _MSGS, "provider": "anthropic",
                                              "model": "claude-opus-4-1", "operator": "TestOp"})
@@ -330,6 +407,8 @@ def test_stream_routes_take_a_missing_provider_from_default_provider(stream_fake
     r = client.post("/chat/stream", json={"messages": _MSGS, "operator": "TestOp"})
     assert r.status_code == 200
     assert (stream_fakes["stream"], stream_fakes["model"]) == ("anthropic", config.ANTHROPIC_MODEL_DEFAULT)
+    if not _get_stream_route_exists():
+        return
     r = client.get("/chat/stream", params={"messages": json.dumps(_MSGS), "operator": "TestOp"})
     assert r.status_code == 200
     assert (stream_fakes["stream"], stream_fakes["model"]) == ("anthropic", config.ANTHROPIC_MODEL_DEFAULT)
@@ -429,6 +508,34 @@ def test_flight_recorder_provider_without_a_model_runs_its_default(monkeypatch, 
     assert seen == [expected or config.ANTHROPIC_MODEL_DEFAULT]
 
 
+def test_flight_recorder_keyed_fallbacks_run_each_providers_auto_model(monkeypatch, keys):
+    # No [flight_recorder] provider: the keyed fallbacks run what Auto runs, so
+    # an ANTHROPIC_MODEL pinned to a retired id gets its successor there too.
+    import configparser
+    import Orchestrator.oversight as oversight
+    import Orchestrator.routes.chat_routes as cr
+
+    monkeypatch.setattr(oversight, "CFG", configparser.ConfigParser())
+    keys(anthropic="a")
+    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", "claude-sonnet-4-20250514")
+    seen = []
+    monkeypatch.setattr(cr, "call_anthropic",
+                        lambda messages, model, operator: seen.append(model) or ("report", {}, "", []))
+    assert oversight._synthesize("digest") == "report"
+    assert seen == ["claude-sonnet-5-5"]
+
+
+def test_model_catalog_preselects_what_auto_runs(monkeypatch):
+    from Orchestrator.routes.admin_routes import _wrap
+    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", "claude-sonnet-4-20250514")
+    assert _wrap("anthropic", [], "live")["default_id"] == "claude-sonnet-5-5"
+    monkeypatch.setattr(config, "ANTHROPIC_MODEL_DEFAULT", "claude-opus-5-5")
+    assert _wrap("anthropic", [], "live")["default_id"] == "claude-opus-5-5"
+    for provider in ("google", "openai", "xai", "computer-use"):
+        assert _wrap(provider, [], "live")["default_id"] == config.resolve_default_model(provider)
+    assert _wrap("custom", [], "live")["default_id"] == ""
+
+
 # ── 6. SMS: router + /sms/preferences ────────────────────────────────────────
 
 class _Resp:
@@ -525,6 +632,17 @@ async def test_sms_router_unset_preferences_use_default_provider(sms_router, mon
     _url, payload = _Session.posted[0]
     assert payload["provider"] == "anthropic"
     assert payload["model"] == config.ANTHROPIC_MODEL_DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_sms_on_an_anthropic_only_box_replies_with_anthropic(sms_router, monkeypatch, keys):
+    # The default provider the box boots with (DEFAULT_PROVIDER unset).
+    r, _prefs = sms_router
+    keys(anthropic="a")
+    monkeypatch.setattr(config, "DEFAULT_PROVIDER", config._default_provider())
+    await r._route_through_chat("+15555550123", "hi", "TestOp", "Pat")
+    _url, payload = _Session.posted[0]
+    assert (payload["provider"], payload["model"]) == ("anthropic", config.ANTHROPIC_MODEL_DEFAULT)
 
 
 @pytest.mark.asyncio

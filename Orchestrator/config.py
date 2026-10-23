@@ -1088,7 +1088,24 @@ ANTHROPIC_THINKING_DISPLAY_MODELS = {
 }
 GEMINI_MODEL_DEFAULT    = os.getenv("GOOGLE_GEMINI_MODEL", "gemini-3.1-pro-preview")
 XAI_MODEL_DEFAULT       = os.getenv("XAI_MODEL", "grok-4.3")  # Bumped 2026-05-18: prior default grok-4-1-fast-reasoning is on xAI's May 2026 deprecation list (auto-redirected to grok-4.3 server-side)
-DEFAULT_PROVIDER        = (os.getenv("DEFAULT_PROVIDER") or "google").strip().lower()
+
+
+def _default_provider() -> str:
+    """DEFAULT_PROVIDER, else the first chat provider this box holds a key for
+    (google, anthropic, openai, xai), else "google". Onboarding never writes
+    DEFAULT_PROVIDER, so a BYOK box with only an Anthropic key must not send
+    its provider-less turns (SMS without a saved preference, /chat/stream
+    without a provider) to a Gemini that has no key. Read at import, like
+    the *_API_KEY constants it checks, so a new key applies on restart."""
+    explicit = (os.getenv("DEFAULT_PROVIDER") or "").strip().lower()
+    if explicit:
+        return explicit
+    keyed = (("google", GOOGLE_API_KEY), ("anthropic", ANTHROPIC_API_KEY),
+             ("openai", OPENAI_API_KEY), ("xai", XAI_API_KEY))
+    return next((provider for provider, key in keyed if key), "google")
+
+
+DEFAULT_PROVIDER        = _default_provider()
 
 # ── Retired Claude ids -> the newest live model of the same family ──────────
 # An id saved before Anthropic retired it (an SMS model preference, a cron job,
@@ -1137,8 +1154,10 @@ def successor_for(model_id: str) -> str:
     return ANTHROPIC_RETIRED_SUCCESSORS[_claude_family(ANTHROPIC_MODEL_DEFAULT) or "opus"]
 
 
-_PROVIDER_ALIASES = {"gemini": "google", "claude": "anthropic", "gpt": "openai",
-                     "grok": "xai", "cu": "computer-use"}
+# Only the alias every chat dispatch understands: /chat/stream and the worker
+# route "claude", "gpt" and the like to the Gemini fallthrough, so resolving
+# them to another provider's model would send that model to Gemini.
+_PROVIDER_ALIASES = {"gemini": "google"}
 
 
 def resolve_default_model(provider: Optional[str] = None, model: Optional[str] = None) -> str:

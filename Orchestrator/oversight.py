@@ -411,12 +411,14 @@ def _synthesize(prompt: str) -> Optional[str]:
     if cfg_provider:
         # An empty/"Auto" [flight_recorder] model runs that provider's default.
         candidates.append((cfg_provider, _cfg.resolve_default_model(cfg_provider, cfg_model)))
+    # Then each keyed provider's Auto model (a retired configured Claude id
+    # runs its successor).
     if getattr(_cfg, "GOOGLE_API_KEY", ""):
-        candidates.append(("google", _cfg.GEMINI_MODEL_DEFAULT))
+        candidates.append(("google", _cfg.resolve_default_model("google")))
     if getattr(_cfg, "ANTHROPIC_API_KEY", ""):
-        candidates.append(("anthropic", _cfg.ANTHROPIC_MODEL_DEFAULT))
+        candidates.append(("anthropic", _cfg.resolve_default_model("anthropic")))
     if getattr(_cfg, "OPENAI_API_KEY", ""):
-        candidates.append(("openai", _cfg.OPENAI_MODEL_DEFAULT))
+        candidates.append(("openai", _cfg.resolve_default_model("openai")))
     candidates.append(("custom", ""))   # LAN servers need no key
 
     last_err: Optional[str] = None

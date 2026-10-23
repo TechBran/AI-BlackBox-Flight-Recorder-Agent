@@ -21,7 +21,7 @@ _TAILSCALE_TIMEOUT_SECS = 3
 @dataclass
 class Node:
     """A tailnet node distilled from ``tailscale status --json``."""
-    hostname: str        # short name, e.g. "brandon-fold6"
+    hostname: str        # short name, e.g. "my-phone"
     dns_name: str        # addressable MagicDNS FQDN, trailing dot stripped
     ip: str              # first IPv4 from TailscaleIPs ("" if none)
     online: bool
@@ -88,7 +88,7 @@ def _name_matches(tailnet_name: str, node: Node) -> bool:
 
     Matched case-insensitively against the node's short hostname or DNS name
     (full FQDN or just the first label, trailing dot ignored). This tolerates a
-    device attesting either its short name ("brandon-fold6") or its MagicDNS FQDN.
+    device attesting either its short name ("my-phone") or its MagicDNS FQDN.
     """
     if not tailnet_name:
         return False

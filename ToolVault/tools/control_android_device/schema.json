@@ -21,7 +21,7 @@
       },
       "device_id": {
         "type": "string",
-        "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices."
+        "description": "Device ID from the device registry (e.g., 'my-phone'). Use list_devices to see available devices."
       }
     },
     "required": [

@@ -145,19 +145,26 @@ def system_numbers() -> List[Tuple[str, Optional[str]]]:
     """This box's own phone lines as (number, owner) pairs. ``owner`` is the
     operator a gateway port is dedicated to, None for a shared line.
 
-    Sources, in order: the cellular gateway ports, TG200_PHONE_NUMBER, then
-    TWILIO_PHONE_NUMBER; deduplicated by the last 10 digits (first one wins).
-    Read on every call: lines are edited in the Portal at runtime. Empty on a
-    box with no telephony configured.
+    Sources, in order: the cellular gateway ports, TG200_PHONE_NUMBER, the
+    "phone" of each ASTERISK_TRUNKS entry, CELLULAR_PHONE_NUMBER (when
+    CELLULAR_ENABLED), then TWILIO_PHONE_NUMBER; deduplicated by the last 10
+    digits (first one wins). Read on every call: lines are edited in the
+    Portal at runtime. Empty on a box with no telephony configured.
     """
     lines = _gateway_lines()
     try:
         from Orchestrator.asterisk import config as asterisk_config
         lines.append((str(asterisk_config.TG200_PHONE_NUMBER or "").strip(), None))
+        trunks = asterisk_config.ASTERISK_TRUNKS
+        for trunk in trunks if isinstance(trunks, list) else []:
+            if isinstance(trunk, dict):
+                lines.append((str(trunk.get("phone") or "").strip(), None))
     except Exception:
         pass
     try:
         from Orchestrator import config
+        if config.CELLULAR_ENABLED:
+            lines.append((str(config.CELLULAR_PHONE_NUMBER or "").strip(), None))
         lines.append((str(config.TWILIO_PHONE_NUMBER or "").strip(), None))
     except Exception:
         pass

@@ -5,8 +5,13 @@ with the vendor's own phone line and email as the "self / caller identity"
 contact (later a 555-01xx placeholder). Now:
 
   * a new book gets a system contact ONLY when the box has a line configured
-    (cellular gateway ports, TG200_PHONE_NUMBER, TWILIO_PHONE_NUMBER), and
-    that contact can never whitelist an inbound SMS;
+    (cellular gateway ports, TG200_PHONE_NUMBER, ASTERISK_TRUNKS phones, the
+    cellular modem's number, TWILIO_PHONE_NUMBER), and that contact can never
+    whitelist an inbound SMS;
+  * a read (GET /contacts, /contacts/search, /api/cron/contacts, a contact
+    search tool call) never saves a book for a name that is not on the roster
+    (O15-11, merged into O12-07), and the cron picker never offers the box's
+    own line as a delivery target;
   * a startup migration strips the seeded records (exact match only, never a
     user-edited one) from existing books, with a backup and an atomic write;
   * the SMS router gates the box's own lines and the retired seed numbers.
@@ -128,7 +133,7 @@ def test_no_shared_line_means_no_seed(monkeypatch):
     assert data == {"Bob": {}}
 
 
-def test_system_numbers_reads_gateways_then_tg200_then_twilio(tmp_path, monkeypatch):
+def test_system_numbers_reads_every_configured_line_in_order(tmp_path, monkeypatch):
     import Orchestrator.asterisk.config as acfg
     import Orchestrator.config as cfg
 
@@ -144,13 +149,41 @@ def test_system_numbers_reads_gateways_then_tg200_then_twilio(tmp_path, monkeypa
     ]))
     monkeypatch.setattr(contacts, "_gateways_file", lambda: gw)
     monkeypatch.setattr(acfg, "TG200_PHONE_NUMBER", "+15555550153")
+    monkeypatch.setattr(acfg, "ASTERISK_TRUNKS", [
+        {"name": "tg200-1", "phone": "+15555550154"}, {"name": "no-line"}, "junk",
+        {"name": "dup", "phone": "+15555550153"},
+    ])
+    monkeypatch.setattr(cfg, "CELLULAR_ENABLED", True)
+    monkeypatch.setattr(cfg, "CELLULAR_PHONE_NUMBER", "+15555550155")
     monkeypatch.setattr(cfg, "TWILIO_PHONE_NUMBER", "5555550151")  # duplicate of a port
     assert contacts.system_numbers() == [
         ("+1 (555) 555-0150", "Alice"),
         ("+15555550151", None),
         ("+15555550152", None),
         ("+15555550153", None),
+        ("+15555550154", None),
+        ("+15555550155", None),
     ]
+    # The modem's number counts only while the modem is enabled.
+    monkeypatch.setattr(cfg, "CELLULAR_ENABLED", False)
+    assert ("+15555550155", None) not in contacts.system_numbers()
+
+
+def test_a_box_with_only_the_cellular_modem_gets_a_system_contact(tmp_path, monkeypatch):
+    import Orchestrator.asterisk.config as acfg
+    import Orchestrator.config as cfg
+
+    monkeypatch.setattr(contacts, "_gateways_file", lambda: tmp_path / "absent.json")
+    monkeypatch.setattr(acfg, "TG200_PHONE_NUMBER", "")
+    monkeypatch.setattr(acfg, "ASTERISK_TRUNKS", [])
+    monkeypatch.setattr(cfg, "TWILIO_PHONE_NUMBER", "")
+    monkeypatch.setattr(cfg, "CELLULAR_ENABLED", True)
+    monkeypatch.setattr(cfg, "CELLULAR_PHONE_NUMBER", "+15555550156")
+    data = {}
+    contacts.ensure_operator_book(data, "Alice")
+    (seed,) = data["Alice"].values()
+    assert seed["phone"] == "+15555550156" and seed["inbound_allowed"] is False
+    assert contacts.is_system_number("555-555-0156")
 
 
 def test_system_numbers_on_a_fresh_box_is_empty(tmp_path, monkeypatch):
@@ -159,6 +192,9 @@ def test_system_numbers_on_a_fresh_box_is_empty(tmp_path, monkeypatch):
 
     monkeypatch.setattr(contacts, "_gateways_file", lambda: tmp_path / "absent.json")
     monkeypatch.setattr(acfg, "TG200_PHONE_NUMBER", "")
+    monkeypatch.setattr(acfg, "ASTERISK_TRUNKS", [])
+    monkeypatch.setattr(cfg, "CELLULAR_ENABLED", False)
+    monkeypatch.setattr(cfg, "CELLULAR_PHONE_NUMBER", "+15555550156")   # modem off
     monkeypatch.setattr(cfg, "TWILIO_PHONE_NUMBER", "")
     assert contacts.system_numbers() == []
     (tmp_path / "bad.json").write_text("{not json")
@@ -172,6 +208,63 @@ def test_is_system_number(lines):
     assert not contacts.is_system_number("+15555550199")
     assert not contacts.is_system_number("")
     assert contacts.is_system_number("+15555550199", numbers=["5555550199"])
+
+
+# ── 2b. reads never create a book for an arbitrary name ──────────────────────
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    """An empty contacts store in tmp_path, on a box whose roster is Ann."""
+    import Orchestrator.config as cfg
+    cdir = tmp_path / "Contacts"
+    cdir.mkdir()
+    cfile = cdir / "contacts.json"
+    cfile.write_text("{}")
+    monkeypatch.setattr(contacts, "CONTACTS_DIR", cdir)
+    monkeypatch.setattr(contacts, "CONTACTS_FILE", cfile)
+    monkeypatch.setattr(cfg, "USERS_LIST", ["Ann"])
+    return cfile
+
+
+def _books(cfile):
+    return set(json.loads(cfile.read_text()))
+
+
+def test_reads_never_save_a_book_for_a_name_off_the_roster(store, lines):
+    import asyncio
+    from Orchestrator.routes.contacts_routes import list_contacts, search_contacts_endpoint
+    from Orchestrator.routes.cron_routes import list_cron_contacts
+
+    out = asyncio.run(list_contacts(operator="made-up"))
+    assert out["operator"] == "made-up"
+    asyncio.run(search_contacts_endpoint(operator="also-made-up", query="x"))
+    asyncio.run(list_cron_contacts(operator="third-made-up"))
+    contacts.search_contacts("x", "tool-call-made-up")   # the search_contacts tool
+    assert _books(store) == set()
+
+
+def test_a_read_still_seeds_a_roster_operators_book_once(store, lines):
+    import asyncio
+    from Orchestrator.routes.contacts_routes import list_contacts
+
+    first = asyncio.run(list_contacts(operator="Ann"))
+    assert _books(store) == {"Ann"}
+    again = asyncio.run(list_contacts(operator="Ann"))
+    assert [c["id"] for c in first["contacts"]] == [c["id"] for c in again["contacts"]]
+    assert [c["phone"] for c in again["contacts"]] == ["+15555550141"]   # the shared line
+
+
+def test_cron_picker_never_offers_the_boxs_own_line(store, lines):
+    import asyncio
+    from Orchestrator.routes.cron_routes import list_cron_contacts
+
+    contacts.upsert_contact(name="Pat", notes=None, tags=None, operator="Ann",
+                            created_by="Ann", phone="+15555550160")
+    # A contact the operator saved by hand for a box line is no target either.
+    contacts.upsert_contact(name="Our line", notes=None, tags=None, operator="Ann",
+                            created_by="Ann", phone="+1 555 555 0140")
+    out = asyncio.run(list_cron_contacts(operator="Ann"))
+    assert [c["name"] for c in out["contacts"]] == ["Pat"]
 
 
 # ── 3. the SMS router gates the box's own lines ──────────────────────────────

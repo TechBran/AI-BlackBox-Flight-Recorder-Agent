@@ -69,7 +69,7 @@ class DeviceStatus(str, Enum):
 @dataclass
 class Device:
     """A device on the Tailscale mesh network."""
-    id: str                              # Unique slug: "brandon-phone", "work-laptop"
+    id: str                              # Unique slug: "my-phone", "work-laptop"
     name: str                            # Human-friendly: "Z Fold 6", "Work Laptop"
     tailscale_ip: str                    # 100.x.x.x (or 127.0.0.1 for local)
     device_type: DeviceType

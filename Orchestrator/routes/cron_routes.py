@@ -66,6 +66,9 @@ async def list_cron_contacts(operator: str):
     data = load_contacts()
     ensure_book_for_read(data, operator)
     book = data.get(operator, {})
+    # This box's own lines are left out: a text to the box itself reaches no one.
+    from Orchestrator.contacts import is_system_number, system_numbers
+    box_lines = [number for number, _owner in system_numbers()]
     contacts = [
         {
             "name": c.get("name", ""),
@@ -74,7 +77,8 @@ async def list_cron_contacts(operator: str):
             "inbound_allowed": c.get("inbound_allowed", True),
             "is_operator_self": c.get("is_operator_self", False),
         }
-        for c in book.values() if c.get("phone")
+        for c in book.values()
+        if c.get("phone") and not is_system_number(c["phone"], box_lines)
     ]
     contacts.sort(key=lambda c: c["name"].lower())
     return {"contacts": contacts}

@@ -4,7 +4,7 @@ Device Registry — manages all devices on the Tailscale mesh.
 Usage:
     from Orchestrator.device_registry import get_registry
     registry = get_registry()
-    device = registry.get_device("brandon-phone")
+    device = registry.get_device("my-phone")
     android_devices = registry.get_devices_by_type(DeviceType.ANDROID)
 """
 import json

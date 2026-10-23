@@ -670,14 +670,19 @@ _FALLBACK_MODELS = {
     ],
 }
 
-# Per-provider default model id — feeds the dropdown's pre-selected option.
-_DEFAULT_MODEL = {
-    "google": GEMINI_MODEL_DEFAULT,
-    "anthropic": ANTHROPIC_MODEL_DEFAULT,
-    "openai": OPENAI_MODEL_DEFAULT,
-    "xai": XAI_MODEL_DEFAULT,
-    "computer-use": CU_MODEL_DEFAULT,
-}
+# Providers with a configured default model id — it feeds the dropdown's
+# pre-selected option (_default_model_id). Custom has none: its default is the
+# registry's first discovered model.
+_DEFAULT_MODEL_PROVIDERS = ("google", "anthropic", "openai", "xai", "computer-use")
+
+
+def _default_model_id(provider: str) -> str:
+    """What "Auto" runs for ``provider`` (config.resolve_default_model, read per
+    call: a retired ANTHROPIC_MODEL shows its successor), "" for any other."""
+    if provider not in _DEFAULT_MODEL_PROVIDERS:
+        return ""
+    from Orchestrator import config as _config
+    return _config.resolve_default_model(provider)
 
 
 def _fetch_google_models() -> dict | None:
@@ -852,8 +857,8 @@ def _fetch_custom_models() -> dict:
             })
 
     out = _wrap("custom", models, "live" if any_live else "fallback")
-    # _wrap hardcodes default_id from the static _DEFAULT_MODEL map ("" for
-    # custom) and `cached` is normally stamped by the cache layer this
+    # _wrap takes default_id from _default_model_id ("" for custom) and
+    # `cached` is normally stamped by the cache layer this
     # provider bypasses — post-assign both to keep the envelope contract.
     out["default_id"] = models[0]["id"] if models else ""
     out["cached"] = False
@@ -925,7 +930,7 @@ def _wrap(provider: str, models: list, source: str) -> dict:
         "provider": provider,
         "models": models,
         "source": source,
-        "default_id": _DEFAULT_MODEL.get(provider, ""),
+        "default_id": _default_model_id(provider),
         "fetched_iso": _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
