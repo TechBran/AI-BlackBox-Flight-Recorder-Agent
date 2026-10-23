@@ -315,9 +315,26 @@ def test_validate_perplexity_probes_the_configured_search_model(fake_openai, mon
     assert client.chat_calls[0]["max_tokens"] == 16  # Perplexity's minimum
 
 
+def _ini(text=""):
+    import configparser
+    cfg = configparser.ConfigParser()
+    cfg.read_string(text)
+    return cfg
+
+
 def test_perplexity_search_model_defaults_to_sonar():
-    from Orchestrator import config
-    assert config.PERPLEXITY_SEARCH_MODEL == "sonar"
+    """Resolution over explicit inputs, so a box or CI that sets the knob does
+    not fail this test."""
+    from Orchestrator.config import resolve_perplexity_search_model
+    assert resolve_perplexity_search_model({}, _ini()) == "sonar"
+    assert resolve_perplexity_search_model({"PERPLEXITY_SEARCH_MODEL": "  "}, _ini()) == "sonar"
+
+
+def test_perplexity_search_model_env_wins_then_config_ini():
+    from Orchestrator.config import resolve_perplexity_search_model
+    ini = _ini("[web_search]\nperplexity_model = sonar-ini\n")
+    assert resolve_perplexity_search_model({}, ini) == "sonar-ini"
+    assert resolve_perplexity_search_model({"PERPLEXITY_SEARCH_MODEL": "sonar-env"}, ini) == "sonar-env"
 
 
 def test_web_search_and_key_probe_share_the_perplexity_model(monkeypatch):

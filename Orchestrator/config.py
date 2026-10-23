@@ -652,11 +652,13 @@ OPENAI_TTS_URL  = "https://api.openai.com/v1/audio/speech"
 # key probe asks for (Perplexity publishes no model list to discover it from).
 # One place to change when Perplexity retires the id. Env PERPLEXITY_SEARCH_MODEL
 # wins, then config.ini [web_search] perplexity_model.
-PERPLEXITY_SEARCH_MODEL = (
-    os.getenv("PERPLEXITY_SEARCH_MODEL", "").strip()
-    or CFG.get("web_search", "perplexity_model", fallback="").strip()
-    or "sonar"
-)
+def resolve_perplexity_search_model(env=os.environ, cfg=CFG) -> str:
+    return ((env.get("PERPLEXITY_SEARCH_MODEL") or "").strip()
+            or cfg.get("web_search", "perplexity_model", fallback="").strip()
+            or "sonar")
+
+
+PERPLEXITY_SEARCH_MODEL = resolve_perplexity_search_model()
 
 # OpenAI Realtime API (gpt-realtime voice conversations)
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
