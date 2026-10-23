@@ -1,12 +1,15 @@
 """Live voice-probe smoke suite (design WS6 — replaces the voice-blind test_grok.sh).
 
-NOT collected by the default run (pytest.ini: testpaths = Orchestrator/tests).
-Run explicitly, from the repo root, whenever touching voice code or before any
-catalog change:
+NOT collected by the default run (diagnostics/ is outside pytest.ini's
+testpaths, and its -m deselects probe_live). Run explicitly, from the repo root,
+whenever touching voice code or before any catalog change:
 
     Orchestrator/venv/bin/python -m pytest diagnostics/voice_probes/test_live_probes.py -m probe_live -v
 
-Makes real, paid API calls. Skips per-provider when the key is absent
+Makes real, paid API calls. The root conftest.py keeps the suite off the
+network, except for probe_live items; the keys come from the box's .env
+(env.py), which the suite's credential strip does not touch, so no
+BLACKBOX_TEST_LIVE=1 is needed. Skips per-provider when the key is absent
 (fresh-box gate: graceful degradation, no hard failure on an unconfigured box).
 """
 import asyncio

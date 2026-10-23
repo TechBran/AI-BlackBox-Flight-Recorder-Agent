@@ -1,4 +1,10 @@
 import subprocess
+from pathlib import Path
+
+# The checkout this test belongs to (a worktree or a CI clone scans its own
+# tree, not the box's serving tree).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def test_no_hardcoded_whisper1_outside_config():
     """The only 'whisper-1' literal allowed is the STT_MODEL default in config.py.
@@ -7,7 +13,7 @@ def test_no_hardcoded_whisper1_outside_config():
     out = subprocess.run(
         ["grep", "-rn", "whisper-1", "Orchestrator", "--include=*.py",
          "--exclude-dir=venv"],
-        capture_output=True, text=True, cwd="/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc",
+        capture_output=True, text=True, cwd=REPO_ROOT,
     ).stdout
     offenders = [
         line for line in out.splitlines()

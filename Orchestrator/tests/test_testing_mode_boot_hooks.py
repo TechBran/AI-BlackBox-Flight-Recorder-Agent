@@ -103,26 +103,46 @@ def test_production_app_lifespan_runs_no_side_effect_hook(monkeypatch, tmp_path)
             assert client.get("/toolvault/health").status_code == 200
 
 
-# Hooks in startup.py that only log or capture state inside this process, and so
-# stay registered as plain app hooks.
-_IN_PROCESS_HOOKS = {"startup_phone_pin_check"}
+# The app hooks that only log or capture state inside this process, and so stay
+# registered as plain hooks. Every other startup/shutdown hook, in any module,
+# must go through boot_hook.
+_IN_PROCESS_HOOKS = {
+    "Orchestrator.startup.startup_phone_pin_check",
+    "Orchestrator.routes.tts_routes._tts_queue_capture_loop",
+    "Orchestrator.routes.tts_routes._tts_queue_shutdown",
+}
 
 
-def test_every_startup_py_hook_is_gated():
-    """A hook added to Orchestrator/startup.py later must use boot_hook (or be
-    listed above as in-process only), or the suite starts running it again."""
+def _ungated_hooks(app):
+    testing = _testing()
+    ungated = []
+    for handler in _startup_handlers(app):
+        if getattr(handler, testing.BOOT_HOOK_ATTR, False):
+            continue
+        fn = getattr(handler, "__wrapped__", handler)
+        name = f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', repr(fn))}"
+        if name not in _IN_PROCESS_HOOKS:
+            ungated.append(name)
+    return ungated
+
+
+def test_every_app_hook_is_gated():
+    """A hook added later to the app, from startup.py or any route module, must
+    use boot_hook (or be listed above as in-process only), or the suite starts
+    running it again."""
     from Orchestrator.app import app
     testing = _testing()
 
-    ungated = []
-    for handler in _startup_handlers(app):
-        fn = getattr(handler, "__wrapped__", handler)
-        if getattr(fn, "__module__", "") != "Orchestrator.startup":
-            continue
-        if getattr(handler, testing.BOOT_HOOK_ATTR, False):
-            continue
-        if fn.__name__ not in _IN_PROCESS_HOOKS:
-            ungated.append(fn.__name__)
-    assert ungated == []
+    assert _ungated_hooks(app) == []
     gated = [h for h in _startup_handlers(app) if getattr(h, testing.BOOT_HOOK_ATTR, False)]
     assert len(gated) >= 20  # every startup.py hook but the pin check
+
+
+def test_the_hook_check_sees_a_plain_hook_from_any_module():
+    app = FastAPI()
+
+    async def reaper():  # this module, not startup.py: still caught
+        pass
+
+    app.add_event_handler("startup", reaper)
+    assert _ungated_hooks(app) == [f"{__name__}.test_the_hook_check_sees_a_plain_hook_from_any_module.<locals>.reaper"]
