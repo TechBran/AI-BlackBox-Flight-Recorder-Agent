@@ -19,7 +19,8 @@ PHASE state machine:
   None                                          ← no update ever run
   staging      → pre-update tag + venv freezes + worktree validation
   apt_install  → apt-get install via blackbox-apt-install helper (per package)
-  pip_install  → Orchestrator/venv/bin/pip install --require-hashes -r requirements.lock.txt
+  pip_install  → Orchestrator/venv/bin/pip install --require-hashes -r requirements.lock.txt,
+                 then installer-added packages under -c requirements.txt, then pip check
   mcp_install  → MCP/venv/bin/pip install -r MCP/requirements.txt
   systemd_regen → blackbox-write-systemd helper writes (per file)
   reset_hard   → git reset --hard origin/main (atomic file swap)

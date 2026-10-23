@@ -116,15 +116,23 @@ echo "[install-reranker-cpu] MID tier (${RAM_GB} GB RAM, no GPU) — installing 
 # index first, then sentence-transformers is pulled from PyPI (its torch dep is
 # already satisfied by the CPU build). Plain install (no --upgrade) is a cheap
 # no-op on re-run when the requirement is already satisfied.
+# Both resolve UNDER THE LOCK'S PINS (-c requirements.txt, the hash-free
+# rendering of requirements.lock.txt): an unconstrained install moved
+# huggingface-hub past its pin for transformers, the next lock install (the
+# in-app updater) moved it back, and transformers stopped importing while pip
+# exited 0. The updater reinstalls sentence-transformers the same way after
+# every lock change (Orchestrator/update/runner.py LOCK_EXTRAS).
 echo "[install-reranker-cpu] Installing CPU-only torch from $TORCH_CPU_INDEX (large download on first install)..."
-if ! sudo -u "$REAL_USER" "$ORCH_PIP" install torch --index-url "$TORCH_CPU_INDEX"; then
+if ! sudo -u "$REAL_USER" "$ORCH_PIP" install torch --index-url "$TORCH_CPU_INDEX" \
+        -c "$BLACKBOX_ROOT/requirements.txt"; then
     echo "[install-reranker-cpu] ERROR: pip install of CPU torch failed" >&2
     echo "[install-reranker-cpu] (Check network/disk, then re-run" >&2
     echo "[install-reranker-cpu]  sudo bash installer/templates/blackbox-install-reranker-cpu.sh)" >&2
     exit 4
 fi
 echo "[install-reranker-cpu] Installing sentence-transformers from PyPI..."
-if ! sudo -u "$REAL_USER" "$ORCH_PIP" install sentence-transformers; then
+if ! sudo -u "$REAL_USER" "$ORCH_PIP" install sentence-transformers \
+        -c "$BLACKBOX_ROOT/requirements.txt"; then
     echo "[install-reranker-cpu] ERROR: pip install of sentence-transformers failed" >&2
     echo "[install-reranker-cpu] (Check network/disk, then re-run" >&2
     echo "[install-reranker-cpu]  sudo bash installer/templates/blackbox-install-reranker-cpu.sh)" >&2

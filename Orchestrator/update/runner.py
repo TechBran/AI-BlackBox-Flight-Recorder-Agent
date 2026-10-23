@@ -90,6 +90,21 @@ APT_HELPER = "/usr/local/sbin/blackbox-apt-install"
 # unpinned file — that is a manual, operator-run step (see requirements.in).
 PIP_LOCK_FILE = "requirements.lock.txt"
 
+# The lock's pins without hashes, used as constraints (-c) for the packages an
+# installer adds on top of the lock.
+PIP_CONSTRAINTS_FILE = "requirements.txt"
+
+# Packages an installer adds to the Orchestrator venv on top of the lock:
+# installer/templates/blackbox-install-reranker-cpu.sh installs the in-process
+# CPU reranker on MID-tier boxes (torch from the PyTorch CPU index, then these
+# from PyPI), under the lock's pins. A lock install moves a pin they depend on
+# to the lock's version and pip only warns (exit 0): before this, hub went back
+# under transformers and the reranker stopped importing, silently. So after
+# the lock, the pip phase reinstalls them under the new pins, and pip picks
+# versions that work with them. torch is not reinstalled: the lock never moves
+# it, and PyPI does not serve the +cpu build.
+LOCK_EXTRAS = ("sentence-transformers",)
+
 # blackbox-apt-install exit codes we react to specifically (its header is the
 # contract): 4 = allowlist file unreadable, 5 = package not in the allowlist.
 APT_HELPER_RC_ALLOWLIST_UNREADABLE = 4
@@ -389,6 +404,38 @@ class UpdateRunner:
                 return
             yield self._log(PHASE_PIP_INSTALL,
                             f"Orchestrator venv updated from {PIP_LOCK_FILE} (hash-checked).")
+
+            extras = self._installed_lock_extras()
+            if extras:
+                constraints = self.root / PIP_CONSTRAINTS_FILE
+                rc, out = await self._run(
+                    [str(pip), "install", "-c", str(constraints), *extras,
+                     "--quiet", "--disable-pip-version-check"], timeout=600.0)
+                if rc != 0:
+                    yield self._fail(PHASE_PIP_INSTALL,
+                                     f"Reinstalling {', '.join(extras)} under the new "
+                                     f"pins failed (rc={rc}): {_tail(out)}\n"
+                                     f"Without it the CPU reranker would not import. The "
+                                     f"update was rolled back and the venv restored from "
+                                     f"Manifest/pre_update_pip_freeze.txt. Re-run `{pip} "
+                                     f"install -c {constraints} {' '.join(extras)}` to see "
+                                     f"the full error, or remove the reranker (installer/"
+                                     f"templates/blackbox-install-reranker-cpu.sh installed it).")
+                    await self._rollback_pip_and_code()
+                    return
+                yield self._log(PHASE_PIP_INSTALL,
+                                f"Reinstalled {', '.join(extras)} under the new pins "
+                                f"(-c {PIP_CONSTRAINTS_FILE}).")
+
+            # pip install exits 0 when it leaves an installed package's
+            # requirement unmet, so ask. Not fatal: a package nothing here
+            # installs (hand-added, or another venv's) would block every update.
+            rc, out = await self._run([str(pip), "check"], timeout=120.0)
+            if rc != 0:
+                yield self._log(PHASE_PIP_INSTALL,
+                                f"WARNING: pip check found installed packages whose "
+                                f"requirements the venv no longer meets; they may fail "
+                                f"to import:\n{_tail(out, 12)}")
 
         # PHASE: mcp_install (conditional)
         if buckets["mcp_pip"]:
@@ -792,13 +839,34 @@ class UpdateRunner:
         except Exception:
             pass
 
+    def _installed_lock_extras(self) -> list[str]:
+        """The LOCK_EXTRAS present in the pre-update freeze. The lock install
+        removes nothing, so they are still installed."""
+        freeze = self.root / "Manifest/pre_update_pip_freeze.txt"
+        try:
+            installed = {_canonical_name(line) for line in freeze.read_text().splitlines()}
+        except OSError:
+            return []
+        return [name for name in LOCK_EXTRAS if name in installed]
+
     async def _rollback_pip_and_code(self) -> None:
         """Restore Orchestrator venv to pre-update freeze, then reset code."""
         freeze = self.root / "Manifest/pre_update_pip_freeze.txt"
         if freeze.is_file():
+            # Leave out pins with a local version label (torch==2.11.0+cpu):
+            # they came from another index, PyPI cannot serve them, and one
+            # unservable line makes pip refuse the whole restore. Nothing in
+            # the update installs them, so they are still in place.
+            lines = freeze.read_text().splitlines()
+            kept = [line for line in lines
+                    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*==\S*\+", line)]
+            restore = freeze
+            if len(kept) != len(lines):
+                restore = self.root / "Manifest/pre_update_pip_restore.txt"
+                restore.write_text("".join(line + "\n" for line in kept))
             await self._run([
                 str(self.root / "Orchestrator/venv/bin/pip"),
-                "install", "-r", str(freeze),
+                "install", "-r", str(restore),
                 "--quiet", "--force-reinstall",
             ], timeout=600.0)
         await self._rollback_code()
@@ -880,6 +948,13 @@ def _extract_allowlist_path(helper_output: str) -> str:
         if marker in line:
             return line.split(marker, 1)[1].strip()
     return ""
+
+
+def _canonical_name(requirement_line: str) -> str:
+    """PEP 503 name of a `pip freeze` line ("Sentence_Transformers==6.2.0" ->
+    "sentence-transformers"); "" for anything else."""
+    m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*==", requirement_line)
+    return re.sub(r"[-_.]+", "-", m.group(1)).lower() if m else ""
 
 
 def _tail(text: str, lines: int = 6) -> str:
