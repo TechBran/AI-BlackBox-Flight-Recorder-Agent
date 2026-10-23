@@ -14,8 +14,14 @@
 #     STUB_SUDO_USER to the child) and with which arguments.
 # Knobs (environment, read at call time):
 #   STUB_ENABLED_UNITS   space-separated units `systemctl is-enabled` reports enabled
+#                        (on top of those a `systemctl enable` in this kit
+#                        recorded in $STUB_UNITS; `disable` removes them there,
+#                        and `: > "$STUB_UNITS"` forgets them all)
 #   STUB_VRAM_MB         nvidia-smi memory.total (default 16380)
 #   STUB_COMPUTE_CAP     nvidia-smi compute_cap, one GPU per line (default 8.9)
+#   STUB_NVCC_ARCHS      `nvcc --list-gpu-arch` output, space-separated (default:
+#                        Ubuntu 24.04's apt CUDA 12.0, compute_50 .. compute_90);
+#                        "none" makes it fail like an nvcc without the option
 #   STUB_CURL_HANDLER    executable run as `<handler> <url> <output-path>` for
 #                        non-loopback URLs; its exit code is curl's
 #   STUB_DPKG_OWNER      package `dpkg -S` reports for /usr/bin/blackbox-setup
@@ -28,9 +34,11 @@ stub_kit_init() {
     STUB_BIN="$work/stubbin"
     STUB_ROOT="$work/fakeroot"
     STUB_LOG="$work/stub.log"
+    STUB_UNITS="$work/stub-enabled-units"
     mkdir -p "$STUB_BIN" "$STUB_ROOT"
     : > "$STUB_LOG"
-    export STUB_BIN STUB_ROOT STUB_LOG
+    : > "$STUB_UNITS"
+    export STUB_BIN STUB_ROOT STUB_LOG STUB_UNITS
     export PATH="$STUB_BIN:$PATH"
 
     # sudo: drop -n/-E, honour -u USER (exported as STUB_SUDO_USER), remap
@@ -91,7 +99,17 @@ case "${args[0]:-}" in
         for u in ${STUB_ENABLED_UNITS:-}; do
             if [[ "$u" == "${args[1]:-}" ]]; then echo enabled; exit 0; fi
         done
+        if grep -qxF -- "${args[1]:-}" "$STUB_UNITS" 2>/dev/null; then echo enabled; exit 0; fi
         echo disabled; exit 1 ;;
+    enable)
+        for u in "${args[@]:1}"; do
+            grep -qxF -- "$u" "$STUB_UNITS" 2>/dev/null || echo "$u" >> "$STUB_UNITS"
+        done ;;
+    disable)
+        for u in "${args[@]:1}"; do
+            grep -vxF -- "$u" "$STUB_UNITS" > "$STUB_UNITS.tmp" 2>/dev/null || true
+            mv "$STUB_UNITS.tmp" "$STUB_UNITS"
+        done ;;
     is-failed) exit 1 ;;
 esac
 exit 0
@@ -171,8 +189,19 @@ fi
 exit 0
 STUB
 
+    cat > "$STUB_BIN/nvcc" <<'STUB'
+#!/usr/bin/env bash
+echo "nvcc $*" >> "$STUB_LOG"
+if [[ "${1:-}" == "--list-gpu-arch" ]]; then
+    archs="${STUB_NVCC_ARCHS-compute_50 compute_52 compute_53 compute_60 compute_61 compute_62 compute_70 compute_72 compute_75 compute_80 compute_86 compute_87 compute_89 compute_90}"
+    [[ "$archs" == none ]] && { echo "nvcc fatal   : Unknown option '--list-gpu-arch'" >&2; exit 1; }
+    printf '%s\n' $archs
+fi
+exit 0
+STUB
+
     local simple
-    for simple in nvcc apt apt-get sleep; do
+    for simple in apt apt-get sleep; do
         printf '#!/usr/bin/env bash\necho "%s $*" >> "$STUB_LOG"\nexit 0\n' "$simple" \
             > "$STUB_BIN/$simple"
     done

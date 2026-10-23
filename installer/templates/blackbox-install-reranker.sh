@@ -21,6 +21,10 @@
 # and never while blackbox-models.service is enabled (the two would share one
 # card; disable that unit first if vLLM is really wanted). Unrequested runs
 # exit 0 and leave an existing vllm-reranker.service exactly as it is.
+# blackbox-install-localstack.sh (Step 2f, which runs after this) holds the
+# converse: it never enables or restarts blackbox-models.service while
+# vllm-reranker.service is enabled, so neither step order nor a later re-run
+# puts both on one GPU.
 #
 # GPU GATE: requires nvidia-smi + >=8000 MB VRAM. CPU boxes get a clear skip
 # message and exit 0 — vLLM must never be installed on a CPU box.

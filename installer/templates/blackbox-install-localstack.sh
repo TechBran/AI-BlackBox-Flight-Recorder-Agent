@@ -24,7 +24,8 @@
 #       [real_user] [real_home] [blackbox_root]
 #
 # Exit codes:
-#   0 — provisioned + llama-swap answering on :9098/health
+#   0 — provisioned + llama-swap answering on :9098/health (or provisioned and
+#       left disabled because the opt-in vllm-reranker.service is enabled)
 #   2 — could not resolve user/home, or the home/root is outside the
 #       installer charset
 #   4 — download/verify or venv creation failed
@@ -99,9 +100,9 @@ sudo -u "$REAL_USER" mkdir -p "$LOCALSTACK_BIN" "$LOCALSTACK_MODELS"
 USE_CUDA=0
 # Compute capability of every NVIDIA GPU present ("89", or "86+89" on a mixed
 # box; "unknown" when the driver cannot report it). The CUDA build targets
-# `native` (whatever cards are installed); this records which those were, in
-# the build marker, so a GPU swap triggers a rebuild (2026-10 audit
-# X04-security-clients-infra-15 / X06-ops-deploy-16).
+# these cards (lc_cuda_arch_list below), and the build marker records them so a
+# GPU swap triggers a rebuild (2026-10 audit X04-security-clients-infra-15 /
+# X06-ops-deploy-16).
 LC_CUDA_ARCH="unknown"
 if command -v nvidia-smi >/dev/null 2>&1; then
     VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
@@ -165,10 +166,10 @@ fi
 #      prebuilt fallbacks) ──────────────────────────────────────────────────
 # llama.cpp stopped shipping prebuilt Linux CUDA binaries, so on a capable
 # NVIDIA box we BUILD llama-server from source with CUDA at the pinned tag, for
-# the GPUs actually installed (CMAKE_CUDA_ARCHITECTURES=native — this used to
-# be hardcoded to 89, the RTX 2000 Ada, which builds fine everywhere and then
-# fails at first model load on any other generation with "no kernel image is
-# available"). If that build cannot be produced we fall back to the
+# the GPUs actually installed (lc_cuda_arch_list — this used to be hardcoded to
+# 89, the RTX 2000 Ada, which builds fine everywhere and then fails at first
+# model load on an older generation with "no kernel image is available"). If
+# that build cannot be produced we fall back to the
 # Vulkan prebuilt; boxes with no capable GPU get the CPU prebuilt floor. The
 # two shas pin the .tar.gz prebuilt fallbacks (there is no CUDA prebuilt sha —
 # CUDA is compiled, not downloaded).
@@ -256,6 +257,40 @@ if (( need_lc )); then
         return 0
     }
 
+    # CMAKE_CUDA_ARCHITECTURES for the cards in $1 (LC_CUDA_ARCH, "86+89"),
+    # clamped to what the installed nvcc can target. CMake's `native` builds
+    # machine code only (`<cap>-real`) and fails to configure on a card newer
+    # than the toolkit — Ubuntu's apt CUDA 12.0 stops at compute_90, a Blackwell
+    # card is sm_120 — where the old hardcoded `89` still ran on the driver's
+    # PTX JIT. So: machine code for every card nvcc knows, plus PTX for the
+    # newest arch nvcc has that is not newer than the newest card (the JIT path
+    # for a card beyond the toolkit). `89` alone means both (CMake real+virtual),
+    # so a single sm_89 card builds exactly what it always did. Prints `native`
+    # when the caps or nvcc's list are unknown, and nothing when no arch nvcc
+    # supports can run on these cards (the caller falls back to Vulkan).
+    lc_cuda_arch_list() {
+        local caps="$1" supported cap s max_cap=0 virt=0 virt_is_card=0
+        local cards=() list=()
+        if [[ ! "$caps" =~ ^[0-9]+(\+[0-9]+)*$ ]]; then echo native; return 0; fi
+        supported="$(nvcc --list-gpu-arch 2>/dev/null | grep -oE '^compute_[0-9]+$' \
+            | sed 's/^compute_//' | sort -n -u || true)"
+        if [[ -z "$supported" ]]; then echo native; return 0; fi
+        IFS=+ read -ra cards <<< "$caps"
+        for cap in "${cards[@]}"; do
+            if (( cap > max_cap )); then max_cap=$cap; fi
+        done
+        for s in $supported; do
+            if (( s <= max_cap )); then virt=$s; fi
+        done
+        if (( virt == 0 )); then return 0; fi
+        for cap in "${cards[@]}"; do
+            if (( cap == virt )); then virt_is_card=1; continue; fi
+            if grep -qx "$cap" <<< "$supported"; then list+=("${cap}-real"); fi
+        done
+        if (( virt_is_card )); then list+=("$virt"); else list+=("${virt}-virtual"); fi
+        (IFS=';'; echo "${list[*]}")
+    }
+
     # ── CUDA source build (primary path on a capable NVIDIA box) ────────────────
     if (( USE_CUDA )); then
         echo "[install-localstack] Building llama.cpp $LC_VER from source with CUDA (primary path)..."
@@ -273,6 +308,16 @@ if (( need_lc )); then
             echo "[install-localstack] WARNING: nvcc still unavailable after install — falling back to the Vulkan prebuilt." >&2
             CUDA_OK=0
         fi
+        LC_CUDA_ARCHS=""
+        if (( CUDA_OK )); then
+            LC_CUDA_ARCHS="$(lc_cuda_arch_list "$LC_CUDA_ARCH")"
+            if [[ -z "$LC_CUDA_ARCHS" ]]; then
+                echo "[install-localstack] WARNING: this nvcc cannot target sm_${LC_CUDA_ARCH} (nvcc --list-gpu-arch) — falling back to the Vulkan prebuilt." >&2
+                CUDA_OK=0
+            else
+                echo "[install-localstack] CUDA architectures for sm_${LC_CUDA_ARCH}: ${LC_CUDA_ARCHS}"
+            fi
+        fi
         # Shallow, pinned-tag clone.
         if (( CUDA_OK )) && ! git clone --depth 1 --branch "$LC_VER" \
                 https://github.com/ggml-org/llama.cpp "$TMP_LC/llama.cpp"; then
@@ -287,11 +332,10 @@ if (( need_lc )); then
         CUDA_HOST_CC="$(command -v gcc-12 || command -v gcc-11 || command -v gcc-10 || true)"
         CUDA_HOST_FLAG=(); [[ -n "$CUDA_HOST_CC" ]] && CUDA_HOST_FLAG=(-DCMAKE_CUDA_HOST_COMPILER="$CUDA_HOST_CC")
         # Configure + build only the llama-server target, for the installed
-        # GPUs (native — CMake asks the driver at configure time; the arch it
-        # finds is recorded in the marker below). LLAMA_CURL=OFF drops the
-        # libcurl build dependency.
+        # GPUs (the clamped list above; the caps are recorded in the marker
+        # below). LLAMA_CURL=OFF drops the libcurl build dependency.
         if (( CUDA_OK )) && { ! cmake -S "$TMP_LC/llama.cpp" -B "$TMP_LC/llama.cpp/build" \
-                    -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native \
+                    -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="$LC_CUDA_ARCHS" \
                     -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release "${CUDA_HOST_FLAG[@]}" \
                 || ! cmake --build "$TMP_LC/llama.cpp/build" --target llama-server -j"$(nproc)"; }; then
             echo "[install-localstack] WARNING: CUDA build failed — falling back to the Vulkan prebuilt." >&2
@@ -448,6 +492,26 @@ render_models_unit() {
 }
 render_models_unit | sudo tee /etc/systemd/system/blackbox-models.service >/dev/null
 sudo systemctl daemon-reload
+# One GPU reranker owner (2026-10 audit X06-ops-deploy-06). The opt-in vLLM
+# reranker (blackbox-install-reranker.sh, install.sh Step 2d) refuses to
+# provision while this unit is enabled, and this refuses the converse: Step 2d
+# runs first, so without it `RERANK_PROVIDER=vllm bash Scripts/install.sh`, or
+# any re-run after the operator chose vLLM, ends with both units pinning one
+# card — the CUDA-OOM state preflight-vram-idle.sh guards against. An enabled
+# vllm-reranker.service IS the recorded choice. Everything above is still
+# provisioned, so switching back is one disable + one re-run.
+if systemctl is-enabled --quiet vllm-reranker.service 2>/dev/null; then
+    echo "[install-localstack] vllm-reranker.service is enabled (the opt-in vLLM reranker) — not enabling or"
+    echo "[install-localstack] (re)starting blackbox-models.service beside it: the two would pin the same GPU."
+    if systemctl is-enabled --quiet blackbox-models.service 2>/dev/null; then
+        echo "[install-localstack] WARNING: blackbox-models.service is ALSO enabled — both are enabled on one GPU" >&2
+        echo "[install-localstack] (left by an older install.sh). Keep one: 'sudo systemctl disable --now" >&2
+        echo "[install-localstack] blackbox-models.service' to keep vLLM, or the command below to keep the local stack." >&2
+    fi
+    echo "[install-localstack] To use the local model stack instead: sudo systemctl disable --now vllm-reranker.service"
+    echo "[install-localstack] then re-run: sudo bash installer/templates/blackbox-install-localstack.sh"
+    exit 0
+fi
 sudo systemctl enable blackbox-models.service >/dev/null 2>&1
 sudo systemctl restart blackbox-models.service
 echo "[install-localstack] blackbox-models.service written + enabled + (re)started"

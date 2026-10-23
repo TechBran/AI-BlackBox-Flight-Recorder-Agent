@@ -872,7 +872,10 @@ step_2c_install_zellij
 # script provisions only when asked — RERANK_PROVIDER=vllm in this script's
 # environment (e.g. `RERANK_PROVIDER=vllm bash Scripts/install.sh`) — and never
 # while blackbox-models.service is enabled; every other run exits 0 and leaves
-# an existing vllm-reranker.service exactly as it is. Before this, every re-run
+# an existing vllm-reranker.service exactly as it is. Step 2f holds the
+# converse (no enable/restart of blackbox-models.service while
+# vllm-reranker.service is enabled), so on a fresh box the explicit request
+# wins and a later re-run keeps it. Before this, every re-run
 # upgraded vllm unpinned and re-enabled the unit the local-stack migration had
 # retired. It also self-gates on nvidia-smi + >=8000 MB VRAM (vLLM must never
 # land on a CPU box), so the installer calls it unconditionally. Non-fatal like
@@ -904,7 +907,9 @@ fi
 # Provisions llama-swap (:9098), the llama.cpp llama-server (CUDA/CPU per the
 # nvidia-smi gate), the Speaches + qwen-tts venvs, the tier-adjusted
 # llama-swap config.yaml, and blackbox-models.service. Self-gating (build
-# selector, not a skip) + re-run-safe. NON-FATAL like the reranker step —
+# selector, not a skip) + re-run-safe. It provisions but does not enable or
+# restart blackbox-models.service while the opt-in vllm-reranker.service is
+# enabled (Step 2d; one GPU reranker owner). NON-FATAL like the reranker step —
 # cloud STT/TTS/embeddings/rerank keep working and the wizard's local_models
 # step shows remediation. NO weights here (downloaded later in the wizard,
 # disk-gated). Nothing activates implicitly on install.
