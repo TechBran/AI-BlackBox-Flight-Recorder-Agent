@@ -156,20 +156,47 @@ def test_ddgs_available_tracks_importability(monkeypatch):
     assert wt.ddgs_available() is True
 
 
+class _BrokenLazyLoad(type):
+    def __getattr__(cls, name):
+        raise ModuleNotFoundError("import of primp halted; None in sys.modules")
+
+
+class _BrokenLazyDDGS(metaclass=_BrokenLazyLoad):
+    """ddgs 9.x exports a proxy: `from ddgs import DDGS` succeeds, and the real
+    class, with primp (its HTTP client), is imported on first use."""
+
+
+def test_ddgs_probe_loads_the_real_class(monkeypatch):
+    """O06-frontier-agent-17 (bypass review): find_spec() said yes to an
+    installed ddgs whose lazily imported HTTP client could not load, so boot
+    stayed quiet while every DuckDuckGo search failed."""
+    import sys
+    mod = _fake_ddgs_module()
+    mod.DDGS = _BrokenLazyDDGS
+    monkeypatch.setitem(sys.modules, "ddgs", mod)
+    assert wt.ddgs_available() is False
+    assert "primp" in wt.ddgs_import_error()
+
+    monkeypatch.setitem(sys.modules, "ddgs", _fake_ddgs_module())
+    assert wt.ddgs_import_error() is None
+
+
 def test_startup_says_so_when_the_keyless_floor_is_missing(monkeypatch, caplog):
     """O06-frontier-agent-17: the import is lazy, so a venv without ddgs only
-    surfaced as a failed search. Boot must say it, and say how to fix it."""
+    surfaced as a failed search. Boot must say it, say why, and say how to fix it."""
     import asyncio
     import logging
     from Orchestrator import startup
-    monkeypatch.setattr(wt, "ddgs_available", lambda: False)
+    monkeypatch.setattr(wt, "ddgs_import_error",
+                        lambda: "ModuleNotFoundError: import of primp halted")
     with caplog.at_level(logging.WARNING, logger="blackbox.startup"):
         asyncio.run(startup.startup_web_search_floor_check())
     assert "ddgs" in caplog.text
+    assert "import of primp halted" in caplog.text
     assert "requirements.lock.txt" in caplog.text
 
     caplog.clear()
-    monkeypatch.setattr(wt, "ddgs_available", lambda: True)
+    monkeypatch.setattr(wt, "ddgs_import_error", lambda: None)
     with caplog.at_level(logging.WARNING, logger="blackbox.startup"):
         asyncio.run(startup.startup_web_search_floor_check())
     assert caplog.text == ""

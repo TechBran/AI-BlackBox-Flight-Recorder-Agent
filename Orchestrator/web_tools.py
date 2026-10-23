@@ -333,16 +333,25 @@ def _search_gemini(query: str, recency: str) -> "SearchResult":
     return SearchResult(ok=False, error=last_err, source_label=label)
 
 
-def ddgs_available() -> bool:
-    """True when the keyless DuckDuckGo floor can run: the `ddgs` package
-    (requirements.in) is importable. _search_duckduckgo imports it lazily, so
-    without this check a venv missing it shows up only as failed searches
-    (O06-frontier-agent-17); startup_web_search_floor_check logs it at boot."""
-    import importlib.util
+def ddgs_import_error() -> "str | None":
+    """None when the keyless DuckDuckGo floor can run, else why it cannot.
+    _search_duckduckgo imports `ddgs` (requirements.in) lazily, so without this
+    check a venv missing it shows up only as failed searches
+    (O06-frontier-agent-17); startup_web_search_floor_check logs it at boot.
+    Touching DDGS.text matters: ddgs 9.x exports a proxy and imports the real
+    class, with primp (its HTTP client), on first use, so an installed ddgs
+    whose primp cannot load would pass a bare import (~0.05 s either way)."""
     try:
-        return importlib.util.find_spec("ddgs") is not None
-    except (ImportError, ValueError):
-        return False
+        from ddgs import DDGS
+        DDGS.text  # noqa: B018 - loads the real class
+    except Exception as e:  # noqa: BLE001 - any failure here is a dead floor
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
+def ddgs_available() -> bool:
+    """True when the keyless DuckDuckGo floor can run (see ddgs_import_error)."""
+    return ddgs_import_error() is None
 
 
 def _search_duckduckgo(query: str, recency: str) -> "SearchResult":
