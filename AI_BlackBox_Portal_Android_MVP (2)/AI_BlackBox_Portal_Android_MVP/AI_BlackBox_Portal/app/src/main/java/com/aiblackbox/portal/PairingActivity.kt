@@ -62,12 +62,14 @@ class PairingActivity : AppCompatActivity() {
                     Toast.makeText(this, "Invalid QR: missing origin", Toast.LENGTH_SHORT).show()
                 } else {
                     prefs.edit().putString("origin", origin).apply()
-                    // The QR names who this phone is on the box: straight into the store the
-                    // app reads (it used to land in bbx_prefs, which nothing read). Without one
-                    // the app resolves the operator from the box's roster on first contact.
-                    val qrOperator = json.optString("operator").trim()
+                    // The QR's operator (the one the Portal's pairing dialog was opened for, or
+                    // the box's pairing default) goes into the store the app reads (it used to
+                    // land in bbx_prefs, which nothing read), but only while the app has none:
+                    // a re-pair keeps the operator already picked here. Without one the app
+                    // resolves the operator from the box's roster on first contact.
+                    val qrOperator = json.optString("operator")
                     lifecycleScope.launch {
-                        if (qrOperator.isNotEmpty()) BlackBoxStore(applicationContext).setOperator(qrOperator)
+                        BlackBoxStore(applicationContext).adoptPairingOperator(qrOperator)
                         launchMainActivity()
                         finish()
                     }

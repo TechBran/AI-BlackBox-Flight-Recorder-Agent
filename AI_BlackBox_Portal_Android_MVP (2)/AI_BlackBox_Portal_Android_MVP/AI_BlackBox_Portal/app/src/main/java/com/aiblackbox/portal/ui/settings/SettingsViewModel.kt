@@ -364,10 +364,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** Fetch pairing token from backend (POST /pair/start) — matches Portal flow */
-    suspend fun fetchPairToken(): Pair<String, Long>? {
+    /**
+     * Fetch a pairing token (POST /pair/start) minted for [operator], the one opening the
+     * dialog — matches the Portal flow ([PairingPayload.startBody]).
+     */
+    suspend fun fetchPairToken(operator: String): Pair<String, Long>? {
         return try {
-            val response = api?.post("/pair/start", "{}") ?: return null
+            val response = api?.post("/pair/start", PairingPayload.startBody(operator)) ?: return null
             val json = Json { ignoreUnknownKeys = true }
             val obj = json.parseToJsonElement(response).jsonObject
             val token = obj["token"]?.jsonPrimitive?.content ?: return null

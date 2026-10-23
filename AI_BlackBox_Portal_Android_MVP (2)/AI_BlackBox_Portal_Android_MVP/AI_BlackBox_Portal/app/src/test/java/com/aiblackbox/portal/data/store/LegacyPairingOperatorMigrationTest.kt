@@ -92,4 +92,38 @@ class LegacyPairingOperatorMigrationTest {
         closeAll()
         assertEquals("Ben", open(listOf(migration("Ana"))).data.first()[BlackBoxStore.KEY_OPERATOR])
     }
+
+    // ── a pairing QR scanned now (PairingActivity) ──────────────────────────
+    // The QR's operator is the one the pairing dialog was opened for (or the box's
+    // pairing default), never proof of who holds this phone: a store that already has an
+    // operator keeps it, so Settings > Re-pair cannot silently turn Anna's phone into the
+    // box default's (U16 review). The migration above applies the same rule.
+
+    private suspend fun pair(store: DataStore<Preferences>, qr: String): Boolean {
+        var adopted = false
+        store.edit { adopted = BlackBoxStore.adoptPairingOperatorInto(it, qr) }
+        return adopted
+    }
+
+    @Test fun `a first pairing adopts the QR's operator`() = runBlocking {
+        val store = open()
+        assertEquals(true, pair(store, " Ana "))
+        assertEquals("Ana", store.data.first()[BlackBoxStore.KEY_OPERATOR])
+    }
+
+    @Test fun `a re-pair never overwrites the operator already picked`() = runBlocking {
+        val store = open()
+        store.edit { it[BlackBoxStore.KEY_OPERATOR] = "Ben" }
+        assertEquals(false, pair(store, "Ana"))
+        assertEquals("Ben", store.data.first()[BlackBoxStore.KEY_OPERATOR])
+    }
+
+    @Test fun `a cleared operator counts as none, a QR without one writes nothing`() = runBlocking {
+        val store = open()
+        store.edit { it[BlackBoxStore.KEY_OPERATOR] = "" }
+        for (qr in listOf("", "   ")) assertEquals("qr='$qr'", false, pair(store, qr))
+        assertEquals("", BlackBoxStore.operatorOf(store.data.first()))
+        assertEquals(true, pair(store, "Ana"))
+        assertEquals("Ana", BlackBoxStore.operatorOf(store.data.first()))
+    }
 }

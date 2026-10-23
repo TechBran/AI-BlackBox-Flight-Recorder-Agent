@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.model.ZellijSession
 import com.aiblackbox.portal.data.model.ZellijSessionRow
+import com.aiblackbox.portal.data.store.OperatorResolver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.io.IOException
@@ -139,11 +140,35 @@ internal class CliAgentScreenState(
         private set
 
     /**
+     * The store's operator is "" until the box resolves one (OperatorResolver). Sessions
+     * are per operator — a launch for "" would mint a zellij session no operator owns
+     * (the server allows "" when no allow-list is set) — so nothing is listed, launched
+     * or killed until one is; a launch says why, like a chat send.
+     */
+    private val operatorResolved: Boolean get() = operator.isNotBlank()
+
+    /**
+     * True when an operator is resolved; otherwise reports the pick-an-operator message
+     * through [onError] (as a launch) and returns false. Every way into a terminal asks.
+     */
+    fun requireOperator(): Boolean {
+        if (operatorResolved) return true
+        onError("launch", OperatorResolver.CHOOSE_MESSAGE)
+        return false
+    }
+
+    /**
      * Re-fetch sessions from the orchestrator. Idempotent — failures are
      * surfaced via [onError] and leave [sessions] unchanged so a transient
      * network blip doesn't blank the top bar.
      */
     fun refreshSessions() {
+        if (!operatorResolved) {
+            sessions = emptyList()
+            currentSession = null
+            isInitialLoad = false
+            return
+        }
         scope.launch {
             try {
                 sessions = repository.listZellijSessions(operator)
@@ -184,6 +209,7 @@ internal class CliAgentScreenState(
         // LaunchButton.isLoading, but a fast double-tap before
         // recomposition could otherwise race.
         if (provider in launchInFlight) return
+        if (!requireOperator()) return
 
         launchInFlight = launchInFlight + provider
         scope.launch {
@@ -254,6 +280,7 @@ internal class CliAgentScreenState(
         // DELETE and resurrect a half-killed session. Idempotent — a no-op
         // if no live client is held for this name.
         TerminalSessionManager.kill(row.name)
+        if (!operatorResolved) return
         scope.launch {
             try {
                 repository.killZellijSession(operator, row.name)

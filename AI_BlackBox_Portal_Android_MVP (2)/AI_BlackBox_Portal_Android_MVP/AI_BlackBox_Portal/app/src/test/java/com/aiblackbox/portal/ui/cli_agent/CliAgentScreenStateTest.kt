@@ -104,10 +104,11 @@ class CliAgentScreenStateTest {
         scope: CoroutineScope,
         onLaunchedSessionNames: MutableList<String> = mutableListOf(),
         errors: MutableList<Pair<String, String>> = mutableListOf(),
+        operator: String = "Brandon",
     ): CliAgentScreenState = CliAgentScreenState(
         scope = scope,
         repository = repo,
-        operator = "Brandon",
+        operator = operator,
         onLaunched = { onLaunchedSessionNames.add(it.name) },
         onError = { action, reason -> errors.add(action to reason) },
     )
@@ -669,5 +670,39 @@ class CliAgentScreenStateTest {
 
         holder.clearCurrent()
         assertNull(holder.currentSession)
+    }
+
+    // ── no operator resolved (U16 review) ────────────────────────────────
+
+    /**
+     * The store's operator is "" until the box resolves one (OperatorResolver). A
+     * terminal launched for "" got a zellij name like `__claude__root` that no operator
+     * owns, and the server allows "" when no allow-list is configured — so the holder
+     * refuses instead: no request, the same pick-an-operator message as a chat send.
+     */
+    @Test
+    fun `with no operator nothing is launched, listed or killed`() = runTest {
+        val errors = mutableListOf<Pair<String, String>>()
+        val onLaunched = mutableListOf<String>()
+        val holder = newHolder(this, onLaunched, errors, operator = "  ")
+
+        holder.refreshSessions()
+        holder.launch("claude")
+        holder.launch("gemini", yolo = true)
+        holder.kill(ZellijSessionRow(name = "__claude___root__1", provider = "claude"))
+        joinChildren()
+
+        assertEquals(0, server.requestCount)
+        assertTrue(holder.sessions.isEmpty())
+        assertTrue(holder.launchInFlight.isEmpty())
+        assertTrue(onLaunched.isEmpty())
+        assertEquals(
+            listOf(
+                "launch" to com.aiblackbox.portal.data.store.OperatorResolver.CHOOSE_MESSAGE,
+                "launch" to com.aiblackbox.portal.data.store.OperatorResolver.CHOOSE_MESSAGE,
+            ),
+            errors,
+        )
+        assertTrue("the empty state is not stuck loading", !holder.isInitialLoad)
     }
 }

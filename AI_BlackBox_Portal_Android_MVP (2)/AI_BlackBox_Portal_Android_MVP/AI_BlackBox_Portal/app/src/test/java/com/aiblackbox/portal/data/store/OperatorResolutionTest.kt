@@ -123,4 +123,18 @@ class OperatorResolutionTest {
         val prefs = androidx.datastore.preferences.core.mutablePreferencesOf(BlackBoxStore.KEY_OPERATOR to " Ana ")
         assertEquals("Ana", BlackBoxStore.operatorOf(prefs))
     }
+
+    // ── a load that lands after an operator switch ──────────────────────────
+
+    @Test fun `a load started before an operator switch is stale once the switch lands`() {
+        val generation = OperatorGeneration()
+        val beforeSwitch = generation.tag()      // the 10 s poll fires as Ana
+        generation.advance()                     // the top bar switches to Ben
+        val afterSwitch = generation.tag()       // the switch's own reload
+        assertTrue(generation.isCurrent(afterSwitch))
+        // Ana's reply arrives last: it must not replace Ben's list.
+        assertEquals(false, generation.isCurrent(beforeSwitch))
+        generation.advance()
+        assertEquals(false, generation.isCurrent(afterSwitch))
+    }
 }

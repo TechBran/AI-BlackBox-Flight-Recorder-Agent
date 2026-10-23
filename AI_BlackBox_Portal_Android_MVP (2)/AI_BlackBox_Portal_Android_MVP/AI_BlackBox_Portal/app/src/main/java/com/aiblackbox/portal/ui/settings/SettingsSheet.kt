@@ -1641,21 +1641,15 @@ private fun PairNewDeviceDialog(
     var isLoading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
-        val tokenData = viewModel.fetchPairToken()
+        val tokenData = viewModel.fetchPairToken(operator)
         pairToken = tokenData?.first
         pairExp = tokenData?.second ?: 0L
         isLoading = false
     }
 
-    // Build the full pairing payload (matches Portal ui-setup.js lines 811-812)
-    val qrPayload = remember(pairToken) {
-        if (pairToken != null) {
-            """{"type":"pair","token":"$pairToken","exp":$pairExp,"origin":"$origin","operator":"$operator"}"""
-        } else {
-            // Fallback: simple payload without token (still works for scanning)
-            """{"origin":"$origin","operator":"$operator"}"""
-        }
-    }
+    // Build the full pairing payload (matches the Portal's pairing dialog, ui-setup.js);
+    // without a token, the origin alone still pairs.
+    val qrPayload = remember(pairToken) { PairingPayload.qr(pairToken, pairExp, origin, operator) }
     val qrBitmap = remember(qrPayload) { generateQrBitmap(qrPayload, 512) }
 
     AlertDialog(

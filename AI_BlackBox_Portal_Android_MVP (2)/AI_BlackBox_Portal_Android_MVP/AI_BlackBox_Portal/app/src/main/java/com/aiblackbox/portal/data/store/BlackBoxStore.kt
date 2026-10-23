@@ -2,6 +2,7 @@ package com.aiblackbox.portal.data.store
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -52,6 +53,20 @@ class BlackBoxStore(private val context: Context) {
 
         /** The stored operator; "" = unresolved (nothing picked, paired or auto-selected yet). */
         fun operatorOf(prefs: Preferences): String = prefs[KEY_OPERATOR].orEmpty().trim()
+
+        /**
+         * A pairing QR's operator ([qrOperator]) becomes the stored operator only while the
+         * store has none. The QR names the operator the pairing dialog was opened for (or the
+         * box's pairing default), not who holds this phone, so a re-pair (Settings > Re-pair)
+         * never overwrites the operator already picked here. Shared by PairingActivity and
+         * [LegacyPairingOperatorMigration]. Returns true when [qrOperator] was written.
+         */
+        fun adoptPairingOperatorInto(prefs: MutablePreferences, qrOperator: String): Boolean {
+            val qr = qrOperator.trim()
+            if (qr.isEmpty() || operatorOf(prefs).isNotEmpty()) return false
+            prefs[KEY_OPERATOR] = qr
+            return true
+        }
     }
 
     // Origin (server URL)
@@ -63,6 +78,10 @@ class BlackBoxStore(private val context: Context) {
     // operators are whoever it lists (A09-data-local-model-05).
     val operator: Flow<String> = context.dataStore.data.map { operatorOf(it) }
     suspend fun setOperator(value: String) { context.dataStore.edit { it[KEY_OPERATOR] = value.trim() } }
+    /** A scanned pairing QR's operator, kept only by a store with none (see [adoptPairingOperatorInto]). */
+    suspend fun adoptPairingOperator(qrOperator: String) {
+        context.dataStore.edit { adoptPairingOperatorInto(it, qrOperator) }
+    }
 
     // Provider
     val provider: Flow<String> = context.dataStore.data.map { it[KEY_PROVIDER] ?: "gemini" }

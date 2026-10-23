@@ -47,11 +47,14 @@ class SmsInboxApi(
         return api.get("/sms/preferences?operator=${q(op)}")
     }
 
-    /** [model] "" is Auto: the box answers with its own default for [provider]. */
+    /**
+     * [model] "" is Auto: the box answers with its own default for [provider]. The
+     * provider goes out under the Portal's id ([SmsPreference.wireProvider]).
+     */
     suspend fun savePreferences(provider: String, model: String): String {
         val body = buildJsonObject {
             put("operator", operatorOrThrow())
-            put("sms_provider", provider)
+            put("sms_provider", SmsPreference.wireProvider(provider))
             put("sms_model", model)
         }
         return api.post("/sms/preferences", body.toString())
@@ -84,9 +87,18 @@ data class SmsPreference(val provider: String, val model: String) {
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
         /**
+         * The provider id saved for [id] from this app's menu: Google is "google" on the
+         * wire, the id the Portal's SMS select lists (the server treats "gemini" alike, but
+         * a saved "gemini" showed blank in the Portal and a model edit there then saved
+         * another provider). Every other id is the same on both surfaces.
+         */
+        fun wireProvider(id: String): String = if (id == "gemini") "google" else id
+
+        /**
          * GET /sms/preferences → preference; anything missing or unreadable is [DEFAULT].
          * The Portal stores Google as "google"; this app's provider menu calls it "gemini"
-         * (the server treats both alike), so it shows as gemini here.
+         * (the server treats both alike), so it shows as gemini here ([wireProvider] is
+         * the way back).
          */
         fun parse(raw: String?): SmsPreference = try {
             val obj = json.parseToJsonElement(raw ?: "") as? JsonObject

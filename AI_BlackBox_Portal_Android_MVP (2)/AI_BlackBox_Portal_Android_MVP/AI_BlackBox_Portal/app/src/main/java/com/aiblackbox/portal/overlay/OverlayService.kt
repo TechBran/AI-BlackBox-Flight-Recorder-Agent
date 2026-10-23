@@ -59,6 +59,7 @@ import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.PairingActivity
 import com.aiblackbox.portal.R
 import com.aiblackbox.portal.data.remote.RemoteSessionBus
+import com.aiblackbox.portal.data.store.OperatorPrompt
 import com.aiblackbox.portal.data.store.OperatorResolver
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -2684,6 +2685,17 @@ class OverlayService : Service() {
         (statusIndicator?.background as? GradientDrawable)?.setColor(color)
     }
 
+    /**
+     * True (and says so) while no operator is resolved: the starting screen handed none
+     * over and the box's roster has not filled the operator spinner (unreachable, or it
+     * lists nobody). A prompt or a realtime session as "" would run as no one.
+     */
+    private fun operatorBlocks(): Boolean {
+        OperatorResolver.sendBlockedReason(currentOperator, OperatorPrompt.CHOOSE) ?: return false
+        showToast("Choose an operator first: pick one in this panel's operator menu.")
+        return true
+    }
+
     private fun sendPromptToAI() {
         val prompt = promptInput?.text?.toString()?.trim() ?: ""
 
@@ -2691,6 +2703,7 @@ class OverlayService : Service() {
             showToast("Enter a prompt or attach screenshots/recording")
             return
         }
+        if (operatorBlocks()) return
 
         updateStatus("Sending...")
         progressBar?.visibility = View.VISIBLE
@@ -3165,6 +3178,7 @@ class OverlayService : Service() {
             showToast("Server URL not set")
             return
         }
+        if (operatorBlocks()) return
 
         realtimeSessionId = UUID.randomUUID().toString()
 

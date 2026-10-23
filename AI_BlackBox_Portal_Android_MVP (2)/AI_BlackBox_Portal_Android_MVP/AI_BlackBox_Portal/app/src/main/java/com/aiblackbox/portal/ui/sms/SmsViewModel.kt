@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import kotlinx.coroutines.CancellationException
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorGeneration
 import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -58,6 +59,10 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     private var api: BlackBoxApi? = null
     private var boundOrigin = ""
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    // Each load is tagged with the operator generation it started in: a reply that lands
+    // after a switch (the 10 s poll, a load already in flight) was the previous
+    // operator's, so it is dropped instead of replacing the new operator's inbox.
+    private val generation = OperatorGeneration()
 
     private val _threads = MutableStateFlow<List<SmsThread>>(emptyList())
     val threads: StateFlow<List<SmsThread>> = _threads.asStateFlow()
@@ -108,6 +113,7 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
         // badge were the previous operator's, so drop them and load the new operator's.
         viewModelScope.launch {
             store.operator.distinctUntilChanged().drop(1).collect {
+                generation.advance()
                 clearSelection()
                 _threads.value = emptyList()
                 _unreadCount.value = 0
@@ -138,9 +144,12 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     fun loadThreads() {
         val sms = sms ?: return
         _isLoading.value = true
+        val tag = generation.tag()
         viewModelScope.launch {
             try {
-                val response = sms.threads() ?: run { _threads.value = emptyList(); return@launch }
+                val response = sms.threads()
+                if (!generation.isCurrent(tag)) return@launch
+                if (response == null) { _threads.value = emptyList(); return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 val threadsArray = root["threads"]?.jsonArray ?: return@launch
                 _threads.value = threadsArray.map { el ->
@@ -156,9 +165,9 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } catch (_: Exception) {
-                _threads.value = emptyList()
+                if (generation.isCurrent(tag)) _threads.value = emptyList()
             } finally {
-                _isLoading.value = false
+                if (generation.isCurrent(tag)) _isLoading.value = false
             }
         }
     }
@@ -208,9 +217,12 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
         val sms = sms ?: return
         _selectedPhone.value = phone
         _selectedContactName.value = _threads.value.find { it.phoneNumber == phone }?.contactName ?: ""
+        val tag = generation.tag()
         viewModelScope.launch {
             try {
-                val response = sms.messages(phone) ?: run { _messages.value = emptyList(); return@launch }
+                val response = sms.messages(phone)
+                if (!generation.isCurrent(tag)) return@launch
+                if (response == null) { _messages.value = emptyList(); return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 val msgsArray = root["messages"]?.jsonArray ?: return@launch
                 _messages.value = msgsArray.map { el ->
@@ -226,7 +238,7 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 markThreadRead(api, phone)
             } catch (_: Exception) {
-                _messages.value = emptyList()
+                if (generation.isCurrent(tag)) _messages.value = emptyList()
             }
         }
     }
@@ -300,22 +312,27 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadUnreadCount() {
         val sms = sms ?: return
+        val tag = generation.tag()
         viewModelScope.launch {
             try {
-                val response = sms.unread() ?: run { _unreadCount.value = 0; return@launch }
+                val response = sms.unread()
+                if (!generation.isCurrent(tag)) return@launch
+                if (response == null) { _unreadCount.value = 0; return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 _unreadCount.value = root["unread_count"]?.jsonPrimitive?.intOrNull ?: 0
             } catch (_: Exception) {
-                _unreadCount.value = 0
+                if (generation.isCurrent(tag)) _unreadCount.value = 0
             }
         }
     }
 
     fun loadSmsPreferences() {
         val sms = sms ?: return
+        val tag = generation.tag()
         viewModelScope.launch {
             try {
                 val pref = SmsPreference.parse(sms.preferences())
+                if (!generation.isCurrent(tag)) return@launch
                 _smsProvider.value = pref.provider
                 _smsModel.value = pref.model
             } catch (_: Exception) {}

@@ -285,7 +285,8 @@ private fun CliAgentBranches(
                         screenState.launch(provider, yolo = true)
                     },
                     onChooseFolderForTerminal = {
-                        onStateChange(CliAgentInternalState.FolderPicker)
+                        // The legacy picker lists and opens this operator's tmux sessions.
+                        if (screenState.requireOperator()) onStateChange(CliAgentInternalState.FolderPicker)
                     },
                     modifier = Modifier.fillMaxSize(),
                 )

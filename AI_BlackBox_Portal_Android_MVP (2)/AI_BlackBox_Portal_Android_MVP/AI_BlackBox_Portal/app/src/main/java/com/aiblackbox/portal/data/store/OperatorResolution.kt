@@ -43,6 +43,25 @@ sealed interface OperatorResolution {
 /** What the top bar asks of the operator: nothing, a pick, or a first operator. */
 enum class OperatorPrompt { NONE, CHOOSE, ADD_FIRST }
 
+/**
+ * Tags a load with the operator generation it started in. A screen that reloads on an
+ * operator switch [advance]s it; a reply tagged before the switch is then stale and is
+ * dropped, so a poll that lands after the new operator's load cannot show the previous
+ * operator's data. Main-thread only (viewModelScope), like the state it guards.
+ */
+class OperatorGeneration {
+    private var value = 0
+
+    /** The operator changed: every load tagged before now is stale. */
+    fun advance() { value++ }
+
+    /** The tag for a load starting now. */
+    fun tag(): Int = value
+
+    /** Whether a load tagged [tag] may still apply its result. */
+    fun isCurrent(tag: Int): Boolean = tag == value
+}
+
 /** A request that needs an operator was made while none is resolved. */
 class OperatorUnresolvedException(message: String = OperatorResolver.CHOOSE_MESSAGE) :
     IllegalStateException(message)
@@ -144,10 +163,7 @@ class LegacyPairingOperatorMigration(private val readLegacy: () -> String?) : Da
 
     override suspend fun migrate(currentData: Preferences): Preferences {
         val prefs = currentData.toMutablePreferences()
-        val legacy = readLegacy()?.trim().orEmpty()
-        if (legacy.isNotEmpty() && prefs[BlackBoxStore.KEY_OPERATOR].isNullOrBlank()) {
-            prefs[BlackBoxStore.KEY_OPERATOR] = legacy
-        }
+        BlackBoxStore.adoptPairingOperatorInto(prefs, readLegacy().orEmpty())
         prefs[KEY_MIGRATED] = true
         return prefs.toPreferences()
     }

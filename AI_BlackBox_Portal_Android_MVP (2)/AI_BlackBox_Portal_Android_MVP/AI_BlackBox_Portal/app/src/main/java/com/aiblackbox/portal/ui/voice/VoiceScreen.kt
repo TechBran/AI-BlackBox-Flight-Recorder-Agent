@@ -68,6 +68,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorPrompt
+import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.data.voice.MicBuffer
 import com.aiblackbox.portal.data.voice.MicSourcePolicy
 import com.aiblackbox.portal.data.voice.TranscriptEntry
@@ -545,6 +547,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect() {
+        // A voice session runs as the resolved operator (persona, memory, ledger); the
+        // store's operator is "" until the box resolves one, and the server cannot build
+        // context for "" — so say what to do instead of failing generically.
+        OperatorResolver.sendBlockedReason(currentOperator, OperatorPrompt.CHOOSE)?.let {
+            _error.value = it
+            return
+        }
         val sessionConfig = buildSessionConfig()
         _error.value = null
         stopMic()

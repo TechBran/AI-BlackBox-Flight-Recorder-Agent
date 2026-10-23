@@ -113,6 +113,19 @@ class SmsInboxApiTest {
         assertEquals("", SmsPreference.DEFAULT.model)
     }
 
+    @Test fun `the app's gemini is saved as the Portal's google, so both surfaces show it`() = runBlocking {
+        // The box treats the two alike, but the Portal's select only lists "google": a saved
+        // "gemini" showed blank there, and a model edit then saved provider anthropic.
+        reply()
+        sms.savePreferences("gemini", "")
+        assertEquals("google", bodyOf(taken())["sms_provider"]!!.jsonPrimitive.content)
+        reply()
+        sms.savePreferences("anthropic", "claude-opus-5-5")
+        assertEquals("anthropic", bodyOf(taken())["sms_provider"]!!.jsonPrimitive.content)
+        assertEquals("google", SmsPreference.wireProvider("gemini"))
+        assertEquals("xai", SmsPreference.wireProvider("xai"))
+    }
+
     @Test fun `the Portal's google provider id shows as gemini, the id this app's menu uses`() {
         assertEquals("gemini", SmsPreference.parse("""{"sms_provider":"google","sms_model":""}""").provider)
         assertEquals("gemini", SmsPreference.parse("""{"sms_provider":"gemini"}""").provider)

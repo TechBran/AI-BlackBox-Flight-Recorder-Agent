@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.OperatorGeneration
 import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +41,8 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
     private var book: ContactsBookApi? = null
     private var boundOrigin = ""
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    // A book that lands after an operator switch was the previous operator's: dropped.
+    private val generation = OperatorGeneration()
 
     // -- Raw state --
     private val _allContacts = MutableStateFlow<List<Contact>>(emptyList())
@@ -89,6 +92,7 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
         // delete were the previous operator's book, so close them and load the new one.
         viewModelScope.launch {
             store.operator.distinctUntilChanged().drop(1).collect {
+                generation.advance()
                 hideEdit()
                 hideDelete()
                 _allContacts.value = emptyList()
@@ -108,9 +112,12 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
     fun loadContacts() {
         val book = book ?: return
         _isLoading.value = true
+        val tag = generation.tag()
         viewModelScope.launch {
             try {
-                val response = book.list() ?: run { _allContacts.value = emptyList(); return@launch }
+                val response = book.list()
+                if (!generation.isCurrent(tag)) return@launch
+                if (response == null) { _allContacts.value = emptyList(); return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
                 val arr = root["contacts"]?.jsonArray ?: return@launch
                 _allContacts.value = arr.map { el ->
@@ -130,9 +137,9 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
                     )
                 }
             } catch (_: Exception) {
-                _allContacts.value = emptyList()
+                if (generation.isCurrent(tag)) _allContacts.value = emptyList()
             } finally {
-                _isLoading.value = false
+                if (generation.isCurrent(tag)) _isLoading.value = false
             }
         }
     }
