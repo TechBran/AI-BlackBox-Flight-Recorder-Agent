@@ -253,100 +253,6 @@ def ensure_book_for_read(data: Dict[str, Any], operator: str) -> None:
             save_contacts(data)
 
 
-def _is_retired_seed(contact_id: str, contact: Any) -> bool:
-    """True only for a seeded 'self' record exactly as a release wrote it:
-    every field as seeded (the inbound-SMS flags at most materialized at their
-    defaults) and never re-saved since (updated_at == created_at). Any edit,
-    or any field the seed never had, makes the record the user's."""
-    if not isinstance(contact, dict) or not _SEED_FIELDS.issuperset(contact):
-        return False
-    if contact.get("id") != contact_id or contact.get("created_at") != contact.get("updated_at"):
-        return False
-    if (contact.get("name") != SYSTEM_CONTACT_NAME or contact.get("relationship") != "self"
-            or contact.get("tags") != ["system", "self"] or contact.get("created_by") != "system"):
-        return False
-    if contact.get("inbound_allowed", True) is not True or contact.get("is_operator_self", False) is not False:
-        return False
-    phone, email = contact.get("phone"), contact.get("email")
-    if not isinstance(phone, str) or not isinstance(email, str):
-        return False
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if len(digits) != 11 or phone != "+" + digits:  # every seed was E.164 +1
-        return False
-    variant = (hashlib.sha256(digits[-10:].encode()).hexdigest(),
-               hashlib.sha256(email.encode()).hexdigest(),
-               contact.get("notes"))
-    return variant in _RETIRED_SEED_VARIANTS
-
-
-def _atomic_write(path: Path, payload: bytes, mode: int) -> None:
-    """Write ``payload`` to ``path`` via a synced temp file in the same dir."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
-def strip_retired_seed_contacts(path: Optional[Path] = None) -> int:
-    """Startup migration: remove the seeded 'self' records earlier releases put
-    in every book (exact matches only, see _is_retired_seed) and give each such
-    book this box's own line instead when one is configured. Idempotent: once
-    the seeds are gone nothing matches, so later boots change nothing.
-
-    Writes only when it removed something: first a backup of the original bytes
-    (<file>.bak-seed-<UTC>), then the store, each atomically and with the
-    store's mode. A missing store, or one that does not parse, is never
-    written. Returns how many records it removed.
-    """
-    path = Path(path or CONTACTS_FILE)
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
-        return 0
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        log.warning("contacts: %s does not parse; retired-seed cleanup skipped", path)
-        return 0
-    if not isinstance(data, dict):
-        return 0
-    removed = 0
-    for operator, book in data.items():
-        if not isinstance(book, dict):
-            continue
-        seeds = [cid for cid, contact in book.items() if _is_retired_seed(cid, contact)]
-        if not seeds:
-            continue
-        for cid in seeds:
-            del book[cid]
-        removed += len(seeds)
-        replacement = system_self_contact(operator)
-        if replacement and not any(
-            isinstance(c, dict) and _normalize_phone(c.get("phone")) == _normalize_phone(replacement["phone"])
-            for c in book.values()
-        ):
-            book[replacement["id"]] = replacement
-    if not removed:
-        return 0
-    mode = stat.S_IMODE(path.stat().st_mode)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup = path.with_name(f"{path.name}.bak-seed-{stamp}")
-    _atomic_write(backup, raw, mode)
-    _atomic_write(path, json.dumps(data, indent=2).encode(), mode)
-    log.info("contacts: removed %d retired seed contact(s); backup at %s", removed, backup)
-    return removed
-
-
 def search_contacts(query: str, operator: str) -> List[Dict[str, Any]]:
     """
     Case-insensitive fuzzy match across all contact fields.
@@ -509,3 +415,97 @@ def upsert_contact(
     if warning:
         return {**contact, "warning": warning}
     return contact
+
+
+def _is_retired_seed(contact_id: str, contact: Any) -> bool:
+    """True only for a seeded 'self' record exactly as a release wrote it:
+    every field as seeded (the inbound-SMS flags at most materialized at their
+    defaults) and never re-saved since (updated_at == created_at). Any edit,
+    or any field the seed never had, makes the record the user's."""
+    if not isinstance(contact, dict) or not _SEED_FIELDS.issuperset(contact):
+        return False
+    if contact.get("id") != contact_id or contact.get("created_at") != contact.get("updated_at"):
+        return False
+    if (contact.get("name") != SYSTEM_CONTACT_NAME or contact.get("relationship") != "self"
+            or contact.get("tags") != ["system", "self"] or contact.get("created_by") != "system"):
+        return False
+    if contact.get("inbound_allowed", True) is not True or contact.get("is_operator_self", False) is not False:
+        return False
+    phone, email = contact.get("phone"), contact.get("email")
+    if not isinstance(phone, str) or not isinstance(email, str):
+        return False
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if len(digits) != 11 or phone != "+" + digits:  # every seed was E.164 +1
+        return False
+    variant = (hashlib.sha256(digits[-10:].encode()).hexdigest(),
+               hashlib.sha256(email.encode()).hexdigest(),
+               contact.get("notes"))
+    return variant in _RETIRED_SEED_VARIANTS
+
+
+def _atomic_write(path: Path, payload: bytes, mode: int) -> None:
+    """Write ``payload`` to ``path`` via a synced temp file in the same dir."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def strip_retired_seed_contacts(path: Optional[Path] = None) -> int:
+    """Startup migration: remove the seeded 'self' records earlier releases put
+    in every book (exact matches only, see _is_retired_seed) and give each such
+    book this box's own line instead when one is configured. Idempotent: once
+    the seeds are gone nothing matches, so later boots change nothing.
+
+    Writes only when it removed something: first a backup of the original bytes
+    (<file>.bak-seed-<UTC>), then the store, each atomically and with the
+    store's mode. A missing store, or one that does not parse, is never
+    written. Returns how many records it removed.
+    """
+    path = Path(path or CONTACTS_FILE)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return 0
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        log.warning("contacts: %s does not parse; retired-seed cleanup skipped", path)
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    removed = 0
+    for operator, book in data.items():
+        if not isinstance(book, dict):
+            continue
+        seeds = [cid for cid, contact in book.items() if _is_retired_seed(cid, contact)]
+        if not seeds:
+            continue
+        for cid in seeds:
+            del book[cid]
+        removed += len(seeds)
+        replacement = system_self_contact(operator)
+        if replacement and not any(
+            isinstance(c, dict) and _normalize_phone(c.get("phone")) == _normalize_phone(replacement["phone"])
+            for c in book.values()
+        ):
+            book[replacement["id"]] = replacement
+    if not removed:
+        return 0
+    mode = stat.S_IMODE(path.stat().st_mode)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = path.with_name(f"{path.name}.bak-seed-{stamp}")
+    _atomic_write(backup, raw, mode)
+    _atomic_write(path, json.dumps(data, indent=2).encode(), mode)
+    log.info("contacts: removed %d retired seed contact(s); backup at %s", removed, backup)
+    return removed
