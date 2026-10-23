@@ -5,10 +5,12 @@
 #   scripts/compile_python_lock.sh -P aiohttp   also upgrade one package (extra args go to uv)
 #   scripts/compile_python_lock.sh --check      exit 1 if either file is out of date (CI gate)
 #
-# The committed lock seeds the resolver's preferences, so a recompile keeps
-# every validated pin that still satisfies requirements.in and moves only what
-# a changed floor or cap forces, or what -P / --upgrade asks for. Run the
-# targeted tests (and pip-audit) against a venv built from the new lock before
+# The committed lock's versions seed the resolver's preferences, so a
+# recompile keeps every validated pin that still satisfies requirements.in and
+# moves only what a changed floor or cap forces, or what -P / --upgrade asks
+# for. Its hashes are never reused: every compile, --check included, fetches
+# them from the index, so a hand-edited hash fails the check. Run the targeted
+# tests (and pip-audit) against a venv built from the new lock before
 # committing it.
 #
 # requirements.lock.txt  every package, == pinned, with sha256 hashes. Installed
@@ -49,8 +51,12 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# Seed with the pins only. uv keeps the --hash lines of a pin it finds in the
+# -o file as they are, so seeding the hashed lock carried an added, swapped or
+# removed hash straight through --check.
 if [[ -f "$ROOT/requirements.lock.txt" ]]; then
-    cp "$ROOT/requirements.lock.txt" "$tmp/requirements.lock.txt"
+    awk '/^[A-Za-z0-9]/ { sub(/ *\\$/, ""); print }' "$ROOT/requirements.lock.txt" \
+        > "$tmp/requirements.lock.txt"
 fi
 
 # Relative input path, so the lock's "# via -r requirements.in" lines do not
@@ -78,6 +84,8 @@ if (( check )); then
     for f in requirements.lock.txt requirements.txt; do
         if ! diff -u "$ROOT/$f" "$tmp/$f" > "$tmp/$f.diff" 2>&1; then
             echo "ERROR: $f is out of date with requirements.in. Run $SELF and commit the result." >&2
+            echo "       (A hash-only diff means the file was edited, or the index gained a file for" >&2
+            echo "       a locked version since it was compiled; recompiling settles which.)" >&2
             head -n 60 "$tmp/$f.diff" >&2
             rc=1
         fi

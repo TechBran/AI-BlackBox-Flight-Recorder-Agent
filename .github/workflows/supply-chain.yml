@@ -7,6 +7,8 @@
 #   2. The Orchestrator venv builds from the lock with --require-hashes, and
 #      every third-party import in Orchestrator/ and ToolVault/ is declared in
 #      requirements.in and importable there (scripts/check_imports_vs_manifest.py).
+#      The CPU reranker stack that installer/templates/blackbox-install-reranker-cpu.sh
+#      adds on MID-tier boxes still resolves under the lock's pins.
 #   3. pip-audit finds no known vulnerability in the lock or in the MCP venv's
 #      manifest. The weekly run catches advisories published against an
 #      unchanged lock.
@@ -58,6 +60,15 @@ jobs:
 
       - name: Imports match requirements.in
         run: '"$RUNNER_TEMP/orch/bin/python" scripts/check_imports_vs_manifest.py --require-installed'
+
+      - name: The CPU reranker stack resolves under the lock's pins
+        # The installer adds it with -c requirements.txt and the updater
+        # reinstalls it the same way after a lock change, so a lock that leaves
+        # no compatible transformers must fail here, not on a box. Resolution
+        # only (wheel metadata); nothing is downloaded or installed.
+        run: >-
+          "$RUNNER_TEMP/orch/bin/pip" install --dry-run --quiet
+          --disable-pip-version-check -c requirements.txt sentence-transformers
 
       - name: pip-audit requirements.lock.txt
         # Known exceptions, all Starlette 0.48: the fixes are in 0.49.1 and

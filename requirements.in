@@ -29,6 +29,12 @@
 #     move an EXISTING box: pip leaves an installed version that satisfies a
 #     requirement alone. Raise a floor when an advisory lands.
 #
+# Packages an installer adds to the venv on top of the lock (the CPU reranker:
+# installer/templates/blackbox-install-reranker-cpu.sh) install with
+# `-c requirements.txt`, so they resolve inside these pins, and the updater
+# reinstalls them the same way after a lock change (LOCK_EXTRAS in
+# Orchestrator/update/runner.py). Install anything else by hand the same way.
+#
 # If the hashed install fails on a box (no wheel for its platform, a proxy
 # rewriting downloads), the installer and the updater stop with an error.
 # Nothing falls back by itself. The manual fallback is
@@ -45,6 +51,10 @@ starlette==0.48.0
 uvicorn[standard]==0.30.0
 pydantic==2.9.0
 python-multipart>=0.0.32,<0.1   # [runtime] starlette's form parser (File/Form uploads); CVE-2024-53981, CVE-2026-24486, -40347, -42561, -53538..-53540
+                                # Behaviour change from the 0.0.9 the boxes ran: a part named only by `filename*=UTF-8''...` (RFC 5987,
+                                # which RFC 7578 section 4.2 forbids) now parses as a text field, so a File endpoint answers 422. Browsers,
+                                # OkHttp (Android) and urllib3 2.x (MCP) send a plain filename= and are unaffected; an integrator whose
+                                # client sends only filename* (reqwest for non-ASCII names, urllib3 1.x) must send filename= as well.
 
 # === HTTP clients ===
 requests>=2.33.0,<3             # CVE-2024-47081 (2.32.4), CVE-2026-25645 (2.33.0)
@@ -54,7 +64,7 @@ urllib3>=2.8.0,<3               # imported by utils/safe_fetch.py; CVE-2025-6641
 certifi>=2026.10.19             # safe_fetch.py's CA bundle; calendar-versioned CA data, so no cap; PYSEC-2026-4320 (emSign ECC Root CA - G3 pulled from the bundle)
 
 # === WebSockets ===
-websockets>=13.0,<16            # provider realtime/STT bridges; validated on 15.x
+websockets>=13.0,<17            # provider realtime/STT bridges, asyncio client API only (additional_headers); runs on 15.x and on 16.0 (MS-02)
 websocket-client>=1.9.0,<2      # synchronous CDP client (browser/screenshot.py)
 
 # === Environment / process ===
@@ -65,7 +75,7 @@ psutil>=7.1.3,<8                # system introspection
 # === AI provider SDKs ===
 anthropic>=0.96,<1
 openai>=2.9,<3
-google-genai>=1.64,<2
+google-genai>=1.64,<3           # MS-02 runs 2.2; 2.0 broke only the Interactions API, which nothing here calls (generate_content, Live, files, models)
 google-generativeai>=0.8.6,<0.9 # deprecated SDK; keeps protobuf below 6 (see below)
 google-api-python-client>=2.187.0,<3
 google-auth>=2.48,<3            # google.auth / google.oauth2, imported directly
@@ -106,12 +116,13 @@ ddgs>=9.16,<10                  # keyless DuckDuckGo floor + fallback of every g
 # === Local models / tokenization ===
 tiktoken>=0.13.0,<1             # exact local token counts, OpenAI encodings (Orchestrator/tokenization.py, lazy; vendored BPE cache)
 tokenizers>=0.23.1,<1           # exact local token counts, HF tokenizer.json (Orchestrator/tokenization.py, lazy; vendored assets)
-huggingface_hub>=1.21.0,<2      # local-model downloads (localstack_downloads.py, lazy)
+huggingface_hub>=1.31.0,<2      # local-model downloads (localstack_downloads.py, lazy); >=1.31 for transformers 5.20 and <2 for sentence-transformers 6.1,
+                                # the CPU reranker that installer/templates/blackbox-install-reranker-cpu.sh installs under these pins
 PyYAML>=6.0.3,<7                # llama-swap config (local_stack.py)
 
 # === Security floors and caps on transitive dependencies ===
 protobuf>=5.29.6,<6             # [transitive] google-ai-generativelanguage needs <6; CVE-2026-0994
-pyasn1>=0.6.4,<0.7              # [transitive] google-auth (rsa, pyasn1-modules)
+pyasn1>=0.6.4,<0.7              # [transitive] google-auth (pyasn1-modules)
 h11>=0.16.0,<1                  # [transitive] uvicorn's HTTP/1.1 parser; CVE-2025-43859 (chunked smuggling)
 idna>=3.15,<4                   # [transitive] requests/httpx/yarl hostname encoding; CVE-2026-45409
 anyio>=4.14.2,<5                # [transitive] starlette/httpx async layer; CVE-2026-63374, -64847
