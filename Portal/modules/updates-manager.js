@@ -39,7 +39,7 @@
 // (Embedding compute/placement selection — GPU/CPU pins — also lives in the
 // onboarding wizard now; the updates panel no longer renders that card.)
 
-import { toastError } from "./core-utils.js";
+import { escapeHtml, toastError } from "./core-utils.js";
 
 let _state = "loading";
 let _lastStatus = null;  // last /update/status response
@@ -144,7 +144,7 @@ function _setState(newState, ctx = {}) {
             break;
 
         case "error":
-            row.innerHTML = `<span class="updates-status-err">Error: ${_esc(ctx.error || "unknown")}</span>`;
+            row.innerHTML = `<span class="updates-status-err">Error: ${escapeHtml(ctx.error || "unknown")}</span>`;
             list.innerHTML = "";
             break;
 
@@ -162,7 +162,7 @@ function _setState(newState, ctx = {}) {
 
         case "up-to-date": {
             const { status } = ctx;
-            row.innerHTML = `<span class="updates-status-ok">✓ Up to date</span> <code class="updates-sha">${_esc(status.current_short)}</code>`;
+            row.innerHTML = `<span class="updates-status-ok">✓ Up to date</span> <code class="updates-sha">${escapeHtml(status.current_short)}</code>`;
             list.innerHTML = "";
             btnRollback.disabled = !status.last_state;
             break;
@@ -170,7 +170,7 @@ function _setState(newState, ctx = {}) {
 
         case "local-ahead": {
             const { status } = ctx;
-            row.innerHTML = `<span class="updates-status-info">Local ahead of origin by ${status.commits_ahead} commit(s)</span> <code class="updates-sha">${_esc(status.current_short)}</code>`;
+            row.innerHTML = `<span class="updates-status-info">Local ahead of origin by ${status.commits_ahead} commit(s)</span> <code class="updates-sha">${escapeHtml(status.current_short)}</code>`;
             list.innerHTML = "<p class='updates-hint-inline'>Unpushed local work. Nothing to pull from GitHub right now.</p>";
             btnRollback.disabled = !status.last_state;
             break;
@@ -180,7 +180,7 @@ function _setState(newState, ctx = {}) {
             const { status } = ctx;
             row.innerHTML = `
                 <span class="updates-status-update">⬆ ${status.commits_behind} update${status.commits_behind === 1 ? "" : "s"} available</span>
-                <code class="updates-sha">${_esc(status.current_short)} → ${_esc(status.latest_short)}</code>
+                <code class="updates-sha">${escapeHtml(status.current_short)} → ${escapeHtml(status.latest_short)}</code>
             `;
             list.innerHTML = _renderCommits(status);
             btnInstall.disabled = false;
@@ -195,8 +195,8 @@ function _setState(newState, ctx = {}) {
 
         case "failed": {
             const { lastState } = ctx;
-            row.innerHTML = `<span class="updates-status-err">✕ Last update failed during <code>${_esc(lastState.failed_phase || lastState.phase)}</code></span>`;
-            list.innerHTML = `<pre class="updates-error">${_esc(lastState.error || "(no error message recorded)")}</pre>`;
+            row.innerHTML = `<span class="updates-status-err">✕ Last update failed during <code>${escapeHtml(lastState.failed_phase || lastState.phase)}</code></span>`;
+            list.innerHTML = `<pre class="updates-error">${escapeHtml(lastState.error || "(no error message recorded)")}</pre>`;
             btnRollback.disabled = false;
             break;
         }
@@ -205,9 +205,9 @@ function _setState(newState, ctx = {}) {
             const { lastState } = ctx;
             row.innerHTML = `<span class="updates-status-warn">⚠ Update interrupted</span>`;
             list.innerHTML = `
-                <pre class="updates-error">Last phase: ${_esc(lastState.phase)}
-Target SHA: ${_esc(lastState.target_sha || "unknown")}
-Started: ${_esc(lastState.updated_iso || "")}</pre>
+                <pre class="updates-error">Last phase: ${escapeHtml(lastState.phase)}
+Target SHA: ${escapeHtml(lastState.target_sha || "unknown")}
+Started: ${escapeHtml(lastState.updated_iso || "")}</pre>
                 <p class='updates-hint-inline'>The system was killed mid-update (crash, power, or kill -9). Rollback to the pre-update tag is safe — your code reverts to the last known-good SHA.</p>
             `;
             btnRollback.disabled = false;
@@ -224,12 +224,12 @@ function _renderCommits(status) {
         .filter(([k, v]) => v && k !== "code_only")
         .map(([k]) => k);
     const catsHtml = catsOn.length
-        ? `<div class="updates-categories">${catsOn.map((c) => `<span class="updates-cat updates-cat-${_esc(c)}">${_esc(c)}</span>`).join(" ")}</div>`
+        ? `<div class="updates-categories">${catsOn.map((c) => `<span class="updates-cat updates-cat-${escapeHtml(c)}">${escapeHtml(c)}</span>`).join(" ")}</div>`
         : "";
     const items = status.commits.slice(0, 8).map((c) => `
         <li>
-            <code class="updates-commit-sha">${_esc(c.short)}</code>
-            <span class="updates-commit-subject">${_esc(c.subject)}</span>
+            <code class="updates-commit-sha">${escapeHtml(c.short)}</code>
+            <span class="updates-commit-subject">${escapeHtml(c.subject)}</span>
         </li>
     `).join("");
     const more = status.commits.length > 8
@@ -369,7 +369,7 @@ function _renderEmbeddingsCard(container, status) {
         html = `
             <div class="embeddings-card embeddings-card-broken">
                 <div class="embeddings-card-title">⚠ Search memory needs attention</div>
-                <p class="embeddings-card-copy">${_esc(health.detail || "The active embedding model stopped working. Automatic recovery is migrating your search memory to a working model.")}</p>
+                <p class="embeddings-card-copy">${escapeHtml(health.detail || "The active embedding model stopped working. Automatic recovery is migrating your search memory to a working model.")}</p>
                 ${jobRunning ? `<div class="embeddings-card-progress">${_embedProgressLine(job)}</div>` : ""}
                 <div class="embeddings-card-actions">
                     <button class="btn embeddings-manage-btn">Manage</button>
@@ -389,7 +389,7 @@ function _renderEmbeddingsCard(container, status) {
         html = `
             <div class="embeddings-card embeddings-card-info">
                 <div class="embeddings-card-title">⬆ Search memory update available</div>
-                <p class="embeddings-card-copy">Your system will transfer embeddings to ${_esc(successorLabel)} in the background. Search keeps working the whole time; the switch happens automatically when it finishes and survives restarts.</p>
+                <p class="embeddings-card-copy">Your system will transfer embeddings to ${escapeHtml(successorLabel)} in the background. Search keeps working the whole time; the switch happens automatically when it finishes and survives restarts.</p>
                 <div class="embeddings-card-actions">
                     ${health.successor_slug ? `<button id="btnEmbeddingsUpdate" class="btn btn-primary">Update</button>` : ""}
                     <button class="btn embeddings-manage-btn">Manage</button>
@@ -443,7 +443,7 @@ function _rerankStatusLineHtml(rr) {
     if (!rr) return "";  // endpoint unreachable / older backend — hide
     let line;
     if (rr.enabled && rr.available) {
-        line = `Reranking: ON — ${_esc(rr.provider || "?")}/${_esc(rr.model || "?")}`;
+        line = `Reranking: ON — ${escapeHtml(rr.provider || "?")}/${escapeHtml(rr.model || "?")}`;
     } else if (rr.enabled && !rr.available) {
         // Configured ON but preflight failed / not configured — "not in use".
         line = "Reranking: ON — not in use";
@@ -500,7 +500,7 @@ function _renderLocalModelsCard(container, status) {
 
     container.innerHTML = `
         <div class="embeddings-card embeddings-rerank-status">
-            <div class="embeddings-card-title">${_esc(line)}</div>
+            <div class="embeddings-card-title">${escapeHtml(line)}</div>
             <div class="embeddings-card-actions">
                 <button class="btn local-models-manage-btn">Manage</button>
             </div>
@@ -717,13 +717,4 @@ function _ensureLogModal() {
 function _appendLog(pre, text) {
     pre.textContent += text + "\n";
     pre.scrollTop = pre.scrollHeight;
-}
-
-function _esc(s) {
-    if (s == null) return "";
-    return String(s)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;");
 }

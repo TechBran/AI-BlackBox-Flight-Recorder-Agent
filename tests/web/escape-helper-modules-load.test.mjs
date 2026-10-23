@@ -25,7 +25,7 @@ const MODULES = [
     ...["api_keys", "cli_agents", "done", "embeddings", "image", "local_models", "mcp", "operator",
         "optional_integrations", "pair_phone", "tailscale", "transcription", "web_search", "welcome"]
         .map((s) => `onboarding/steps/${s}.js`),
-    "voice-lab.js", "voice-library.js", "modules/devices-section.js",
+    "voice-lab.js", "voice-library.js", "modules/devices-section.js", "modules/updates-manager.js",
 ];
 
 for (const rel of MODULES) {
@@ -44,4 +44,36 @@ test("a wizard step renders hostile server text as text", async () => {
     assert.equal(probe.querySelector("span").textContent, hostile);
     assert.equal(probe.querySelector("img"), null);
     assert.equal(probe.querySelector("input").hasAttribute("onfocus"), false);
+});
+
+test("the Updates panel renders hostile commit and status text as text", async () => {
+    // Commit subjects come from the git remote, status fields from the server.
+    const hostile = `x" onfocus="window.__pwned=1"><img src=x onerror="window.__pwned=1">`;
+    const host = document.createElement("div");
+    host.innerHTML = `<div id="updatesStatusRow"></div><div id="updatesCommitsList"></div>
+        <button id="btnInstallUpdate"></button><button id="btnViewUpdateLog"></button>
+        <button id="btnRollbackUpdate"></button><button id="btnCheckUpdates"></button>`;
+    document.body.appendChild(host);
+    const status = {
+        git_initialized: true, commits_behind: 2, commits_ahead: 0,
+        current_short: hostile, latest_short: hostile,
+        commits: [{ short: hostile, subject: hostile }, { short: "abc1234", subject: "fix: ok" }],
+        categories: { [hostile]: true },
+    };
+    const parked = globalThis.fetch;
+    globalThis.fetch = (url) => String(url) === "/update/status"
+        ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(status) })
+        : new Promise(() => {});
+    try {
+        const { initUpdatesPanel } = await import("../../Portal/modules/updates-manager.js");
+        await initUpdatesPanel();
+    } finally {
+        globalThis.fetch = parked;
+    }
+    assert.equal(host.querySelector("img"), null);
+    assert.equal(host.querySelector("[onfocus]"), null);
+    const subjects = [...host.querySelectorAll(".updates-commit-subject")].map((n) => n.textContent);
+    assert.deepEqual(subjects, [hostile, "fix: ok"]);
+    assert.ok(host.querySelector(".updates-sha").textContent.includes(hostile));
+    host.remove();
 });

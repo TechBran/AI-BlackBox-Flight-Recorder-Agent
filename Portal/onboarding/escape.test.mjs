@@ -7,7 +7,8 @@
 // escapeHtml copy (15 of them) rendering server, model and operator data; they now
 // import util.js, which must escape exactly like core-utils. The same holds for
 // the /ui modules that kept private copies (voice-lab, voice-library,
-// devices-section): they use core-utils.
+// devices-section, updates-manager): they use core-utils, and no /ui module
+// may hand-roll the & -> &amp; replacement again.
 //
 // Run: node --test Portal/onboarding/escape.test.mjs
 import test from "node:test";
@@ -70,10 +71,11 @@ test("no wizard module keeps a private escape copy", () => {
 });
 
 test("the /ui modules that kept copies use core-utils", () => {
-    for (const rel of ["voice-lab.js", "voice-library.js", "modules/devices-section.js"]) {
+    for (const rel of ["voice-lab.js", "voice-library.js", "modules/devices-section.js",
+                       "modules/updates-manager.js"]) {
         const src = readFileSync(join(portal, rel), "utf8");
         assert.ok(!PRIVATE_COPY.test(src), `${rel} defines its own escape helper`);
-        assert.match(src, /import\s*\{[^}]*\bescapeHtml\b[^}]*\}\s*from\s*'\.\/(modules\/)?core-utils\.js'/, rel);
+        assert.match(src, /import\s*\{[^}]*\bescapeHtml\b[^}]*\}\s*from\s*["']\.\/(modules\/)?core-utils\.js["']/, rel);
     }
 });
 
@@ -84,4 +86,25 @@ test("every wizard module that renders escaped text imports it from util.js", ()
         if (!/\bescapeHtml\(/.test(src)) continue;
         assert.match(src, /import\s*\{[^}]*\bescapeHtml\b[^}]*\}\s*from\s*"\.\.?\/util\.js"/, p);
     }
+});
+
+// The idiom every private copy is built from, under any name (updates-manager's
+// was `_esc`). core-utils and util.js keep the only escape tables.
+const HAND_ROLLED = /\b(replaceAll|replace)\(\s*(["'`]&["'`]|\/&\/g?)\s*,\s*["'`]&amp;/;
+
+function portalModules(dir) {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) {
+            return ["node_modules", "vendor", "uploads", "fonts", "dev"].includes(e.name) ? [] : portalModules(p);
+        }
+        return /\.m?js$/.test(e.name) && !/\.test\.m?js$/.test(e.name) ? [p] : [];
+    });
+}
+
+test("no Portal module hand-rolls an HTML escape", () => {
+    const offenders = portalModules(portal)
+        .filter((p) => HAND_ROLLED.test(readFileSync(p, "utf8")))
+        .map((p) => p.slice(portal.length + 1));
+    assert.deepEqual(offenders, []);
 });
