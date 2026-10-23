@@ -766,6 +766,21 @@ def _open_fds() -> int:
     return len(os.listdir("/proc/self/fd"))
 
 
+def _fds_on(sock) -> int:
+    """Descriptors in this process that refer to sock's socket (sock itself
+    and any dup). Unlike the process-wide count, threads other tests left
+    running cannot move it."""
+    target = f"socket:[{os.fstat(sock.fileno()).st_ino}]"
+    count = 0
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            if os.readlink(f"/proc/self/fd/{fd}") == target:
+                count += 1
+        except OSError:  # closed between listdir and readlink
+            pass
+    return count
+
+
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
 def test_watchdog_wakes_a_blocked_recv_at_the_deadline():
     a, b = socket.socketpair()
@@ -790,18 +805,18 @@ def test_watchdog_closes_every_handle_it_took():
     would leak a descriptor and keep its TCP connection half open."""
     a, b = socket.socketpair()
     try:
-        before = _open_fds()
+        before = _fds_on(a)
         wd = sf._Watchdog(time.monotonic() + 60)
         wd.watch(a)
-        assert _open_fds() == before + 1
+        assert _fds_on(a) == before + 1
         wd.release()
-        assert _open_fds() == before
+        assert _fds_on(a) == before
         wd.watch(a)
         wd.stop()
-        assert _open_fds() == before
+        assert _fds_on(a) == before
         assert not wd.fired
         wd.watch(a)                          # after stop: never tracked
-        assert _open_fds() == before
+        assert _fds_on(a) == before
     finally:
         a.close()
         b.close()
