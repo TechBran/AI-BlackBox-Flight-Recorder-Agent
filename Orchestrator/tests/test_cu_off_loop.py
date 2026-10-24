@@ -119,9 +119,74 @@ def test_bash_tool_caps_output_at_10kb():
     assert len(result["output"]) < 10100
 
 
+def _loop_runners():
+    """asyncio.run, and uvloop.run as uvicorn runs the server when it is installed."""
+    runners = [pytest.param(asyncio.run, id="asyncio")]
+    try:
+        import uvloop
+        runners.append(pytest.param(uvloop.run, id="uvloop"))
+    except ImportError:
+        pass
+    return runners
+
+
+@pytest.mark.parametrize("run", _loop_runners())
+def test_bash_background_launch_returns_at_once_and_the_app_survives(pidfile, run):
+    """The CU prompt tells the model to open apps with `xterm &`. The app
+    inherits the output pipes, so waiting for end-of-file held the step for the
+    whole timeout, and the process-group kill then took the app down with it."""
+    from Orchestrator.routes import chat_routes
+    t0 = time.monotonic()
+    result = run(chat_routes.execute_bash_command(
+        f"echo started; sleep 30 & echo $! > {pidfile}", timeout=5))
+    assert result == {"output": "started\n", "exit_code": 0}
+    assert time.monotonic() - t0 < 2, "the step waited on the launched app's pipe"
+    assert _pid_alive(_read_pid(pidfile)), "the launched app was killed"
+
+
+def test_a_launched_app_that_writes_later_is_not_killed_by_sigpipe(pidfile):
+    """The step returns at the shell's exit, but the app still holds the pipes:
+    closing them would kill it with SIGPIPE on its next log line."""
+    from Orchestrator.routes import chat_routes
+
+    async def go():
+        result = await chat_routes.execute_bash_command(
+            f"(sleep 0.3; echo late; echo late >&2; exec sleep 30) & echo $! > {pidfile}",
+            timeout=5)
+        await asyncio.sleep(1.0)  # the loop keeps running, as the server's does
+        return result
+
+    t0 = time.monotonic()
+    result = asyncio.run(go())
+    assert result == {"output": "", "exit_code": 0}
+    assert time.monotonic() - t0 < 3
+    assert _pid_alive(_read_pid(pidfile)), "the launched app died after writing"
+
+
+@pytest.mark.parametrize("run", _loop_runners())
+def test_background_launch_leaves_no_transport_behind(pidfile, run, monkeypatch):
+    """A headless CU run ends its own loop with the launched app still holding
+    the pipes: the transport must be closed with the loop, not left for the GC
+    ("Event loop is closed")."""
+    import gc
+    from Orchestrator.routes import chat_routes
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    run(chat_routes.execute_bash_command(f"sleep 30 & echo $! > {pidfile}", timeout=5))
+    gc.collect()
+    assert not unraisable, [str(u.exc_value) for u in unraisable]
+
+
+def test_bash_output_beyond_the_pipe_buffer_does_not_wedge_the_step():
+    from Orchestrator.routes import chat_routes
+    result = asyncio.run(chat_routes.execute_bash_command(
+        "head -c 300000 /dev/zero | tr '\\0' x; echo; echo tail >&2", timeout=10))
+    assert result == {"output": "x" * 10000 + "\n... [OUTPUT TRUNCATED at 10KB]", "exit_code": 0}
+
+
 def test_bash_timeout_kills_the_whole_process_group(pidfile):
-    """A backgrounded child must not outlive the step: subprocess.run's timeout
-    killed only the shell and orphaned it."""
+    """A command still running at the timeout loses its whole group, children
+    included: subprocess.run's timeout killed only the shell and orphaned them."""
     from Orchestrator.routes import chat_routes
     t0 = time.monotonic()
     result = asyncio.run(chat_routes.execute_bash_command(

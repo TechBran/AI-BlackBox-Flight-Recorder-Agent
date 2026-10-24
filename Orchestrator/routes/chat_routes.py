@@ -4114,19 +4114,63 @@ You are serving operator: {operator}
 """
 
 
+# How long the CU bash step keeps collecting output after the shell exits. An
+# app the command launched in the background (`xterm &`) inherits the output
+# pipes and holds them open for as long as it runs, so the step ends at the
+# shell's exit, not at end-of-file.
+_BASH_DRAIN_GRACE_S = 0.3
+# Bytes kept per stream: the 10 KB character cap needs at most four bytes per
+# character. The rest is read and dropped, so memory stays bounded.
+_BASH_CAPTURE_BYTES = 4 * 10000 + 4
+# Pipes still held by launched apps, kept open (and drained) until they exit.
+_bash_drains: set = set()
+
+
+class _BashStepProtocol(asyncio.SubprocessProtocol):
+    """Collects a CU bash step's output and reports the shell's own exit.
+
+    asyncio's Process.wait() returns only once every pipe is closed, which a
+    launched app holding them never does; process_exited fires at the exit."""
+
+    def __init__(self, loop):
+        self.out, self.err = bytearray(), bytearray()
+        self.exited = loop.create_future()
+        self.pipes_closed = loop.create_future()
+        self._open_pipes = {1, 2}
+
+    def pipe_data_received(self, fd, data):
+        buf = self.out if fd == 1 else self.err
+        room = _BASH_CAPTURE_BYTES - len(buf)
+        if room > 0:
+            buf += data[:room]
+
+    def pipe_connection_lost(self, fd, exc):
+        self._open_pipes.discard(fd)
+        if not self._open_pipes and not self.pipes_closed.done():
+            self.pipes_closed.set_result(None)
+
+    def process_exited(self):
+        if not self.exited.done():
+            self.exited.set_result(None)
+
+
 async def execute_bash_command(command: str, timeout: int = 120) -> dict:
     """Execute a bash command and return output. Caps output at 10KB.
 
     The CU driver awaits this on the server's event loop, where the old
     subprocess.run froze every stream and voice call for up to ``timeout``
     (audit O02-chat-routes-A-02). It is an asyncio subprocess now, started in
-    its own session so it leads a process group: on timeout or cancellation
-    (the E-stop) the whole group is killed, and a child the command put in the
-    background (``cmd &``) cannot outlive the step.
+    its own session so it leads a process group. The step ends when the shell
+    exits: an app the command put in the background (`xterm &`, as the CU
+    prompt suggests) keeps running, and its output pipes stay open and drained,
+    so it never dies of SIGPIPE. If the shell itself is still running at the
+    timeout or on cancellation (the E-stop), the whole group is killed, so a
+    hung command cannot leave its children behind.
     """
+    import subprocess
     from Orchestrator.browser.config import ACTIVE_DISPLAY, NATIVE_MODE, get_native_env
     from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
-    proc = None
+    transport = protocol = None
     try:
         # Scrubbed env + ensure DISPLAY is set for GUI commands. This is the CU
         # driver's model-driven `bash` tool (every Anthropic CU run offers it),
@@ -4137,28 +4181,57 @@ async def execute_bash_command(command: str, timeout: int = 120) -> dict:
             env.update(get_native_env())
         else:
             env["DISPLAY"] = f":{ACTIVE_DISPLAY}"
-        proc = await asyncio.create_subprocess_shell(
-            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        loop = asyncio.get_running_loop()
+        transport, protocol = await loop.subprocess_shell(
+            lambda: _BashStepProtocol(loop), command,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=str(blackbox_root()), env=env, start_new_session=True,
         )
         try:
-            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout)
+            await asyncio.wait_for(asyncio.shield(protocol.exited), timeout)
         except asyncio.TimeoutError:
-            await _kill_process_group(proc)
+            await _kill_process_group(transport.get_pid(), protocol.exited)
             return {"output": f"Command timed out after {timeout}s", "exit_code": -1}
-        output = _decode_command_output(out_b)
-        stderr = _decode_command_output(err_b)
+        # The shell has exited, so everything its foreground commands wrote is
+        # already in the pipes.
+        await asyncio.wait({protocol.pipes_closed}, timeout=_BASH_DRAIN_GRACE_S)
+        output = _decode_command_output(bytes(protocol.out))
+        stderr = _decode_command_output(bytes(protocol.err))
         combined = output + ("\n" + stderr if stderr else "")
         # Cap output to prevent token explosion
         if len(combined) > 10000:
             combined = combined[:10000] + "\n... [OUTPUT TRUNCATED at 10KB]"
-        return {"output": combined, "exit_code": proc.returncode}
+        return {"output": combined, "exit_code": transport.get_returncode()}
     except asyncio.CancelledError:
-        if proc is not None and proc.returncode is None:
-            await _kill_process_group(proc)
+        if transport is not None and transport.get_returncode() is None:
+            await _kill_process_group(transport.get_pid(), protocol.exited)
         raise
     except Exception as e:
         return {"output": f"Error executing command: {e}", "exit_code": -1}
+    finally:
+        if transport is not None:
+            _close_after_drain(transport, protocol)
+
+
+def _close_after_drain(transport, protocol) -> None:
+    """Close the step's transport once its pipes are closed. A launched app may
+    hold them for hours, so a task waits for that and closes it."""
+    if protocol.pipes_closed.done():
+        transport.close()
+        return
+    task = asyncio.ensure_future(_drain_until_closed(transport, protocol))
+    _bash_drains.add(task)
+    task.add_done_callback(_bash_drains.discard)
+
+
+async def _drain_until_closed(transport, protocol) -> None:
+    try:
+        await protocol.pipes_closed
+    finally:
+        # Also reached when the loop shuts down (a headless CU run ends): close
+        # the pipes with the loop rather than leave the transport to the GC.
+        # The shell has exited or been killed, so close() kills nothing.
+        transport.close()
 
 
 def _decode_command_output(data: bytes) -> str:
@@ -4168,18 +4241,19 @@ def _decode_command_output(data: bytes) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-async def _kill_process_group(proc) -> None:
-    """SIGKILL ``proc``'s whole process group (it leads one: start_new_session)
-    and reap it, so neither it nor a backgrounded child outlives the CU step."""
+async def _kill_process_group(pid, exited) -> None:
+    """SIGKILL the whole process group ``pid`` leads (start_new_session) and
+    wait for the shell's exit, so neither a hung command nor a child it started
+    outlives it."""
     import os
     import signal
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
     try:
-        await asyncio.wait_for(proc.wait(), 5)
-    except (asyncio.TimeoutError, ProcessLookupError):
+        await asyncio.wait_for(asyncio.shield(exited), 5)
+    except asyncio.TimeoutError:
         pass
 
 
