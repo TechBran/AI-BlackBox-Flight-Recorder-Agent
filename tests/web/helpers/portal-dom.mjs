@@ -46,6 +46,9 @@ export function installDom() {
         "MutationObserver", "Event", "CustomEvent", "KeyboardEvent", "getComputedStyle",
         "requestAnimationFrame", "cancelAnimationFrame", "Image", "Audio", "FileReader",
         "Blob", "URL", "WebSocket", "XMLHttpRequest", "HTMLAudioElement",
+        // jsdom's addEventListener({signal}) accepts only jsdom's own
+        // AbortSignal, as a browser's accepts only the page's.
+        "AbortController", "AbortSignal",
     ]) {
         if (w[k] !== undefined) {
             Object.defineProperty(globalThis, k, { value: w[k], configurable: true, writable: true });

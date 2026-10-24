@@ -36,17 +36,36 @@ export function configureMarked() {
 }
 
 // =============================================================================
-// Media URL Detection and Rendering
+// Media URL Upgrade (post-sanitize DOM pass)
 // =============================================================================
+//
+// Models show generated media by writing its URL (/ui/uploads/x.png, or an
+// absolute http(s)://host/ui/uploads/... one), as a bare URL, a link or the
+// markdown image form. This used to be a string rewrite BEFORE marked.parse,
+// which split ![alt](url) across lines (the reply showed a literal "![alt]("
+// around the player) and printed the raw <div ...> inside inline code and
+// ``` fences (audit P01-chat-core-web-12). The upgrade now runs on the
+// SANITIZED output: it walks the parsed DOM, turns <img>/<a> elements and text
+// URLs into players, skips code, and builds every node with createElement and
+// setAttribute -- no URL is ever spliced into markup. When it changed anything
+// the result goes through sanitizeAssistantHtml once more, so the sanitizer
+// stays the last word on every string renderMarkdown returns.
 
-/**
- * Media file extensions by type
- */
-const MEDIA_EXTENSIONS = {
-    image: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'],
-    video: ['.mp4', '.webm', '.mov', '.avi', '.mkv'],
-    audio: ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac']
+const MEDIA_EXT = 'png|jpg|jpeg|gif|webp|bmp|svg|mp4|webm|mov|avi|mkv|mp3|wav|ogg|m4a|flac|aac';
+
+/** One media URL: /ui/uploads/... or http(s)://host/ui/uploads/..., ending in a media extension. */
+const MEDIA_URL_SOURCE = `(?:https?:\\/\\/[^\\s\\/<>"']+)?\\/ui\\/uploads\\/[^\\s<>"']+?\\.(?:${MEDIA_EXT})(?![\\w\\/-]|\\.\\w)`;
+const MEDIA_URL_IN_TEXT = new RegExp(MEDIA_URL_SOURCE, 'gi');
+const MEDIA_URL_EXACT = new RegExp(`^${MEDIA_URL_SOURCE}$`, 'i');
+
+const MEDIA_TYPES = {
+    image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'],
+    video: ['mp4', 'webm', 'mov', 'avi', 'mkv'],
+    audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'],
 };
+
+/** Text in these never becomes a player (code stays code; links/players stay what they are). */
+const SKIP_TEXT_IN = 'a, code, pre, kbd, samp, button, textarea, audio, video, .media-preview';
 
 /**
  * Detect media type from URL/filename
@@ -54,79 +73,162 @@ const MEDIA_EXTENSIONS = {
  * @returns {string|null} Media type (image, video, audio) or null
  */
 function detectMediaType(url) {
-    const lower = url.toLowerCase();
-    for (const [type, exts] of Object.entries(MEDIA_EXTENSIONS)) {
-        if (exts.some(ext => lower.endsWith(ext))) {
-            return type;
-        }
+    const ext = url.split('.').pop().toLowerCase();
+    for (const [type, exts] of Object.entries(MEDIA_TYPES)) {
+        if (exts.includes(ext)) return type;
     }
     return null;
 }
 
 /**
- * Convert media URLs in text to HTML elements
- * Detects /ui/uploads/... URLs and converts them to img/video/audio tags
- *
- * Models can display media by outputting URLs like:
- *   /ui/uploads/image.png
- *   http://localhost:9091/ui/uploads/video.mp4
- *
- * @param {string} text - Text containing media URLs
- * @returns {string} Text with URLs converted to HTML elements
+ * Build the media-preview block for one URL (DOM APIs only).
+ * @param {Document} doc - Owner document of the fragment being upgraded
+ * @param {string} url - A MEDIA_URL_EXACT match
+ * @param {string} [alt] - Alt text for an image (defaults to the filename)
+ * @returns {HTMLElement|null}
  */
-export function convertMediaUrlsToHtml(text) {
-    if (!text) return text;
+function buildMediaPreview(doc, url, alt) {
+    const type = detectMediaType(url);
+    if (!type) return null;
+    const filename = url.split('/').pop();
+    const ext = filename.split('.').pop().toLowerCase();
+    const el = (tag, attrs = {}, text) => {
+        const node = doc.createElement(tag);
+        for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+        if (text !== undefined) node.textContent = text;
+        return node;
+    };
+    const downloadRow = (title) => {
+        const row = el('div', { class: 'media-controls-row' });
+        row.appendChild(el('a', { href: url, download: filename, class: 'media-download-btn', title }, '💾 Download'));
+        return row;
+    };
 
-    // Pattern to match media URLs:
-    // - /ui/uploads/filename.ext
-    // - http://localhost:9091/ui/uploads/filename.ext
-    // - https://hostname/ui/uploads/filename.ext
-    const urlPattern = /((?:https?:\/\/[^\s\/]+)?\/ui\/uploads\/[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|bmp|svg|mp4|webm|mov|avi|mkv|mp3|wav|ogg|m4a|flac|aac))/gi;
+    const preview = el('div', { class: `media-preview media-${type}` });
+    if (type === 'image') {
+        preview.appendChild(el('img', { src: url, alt: alt || filename, loading: 'lazy' }));
+        preview.appendChild(downloadRow('Download Image'));
+        preview.appendChild(el('div', { class: 'media-caption' }, url));
+    } else if (type === 'video') {
+        const video = el('video', { controls: '', preload: 'metadata' });
+        video.appendChild(el('source', { src: url, type: `video/${ext}` }));
+        video.appendChild(doc.createTextNode('Your browser does not support video playback.'));
+        preview.appendChild(video);
+        preview.appendChild(downloadRow('Download Video'));
+        preview.appendChild(el('div', { class: 'media-caption' }, url));
+    } else {
+        const audio = el('audio', { controls: '', preload: 'metadata' });
+        audio.appendChild(el('source', { src: url, type: `audio/${ext === 'mp3' ? 'mpeg' : ext}` }));
+        audio.appendChild(doc.createTextNode('Your browser does not support audio playback.'));
+        preview.appendChild(audio);
+        preview.appendChild(el('div', { class: 'media-caption' }, filename));
+    }
+    return preview;
+}
 
-    return text.replace(urlPattern, (match) => {
-        const mediaType = detectMediaType(match);
+/** True when a node holds nothing a reader would see. */
+function isBlank(node) {
+    if (!node) return true;
+    if ((node.textContent || '').trim() !== '') return false;
+    return !(node.querySelector && node.querySelector('img, video, audio, picture, svg, canvas'));
+}
 
-        // Clean the URL - ensure it starts with / for relative or http for absolute
-        let cleanUrl = match.trim();
+/**
+ * A <div> inside a <p> does not survive serialization (the HTML parser closes
+ * the <p> before it), so move a preview out of its paragraph: the paragraph is
+ * split around it, inline wrappers included (Range.extractContents clones the
+ * partially selected ancestors).
+ * @param {HTMLElement} preview
+ */
+function hoistOutOfParagraph(preview) {
+    const p = preview.parentElement ? preview.parentElement.closest('p') : null;
+    if (!p) return;
+    const doc = preview.ownerDocument;
+    const range = doc.createRange();
+    range.setStartAfter(preview);
+    range.setEnd(p, p.childNodes.length);
+    const after = range.extractContents();
+    preview.remove();
+    p.after(preview);
+    if (!isBlank(after)) {
+        const tail = doc.createElement('p');
+        tail.appendChild(after);
+        preview.after(tail);
+    }
+    if (isBlank(p)) p.remove();
+}
 
-        // Extract just the filename for display
-        const filename = cleanUrl.split('/').pop();
+/**
+ * Sanitize HTML, then upgrade its media URLs to players (see the section comment).
+ * @param {string} dirty - Untrusted HTML (marked output)
+ * @returns {string} Safe HTML
+ */
+export function sanitizeWithMediaPlayers(dirty) {
+    const source = (dirty === null || dirty === undefined) ? '' : String(dirty);
+    if (source.indexOf('/ui/uploads/') === -1 || typeof document === 'undefined') {
+        return sanitizeAssistantHtml(source);
+    }
+    const template = document.createElement('template');   // inert: no loads, no handlers
+    template.innerHTML = sanitizeAssistantHtml(source);
+    const root = template.content;
+    const doc = root.ownerDocument;
+    const previews = [];
+    const inPreview = (node) => !!(node.parentElement && node.parentElement.closest('.media-preview'));
 
-        switch (mediaType) {
-            case 'image':
-                return `\n<div class="media-preview media-image">
-                    <img src="${cleanUrl}" alt="${filename}" loading="lazy">
-                    <div class="media-controls-row">
-                        <a href="${cleanUrl}" download="${filename}" class="media-download-btn" title="Download Image">💾 Download</a>
-                    </div>
-                    <div class="media-caption">${cleanUrl}</div>
-                </div>\n`;
+    // Links first: [text](url) and autolinked absolute URLs (an <a> may wrap an <img>).
+    for (const a of Array.from(root.querySelectorAll('a[href]'))) {
+        const href = (a.getAttribute('href') || '').trim();
+        if (a.hasAttribute('class') || inPreview(a) || !MEDIA_URL_EXACT.test(href)) continue;
+        const img = a.querySelector('img');
+        const preview = buildMediaPreview(doc, href, img ? img.getAttribute('alt') : '');
+        if (!preview) continue;
+        a.replaceWith(preview);
+        previews.push(preview);
+    }
 
-            case 'video':
-                return `\n<div class="media-preview media-video">
-                    <video controls preload="metadata">
-                        <source src="${cleanUrl}" type="video/${cleanUrl.split('.').pop()}">
-                        Your browser does not support video playback.
-                    </video>
-                    <div class="media-controls-row">
-                        <a href="${cleanUrl}" download="${filename}" class="media-download-btn" title="Download Video">💾 Download</a>
-                    </div>
-                    <div class="media-caption">${cleanUrl}</div>
-                </div>\n`;
+    // The markdown image form. Server-built images carry a class
+    // (generated-image, inline-media-image...) and are left exactly as they are.
+    for (const img of Array.from(root.querySelectorAll('img[src]'))) {
+        const src = (img.getAttribute('src') || '').trim();
+        if (img.hasAttribute('class') || inPreview(img) || !MEDIA_URL_EXACT.test(src)) continue;
+        const preview = buildMediaPreview(doc, src, img.getAttribute('alt') || '');
+        if (!preview) continue;
+        img.replaceWith(preview);
+        previews.push(preview);
+    }
 
-            case 'audio':
-                return `\n<div class="media-preview media-audio">
-                    <audio controls preload="metadata">
-                        <source src="${cleanUrl}" type="audio/${cleanUrl.split('.').pop() === 'mp3' ? 'mpeg' : cleanUrl.split('.').pop()}">
-                        Your browser does not support audio playback.
-                    </audio>
-                    <div class="media-caption">${filename}</div>
-                </div>\n`;
-
-            default:
-                return match; // Return unchanged if not a recognized media type
+    // Bare URLs in text.
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.nodeValue.indexOf('/ui/uploads/') === -1) continue;
+        if (node.parentElement && node.parentElement.closest(SKIP_TEXT_IN)) continue;
+        textNodes.push(node);
+    }
+    for (const node of textNodes) {
+        const text = node.nodeValue;
+        const frag = doc.createDocumentFragment();
+        let last = 0;
+        let changed = false;
+        MEDIA_URL_IN_TEXT.lastIndex = 0;
+        let m;
+        while ((m = MEDIA_URL_IN_TEXT.exec(text)) !== null) {
+            const preview = buildMediaPreview(doc, m[0]);
+            if (!preview) continue;
+            if (m.index > last) frag.appendChild(doc.createTextNode(text.slice(last, m.index)));
+            frag.appendChild(preview);
+            previews.push(preview);
+            last = m.index + m[0].length;
+            changed = true;
         }
-    });
+        if (!changed) continue;
+        if (last < text.length) frag.appendChild(doc.createTextNode(text.slice(last)));
+        node.replaceWith(frag);
+    }
+
+    if (!previews.length) return template.innerHTML;
+    previews.forEach(hoistOutOfParagraph);
+    return sanitizeAssistantHtml(template.innerHTML);
 }
 
 // =============================================================================
@@ -154,6 +256,14 @@ const MIN_INLINE_JSON_CHARS = 80;
 /**
  * Wrap any qualifying unfenced JSON run in a ```json fence.
  * Pure function: returns the input unchanged when no run qualifies.
+ *
+ * One forward pass over the lines, carrying the ``` fence state along. (The
+ * old version rescanned the text from index 0 for every line-start brace to
+ * learn whether it sat inside a fence -- O(n^2) per call, and renderMarkdown
+ * runs on every streamed token; audit P01-chat-core-web-11.) A candidate is
+ * the first non-whitespace char of a line, outside a fence; a consumed JSON
+ * run cannot contain a fence marker (JSON has no raw newlines in strings and
+ * no ``` token), so scanning resumes at the line after it.
  * @param {string} text - Raw assistant text (may contain markdown + JSON)
  * @returns {string} text with qualifying JSON runs fenced
  */
@@ -162,73 +272,43 @@ export function fenceUnfencedJson(text) {
 
     let out = '';
     let proseStart = 0;       // start of the not-yet-emitted prose run
-    let i = 0;
+    let inFence = false;
+    let lineStart = 0;
     const n = text.length;
 
-    while (i < n) {
-        const c = text[i];
-        // Candidate must begin at the start of a line (after optional whitespace),
-        // and must not already be inside a ``` fenced region.
-        if ((c === '{' || c === '[') && atLineStart(text, i) && !insideFence(text, i)) {
-            const end = jsonRunEnd(text, i);   // exclusive end, or -1 if unbalanced
-            if (end > i) {
-                const candidate = text.substring(i, end);
+    while (lineStart < n) {
+        // First non-whitespace char of this line.
+        let k = lineStart;
+        while (k < n && (text[k] === ' ' || text[k] === '\t')) k++;
+        const c = text[k];
+        let resumeAt = k;
+
+        if (c === '`' && text[k + 1] === '`' && text[k + 2] === '`') {
+            inFence = !inFence;
+        } else if (!inFence && (c === '{' || c === '[')) {
+            const end = jsonRunEnd(text, k);   // exclusive end, or -1 if unbalanced
+            if (end > k) {
+                const candidate = text.substring(k, end);
                 const multiLine = candidate.indexOf('\n') !== -1;
                 if ((multiLine || candidate.length >= MIN_INLINE_JSON_CHARS) && parsesAsJson(candidate)) {
                     // Emit prose preceding this blob verbatim, then the fenced JSON.
-                    out += text.substring(proseStart, i);
+                    out += text.substring(proseStart, k);
                     out += '\n```json\n' + candidate + '\n```\n';
-                    i = end;
                     proseStart = end;
-                    continue;
+                    resumeAt = end;
                 }
             }
         }
-        i++;
+
+        // Next line (the rest of this one can hold no candidate).
+        const nl = text.indexOf('\n', resumeAt);
+        if (nl === -1) break;
+        lineStart = nl + 1;
     }
 
     // Trailing prose (or the whole string if nothing matched).
     out += text.substring(proseStart);
     return out;
-}
-
-/** True if [index] is the first non-whitespace char on its line. */
-function atLineStart(s, index) {
-    for (let j = index - 1; j >= 0; j--) {
-        const ch = s[j];
-        if (ch === '\n') return true;
-        if (ch !== ' ' && ch !== '\t') return false;
-    }
-    return true;   // start of string
-}
-
-/** True if the char at [index] sits inside a ``` fenced region. Counts fence
- *  markers (lines whose first non-whitespace is ```) before [index]; an odd
- *  count means we are currently open inside a fence. */
-function insideFence(s, index) {
-    let open = false;
-    let lineStart = 0;
-    for (let k = 0; k < index; k++) {
-        if (s[k] === '\n') {
-            lineStart = k + 1;
-        } else if (isFenceMarkerAt(s, lineStart, k)) {
-            open = !open;
-            // Skip to end of this line so we don't re-count the same marker.
-            while (k < index && s[k] !== '\n') k++;
-            lineStart = k + 1;
-        }
-    }
-    return open;
-}
-
-/** True if position [k] is the start of a ``` marker for the line beginning at
- *  [lineStart] (i.e. only whitespace precedes it on the line and ``` follows). */
-function isFenceMarkerAt(s, lineStart, k) {
-    // k must be the first non-whitespace char of its line.
-    for (let j = lineStart; j < k; j++) {
-        if (s[j] !== ' ' && s[j] !== '\t') return false;
-    }
-    return s[k] === '`' && s[k + 1] === '`' && s[k + 2] === '`';
 }
 
 /**
@@ -295,7 +375,12 @@ function isMarkedAvailable() {
  */
 function renderWithoutMarked(text) {
     warnDegraded('markdown');
-    return sanitizeAssistantHtml(text.replace(/(<[^>]*>)|\r?\n/g, (match, tag) => tag || '<br>'));
+    return sanitizeAssistantHtml(newlinesToBreaks(text));
+}
+
+/** Newlines outside tags become <br> (the no-marked line-break rendering). */
+function newlinesToBreaks(text) {
+    return text.replace(/(<[^>]*>)|\r?\n/g, (match, tag) => tag || '<br>');
 }
 
 /**
@@ -323,7 +408,8 @@ export function markdownToSafeHtml(text) {
 
 /**
  * Convert markdown text to HTML using marked library
- * Also converts media URLs to embedded elements
+ * Also upgrades media URLs to embedded players (upgradeMediaUrls, after the
+ * sanitizer: the URL is never spliced into markdown or markup)
  * @param {string} text - Markdown text to render
  * @returns {string} Safe HTML string (fails closed to escaped text)
  */
@@ -337,10 +423,11 @@ export function renderMarkdown(text) {
         // Wrap unfenced JSON blobs in a ```json fence so they render via the
         // clean code-block path instead of being mangled by the markdown parser.
         const fenced = fenceUnfencedJson(source);
-        // Then convert any media URLs to HTML elements
-        const textWithMedia = convertMediaUrlsToHtml(fenced);
-        if (!isMarkedAvailable()) return renderWithoutMarked(textWithMedia);
-        return sanitizeAssistantHtml(marked.parse(textWithMedia));
+        if (!isMarkedAvailable()) {
+            warnDegraded('markdown');
+            return sanitizeWithMediaPlayers(newlinesToBreaks(fenced));
+        }
+        return sanitizeWithMediaPlayers(marked.parse(fenced));
     } catch (e) {
         console.warn('Markdown parse error:', e);
         return plainTextHtml(source);

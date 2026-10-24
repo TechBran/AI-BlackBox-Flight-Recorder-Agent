@@ -25,7 +25,7 @@ import { escapeHtml, toastError } from './core-utils.js';
 
 /**
  * Explicit allowlist additions on top of DOMPurify's safe defaults.
- * - Media the renderers emit (convertMediaUrlsToHtml, inline_media, generated
+ * - Media the renderers emit (sanitizeWithMediaPlayers, inline_media, generated
  *   image/video/music results) must survive: audio, video, source + their
  *   playback attributes. class and data-* (data-highlight, data-snap-id,
  *   data-task-id) are kept by DOMPurify's defaults.

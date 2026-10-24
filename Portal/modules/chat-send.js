@@ -7,7 +7,8 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, escapeAttr } from './core-utils.js';
+import { $, toast, escapeAttr, createPoller } from './core-utils.js';
+import { parseSseStream } from './sse.js';
 import { getHistoryData, setHistoryData, saveHistory, loadHistory, getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
@@ -46,13 +47,20 @@ let _cuStreamActive = false;
 // =============================================================================
 
 /**
- * Strip markdown fences from text
+ * Unwrap a reply that is ENTIRELY one ```json (or bare ```) fence around a
+ * JSON envelope, e.g. ```json {"reply": ...} ```. Anything else comes back
+ * trimmed but otherwise untouched: the old version deleted every ``` line in
+ * the reply, so code blocks in polled replies rendered as prose (audit
+ * P01-chat-core-web-08).
  * @param {string} s - Text to strip
  * @returns {string} Stripped text
  */
 function stripMdAndFences(s) {
     if (typeof s !== 'string') return s;
-    return s.replace(/^```[\w]*\n?|```$/gm, '').trim();
+    const t = s.trim();
+    const m = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```$/i.exec(t);
+    if (m && /^\s*[{[]/.test(m[1]) && m[1].indexOf('```') === -1) return m[1].trim();
+    return t;
 }
 
 /**
@@ -139,10 +147,12 @@ export function createStreamingThinkingBubble() {
     const signalHost = document.createElement("div");
     signalHost.className = "signal-host";
 
-    // Create the floating panel (collapsed by default)
+    // Create the floating panel (collapsed by default). No id: every turn has
+    // its own panel, reached through bubble._floatingPanel (a fixed id made a
+    // panel orphaned by a failed turn capture the next turn's reasoning,
+    // audit P01-chat-core-web-09).
     const panel = document.createElement("div");
     panel.className = "streaming-thinking-panel reasoning-active floating collapsed";
-    panel.id = "thinkingPanel";
     panel.innerHTML = `
         <div class="reasoning-header" onclick="toggleThinkingPanel(this)">
             <span class="reasoning-icon">\uD83E\uDDE0</span>
@@ -175,10 +185,10 @@ export function createStreamingThinkingBubble() {
 
     // Create floating panel for body (clone and append)
     const floatingPanel = panel.cloneNode(true);
-    floatingPanel.id = 'floatingReasoningPanel';
     document.body.appendChild(floatingPanel);
 
-    // Keep reference to original panel for syncing
+    // This turn's floating panel: every reasoning update and the removal go
+    // through this reference, never a document-wide lookup.
     bubble._floatingPanel = floatingPanel;
     // The Signal controller — the SSE loop and the post-save mint push reach it here.
     bubble._signalLine = signalLine;
@@ -673,12 +683,12 @@ export function createBubbleWithThinking(content, thinking, cuLog) {
  * @param {string} text - Thinking text to append
  */
 export function appendThinkingContent(bubble, text) {
-    // Update floating panel content
-    const floatingPanel = document.getElementById('floatingReasoningPanel');
+    // Update floating panel content (a text node: linear, never re-parsed)
+    const floatingPanel = bubble._floatingPanel;
     if (floatingPanel) {
         const floatingContent = floatingPanel.querySelector('.thinking-content');
         if (floatingContent) {
-            floatingContent.innerHTML += escapeHtml(text);
+            floatingContent.appendChild(document.createTextNode(text));
             floatingContent.scrollTop = floatingContent.scrollHeight;
         }
     }
@@ -686,11 +696,28 @@ export function appendThinkingContent(bubble, text) {
     // Also update inline panel for when it returns
     const thinkingContent = bubble.querySelector('.thinking-content');
     if (thinkingContent) {
-        thinkingContent.innerHTML += escapeHtml(text);
+        thinkingContent.appendChild(document.createTextNode(text));
         thinkingContent.scrollTop = thinkingContent.scrollHeight;
     }
 
     updateThinkingStats(bubble);
+}
+
+/**
+ * Remove this turn's floating reasoning panel (no-op when already gone).
+ * @param {HTMLElement} bubble - Bubble element
+ * @param {boolean} [animate=false] - Fade out first (the normal completion path)
+ */
+function removeFloatingPanel(bubble, animate = false) {
+    const floatingPanel = bubble && bubble._floatingPanel;
+    if (!floatingPanel) return;
+    bubble._floatingPanel = null;
+    if (animate) {
+        floatingPanel.classList.add('floating-exit');
+        setTimeout(() => floatingPanel.remove(), 300);
+    } else {
+        floatingPanel.remove();
+    }
 }
 
 /**
@@ -699,7 +726,7 @@ export function appendThinkingContent(bubble, text) {
  */
 function updateThinkingStats(bubble) {
     // Get content from floating panel
-    const floatingPanel = document.getElementById('floatingReasoningPanel');
+    const floatingPanel = bubble._floatingPanel;
     const floatingContent = floatingPanel?.querySelector('.thinking-content');
     const text = floatingContent?.textContent || '';
     const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
@@ -734,15 +761,48 @@ export function appendResponseContent(bubble, text, fullResponse = null) {
     if (!responseContent) return;
 
     if (fullResponse !== null) {
-        // Render markdown on every chunk - no throttle since we're not syntax highlighting
-        // This keeps the stream smooth and responsive
-        responseContent.innerHTML = renderMarkdown(fullResponse);
-    } else {
-        responseContent.innerHTML += escapeHtml(text);
+        // Coalesce: at most one full markdown + sanitize render per animation
+        // frame, of the latest text. Rendering on every token re-parsed the
+        // whole reply each time and stalled phones on long answers (audit
+        // P01-chat-core-web-11). finalizeStreamingBubble renders the final state.
+        bubble._pendingRender = fullResponse;
+        if (!bubble._renderFrame) {
+            bubble._renderFrame = requestFrame(() => {
+                bubble._renderFrame = 0;
+                const latest = bubble._pendingRender;
+                bubble._pendingRender = null;
+                if (latest === null || latest === undefined) return;
+                responseContent.innerHTML = renderMarkdown(latest);
+                // Smooth scroll to bottom during streaming
+                scrollToBottomIfNeeded();
+            });
+        }
+        return;
     }
+
+    responseContent.innerHTML += escapeHtml(text);
 
     // Smooth scroll to bottom during streaming
     scrollToBottomIfNeeded();
+}
+
+/** requestAnimationFrame, or a ~16 ms timer where there is none. */
+function requestFrame(fn) {
+    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(fn);
+    return setTimeout(fn, 16);
+}
+
+/**
+ * Drop a coalesced render that has not run yet (the final render, or the
+ * bubble's removal, supersedes it).
+ * @param {HTMLElement} bubble - Bubble element
+ */
+function cancelPendingRender(bubble) {
+    if (!bubble || !bubble._renderFrame) return;
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(bubble._renderFrame);
+    clearTimeout(bubble._renderFrame);
+    bubble._renderFrame = 0;
+    bubble._pendingRender = null;
 }
 
 /**
@@ -751,7 +811,7 @@ export function appendResponseContent(bubble, text, fullResponse = null) {
  */
 export function markThinkingComplete(bubble) {
     // Get floating panel and copy its content to inline panel
-    const floatingPanel = document.getElementById('floatingReasoningPanel');
+    const floatingPanel = bubble._floatingPanel;
     const inlinePanel = bubble.querySelector('.streaming-thinking-panel');
 
     if (floatingPanel && inlinePanel) {
@@ -770,10 +830,7 @@ export function markThinkingComplete(bubble) {
         }
 
         // Remove floating panel with fade animation
-        floatingPanel.classList.add('floating-exit');
-        setTimeout(() => {
-            floatingPanel.remove();
-        }, 300);
+        removeFloatingPanel(bubble, true);
     }
 
     // Show the inline (collapsed) reasoning panel. Note: The Signal line is left
@@ -821,6 +878,9 @@ export function finalizeStreamingBubble(bubble, fullResponse, fullThinking) {
             operator: getOperator()
         });
     }
+
+    // The final render below supersedes any coalesced one still pending.
+    cancelPendingRender(bubble);
 
     const responseContent = bubble.querySelector('.response-content');
     console.log('[FINALIZE] Found responseContent:', !!responseContent, 'fullResponse:', !!fullResponse);
@@ -936,613 +996,650 @@ function setupBubbleControls(bubble, text) {
 // =============================================================================
 
 /**
+ * Which failures of a /chat/stream turn may be re-sent through POST /chat.
+ *
+ * Only a turn the server never accepted: the request never got a response
+ * (fetch rejected) or the server refused the stream with an HTTP error. Once
+ * it answered 200 the turn is running server-side -- its provider call is
+ * billed and its tools (image/video/music jobs, messages, device control) may
+ * already have acted -- so re-sending it would run them twice (audit
+ * P01-chat-core-web-18). Those failures drop the partial bubble and offer the
+ * retry chip instead, which the operator chooses to press.
+ * @param {*} err - What sendStreamingChat rejected with
+ * @returns {boolean}
+ */
+export function shouldFallBackToStandard(err) {
+    return !!err && (err.stage === 'request' || err.stage === 'http');
+}
+
+/** An Error tagged with the stage of the stream it failed in (see shouldFallBackToStandard). */
+function streamFailure(stage, cause, status) {
+    const err = new Error(cause && cause.message ? cause.message : String(cause || 'stream failed'));
+    err.stage = stage;
+    err.cause = cause;
+    if (status !== undefined) err.status = status;
+    return err;
+}
+
+/** The controller of the /chat/stream request in flight (abortActiveStream). */
+let _activeStreamController = null;
+
+/**
+ * Abort the /chat/stream request in flight, if any. The turn then fails like
+ * any mid-stream failure (partial bubble removed, retry chip offered).
+ * @returns {boolean} Whether there was a stream to abort
+ */
+export function abortActiveStream() {
+    if (!_activeStreamController) return false;
+    _activeStreamController.abort();
+    return true;
+}
+
+/**
+ * Tidy the UI after a failed stream: the Signal line, any pending render and
+ * the floating reasoning panel go; the partial bubble is removed (a Computer
+ * Use bubble stays, finalized, because the CU task keeps running server-side
+ * and its live view is the only progress the operator has).
+ * @param {HTMLElement} bubble - The turn's streaming bubble
+ * @param {string} provider - The turn's provider
+ * @param {Error} err - The tagged failure
+ */
+function cleanupFailedStream(bubble, provider, err) {
+    if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; } // no leaked rAF
+    cancelPendingRender(bubble);
+    removeFloatingPanel(bubble);
+    _hideCUToolIndicator(bubble);
+    setStreamingState(false);
+    if (provider === 'computer-use') {
+        _cuStreamActive = false;
+        _cuQueueAppendMode = false;
+        if (!shouldFallBackToStandard(err) && bubble.parentNode) {
+            bubble.classList.remove('streaming-bubble');
+            _stopCULiveViewPolling();
+            return;
+        }
+    }
+    if (bubble.parentNode) bubble.parentNode.removeChild(bubble);
+}
+
+/**
  * Send chat message via streaming SSE
  * @param {Array} messages - Messages array
  * @param {string} provider - AI provider
  * @param {string} model - Model ID
  * @param {string} operator - Operator name
- * @returns {Promise<Object>} Response with thinking and content
+ * @returns {Promise<Object>} Response with thinking, content and usage. Rejects
+ *   with an Error whose .stage says where it failed: 'request' (no response),
+ *   'http' (the server refused the stream), 'stream' (died after the server
+ *   answered) or 'stalled' (no bytes for 300 s). The UI is already tidied.
  */
 export async function sendStreamingChat(messages, provider, model, operator) {
-    return new Promise((resolve, reject) => {
-        const bubble = createStreamingThinkingBubble();
-        const hist = $("history");
-        if (hist) {
-            hist.appendChild(bubble);
-            scrollToBottomIfNeeded();
-        }
+    const bubble = createStreamingThinkingBubble();
+    const hist = $("history");
+    if (hist) {
+        hist.appendChild(bubble);
+        scrollToBottomIfNeeded();
+    }
 
-        // CU doesn't need the reasoning panel or The Signal — the tool indicator,
-        // todo panel, and Live View carry the activity narrative instead.
-        if (provider === 'computer-use') {
-            const floatingPanel = document.getElementById('floatingReasoningPanel');
-            if (floatingPanel) floatingPanel.remove();
-            if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; }
-            const inlinePanel = bubble.querySelector('.streaming-thinking-panel');
-            if (inlinePanel) inlinePanel.style.display = 'none';
-            // Initialize TodoTracker for CU session
-            todoTracker.init('todoPanel', 'cu-' + Date.now());
-        }
+    // CU doesn't need the reasoning panel or The Signal — the tool indicator,
+    // todo panel, and Live View carry the activity narrative instead.
+    if (provider === 'computer-use') {
+        removeFloatingPanel(bubble);
+        if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; }
+        const inlinePanel = bubble.querySelector('.streaming-thinking-panel');
+        if (inlinePanel) inlinePanel.style.display = 'none';
+        // Initialize TodoTracker for CU session
+        todoTracker.init('todoPanel', 'cu-' + Date.now());
+    }
 
-        // The Signal controller for this turn (null for CU, destroyed above).
-        const signal = bubble._signalLine;
-        // Tracks the most recent tool_start name so tool_result can echo it as done.
-        let signalLastTool = "";
-        // Push "generating · <model>" exactly once when the answer starts streaming.
-        let signalGenerating = false;
-        // Honest generating label = the REAL resolved model id. The `model` arg is
-        // often "" (window.__model unset), so this is refined from the stream_start
-        // frame's `model` field below; provider is only a last-ditch fallback.
-        let signalModelLabel = model || provider || 'model';
+    // The Signal controller for this turn (null for CU, destroyed above).
+    const signal = bubble._signalLine;
+    // Tracks the most recent tool_start name so tool_result can echo it as done.
+    let signalLastTool = "";
+    // Push "generating · <model>" exactly once when the answer starts streaming.
+    let signalGenerating = false;
+    // Honest generating label = the REAL resolved model id. The `model` arg is
+    // often "" (window.__model unset), so this is refined from the stream_start
+    // frame's `model` field below; provider is only a last-ditch fallback.
+    let signalModelLabel = model || provider || 'model';
 
-        let fullThinking = "";
-        let fullResponse = "";
-        let thinkingStarted = false;
-        let provenance = null;
-        let cuLog = [];  // Computer Use session log for persistence
-        // SSE 'error' event text — accumulated so send() can detect an ERROR-ONLY
-        // stream (transport OK, no reply) and surface the failure + retry chip.
-        let streamErrorText = "";
+    let fullThinking = "";
+    let fullResponse = "";
+    let thinkingStarted = false;
+    let provenance = null;
+    let cuLog = [];  // Computer Use session log for persistence
+    // SSE 'error' event text — accumulated so send() can detect an ERROR-ONLY
+    // stream (transport OK, no reply) and surface the failure + retry chip.
+    let streamErrorText = "";
+    // The turn's token usage: the LAST 'usage' event wins (Android parity,
+    // ChatViewModel's onMeta), sent to /chat/save as {prompt, completion}.
+    let usage = null;
 
-        // NOTE: We no longer use streaming TTS (real-time sentence-by-sentence).
-        // Auto-TTS now waits for the complete response and generates a single TTS call.
-        // This is more reliable and avoids audio gaps, cut-offs, and wasted API calls.
-        // The triggerAutoTTS function in finalizeStreamingBubble handles this.
+    // NOTE: We no longer use streaming TTS (real-time sentence-by-sentence).
+    // Auto-TTS now waits for the complete response and generates a single TTS call.
+    // This is more reliable and avoids audio gaps, cut-offs, and wasted API calls.
+    // The triggerAutoTTS function in finalizeStreamingBubble handles this.
 
-        const body = JSON.stringify({
-            messages: messages,
-            provider: provider,
-            model: model,
-            operator: operator,
-            ...(provider === 'computer-use' && {
-                session_id: getCUSessionId() || undefined,
-                device_id: getCUDeviceId() || 'blackbox'
-            })
-        });
-
-        fetch("/chat/stream", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: body
-        }).then(response => {
-            if (!response.ok) {
-                throw new Error(`Stream failed: ${response.status}`);
-            }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            // ── M7 stall watchdog (mirrors Android M7.1a's 300s stream read
-            // timeout, = the server's provider-leg httpx timeout). The server
-            // now emits ": keepalive" SSE comment frames every ~10s during
-            // provider prefill silence (comment frames parse to blocks with no
-            // event:/data: lines and are skipped below), so ANY healthy stream
-            // delivers bytes at least every ~10s. If NOTHING arrives for 300s
-            // the stream is dead — surface an error state instead of leaving
-            // this bubble hanging forever.
-            const STALL_TIMEOUT_MS = 300000;
-            let stallTimer = null;
-            let stalled = false;
-            const armStallWatchdog = () => {
-                if (stallTimer) clearTimeout(stallTimer);
-                stallTimer = setTimeout(() => {
-                    stalled = true;
-                    console.error('[STREAM] Stall watchdog: no stream data for 300s — aborting');
-                    try { reader.cancel(); } catch (e) { /* reader already closed */ }
-                }, STALL_TIMEOUT_MS);
-            };
-
-            function processChunk(result) {
-                if (result.done) {
-                    if (stallTimer) clearTimeout(stallTimer);
-                    if (stalled) {
-                        // reader.cancel() resolves the pending read as done —
-                        // route it to the error path, not the finalize path.
-                        toast('Stream stalled — no data received for 5 minutes.');
-                        onStreamError(new Error('Stream stalled: no data received for 300s'));
-                        return;
-                    }
-                    // If this was a queued request (bubble was removed), resolve silently
-                    if (!bubble.parentNode && provider === 'computer-use') {
-                        console.log('[CU] Queued request stream ended — no bubble to finalize');
-                        resolve({ thinking: '', response: '', provenance: provenance, cuLog: cuLog, queued: true });
-                        return;
-                    }
-
-                    markThinkingComplete(bubble);
-
-                    // CU: mark all todo steps completed and hide tool indicator
-                    if (provider === 'computer-use') {
-                        _cuTodoComplete();
-                        _hideCUToolIndicator(bubble);
-                        _cuQueueAppendMode = false;
-                        _cuStreamActive = false;
-                    }
-
-                    // Finalize the bubble first
-                    finalizeStreamingBubble(bubble, fullResponse, fullThinking);
-
-                    // Trigger Auto-TTS after response is complete (if enabled)
-                    // This generates a single TTS call for the full response
-                    if (window.autoTTSEnabled && window.triggerAutoTTS && fullResponse) {
-                        console.log('[STREAM] Response complete, triggering Auto-TTS');
-                        window.triggerAutoTTS(fullResponse, bubble);
-                    }
-
-                    resolve({
-                        thinking: fullThinking,
-                        response: fullResponse,
-                        provenance: provenance,
-                        cuLog: cuLog,
-                        errorText: streamErrorText,
-                        bubbleEl: bubble  // lets send() remove/convert an error-only stream's empty bubble
-                    });
-                    return;
-                }
-
-                armStallWatchdog(); // any bytes (incl. keepalive comments) reset the stall clock
-
-                const text = decoder.decode(result.value, { stream: true });
-                const events = text.split('\n\n').filter(e => e.trim());
-
-                for (const eventBlock of events) {
-                    const lines = eventBlock.split('\n');
-                    let eventType = '';
-                    let eventData = '';
-
-                    for (const line of lines) {
-                        if (line.startsWith('event: ')) {
-                            eventType = line.slice(7);
-                        } else if (line.startsWith('data: ')) {
-                            eventData = line.slice(6);
-                        }
-                    }
-
-                    // Skips SSE comment frames too (e.g. the server's ": keepalive"
-                    // prefill heartbeat, M7) — they parse to no event:/data: lines.
-                    if (!eventType || !eventData) continue;
-
-                    try {
-                        const data = JSON.parse(eventData);
-
-                        // Debug: Log ALL event types received
-                        console.log(`[STREAM DEBUG] Event type: ${eventType}`, typeof data === 'string' ? data.substring(0, 100) : data);
-
-                        switch (eventType) {
-                            case 'stream_start':
-                                console.log('[STREAM] Started:', data);
-                                setStreamingState(true); // Enable smooth scrolling
-                                if (provider === 'computer-use') _cuStreamActive = true;
-                                // The server resolves the real model id here — use it for
-                                // the honest "generating · <model>" line (not the provider).
-                                if (data.model) signalModelLabel = data.model;
-                                if (data.provenance) {
-                                    provenance = data.provenance;
-                                    console.log('[STREAM] Provenance:', provenance);
-                                }
-                                break;
-
-                            case 'thinking_start':
-                                thinkingStarted = true;
-                                // Panel stays collapsed - user can expand if they want to see reasoning
-                                break;
-
-                            case 'thinking':
-                                if (typeof data === 'string') {
-                                    fullThinking += data;
-                                    appendThinkingContent(bubble, data);
-                                }
-                                break;
-
-                            case 'thinking_end':
-                                markThinkingComplete(bubble);
-                                break;
-
-                            // ─── The Signal — presentation-only telemetry HUD ───
-                            // These three cases drive the morphing red line ONLY.
-                            // HARD RULE: they must NEVER append to fullThinking /
-                            // fullResponse or feed the /chat/save payload — this
-                            // telemetry is display-only and is never persisted.
-                            case 'system_activity':
-                                // data = { stage, label, detail, seq } (see
-                                // Orchestrator/telemetry_events.py). We render only the label.
-                                if (signal && data && typeof data.label === 'string') {
-                                    signal.push(data.label);
-                                }
-                                break;
-
-                            case 'tool_start': {
-                                // data = tool name (string) per chat_routes.py stream.
-                                const toolName = (typeof data === 'string')
-                                    ? data
-                                    : (data && (data.name || data.tool)) || '';
-                                signalLastTool = toolName;
-                                if (signal && toolName) signal.push('tool · ' + toolName);
-                                break;
-                            }
-
-                            case 'tool_result': {
-                                // data = a result-description string. Echo the last
-                                // tool name as done; fall back to a trimmed description.
-                                if (signal) {
-                                    if (signalLastTool) {
-                                        signal.push('tool · ' + signalLastTool + ' · ok');
-                                    } else if (typeof data === 'string' && data) {
-                                        signal.push('tool · ' + (data.length > 40 ? data.slice(0, 40) : data));
-                                    }
-                                }
-                                break;
-                            }
-
-                            case 'content_start':
-                                if (signal && !signalGenerating) {
-                                    signal.push('generating · ' + signalModelLabel);
-                                    signalGenerating = true;
-                                }
-                                break;
-
-                            case 'content':
-                                if (typeof data === 'string') {
-                                    // First answer bytes → narrate generation once. On a
-                                    // silent turn (no system_activity) this is the only
-                                    // honest line the HUD shows before it dissolves.
-                                    if (signal && !signalGenerating) {
-                                        signal.push('generating · ' + signalModelLabel);
-                                        signalGenerating = true;
-                                    }
-                                    fullResponse += data;
-                                    appendResponseContent(bubble, data, fullResponse);
-                                    // Note: Auto-TTS is now triggered after complete response
-                                    // See processChunk result.done handler
-                                }
-                                break;
-
-                            case 'usage':
-                                console.log('[STREAM] Usage:', data);
-                                break;
-
-                            case 'image_task': {
-                                console.log('[STREAM] Image generation task:', data);
-
-                                // Track with task manager - it will handle the placeholder
-                                const imgTaskId = data.task_id;
-                                const imgPrompt = data.prompt;
-                                const imgCount = data.count;
-                                import('./task-manager.js').then(({ taskManager }) => {
-                                    taskManager.addTask(imgTaskId, 'image_generation', imgPrompt, null, imgCount);
-                                    console.log(`[STREAM] Tracking image generation: ${imgTaskId}`);
-                                });
-                                break;
-                            }
-
-                            case 'video_task': {
-                                console.log('[STREAM] Video generation task:', data);
-
-                                // Track with task manager - it will handle the placeholder
-                                const vidTaskId = data.task_id;
-                                const vidPrompt = data.prompt;
-                                const vidDuration = data.duration;
-                                const vidResolution = data.resolution;
-                                import('./task-manager.js').then(({ taskManager }) => {
-                                    taskManager.addTask(vidTaskId, 'video_generation', vidPrompt, { duration: vidDuration, resolution: vidResolution });
-                                    console.log(`[STREAM] Tracking video generation: ${vidTaskId}`);
-                                });
-                                break;
-                            }
-
-                            case 'music_task': {
-                                console.log('[STREAM] Music generation task:', data);
-
-                                // Track with task manager
-                                const musTaskId = data.task_id;
-                                const musPrompt = data.prompt;
-                                const musSampleCount = data.sample_count;
-                                import('./task-manager.js').then(({ taskManager }) => {
-                                    taskManager.addTask(musTaskId, 'lyria_music', musPrompt, null, musSampleCount || 1);
-                                    console.log(`[STREAM] Tracking music generation: ${musTaskId}`);
-                                });
-                                break;
-                            }
-
-                            // ─── Computer Use Events ───
-                            case 'cu_screenshot': {
-                                const ssUrl = data.url;
-                                const ssStep = data.step || 0;
-                                console.log(`[CU] Screenshot step ${ssStep}:`, ssUrl);
-                                cuLog.push({ type: 'screenshot', url: ssUrl, step: ssStep });
-
-                                // Persist CU state for refresh recovery
-                                saveCUState(ssUrl, ssStep);
-
-                                // Update the Live View panel (single image replacement)
-                                const liveView = _ensureCULiveView(bubble);
-                                const liveImg = liveView.querySelector('.cu-live-view-img');
-                                if (liveImg) {
-                                    liveImg.src = ssUrl;
-                                    liveImg.alt = `Screenshot step ${ssStep}`;
-                                    // M4 routing (design 2026-07-23 §7.1): open the
-                                    // streaming client when this session has a live
-                                    // virtual display; the screenshot-poll modal is
-                                    // the automatic fallback (native mode / remote
-                                    // device / no-websockify box).
-                                    liveImg.onclick = () => {
-                                        import('./cu-viewer-route.js')
-                                            .then((m) => m.openCuViewer({
-                                                sessionId: getCUSessionId() || undefined,
-                                                deviceId: getCUDeviceId(),
-                                                screenshotUrl: ssUrl
-                                            }))
-                                            .catch(() => openCUInteract(ssUrl));
-                                    };
-                                }
-                                const stepLabel = liveView.querySelector('.cu-live-view-step');
-                                if (stepLabel) stepLabel.textContent = `Step ${ssStep}`;
-
-                                // Also update the interactive modal if it's open
-                                if (isInteractOpen()) {
-                                    updateCUInteractScreenshot(ssUrl, ssStep);
-                                }
-
-                                // Pulse the live dot
-                                const liveDot = liveView.querySelector('.cu-live-dot');
-                                if (liveDot) {
-                                    liveDot.classList.remove('pulse');
-                                    void liveDot.offsetWidth; // force reflow
-                                    liveDot.classList.add('pulse');
-                                }
-
-                                // Also update the activity panel step counter (if it exists)
-                                const actPanel = bubble.querySelector('.cu-activity-panel');
-                                if (actPanel) {
-                                    const counter = actPanel.querySelector('.cu-step-counter');
-                                    if (counter) counter.textContent = `Step ${ssStep}`;
-                                }
-
-                                _updateCUToolIndicator(bubble, 'screenshot', 'Step ' + ssStep);
-                                _cuTodoDescribe('Capturing screenshot', 'Capturing screenshot');
-                                scrollToBottomIfNeeded();
-                                break;
-                            }
-
-                            case 'cu_action': {
-                                const actAction = data.action || '';
-                                const actParams = data.params || '';
-                                console.log(`[CU] Action: ${actAction}`, actParams);
-                                cuLog.push({ type: 'action', action: actAction, params: actParams, step: data.step });
-                                const panel2 = _ensureCUPanel(bubble);
-                                const body2 = panel2.querySelector('.cu-activity-body');
-                                if (body2) {
-                                    const line = document.createElement('div');
-                                    line.className = 'cu-action-line';
-                                    line.innerHTML = `<strong>${escapeHtml(actAction)}</strong> <span>${escapeHtml(actParams)}</span>`;
-                                    body2.appendChild(line);
-                                }
-                                _updateCUToolIndicator(bubble, actAction, actParams);
-                                _cuTodoDescribe(_cuActionLabel(actAction, actParams));
-                                break;
-                            }
-
-                            case 'cu_bash_output': {
-                                const bashCmd = data.command || '';
-                                const bashOut = data.output || '';
-                                const bashCode = data.exit_code;
-                                console.log(`[CU] Bash (exit ${bashCode}):`, bashCmd);
-                                cuLog.push({ type: 'bash', command: bashCmd, output: bashOut, exit_code: bashCode, step: data.step });
-                                const panel3 = _ensureCUPanel(bubble);
-                                const body3 = panel3.querySelector('.cu-activity-body');
-                                if (body3) {
-                                    const block = document.createElement('div');
-                                    block.className = 'cu-bash-block';
-                                    block.innerHTML = `
-                                        <div class="cu-bash-header">
-                                            <span>$ ${escapeHtml(bashCmd.length > 120 ? bashCmd.slice(0, 120) + '...' : bashCmd)}</span>
-                                            <span class="cu-bash-exit ${bashCode === 0 ? 'success' : 'error'}">exit ${escapeHtml(bashCode)}</span>
-                                        </div>
-                                        <pre class="cu-bash-output">${escapeHtml(bashOut.length > 1500 ? bashOut.slice(0, 1500) + '\n... [truncated]' : bashOut)}</pre>
-                                    `;
-                                    body3.appendChild(block);
-                                }
-                                _updateCUToolIndicator(bubble, 'bash', bashCmd?.substring(0, 60));
-                                const shortCmd = bashCmd?.length > 50 ? bashCmd.slice(0, 50) + '...' : bashCmd;
-                                _cuTodoDescribe(`Run: ${shortCmd}`, `bash: ${shortCmd}`);
-                                break;
-                            }
-
-                            case 'cu_file_edit': {
-                                const feCmd = data.command || '';
-                                const fePath = data.path || '';
-                                console.log(`[CU] File edit: ${feCmd} ${fePath}`);
-                                cuLog.push({ type: 'file_edit', command: feCmd, path: fePath, step: data.step });
-                                const panel4 = _ensureCUPanel(bubble);
-                                const body4 = panel4.querySelector('.cu-activity-body');
-                                if (body4) {
-                                    const line = document.createElement('div');
-                                    line.className = 'cu-action-line cu-file-edit';
-                                    line.innerHTML = `<strong>${escapeHtml(feCmd)}</strong> <code>${escapeHtml(fePath)}</code>`;
-                                    body4.appendChild(line);
-                                }
-                                _updateCUToolIndicator(bubble, feCmd, fePath);
-                                _cuTodoDescribe(`Edit: ${fePath}`, `${feCmd} ${fePath}`);
-                                break;
-                            }
-
-                            case 'cu_step': {
-                                console.log(`[CU] Step ${data.step}/${data.total}`);
-                                const panel5 = _ensureCUPanel(bubble);
-                                const counter = panel5.querySelector('.cu-step-counter');
-                                if (counter) counter.textContent = `Step ${data.step}/${data.total}`;
-                                // Pulse the live indicator
-                                const dot = panel5.querySelector('.cu-live-dot');
-                                if (dot) { dot.classList.remove('pulse'); void dot.offsetWidth; dot.classList.add('pulse'); }
-                                _cuCurrentStep = data.step;
-                                _cuTotalSteps = data.total || _cuTotalSteps;
-                                _updateCUToolIndicator(bubble, 'processing', 'Step ' + data.step + '/' + data.total);
-                                if (window.__cuDrawerUpdateStep) window.__cuDrawerUpdateStep(data.step, data.total);
-                                if (window.__cuDrawerUpdateStatus) window.__cuDrawerUpdateStatus('running');
-                                _cuTodoNewStep(data.step);
-                                break;
-                            }
-
-                            case 'heartbeat': {
-                                // Background task keepalive — update step counter
-                                console.log(`[CU] Heartbeat: step ${data.step}/${data.total}`);
-                                if (bubble) {
-                                    const hbPanel = bubble.querySelector('.cu-activity-panel');
-                                    if (hbPanel) {
-                                        const hbCounter = hbPanel.querySelector('.cu-step-counter');
-                                        if (hbCounter) hbCounter.textContent = `Step ${data.step}/${data.total}`;
-                                        const hbDot = hbPanel.querySelector('.cu-live-dot');
-                                        if (hbDot) { hbDot.classList.remove('pulse'); void hbDot.offsetWidth; hbDot.classList.add('pulse'); }
-                                    }
-                                }
-                                _cuCurrentStep = data.step;
-                                _cuTotalSteps = data.total || _cuTotalSteps;
-                                _updateCUToolIndicator(bubble, 'processing', 'Step ' + data.step + '/' + data.total);
-                                // Only add a new step if we haven't seen it yet
-                                if (!_cuTasks.find(t => t.id === `cu-step-${data.step}`)) {
-                                    _cuTodoNewStep(data.step);
-                                }
-                                _cuTodoDescribe('Running in background...', 'Background task');
-                                break;
-                            }
-
-                            // ─── CU Session Management Events ───
-                            case 'cu_session':
-                                console.log('[CU] Session ID:', data.session_id, 'Device:', data.device_id);
-                                setCUSessionId(data.session_id);
-                                if (window.__cuDrawerSetSession) window.__cuDrawerSetSession(data.session_id);
-                                if (data.device_id && window.__cuDrawerSetDevice) window.__cuDrawerSetDevice(data.device_id);
-                                break;
-
-                            case 'cu_queued':
-                                console.log(`[CU] Prompt queued #${data.position}`);
-                                toast(`Prompt queued (#${data.position})`);
-                                if (window.__cuDrawerUpdateQueue) window.__cuDrawerUpdateQueue(data.position);
-                                // Remove the empty assistant bubble — queued response will
-                                // appear in the original stream's bubble via cu_queue_next
-                                if (bubble && bubble.parentNode) {
-                                    bubble.remove();
-                                }
-                                // Remove the user's queued message bubble too — its text
-                                // will appear as the separator in the original bubble.
-                                // This keeps the original assistant bubble as the last element
-                                // so auto-scroll works correctly.
-                                {
-                                    const histEl = $('history');
-                                    if (histEl && histEl.lastElementChild) {
-                                        const lastEl = histEl.lastElementChild;
-                                        if (lastEl.classList.contains('user') || (lastEl.querySelector && lastEl.querySelector('.bubble-text'))) {
-                                            lastEl.remove();
-                                        }
-                                    }
-                                    // Remove from history data too (last user entry)
-                                    const hd = getHistoryData();
-                                    if (hd.length > 0 && hd[hd.length - 1].role === 'user') {
-                                        hd.pop();
-                                        setHistoryData(hd);
-                                        saveHistory();
-                                    }
-                                }
-                                break;
-
-                            case 'cu_stopped':
-                                console.log('[CU] Task stopped:', data.reason);
-                                if (window.__cuDrawerUpdateStatus) window.__cuDrawerUpdateStatus('stopped');
-                                toast('Computer Use task stopped');
-                                break;
-
-                            case 'cu_queue_next':
-                                console.log(`[CU] Auto-dequeuing next prompt (${data.remaining} remaining)`);
-                                if (window.__cuDrawerUpdateQueue) window.__cuDrawerUpdateQueue(data.remaining);
-                                // Enter append mode — subsequent content streams into same bubble
-                                _cuQueueAppendMode = true;
-                                // Re-enable streaming state so scroll tracking works for new content
-                                setStreamingState(true);
-                                // Add visual separator with the queued prompt text
-                                fullResponse += '\n\n---\n\n**\u27A1 Next:** ' + (data.prompt || '') + '\n\n';
-                                appendResponseContent(bubble, '', fullResponse);
-                                // Force scroll to the bubble since it's now the last element
-                                if (bubble && bubble.scrollIntoView) {
-                                    bubble.scrollIntoView({ block: 'end', behavior: 'smooth' });
-                                }
-                                break;
-
-                            case 'done':
-                                console.log('[STREAM] Done:', data);
-                                if (data.thinking) {
-                                    fullThinking = _cuQueueAppendMode
-                                        ? (fullThinking + '\n\n' + data.thinking)
-                                        : data.thinking;
-                                }
-                                if (data.content) {
-                                    if (_cuQueueAppendMode) {
-                                        // Append mode: content already streamed into fullResponse
-                                        // via content events — don't overwrite
-                                        console.log('[CU] Queue append mode — preserving accumulated response');
-                                    } else {
-                                        fullResponse = data.content;
-                                    }
-                                }
-                                if (provider === 'computer-use' && window.__cuDrawerUpdateStatus) {
-                                    window.__cuDrawerUpdateStatus('complete');
-                                }
-                                break;
-
-                            case 'error':
-                                console.error('[STREAM] Error:', data);
-                                toast('Stream error: ' + data);
-                                // Accumulate — an error-only stream (no response)
-                                // must reach send()'s failure/retry handling instead
-                                // of leaving a dangling empty streaming bubble.
-                                streamErrorText += (streamErrorText ? '\n\n' : '') +
-                                    (typeof data === 'string' ? data : JSON.stringify(data));
-                                break;
-
-                            case 'stream_end':
-                                console.log('[STREAM] Stream ended');
-                                // The answer is finalized — dissolve The Signal. If a
-                                // mint follows (after /chat/save resolves), the caller
-                                // re-animates this same line with the mint id, then
-                                // dissolves again.
-                                if (signal) signal.dissolve();
-                                // Don't kill streaming state if another CU stream is still active
-                                // (the queued request's short SSE stream ends before the original)
-                                if (!_cuQueueAppendMode) {
-                                    setStreamingState(false);
-                                }
-                                if (provider === 'computer-use' && window.__cuDrawerUpdateStatus && !_cuQueueAppendMode) {
-                                    window.__cuDrawerUpdateStatus('complete');
-                                }
-                                break;
-                        }
-                    } catch (e) {
-                        console.warn('[STREAM] Parse error:', e, eventData);
-                    }
-                }
-
-                reader.read().then(processChunk).catch(onStreamError);
-            }
-
-            // On a mid-stream read error, clear the streaming marker before rejecting —
-            // otherwise the orphaned `.streaming-bubble` lingers and pins the generation
-            // ember backdrop on (the outer fetch .catch below only runs for pre-stream errors).
-            function onStreamError(err) {
-                if (stallTimer) clearTimeout(stallTimer); // watchdog dies with the stream
-                if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; } // no leaked rAF
-                bubble.classList.remove('streaming-bubble');
-                reject(err);
-            }
-
-            armStallWatchdog(); // covers a server that never sends a first chunk
-            reader.read().then(processChunk).catch(onStreamError);
-
-        }).catch(error => {
-            console.error('[STREAM] Fetch error:', error);
-            if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; } // no leaked rAF
-            if (bubble.parentNode) bubble.parentNode.removeChild(bubble);
-            reject(error);
-        });
+    const body = JSON.stringify({
+        messages: messages,
+        provider: provider,
+        model: model,
+        operator: operator,
+        ...(provider === 'computer-use' && {
+            session_id: getCUSessionId() || undefined,
+            device_id: getCUDeviceId() || 'blackbox'
+        })
     });
+
+    // ── M7 stall watchdog (mirrors Android M7.1a's 300s stream read
+    // timeout, = the server's provider-leg httpx timeout). The server
+    // emits ": keepalive" SSE comment frames every ~10s during provider
+    // prefill silence, so ANY healthy stream delivers bytes at least every
+    // ~10s. If NOTHING arrives for 300s the stream is dead: the request is
+    // aborted and the turn fails instead of leaving this bubble hanging.
+    const STALL_TIMEOUT_MS = 300000;
+    const controller = new AbortController();
+    _activeStreamController = controller;
+    let stallTimer = null;
+    let stalled = false;
+    const armStallWatchdog = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+            stalled = true;
+            console.error('[STREAM] Stall watchdog: no stream data for 300s — aborting');
+            controller.abort();
+        }, STALL_TIMEOUT_MS);
+    };
+
+    const handleEvent = (eventType, eventData) => {
+        try {
+            const data = JSON.parse(eventData);
+
+            // Debug: Log ALL event types received
+            console.log(`[STREAM DEBUG] Event type: ${eventType}`, typeof data === 'string' ? data.substring(0, 100) : data);
+
+            switch (eventType) {
+                case 'stream_start':
+                    console.log('[STREAM] Started:', data);
+                    setStreamingState(true); // Enable smooth scrolling
+                    if (provider === 'computer-use') _cuStreamActive = true;
+                    // The server resolves the real model id here — use it for
+                    // the honest "generating · <model>" line (not the provider).
+                    if (data.model) signalModelLabel = data.model;
+                    if (data.provenance) {
+                        provenance = data.provenance;
+                        console.log('[STREAM] Provenance:', provenance);
+                    }
+                    break;
+
+                case 'thinking_start':
+                    thinkingStarted = true;
+                    // Panel stays collapsed - user can expand if they want to see reasoning
+                    break;
+
+                case 'thinking':
+                    if (typeof data === 'string') {
+                        fullThinking += data;
+                        appendThinkingContent(bubble, data);
+                    }
+                    break;
+
+                case 'thinking_end':
+                    markThinkingComplete(bubble);
+                    break;
+
+                // ─── The Signal — presentation-only telemetry HUD ───
+                // These three cases drive the morphing red line ONLY.
+                // HARD RULE: they must NEVER append to fullThinking /
+                // fullResponse or feed the /chat/save payload — this
+                // telemetry is display-only and is never persisted.
+                case 'system_activity':
+                    // data = { stage, label, detail, seq } (see
+                    // Orchestrator/telemetry_events.py). We render only the label.
+                    if (signal && data && typeof data.label === 'string') {
+                        signal.push(data.label);
+                    }
+                    break;
+
+                case 'tool_start': {
+                    // data = tool name (string) per chat_routes.py stream.
+                    const toolName = (typeof data === 'string')
+                        ? data
+                        : (data && (data.name || data.tool)) || '';
+                    signalLastTool = toolName;
+                    if (signal && toolName) signal.push('tool · ' + toolName);
+                    break;
+                }
+
+                case 'tool_result': {
+                    // data = a result-description string. Echo the last
+                    // tool name as done; fall back to a trimmed description.
+                    if (signal) {
+                        if (signalLastTool) {
+                            signal.push('tool · ' + signalLastTool + ' · ok');
+                        } else if (typeof data === 'string' && data) {
+                            signal.push('tool · ' + (data.length > 40 ? data.slice(0, 40) : data));
+                        }
+                    }
+                    break;
+                }
+
+                case 'content_start':
+                    if (signal && !signalGenerating) {
+                        signal.push('generating · ' + signalModelLabel);
+                        signalGenerating = true;
+                    }
+                    break;
+
+                case 'content':
+                    if (typeof data === 'string') {
+                        // First answer bytes → narrate generation once. On a
+                        // silent turn (no system_activity) this is the only
+                        // honest line the HUD shows before it dissolves.
+                        if (signal && !signalGenerating) {
+                            signal.push('generating · ' + signalModelLabel);
+                            signalGenerating = true;
+                        }
+                        fullResponse += data;
+                        appendResponseContent(bubble, data, fullResponse);
+                        // Note: Auto-TTS is now triggered after complete response
+                        // See processChunk result.done handler
+                    }
+                    break;
+
+                case 'usage':
+                    console.log('[STREAM] Usage:', data);
+                    if (data && typeof data === 'object') usage = data;
+                    break;
+
+                case 'image_task': {
+                    console.log('[STREAM] Image generation task:', data);
+
+                    // Track with task manager - it will handle the placeholder
+                    const imgTaskId = data.task_id;
+                    const imgPrompt = data.prompt;
+                    const imgCount = data.count;
+                    import('./task-manager.js').then(({ taskManager }) => {
+                        taskManager.addTask(imgTaskId, 'image_generation', imgPrompt, null, imgCount);
+                        console.log(`[STREAM] Tracking image generation: ${imgTaskId}`);
+                    });
+                    break;
+                }
+
+                case 'video_task': {
+                    console.log('[STREAM] Video generation task:', data);
+
+                    // Track with task manager - it will handle the placeholder
+                    const vidTaskId = data.task_id;
+                    const vidPrompt = data.prompt;
+                    const vidDuration = data.duration;
+                    const vidResolution = data.resolution;
+                    import('./task-manager.js').then(({ taskManager }) => {
+                        taskManager.addTask(vidTaskId, 'video_generation', vidPrompt, { duration: vidDuration, resolution: vidResolution });
+                        console.log(`[STREAM] Tracking video generation: ${vidTaskId}`);
+                    });
+                    break;
+                }
+
+                case 'music_task': {
+                    console.log('[STREAM] Music generation task:', data);
+
+                    // Track with task manager
+                    const musTaskId = data.task_id;
+                    const musPrompt = data.prompt;
+                    const musSampleCount = data.sample_count;
+                    import('./task-manager.js').then(({ taskManager }) => {
+                        taskManager.addTask(musTaskId, 'lyria_music', musPrompt, null, musSampleCount || 1);
+                        console.log(`[STREAM] Tracking music generation: ${musTaskId}`);
+                    });
+                    break;
+                }
+
+                // ─── Computer Use Events ───
+                case 'cu_screenshot': {
+                    const ssUrl = data.url;
+                    const ssStep = data.step || 0;
+                    console.log(`[CU] Screenshot step ${ssStep}:`, ssUrl);
+                    cuLog.push({ type: 'screenshot', url: ssUrl, step: ssStep });
+
+                    // Persist CU state for refresh recovery
+                    saveCUState(ssUrl, ssStep);
+
+                    // Update the Live View panel (single image replacement)
+                    const liveView = _ensureCULiveView(bubble);
+                    const liveImg = liveView.querySelector('.cu-live-view-img');
+                    if (liveImg) {
+                        liveImg.src = ssUrl;
+                        liveImg.alt = `Screenshot step ${ssStep}`;
+                        // M4 routing (design 2026-07-23 §7.1): open the
+                        // streaming client when this session has a live
+                        // virtual display; the screenshot-poll modal is
+                        // the automatic fallback (native mode / remote
+                        // device / no-websockify box).
+                        liveImg.onclick = () => {
+                            import('./cu-viewer-route.js')
+                                .then((m) => m.openCuViewer({
+                                    sessionId: getCUSessionId() || undefined,
+                                    deviceId: getCUDeviceId(),
+                                    screenshotUrl: ssUrl
+                                }))
+                                .catch(() => openCUInteract(ssUrl));
+                        };
+                    }
+                    const stepLabel = liveView.querySelector('.cu-live-view-step');
+                    if (stepLabel) stepLabel.textContent = `Step ${ssStep}`;
+
+                    // Also update the interactive modal if it's open
+                    if (isInteractOpen()) {
+                        updateCUInteractScreenshot(ssUrl, ssStep);
+                    }
+
+                    // Pulse the live dot
+                    const liveDot = liveView.querySelector('.cu-live-dot');
+                    if (liveDot) {
+                        liveDot.classList.remove('pulse');
+                        void liveDot.offsetWidth; // force reflow
+                        liveDot.classList.add('pulse');
+                    }
+
+                    // Also update the activity panel step counter (if it exists)
+                    const actPanel = bubble.querySelector('.cu-activity-panel');
+                    if (actPanel) {
+                        const counter = actPanel.querySelector('.cu-step-counter');
+                        if (counter) counter.textContent = `Step ${ssStep}`;
+                    }
+
+                    _updateCUToolIndicator(bubble, 'screenshot', 'Step ' + ssStep);
+                    _cuTodoDescribe('Capturing screenshot', 'Capturing screenshot');
+                    scrollToBottomIfNeeded();
+                    break;
+                }
+
+                case 'cu_action': {
+                    const actAction = data.action || '';
+                    const actParams = data.params || '';
+                    console.log(`[CU] Action: ${actAction}`, actParams);
+                    cuLog.push({ type: 'action', action: actAction, params: actParams, step: data.step });
+                    const panel2 = _ensureCUPanel(bubble);
+                    const body2 = panel2.querySelector('.cu-activity-body');
+                    if (body2) {
+                        const line = document.createElement('div');
+                        line.className = 'cu-action-line';
+                        line.innerHTML = `<strong>${escapeHtml(actAction)}</strong> <span>${escapeHtml(actParams)}</span>`;
+                        body2.appendChild(line);
+                    }
+                    _updateCUToolIndicator(bubble, actAction, actParams);
+                    _cuTodoDescribe(_cuActionLabel(actAction, actParams));
+                    break;
+                }
+
+                case 'cu_bash_output': {
+                    const bashCmd = data.command || '';
+                    const bashOut = data.output || '';
+                    const bashCode = data.exit_code;
+                    console.log(`[CU] Bash (exit ${bashCode}):`, bashCmd);
+                    cuLog.push({ type: 'bash', command: bashCmd, output: bashOut, exit_code: bashCode, step: data.step });
+                    const panel3 = _ensureCUPanel(bubble);
+                    const body3 = panel3.querySelector('.cu-activity-body');
+                    if (body3) {
+                        const block = document.createElement('div');
+                        block.className = 'cu-bash-block';
+                        block.innerHTML = `
+                            <div class="cu-bash-header">
+                                <span>$ ${escapeHtml(bashCmd.length > 120 ? bashCmd.slice(0, 120) + '...' : bashCmd)}</span>
+                                <span class="cu-bash-exit ${bashCode === 0 ? 'success' : 'error'}">exit ${escapeHtml(bashCode)}</span>
+                            </div>
+                            <pre class="cu-bash-output">${escapeHtml(bashOut.length > 1500 ? bashOut.slice(0, 1500) + '\n... [truncated]' : bashOut)}</pre>
+                        `;
+                        body3.appendChild(block);
+                    }
+                    _updateCUToolIndicator(bubble, 'bash', bashCmd?.substring(0, 60));
+                    const shortCmd = bashCmd?.length > 50 ? bashCmd.slice(0, 50) + '...' : bashCmd;
+                    _cuTodoDescribe(`Run: ${shortCmd}`, `bash: ${shortCmd}`);
+                    break;
+                }
+
+                case 'cu_file_edit': {
+                    const feCmd = data.command || '';
+                    const fePath = data.path || '';
+                    console.log(`[CU] File edit: ${feCmd} ${fePath}`);
+                    cuLog.push({ type: 'file_edit', command: feCmd, path: fePath, step: data.step });
+                    const panel4 = _ensureCUPanel(bubble);
+                    const body4 = panel4.querySelector('.cu-activity-body');
+                    if (body4) {
+                        const line = document.createElement('div');
+                        line.className = 'cu-action-line cu-file-edit';
+                        line.innerHTML = `<strong>${escapeHtml(feCmd)}</strong> <code>${escapeHtml(fePath)}</code>`;
+                        body4.appendChild(line);
+                    }
+                    _updateCUToolIndicator(bubble, feCmd, fePath);
+                    _cuTodoDescribe(`Edit: ${fePath}`, `${feCmd} ${fePath}`);
+                    break;
+                }
+
+                case 'cu_step': {
+                    console.log(`[CU] Step ${data.step}/${data.total}`);
+                    const panel5 = _ensureCUPanel(bubble);
+                    const counter = panel5.querySelector('.cu-step-counter');
+                    if (counter) counter.textContent = `Step ${data.step}/${data.total}`;
+                    // Pulse the live indicator
+                    const dot = panel5.querySelector('.cu-live-dot');
+                    if (dot) { dot.classList.remove('pulse'); void dot.offsetWidth; dot.classList.add('pulse'); }
+                    _cuCurrentStep = data.step;
+                    _cuTotalSteps = data.total || _cuTotalSteps;
+                    _updateCUToolIndicator(bubble, 'processing', 'Step ' + data.step + '/' + data.total);
+                    if (window.__cuDrawerUpdateStep) window.__cuDrawerUpdateStep(data.step, data.total);
+                    if (window.__cuDrawerUpdateStatus) window.__cuDrawerUpdateStatus('running');
+                    _cuTodoNewStep(data.step);
+                    break;
+                }
+
+                case 'heartbeat': {
+                    // Background task keepalive — update step counter
+                    console.log(`[CU] Heartbeat: step ${data.step}/${data.total}`);
+                    if (bubble) {
+                        const hbPanel = bubble.querySelector('.cu-activity-panel');
+                        if (hbPanel) {
+                            const hbCounter = hbPanel.querySelector('.cu-step-counter');
+                            if (hbCounter) hbCounter.textContent = `Step ${data.step}/${data.total}`;
+                            const hbDot = hbPanel.querySelector('.cu-live-dot');
+                            if (hbDot) { hbDot.classList.remove('pulse'); void hbDot.offsetWidth; hbDot.classList.add('pulse'); }
+                        }
+                    }
+                    _cuCurrentStep = data.step;
+                    _cuTotalSteps = data.total || _cuTotalSteps;
+                    _updateCUToolIndicator(bubble, 'processing', 'Step ' + data.step + '/' + data.total);
+                    // Only add a new step if we haven't seen it yet
+                    if (!_cuTasks.find(t => t.id === `cu-step-${data.step}`)) {
+                        _cuTodoNewStep(data.step);
+                    }
+                    _cuTodoDescribe('Running in background...', 'Background task');
+                    break;
+                }
+
+                // ─── CU Session Management Events ───
+                case 'cu_session':
+                    console.log('[CU] Session ID:', data.session_id, 'Device:', data.device_id);
+                    setCUSessionId(data.session_id);
+                    if (window.__cuDrawerSetSession) window.__cuDrawerSetSession(data.session_id);
+                    if (data.device_id && window.__cuDrawerSetDevice) window.__cuDrawerSetDevice(data.device_id);
+                    break;
+
+                case 'cu_queued':
+                    console.log(`[CU] Prompt queued #${data.position}`);
+                    toast(`Prompt queued (#${data.position})`);
+                    if (window.__cuDrawerUpdateQueue) window.__cuDrawerUpdateQueue(data.position);
+                    // Remove the empty assistant bubble — queued response will
+                    // appear in the original stream's bubble via cu_queue_next
+                    if (bubble && bubble.parentNode) {
+                        bubble.remove();
+                    }
+                    // Remove the user's queued message bubble too — its text
+                    // will appear as the separator in the original bubble.
+                    // This keeps the original assistant bubble as the last element
+                    // so auto-scroll works correctly.
+                    {
+                        const histEl = $('history');
+                        if (histEl && histEl.lastElementChild) {
+                            const lastEl = histEl.lastElementChild;
+                            if (lastEl.classList.contains('user') || (lastEl.querySelector && lastEl.querySelector('.bubble-text'))) {
+                                lastEl.remove();
+                            }
+                        }
+                        // Remove from history data too (last user entry)
+                        const hd = getHistoryData();
+                        if (hd.length > 0 && hd[hd.length - 1].role === 'user') {
+                            hd.pop();
+                            setHistoryData(hd);
+                            saveHistory();
+                        }
+                    }
+                    break;
+
+                case 'cu_stopped':
+                    console.log('[CU] Task stopped:', data.reason);
+                    if (window.__cuDrawerUpdateStatus) window.__cuDrawerUpdateStatus('stopped');
+                    toast('Computer Use task stopped');
+                    break;
+
+                case 'cu_queue_next':
+                    console.log(`[CU] Auto-dequeuing next prompt (${data.remaining} remaining)`);
+                    if (window.__cuDrawerUpdateQueue) window.__cuDrawerUpdateQueue(data.remaining);
+                    // Enter append mode — subsequent content streams into same bubble
+                    _cuQueueAppendMode = true;
+                    // Re-enable streaming state so scroll tracking works for new content
+                    setStreamingState(true);
+                    // Add visual separator with the queued prompt text
+                    fullResponse += '\n\n---\n\n**\u27A1 Next:** ' + (data.prompt || '') + '\n\n';
+                    appendResponseContent(bubble, '', fullResponse);
+                    // Force scroll to the bubble since it's now the last element
+                    if (bubble && bubble.scrollIntoView) {
+                        bubble.scrollIntoView({ block: 'end', behavior: 'smooth' });
+                    }
+                    break;
+
+                case 'done':
+                    console.log('[STREAM] Done:', data);
+                    if (data.thinking) {
+                        fullThinking = _cuQueueAppendMode
+                            ? (fullThinking + '\n\n' + data.thinking)
+                            : data.thinking;
+                    }
+                    if (data.content) {
+                        if (_cuQueueAppendMode) {
+                            // Append mode: content already streamed into fullResponse
+                            // via content events — don't overwrite
+                            console.log('[CU] Queue append mode — preserving accumulated response');
+                        } else {
+                            fullResponse = data.content;
+                        }
+                    }
+                    if (provider === 'computer-use' && window.__cuDrawerUpdateStatus) {
+                        window.__cuDrawerUpdateStatus('complete');
+                    }
+                    break;
+
+                case 'error':
+                    console.error('[STREAM] Error:', data);
+                    toast('Stream error: ' + data);
+                    // Accumulate — an error-only stream (no response)
+                    // must reach send()'s failure/retry handling instead
+                    // of leaving a dangling empty streaming bubble.
+                    streamErrorText += (streamErrorText ? '\n\n' : '') +
+                        (typeof data === 'string' ? data : JSON.stringify(data));
+                    break;
+
+                case 'stream_end':
+                    console.log('[STREAM] Stream ended');
+                    // The answer is finalized — dissolve The Signal. If a
+                    // mint follows (after /chat/save resolves), the caller
+                    // re-animates this same line with the mint id, then
+                    // dissolves again.
+                    if (signal) signal.dissolve();
+                    // Don't kill streaming state if another CU stream is still active
+                    // (the queued request's short SSE stream ends before the original)
+                    if (!_cuQueueAppendMode) {
+                        setStreamingState(false);
+                    }
+                    if (provider === 'computer-use' && window.__cuDrawerUpdateStatus && !_cuQueueAppendMode) {
+                        window.__cuDrawerUpdateStatus('complete');
+                    }
+                    break;
+            }
+        } catch (e) {
+            console.warn('[STREAM] Parse error:', e, eventData);
+        }
+    };
+
+    try {
+        armStallWatchdog(); // covers a server that never answers or never sends a first chunk
+        let response;
+        try {
+            response = await fetch("/chat/stream", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: body,
+                signal: controller.signal
+            });
+        } catch (err) {
+            throw streamFailure(stalled ? 'stalled' : 'request', err);
+        }
+        if (!response.ok) {
+            throw streamFailure('http', new Error(`Stream failed: ${response.status}`), response.status);
+        }
+        try {
+            await parseSseStream(response.body.getReader(),
+                ({ event, data }) => handleEvent(event, data),
+                { onChunk: armStallWatchdog, signal: controller.signal }); // any bytes (keepalives too) reset the stall clock
+        } catch (err) {
+            throw streamFailure(stalled ? 'stalled' : 'stream', err);
+        }
+    } catch (err) {
+        if (stallTimer) clearTimeout(stallTimer); // watchdog dies with the stream
+        if (_activeStreamController === controller) _activeStreamController = null;
+        if (err.stage === 'stalled') toast('Stream stalled — no data received for 5 minutes.');
+        console.error(`[STREAM] Stream failed (${err.stage}):`, err.cause || err);
+        cleanupFailedStream(bubble, provider, err);
+        throw err;
+    }
+    if (stallTimer) clearTimeout(stallTimer);
+    if (_activeStreamController === controller) _activeStreamController = null;
+
+    // If this was a queued request (bubble was removed), resolve silently
+    if (!bubble.parentNode && provider === 'computer-use') {
+        console.log('[CU] Queued request stream ended — no bubble to finalize');
+        return { thinking: '', response: '', provenance: provenance, cuLog: cuLog, queued: true };
+    }
+
+    markThinkingComplete(bubble);
+
+    // CU: mark all todo steps completed and hide tool indicator
+    if (provider === 'computer-use') {
+        _cuTodoComplete();
+        _hideCUToolIndicator(bubble);
+        _cuQueueAppendMode = false;
+        _cuStreamActive = false;
+    }
+
+    // Finalize the bubble first
+    finalizeStreamingBubble(bubble, fullResponse, fullThinking);
+
+    // Trigger Auto-TTS after response is complete (if enabled)
+    // This generates a single TTS call for the full response
+    if (window.autoTTSEnabled && window.triggerAutoTTS && fullResponse) {
+        console.log('[STREAM] Response complete, triggering Auto-TTS');
+        window.triggerAutoTTS(fullResponse, bubble);
+    }
+
+    return {
+        thinking: fullThinking,
+        response: fullResponse,
+        provenance: provenance,
+        cuLog: cuLog,
+        errorText: streamErrorText,
+        usage: usage,
+        bubbleEl: bubble  // lets send() remove/convert an error-only stream's empty bubble
+    };
 }
 
 // =============================================================================
@@ -2195,65 +2292,71 @@ export async function send() {
     }
 
     // =========================================================================
+    // ATTACHMENTS: uploaded ONCE per logical send. Both modes below build on
+    // the same userContent, so a streaming->standard fallback never uploads
+    // the files a second time (audit P01-chat-core-web-18).
+    // =========================================================================
+    let userContent = [];
+    let bubbleContent = txt;
+    if (txt) userContent.push({ type: "text", text: txt });
+
+    if (attachedFiles.length > 0) {
+        let imageUrls = [];  // Track image URLs for tool usage
+        for (const file of attachedFiles) {
+            let uploadResult;
+            try {
+                uploadResult = await handleFileUpload(file);
+            } catch (err) {
+                // Nothing is sent: the draft and the attachments stay put for another try.
+                console.error('[CHAT] Upload failed:', file.name, err);
+                toast(`Upload failed: ${file.name} — ${err?.message || err}`);
+                return;
+            }
+            if (!uploadResult || !uploadResult.url) continue;
+            const type = classifyAttachment(file);
+            if (!type) {
+                // Never dropped silently: the operator would think the model saw it.
+                toast(`Not sent to the model (unsupported type): ${file.name}`);
+                continue;
+            }
+            userContent.push({ type, [type]: { url: uploadResult.url } });
+            bubbleContent += `\n[Attached: ${file.name}]`;
+
+            // Track image URLs so model can use them for tools
+            if (type === "image_url") {
+                imageUrls.push({ filename: file.name, url: uploadResult.url });
+            }
+        }
+
+        // Add image URL info as text so model can use for generate_video(image_url) or generate_image(reference_images)
+        if (imageUrls.length > 0) {
+            let urlInfo = '\n\n[Uploaded Image URLs for tool use:';
+            for (const img of imageUrls) {
+                urlInfo += `\n- ${img.filename}: ${img.url}`;
+            }
+            urlInfo += '\nUse these URLs with generate_video(image_url=...) for image-to-video, or generate_image(reference_images=[...]) for image-to-image.]';
+            userContent.push({ type: "text", text: urlInfo });
+        }
+    }
+
+    // The user turn's bubble for this logical send, appended exactly ONCE
+    // (the standard-mode fallback reuses it), and the anchor for the retry
+    // chip when the FINAL outcome is failure. tagUserTurn stamps a per-send
+    // key onto the history entry + bubble so failure marking / retry removal
+    // target exactly THIS send even when sends overlap.
+    const userTurnBubble = addBubble("user", bubbleContent);
+    tagUserTurn(userTurnBubble);
+    if ($("prompt")) $("prompt").value = "";
+    clearAttachedFiles();
+    renderPreviews();
+
+    // =========================================================================
     // STREAMING MODE: Use SSE with thinking/reasoning display
     // =========================================================================
-    let streamingCompleted = false;
-
-    // The user turn's bubble for this logical send. Set by whichever mode appends
-    // it FIRST — the standard-mode fallback must NOT re-append the user bubble /
-    // history entry when streaming already did (that duplicated the user turn on
-    // every streaming→standard fallback). Also the anchor for the retry chip when
-    // the FINAL outcome is failure. tagUserTurn stamps a per-send key onto the
-    // history entry + bubble so failure marking / retry removal target exactly
-    // THIS send even when sends overlap.
-    let userTurnBubble = null;
-
     if (STREAMING_ENABLED && window.__provider !== 'agents' && window.__provider !== 'gemini-agents') {
+        const provider = window.__provider || "gemini";
+        let result;
         try {
-            let userContent = [];
-            let bubbleContent = txt;
-            if (txt) userContent.push({ type: "text", text: txt });
-
-            if (attachedFiles.length > 0) {
-                let imageUrls = [];  // Track image URLs for tool usage
-                for (const file of attachedFiles) {
-                    const uploadResult = await handleFileUpload(file);
-                    if (uploadResult && uploadResult.url) {
-                        let type = "unknown";
-                        if (file.type.startsWith("image/")) type = "image_url";
-                        else if (file.type.startsWith("video/")) type = "video_url";
-                        else if (file.type.startsWith("audio/")) type = "audio_url";
-                        else if (file.type === "application/pdf" || file.type === "text/plain") type = "document_url";
-
-                        if (type !== "unknown") {
-                            userContent.push({ type, [type]: { url: uploadResult.url } });
-                            bubbleContent += `\n[Attached: ${file.name}]`;
-
-                            // Track image URLs so model can use them for tools
-                            if (type === "image_url") {
-                                imageUrls.push({ filename: file.name, url: uploadResult.url });
-                            }
-                        }
-                    }
-                }
-
-                // Add image URL info as text so model can use for generate_video(image_url) or generate_image(reference_images)
-                if (imageUrls.length > 0) {
-                    let urlInfo = '\n\n[Uploaded Image URLs for tool use:';
-                    for (const img of imageUrls) {
-                        urlInfo += `\n- ${img.filename}: ${img.url}`;
-                    }
-                    urlInfo += '\nUse these URLs with generate_video(image_url=...) for image-to-video, or generate_image(reference_images=[...]) for image-to-image.]';
-                    userContent.push({ type: "text", text: urlInfo });
-                }
-            }
-
-            userTurnBubble = addBubble("user", bubbleContent);
-            tagUserTurn(userTurnBubble);
-            if ($("prompt")) $("prompt").value = "";
-            clearAttachedFiles();
-            renderPreviews();
-
             // IMPORTANT: We do NOT send localStorage history to the AI model.
             // Context comes from BlackBox snapshots (recent, relevant, checkpoints) which are:
             // - Synthesized and reasoned (not raw conversation)
@@ -2264,13 +2367,33 @@ export async function send() {
             messages.push({ role: "user", content: userContent.length === 1 && userContent[0].type === "text" ? txt : userContent });
             console.log('[CHAT] Sending only current message - context comes from BlackBox snapshots');
 
-            const result = await sendStreamingChat(
+            result = await sendStreamingChat(
                 messages,
-                window.__provider || "gemini",
+                provider,
                 window.__model || "",
                 getOperator()
             );
+        } catch (streamError) {
+            if (!shouldFallBackToStandard(streamError)) {
+                // The server accepted the turn and it died mid-stream. Re-sending
+                // would run it (and its tools) twice, so the partial bubble is
+                // already gone and the operator gets the retry chip instead.
+                if (provider === 'computer-use') {
+                    // The CU task keeps running server-side; the background
+                    // banner picks it up and adds its result when it finishes.
+                    toast('Lost the Computer Use stream — the task keeps running in the background');
+                    checkCUBackgroundStatus();
+                } else {
+                    addBubble("assistant", "Chat error: " + (streamError?.message || String(streamError)));
+                    markSendFailed(userTurnBubble, txt);
+                }
+                return;
+            }
+            console.warn("[STREAM] Server did not accept the stream, falling back to polling:", streamError);
+            toast("Streaming unavailable, using standard mode...");
+        }
 
+        if (result) {
             // ERROR-ONLY stream: the transport completed but the server delivered
             // only SSE 'error' events — no reply. Previously this left a dangling
             // empty streaming bubble and a user turn with no reply and NO retry
@@ -2285,7 +2408,6 @@ export async function send() {
                 }
                 addBubble("assistant", "Chat error: " + result.errorText);
                 markSendFailed(userTurnBubble, txt);
-                streamingCompleted = true;
                 return;
             }
 
@@ -2293,117 +2415,15 @@ export async function send() {
                 console.log('[STREAM] Queued request — response will appear in original bubble');
                 // Don't save to history — the original stream handles the combined response
             } else if (result.response) {
-                const updatedHistoryData = getHistoryData();
-                updatedHistoryData.push({ role: "assistant", content: result.response });
-                if (result.thinking) {
-                    updatedHistoryData[updatedHistoryData.length - 1].thinking = result.thinking;
-                }
-                if (result.cuLog && result.cuLog.length > 0) {
-                    updatedHistoryData[updatedHistoryData.length - 1].cuLog = result.cuLog;
-                }
-                setHistoryData(updatedHistoryData);
-                saveHistory();
-                setLastAssistantText(result.response);
-
-                try {
-                    // CU provider saves internally via background task — skip /chat/save
-                    if (window.__provider === 'computer-use') {
-                        console.log('[STREAM] Skipping /chat/save for computer-use (background task saves internally)');
-                    } else {
-                    const saveResponse = await fetch("/chat/save", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            operator: getOperator(),
-                            user_message: txt,
-                            assistant_response: result.response,
-                            reasoning: result.thinking || "",
-                            provenance: result.provenance || {},
-                            model: window.__model || "",
-                            tokens: result.usage || {}
-                        })
-                    });
-                    const saveResult = await saveResponse.json();
-                    if (saveResult.minted) {
-                        console.log('[STREAM] Snapshot minted:', saveResult.snap_id);
-                    }
-
-                    // The Signal: narrate the mint on the turn's HUD line as a brief
-                    // final flourish, then dissolve. The .signal-host survives
-                    // finalizeStreamingBubble, so the line is still mountable here.
-                    // Degrades gracefully — dims omitted if the save response lacks it.
-                    // Presentation-only: reads saveResult, never writes the payload.
-                    const _sig = result.bubbleEl && result.bubbleEl._signalLine;
-                    if (_sig && saveResult && saveResult.snap_id) {
-                        const _dims = saveResult.dims || saveResult.embedding_dims;
-                        _sig.push('mint · ' + saveResult.snap_id + (_dims ? ' · ' + _dims + 'd' : ''));
-                        // Let the mint line fully morph in and linger before dissolving.
-                        // Dissolving synchronously would call push("") on the same tick
-                        // and cancel the just-scheduled mint-in animation (never visible).
-                        setTimeout(() => _sig.dissolve(), 1600);
-                    }
-
-                    if (saveResult.modified_response) {
-                        console.log('[STREAM] Modified response received, updating bubble...');
-                        const hist = $("history");
-                        if (hist) {
-                            const lastChild = hist.lastElementChild;
-                            if (lastChild) {
-                                let contentDiv = lastChild.querySelector('.response-content') ||
-                                                 lastChild.querySelector('.bubble-text') ||
-                                                 lastChild.querySelector('span');
-
-                                if (contentDiv && saveResult.modified_response) {
-                                    const parsedContent = renderMarkdown(saveResult.modified_response);
-                                    contentDiv.innerHTML = parsedContent;
-
-                                    contentDiv.querySelectorAll('pre code').forEach((block) => {
-                                        if (window.hljs) hljs.highlightElement(block);
-                                    });
-
-                                    if (typeof makeSnapshotsClickable === 'function') {
-                                        makeSnapshotsClickable(contentDiv);
-                                    }
-
-                                    if (typeof applySyntaxHighlighting === 'function') {
-                                        applySyntaxHighlighting(contentDiv);
-                                    }
-
-                                    const finalHistoryData = getHistoryData();
-                                    const lastAssistantIndex = finalHistoryData.length - 1;
-                                    if (lastAssistantIndex >= 0 && finalHistoryData[lastAssistantIndex].role === 'assistant') {
-                                        finalHistoryData[lastAssistantIndex].content = saveResult.modified_response;
-                                        setHistoryData(finalHistoryData);
-                                        saveHistory();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    } // end else (non-CU save)
-                } catch (saveErr) {
-                    console.error('[STREAM] Failed to save conversation:', saveErr);
-                }
+                await saveStreamedTurn(txt, result);
             }
-
-            streamingCompleted = true;
             return;
-        } catch (streamError) {
-            console.error("[STREAM] Streaming failed, falling back to polling:", streamError);
-            if (!streamingCompleted) {
-                toast("Streaming unavailable, using standard mode...");
-            }
         }
     }
 
     // =========================================================================
     // STANDARD MODE: Use polling-based chat (fallback)
     // =========================================================================
-    if (streamingCompleted) {
-        console.log('[STANDARD] Skipping - streaming already completed successfully');
-        return;
-    }
-
     let thinking;
 
     try {
@@ -2414,61 +2434,7 @@ export async function send() {
             messages: []
         };
 
-        let bubbleContent = txt;
-        let userContent = [];
-        if (txt) userContent.push({ type: "text", text: txt });
-
-        if (attachedFiles.length > 0) {
-            let imageUrls = [];  // Track image URLs for tool usage
-            for (const file of attachedFiles) {
-                const uploadResult = await handleFileUpload(file);
-                if (uploadResult && uploadResult.url) {
-                    let type = "unknown";
-                    if (file.type.startsWith("image/")) type = "image_url";
-                    else if (file.type.startsWith("video/")) type = "video_url";
-                    else if (file.type.startsWith("audio/")) type = "audio_url";
-                    else if (file.type === "application/pdf" ||
-                             file.type === "text/plain" ||
-                             file.type === "application/msword" ||
-                             file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
-                        type = "document_url";
-                    }
-
-                    if (type !== "unknown") {
-                        userContent.push({ type, [type]: { url: uploadResult.url } });
-                        bubbleContent += `\n[Attached: ${file.name}]`;
-
-                        // Track image URLs so model can use them for tools
-                        if (type === "image_url") {
-                            imageUrls.push({ filename: file.name, url: uploadResult.url });
-                        }
-                    }
-                }
-            }
-
-            // Add image URL info as text so model can use for generate_video(image_url) or generate_image(reference_images)
-            if (imageUrls.length > 0) {
-                let urlInfo = '\n\n[Uploaded Image URLs for tool use:';
-                for (const img of imageUrls) {
-                    urlInfo += `\n- ${img.filename}: ${img.url}`;
-                }
-                urlInfo += '\nUse these URLs with generate_video(image_url=...) for image-to-video, or generate_image(reference_images=[...]) for image-to-image.]';
-                userContent.push({ type: "text", text: urlInfo });
-            }
-        }
-
         payload.messages.push({ role: "user", content: userContent });
-
-        // Append the user bubble exactly ONCE per logical send: when we got here
-        // via the streaming→standard fallback, streaming already appended it
-        // (userTurnBubble set) — re-appending duplicated the user turn.
-        if (!userTurnBubble) {
-            userTurnBubble = addBubble("user", bubbleContent);
-            tagUserTurn(userTurnBubble);
-        }
-        if ($("prompt")) $("prompt").value = "";
-        clearAttachedFiles();
-        renderPreviews();
 
         thinking = createAnimatedThinkingBubble();
         const hist = $("history");
@@ -2536,6 +2502,7 @@ export async function send() {
         }));
 
         let reply = null;
+        let taskFailure = null;
         let pollAttempts = 0;
         const maxPollAttempts = 180;
 
@@ -2543,22 +2510,34 @@ export async function send() {
             await new Promise(resolve => setTimeout(resolve, 1000));
             pollAttempts++;
 
+            let taskStatus;
             try {
                 const statusResponse = await fetch(`/tasks/status/${taskId}`);
-                const taskStatus = await statusResponse.json();
-
-                console.log(`[ASYNC-CHAT] Poll attempt ${pollAttempts}: status=${taskStatus.status}, progress=${taskStatus.progress}`);
-
-                if (taskStatus.status === "completed") {
-                    console.log(`[ASYNC-CHAT] Task completed after ${pollAttempts} polls`);
-                    reply = taskStatus.result_data;
-                    break;
-                } else if (taskStatus.status === "failed") {
-                    throw new Error(`Task failed: ${taskStatus.error_message || "Unknown error"}`);
-                }
+                taskStatus = await statusResponse.json();
             } catch (pollError) {
+                // A transient fetch error: keep polling the same task.
                 console.error(`[ASYNC-CHAT] Polling error:`, pollError);
+                continue;
             }
+
+            console.log(`[ASYNC-CHAT] Poll attempt ${pollAttempts}: status=${taskStatus.status}, progress=${taskStatus.progress}`);
+
+            if (taskStatus.status === "completed") {
+                console.log(`[ASYNC-CHAT] Task completed after ${pollAttempts} polls`);
+                reply = taskStatus.result_data;
+                break;
+            } else if (taskStatus.status === "failed" || taskStatus.status === "cancelled") {
+                // Terminal: stop polling now and surface the task's own error
+                // (it used to be swallowed by the poll's catch, and the turn
+                // reported a 180 s timeout instead; audit P01-chat-core-web-07).
+                taskFailure = taskStatus.error_message || (taskStatus.status === "cancelled" ? "Task cancelled" : "Unknown error");
+                break;
+            }
+        }
+
+        if (taskFailure !== null) {
+            localStorage.removeItem("bb_pending_task");
+            throw new Error(`Task failed: ${taskFailure}`);
         }
 
         if (!reply) {
@@ -2606,14 +2585,10 @@ export async function send() {
             setLastAssistantText(replyText);
         }
 
-        if (replyText.includes('video-loading-placeholder')) {
-            setTimeout(pollVideoTasks, 1000);
-        }
-        if (replyText.includes('image-loading-placeholder')) {
-            setTimeout(pollImageTasks, 1000);
-        }
-        if (replyText.includes('music-loading-placeholder')) {
-            setTimeout(pollMusicTasks, 1000);
+        // Server-built loading placeholders (image/video/music jobs the turn
+        // started) wake the media pollers, which stop again once none are left.
+        if (/(?:video|image|music)-loading-placeholder/.test(replyText)) {
+            ensureMediaPolling();
         }
 
         await refreshHealth();
@@ -2629,6 +2604,144 @@ export async function send() {
         // mode failed directly): flag the user turn + offer retry under its bubble.
         markSendFailed(userTurnBubble, txt);
     }
+}
+
+/**
+ * The type a chat attachment is sent to the model as, or null when the model
+ * cannot take it. ONE table for both modes, matching the file picker's accept
+ * list (the streaming branch used to drop .doc/.docx silently; audit
+ * P01-chat-core-web-16).
+ * @param {File} file - An attached file
+ * @returns {'image_url'|'video_url'|'audio_url'|'document_url'|null}
+ */
+export function classifyAttachment(file) {
+    const mime = (file && file.type) || '';
+    if (mime.startsWith("image/")) return "image_url";
+    if (mime.startsWith("video/")) return "video_url";
+    if (mime.startsWith("audio/")) return "audio_url";
+    if (DOCUMENT_MIME_TYPES.has(mime)) return "document_url";
+    return null;
+}
+
+const DOCUMENT_MIME_TYPES = new Set([
+    "application/pdf",
+    "text/plain",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+
+/**
+ * Persist a completed streamed turn: local history, then /chat/save (which
+ * mints the snapshot) with the turn's real token usage, then the Signal's
+ * mint flourish and any server-modified response.
+ * @param {string} txt - The user's prompt text
+ * @param {Object} result - What sendStreamingChat resolved with
+ */
+async function saveStreamedTurn(txt, result) {
+    const updatedHistoryData = getHistoryData();
+    updatedHistoryData.push({ role: "assistant", content: result.response });
+    if (result.thinking) {
+        updatedHistoryData[updatedHistoryData.length - 1].thinking = result.thinking;
+    }
+    if (result.cuLog && result.cuLog.length > 0) {
+        updatedHistoryData[updatedHistoryData.length - 1].cuLog = result.cuLog;
+    }
+    setHistoryData(updatedHistoryData);
+    saveHistory();
+    setLastAssistantText(result.response);
+
+    try {
+        // CU provider saves internally via background task — skip /chat/save
+        if (window.__provider === 'computer-use') {
+            console.log('[STREAM] Skipping /chat/save for computer-use (background task saves internally)');
+            return;
+        }
+        const saveResponse = await fetch("/chat/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                operator: getOperator(),
+                user_message: txt,
+                assistant_response: result.response,
+                reasoning: result.thinking || "",
+                provenance: result.provenance || {},
+                model: window.__model || "",
+                tokens: saveTokens(result.usage)
+            })
+        });
+        const saveResult = await saveResponse.json();
+        if (saveResult.minted) {
+            console.log('[STREAM] Snapshot minted:', saveResult.snap_id);
+        }
+
+        // The Signal: narrate the mint on the turn's HUD line as a brief
+        // final flourish, then dissolve. The .signal-host survives
+        // finalizeStreamingBubble, so the line is still mountable here.
+        // Degrades gracefully — dims omitted if the save response lacks it.
+        // Presentation-only: reads saveResult, never writes the payload.
+        const _sig = result.bubbleEl && result.bubbleEl._signalLine;
+        if (_sig && saveResult && saveResult.snap_id) {
+            const _dims = saveResult.dims || saveResult.embedding_dims;
+            _sig.push('mint · ' + saveResult.snap_id + (_dims ? ' · ' + _dims + 'd' : ''));
+            // Let the mint line fully morph in and linger before dissolving.
+            // Dissolving synchronously would call push("") on the same tick
+            // and cancel the just-scheduled mint-in animation (never visible).
+            setTimeout(() => _sig.dissolve(), 1600);
+        }
+
+        if (saveResult.modified_response) {
+            console.log('[STREAM] Modified response received, updating bubble...');
+            const hist = $("history");
+            if (hist) {
+                const lastChild = hist.lastElementChild;
+                if (lastChild) {
+                    let contentDiv = lastChild.querySelector('.response-content') ||
+                                     lastChild.querySelector('.bubble-text') ||
+                                     lastChild.querySelector('span');
+
+                    if (contentDiv && saveResult.modified_response) {
+                        const parsedContent = renderMarkdown(saveResult.modified_response);
+                        contentDiv.innerHTML = parsedContent;
+
+                        contentDiv.querySelectorAll('pre code').forEach((block) => {
+                            if (window.hljs) hljs.highlightElement(block);
+                        });
+
+                        if (typeof makeSnapshotsClickable === 'function') {
+                            makeSnapshotsClickable(contentDiv);
+                        }
+
+                        if (typeof applySyntaxHighlighting === 'function') {
+                            applySyntaxHighlighting(contentDiv);
+                        }
+
+                        const finalHistoryData = getHistoryData();
+                        const lastAssistantIndex = finalHistoryData.length - 1;
+                        if (lastAssistantIndex >= 0 && finalHistoryData[lastAssistantIndex].role === 'assistant') {
+                            finalHistoryData[lastAssistantIndex].content = saveResult.modified_response;
+                            setHistoryData(finalHistoryData);
+                            saveHistory();
+                        }
+                    }
+                }
+            }
+        }
+    } catch (saveErr) {
+        console.error('[STREAM] Failed to save conversation:', saveErr);
+    }
+}
+
+/**
+ * The stream's usage event as /chat/save's tokens shape ({prompt, completion},
+ * what the server adds to the operator's counters). {} when there was none.
+ * @param {?Object} usage - {prompt_tokens, completion_tokens} from the stream
+ * @returns {{prompt?: number, completion?: number}}
+ */
+function saveTokens(usage) {
+    if (!usage || typeof usage !== 'object') return {};
+    const prompt = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0;
+    const completion = Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0;
+    return { prompt, completion };
 }
 
 // =============================================================================
@@ -2794,6 +2907,7 @@ let videoObserver = null;
  */
 export function setupVideoObserver() {
     videoObserver = new MutationObserver((mutations) => {
+        let placeholderAdded = false;
         mutations.forEach((mutation) => {
             mutation.addedNodes.forEach((node) => {
                 if (node.nodeType === 1) {
@@ -2802,9 +2916,16 @@ export function setupVideoObserver() {
                     }
                     const videos = node.querySelectorAll ? node.querySelectorAll('video.generated-video') : [];
                     videos.forEach(video => addExtendButtonToVideo(video));
+                    if (!placeholderAdded && (node.matches(MEDIA_PLACEHOLDER_SELECTOR)
+                        || node.querySelector(MEDIA_PLACEHOLDER_SELECTOR))) {
+                        placeholderAdded = true;
+                    }
                 }
             });
         });
+        // A media job's placeholder appeared (a polled reply, a restored
+        // history bubble): wake the media pollers.
+        if (placeholderAdded) ensureMediaPolling();
     });
 
     const historyEl = $("history");
@@ -2822,18 +2943,50 @@ export function setupVideoObserver() {
 // Polling Intervals
 // =============================================================================
 
+/** Server-built loading placeholders of image/video/music jobs (tasks.py). */
+const MEDIA_PLACEHOLDER_SELECTOR = '.video-loading-placeholder, .image-loading-placeholder, .music-loading-placeholder';
+
+/** The three media pollers (created on first use). */
+const _mediaPollers = [];
+
 /**
- * Start media polling intervals
+ * A createPoller poller that sweeps one kind of placeholder and stops itself
+ * as soon as none is left on the page (the old setIntervals ran a
+ * querySelectorAll sweep every 3 s for the life of the page, hidden or not;
+ * audit P01-chat-core-web-21).
+ */
+function mediaPoller(selector, sweep, intervalMs) {
+    const poller = createPoller(async () => {
+        if (!document.querySelector(selector)) {
+            poller.stop();
+            return;
+        }
+        await sweep();
+    }, { intervalMs, immediate: false });
+    return poller;
+}
+
+/**
+ * Wake the media pollers (no-op for one already running). Called when a
+ * placeholder appears; each stops again once its kind is all resolved.
+ */
+export function ensureMediaPolling() {
+    if (!_mediaPollers.length) {
+        _mediaPollers.push(
+            mediaPoller('.video-loading-placeholder', pollVideoTasks, 10000),
+            mediaPoller('.image-loading-placeholder', pollImageTasks, 3000),
+            mediaPoller('.music-loading-placeholder', pollMusicTasks, 3000),
+        );
+    }
+    _mediaPollers.forEach(p => p.start());
+}
+
+/**
+ * Start media polling (placeholders already on the page get swept; later ones
+ * wake the pollers through the history observer).
  */
 export function startMediaPolling() {
-    setInterval(pollVideoTasks, 10000);
-    setTimeout(pollVideoTasks, 2000);
-
-    setInterval(pollImageTasks, 3000);
-    setTimeout(pollImageTasks, 1000);
-
-    setInterval(pollMusicTasks, 3000);
-    setTimeout(pollMusicTasks, 1000);
+    ensureMediaPolling();
 }
 
 // =============================================================================

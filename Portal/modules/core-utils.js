@@ -129,6 +129,120 @@ export function simpleHash(str) {
  */
 export const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * The one poller the Portal uses (audit P01-chat-core-web-21, rank 67).
+ *
+ * Bare setInterval pollers kept a backgrounded tab or the Android WebView
+ * hitting the box every few seconds for the life of the page, started a
+ * second request while a slow one was still in flight, and kept their full
+ * cadence through a 60-90 s service restart. A createPoller poller:
+ *  - waits intervalMs from the END of one tick to the start of the next, so a
+ *    tick never overlaps itself (poke() while one is in flight is a no-op);
+ *  - pauses while the page is hidden (no timer is even armed) and runs once
+ *    as soon as it is visible again;
+ *  - backs off exponentially while tick() throws or rejects, up to
+ *    maxIntervalMs, and returns to intervalMs on the next success.
+ *
+ * A tick may call stop() on its own poller (e.g. when nothing is left to
+ * watch); start() revives it.
+ *
+ * @param {() => (Promise<*>|*)} tick - One poll. A throw/rejection is a failure.
+ * @param {object} opts
+ * @param {number} opts.intervalMs - Delay between ticks
+ * @param {number} [opts.maxIntervalMs] - Backoff ceiling (default 8x intervalMs)
+ * @param {boolean} [opts.immediate=true] - First tick on start() (else after one interval)
+ * @param {boolean} [opts.pauseWhenHidden=true] - Pause while document.hidden
+ * @param {(err: *, failures: number) => void} [opts.onError] - After each failed tick
+ * @param {() => void} [opts.onRecover] - After the first success that follows a failure
+ * @param {{setTimeout: Function, clearTimeout: Function}} [opts.timers] - Injectable for tests
+ * @returns {{start: () => void, stop: () => void, poke: () => void, readonly running: boolean, readonly failures: number}}
+ */
+export function createPoller(tick, {
+    intervalMs,
+    maxIntervalMs = intervalMs * 8,
+    immediate = true,
+    pauseWhenHidden = true,
+    onError = null,
+    onRecover = null,
+    timers = null,
+} = {}) {
+    const setT = timers ? timers.setTimeout.bind(timers) : (fn, ms) => setTimeout(fn, ms);
+    const clearT = timers ? timers.clearTimeout.bind(timers) : (id) => clearTimeout(id);
+    const doc = typeof document !== 'undefined' ? document : null;
+    let running = false;
+    let inFlight = false;
+    let timer = null;
+    let failures = 0;
+
+    const hidden = () => pauseWhenHidden && !!doc && doc.hidden === true;
+
+    const clearTimer = () => {
+        if (timer !== null) {
+            clearT(timer);
+            timer = null;
+        }
+    };
+
+    const schedule = (delay) => {
+        clearTimer();
+        if (!running || hidden()) return;
+        timer = setT(run, delay);
+    };
+
+    const nextDelay = () => (failures
+        ? Math.min(intervalMs * Math.pow(2, failures), maxIntervalMs)
+        : intervalMs);
+
+    async function run() {
+        timer = null;
+        if (!running || inFlight || hidden()) return;
+        inFlight = true;
+        try {
+            await tick();
+            if (failures) {
+                failures = 0;
+                if (onRecover) onRecover();
+            }
+        } catch (err) {
+            failures += 1;
+            if (onError) {
+                try { onError(err, failures); } catch (_) { /* a reporter never kills the poller */ }
+            }
+        } finally {
+            inFlight = false;
+            schedule(nextDelay());
+        }
+    }
+
+    const onVisibility = () => {
+        if (!running) return;
+        if (hidden()) clearTimer();
+        else if (!inFlight) run();
+    };
+
+    return {
+        start() {
+            if (running) return;
+            running = true;
+            if (doc && pauseWhenHidden) doc.addEventListener('visibilitychange', onVisibility);
+            if (immediate) run();
+            else schedule(intervalMs);
+        },
+        stop() {
+            running = false;
+            clearTimer();
+            if (doc && pauseWhenHidden) doc.removeEventListener('visibilitychange', onVisibility);
+        },
+        poke() {
+            if (!running || inFlight) return;
+            clearTimer();
+            run();
+        },
+        get running() { return running; },
+        get failures() { return failures; },
+    };
+}
+
 // =============================================================================
 // Debug Utilities
 // =============================================================================
