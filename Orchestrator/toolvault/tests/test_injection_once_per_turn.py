@@ -134,6 +134,40 @@ def test_a_swapped_embedder_is_never_served_an_old_vector(env, monkeypatch):
     assert embeddings.embed_query("q") == [0.0, 1.0]
 
 
+def test_a_freed_embedder_address_is_never_mistaken_for_a_new_one(env):
+    """Keyed on id() alone, a double freed after use and a new one allocated at
+    the same address shared a memo entry: the new one got the old vector."""
+    stale = []
+    for i in range(100):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(shared_search, "generate_embedding_sync",
+                       lambda text, purpose="document", slug=None, i=i: [float(i), 1.0])
+            got = embeddings.embed_query("same prompt")
+        if got != [float(i), 1.0]:
+            stale.append((i, got))
+    assert not stale, f"{len(stale)} of 100 embeds served another double's vector: {stale[:3]}"
+
+
+def test_the_first_query_after_a_restart_is_reused(env, monkeypatch):
+    """The embed itself creates the slug's provider instance on a box's first
+    query, so the vector must be stored under the instance that made it, or
+    the same turn's second injection embeds again."""
+    from Orchestrator.embeddings import providers
+    monkeypatch.setattr(providers, "_instances", {})
+    embeddings._query_vecs.clear()
+    calls = []
+
+    def first_embed(text, purpose="document", slug=None):
+        calls.append(text)
+        providers._instances.setdefault("test-slug", object())  # what get_provider does
+        return list(VEC)
+
+    monkeypatch.setattr(shared_search, "generate_embedding_sync", first_embed)
+    assert embeddings.embed_query("send a text") == VEC
+    assert embeddings.embed_query("send a text") == VEC
+    assert calls == ["send a text"]
+
+
 # ---------------------------------------------------------------------------
 # The parsed store is cached until the file changes
 # ---------------------------------------------------------------------------

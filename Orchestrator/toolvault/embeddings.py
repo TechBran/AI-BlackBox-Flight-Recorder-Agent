@@ -97,8 +97,9 @@ def embed_tool_description(
 # vector instead of another provider round trip (audit O17-toolvault-runtime-02).
 # A failed embed (None) is reused only briefly: long enough that a down provider
 # is not paid for twice in one turn (its retries take ~7 s), short enough that a
-# recovery is seen on the next turn. The key also carries the identity of the
-# embed function and of the slug's provider instance, so swapping either (a
+# recovery is seen on the next turn. The key also carries the embed function
+# and the slug's provider instance (the one that made the vector: the embed
+# itself creates it on a box's first query), so swapping either (a
 # re-registered provider, a test double) never serves a vector made by another.
 QUERY_VEC_TTL_S = 300.0
 QUERY_VEC_FAIL_TTL_S = 10.0
@@ -108,19 +109,48 @@ _query_vecs_lock = threading.Lock()
 _monotonic = time.monotonic  # module global so tests can drive the clock
 
 
+class _Same:
+    """A memo-key part that compares by identity and keeps its object alive, so
+    a freed object's address (id) can never be mistaken for a new one's."""
+
+    __slots__ = ("obj",)
+
+    def __init__(self, obj):
+        self.obj = obj
+
+    def __hash__(self):
+        return id(self.obj)
+
+    def __eq__(self, other):
+        return isinstance(other, _Same) and other.obj is self.obj
+
+
+def _query_key(slug: str, query: str) -> tuple:
+    from Orchestrator.embeddings import providers
+    from Orchestrator.embeddings import search
+
+    return (slug, query, _Same(search.generate_embedding_sync),
+            _Same(providers._instances.get(slug)))
+
+
+def _reset_query_cache() -> None:
+    """Forget every memoised query vector (the test suite does, per test)."""
+    with _query_vecs_lock:
+        _query_vecs.clear()
+
+
 def embed_query(query: str) -> Optional[List[float]]:
     """Embed a search query via the shared active provider.
 
     purpose="query": optimized for finding relevant docs. None on failure.
     Reused for the same text under the same model (see QUERY_VEC_TTL_S).
     """
-    from Orchestrator.embeddings import providers
     from Orchestrator.embeddings.search import generate_embedding_sync
 
     slug = _active_slug()
-    key = (slug, query, id(generate_embedding_sync), id(providers._instances.get(slug)))
     now = _monotonic()
     with _query_vecs_lock:
+        key = _query_key(slug, query)
         hit = _query_vecs.get(key)
         if hit is not None and hit[0] > now:
             _query_vecs.move_to_end(key)
@@ -128,6 +158,7 @@ def embed_query(query: str) -> Optional[List[float]]:
     vec = generate_embedding_sync(query, purpose="query")
     ttl = QUERY_VEC_TTL_S if vec else QUERY_VEC_FAIL_TTL_S
     with _query_vecs_lock:
+        key = _query_key(slug, query)  # under the provider that made the vector
         _query_vecs[key] = (now + ttl, vec)
         _query_vecs.move_to_end(key)
         while len(_query_vecs) > _QUERY_VEC_MAX:

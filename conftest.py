@@ -549,6 +549,17 @@ def _box_stores_off_the_checkout(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _no_query_vector_carries_over():
+    """ToolVault memoises query vectors module-wide (one turn's two injections
+    share one embed). A test that stubs the embedder must not be served another
+    test's vector for the same text. Cleared only when the module is loaded."""
+    yield
+    emb = sys.modules.get("Orchestrator.toolvault.embeddings")
+    if emb is not None and hasattr(emb, "_reset_query_cache"):
+        emb._reset_query_cache()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_provider_billing_state(tmp_path_factory, monkeypatch):
     """Point the billing state file (W09) at a per-test temp path.
 
