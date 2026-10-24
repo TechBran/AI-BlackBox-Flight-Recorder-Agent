@@ -16,6 +16,8 @@ Structured errors (data["error_kind"]): resolution (invalid_target / origin_mism
 no_primary_device / no_device) + pairing (not_paired) + delivery (refused / bad_response /
 lost_contact).
 """
+import asyncio
+
 import aiohttp
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult
@@ -62,9 +64,11 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     # M3 origin-aware routing — identical rule to control_device: explicit device → any tailnet
     # node; else the origin device (must belong to this operator — never silent-retarget); else
-    # the operator's PRIMARY device; else an error.
+    # the operator's PRIMARY device; else an error. Resolution runs `tailscale status` (up to
+    # 3 s): in a worker thread, off the server's loop.
     try:
-        node = mesh.resolve_device(
+        node = await asyncio.to_thread(
+            mesh.resolve_device,
             operator=ctx.operator,
             origin_device_id=ctx.origin_device_id,
             target_device_id=device or None,

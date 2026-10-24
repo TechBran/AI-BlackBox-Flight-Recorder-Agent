@@ -30,6 +30,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[3] / "ToolVault" / "tools"
 # the 58 MB ledger, the embed + rerank retrieval, the media index scan).
 BLOCKING_PREFIXES = (
     "requests.",
+    "httpx.",
     "urllib.request.",
     "http.client.",
     "subprocess.",
@@ -49,10 +50,19 @@ BLOCKING_PREFIXES = (
     "Orchestrator.media_index.",
     "Orchestrator.embeddings.search.",
     "Orchestrator.toolvault.meta_tool.",
+    "Orchestrator.context_builder.",
+    "Orchestrator.local_stack.",
+    # Device resolution shells out to `tailscale status` (3 s timeout).
+    "Orchestrator.local_provider.mesh.resolve_device",
+    "Orchestrator.local_provider.mesh.resolve_origin",
+    "Orchestrator.local_provider.mesh.reachable_devices",
+    "Orchestrator.local_provider.mesh._run_tailscale_status",
     "Orchestrator.routes.admin_routes.get_available_models",
     "Orchestrator.routes.chat_routes.execute_",
 )
 BLOCKING_BUILTINS = {"open"}
+# File methods that block whatever object they are called on (pathlib.Path).
+BLOCKING_METHODS = {"read_text", "read_bytes", "write_text", "write_bytes"}
 
 # Pure helpers under a blocking prefix (no I/O): calling them on the loop is fine.
 PURE = {
@@ -60,6 +70,10 @@ PURE = {
     "Orchestrator.fossils.format_snapshot_for_delivery",
     "Orchestrator.fossils.cap_chars",
     "Orchestrator.gmail.service.is_error_result",
+    # httpx's async client and its config objects never block.
+    "httpx.AsyncClient",
+    "httpx.Timeout",
+    "httpx.Limits",
 }
 
 
@@ -90,29 +104,76 @@ def _dotted(func):
 
 class _Calls(ast.NodeVisitor):
     """Calls made directly in one function body (nested defs/lambdas excluded:
-    a nested sync def handed to a thread is not run on the loop)."""
+    a nested sync def handed to a thread is not run on the loop). Nested sync
+    defs are collected so that calling one inline can be caught, and a name
+    bound to another callable (``search = perform_provider_search``) resolves
+    to it."""
 
     def __init__(self):
         self.calls = []
+        self.nested = {}
+        self.aliases = {}
 
     def visit_FunctionDef(self, node):
+        self.nested[node.name] = node
+
+    def visit_AsyncFunctionDef(self, node):
         pass
 
-    visit_AsyncFunctionDef = visit_FunctionDef
-    visit_Lambda = visit_FunctionDef
+    visit_Lambda = visit_AsyncFunctionDef
+
+    def visit_Assign(self, node):
+        d = _dotted(node.value)
+        if d and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            self.aliases[node.targets[0].id] = d
+        self.generic_visit(node)
 
     def visit_Call(self, node):
         d = _dotted(node.func)
         if d:
             self.calls.append((node.lineno, d))
+        elif isinstance(node.func, ast.Attribute):
+            # A method on an expression: Path(p).read_bytes()
+            self.calls.append((node.lineno, ["<expr>", node.func.attr]))
         self.generic_visit(node)
 
 
-def _body_calls(fn):
+def _visit_body(fn):
     v = _Calls()
     for stmt in fn.body:
         v.visit(stmt)
-    return v.calls
+    for line, parts in list(v.calls):
+        if parts[0] in v.aliases:
+            v.calls.append((line, v.aliases[parts[0]] + parts[1:]))
+    return v
+
+
+def _body_calls(fn):
+    return _visit_body(fn).calls
+
+
+def _blocking_nested(v, imports, blocking_helpers):
+    """Names of the sync defs nested in a function body that block."""
+    blocking = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, fn in v.nested.items():
+            if name in blocking:
+                continue
+            for _, parts in _body_calls(fn):
+                callee = parts[0] if len(parts) == 1 else None
+                if (_call_blocks(parts, imports)
+                        or callee in blocking_helpers or callee in blocking):
+                    blocking.add(name)
+                    changed = True
+                    break
+    return blocking
+
+
+def _call_blocks(parts, imports):
+    return _is_blocking(_resolve(parts, imports)) or (
+        len(parts) > 1 and parts[-1] in BLOCKING_METHODS)
 
 
 def _resolve(parts, imports):
@@ -155,9 +216,12 @@ def blocking_calls_on_loop(source, filename="executor.py"):
     for fn in _top_functions(tree).values():
         if not isinstance(fn, ast.AsyncFunctionDef):
             continue
-        for line, parts in _body_calls(fn):
+        v = _visit_body(fn)
+        nested = _blocking_nested(v, imports, blocking_helpers)
+        for line, parts in v.calls:
             full = _resolve(parts, imports)
-            if _is_blocking(full) or (len(parts) == 1 and parts[0] in blocking_helpers):
+            if _call_blocks(parts, imports) or (
+                    len(parts) == 1 and (parts[0] in blocking_helpers or parts[0] in nested)):
                 hits.append((line, full))
     return hits
 
@@ -175,7 +239,7 @@ def _blocking_helpers(tree, imports):
                 continue
             for _, parts in _body_calls(fn):
                 callee = parts[0] if len(parts) == 1 else None
-                if _is_blocking(_resolve(parts, imports)) or callee in blocking_helpers:
+                if _call_blocks(parts, imports) or callee in blocking_helpers:
                     blocking_helpers.add(name)
                     changed = True
                     break
@@ -218,6 +282,58 @@ def test_the_guard_sees_the_blocking_shapes_it_must_catch():
     assert "open" in hits
     assert "ToolVault.tools.create_cron_job.executor._validate_model" in hits
     assert len(hits) == 6, hits
+
+
+@pytest.mark.parametrize("src", [
+    # a nested sync def called inline (handing it to a thread is fine, below)
+    "import requests\n"
+    "async def execute(params, ctx):\n"
+    "    def _do():\n"
+    "        return requests.get('http://x', timeout=90)\n"
+    "    return _do()\n",
+    # httpx's sync API
+    "import httpx\n"
+    "async def execute(params, ctx):\n"
+    "    return httpx.get('http://x', timeout=90)\n",
+    # pathlib reads and writes
+    "from pathlib import Path\n"
+    "async def execute(params, ctx):\n"
+    "    return Path('/big/ledger').read_bytes()\n",
+    # a blocking callable bound to another name first
+    "async def execute(params, ctx):\n"
+    "    from Orchestrator.web_tools import perform_provider_search\n"
+    "    search = perform_provider_search\n"
+    "    return search('ddg', 'q')\n",
+    # the box's retrieval, local-stack and device-resolution helpers
+    "async def execute(params, ctx):\n"
+    "    from Orchestrator.context_builder import build_fossil_context\n"
+    "    return build_fossil_context('q', operator='x')\n",
+    "async def execute(params, ctx):\n"
+    "    from Orchestrator.local_stack import is_healthy\n"
+    "    return is_healthy()\n",
+    "from Orchestrator.local_provider import mesh\n"
+    "async def execute(params, ctx):\n"
+    "    return mesh.resolve_device(operator='x')\n",
+], ids=["nested-def", "httpx-sync", "pathlib-read", "rebound-name",
+        "context-builder", "local-stack", "tailscale-status"])
+def test_the_guard_sees_shapes_that_hide_a_blocking_call(src):
+    assert blocking_calls_on_loop(src), "the guard missed a blocking call"
+
+
+def test_the_guard_leaves_threaded_and_async_work_alone():
+    src = (
+        "import asyncio\n"
+        "import httpx\n"
+        "from Orchestrator.local_provider import mesh\n"
+        "async def execute(params, ctx):\n"
+        "    def _do():\n"
+        "        return httpx.get('http://x')\n"
+        "    await asyncio.to_thread(_do)\n"
+        "    await asyncio.to_thread(mesh.resolve_device, operator='x')\n"
+        "    async with httpx.AsyncClient(timeout=httpx.Timeout(5)) as c:\n"
+        "        await c.get('http://x')\n"
+    )
+    assert blocking_calls_on_loop(src) == []
 
 
 def test_a_sync_executor_module_is_not_flagged():
@@ -271,7 +387,11 @@ def _patch_calendar(monkeypatch):
 def _patch_search(monkeypatch):
     import Orchestrator.fossils as fossils
     import Orchestrator.volume as volume
-    monkeypatch.setattr(volume, "read_text_safe", lambda p: "")
+
+    def no_ledger_read(path):
+        raise AssertionError("search_snapshots read the whole ledger (retrieval reads it itself)")
+
+    monkeypatch.setattr(volume, "read_text_safe", no_ledger_read)
     monkeypatch.setattr(fossils, "hybrid_retrieve", _sleeps([]))
 
 
@@ -287,10 +407,41 @@ def _patch_el_voices(monkeypatch):
     monkeypatch.setattr(catalog, "get_voices", _sleeps(None))
 
 
+def _patch_tailscale(monkeypatch):
+    from Orchestrator.local_provider import mesh
+    # `tailscale status` takes ~5 ms healthy and up to its 3 s timeout when
+    # tailscaled hangs. No nodes: resolution fails cleanly, no network touched.
+    monkeypatch.setattr(mesh, "_run_tailscale_status", _sleeps(""))
+
+
 def _patch_toolvault_search(monkeypatch):
     import Orchestrator.toolvault.embeddings as emb
     monkeypatch.setattr(emb, "embed_query", _sleeps(None))
     monkeypatch.setattr(emb, "load_embeddings_store", lambda path=None: {})
+
+
+def test_search_snapshots_never_reads_the_ledger(monkeypatch):
+    """hybrid_retrieve ignores vol_txt (retrieve() reads the ledger itself), so
+    reading the 58 MB file first only burned a decode that holds the GIL and
+    stalls the loop ~90 ms even from a thread (O18-toolvault-modules-09)."""
+    import Orchestrator.fossils as fossils
+    import Orchestrator.volume as volume
+    seen = []
+
+    def no_ledger_read(path):
+        raise AssertionError("search_snapshots read the whole ledger")
+
+    def fake_retrieve(vol_txt, query, k=3, operator="", **kw):
+        seen.append((vol_txt, query, k, operator))
+        return []
+
+    monkeypatch.setattr(volume, "read_text_safe", no_ledger_read)
+    monkeypatch.setattr(fossils, "hybrid_retrieve", fake_retrieve)
+    registry.invalidate_cache()
+    result = asyncio.run(BlackBoxToolExecutor(operator="LoopTester").execute(
+        "search_snapshots", {"query": "rovers", "limit": 2}))
+    assert result.success, result.result
+    assert seen == [("", "rovers", 2, "LoopTester")]
 
 
 @pytest.mark.parametrize("tool,params,patch", [
@@ -303,6 +454,10 @@ def _patch_toolvault_search(monkeypatch):
     ("list_recent_snapshots", {"count": 2}, _patch_recent),
     ("elevenlabs_list_voices", {}, _patch_el_voices),
     ("toolvault", {"action": "search", "query": "send a text"}, _patch_toolvault_search),
+    ("control_phone", {"task": "open the camera", "device": "pixel"}, _patch_tailscale),
+    ("control_device", {"task": "open settings", "device": "pixel"}, _patch_tailscale),
+    ("stop_device_control", {"device": "pixel"}, _patch_tailscale),
+    ("navigate_device", {"destination": "1 Main St", "device": "pixel"}, _patch_tailscale),
 ])
 def test_real_executor_leaves_the_loop_running(monkeypatch, tool, params, patch):
     patch(monkeypatch)

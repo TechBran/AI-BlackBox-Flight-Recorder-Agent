@@ -120,9 +120,11 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     # (ctx.origin_device_id, once the Android app stamps it — 3.6 Android half) and,
     # when the origin is a non-device surface with no primary set, falls back to the
     # legacy single-attested-device path (resolve_origin) it always used. The optional
-    # `device` param (if ever supplied) still targets any tailnet node.
+    # `device` param (if ever supplied) still targets any tailnet node. Resolution runs
+    # `tailscale status` (up to 3 s): in a worker thread, off the server's loop.
     try:
-        node = mesh.resolve_device(
+        node = await asyncio.to_thread(
+            mesh.resolve_device,
             operator=ctx.operator,
             origin_device_id=ctx.origin_device_id,
             target_device_id=(params.get("device") or "").strip() or None,

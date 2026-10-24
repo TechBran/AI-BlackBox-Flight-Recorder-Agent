@@ -48,6 +48,7 @@ aloud verbatim:
   device     : maps_missing / unsupported_device / invalid_destination / declined /
                background_blocked / notifications_blocked / device_error
 """
+import asyncio
 import re
 import uuid
 
@@ -457,7 +458,9 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     # ── 2. Resolve the target device (same rule as control_device) ────────────────────
     device = str(params.get("device") or "").strip()
     try:
-        node = mesh.resolve_device(
+        # `tailscale status` (up to 3 s): in a worker thread, off the server's loop.
+        node = await asyncio.to_thread(
+            mesh.resolve_device,
             operator=ctx.operator,
             origin_device_id=ctx.origin_device_id,
             target_device_id=device or None,
