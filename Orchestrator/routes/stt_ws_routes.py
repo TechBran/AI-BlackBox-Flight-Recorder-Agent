@@ -173,13 +173,20 @@ async def ws_stt(websocket: WebSocket):
         # Local streaming resolves ONLY when a registered server advertises the
         # realtime (/v1/realtime) capability; otherwise local stays file-only and
         # must not win STREAMING resolution.
+        # The availability checks probe the local stack over HTTP (a wedged
+        # llama-swap holds each for its 2 s connect + 2 s read), so resolution
+        # runs off the event loop every voice and STT session shares.
         override = {}
-        local_ok = local_streaming_stt_available()
-        onbox_ok = onbox_stt_available()
-        provider = resolve_stt_provider(start.get("provider"),
-                                        local_ok=local_ok,
-                                        onbox_ok=onbox_ok,
-                                        override_out=override)
+        # The probes and the resolver block (a local server probe can wait on a
+        # socket), so they run in one worker thread; the probe answers are kept
+        # for streaming_stt_providers below instead of probing twice.
+        def _probe_and_resolve():
+            _local = local_streaming_stt_available()
+            _onbox = onbox_stt_available()
+            return _local, _onbox, resolve_stt_provider(start.get("provider"),
+                                                      local_ok=_local, onbox_ok=_onbox,
+                                                      override_out=override)
+        local_ok, onbox_ok, provider = await asyncio.to_thread(_probe_and_resolve)
         overridden_from = override.get("overridden_from")
         if not provider:
             await websocket.send_json(stt_errors.frame("no STT provider configured",

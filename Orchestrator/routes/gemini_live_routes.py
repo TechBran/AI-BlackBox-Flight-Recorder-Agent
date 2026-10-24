@@ -186,8 +186,10 @@ async def execute_search_snapshots(session: GeminiLiveSession, arguments: Dict) 
         return "Error: No search query provided."
 
     try:
-        # Use hybrid retrieval for best results
-        results = hybrid_retrieve("", query, k=k, operator=session.operator)
+        # Use hybrid retrieval for best results. It embeds, reranks and reads
+        # the ledger, so it runs off the event loop every voice session shares
+        # (its vol_txt argument is unused: no 58 MB volume read for it here).
+        results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=session.operator)
 
         if not results:
             return f"No snapshots found matching: {query}"
@@ -434,7 +436,7 @@ async def configure_gemini_session(
     # message (`data.get("operator", "")`) at the bottom of this file.
     # At session open we have no user_text yet, so keyword/semantic will
     # be empty; recent + checkpoint still populate.
-    context, provenance = build_context_for_operator(operator, user_text="")
+    context, provenance = await run_blocking(build_context_for_operator, operator, user_text="")  # retrieval: off the loop
     # Stash provenance on the session so the cleanup/save path and the
     # client-facing WS emission below can reference it.
     session.provenance = provenance
@@ -1497,7 +1499,8 @@ async def _execute_gemini_tool(session: GeminiLiveSession, name: str, args: Dict
         print(f"[GEMINI-LIVE] Getting {count} recent snapshots for {operator} (see_all={see_all})")
         try:
             from Orchestrator.fossils import load_snapshot_index, read_volume_bytes
-            index = load_snapshot_index()
+            # The index parse and the whole-volume read block: off the event loop.
+            index = await run_blocking(load_snapshot_index)
 
             if index:
                 # Sort all snapshots by ID (date + sequence)
@@ -1525,7 +1528,7 @@ async def _execute_gemini_tool(session: GeminiLiveSession, name: str, args: Dict
                 if not recent:
                     result = f"No recent snapshots found for operator '{operator}'."
                 else:
-                    vol_bytes = read_volume_bytes(VOL_PATH)
+                    vol_bytes = await run_blocking(read_volume_bytes, VOL_PATH)
                     scope_desc = "all operators" if see_all else f"operator: {operator}"
                     result_parts = [f"Found {len(recent)} recent snapshot(s) ({scope_desc}):\n"]
 
