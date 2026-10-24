@@ -81,11 +81,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 
 // =============================================================================
 // Data model (v2 /asterisk/gateways)
@@ -386,28 +390,36 @@ class TelephonyViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun addGateway(payloadJson: String) {
-        val api = api ?: return
+    /**
+     * Add a gateway; [onDone] gets null on success or the error to show IN the form, so
+     * the form stays open with everything typed (A13-ui-ops-03: it closed first, and a
+     * failure discarded the AMI secret and HTTP password with it).
+     */
+    fun addGateway(payloadJson: String, onDone: (error: String?) -> Unit = {}) {
+        val api = api ?: return onDone("Not connected to the BlackBox")
         viewModelScope.launch {
             try {
                 api.post("/asterisk/gateways", payloadJson)
                 _actionMessage.value = "Gateway added"
                 loadGateways()
+                onDone(null)
             } catch (e: Exception) {
-                _actionMessage.value = "Failed to add: ${e.message}"
+                onDone("Failed to add: ${e.message}")
             }
         }
     }
 
-    fun updateGateway(id: String, payloadJson: String) {
-        val api = api ?: return
+    /** Update a gateway; [onDone] as for [addGateway]. */
+    fun updateGateway(id: String, payloadJson: String, onDone: (error: String?) -> Unit = {}) {
+        val api = api ?: return onDone("Not connected to the BlackBox")
         viewModelScope.launch {
             try {
                 api.put("/asterisk/gateways/$id", payloadJson)
                 _actionMessage.value = "Gateway updated"
                 loadGateways()
+                onDone(null)
             } catch (e: Exception) {
-                _actionMessage.value = "Failed to update: ${e.message}"
+                onDone("Failed to update: ${e.message}")
             }
         }
     }
@@ -502,12 +514,12 @@ class TelephonyViewModel(application: Application) : AndroidViewModel(applicatio
 // JSON payload builder (send-on-change secrets)
 // =============================================================================
 
-private fun jsonStr(s: String): String =
-    "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-
 /**
- * Build the add/edit payload. Secrets (httpPassword/amiSecret) are included ONLY
- * when non-blank (send-on-change). Mirrors web handleFormSave.
+ * Build the add/edit payload as a JSON object (any character in a field stays text).
+ * Secrets (httpPassword/amiSecret) and the usernames are included ONLY when non-blank:
+ * a blank username used to go out as null, which the backend's `http_user: str =
+ * "admin"` rejects with a 422 (A13-ui-ops-03); leaving it out applies the box default
+ * on an add and leaves the stored value alone on an edit. Mirrors web handleFormSave.
  */
 fun buildGatewayPayload(
     name: String,
@@ -522,37 +534,32 @@ fun buildGatewayPayload(
     amiSecret: String,
     ports: List<GwPort>,
     operator: String
-): String {
-    val sb = StringBuilder()
-    sb.append("{")
-    sb.append("\"name\":").append(jsonStr(name))
-    sb.append(",\"ip\":").append(jsonStr(ip))
-    sb.append(",\"model\":").append(jsonStr(model))
-    sb.append(",\"sip_port\":").append(sipPort)
-    sb.append(",\"http_port\":").append(httpPort)
-    sb.append(",\"codec\":").append(jsonStr(codec))
-    sb.append(",\"http_user\":").append(if (httpUser.isBlank()) "null" else jsonStr(httpUser))
-    sb.append(",\"ami_user\":").append(if (amiUser.isBlank()) "null" else jsonStr(amiUser))
-    sb.append(",\"operator\":").append(jsonStr(operator))
-    if (httpPassword.isNotBlank()) sb.append(",\"http_password\":").append(jsonStr(httpPassword))
-    if (amiSecret.isNotBlank()) sb.append(",\"ami_secret\":").append(jsonStr(amiSecret))
+): String = buildJsonObject {
+    put("name", name)
+    put("ip", ip)
+    put("model", model)
+    put("sip_port", sipPort)
+    put("http_port", httpPort)
+    put("codec", codec)
+    if (httpUser.isNotBlank()) put("http_user", httpUser)
+    if (amiUser.isNotBlank()) put("ami_user", amiUser)
+    put("operator", operator)
+    if (httpPassword.isNotBlank()) put("http_password", httpPassword)
+    if (amiSecret.isNotBlank()) put("ami_secret", amiSecret)
     if (ports.isNotEmpty()) {
-        sb.append(",\"ports\":[")
-        ports.forEachIndexed { i, p ->
-            if (i > 0) sb.append(",")
-            sb.append("{")
-            sb.append("\"span\":").append(p.span ?: 0)
-            if (p.slot != null) sb.append(",\"slot\":").append(p.slot)
-            sb.append(",\"phone_number\":").append(jsonStr(p.phoneNumber))
-            sb.append(",\"operator\":").append(jsonStr(p.operator))
-            sb.append(",\"enabled\":").append(p.enabled)
-            sb.append("}")
+        putJsonArray("ports") {
+            ports.forEach { p ->
+                addJsonObject {
+                    put("span", p.span ?: 0)
+                    if (p.slot != null) put("slot", p.slot)
+                    put("phone_number", p.phoneNumber)
+                    put("operator", p.operator)
+                    put("enabled", p.enabled)
+                }
+            }
         }
-        sb.append("]")
     }
-    sb.append("}")
-    return sb.toString()
-}
+}.toString()
 
 private fun copyToClipboard(context: Context, text: String, label: String) {
     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
@@ -584,6 +591,9 @@ fun TelephonyScreen(
     // Dialog state
     var showForm by remember { mutableStateOf(false) }
     var editingGateway by remember { mutableStateOf<Gateway?>(null) }
+    // The open form's save in flight, and its error (shown in the form, which stays open).
+    var formSaving by remember { mutableStateOf(false) }
+    var formError by remember { mutableStateOf<String?>(null) }
     var prefillIp by remember { mutableStateOf("") }
     var prefillModel by remember { mutableStateOf("TG200") }
 
@@ -693,13 +703,28 @@ fun TelephonyScreen(
             prefillIp = prefillIp,
             prefillModel = prefillModel,
             operators = operators,
-            onDismiss = { showForm = false },
-            onSave = { payload ->
-                val ed = editingGateway
-                if (ed != null) viewModel.updateGateway(ed.id, payload)
-                else viewModel.addGateway(payload)
-                viewModel.clearDiscovered()
+            saving = formSaving,
+            error = formError,
+            onDismiss = {
                 showForm = false
+                formError = null
+            },
+            onSave = { payload ->
+                // The form stays open (fields kept) until the box accepts the save.
+                formSaving = true
+                formError = null
+                val done: (String?) -> Unit = { error ->
+                    formSaving = false
+                    if (error == null) {
+                        viewModel.clearDiscovered()
+                        showForm = false
+                    } else {
+                        formError = error
+                    }
+                }
+                val ed = editingGateway
+                if (ed != null) viewModel.updateGateway(ed.id, payload, done)
+                else viewModel.addGateway(payload, done)
             }
         )
     }
@@ -875,6 +900,8 @@ private fun GatewayFormDialog(
     prefillIp: String,
     prefillModel: String,
     operators: List<String>,
+    saving: Boolean = false,
+    error: String? = null,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit
 ) {
@@ -910,7 +937,7 @@ private fun GatewayFormDialog(
         title = if (isEdit) "Edit Gateway" else "Add Gateway",
         onDismiss = onDismiss,
         confirmLabel = if (isEdit) "Update" else "Add Gateway",
-        confirmEnabled = name.isNotBlank() && ip.isNotBlank(),
+        confirmEnabled = !saving && name.isNotBlank() && ip.isNotBlank(),
         onConfirm = {
             val ports = lineStates.map { ls ->
                 GwPort(
@@ -942,6 +969,10 @@ private fun GatewayFormDialog(
             )
         }
     ) {
+        if (error != null) {
+            Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(8.dp))
+        }
         FormField("Name", name, { name = it }, "e.g. Office TG200")
         FormField("IP Address", ip, { ip = it }, "e.g. 192.168.1.100")
 

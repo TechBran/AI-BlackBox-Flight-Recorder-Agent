@@ -164,12 +164,14 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
 
         viewModelScope.launch {
             try {
-                // Always a POST — backend upserts by name (case-insensitive match)
+                // Always a POST. An edit names the contact by id, so a rename updates it
+                // in place instead of creating a second contact (A14-ui-misc-06).
+                val existingId = _editingContact.value?.id
                 val response = book.save(
                     name = name, phone = phone, email = email, relationship = relationship,
                     notes = notes, tags = tags, inboundAllowed = inboundAllowed, isOperatorSelf = isOperatorSelf,
+                    id = existingId,
                 )
-                val existingId = _editingContact.value?.id
 
                 // Surface the write-time identity guard warning if present (save still succeeded)
                 val warning = try {

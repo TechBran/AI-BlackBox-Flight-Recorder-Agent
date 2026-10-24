@@ -66,6 +66,24 @@ class ContactsBookApiTest {
         assertEquals("Ben", deleted.url.queryParameter("operator"))
     }
 
+    // A14-ui-misc-06: the backend upserts by NAME, so renaming a contact created a second
+    // contact and left the old one (and its SMS flags) in place. The edit now names the
+    // contact it edits; a new contact sends no id.
+    @Test fun `an edit sends the contact id and a new contact sends none`() = runBlocking {
+        repeat(2) { reply() }
+        book.save(
+            name = "Renamed", phone = "+15550002222", email = "", relationship = "", notes = "",
+            tags = "", inboundAllowed = true, isOperatorSelf = false, id = "c-42",
+        )
+        val edited = Json.parseToJsonElement(taken().body!!.utf8()).jsonObject
+        assertEquals("c-42", edited["id"]!!.jsonPrimitive.content)
+        assertEquals("Renamed", edited["name"]!!.jsonPrimitive.content)
+
+        save(name = "Brand new")
+        val created = Json.parseToJsonElement(taken().body!!.utf8()).jsonObject
+        assertNull("a create carries no id", created["id"])
+    }
+
     @Test fun `with no operator the book is neither read nor written`() = runBlocking {
         operator = ""
         assertNull(book.list())

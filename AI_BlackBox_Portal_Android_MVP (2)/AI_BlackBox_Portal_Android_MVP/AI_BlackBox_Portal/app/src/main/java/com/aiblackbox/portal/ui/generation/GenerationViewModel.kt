@@ -23,7 +23,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 enum class GenType { IMAGE, VIDEO, MUSIC }
 // CANCELLED is terminal (A11-settings-generation-02): Settings > Cancel Tasks or a
@@ -32,6 +36,34 @@ enum class GenType { IMAGE, VIDEO, MUSIC }
 // is "Check again" (GenerationViewModel.resumePolling, the same task id), never the
 // FAILED "Retry", which submits a new, paid generation.
 enum class GenState { IDLE, SUBMITTING, POLLING, COMPLETED, FAILED, CANCELLED, LOST }
+
+/**
+ * [url] made absolute against the paired [origin] (A11-settings-generation-03). The box
+ * stores result_url as a box-relative "/ui/uploads/<file>" path, which Coil and
+ * MediaPlayer read as a local FILE, so generated media never rendered or played. An
+ * absolute URL passes through; blank input, or no usable origin, gives null.
+ */
+fun absoluteMediaUrl(origin: String, url: String?): String? {
+    val u = url?.trim().orEmpty()
+    if (u.isEmpty()) return null
+    if (u.startsWith("http://", ignoreCase = true) || u.startsWith("https://", ignoreCase = true)) return u
+    val base = origin.trim().toHttpUrlOrNull() ?: return null
+    return base.resolve(u)?.toString()
+}
+
+/**
+ * Every media URL a finished task produced, absolute: result_data.all_urls (all N images
+ * of a multi-image request, as the Portal renders them), else the single result_url.
+ */
+fun mediaUrlsFor(status: TaskStatus?, origin: String): List<String> {
+    if (status == null) return emptyList()
+    val all = ((status.resultData as? JsonObject)?.get("all_urls") as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        ?.takeIf { it.isNotEmpty() }
+    return (all ?: listOfNotNull(status.resultUrl))
+        .mapNotNull { absoluteMediaUrl(origin, it) }
+        .distinct()
+}
 
 class GenerationViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
@@ -78,8 +110,12 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
     private suspend fun operatorForRequest(): String =
         store.operator.first().ifBlank { throw OperatorUnresolvedException() }
 
+    // The paired origin, which result URLs are made absolute against.
+    private var origin: String = ""
+
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
+        this.origin = origin
         api = BlackBoxApi(origin)
         taskRepo = TaskRepository(api!!)
         imageCatalogRepo = ImageCatalogRepository(api!!)
@@ -281,8 +317,13 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
         _error.value = null
         pollJob = viewModelScope.launch {
             val result = pollToResult(repo.pollTask(taskId)) { status -> _taskStatus.value = status }
+            if (result.state == GenState.COMPLETED) {
+                // Absolute, and every image of a multi-image result (A11-settings-generation-03).
+                val urls = mediaUrlsFor(_taskStatus.value, origin)
+                _resultUrls.value = urls
+                (urls.firstOrNull() ?: absoluteMediaUrl(origin, result.resultUrl))?.let { _resultUrl.value = it }
+            }
             _state.value = result.state
-            if (result.resultUrl != null) _resultUrl.value = result.resultUrl
             _error.value = result.error
         }
     }

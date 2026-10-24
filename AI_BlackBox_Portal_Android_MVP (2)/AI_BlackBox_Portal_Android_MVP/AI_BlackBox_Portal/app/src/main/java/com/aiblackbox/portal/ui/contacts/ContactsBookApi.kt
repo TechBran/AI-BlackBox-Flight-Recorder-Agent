@@ -32,7 +32,12 @@ class ContactsBookApi(
         return api.get("/contacts?operator=${q(op)}")
     }
 
-    /** Upsert by name (the backend matches case-insensitively). [tags] is comma-separated. */
+    /**
+     * Create or update a contact. [tags] is comma-separated. [id] names the contact being
+     * EDITED (A14-ui-misc-06): the backend matches by name otherwise, so a rename made a
+     * second contact and left the old one, phone and SMS flags included. A box that does
+     * not know `id` yet ignores it and keeps the name match.
+     */
     suspend fun save(
         name: String,
         phone: String,
@@ -42,9 +47,11 @@ class ContactsBookApi(
         tags: String,
         inboundAllowed: Boolean,
         isOperatorSelf: Boolean,
+        id: String? = null,
     ): String {
         val body = buildJsonObject {
             put("operator", operatorOrThrow())
+            if (!id.isNullOrBlank()) put("id", id)
             put("name", name)
             put("phone", phone)
             put("email", email)
