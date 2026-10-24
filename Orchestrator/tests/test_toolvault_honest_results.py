@@ -235,6 +235,55 @@ def test_analyze_image_without_a_google_key_says_so(box, stub, model, monkeypatc
     assert model.calls == []
 
 
+def test_the_analysis_tools_answer_within_the_mcp_gateways_proxy_timeout():
+    """Over MCP (BLACKBOX_MCP_PROXY_TIMEOUT, 120 s by default) a longer wait is a
+    gateway timeout: the model call is paid for and its answer thrown away."""
+    from Orchestrator import media_analysis
+    audio = _executor("analyze_audio")
+    gateway = 120
+    assert media_analysis.ANALYSIS_BUDGET_SECONDS + 2 < gateway
+    assert audio.POLL_BUDGET_SECONDS + 1 + audio.POLL_INTERVAL_SECONDS < gateway
+    assert audio.QUEUE_TIMEOUT_SECONDS < audio.POLL_BUDGET_SECONDS
+
+
+def test_a_model_call_that_overruns_the_budget_is_a_clear_failure(box, stub, monkeypatch):
+    """A socket timeout restarts on every byte, so the tool's own deadline is what
+    bounds a server that trickles its answer."""
+    import time as _time
+    from Orchestrator import media_analysis
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", "test-google-key")
+    monkeypatch.setattr(media_analysis, "_MIN_MODEL_SECONDS", 0.0)
+    release = threading.Event()
+
+    def trickling_post(url, headers=None, json=None, timeout=None, **kw):
+        release.wait(30)
+        raise requests.ConnectionError("released")
+
+    monkeypatch.setattr(requests, "post", trickling_post)
+
+    async def run():
+        started = _time.monotonic()
+        try:
+            await media_analysis.analyze_media("/ui/uploads/clip.mp4", "describe", "video", timeout=1.0)
+        except media_analysis.MediaAnalysisError as e:
+            return str(e), _time.monotonic() - started
+        finally:
+            release.set()
+        raise AssertionError("no failure")
+
+    message, elapsed = asyncio.run(run())
+    assert "did not finish within 1s" in message and "shorter clip" in message
+    assert elapsed < 1.0 + 2.0 + 1.0
+
+
+def test_media_that_takes_the_whole_budget_to_load_skips_the_model_call(box, stub, model, monkeypatch):
+    from Orchestrator import media_analysis
+    with pytest.raises(media_analysis.MediaAnalysisError, match="did not finish within"):
+        media_analysis.analyze_blocking("/ui/uploads/red.png", "describe", "image",
+                                        timeout=media_analysis._MIN_MODEL_SECONDS / 2)
+    assert model.calls == []
+
+
 def test_analyze_video_returns_the_models_answer_and_queues_no_chat_turn(box, stub, model):
     model.reply["body"] = {"candidates": [{"content": {"parts": [{"text": "A cat jumps."}]}}]}
     api = stub({("POST", "/chat"): lambda body: (200, _CHAT_QUEUE_SHAPE)})
@@ -280,6 +329,25 @@ def test_analyze_audio_reports_a_failed_task(box, stub, monkeypatch):
     res = asyncio.run(ex.execute({"file_path": "/ui/uploads/memo.wav"}, _ctx(api.url)))
     assert res.success is False
     assert "403" in res.result
+
+
+def test_analyze_audio_treats_a_slow_status_check_as_still_running(box, stub, monkeypatch):
+    import time as _time
+    ex = _executor("analyze_audio")
+    monkeypatch.setattr(ex, "POLL_INTERVAL_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(ex, "POLL_BUDGET_SECONDS", 1.5, raising=False)
+
+    def slow_task(body):
+        _time.sleep(2.5)                  # longer than the 1 s floor of a clipped check
+        return 200, {"task_id": "a1", "status": "processing"}
+
+    api = stub({
+        ("POST", "/analyze/audio"): lambda body: (200, {"task_id": "a1", "status": "pending"}),
+        ("GET", "/tasks/a1"): slow_task,
+    })
+    res = asyncio.run(ex.execute({"file_path": "/ui/uploads/memo.wav"}, _ctx(api.url)))
+    assert res.success is True
+    assert "still running" in res.result and res.data["task_id"] == "a1"
 
 
 def test_analyze_audio_hands_back_the_task_when_it_runs_long(box, stub, monkeypatch):
@@ -401,6 +469,9 @@ def test_gmail_send_logs_no_recipient_or_subject(monkeypatch, capsys):
     ("", None),
     (None, None),
     ("+1234567890123456", None),       # 16 digits: longer than E.164 allows
+    ("\uff15\uff15\uff15\uff11\uff12\uff13\uff14\uff15\uff16\uff17", None),  # fullwidth digits
+    ("\u0665\u0665\u0665\u0661\u0662\u0663\u0664\u0665\u0666\u0667", None),  # Arabic-Indic digits
+    ("+1\uff15\uff15\uff15\uff11\uff12\uff13\uff14\uff15\uff16\uff17", None),
 ])
 def test_normalize_e164(raw, expected):
     from Orchestrator.telephony import normalize_e164

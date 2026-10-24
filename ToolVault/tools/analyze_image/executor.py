@@ -17,7 +17,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(False, "image_url is required")
 
     try:
-        analysis, model = await analyze_media(image_url, prompt, "image", timeout=120)
+        analysis, model = await analyze_media(image_url, prompt, "image")
     except MediaAnalysisError as e:
         return ToolResult(False, f"Analyze image error: {e}")
     return ToolResult(True, analysis, data={"provider": "gemini", "model": model})

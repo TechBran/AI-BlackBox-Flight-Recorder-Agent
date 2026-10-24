@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import mimetypes
+import time
 from typing import Tuple
 from urllib.parse import urlsplit
 
@@ -39,6 +40,13 @@ KINDS = {
     "video": {"exts": VIDEO_EXTS, "mime": "video/"},
 }
 FETCH_TIMEOUT_SECONDS = 60
+# The whole analysis (fetching the media and the model call) gets this long.
+# It stays below the MCP gateway's proxy timeout (BLACKBOX_MCP_PROXY_TIMEOUT,
+# 120 s by default), so a remote caller gets the answer or a clear failure
+# rather than a gateway timeout for a model call it paid for.
+ANALYSIS_BUDGET_SECONDS = 100.0
+# A model call is not started with less time than this left.
+_MIN_MODEL_SECONDS = 5.0
 # Formats mimetypes does not know on every box.
 _MIME_FALLBACKS = {".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
                    ".m4v": "video/x-m4v", ".mkv": "video/x-matroska", ".3gp": "video/3gpp",
@@ -60,8 +68,12 @@ def _is_upload_reference(ref: str) -> bool:
     return True
 
 
-def load_media(ref: str, kind: str) -> Tuple[bytes, str]:
-    """``(bytes, mime_type)`` for the media ``ref`` names (blocking)."""
+def load_media(ref: str, kind: str, fetch_timeout: float = FETCH_TIMEOUT_SECONDS) -> Tuple[bytes, str]:
+    """``(bytes, mime_type)`` for the media ``ref`` names (blocking).
+
+    Any upload is accepted, sessions/ and terminal/ included: the same policy
+    the MCP gateway applies to a remote caller's speech_to_text.
+    """
     spec = KINDS[kind]
     ref = (ref or "").strip()
     if not ref:
@@ -80,7 +92,7 @@ def load_media(ref: str, kind: str) -> Tuple[bytes, str]:
 
     from Orchestrator.utils.safe_fetch import FetchError, safe_get
     try:
-        resp = safe_get(ref, timeout=FETCH_TIMEOUT_SECONDS, max_bytes=GEMINI_INLINE_MAX_BYTES)
+        resp = safe_get(ref, timeout=fetch_timeout, max_bytes=GEMINI_INLINE_MAX_BYTES)
     except FetchError as e:
         raise MediaAnalysisError(f"Could not fetch the {kind}: {e}") from None
     if not 200 <= resp.status_code < 300:
@@ -116,13 +128,25 @@ def _answer_text(body: dict) -> str:
     return text.strip()
 
 
-def analyze_blocking(ref: str, prompt: str, kind: str, timeout: float) -> Tuple[str, str]:
-    """``(analysis_text, model)`` for one image or video. Raises MediaAnalysisError."""
+def _too_slow(kind: str, budget: float) -> MediaAnalysisError:
+    return MediaAnalysisError(
+        f"The {kind} analysis did not finish within {budget:.0f}s. Try a shorter clip "
+        f"or a smaller {kind}.")
+
+
+def analyze_blocking(ref: str, prompt: str, kind: str,
+                     timeout: float = ANALYSIS_BUDGET_SECONDS) -> Tuple[str, str]:
+    """``(analysis_text, model)`` for one image or video within ``timeout``
+    seconds in all. Raises MediaAnalysisError."""
     key = _api_key()
     if not key:
         raise MediaAnalysisError(
             f"analyze_{kind} needs a Google (Gemini) API key: add one in the setup wizard's API keys step")
-    data, mime = load_media(ref, kind)
+    deadline = time.monotonic() + timeout
+    data, mime = load_media(ref, kind, fetch_timeout=min(FETCH_TIMEOUT_SECONDS, timeout))
+    remaining = deadline - time.monotonic()
+    if remaining < _MIN_MODEL_SECONDS:
+        raise _too_slow(kind, timeout)
     model = config.resolve_default_model("google")
     payload = {"contents": [{"role": "user", "parts": [
         {"text": prompt},
@@ -131,7 +155,9 @@ def analyze_blocking(ref: str, prompt: str, kind: str, timeout: float) -> Tuple[
     try:
         resp = requests.post(f"{config.GEMINI_BASE_URL}/{model}:generateContent",
                              headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                             json=payload, timeout=timeout)
+                             json=payload, timeout=remaining)
+    except requests.Timeout:
+        raise _too_slow(kind, timeout) from None
     except requests.RequestException as e:
         raise MediaAnalysisError(f"Could not reach the model: {type(e).__name__}") from None
     if not 200 <= resp.status_code < 300:
@@ -144,10 +170,15 @@ def analyze_blocking(ref: str, prompt: str, kind: str, timeout: float) -> Tuple[
     return _answer_text(body if isinstance(body, dict) else {}), model
 
 
-async def analyze_media(ref: str, prompt: str, kind: str, timeout: float) -> Tuple[str, str]:
-    """analyze_blocking() off the event loop."""
+async def analyze_media(ref: str, prompt: str, kind: str,
+                        timeout: float = ANALYSIS_BUDGET_SECONDS) -> Tuple[str, str]:
+    """analyze_blocking() off the event loop, answered within ``timeout`` (plus
+    a moment) even when a socket timeout restarts on every byte."""
     try:
-        return await asyncio.to_thread(analyze_blocking, ref, prompt, kind, timeout)
+        return await asyncio.wait_for(
+            asyncio.to_thread(analyze_blocking, ref, prompt, kind, timeout), timeout=timeout + 2.0)
+    except asyncio.TimeoutError:
+        raise _too_slow(kind, timeout) from None
     except MediaAnalysisError:
         raise
     except Exception as e:  # noqa: BLE001 — surfaced as the tool's failure text

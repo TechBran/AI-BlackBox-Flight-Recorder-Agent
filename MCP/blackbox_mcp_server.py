@@ -170,9 +170,9 @@ BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 # Backend-proxy timeout (seconds). Media/generation tools return a task_id FAST
 # (they do not block on the actual generation -- that runs async and is polled
 # via get_task_status), so a 120s cap comfortably covers every kept/proxied tool
-# including the multimodal /chat analysis paths (analyze_image/video, capped at
-# 120-180s server-side -- see note on analyze_video below). Override per-deploy
-# via BLACKBOX_MCP_PROXY_TIMEOUT.
+# including the analysis tools, which answer within their own budgets below it
+# (analyze_image/video ~100s: Orchestrator/media_analysis.py; analyze_audio
+# ~90s, then a task_id). Override per-deploy via BLACKBOX_MCP_PROXY_TIMEOUT.
 PROXY_TIMEOUT = float(os.getenv("BLACKBOX_MCP_PROXY_TIMEOUT", "120"))
 
 # --- M2: Streamable HTTP transport config -----------------------------------

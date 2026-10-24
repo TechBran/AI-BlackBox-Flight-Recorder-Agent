@@ -56,7 +56,6 @@ from Orchestrator.config import (
     REALTIME_SNAPSHOT_CHARS_EACH,
     STT_OPENAI_STREAM,
     VOL_PATH,
-    orchestrator_url,
 )
 from Orchestrator.models import RealtimeSession, REALTIME_SESSIONS, TaskType
 from Orchestrator.volume import now_utc_iso, read_text_safe
@@ -1039,34 +1038,20 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
             result = tool_result.rich_result()
             print(f"[REALTIME] SMS result: {result}")
         elif name == "make_phone_call":
-            # Initiate outbound phone call
-            import aiohttp
+            # Initiate outbound phone call through the unified tool executor: the
+            # box's call route (Asterisk/TG200 or Twilio), an E.164 number, and a
+            # 200 {"error": ...} counted as a failure (Orchestrator.telephony).
+            from Orchestrator.tools import BlackBoxToolExecutor
             phone_number = arguments.get("phone_number", "")
-            greeting = arguments.get("greeting", "")
-            role = arguments.get("role", "")
-            backend = arguments.get("backend", "openai_realtime")
-            print(f"[REALTIME] Executing make_phone_call to {phone_number} with backend {backend}")
-            try:
-                async with aiohttp.ClientSession() as http_session:
-                    async with http_session.post(
-                        orchestrator_url("/twilio/call"),
-                        json={
-                            "to": phone_number,
-                            "backend": backend,
-                            "operator": session.operator or "system",
-                            "greeting": greeting,
-                            "role": role
-                        },
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as resp:
-                        call_result = await resp.json()
-                        if call_result.get("status") == "initiated":
-                            result = f"Call initiated to {phone_number}. The recipient should receive a call shortly."
-                        else:
-                            error = call_result.get("error", "Unknown error")
-                            result = f"Failed to initiate call: {error}"
-            except Exception as e:
-                result = f"Error making call: {str(e)}"
+            print(f"[REALTIME] Executing make_phone_call to {phone_number}")
+            executor = BlackBoxToolExecutor(operator=session.operator or "system")
+            tool_result = await executor.execute("make_phone_call", {
+                "phone_number": phone_number,
+                "greeting": arguments.get("greeting", ""),
+                "role": arguments.get("role", ""),
+                "backend": arguments.get("backend", "openai_realtime"),
+            })
+            result = tool_result.rich_result()
             print(f"[REALTIME] Call result: {result}")
         elif name == "make_voice_call":
             # Call with pre-generated TTS message (no delay on connect)

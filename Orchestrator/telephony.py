@@ -27,17 +27,23 @@ from typing import Optional
 _DEFAULT_COUNTRY_CODE = "1"
 
 # E.164: a "+", then a country code that never starts with 0, at most 15 digits
-# in all. The shortest real international numbers are 7-8 digits.
-_E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
+# in all. The shortest real international numbers are 7-8 digits. ASCII digits
+# only: str.isdigit() and \d also match fullwidth or Arabic-Indic digits, which
+# no gateway dials.
+_E164_RE = re.compile(r"^\+[1-9][0-9]{6,14}$")
 _SEPARATORS_RE = re.compile(r"[\s\-.() ]")
 
 ASTERISK_CALL_PATH = "/asterisk/call"
 TWILIO_CALL_PATH = "/twilio/call"
 
 
+def _ascii_digits(text: str) -> bool:
+    return text.isascii() and text.isdigit()
+
+
 def default_country_code() -> str:
     code = (os.environ.get("TELEPHONY_DEFAULT_COUNTRY_CODE") or "").strip().lstrip("+")
-    return code if code.isdigit() and not code.startswith("0") else _DEFAULT_COUNTRY_CODE
+    return code if _ascii_digits(code) and not code.startswith("0") else _DEFAULT_COUNTRY_CODE
 
 
 def normalize_e164(number, country_code: Optional[str] = None) -> Optional[str]:
@@ -61,7 +67,7 @@ def normalize_e164(number, country_code: Optional[str] = None) -> Optional[str]:
         candidate = raw
     elif raw.startswith("00"):
         candidate = "+" + raw[2:]
-    elif not raw.isdigit():
+    elif not _ascii_digits(raw):
         return None
     elif raw.startswith("0"):
         if cc == "1":
