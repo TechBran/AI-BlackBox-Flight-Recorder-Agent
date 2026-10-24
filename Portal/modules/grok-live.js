@@ -8,7 +8,7 @@
  * Features:
  * - Toggle-to-record audio input (click to start, click to stop)
  * - Real-time audio playback from AI (24kHz)
- * - Audio input at 24kHz (Grok standard)
+ * - Audio input at 16kHz (GROK_LIVE_INPUT_SAMPLE_RATE, the bridge's session rate)
  * - Voice selection (Ara, Rex, Sal, Eve, Leo)
  * - Text input support alongside voice
  * - AI interrupt capability (barge-in)
@@ -21,6 +21,10 @@ import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
 import { pauseAllPlayers } from './tts-stt.js';
 import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
+import { claimMic, releaseMic, bindNativeStream, unbindNativeStream } from './mic-arbiter.js';
+
+/** This module's mic-arbiter owner id. */
+const MIC_OWNER = 'grok-live';
 
 // =============================================================================
 // Selector configuration
@@ -223,13 +227,25 @@ function lowPassFilter(input, cutoffRatio = 0.4) {
 }
 
 /**
+ * Grok input rate — must match the backend's session.update
+ * audio.input.format.rate (config.py GROK_LIVE_INPUT_SAMPLE_RATE, 16k).
+ */
+const GROK_INPUT_SAMPLE_RATE = 16000;
+
+/**
+ * Rate of the Android WebView's native mic stream (AndroidMic.startAudioStreaming
+ * in PortalActivity.kt captures 24 kHz PCM16, the OpenAI Realtime format).
+ */
+const NATIVE_MIC_SAMPLE_RATE = 24000;
+
+/**
  * Resample audio from source rate to 16kHz for Grok input
  * @param {Float32Array} input - Input samples
  * @param {number} sourceRate - Source sample rate
  * @returns {Float32Array} Resampled audio at 16kHz
  */
-function resampleTo24kHz(input, sourceRate) {
-    const targetRate = 16000;  // Grok input rate — must match the backend's session.update audio.input.format.rate (16k)
+function resampleTo16kHz(input, sourceRate) {
+    const targetRate = GROK_INPUT_SAMPLE_RATE;
 
     if (sourceRate === targetRate) {
         return input;
@@ -264,6 +280,19 @@ function resampleTo24kHz(input, sourceRate) {
     }
 
     return output;
+}
+
+/**
+ * Resample one native-mic chunk (base64 PCM16 at NATIVE_MIC_SAMPLE_RATE) to
+ * the 16 kHz the bridge configures Grok for. Sent verbatim, 24 kHz audio was
+ * heard at 2/3 speed and a lower pitch, and transcription on the Android
+ * WebView came out garbled (audit P03-live-agents-web-03).
+ * @param {string} base64Audio - Base64 PCM16 from AndroidMic
+ * @param {number} [sourceRate] - The chunk's sample rate
+ * @returns {string} Base64 PCM16 at 16 kHz
+ */
+export function resampleNativeChunkForGrok(base64Audio, sourceRate = NATIVE_MIC_SAMPLE_RATE) {
+    return float32ToPCM16Base64(resampleTo16kHz(pcm16Base64ToFloat32(base64Audio), sourceRate));
 }
 
 /**
@@ -469,24 +498,11 @@ function isNativeAndroid() {
 }
 
 /**
- * Stop other mic users before starting recording
+ * Stop other mic users (dictation, the Gemini recorder, the other voice
+ * agents) before starting recording, through the shared mic arbiter.
  */
 async function stopOtherMicUsers() {
-    // Stop GPT Realtime if it's using mic
-    if (typeof window.realtimeStopRecording === 'function') {
-        try {
-            window.realtimeStopRecording();
-            await new Promise(resolve => setTimeout(resolve, 200));
-        } catch (e) {}
-    }
-
-    // Stop Gemini Live if it's using mic
-    if (typeof window.geminiLiveStopRecording === 'function') {
-        try {
-            window.geminiLiveStopRecording();
-            await new Promise(resolve => setTimeout(resolve, 200));
-        } catch (e) {}
-    }
+    await claimMic(MIC_OWNER, stopRecordingAndSend);
 }
 
 // =============================================================================
@@ -494,7 +510,7 @@ async function stopOtherMicUsers() {
 // =============================================================================
 
 /**
- * Start audio recording - captures at native rate, resamples to 24kHz
+ * Start audio recording - captures at native rate, resamples to 16kHz
  */
 async function startRecording() {
     if (isRecording) return;
@@ -568,7 +584,7 @@ async function startRecording() {
 
         sourceNode = recordingContext.createMediaStreamSource(mediaStream);
         const nativeRate = recordingContext.sampleRate;
-        console.log(`[GROK-LIVE] Recording at native rate: ${nativeRate}Hz, resampling to 24kHz`);
+        console.log(`[GROK-LIVE] Recording at native rate: ${nativeRate}Hz, resampling to ${GROK_INPUT_SAMPLE_RATE}Hz`);
 
         const bufferSize = isMobile ? 4096 : 8192;
         scriptProcessor = recordingContext.createScriptProcessor(bufferSize, 1, 1);
@@ -610,8 +626,8 @@ async function startRecording() {
                 normalizedData[i] = Math.max(-1, Math.min(1, filtered[i] * gain));
             }
 
-            // Resample to 24kHz for Grok
-            const resampled = resampleTo24kHz(normalizedData, nativeRate);
+            // Resample to 16kHz for Grok
+            const resampled = resampleTo16kHz(normalizedData, nativeRate);
             const base64 = float32ToPCM16Base64(resampled);
 
             ws.send(JSON.stringify({
@@ -664,7 +680,7 @@ async function startNativeStreaming() {
 
             ws.send(JSON.stringify({
                 type: 'audio_input',
-                data: base64Audio
+                data: resampleNativeChunkForGrok(base64Audio)
             }));
         };
 
@@ -676,11 +692,14 @@ async function startNativeStreaming() {
         };
 
         try {
-            // Redirect callbacks to Grok handlers
-            window.onNativeStreamStart = window.onGrokNativeStreamStart;
-            window.onNativeStreamError = window.onGrokNativeStreamError;
-            window.onNativeAudioChunk = window.onGrokNativeAudioChunk;
-            window.onNativeStreamStop = window.onGrokNativeStreamStop;
+            // Route the shared native callbacks to the Grok handlers through
+            // the mic arbiter (no overwrite of window globals).
+            bindNativeStream(MIC_OWNER, {
+                onNativeStreamStart: window.onGrokNativeStreamStart,
+                onNativeStreamError: window.onGrokNativeStreamError,
+                onNativeAudioChunk: window.onGrokNativeAudioChunk,
+                onNativeStreamStop: window.onGrokNativeStreamStop,
+            });
 
             AndroidMic.startAudioStreaming();
         } catch (e) {
@@ -705,6 +724,7 @@ function stopNativeStreaming() {
         console.log('[GROK-LIVE] Stopping native audio streaming');
         AndroidMic.stopAudioStreaming();
     }
+    unbindNativeStream(MIC_OWNER);
 
     usingNativeRecording = false;
     isRecording = false;
@@ -715,6 +735,7 @@ function stopNativeStreaming() {
  * Stop recording and send audio to AI
  */
 function stopRecordingAndSend() {
+    releaseMic(MIC_OWNER);
     if (!isRecording) return;
 
     console.log('[GROK-LIVE] Stopping recording...');

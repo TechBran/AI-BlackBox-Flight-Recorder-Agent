@@ -12,7 +12,7 @@
 // =============================================================================
 
 // Phase 1: Foundation
-import { $, toast, sleep } from './core-utils.js';
+import { $, toast, sleep, createPoller } from './core-utils.js';
 import {
     loadHistory,
     saveHistory,
@@ -601,13 +601,14 @@ function setupAndroidOverlay() {
         });
     }
 
-    // Periodic status check (every 1 second when menu is visible)
-    setInterval(() => {
+    // Periodic status check (every 1 second when menu is visible; paused
+    // while the page is hidden)
+    createPoller(() => {
         const menuPanel = $('menuPanel');
         if (menuPanel && !menuPanel.classList.contains('hide')) {
             updateOverlayStatus();
         }
-    }, 1000);
+    }, { intervalMs: 1000, immediate: false }).start();
 
     console.log('[AndroidOverlay] Setup complete');
 }
@@ -669,17 +670,20 @@ async function initApp() {
     // SMS Inbox button
     const btnSMS = $('btnSMSInbox');
     if (btnSMS) btnSMS.addEventListener('click', () => openSMSInbox());
-    // Poll unread SMS every 30s
-    pollSMSUnread();
-    setInterval(pollSMSUnread, 30000);
+    // Poll unread SMS every 30s (paused while the page is hidden)
+    createPoller(pollSMSUnread, { intervalMs: 30000 }).start();
 
     // Computer Use Tools button — shortcut that switches chat provider to
     // computer-use, which auto-attaches the existing cu-drawer to the
     // operator-menu-bubble. Per docs/plans/2026-05-20-portal-tools-section-alignment.md
     // Track 2 — Brandon decision: keep existing cu-drawer flow exactly as-is.
-    const btnComputerUse = $('btnComputerUse');
-    if (btnComputerUse) {
-        btnComputerUse.addEventListener('click', () => {
+    // Its own id: it used to share "btnComputerUse" with the composer shortcut,
+    // so this handler landed on the composer button too (one click switched the
+    // chat provider AND opened the viewer) and this button had none (audit
+    // P01-chat-core-web-06, X05-architecture-09).
+    const btnToolsComputerUse = $('btnToolsComputerUse');
+    if (btnToolsComputerUse) {
+        btnToolsComputerUse.addEventListener('click', () => {
             const providerSelect = document.getElementById('providerSelect');
             if (providerSelect) {
                 providerSelect.value = 'computer-use';
@@ -769,8 +773,9 @@ async function initApp() {
     // Refresh health status
     await refreshHealth();
 
-    // Periodic health refresh (every 60 seconds)
-    setInterval(refreshHealth, 60000);
+    // Periodic health refresh (every 60 seconds; paused while the page is
+    // hidden, refreshed at once on return)
+    createPoller(refreshHealth, { intervalMs: 60000, immediate: false }).start();
 
     console.log('[Portal] App initialization complete!');
 }

@@ -3,7 +3,7 @@
  * Cellular Internet Failover Manager — monitor, control, and debug cellular data connection
  */
 
-import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr, createPoller } from './core-utils.js';
 
 // =============================================================================
 // State
@@ -368,20 +368,24 @@ function handleActions(e) {
 
 function startPolling() {
     if (_pollInterval) return;
-    fetchStatus();
-    fetchHistory();
-    _pollInterval = setInterval(() => {
+    // One poller (createPoller: paused while hidden, never overlapping): the
+    // status every 5 s and the event log every third tick (15 s). The log used
+    // to run on its own anonymous setInterval that stopPolling could not
+    // clear, so every open/close of the modal leaked one more 15 s timer
+    // (audit P06-comms-web-06).
+    let tick = 0;
+    _pollInterval = createPoller(() => {
+        const withHistory = tick % 3 === 0;
+        tick += 1;
         fetchStatus();
-    }, 5000);
-    // Refresh event log every 15s
-    setInterval(() => {
-        if (_pollInterval) fetchHistory();
-    }, 15000);
+        if (withHistory) fetchHistory();
+    }, { intervalMs: 5000 });
+    _pollInterval.start();
 }
 
 function stopPolling() {
     if (_pollInterval) {
-        clearInterval(_pollInterval);
+        _pollInterval.stop();
         _pollInterval = null;
     }
 }

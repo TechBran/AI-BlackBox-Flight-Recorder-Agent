@@ -3,7 +3,7 @@
  * Cron Job Scheduler management interface
  */
 
-import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr, createPoller } from './core-utils.js';
 import { getOperator, fetchAvailableModels, getHydratedModels } from './state-management.js';
 
 // Cache server operator list (populated once on first modal open)
@@ -245,14 +245,29 @@ async function populateOperatorSelector(selectedOperator) {
 // Job List Rendering
 // =============================================================================
 
+/** JSON of the job list last rendered (an unchanged poll leaves the DOM alone). */
+let _lastJobsSignature = null;
+/** True while refreshes keep failing (one toast per outage, not one per poll). */
+let _jobsLoadFailing = false;
+
 async function refreshJobList() {
     try {
         const status = currentFilter !== 'all' ? currentFilter : null;
-        allJobs = await fetchJobs(status);
+        const jobs = await fetchJobs(status);
+        _jobsLoadFailing = false;
+        // The 5 s poll re-rendered the list wholesale every time, destroying
+        // buttons mid-click and resetting scroll/hover; it now renders only
+        // when the jobs changed (audit P05-ops-panels-web-07).
+        const signature = JSON.stringify([status, jobs]);
+        allJobs = jobs;
+        if (signature === _lastJobsSignature) return;
+        _lastJobsSignature = signature;
         renderFilteredJobs();
     } catch (e) {
         console.error('Failed to refresh jobs:', e);
-        toastError('Failed to load jobs');
+        // Through a 60-90 s service restart the poll fails a dozen times.
+        if (!_jobsLoadFailing) toastError('Failed to load jobs');
+        _jobsLoadFailing = true;
     }
 }
 
@@ -1118,12 +1133,15 @@ function dayName(dayNum) {
 
 function _startPolling() {
     _stopPolling();
-    _pollInterval = setInterval(refreshJobList, 5000);
+    _lastJobsSignature = null;
+    // createPoller: paused while the page is hidden, never overlapping.
+    _pollInterval = createPoller(refreshJobList, { intervalMs: 5000, immediate: false });
+    _pollInterval.start();
 }
 
 function _stopPolling() {
     if (_pollInterval) {
-        clearInterval(_pollInterval);
+        _pollInterval.stop();
         _pollInterval = null;
     }
 }

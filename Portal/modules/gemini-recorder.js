@@ -8,6 +8,10 @@
 
 import { $, toast, toastError } from './core-utils.js';
 import { getAttachedFiles, addAttachedFile } from './file-upload.js';
+import { claimMic, releaseMic } from './mic-arbiter.js';
+
+/** This module's mic-arbiter owner id. */
+const MIC_OWNER = 'gemini-recorder';
 
 // =============================================================================
 // State
@@ -275,6 +279,7 @@ function cleanupGeminiRecording(recordBtn, waveformContainer) {
     geminiRecordStartTime = null;
     geminiRecording = false;
     usingNativeGeminiRecording = false;
+    releaseMic(MIC_OWNER);
 
     if (recordBtn) recordBtn.setAttribute('aria-pressed', 'false');
     if (waveformContainer) waveformContainer.classList.add('hide');
@@ -496,12 +501,9 @@ export function initGeminiAudioRecorder(options = {}) {
     }
 
     async function startGeminiRecording() {
-        // Check if STT is currently recording
-        if (window.micOn) {
-            console.log('[GeminiAudio] STT is active, stopping it first');
-            if (window.stopSTT) window.stopSTT(true);
-            await new Promise(resolve => setTimeout(resolve, 200));
-        }
+        // Dictation and the voice agents let go of the mic through the shared
+        // arbiter (window.micOn / window.stopSTT were never assigned).
+        await claimMic(MIC_OWNER, cancelGeminiRecording);
 
         if (!hasMic()) {
             toast('Microphone not available');

@@ -439,6 +439,12 @@ function handleScreenScroll(e) {
 
 function handleKeyDown(e) {
     if (e.key === 'Escape') return;
+    // The typing bar has its own handler (handleTypingKeyDown) and its text
+    // arrives through the input event; only modifier combos reach here from it.
+    // Handling its keys here too sent Enter/Backspace/Tab twice to the remote
+    // desktop, and preventDefault on an IME's 'Unidentified' keydown could
+    // swallow soft-keyboard text (audit P05-ops-panels-web-01).
+    if (isTypingInput(e.target) && !(e.ctrlKey || e.metaKey || e.altKey)) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -544,6 +550,7 @@ function handleTypingKeyDown(e) {
 
     if (keyMap[e.key]) {
         e.preventDefault();
+        e.stopPropagation(); // one key press, one /browser/key (the modal handler must not resend it)
         fetch('/browser/key', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -552,6 +559,11 @@ function handleTypingKeyDown(e) {
         setStatus(`Key: ${e.key}`);
         setTimeout(refreshScreenshot, 200);
     }
+}
+
+/** True for the mobile typing bar's input. */
+function isTypingInput(el) {
+    return !!(el && el.classList && el.classList.contains('cu-interact-typing-input'));
 }
 
 function showClickIndicator(localX, localY, rect) {

@@ -13,7 +13,7 @@
  * Updated: 2026-01-04 - Added Nano Banana Pro full features
  */
 
-import { $, toast, escapeAttr } from './core-utils.js';
+import { $, toast, toastError, escapeAttr } from './core-utils.js';
 import { generateImageAsync, generateVideoAsync, extendVideoAsync, generateMusicAsync } from './task-manager.js';
 import { toggleSTTFor } from './tts-stt.js';
 import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
@@ -301,6 +301,17 @@ export function setupGenerationModal() {
         });
     }
 
+    // The other generation prompts' mic buttons use the same shared STT
+    // helper (they had no handler at all; audit P07-html-css-03).
+    for (const [micId, inputId] of [
+        ['micVideoExtensionPrompt', 'videoExtensionPrompt'],
+        ['micGoogleSSML', 'google-ssml-input'],
+        ['micGeminiPro', 'gemini-pro-text-input'],
+    ]) {
+        const btn = $(micId);
+        if (btn) btn.addEventListener('click', () => toggleSTTFor(inputId, micId));
+    }
+
     // Image Generation Button
     const btnGenImage = $("btnGenImage");
     if (btnGenImage) {
@@ -403,6 +414,31 @@ export function setupGenerationModal() {
         // Call original handler for normal attachments
         if (originalOnNativeFileSelected) {
             originalOnNativeFileSelected(base64Data, mimeType, fileName);
+        }
+    };
+
+    // Files over 5 MB arrive through onNativeFileUploaded instead (PortalActivity
+    // uploads them itself and passes the URL). Without this route a typical
+    // phone photo picked as a reference / start image was silently attached to
+    // the CHAT composer instead (audit P04-media-tasks-fx-web-10).
+    const originalOnNativeFileUploaded = window.onNativeFileUploaded;
+    window.onNativeFileUploaded = function(uploadUrl, mimeType, fileName) {
+        const route = window.referenceImageSelectionActive ? window.referenceImageSelectionCallback
+            : window.videoStartImageSelectionActive ? window.videoStartImageSelectionCallback
+            : null;
+        if (route) {
+            uploadedUrlToBase64(uploadUrl)
+                .then((base64Data) => route(base64Data, mimeType, fileName))
+                .catch((e) => {
+                    console.error('[NativeFileUploaded] Could not read the uploaded image:', e);
+                    window.referenceImageSelectionActive = false;
+                    window.videoStartImageSelectionActive = false;
+                    toast('Failed to load the selected image');
+                });
+            return;
+        }
+        if (originalOnNativeFileUploaded) {
+            originalOnNativeFileUploaded(uploadUrl, mimeType, fileName);
         }
     };
 
@@ -743,25 +779,51 @@ function populateGeminiProVoices(select, defaultVoice = "Charon") {
 // Google SSML Modal
 // =============================================================================
 
+/**
+ * Read an uploaded file (a same-origin /ui/uploads URL) back as base64, the
+ * form the generation modals' image callbacks take.
+ * @param {string} url - Upload URL
+ * @returns {Promise<string>} Base64 payload (no data: prefix)
+ */
+async function uploadedUrlToBase64(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`fetching ${url} returned ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    let binary = '';
+    const CHUNK = 0x8000;   // String.fromCharCode's argument count stays bounded
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
+}
+
 /** Cached Google Cloud TTS voices */
 let googleCloudVoices = null;
 
+/** True once the language select's change listener is wired (once per page). */
+let googleLanguageListenerWired = false;
+
 /**
- * Fetch Google Cloud TTS voices from server
+ * Fetch Google Cloud TTS voices from server: GET /tts/google/voices, the
+ * box's Google voices route (the old /tts/voices never existed, so every
+ * SSML generation used one hardcoded fallback voice; audit
+ * P04-media-tasks-fx-web-07).
+ * @returns {Promise<Object>} Google's {voices: [...]} listing
+ * @throws {Error} With the server's reason (e.g. no Google key configured)
  */
 async function fetchGoogleCloudVoices() {
     if (googleCloudVoices) return googleCloudVoices;
 
-    try {
-        const res = await fetch('/tts/voices');
-        if (res.ok) {
-            googleCloudVoices = await res.json();
-            return googleCloudVoices;
-        }
-    } catch (e) {
-        console.error('Failed to fetch Google Cloud voices:', e);
+    const operator = getOperator();
+    const qs = operator ? `?operator=${encodeURIComponent(operator)}` : '';
+    const res = await fetch(`/tts/google/voices${qs}`);
+    let body = null;
+    try { body = await res.json(); } catch (_) { /* non-JSON error page */ }
+    if (!res.ok || !body || !Array.isArray(body.voices)) {
+        throw new Error((body && body.detail) || `voice list returned ${res.status}`);
     }
-    return null;
+    googleCloudVoices = body;
+    return googleCloudVoices;
 }
 
 /**
@@ -772,11 +834,22 @@ async function populateGoogleLanguages() {
     const voiceSelect = $("google-voice-name-select");
     if (!langSelect || !voiceSelect) return;
 
-    const voices = await fetchGoogleCloudVoices();
-    if (!voices || !voices.voices) {
-        // Fallback - add a default option
-        langSelect.innerHTML = '<option value="en-US">English (US)</option>';
-        voiceSelect.innerHTML = '<option value="en-US-Neural2-D">en-US-Neural2-D</option>';
+    let voices;
+    try {
+        voices = await fetchGoogleCloudVoices();
+    } catch (e) {
+        // No invented fallback voice: say why there is nothing to pick.
+        console.error('Failed to fetch Google Cloud voices:', e);
+        for (const select of [langSelect, voiceSelect]) {
+            select.innerHTML = '';
+            const option = document.createElement('option');
+            option.value = '';
+            option.disabled = true;
+            option.selected = true;
+            option.textContent = 'Google voices unavailable';
+            select.appendChild(option);
+        }
+        toastError(`Couldn't load Google voices: ${e.message}`);
         return;
     }
 
@@ -806,12 +879,15 @@ async function populateGoogleLanguages() {
     });
 
     // Populate voices for default language
-    populateGoogleVoicesForLanguage('en-US');
+    populateGoogleVoicesForLanguage(langSelect.value || 'en-US');
 
-    // Update voices when language changes
-    langSelect.addEventListener('change', () => {
-        populateGoogleVoicesForLanguage(langSelect.value);
-    });
+    // Update voices when language changes (wired once: this runs on every open)
+    if (!googleLanguageListenerWired) {
+        googleLanguageListenerWired = true;
+        langSelect.addEventListener('change', () => {
+            populateGoogleVoicesForLanguage(langSelect.value);
+        });
+    }
 }
 
 /**
@@ -861,8 +937,9 @@ async function pollTaskStatus(taskId, onStatus) {
             return task;
         }
 
-        if (task.status === 'failed') {
-            throw new Error(task.error || 'Generation failed');
+        if (task.status === 'failed' || task.status === 'cancelled') {
+            // The task record's field is error_message (task_routes.py).
+            throw new Error(task.error_message || task.error || 'Generation failed');
         }
 
         if (onStatus) onStatus(task.status);

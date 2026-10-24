@@ -460,25 +460,42 @@ async function launchSession() {
 
     term.write(`\x1b[2m[connecting to ${provider}...]\x1b[0m\r\n`);
 
+    // A socket still open from an earlier launch is closed first, quietly.
+    if (activeSocket) {
+        try { activeSocket.close(1000, 'relaunch'); } catch {}
+        activeSocket = null;
+    }
+
+    let ws;
     try {
-        activeSocket = new WebSocket(wsUrl);
+        ws = new WebSocket(wsUrl);
         // MUST set binaryType before listeners so message events deliver
         // ArrayBuffer (not Blob) — avoids the async-decode dance.
-        activeSocket.binaryType = 'arraybuffer';
+        ws.binaryType = 'arraybuffer';
     } catch (err) {
         toastError(`WS connect failed: ${err.message}`);
         term.write(`\r\n\x1b[31m[connect failed: ${err.message}]\x1b[0m\r\n`);
         return;
     }
+    activeSocket = ws;
 
-    activeSocket.addEventListener('open', () => {
+    // Every handler acts only while ITS socket is still the active one. A
+    // close event arrives asynchronously after Disconnect / modal close, and
+    // the old handler used to null out a socket launched in the meantime
+    // (keystrokes then went nowhere) and print the old session's disconnect
+    // line into the new one (audit P05-ops-panels-web-06).
+    const isCurrent = () => activeSocket === ws;
+
+    ws.addEventListener('open', () => {
+        if (!isCurrent()) return;
         term.write('\x1b[2m[connected]\x1b[0m\r\n');
         // Send an authoritative resize once the socket is open — the URL-param
         // dims are a first guess; this is the real one.
         sendResize();
     });
 
-    activeSocket.addEventListener('message', (ev) => {
+    ws.addEventListener('message', (ev) => {
+        if (!isCurrent()) return;
         if (ev.data instanceof ArrayBuffer) {
             // PTY bytes — raw write. xterm.js owns ANSI/cursor/box-drawing.
             terminal?.write(new Uint8Array(ev.data));
@@ -505,12 +522,14 @@ async function launchSession() {
         }
     });
 
-    activeSocket.addEventListener('close', (ev) => {
+    ws.addEventListener('close', (ev) => {
+        if (!isCurrent()) return;
         terminal?.write(`\r\n\x1b[33m[disconnected: code=${ev.code}${ev.reason ? ' ' + ev.reason : ''}]\x1b[0m\r\n`);
         activeSocket = null;
     });
 
-    activeSocket.addEventListener('error', () => {
+    ws.addEventListener('error', () => {
+        if (!isCurrent()) return;
         // The 'close' event will fire right after with the real code/reason.
         terminal?.write('\r\n\x1b[31m[ws error]\x1b[0m\r\n');
     });

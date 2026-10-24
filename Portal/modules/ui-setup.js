@@ -6,7 +6,7 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, toastError } from './core-utils.js';
+import { $, toast, toastError, createPoller } from './core-utils.js';
 import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { openSnapshotById } from './timeline-browser.js';
 import { taskTypeMeta, isAgentTaskType, canShowLiveView, truncateText } from './task-ui.js';
@@ -32,7 +32,10 @@ export async function refreshHealth() {
         const r = await fetch("/health");
         const j = await r.json();
         const pre = $("manifest");
-        if (pre) pre.textContent = JSON.stringify(j.latest_manifest || {}, null, 2);
+        // Not while the modal shows the Tail / Recall view (it shares the <pre>).
+        if (pre && $("manifestModal")?.dataset.view !== "info") {
+            pre.textContent = JSON.stringify(j.latest_manifest || {}, null, 2);
+        }
 
         const manifest = j.latest_manifest || {};
 
@@ -317,19 +320,9 @@ export function setupKeyboardShortcuts() {
             return;
         }
 
-        // Ctrl+M or Cmd+M: Mint snapshot
-        if ((e.ctrlKey || e.metaKey) && e.key === 'm') {
-            e.preventDefault();
-            const btnMint = $("ctlMint");
-            if (btnMint) btnMint.click();
-            return;
-        }
-
-        // Escape: Close all modals
+        // Escape: Close all modals, each through its own close path
         if (e.key === 'Escape') {
-            document.querySelectorAll('.modal:not(.hide)').forEach(modal => {
-                modal.classList.add('hide');
-            });
+            document.querySelectorAll('.modal:not(.hide)').forEach(closeModalViaOwnPath);
             return;
         }
 
@@ -341,6 +334,42 @@ export function setupKeyboardShortcuts() {
             return;
         }
     });
+}
+
+/**
+ * The control a modal's own module closes it with, or null. Preference: an
+ * explicit [data-modal-close], the shared .modal-close, then the header's ✕
+ * (btnClose... ids, ...-close classes), then any btnClose... or btnCancel... button.
+ * @param {HTMLElement} modal
+ * @returns {HTMLElement|null}
+ */
+export function findModalCloseControl(modal) {
+    return modal.querySelector('[data-modal-close]')
+        || modal.querySelector('.modal-close')
+        || modal.querySelector('.modal-head button[id^="btnClose"], .modal-head button[class*="close"], .modal-head button[id$="CloseBtn"]')
+        || modal.querySelector('button[id^="btnClose"], button[id$="CloseBtn"], button[class*="-close"]')
+        || modal.querySelector('button[id^="btnCancel"]');
+}
+
+/**
+ * Close one open modal the way its own close control does, so the module's
+ * close logic runs: the voice agents disconnect and release the mic, Voice Lab
+ * stops recording, the SMS / telephony / cellular pollers stop, edit forms
+ * reset. Escape used to add `hide` and nothing else, which left all of that
+ * running behind an invisible modal (audit P06-comms-web-04). A modal whose
+ * control did not hide it (or that has none) is hidden afterwards.
+ * @param {HTMLElement} modal
+ */
+export function closeModalViaOwnPath(modal) {
+    const control = findModalCloseControl(modal);
+    if (control) {
+        try {
+            control.click();
+        } catch (e) {
+            console.error('[UI] Modal close handler failed:', e);
+        }
+    }
+    if (!modal.classList.contains('hide')) modal.classList.add('hide');
 }
 
 // =============================================================================
@@ -376,8 +405,14 @@ export function adjustClaudeBannerPosition() {
 // Task Monitor
 // =============================================================================
 
-/** Interval ID for task polling */
-let taskMonitorInterval = null;
+/** The task monitor's poller (createPoller) */
+let taskMonitorPoller = null;
+
+/**
+ * What the task monitor asks for: it renders only active tasks, so the
+ * server filters to those (status + limit run in the query; audit rank 67).
+ */
+const TASK_MONITOR_URL = '/tasks/list?status=pending,processing&limit=100';
 
 /** Track previous active task count for notifications */
 let previousActiveTaskCount = 0;
@@ -420,38 +455,25 @@ export function setupTaskMonitor() {
  */
 function startTaskPolling() {
     console.log('[DEBUG] Task polling started');
+    if (taskMonitorPoller) return;
 
-    // Poll every 2 seconds
-    taskMonitorInterval = setInterval(async () => {
-        try {
-            const response = await fetch('/tasks/list');
-            if (!response.ok) {
-                console.log('[DEBUG] Task list fetch not OK:', response.status);
-                return;
-            }
-
-            const data = await response.json();
-            const tasks = data.tasks || data;
-            console.log('[DEBUG] Fetched tasks:', tasks.length, 'total');
-            updateTaskMonitor(tasks);
-        } catch (error) {
-            console.error('[TaskMonitor] Error fetching tasks:', error);
-        }
-    }, 2000);
-
-    // Also run immediately on startup
-    setTimeout(async () => {
-        try {
-            const response = await fetch('/tasks/list');
-            if (!response.ok) return;
-
-            const data = await response.json();
-            const tasks = data.tasks || data;
-            updateTaskMonitor(tasks);
-        } catch (error) {
-            console.error('[TaskMonitor] Error on initial fetch:', error);
-        }
-    }, 1000);
+    // Every 2 seconds while the page is visible; a failing box (a restart)
+    // backs the poll off instead of hammering it every 2 s.
+    taskMonitorPoller = createPoller(async () => {
+        const response = await fetch(TASK_MONITOR_URL);
+        if (!response.ok) throw new Error(`Task list fetch not OK: ${response.status}`);
+        const data = await response.json();
+        const tasks = data.tasks || data;
+        console.log('[DEBUG] Fetched tasks:', tasks.length, 'total');
+        updateTaskMonitor(tasks);
+    }, {
+        intervalMs: 2000,
+        maxIntervalMs: 30000,
+        onError: (error, failures) => {
+            if (failures === 1) console.error('[TaskMonitor] Error fetching tasks:', error);
+        },
+    });
+    taskMonitorPoller.start();
 }
 
 /**
@@ -793,9 +815,7 @@ async function openLiveView(task) {
 // Stop polling when page unloads
 if (typeof window !== 'undefined') {
     window.addEventListener('beforeunload', () => {
-        if (taskMonitorInterval) {
-            clearInterval(taskMonitorInterval);
-        }
+        if (taskMonitorPoller) taskMonitorPoller.stop();
     });
 }
 
@@ -1045,12 +1065,117 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
     wireCollapsibleSection("btnToggleReasoning", "reasoningContent");
     wireCollapsibleSection("btnToggleSystemPrompt", "systemPromptContent");
 
-    // Manifest modal
+    // Manifest modal (also the read-only viewer for Tail and Recall below)
+    const showInfoModal = (title, text) => {
+        if (manifestModal) manifestModal.dataset.view = "info";
+        if ($("manifestTitle")) $("manifestTitle").textContent = title;
+        if ($("manifest")) $("manifest").textContent = text;
+        manifestModal && manifestModal.classList.remove("hide");
+    };
     safeSetOnClick("btnManifest", async () => {
+        if (manifestModal) manifestModal.dataset.view = "manifest";
+        if ($("manifestTitle")) $("manifestTitle").textContent = "Manifest (latest)";
         await refreshHealth();
         manifestModal && manifestModal.classList.remove("hide");
     });
     safeSetOnClick("btnCloseManifest", () => manifestModal && manifestModal.classList.add("hide"));
+
+    // Ledger viewers (audit P07-html-css-03: these buttons had no handler).
+    // Tail: the volume's last snapshot id + time; Recall: that snapshot's text.
+    const fetchLedger = async (url) => {
+        const r = await fetch(url);
+        let body = null;
+        try { body = await r.json(); } catch (_) { /* non-JSON error page */ }
+        if (!r.ok) throw new Error((body && body.detail) || `${url} returned ${r.status}`);
+        return body;
+    };
+    safeSetOnClick("ctlTail", async () => {
+        try {
+            const tail = await fetchLedger("/tail");
+            showInfoModal("Ledger tail", JSON.stringify(tail, null, 2));
+        } catch (e) {
+            toastError("Tail failed: " + e.message);
+        }
+    });
+    safeSetOnClick("ctlRecall", async () => {
+        try {
+            const { prior } = await fetchLedger("/recall");
+            showInfoModal("Last snapshot", prior || "The ledger has no snapshot yet.");
+        } catch (e) {
+            toastError("Recall failed: " + e.message);
+        }
+    });
+
+    // Health: refresh the status bar now (it also refreshes every 60 s).
+    safeSetOnClick("btnHealth", async () => {
+        await refreshHealth();
+        const label = $("healthLabel");
+        toast(`Health: ${label ? label.textContent : "refreshed"}`);
+    });
+
+    // Checkpoint: confirm, then POST /checkpoint for the resolved operator
+    // (the server summarizes in the background and toasts nothing back).
+    const confirmCheckpointModal = $("confirmCheckpointModal");
+    safeSetOnClick("btnCheckpoint", () => {
+        if (!getOperator()) {
+            toast(OPERATOR_REQUIRED_MESSAGE);
+            return;
+        }
+        confirmCheckpointModal && confirmCheckpointModal.classList.remove("hide");
+    });
+    safeSetOnClick("btnCancelCheckpoint", () => confirmCheckpointModal && confirmCheckpointModal.classList.add("hide"));
+    safeSetOnClick("btnConfirmCheckpoint", async () => {
+        confirmCheckpointModal && confirmCheckpointModal.classList.add("hide");
+        const operator = getOperator();
+        if (!operator) {
+            toast(OPERATOR_REQUIRED_MESSAGE);
+            return;
+        }
+        try {
+            const r = await fetch("/checkpoint", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ operator })
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok || j.status !== "success") throw new Error(j.detail || j.error || `checkpoint returned ${r.status}`);
+            toast(j.message || "Checkpoint started");
+        } catch (e) {
+            toastError("Checkpoint failed: " + e.message);
+        }
+    });
+
+    // Restart Service: an inline two-step confirm on the button itself (no
+    // confirm() dialog: the Android WebView has no dialog host for it).
+    const btnRestart = $("btnRestart");
+    if (btnRestart) {
+        const restartLabel = btnRestart.textContent;
+        let armedUntil = 0;
+        let disarmTimer = null;
+        btnRestart.onclick = async () => {
+            if (Date.now() > armedUntil) {
+                armedUntil = Date.now() + 4000;
+                btnRestart.textContent = "Tap again to restart";
+                clearTimeout(disarmTimer);
+                disarmTimer = setTimeout(() => { btnRestart.textContent = restartLabel; armedUntil = 0; }, 4000);
+                return;
+            }
+            clearTimeout(disarmTimer);
+            armedUntil = 0;
+            btnRestart.textContent = restartLabel;
+            btnRestart.disabled = true;
+            try {
+                const r = await fetch("/restart", { method: "POST" });
+                const j = await r.json().catch(() => ({}));
+                if (!r.ok || j.status !== "success") throw new Error(j.message || j.error || `restart returned ${r.status}`);
+                toast("Restarting — the box is back in about a minute");
+            } catch (e) {
+                toastError("Restart failed: " + e.message);
+            } finally {
+                btnRestart.disabled = false;
+            }
+        };
+    }
 
     // Pairing modal. The QR names the operator the phone starts as, so the token is
     // minted for the operator who opened this dialog (POST /pair/start {operator}),

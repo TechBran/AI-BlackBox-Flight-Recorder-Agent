@@ -47,6 +47,7 @@
  */
 
 import { $, toast } from './core-utils.js';
+import { bindNativeStream, unbindNativeStream } from './mic-arbiter.js';
 
 // =============================================================================
 // Module state
@@ -63,12 +64,9 @@ let sourceNode = null;          // MediaStreamAudioSourceNode
 let scriptProcessor = null;     // ScriptProcessorNode
 let nativeRate = 48000;         // actual capture rate, set on start
 
-// Native Android path
+// Native Android path (callbacks routed by mic-arbiter.js)
 let usingNative = false;
-let prevNativeAudioChunk = null;   // saved window.onNativeAudioChunk to restore
-let prevNativeStreamStart = null;
-let prevNativeStreamStop = null;
-let prevNativeStreamError = null;
+const NATIVE_OWNER = 'stt-stream';
 
 // Target / delta-applier state
 let targetId = null;            // id of the input/textarea
@@ -604,28 +602,28 @@ function stopBrowserCapture() {
 // =============================================================================
 
 function startNativeCapture() {
-    // Save the previous handler so we can restore it on stop (mirrors gemini-live).
-    prevNativeAudioChunk = window.onNativeAudioChunk;
-    prevNativeStreamStart = window.onNativeStreamStart;
-    prevNativeStreamStop = window.onNativeStreamStop;
-    prevNativeStreamError = window.onNativeStreamError;
-
-    window.onNativeStreamStart = () => {
-        console.log('[STT-STREAM] Native streaming started');
-    };
-    window.onNativeStreamStop = () => {
-        console.log('[STT-STREAM] Native streaming stopped');
-    };
-    window.onNativeStreamError = (error) => {
-        console.error('[STT-STREAM] Native streaming error:', error);
-        toast('Mic error: ' + error);
-        cleanup();
-    };
-    window.onNativeAudioChunk = (base64Data) => {
-        // Native frames are already 24kHz PCM16 base64 — send as-is (stt_start
-        // declared sample_rate:24000 for the native path).
-        sendAudio(base64Data);
-    };
+    // The shared native callbacks are routed here by the mic arbiter. The old
+    // save-and-restore of the window globals restored a stale handler (often
+    // null) on stop and silently cut a voice agent's audio feed (audit
+    // P02-voice-web-02); unbinding only ever drops OUR binding.
+    bindNativeStream(NATIVE_OWNER, {
+        onNativeStreamStart: () => {
+            console.log('[STT-STREAM] Native streaming started');
+        },
+        onNativeStreamStop: () => {
+            console.log('[STT-STREAM] Native streaming stopped');
+        },
+        onNativeStreamError: (error) => {
+            console.error('[STT-STREAM] Native streaming error:', error);
+            toast('Mic error: ' + error);
+            cleanup();
+        },
+        onNativeAudioChunk: (base64Data) => {
+            // Native frames are already 24kHz PCM16 base64 — send as-is (stt_start
+            // declared sample_rate:24000 for the native path).
+            sendAudio(base64Data);
+        },
+    });
 
     AndroidMic.startAudioStreaming();
     usingNative = true;
@@ -635,15 +633,7 @@ function stopNativeCapture() {
     if (typeof AndroidMic !== 'undefined' && typeof AndroidMic.stopAudioStreaming === 'function') {
         try { AndroidMic.stopAudioStreaming(); } catch (e) {}
     }
-    // Restore previous native handlers.
-    window.onNativeAudioChunk = prevNativeAudioChunk || null;
-    window.onNativeStreamStart = prevNativeStreamStart || null;
-    window.onNativeStreamStop = prevNativeStreamStop || null;
-    window.onNativeStreamError = prevNativeStreamError || null;
-    prevNativeAudioChunk = null;
-    prevNativeStreamStart = null;
-    prevNativeStreamStop = null;
-    prevNativeStreamError = null;
+    unbindNativeStream(NATIVE_OWNER);
     usingNative = false;
 }
 

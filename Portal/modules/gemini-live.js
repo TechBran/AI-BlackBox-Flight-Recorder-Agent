@@ -21,6 +21,10 @@ import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
 import { pauseAllPlayers } from './tts-stt.js';
 import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
+import { claimMic, releaseMic, bindNativeStream, unbindNativeStream } from './mic-arbiter.js';
+
+/** This module's mic-arbiter owner id. */
+const MIC_OWNER = 'gemini-live';
 
 // =============================================================================
 // Selector configuration
@@ -477,11 +481,9 @@ function hasMic() {
 }
 
 async function stopOtherMicUsers() {
-    if (window.micOn && window.stopSTT) {
-        console.log('[GEMINI-LIVE] Stopping STT before taking mic');
-        window.stopSTT(true);
-        await new Promise(resolve => setTimeout(resolve, 200));
-    }
+    // Dictation, the Gemini recorder and the other voice agents let go
+    // through the shared mic arbiter (window.micOn/stopSTT never existed).
+    await claimMic(MIC_OWNER, stopRecordingAndSend);
 }
 
 /**
@@ -575,18 +577,14 @@ async function startNativeStreaming() {
         try {
             console.log('[GEMINI-LIVE] Calling AndroidMic.startAudioStreaming()...');
 
-            // Use custom callback names for Gemini to avoid conflict with GPT Realtime
-            // Store original callbacks
-            const origStart = window.onNativeStreamStart;
-            const origError = window.onNativeStreamError;
-            const origChunk = window.onNativeAudioChunk;
-            const origStop = window.onNativeStreamStop;
-
-            // Redirect callbacks to Gemini handlers
-            window.onNativeStreamStart = window.onGeminiNativeStreamStart;
-            window.onNativeStreamError = window.onGeminiNativeStreamError;
-            window.onNativeAudioChunk = window.onGeminiNativeAudioChunk;
-            window.onNativeStreamStop = window.onGeminiNativeStreamStop;
+            // Route the shared native callbacks to the Gemini handlers through
+            // the mic arbiter (no save/overwrite/restore of window globals).
+            bindNativeStream(MIC_OWNER, {
+                onNativeStreamStart: window.onGeminiNativeStreamStart,
+                onNativeStreamError: window.onGeminiNativeStreamError,
+                onNativeAudioChunk: window.onGeminiNativeAudioChunk,
+                onNativeStreamStop: window.onGeminiNativeStreamStop,
+            });
 
             AndroidMic.startAudioStreaming();
         } catch (e) {
@@ -612,6 +610,7 @@ function stopNativeStreaming() {
         console.log('[GEMINI-LIVE] Stopping native audio streaming');
         AndroidMic.stopAudioStreaming();
     }
+    unbindNativeStream(MIC_OWNER);
 
     usingNativeRecording = false;
     isRecording = false;
@@ -768,6 +767,7 @@ async function startRecording() {
  * Stop recording and send audio to AI
  */
 function stopRecordingAndSend() {
+    releaseMic(MIC_OWNER);
     if (!isRecording) return;
 
     console.log('[GEMINI-LIVE] Stopping recording...');

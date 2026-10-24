@@ -485,7 +485,7 @@
               <button id="btnCellularManager" class="btn">Cellular</button>
               <button id="btnSMSInbox" class="btn">SMS<span id="smsBadge"></span></button>
               <button id="btnContactsManager" class="btn">Contacts</button>
-              <button id="btnComputerUse" class="btn">🖥️ Computer Use</button>
+              <button id="btnToolsComputerUse" class="btn">🖥️ Computer Use</button>
               <button id="btnCLIAgents" class="btn">💻 CLI Agents</button>
               <button id="btnVoiceAgents" class="btn">🎙️ Voice Agents</button>
               <button id="btnGmail" class="btn">📧 Google Workspace</button>
@@ -724,12 +724,8 @@
               <button id="btnManifest" class="btn" title="Show Manifest">Manifest</button>
               <button id="ctlPair"     class="btn" title="Pair device via QR">Pair Device</button>
               <button id="btnManageSetup" class="btn" title="Open the setup console — keys, operators, integrations, status">⚙️ Setup / Console</button>
-              <button id="ctlMint"     class="btn" title="Mint snapshot">Mint</button>
-              <button id="ctlAssert"   class="btn" title="Assert volume">Assert</button>
-              <button id="ctlTail"     class="btn" title="Show tail">Tail</button>
-              <button id="ctlRecall"   class="btn" title="Recall last fossil">Recall</button>
-              <button id="ctlDLVol"    class="btn" title="Download Volume">DL Vol</button>
-              <button id="ctlDLFos"    class="btn" title="Download Fossil">DL Fossil</button>
+              <button id="ctlTail"     class="btn" title="Show the ledger's last snapshot id">Tail</button>
+              <button id="ctlRecall"   class="btn" title="Show the last snapshot">Recall</button>
               <button id="btnCancelTasks" class="btn" title="Cancel all stuck tasks">Cancel Tasks</button>
             </div>
           </div>
@@ -742,7 +738,7 @@
   <div id="manifestModal" class="modal hide">
     <div class="modal-card">
       <div class="modal-head">
-        <h3>Manifest (latest)</h3>
+        <h3 id="manifestTitle">Manifest (latest)</h3>
         <button id="btnCloseManifest" class="btn">✕</button>
       </div>
       <pre id="manifest" class="manifest-pre"></pre>
@@ -1221,38 +1217,6 @@
               <div id="gemini-pro-result-container" class="gemini-pro-result hide">
                   <audio id="gemini-pro-audio-player" controls></audio>
               </div>
-          </div>
-      </div>
-  </div>
-
-  <!-- Attachment Type Selection Modal -->
-  <div id="attachmentModal" class="modal hide">
-      <div class="modal-card" style="width: min(400px, 90vw);">
-          <div class="modal-head">
-              <h3>Attach File</h3>
-              <button id="btnCloseAttachment" class="btn">✕</button>
-          </div>
-          <div class="attachment-menu">
-              <button id="btnAttachImage" class="attachment-option">
-                  <span class="attachment-icon">🖼️</span>
-                  <span class="attachment-label">Image</span>
-                  <span class="attachment-desc">JPG, PNG, WebP</span>
-              </button>
-              <button id="btnAttachVideo" class="attachment-option">
-                  <span class="attachment-icon">🎬</span>
-                  <span class="attachment-label">Video</span>
-                  <span class="attachment-desc">MP4, WebM, MOV</span>
-              </button>
-              <button id="btnAttachAudio" class="attachment-option">
-                  <span class="attachment-icon">🎵</span>
-                  <span class="attachment-label">Audio</span>
-                  <span class="attachment-desc">MP3, WAV, M4A, OGG</span>
-              </button>
-              <button id="btnAttachDocument" class="attachment-option">
-                  <span class="attachment-icon">📄</span>
-                  <span class="attachment-label">Document</span>
-                  <span class="attachment-desc">PDF, TXT, DOC, DOCX</span>
-              </button>
           </div>
       </div>
   </div>

@@ -132,3 +132,17 @@
   color: var(--neutral-700);
   font-family: monospace;
 }
+
+/* Live status from probeAppPort (agent-handler.js), never the registry's claim */
+.menu-app-item .app-status {
+  font-size: 11px;
+  color: var(--neutral-600);
+}
+
+.menu-app-item .app-status.is-up {
+  color: #34c759;
+}
+
+.menu-app-item .app-status.is-down {
+  color: #ff6b6b;
+}

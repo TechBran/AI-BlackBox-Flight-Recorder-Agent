@@ -39,6 +39,9 @@ FILE_LITERALS = {
         "voice-presets.js",
         "connectMsg.agent",
         "reconnectMsg.agent",
+        # Audit P03-live-agents-web-03: AndroidMic streams 24 kHz PCM16 and the
+        # bridge configures Grok for 16 kHz, so the native path resamples.
+        "data: resampleNativeChunkForGrok(base64Audio)",
     ],
     "modules/gpt-realtime.js": [
         "connectMsg.noise_reduction",

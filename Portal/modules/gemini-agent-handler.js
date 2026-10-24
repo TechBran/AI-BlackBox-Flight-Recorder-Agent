@@ -38,6 +38,11 @@ export class GeminiAgentHandler {
         this.hasReceivedStreamingContent = false;
         this._saveStateTimer = null;
         this.yoloMode = true;  // Default to YOLO mode (auto-approve tools)
+        // Every listener this instance adds to shared DOM goes through this
+        // signal, so dispose() removes them all (a second instance used to
+        // stack its own copies; audit P03-live-agents-web-04).
+        this._listeners = new AbortController();
+        const signal = this._listeners.signal;
 
         // Setup End Session button handler
         const endBtn = $('endGeminiSession');
@@ -99,11 +104,11 @@ export class GeminiAgentHandler {
         };
 
         if (bannerCollapsed) {
-            bannerCollapsed.addEventListener('click', window.expandGeminiBanner, { passive: false, capture: true });
+            bannerCollapsed.addEventListener('click', window.expandGeminiBanner, { passive: false, capture: true, signal });
         }
 
         if (bannerCollapseBtn) {
-            bannerCollapseBtn.addEventListener('click', window.collapseGeminiBanner, { passive: false, capture: true });
+            bannerCollapseBtn.addEventListener('click', window.collapseGeminiBanner, { passive: false, capture: true, signal });
         }
 
         // Save state when page is about to unload
@@ -111,7 +116,38 @@ export class GeminiAgentHandler {
             if (this.isStreaming && this.currentBubble) {
                 this._saveToHistory();
             }
-        });
+        }, { signal });
+    }
+
+    /**
+     * Retire this instance: its DOM listeners go and its socket is let go
+     * quietly (the session itself is not ended server-side).
+     */
+    dispose() {
+        this._listeners.abort();
+        this._releaseSession();
+    }
+
+    /**
+     * Leave the streaming state after a failure: a backend 'error', or a
+     * socket that closed or errored. 'completed' used to be the only way out,
+     * so after a failure isStreaming stayed true, the bubble kept its loader
+     * and ui-setup's page-fill scrolling stayed on (audit P03-live-agents-web-12).
+     * @param {string} [message] - Shown where the loader was, if no reply came
+     */
+    _finalizeFailure(message) {
+        this.isStreaming = false;
+        setStreamingState(false);
+        const bubble = this.currentBubble;
+        if (!bubble) return;
+        bubble.classList.remove('agent-streaming');
+        const loading = bubble.querySelector('.agent-loading');
+        if (loading) {
+            const note = document.createElement('div');
+            note.className = 'agent-error';
+            note.textContent = message || 'Gemini CLI stopped before replying.';
+            loading.replaceWith(note);
+        }
     }
 
     // =========================================================================
@@ -358,18 +394,15 @@ export class GeminiAgentHandler {
 
         this.ws.onclose = (e) => {
             console.log('[GeminiAgent] WebSocket closed:', e.code, e.reason);
-            this.isStreaming = false;
+            this._finalizeFailure();
             this.updateBannerStatus('Disconnected');
-            if (this.currentBubble) {
-                this.currentBubble.classList.remove('agent-streaming');
-            }
         };
 
         this.ws.onerror = (err) => {
             console.error('[GeminiAgent] WebSocket error:', err);
             this.updateBannerStatus('Error');
             toast('Gemini agent connection error - check console');
-            this.isStreaming = false;
+            this._finalizeFailure('Could not reach Gemini CLI.');
         };
     }
 
@@ -432,6 +465,14 @@ export class GeminiAgentHandler {
                 this.updateBannerStatus('Error');
                 console.error('[GeminiAgent] Error:', msg.data);
                 toast(`Gemini agent error: ${msg.data}`);
+                // The backend no longer has this session (e.g. after a service
+                // restart): forget it so the next prompt starts a fresh one.
+                if (/no (active )?session|no session found/i.test(String(msg.data || ''))) {
+                    const operator = this.currentOperator || getOperator();
+                    this._releaseSession();
+                    if (operator) clearOperatorSession(operator + '-gemini');
+                }
+                this._finalizeFailure(String(msg.data || ''));
                 break;
             case 'pong':
                 break;
@@ -469,20 +510,11 @@ export class GeminiAgentHandler {
      * @returns {string} Enhanced text
      */
     enhanceContent(text) {
-        // Detect file path references
-        text = text.replace(/([\/\w\-\.]+\.(js|py|html|css|json|ts|tsx|jsx|md|txt|yaml|yml|xml|sh)):(\d+)/g,
+        // Detect file path references. No per-delta diff decoration: it
+        // wrapped every markdown bullet and '---' rule in diff spans (audit
+        // P03-live-agents-web-01); fenced ```diff blocks are colored at render.
+        return text.replace(/([\/\w\-\.]+\.(js|py|html|css|json|ts|tsx|jsx|md|txt|yaml|yml|xml|sh)):(\d+)/g,
             '<code class="file-ref">$1:<span class="line-num">$3</span></code>');
-
-        // Detect diff markers
-        if (text.includes('---') && text.includes('+++')) {
-            text = text.replace(/^(---\s+.*)$/gm, '<span class="diff-file-old">$1</span>');
-            text = text.replace(/^(\+\+\+\s+.*)$/gm, '<span class="diff-file-new">$1</span>');
-        }
-        text = text.replace(/^(\+.*)$/gm, '<span class="diff-add">$1</span>');
-        text = text.replace(/^(-.*)$/gm, '<span class="diff-remove">$1</span>');
-        text = text.replace(/^(@@.*)$/gm, '<span class="diff-hunk">$1</span>');
-
-        return text;
     }
 
     /**
@@ -1012,11 +1044,11 @@ export class GeminiAgentHandler {
                     };
                     this.ws.onclose = () => {
                         console.log('[GeminiAgent] WebSocket closed after follow-up');
-                        this.isStreaming = false;
+                        this._finalizeFailure();
                     };
                     this.ws.onerror = (err) => {
                         console.error('[GeminiAgent] WebSocket error:', err);
-                        this.isStreaming = false;
+                        this._finalizeFailure('Could not reach Gemini CLI.');
                     };
                 } catch (err) {
                     console.error('[GeminiAgent] Reconnect failed:', err);
@@ -1151,8 +1183,27 @@ export function getGeminiAgentHandler() {
  * @param {GeminiAgentHandler} handler - Handler to set
  */
 export function setGeminiAgentHandler(handler) {
+    if (geminiAgentHandler && geminiAgentHandler !== handler) geminiAgentHandler.dispose();
     geminiAgentHandler = handler;
     window.geminiAgentHandler = handler;
+}
+
+/** The restore in flight, shared by concurrent callers (boot + an operator switch). */
+let _geminiSessionCheck = null;
+
+/**
+ * The handler a restore goes into: the existing instance, never a second
+ * one (each constructor registers document-level listeners).
+ * @param {string} operator - Whose session is being restored
+ * @returns {GeminiAgentHandler}
+ */
+function geminiHandlerForRestore(operator) {
+    if (!geminiAgentHandler) setGeminiAgentHandler(new GeminiAgentHandler());
+    if (geminiAgentHandler.currentOperator && geminiAgentHandler.currentOperator !== operator) {
+        geminiAgentHandler._releaseSession();
+    }
+    geminiAgentHandler.currentOperator = operator;
+    return geminiAgentHandler;
 }
 
 // =============================================================================
@@ -1164,9 +1215,18 @@ export function setGeminiAgentHandler(handler) {
  * resolved (app-init awaits initOperatorSelector). With no operator there is
  * nobody's session to look for, so it neither probes nor restores.
  */
-export async function checkExistingGeminiAgentSession() {
+export function checkExistingGeminiAgentSession() {
+    if (!_geminiSessionCheck) {
+        _geminiSessionCheck = _checkExistingGeminiAgentSession().finally(() => { _geminiSessionCheck = null; });
+    }
+    return _geminiSessionCheck;
+}
+
+async function _checkExistingGeminiAgentSession() {
     const operator = getOperator();
     if (!operator) return;
+    // A turn that is streaming keeps its session; nothing to restore over it.
+    if (geminiAgentHandler && geminiAgentHandler.isStreaming) return;
 
     const persistedSessionId = getOperatorSession(operator + '-gemini');
     if (persistedSessionId) {
@@ -1179,14 +1239,12 @@ export async function checkExistingGeminiAgentSession() {
             const data = await resp.json();
             if (data.session && data.session.status !== 'completed') {
                 console.log('[GeminiAgent] Found active backend session:', data.session.session_id);
-                geminiAgentHandler = new GeminiAgentHandler();
-                window.geminiAgentHandler = geminiAgentHandler;
-                geminiAgentHandler.currentOperator = operator;
-                geminiAgentHandler.sessionId = data.session.session_id;
-                geminiAgentHandler.hasActiveSession = true;
-                geminiAgentHandler.yoloMode = data.session.yolo_mode !== false;
-                geminiAgentHandler.updateBannerStatus('Session Ready');
-                geminiAgentHandler.updateBannerYoloStatus();
+                const handler = geminiHandlerForRestore(operator);
+                handler.sessionId = data.session.session_id;
+                handler.hasActiveSession = true;
+                handler.yoloMode = data.session.yolo_mode !== false;
+                handler.updateBannerStatus('Session Ready');
+                handler.updateBannerYoloStatus();
                 saveOperatorSession(operator + '-gemini', data.session.session_id);
                 return;
             }
@@ -1196,13 +1254,12 @@ export async function checkExistingGeminiAgentSession() {
     }
 
     if (persistedSessionId) {
+        const handler = geminiHandlerForRestore(operator);
+        if (handler.sessionId === persistedSessionId && handler.hasActiveSession) return; // already restored
         console.log('[GeminiAgent] Pre-loading persisted session ID for operator:', operator);
-        geminiAgentHandler = new GeminiAgentHandler();
-        window.geminiAgentHandler = geminiAgentHandler;
-        geminiAgentHandler.currentOperator = operator;
-        geminiAgentHandler.sessionId = persistedSessionId;
-        geminiAgentHandler.hasActiveSession = true;
-        geminiAgentHandler.updateBannerStatus('Session Ready');
+        handler.sessionId = persistedSessionId;
+        handler.hasActiveSession = true;
+        handler.updateBannerStatus('Session Ready');
         toast(`Restored Gemini session for ${operator}.`, 3000);
     }
 }

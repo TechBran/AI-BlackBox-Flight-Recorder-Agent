@@ -273,29 +273,11 @@ export async function handleSessionFileUpload(file, sessionId) {
  */
 export function setupNativeFileCallback() {
     // Handler for large files uploaded directly from Android via OkHttp
-    // Receives the server URL instead of Base64 data (no memory explosion)
+    // Receives the server URL instead of Base64 data (no memory explosion).
+    // Picks for a generation modal's reference / start image are routed there
+    // by generation-modals.js, which wraps this handler.
     window.onNativeFileUploaded = function(uploadUrl, mimeType, fileName) {
         try {
-            // Check if this is for video image selection
-            if (window.videoImageSelectionActive && window.videoImageSelectionCallback) {
-                // For video image selection, fetch the file and convert to base64
-                fetch(uploadUrl)
-                    .then(r => r.blob())
-                    .then(blob => {
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            const base64 = reader.result.split(',')[1];
-                            window.videoImageSelectionCallback(base64, mimeType, fileName);
-                        };
-                        reader.readAsDataURL(blob);
-                    })
-                    .catch(e => {
-                        console.error('[NativeFileUploaded] Error converting for video selection:', e);
-                        toast('Failed to process uploaded file for video selection.');
-                    });
-                return;
-            }
-
             // Create a File object from the uploaded URL for normal attachment flow
             fetch(uploadUrl)
                 .then(r => r.blob())
@@ -320,13 +302,8 @@ export function setupNativeFileCallback() {
 
     window.onNativeFileSelected = function(base64Data, mimeType, fileName) {
         try {
-            // Check if this is for video image selection
-            if (window.videoImageSelectionActive && window.videoImageSelectionCallback) {
-                window.videoImageSelectionCallback(base64Data, mimeType, fileName);
-                return;
-            }
-
-            // Normal attachment handling
+            // Normal attachment handling (generation-modals.js wraps this
+            // handler to route reference / start image picks to its modals)
             const byteCharacters = atob(base64Data);
             const byteNumbers = new Array(byteCharacters.length);
             for (let i = 0; i < byteCharacters.length; i++) {

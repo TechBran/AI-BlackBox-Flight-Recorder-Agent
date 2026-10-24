@@ -11,6 +11,10 @@ import { $, toast, simpleHash, escapeAttr } from './core-utils.js';
 import { getOperator, getAudioCache, saveAudioCache } from './state-management.js';
 import { sttStream } from './stt-stream.js';
 import { htmlToText } from './sanitize.js';
+import { claimMic, releaseMic } from './mic-arbiter.js';
+
+/** Dictation's mic-arbiter owner id. */
+const DICTATION_MIC_OWNER = 'dictation';
 
 // =============================================================================
 // TTS Constants
@@ -150,12 +154,13 @@ function cancelActiveTTS() {
     }
 }
 
-// Cancel TTS on page unload/navigation to prevent blocking reload
+// Cancel TTS on page unload/navigation to prevent blocking reload. NOT on
+// visibilitychange: a phone lock or app switch fires `hidden`, and cancelling
+// there silently threw away the reply being spoken -- and the server-side
+// on-box queue job behind it (audit P02-voice-web-04). A backgrounded tab
+// just keeps waiting for its audio.
 if (typeof window !== 'undefined') {
     window.addEventListener('beforeunload', cancelActiveTTS);
-    window.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden') cancelActiveTTS();
-    });
 }
 
 /** Last assistant text for main speaker button */
@@ -2331,7 +2336,9 @@ export function attachGeneratedAudioPlayer(bubbleElement, audioURL, filenamePref
 }
 
 /**
- * Speak thinking/reasoning content
+ * Speak thinking/reasoning content. Also on window: the reasoning panels'
+ * "Listen to reasoning" buttons (chat-send.js) call it from an inline onclick,
+ * where an ES-module export is not in scope (audit P01-chat-core-web-05).
  * @param {HTMLElement} btn - Button element
  */
 export async function speakThinkingContent(btn) {
@@ -2411,6 +2418,10 @@ export async function speakThinkingContent(btn) {
         activeTTSAbort = null;
         ttsState.isFetching = false;
     }
+}
+
+if (typeof window !== 'undefined') {
+    window.speakThinkingContent = speakThinkingContent;
 }
 
 /**
@@ -2972,6 +2983,11 @@ export async function startSTT() {
         return;
     }
 
+    // Take the mic from whoever holds it (a voice agent, the Gemini recorder);
+    // they stop dictation the same way when they claim it (mic-arbiter.js).
+    await claimMic(DICTATION_MIC_OWNER, () => stopSTT(true));
+    if (sttStreamingActive || micOn) return;
+
     const targetId = currentSTTTarget || "prompt";
     const buttonId = currentSTTButton || "ctlMic";
 
@@ -3004,6 +3020,7 @@ export async function startSTT() {
  * @param {boolean} cancelOnly - Cancel without committing (used when retargeting)
  */
 export function stopSTT(cancelOnly = false) {
+    releaseMic(DICTATION_MIC_OWNER);
     if (sttStreamingActive) {
         sttStreamingActive = false;
         try { sttStream.stop(); } catch (e) { console.error("[STT] sttStream.stop error:", e); }

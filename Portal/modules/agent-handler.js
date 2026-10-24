@@ -94,6 +94,12 @@ export class AgentChatHandler {
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 15;
         this.reconnectTimer = null;
+        // Every listener this instance adds to shared DOM goes through this
+        // signal, so dispose() removes them all. A second instance used to
+        // stack its own copies: Shift+Tab and the mode indicator then cycled
+        // the permission mode twice (audit P03-live-agents-web-04).
+        this._listeners = new AbortController();
+        const signal = this._listeners.signal;
 
         // Setup End Session button handler
         const endBtn = $('endAgentSession');
@@ -144,7 +150,7 @@ export class AgentChatHandler {
         };
 
         if (bannerCollapsed) {
-            bannerCollapsed.addEventListener('click', window.expandAgentBanner, { passive: false, capture: true });
+            bannerCollapsed.addEventListener('click', window.expandAgentBanner, { passive: false, capture: true, signal });
             bannerCollapsed.setAttribute('role', 'button');
             bannerCollapsed.setAttribute('tabindex', '0');
             bannerCollapsed.addEventListener('keydown', (e) => {
@@ -152,11 +158,11 @@ export class AgentChatHandler {
                     e.preventDefault();
                     window.expandAgentBanner(e);
                 }
-            });
+            }, { signal });
         }
 
         if (bannerCollapseBtn) {
-            bannerCollapseBtn.addEventListener('click', window.collapseAgentBanner, { passive: false, capture: true });
+            bannerCollapseBtn.addEventListener('click', window.collapseAgentBanner, { passive: false, capture: true, signal });
             bannerCollapseBtn.setAttribute('role', 'button');
             bannerCollapseBtn.setAttribute('tabindex', '0');
             bannerCollapseBtn.addEventListener('keydown', (e) => {
@@ -164,13 +170,13 @@ export class AgentChatHandler {
                     e.preventDefault();
                     window.collapseAgentBanner(e);
                 }
-            });
+            }, { signal });
         }
 
         // Setup Permission Mode click handler
         const permissionIndicator = $('permissionModeIndicator');
         if (permissionIndicator) {
-            permissionIndicator.addEventListener('click', () => this.cyclePermissionMode());
+            permissionIndicator.addEventListener('click', () => this.cyclePermissionMode(), { signal });
         }
 
         // Setup Shift+Tab keyboard handler for permission mode cycling
@@ -183,7 +189,7 @@ export class AgentChatHandler {
                     this.cyclePermissionMode();
                 }
             }
-        });
+        }, { signal });
 
         // Initialize permission mode indicator
         this.updatePermissionModeIndicator();
@@ -193,7 +199,44 @@ export class AgentChatHandler {
             if (this.isStreaming && this.currentBubble) {
                 this._saveToHistory();
             }
-        });
+        }, { signal });
+    }
+
+    /**
+     * Retire this instance: its DOM listeners go and its socket is let go
+     * quietly (the session itself is not ended server-side).
+     */
+    dispose() {
+        this._listeners.abort();
+        this._releaseSession();
+        this.stopReasoningCycle();
+    }
+
+    /**
+     * Leave the streaming state after a failure: a backend 'error', or a
+     * socket that closed or errored without reconnecting. The 'completed'
+     * message used to be the ONLY way out, so after a failure isStreaming
+     * stayed true, the bubble kept its "Starting Claude Code session..."
+     * loader and ui-setup's page-fill scrolling stayed on for the rest of the
+     * page (audit P03-live-agents-web-12).
+     * @param {string} [message] - Shown where the loader was, if no reply came
+     */
+    _finalizeFailure(message) {
+        this.isStreaming = false;
+        setStreamingState(false);
+        this.stopReasoningCycle();
+        $('thinkingIndicator')?.classList.add('hide'); // don't leave embers pinned on
+        statusLine.endSession();
+        const bubble = this.currentBubble;
+        if (!bubble) return;
+        bubble.classList.remove('agent-streaming');
+        const loading = bubble.querySelector('.agent-loading');
+        if (loading) {
+            const note = document.createElement('div');
+            note.className = 'agent-error';
+            note.textContent = message || 'Claude Code stopped before replying.';
+            loading.replaceWith(note);
+        }
     }
 
     // =========================================================================
@@ -374,7 +417,7 @@ export class AgentChatHandler {
                     if (e.code !== 1000 && this.sessionId) {
                         this.attemptReconnect();
                     } else {
-                        this.isStreaming = false;
+                        this._finalizeFailure();
                         this.updateBannerStatus('Session Complete');
                     }
                 };
@@ -499,13 +542,8 @@ export class AgentChatHandler {
             if (e.code !== 1000 && this.sessionId) {
                 this.attemptReconnect();
             } else {
-                this.isStreaming = false;
-                $('thinkingIndicator')?.classList.add('hide'); // don't leave embers pinned on
+                this._finalizeFailure();
                 this.updateBannerStatus('Disconnected');
-                if (this.currentBubble) {
-                    this.currentBubble.classList.remove('agent-streaming');
-                }
-                statusLine.endSession();
             }
         };
 
@@ -513,9 +551,7 @@ export class AgentChatHandler {
             console.error('[Agent] WebSocket error:', err);
             this.updateBannerStatus('Error');
             toast('Agent connection error - check console');
-            this.isStreaming = false;
-            $('thinkingIndicator')?.classList.add('hide'); // don't leave embers pinned on
-            statusLine.endSession();
+            this._finalizeFailure('Could not reach Claude Code.');
         };
     }
 
@@ -603,6 +639,11 @@ export class AgentChatHandler {
                 this.updateBannerStatus('Error');
                 console.error('[Agent] Error:', msg.data);
                 toast(`Agent error: ${msg.data}`);
+                // The backend no longer has this session (e.g. after a service
+                // restart): forget it, or every next prompt goes to sendInput
+                // and fails the same way until "New Session".
+                if (/no (active )?session/i.test(String(msg.data || ''))) this._forgetSession();
+                this._finalizeFailure(String(msg.data || ''));
                 break;
             case 'app_detected':
                 console.log('[Agent] App detected:', msg.data);
@@ -672,25 +713,20 @@ export class AgentChatHandler {
     }
 
     /**
-     * Enhance content with file path highlighting and diff markers
+     * Enhance content with file path highlighting.
+     *
+     * No diff decoration here: this runs on every streamed DELTA, so the old
+     * ^-/^+ passes wrapped every markdown bullet, every '---' rule and any
+     * delta that merely began with '-' in red/green diff spans. Real diffs
+     * arrive fenced (```diff), and highlightDiff colors those at render time
+     * (audit P03-live-agents-web-01).
      * @param {string} text - Text to enhance
      * @returns {string} Enhanced text
      */
     enhanceContent(text) {
         // Detect file path references
-        text = text.replace(/([\/\w\-\.]+\.(js|py|html|css|json|ts|tsx|jsx|md|txt|yaml|yml|xml|sh)):(\d+)/g,
+        return text.replace(/([\/\w\-\.]+\.(js|py|html|css|json|ts|tsx|jsx|md|txt|yaml|yml|xml|sh)):(\d+)/g,
             '<code class="file-ref">$1:<span class="line-num">$3</span></code>');
-
-        // Detect diff markers
-        if (text.includes('---') && text.includes('+++')) {
-            text = text.replace(/^(---\s+.*)$/gm, '<span class="diff-file-old">$1</span>');
-            text = text.replace(/^(\+\+\+\s+.*)$/gm, '<span class="diff-file-new">$1</span>');
-        }
-        text = text.replace(/^(\+.*)$/gm, '<span class="diff-add">$1</span>');
-        text = text.replace(/^(-.*)$/gm, '<span class="diff-remove">$1</span>');
-        text = text.replace(/^(@@.*)$/gm, '<span class="diff-hunk">$1</span>');
-
-        return text;
     }
 
     /**
@@ -1649,6 +1685,17 @@ export class AgentChatHandler {
     }
 
     /**
+     * Forget a session the backend reports it no longer has: let go of the
+     * socket and drop the persisted id, so the next prompt starts a fresh one.
+     */
+    _forgetSession() {
+        const operator = this.currentOperator || getOperator();
+        this._releaseSession();
+        if (operator) clearOperatorSession(operator);
+        this.updateBannerStatus('Ready');
+    }
+
+    /**
      * End the current session
      */
     endSession() {
@@ -1694,20 +1741,7 @@ export class AgentChatHandler {
 
         if (menuAppsList.querySelector(`[data-port="${app.port}"]`)) return;
 
-        const item = document.createElement('div');
-        item.className = 'menu-app-item';
-        item.dataset.port = app.port;
-        item.innerHTML = `
-            <span class="app-name">${this.escapeHtml(app.name)}</span>
-            <span class="app-port">:${this.escapeHtml(app.port)}</span>
-            <button class="btn btn-open-app">Open</button>
-        `;
-
-        item.querySelector('.btn-open-app').onclick = () => {
-            this.openAppPreview(app.port, app.name);
-        };
-
-        menuAppsList.appendChild(item);
+        menuAppsList.appendChild(buildAppMenuItem(app, () => this.openAppPreview(app.port, app.name)));
     }
 
     /**
@@ -1906,8 +1940,28 @@ export function getAgentHandler() {
  * @param {AgentChatHandler} handler - Handler to set
  */
 export function setAgentHandler(handler) {
+    if (agentHandler && agentHandler !== handler) agentHandler.dispose();
     agentHandler = handler;
     window.agentHandler = handler;
+}
+
+/** The restore in flight, shared by concurrent callers (boot + an operator switch). */
+let _agentSessionCheck = null;
+
+/**
+ * The handler a restore goes into: the existing instance, never a second
+ * one (each constructor registers document-level listeners; two instances
+ * doubled Shift+Tab, the toasts and, on reconnect, every delta).
+ * @param {string} operator - Whose session is being restored
+ * @returns {AgentChatHandler}
+ */
+function handlerForRestore(operator) {
+    if (!agentHandler) setAgentHandler(new AgentChatHandler());
+    if (agentHandler.currentOperator && agentHandler.currentOperator !== operator) {
+        agentHandler._releaseSession();
+    }
+    agentHandler.currentOperator = operator;
+    return agentHandler;
 }
 
 // =============================================================================
@@ -1920,9 +1974,18 @@ export function setAgentHandler(handler) {
  * operator is resolved (app-init awaits initOperatorSelector); with no operator
  * there is nobody's session to look for, so it neither probes nor restores.
  */
-export async function checkExistingAgentSession() {
+export function checkExistingAgentSession() {
+    if (!_agentSessionCheck) {
+        _agentSessionCheck = _checkExistingAgentSession().finally(() => { _agentSessionCheck = null; });
+    }
+    return _agentSessionCheck;
+}
+
+async function _checkExistingAgentSession() {
     const operator = getOperator();
     if (!operator) return;
+    // A turn that is streaming keeps its session; nothing to restore over it.
+    if (agentHandler && agentHandler.isStreaming) return;
 
     const persistedSessionId = getOperatorSession(operator);
     if (persistedSessionId) {
@@ -1935,13 +1998,18 @@ export async function checkExistingAgentSession() {
             const data = await resp.json();
             if (data.session && data.session.status !== 'completed') {
                 console.log('[Agent] Found active backend session:', data.session.session_id);
-                agentHandler = new AgentChatHandler();
-                window.agentHandler = agentHandler;
-                agentHandler.currentOperator = operator;
-                await agentHandler.reconnect({
-                    ...data.session,
-                    output_buffer: data.output_buffer || []
-                });
+                const handler = handlerForRestore(operator);
+                const ws = handler.ws;
+                const alreadyAttached = handler.sessionId === data.session.session_id
+                    && ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+                if (!alreadyAttached) {
+                    if (ws) handler._releaseSession(); // one socket per session, never two
+                    handler.currentOperator = operator;
+                    await handler.reconnect({
+                        ...data.session,
+                        output_buffer: data.output_buffer || []
+                    });
+                }
                 saveOperatorSession(operator, data.session.session_id);
                 return;
             }
@@ -1951,13 +2019,12 @@ export async function checkExistingAgentSession() {
     }
 
     if (persistedSessionId) {
+        const handler = handlerForRestore(operator);
+        if (handler.sessionId === persistedSessionId && handler.hasActiveSession) return; // already restored
         console.log('[Agent] Pre-loading persisted session ID for operator:', operator);
-        agentHandler = new AgentChatHandler();
-        window.agentHandler = agentHandler;
-        agentHandler.currentOperator = operator;
-        agentHandler.sessionId = persistedSessionId;
-        agentHandler.hasActiveSession = true;
-        agentHandler.updateBannerStatus('Session Ready');
+        handler.sessionId = persistedSessionId;
+        handler.hasActiveSession = true;
+        handler.updateBannerStatus('Session Ready');
         toast(`Restored session for ${operator}. Your context is preserved.`, 3000);
     }
 }
@@ -2019,20 +2086,59 @@ function addAppToMenuPanel(app) {
 
     if (menuAppsList.querySelector(`[data-port="${app.port}"]`)) return;
 
+    menuAppsList.appendChild(buildAppMenuItem(app, () => openAppPreviewSimple(app.port, app.name)));
+}
+
+/**
+ * Ask a registered app's own server whether it is up, through the proxy the
+ * Open button uses. The registry's status is always "running" (a default
+ * nothing ever updates), so the Apps tab listed dead apps as running (W23).
+ * The proxy answers 503/504 when nothing listens on the port; 403 means it
+ * refuses the port, which the operator cannot open either.
+ * @param {number|string} port - The app's port
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs=4000]
+ * @returns {Promise<boolean>} Whether the app answered
+ */
+export async function probeAppPort(port, { timeoutMs = 4000 } = {}) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const r = await fetch(`/app-proxy/${encodeURIComponent(port)}/`, { cache: 'no-store', signal: ctrl.signal });
+        return r.status < 500 && r.status !== 403;
+    } catch (_) {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * One Apps-tab row: name, port, a live status (probed, never the registry's
+ * claim) and the Open button.
+ * @param {Object} app - Registry entry ({name, port})
+ * @param {Function} onOpen - Open button handler
+ * @returns {HTMLElement}
+ */
+function buildAppMenuItem(app, onOpen) {
     const item = document.createElement('div');
     item.className = 'menu-app-item';
     item.dataset.port = app.port;
     item.innerHTML = `
         <span class="app-name">${escapeHtmlSimple(app.name)}</span>
         <span class="app-port">:${escapeHtmlSimple(app.port)}</span>
+        <span class="app-status">checking…</span>
         <button class="btn btn-open-app">Open</button>
     `;
+    item.querySelector('.btn-open-app').onclick = onOpen;
 
-    item.querySelector('.btn-open-app').onclick = () => {
-        openAppPreviewSimple(app.port, app.name);
-    };
-
-    menuAppsList.appendChild(item);
+    const statusEl = item.querySelector('.app-status');
+    probeAppPort(app.port).then((up) => {
+        statusEl.textContent = up ? 'running' : 'not running';
+        statusEl.classList.add(up ? 'is-up' : 'is-down');
+        item.classList.toggle('app-down', !up);
+    });
+    return item;
 }
 
 /**

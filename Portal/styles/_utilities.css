@@ -1157,61 +1157,6 @@ label[for="operatorSelect"]{ color:var(--muted); font-weight: normal; font-size:
     transform: translateY(0);
 }
 
-/* --- Attachment Menu Modal --- */
-.attachment-menu {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    padding: 12px 0;
-}
-
-.attachment-option {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 24px 16px;
-    background: var(--neutral-0);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    cursor: pointer;
-    transition: all var(--transition-base);
-    color: var(--text);
-    font-weight: normal;
-}
-
-.attachment-option:hover {
-    background: var(--neutral-300);
-    border-color: var(--accent);
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    text-decoration: none;
-}
-
-.attachment-icon {
-    font-size: 32px;
-    line-height: 1;
-}
-
-.attachment-label {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-}
-
-.attachment-desc {
-    font-size: 11px;
-    color: var(--muted);
-    text-align: center;
-}
-
-@media (max-width:480px){
-    .attachment-menu {
-        grid-template-columns: 1fr;
-    }
-}
-
 /* --- Status Bar - REMOVED (stats moved to operator bubble, timeline to top-right) --- */
 .status-bar {
     display: none !important;  /* v222: Status bar removed from UI */

@@ -18,6 +18,10 @@ import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
 import { pauseAllPlayers } from './tts-stt.js';
 import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
+import { claimMic, releaseMic, bindNativeStream, unbindNativeStream } from './mic-arbiter.js';
+
+/** This module's mic-arbiter owner id. */
+const MIC_OWNER = 'realtime';
 
 // =============================================================================
 // Selector configuration
@@ -632,23 +636,11 @@ function hasMic() {
 }
 
 /**
- * Stop other modules that may be using the microphone
- * Ensures we don't conflict with STT or Gemini recorder
+ * Stop other modules that may be using the microphone (dictation, the Gemini
+ * recorder, the other voice agents) through the shared mic arbiter.
  */
 async function stopOtherMicUsers() {
-    // Check if STT is recording
-    if (window.micOn && window.stopSTT) {
-        console.log('[REALTIME] Stopping STT before taking mic');
-        window.stopSTT(true);  // Cancel without processing
-        await new Promise(resolve => setTimeout(resolve, 200));
-    }
-
-    // Check if Gemini recorder is active
-    if (window.geminiRecording) {
-        console.log('[REALTIME] Gemini recorder is active - waiting for it to finish');
-        // Don't forcefully stop it, just wait a moment
-        await new Promise(resolve => setTimeout(resolve, 300));
-    }
+    await claimMic(MIC_OWNER, stopRecordingFully);
 }
 
 /**
@@ -709,8 +701,9 @@ async function releaseNativeMicAndWait() {
  */
 async function startNativeStreaming() {
     return new Promise((resolve, reject) => {
-        // Set up callbacks
-        window.onNativeStreamStart = () => {
+        // Set up callbacks (routed to this module by the mic arbiter below)
+        const nativeHandlers = {};
+        nativeHandlers.onNativeStreamStart = () => {
             console.log('[REALTIME] Native streaming started');
             isRecording = true;
             usingNativeRecording = true;
@@ -718,7 +711,7 @@ async function startNativeStreaming() {
             resolve();
         };
 
-        window.onNativeStreamError = (error) => {
+        nativeHandlers.onNativeStreamError = (error) => {
             console.error('[REALTIME] Native streaming error:', error);
             isRecording = false;
             usingNativeRecording = false;
@@ -726,7 +719,7 @@ async function startNativeStreaming() {
             reject(new Error(error));
         };
 
-        window.onNativeAudioChunk = (base64Data) => {
+        nativeHandlers.onNativeAudioChunk = (base64Data) => {
             // Native Android captures at 24kHz PCM16 - exactly what OpenAI needs
             // Auto-mute while AI is speaking AND for POST_SPEECH_DELAY_MS after
             const timeSinceAIStopped = Date.now() - aiStoppedSpeakingAt;
@@ -799,7 +792,7 @@ async function startNativeStreaming() {
             }
         };
 
-        window.onNativeStreamStop = () => {
+        nativeHandlers.onNativeStreamStop = () => {
             console.log('[REALTIME] Native streaming stopped');
             isRecording = false;
             usingNativeRecording = false;
@@ -809,6 +802,7 @@ async function startNativeStreaming() {
         // Start native streaming
         try {
             console.log('[REALTIME] Calling AndroidMic.startAudioStreaming()...');
+            bindNativeStream(MIC_OWNER, nativeHandlers);
             AndroidMic.startAudioStreaming();
         } catch (e) {
             console.error('[REALTIME] Failed to start native streaming:', e);
@@ -833,6 +827,7 @@ function stopNativeStreaming() {
         console.log('[REALTIME] Stopping native audio streaming');
         AndroidMic.stopAudioStreaming();
     }
+    unbindNativeStream(MIC_OWNER);
 
     // Send commit to trigger AI response
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1121,6 +1116,7 @@ function unmuteRecording() {
  */
 function stopRecordingFully() {
     console.log('[REALTIME] Fully stopping recording...');
+    releaseMic(MIC_OWNER);
 
     // If using native Android streaming, use native stop
     if (usingNativeRecording) {

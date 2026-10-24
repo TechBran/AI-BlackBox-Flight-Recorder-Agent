@@ -7,7 +7,7 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, escapeHtml, escapeAttr } from './core-utils.js';
+import { $, toast, escapeHtml, escapeAttr, createPoller } from './core-utils.js';
 import { getOperator } from './state-management.js';
 import { notifyTaskComplete } from './notifications.js';
 import { taskTypeMeta, isAgentTaskType, truncateText } from './task-ui.js';
@@ -56,6 +56,7 @@ export class TaskManager {
     constructor() {
         this.activeTasks = new Map(); // task_id -> task info
         this.pollInterval = 3000; // Poll every 3 seconds
+        this.poller = null;       // createPoller (startPolling)
         this.addBubble = null; // Set by init to avoid circular deps
         this.attachGeneratedAudioPlayer = null; // Set by init
     }
@@ -177,6 +178,33 @@ export class TaskManager {
     }
 
     /**
+     * True for a status the task never leaves. 'cancelled' is TERMINAL
+     * alongside completed/failed (G2-T8): without it a cancelled task never
+     * stops polling and the pill renders "processing forever".
+     * @param {string} status - Task status
+     * @returns {boolean}
+     */
+    static isTerminal(status) {
+        return status === 'completed' || status === 'failed' || status === 'cancelled';
+    }
+
+    /**
+     * The ONE terminal path: stop tracking the task, then show its result.
+     * Untracking first makes it idempotent -- resumeTask and the poll (or two
+     * overlapping polls) can both see the same finished task, and the result
+     * bubble, toast and OS notification must still happen exactly once
+     * (audit P04-media-tasks-fx-web-02: a reload showed every result twice).
+     * @param {string} taskId - Task ID
+     * @param {Object} status - Final task status
+     */
+    finishTask(taskId, status) {
+        const storedTask = this.activeTasks.get(taskId);
+        if (!storedTask) return;
+        this.removeTask(taskId);
+        this.handleTaskComplete(taskId, status, storedTask);
+    }
+
+    /**
      * Resume tracking an existing task
      * @param {string} taskId - Task ID
      * @param {string} storedOperator - Stored operator
@@ -187,14 +215,14 @@ export class TaskManager {
 
         try {
             const status = await this.checkTaskStatus(taskId);
-            if (status.status === 'completed' || status.status === 'failed') {
+            if (TaskManager.isTerminal(status.status)) {
                 this.activeTasks.set(taskId, {
                     type: status.task_type,
                     prompt: null,
                     operator: taskOperator,
                     startTime: Date.now()
                 });
-                this.handleTaskComplete(taskId, status);
+                this.finishTask(taskId, status);
             } else {
                 this.activeTasks.set(taskId, {
                     type: status.task_type,
@@ -214,9 +242,14 @@ export class TaskManager {
      * Start the polling loop
      */
     startPolling() {
-        setInterval(() => {
-            this.pollActiveTasks();
-        }, this.pollInterval);
+        // createPoller: paused while the page is hidden, never overlapping a
+        // slow sweep, backing off while the box is unreachable.
+        if (this.poller) return;
+        this.poller = createPoller(() => this.pollActiveTasks(), {
+            intervalMs: this.pollInterval,
+            immediate: false,
+        });
+        this.poller.start();
     }
 
     /**
@@ -230,20 +263,15 @@ export class TaskManager {
             return;
         }
 
-        for (const [taskId, taskInfo] of this.activeTasks.entries()) {
+        for (const [taskId, taskInfo] of Array.from(this.activeTasks.entries())) {
             console.log('[DEBUG] Polling task:', taskId, taskInfo.type);
             try {
                 const status = await this.checkTaskStatus(taskId);
                 console.log('[DEBUG] Task status:', status.status);
 
-                // 'cancelled' is TERMINAL alongside completed/failed (G2-T8).
-                // Without it a cancelled task never stops polling and the pill
-                // renders "processing forever" — the "UI lies" bug T8 kills.
-                if (status.status === 'completed' || status.status === 'failed'
-                    || status.status === 'cancelled') {
-                    console.log('[DEBUG] Task finished, calling handleTaskComplete');
-                    this.handleTaskComplete(taskId, status);
-                    this.removeTask(taskId);
+                if (TaskManager.isTerminal(status.status)) {
+                    console.log('[DEBUG] Task finished, calling finishTask');
+                    this.finishTask(taskId, status);
                 } else {
                     this.updateTaskProgress(taskId, status);
                 }
@@ -267,17 +295,17 @@ export class TaskManager {
     }
 
     /**
-     * Handle task completion
+     * Handle task completion (reached through finishTask only)
      * @param {string} taskId - Task ID
      * @param {Object} status - Task status
+     * @param {Object} [storedTask] - The tracking record finishTask just removed
      */
-    handleTaskComplete(taskId, status) {
+    handleTaskComplete(taskId, status, storedTask = this.activeTasks.get(taskId)) {
         console.log(`[TaskManager] Task ${taskId} completed:`, status);
         console.log('[DEBUG] ===== TASK COMPLETION DETECTED =====');
         console.log('[DEBUG] Task type:', status.task_type);
         console.log('[DEBUG] Status:', status.status);
 
-        const storedTask = this.activeTasks.get(taskId);
         const taskOperator = storedTask?.operator || status.result_data?.operator || null;
         console.log('[DEBUG] Task operator:', taskOperator);
 
