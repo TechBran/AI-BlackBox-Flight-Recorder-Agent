@@ -5,8 +5,10 @@ import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.io.IOException
 import java.net.URLEncoder
 
 /**
@@ -60,7 +62,11 @@ class SmsInboxApi(
         return api.post("/sms/preferences", body.toString())
     }
 
-    /** [fromNumber] null/blank = the box's default line. */
+    /**
+     * [fromNumber] null/blank = the box's default line. Returns once the box accepted the
+     * SMS; throws [SmsSendFailedException] with the box's reason when it answered
+     * success=false (the gateway refused it or is down), never reporting that as sent.
+     */
     suspend fun send(to: String, message: String, fromNumber: String?): String {
         val body = buildJsonObject {
             put("operator", operatorOrThrow())
@@ -68,11 +74,29 @@ class SmsInboxApi(
             put("message", message)
             if (!fromNumber.isNullOrBlank()) put("from_number", fromNumber)
         }
-        return api.post("/sms/send", body.toString())
+        val reply = api.post("/sms/send", body.toString())
+        val obj = try {
+            json.parseToJsonElement(reply) as? JsonObject
+        } catch (_: Exception) {
+            null
+        }
+        val success = (obj?.get("success") as? JsonPrimitive)?.booleanOrNull == true
+        if (!success) {
+            val reason = (obj?.get("error") as? JsonPrimitive)?.takeIf { it.isString }?.content
+            throw SmsSendFailedException(reason?.ifBlank { null } ?: "Send failed")
+        }
+        return reply
     }
 
     private fun q(value: String): String = URLEncoder.encode(value, "UTF-8")
+
+    private companion object {
+        val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    }
 }
+
+/** The box answered POST /sms/send with success=false; [message] is its reason. */
+class SmsSendFailedException(message: String) : IOException(message)
 
 /**
  * The SMS reply model the inbox shows. An empty [model] is "Auto" — the box's configured

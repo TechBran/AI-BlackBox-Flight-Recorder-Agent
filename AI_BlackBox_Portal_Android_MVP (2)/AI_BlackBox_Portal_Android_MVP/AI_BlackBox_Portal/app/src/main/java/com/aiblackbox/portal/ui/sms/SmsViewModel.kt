@@ -9,13 +9,16 @@ import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.OperatorGeneration
 import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -85,8 +88,15 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     private val _unreadCount = MutableStateFlow(0)
     val unreadCount: StateFlow<Int> = _unreadCount.asStateFlow()
 
-    private val _actionMessage = MutableStateFlow<String?>(null)
-    val actionMessage: StateFlow<String?> = _actionMessage.asStateFlow()
+    // One-shot messages for the screen's snackbar ("Message sent", "Failed to send: …").
+    // A Channel, not a nullable StateFlow: a second identical message still shows, and
+    // none is lost while the screen is between views (A14-ui-misc-04).
+    private val _actionMessages = Channel<String>(Channel.BUFFERED)
+    val actionMessages: Flow<String> = _actionMessages.receiveAsFlow()
+
+    // The compose box's text per thread; only a successful send clears it.
+    private val drafts = SmsDrafts()
+    val draftTexts: StateFlow<Map<String, String>> = drafts.drafts
 
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected.asStateFlow()
@@ -115,6 +125,7 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
             store.operator.distinctUntilChanged().drop(1).collect {
                 generation.advance()
                 clearSelection()
+                drafts.clear()
                 _threads.value = emptyList()
                 _unreadCount.value = 0
                 loadAll()
@@ -150,20 +161,8 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                 val response = sms.threads()
                 if (!generation.isCurrent(tag)) return@launch
                 if (response == null) { _threads.value = emptyList(); return@launch }
-                val root = json.parseToJsonElement(response).jsonObject
-                val threadsArray = root["threads"]?.jsonArray ?: return@launch
-                _threads.value = threadsArray.map { el ->
-                    val obj = el.jsonObject
-                    SmsThread(
-                        phoneNumber = obj["phone_number"]?.jsonPrimitive?.content ?: "",
-                        contactName = obj["contact_name"]?.jsonPrimitive?.content ?: "",
-                        lastMessage = obj["last_message"]?.jsonPrimitive?.content ?: "",
-                        lastTimestamp = obj["last_timestamp"]?.jsonPrimitive?.content ?: "",
-                        unreadCount = obj["unread_count"]?.jsonPrimitive?.intOrNull ?: 0,
-                        direction = obj["direction"]?.jsonPrimitive?.content ?: "",
-                        lineNumber = obj["line_number"]?.jsonPrimitive?.content ?: ""
-                    )
-                }
+                // One row per thread key: the list is keyed by it (A14-ui-misc-10).
+                _threads.value = parseSmsThreads(response)
             } catch (_: Exception) {
                 if (generation.isCurrent(tag)) _threads.value = emptyList()
             } finally {
@@ -260,20 +259,36 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun sendSms(message: String) {
+    private fun say(message: String?) {
+        if (!message.isNullOrBlank()) _actionMessages.trySend(message)
+    }
+
+    /** The open thread's compose text changed. */
+    fun setDraft(phone: String, text: String) = drafts.set(phone, text)
+
+    /**
+     * Send the open thread's draft. The draft is cleared only once the box accepted the
+     * SMS; a failure (no operator, the box unreachable, the gateway refusing it) leaves
+     * it in the box to retry and says why (A14-ui-misc-04).
+     */
+    fun sendSms() {
         val sms = sms ?: return
         val phone = _selectedPhone.value ?: return
-        if (_isSending.value) return
+        if (_isSending.value || drafts.of(phone).isBlank()) return
         _isSending.value = true
         viewModelScope.launch {
             try {
-                sms.send(to = phone, message = message, fromNumber = _selectedFromNumber.value)
-                _actionMessage.value = "Message sent"
+                drafts.send(phone) { text ->
+                    sms.send(to = phone, message = text, fromNumber = _selectedFromNumber.value)
+                }
+                say("Message sent")
                 loadMessages(phone)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: OperatorUnresolvedException) {
-                _actionMessage.value = e.message
+                say(e.message)
             } catch (e: Exception) {
-                _actionMessage.value = "Failed to send: ${e.message}"
+                say("Failed to send: ${e.message}")
             } finally {
                 _isSending.value = false
             }
@@ -287,12 +302,14 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 sms.send(to = to, message = message, fromNumber = _selectedFromNumber.value)
-                _actionMessage.value = "Message sent"
+                say("Message sent")
                 loadThreads()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: OperatorUnresolvedException) {
-                _actionMessage.value = e.message
+                say(e.message)
             } catch (e: Exception) {
-                _actionMessage.value = "Failed to send: ${e.message}"
+                say("Failed to send: ${e.message}")
             } finally {
                 _isSending.value = false
             }
@@ -321,7 +338,8 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                 if (!generation.isCurrent(tag)) return@launch
                 if (response == null) { _unreadCount.value = 0; return@launch }
                 val root = json.parseToJsonElement(response).jsonObject
-                _unreadCount.value = root["unread_count"]?.jsonPrimitive?.intOrNull ?: 0
+                // GET /sms/unread answers {"unread": N} (A14-ui-misc-19).
+                _unreadCount.value = root["unread"]?.jsonPrimitive?.intOrNull ?: 0
             } catch (_: Exception) {
                 if (generation.isCurrent(tag)) _unreadCount.value = 0
             }
@@ -350,8 +368,12 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 sms.savePreferences(provider, model)
             } catch (e: OperatorUnresolvedException) {
-                _actionMessage.value = e.message
-            } catch (_: Exception) {}
+                say(e.message)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                say("SMS model not saved: ${e.message}")
+            }
         }
     }
 
@@ -383,10 +405,6 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     fun stopPolling() {
         pollJob?.cancel()
         pollJob = null
-    }
-
-    fun clearActionMessage() {
-        _actionMessage.value = null
     }
 
     override fun onCleared() {

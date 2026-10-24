@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -75,11 +76,11 @@ fun SmsInboxScreen(
     val isSending by viewModel.isSending.collectAsState()
     val connected by viewModel.connected.collectAsState()
     val selectedContactName by viewModel.selectedContactName.collectAsState()
-    val actionMessage by viewModel.actionMessage.collectAsState()
     val smsProvider by viewModel.smsProvider.collectAsState()
     val smsModel by viewModel.smsModel.collectAsState()
     val lines by viewModel.lines.collectAsState()
     val selectedFromNumber by viewModel.selectedFromNumber.collectAsState()
+    val drafts by viewModel.draftTexts.collectAsState()
 
     // The view model reads the operator from the store at every request and reloads on a
     // switch (A14-ui-misc-07), so only the origin is handed over here.
@@ -89,36 +90,49 @@ fun SmsInboxScreen(
         onDispose { viewModel.stopPolling() }
     }
 
-    // Snackbar
+    // ONE snackbar host above both views: the conversation had none, so "Failed to send"
+    // stayed hidden (and the send suspended) until the thread list came back
+    // (A14-ui-misc-04). Messages are one-shot events, each shown in turn.
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(actionMessage) {
-        actionMessage?.let { snackbarHostState.showSnackbar(it); viewModel.clearActionMessage() }
+    LaunchedEffect(viewModel) {
+        viewModel.actionMessages.collect { snackbarHostState.showSnackbar(it) }
     }
 
-    // If a thread is selected, show conversation view. Otherwise show thread list.
-    if (selectedPhone != null) {
-        SmsConversationView(
-            phone = selectedPhone!!,
-            contactName = selectedContactName,
-            messages = messages,
-            isSending = isSending,
-            lines = lines,
-            selectedFromNumber = selectedFromNumber,
-            onSelectFromNumber = { n -> viewModel.setFromNumber(n) },
-            onSend = { msg -> viewModel.sendSms(msg) },
-            onBack = { viewModel.clearSelection() }
-        )
-    } else {
-        SmsThreadListView(
-            threads = threads,
-            isLoading = isLoading,
-            connected = connected,
-            smsProvider = smsProvider,
-            smsModel = smsModel,
-            onProviderModelChange = { provider, model -> viewModel.saveSmsPreferences(provider, model) },
-            onRefresh = { viewModel.loadThreads() },
-            onSelectThread = { thread -> viewModel.loadMessages(thread.phoneNumber) },
-            snackbarHostState = snackbarHostState
+    Box(modifier.fillMaxSize()) {
+        // If a thread is selected, show conversation view. Otherwise show thread list.
+        val phone = selectedPhone
+        if (phone != null) {
+            SmsConversationView(
+                phone = phone,
+                contactName = selectedContactName,
+                messages = messages,
+                isSending = isSending,
+                lines = lines,
+                selectedFromNumber = selectedFromNumber,
+                draft = drafts[SmsPhone.threadKey(phone)].orEmpty(),
+                onDraftChange = { text -> viewModel.setDraft(phone, text) },
+                onSelectFromNumber = { n -> viewModel.setFromNumber(n) },
+                onSend = { viewModel.sendSms() },
+                onBack = { viewModel.clearSelection() }
+            )
+        } else {
+            SmsThreadListView(
+                threads = threads,
+                isLoading = isLoading,
+                connected = connected,
+                smsProvider = smsProvider,
+                smsModel = smsModel,
+                onProviderModelChange = { provider, model -> viewModel.saveSmsPreferences(provider, model) },
+                onRefresh = { viewModel.loadThreads() },
+                onSelectThread = { thread -> viewModel.loadMessages(thread.phoneNumber) }
+            )
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            // Above the conversation's compose bar while a thread is open.
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = if (phone != null) 84.dp else 0.dp)
         )
     }
 }
@@ -132,8 +146,7 @@ private fun SmsThreadListView(
     smsModel: String,
     onProviderModelChange: (String, String) -> Unit,
     onRefresh: () -> Unit,
-    onSelectThread: (SmsThread) -> Unit,
-    snackbarHostState: SnackbarHostState
+    onSelectThread: (SmsThread) -> Unit
 ) {
     // SMS-capable providers (text chat only, no agents/voice/CU)
     val smsProviders = listOf(
@@ -216,16 +229,13 @@ private fun SmsThreadListView(
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(threads, key = { it.phoneNumber }) { thread ->
+                    // parseSmsThreads keeps one row per thread key, so the key is unique.
+                    items(threads, key = { SmsPhone.threadKey(it.phoneNumber) }) { thread ->
                         SmsThreadCard(thread = thread, onClick = { onSelectThread(thread) })
                     }
                 }
             }
         }
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
     }
 }
 
@@ -304,7 +314,7 @@ private fun SmsThreadCard(thread: SmsThread, onClick: () -> Unit) {
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    thread.lastTimestamp.take(19).replace("T", " "),
+                    SmsTime.threadStamp(thread.lastTimestamp),
                     style = MaterialTheme.typography.labelSmall,
                     color = Neutral500
                 )
@@ -321,17 +331,28 @@ private fun SmsConversationView(
     isSending: Boolean,
     lines: List<SmsLine>,
     selectedFromNumber: String?,
+    draft: String,
+    onDraftChange: (String) -> Unit,
     onSelectFromNumber: (String?) -> Unit,
-    onSend: (String) -> Unit,
+    onSend: () -> Unit,
     onBack: () -> Unit
 ) {
-    var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val feedback = rememberPressFeedback()
 
-    // Scroll to bottom when messages change
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // Follow new messages while the reader is at the newest one; once they scroll up to
+    // read history a poll must not pull them back down. Only the reader's own scrolling
+    // moves this (content growing below them does not).
+    var followNewest by remember(phone) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
+            .collect { (scrolling, canScrollForward) -> if (scrolling) followNewest = !canScrollForward }
+    }
+    // Keyed on the newest message, not the count: the box serves a fixed-size newest
+    // page, so a new message leaves the count unchanged.
+    val newestId = messages.lastOrNull()?.id
+    LaunchedEffect(phone, newestId) {
+        if (messages.isNotEmpty() && followNewest) listState.animateScrollToItem(messages.size - 1)
     }
 
     Column(
@@ -401,8 +422,8 @@ private fun SmsConversationView(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             OutlinedTextField(
-                value = inputText,
-                onValueChange = { inputText = it },
+                value = draft,
+                onValueChange = onDraftChange,
                 modifier = Modifier.weight(1f),
                 placeholder = { Text("Type a message...", color = Neutral500) },
                 singleLine = false,
@@ -420,12 +441,14 @@ private fun SmsConversationView(
             Button(
                 onClick = {
                     feedback()
-                    if (inputText.isNotBlank()) {
-                        onSend(inputText.trim())
-                        inputText = ""
+                    // The view model clears the draft once the box accepted the SMS;
+                    // a failed send leaves it here to retry. Our own message is shown.
+                    if (draft.isNotBlank()) {
+                        followNewest = true
+                        onSend()
                     }
                 },
-                enabled = inputText.isNotBlank() && !isSending,
+                enabled = draft.isNotBlank() && !isSending,
                 modifier = Modifier.size(48.dp),
                 shape = CircleShape,
                 contentPadding = PaddingValues(0.dp),
@@ -689,7 +712,7 @@ private fun SmsBubble(msg: SmsMsg) {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        msg.timestamp.takeLast(8).take(5),
+                        SmsTime.clock(msg.timestamp),
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isOutbound) Color(0xFFA0C3E6).copy(alpha = 0.7f) else Neutral500
                     )

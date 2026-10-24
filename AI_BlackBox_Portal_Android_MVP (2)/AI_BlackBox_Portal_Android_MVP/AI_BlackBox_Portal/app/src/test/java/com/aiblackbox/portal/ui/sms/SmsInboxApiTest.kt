@@ -37,6 +37,7 @@ class SmsInboxApiTest {
     @After fun tearDown() = server.close()
 
     private fun reply(body: String = "{}") = server.enqueue(MockResponse.Builder().body(body).build())
+    private val SENT = """{"success":true,"error":null,"message_id":1}"""
     private fun taken(): RecordedRequest = server.takeRequest(5, TimeUnit.SECONDS)!!
     private fun bodyOf(r: RecordedRequest) = Json.parseToJsonElement(r.body!!.utf8()).jsonObject
 
@@ -55,10 +56,10 @@ class SmsInboxApiTest {
     }
 
     @Test fun `a send goes out as the current operator, JSON-escaped`() = runBlocking {
-        reply()
+        reply(SENT)
         sms.send(to = "+15550001111", message = "say \"hi\"\nnow", fromNumber = null)
         operator = "Ben Ng"
-        reply()
+        reply(SENT)
         sms.send(to = "+15550002222", message = "x", fromNumber = "+15550009999")
 
         val first = bodyOf(taken())
@@ -68,6 +69,37 @@ class SmsInboxApiTest {
         val second = bodyOf(taken())
         assertEquals("Ben Ng", second["operator"]!!.jsonPrimitive.content)
         assertEquals("+15550009999", second["from_number"]!!.jsonPrimitive.content)
+    }
+
+    // A14-ui-misc-03: the body used to be string-built, escaping only quotes, so a newline
+    // (the compose box is multi-line), a backslash or a tab made every send a 422.
+    @Test fun `newlines, backslashes, tabs and quotes in a message stay text`() = runBlocking {
+        reply("""{"success":true,"error":null,"message_id":7}""")
+        val text = "line one\nC:\\Users\\pat\t\"tab\" \\o/ \u2603"
+        sms.send(to = "+15550001111", message = text, fromNumber = "+1555000\"9999")
+        val body = bodyOf(taken())
+        assertEquals(text, body["message"]!!.jsonPrimitive.content)
+        assertEquals("+1555000\"9999", body["from_number"]!!.jsonPrimitive.content)
+    }
+
+    // The box answers 200 with success=false when the gateway refused or is down; that
+    // was reported as "Message sent" (and the draft was already gone).
+    @Test fun `a send the box reports as failed throws with the box's reason`() = runBlocking {
+        reply("""{"success":false,"error":"Not connected to AMI","message_id":12}""")
+        val err = assertThrows(SmsSendFailedException::class.java) {
+            runBlocking { sms.send(to = "+15550001111", message = "hi", fromNumber = null) }
+        }
+        assertEquals("Not connected to AMI", err.message)
+        reply("""{"success":false}""")
+        val bare = assertThrows(SmsSendFailedException::class.java) {
+            runBlocking { sms.send(to = "+15550001111", message = "hi", fromNumber = null) }
+        }
+        assertEquals("Send failed", bare.message)
+        reply("not json")
+        assertThrows(SmsSendFailedException::class.java) {
+            runBlocking { sms.send(to = "+15550001111", message = "hi", fromNumber = null) }
+        }
+        Unit
     }
 
     @Test fun `operator and phone are query-encoded`() = runBlocking {
