@@ -116,8 +116,15 @@ class LiteRtEngine(
     private val supportImage: Boolean = false,
 ) : LocalLlm, ToolCallingLlm, NativeToolCallingLlm, VisionLlm {
 
-    @Volatile
-    private var engine: Engine? = null
+    // The native engine, leased by every generation (A09-data-local-model-03): close()
+    // and a model switch retire it, and its native close waits for the last running
+    // generation instead of freeing it under a multi-second sendMessageAsync.
+    private val native = LeaseGate<Engine> { it.close() }
+
+    // close() calls, counted. A close() that finds a load holding [loadLock] cannot
+    // take the lock without blocking its (Main) caller for the whole load, so it only
+    // counts; the load sees the count moved and closes what it built.
+    private val closeRequests = AtomicInteger(0)
     // Absolute path of the model the current engine was initialized for, so a
     // repeat load() of the SAME bundle is a no-op (initialize() is ~10s).
     @Volatile
@@ -153,16 +160,18 @@ class LiteRtEngine(
      */
     override suspend fun load(modelFile: File, delegate: String) = withContext(Dispatchers.IO) {
         val targetPath = modelFile.absolutePath
+        var closesBefore = 0
         // Serialize the whole check-then-act under loadLock so concurrent first
         // turns can't both build an engine (leak) or close-while-building.
         loadLock.withLock {
+            closesBefore = closeRequests.get()
             // Idempotent: same bundle already initialized → nothing to do.
-            if (engine?.isInitialized() == true && loadedModelPath == targetPath) {
+            if (native.peek()?.isInitialized() == true && loadedModelPath == targetPath) {
                 return@withLock
             }
-            // Switching models (or recovering from a half-built engine): drop the old one.
-            engine?.close()
-            engine = null
+            // Switching models (or recovering from a half-built engine): drop the old one
+            // (closed now, or when its last running generation ends).
+            native.retire()
             loadedModelPath = null
 
             // Vision backend (Task W4): only set a visionBackend when this model
@@ -206,8 +215,14 @@ class LiteRtEngine(
                     buildOnCpuOrThrow(targetPath, delegate, e)
                 }
             }
-            engine = built
+            native.install(built)
             loadedModelPath = targetPath
+        }
+        // A close() that arrived while this load held the lock: honour it now that the
+        // lock is free, and tell the caller the engine it asked for is gone.
+        if (closeRequests.get() != closesBefore) {
+            close()
+            throw IllegalStateException("LiteRtEngine was closed while loading")
         }
     }
 
@@ -276,15 +291,45 @@ class LiteRtEngine(
         // M4 (review): capture the @Volatile engine into a local so close() can't
         // null it between the null-check and the native isInitialized() call.
         get() {
-            val e = engine
+            val e = native.peek()
             return e != null && e.isInitialized()
         }
 
-    /** Release the native engine. After [close], a fresh [load] is required. */
+    /**
+     * Release the native engine. After [close], a fresh [load] is required.
+     *
+     * Serialized against [load] (A09-data-local-model-03): it takes [loadLock], and
+     * while a load holds it, it never blocks (the caller may be Main and the load takes
+     * ~10-75s) but counts itself so that load closes what it built. A generation still
+     * running keeps the native engine alive until it ends ([LeaseGate]).
+     */
     override fun close() {
-        engine?.close()
-        engine = null
-        loadedModelPath = null
+        closeRequests.incrementAndGet()
+        if (!loadLock.tryLock()) return
+        try {
+            native.retire()
+            loadedModelPath = null
+        } finally {
+            loadLock.unlock()
+        }
+    }
+
+    /**
+     * Run [block] with a lease on the native engine, so a concurrent [close] or model
+     * switch defers its native close until [block] (the whole generation, including a
+     * callbackFlow's awaitClose) has finished.
+     */
+    private inline fun <R> withLeasedEngine(caller: String, block: (Engine) -> R): R {
+        val lease = native.acquire()
+        try {
+            val eng = lease?.value
+            check(eng != null && eng.isInitialized()) {
+                "LiteRtEngine.$caller called before load(); call load(modelFile, delegate) first."
+            }
+            return block(eng)
+        } finally {
+            lease?.release()
+        }
     }
 
     /**
@@ -295,32 +340,30 @@ class LiteRtEngine(
      * the caller loads first).
      */
     override fun generate(prompt: String): Flow<String> = flow {
-        val eng = engine
-        check(eng != null && eng.isInitialized()) {
-            "LiteRtEngine.generate called before load(); call load(modelFile, delegate) first."
-        }
-        // Per-model sampler (Task W2): only build a ConversationConfig when an
-        // override is set; otherwise keep the prior tool-less, default-sampler path.
-        val samplerConfig = sampler.toSamplerConfig()
-        val conversation = if (samplerConfig != null) {
-            eng.createConversation(ConversationConfig(samplerConfig = samplerConfig))
-        } else {
-            eng.createConversation() // no tools, engine-default sampler
-        }
-        try {
-            conversation.sendMessageAsync(prompt).collect { msg ->
-                val text = msg.plainText()
-                if (text.isNotEmpty()) emit(text)
+        withLeasedEngine("generate") { eng ->
+            // Per-model sampler (Task W2): only build a ConversationConfig when an
+            // override is set; otherwise keep the prior tool-less, default-sampler path.
+            val samplerConfig = sampler.toSamplerConfig()
+            val conversation = if (samplerConfig != null) {
+                eng.createConversation(ConversationConfig(samplerConfig = samplerConfig))
+            } else {
+                eng.createConversation() // no tools, engine-default sampler
             }
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            // I2 (review): on cancellation (user stop / new send), abort the
-            // in-flight native generation, not just close the conversation.
-            // TODO(2.6b): confirm whether close() alone aborts the native compute;
-            // cancelProcess() is added defensively and is a no-op if already done.
-            runCatching { conversation.cancelProcess() }
-            throw c
-        } finally {
-            runCatching { conversation.close() }
+            try {
+                conversation.sendMessageAsync(prompt).collect { msg ->
+                    val text = msg.plainText()
+                    if (text.isNotEmpty()) emit(text)
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                // I2 (review): on cancellation (user stop / new send), abort the
+                // in-flight native generation, not just close the conversation.
+                // TODO(2.6b): confirm whether close() alone aborts the native compute;
+                // cancelProcess() is added defensively and is a no-op if already done.
+                runCatching { conversation.cancelProcess() }
+                throw c
+            } finally {
+                runCatching { conversation.close() }
+            }
         }
     }
 
@@ -357,48 +400,46 @@ class LiteRtEngine(
      *   method never writes them anywhere; the caller must not persist them either.
      */
     override fun generateWithImage(prompt: String, images: List<ByteArray>): Flow<String> = flow {
-        val eng = engine
-        check(eng != null && eng.isInitialized()) {
-            "LiteRtEngine.generateWithImage called before load(); call load(modelFile, delegate) first."
-        }
-        check(supportImage) {
-            "LiteRtEngine.generateWithImage requires a vision-capable model (supportImage=true); this bundle is text-only."
-        }
-        // Graceful GPU-vision degrade (W4 follow-up): the engine loaded text-only
-        // because GPU vision init failed on this device. Fail with a CLEAR message
-        // rather than attempting a vision turn the engine can't serve (the text
-        // path still works — the caller surfaces this as "vision unavailable").
-        check(!visionDegraded) {
-            "LiteRtEngine.generateWithImage: vision is unavailable on this device (GPU vision init failed; the engine is running text-only)."
-        }
-        check(images.isNotEmpty()) {
-            "LiteRtEngine.generateWithImage requires at least one image; use generate() for a text-only turn."
-        }
-        // Images BEFORE text (Edge Gallery ordering), via the pure orderer.
-        val contents = Contents.of(
-            orderVisionContents<Content>(
-                images = images.map { Content.ImageBytes(it) },
-                textContent = Content.Text(prompt),
-            ),
-        )
-        // Per-model sampler (Task W2): only build a ConversationConfig when an
-        // override is set; otherwise keep the tool-less, default-sampler path.
-        val samplerConfig = sampler.toSamplerConfig()
-        val conversation = if (samplerConfig != null) {
-            eng.createConversation(ConversationConfig(samplerConfig = samplerConfig))
-        } else {
-            eng.createConversation()
-        }
-        try {
-            conversation.sendMessageAsync(contents).collect { msg ->
-                val text = msg.plainText()
-                if (text.isNotEmpty()) emit(text)
+        withLeasedEngine("generateWithImage") { eng ->
+            check(supportImage) {
+                "LiteRtEngine.generateWithImage requires a vision-capable model (supportImage=true); this bundle is text-only."
             }
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            runCatching { conversation.cancelProcess() }
-            throw c
-        } finally {
-            runCatching { conversation.close() }
+            // Graceful GPU-vision degrade (W4 follow-up): the engine loaded text-only
+            // because GPU vision init failed on this device. Fail with a CLEAR message
+            // rather than attempting a vision turn the engine can't serve (the text
+            // path still works — the caller surfaces this as "vision unavailable").
+            check(!visionDegraded) {
+                "LiteRtEngine.generateWithImage: vision is unavailable on this device (GPU vision init failed; the engine is running text-only)."
+            }
+            check(images.isNotEmpty()) {
+                "LiteRtEngine.generateWithImage requires at least one image; use generate() for a text-only turn."
+            }
+            // Images BEFORE text (Edge Gallery ordering), via the pure orderer.
+            val contents = Contents.of(
+                orderVisionContents<Content>(
+                    images = images.map { Content.ImageBytes(it) },
+                    textContent = Content.Text(prompt),
+                ),
+            )
+            // Per-model sampler (Task W2): only build a ConversationConfig when an
+            // override is set; otherwise keep the tool-less, default-sampler path.
+            val samplerConfig = sampler.toSamplerConfig()
+            val conversation = if (samplerConfig != null) {
+                eng.createConversation(ConversationConfig(samplerConfig = samplerConfig))
+            } else {
+                eng.createConversation()
+            }
+            try {
+                conversation.sendMessageAsync(contents).collect { msg ->
+                    val text = msg.plainText()
+                    if (text.isNotEmpty()) emit(text)
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                runCatching { conversation.cancelProcess() }
+                throw c
+            } finally {
+                runCatching { conversation.close() }
+            }
         }
     }
 
@@ -412,41 +453,39 @@ class LiteRtEngine(
      * outcomes). Requires [isLoaded] (throws [IllegalStateException] otherwise).
      */
     override fun generateWithTools(prompt: String, tools: List<ToolSchema>): Flow<LlmEvent> = flow {
-        val eng = engine
-        check(eng != null && eng.isInitialized()) {
-            "LiteRtEngine.generateWithTools called before load(); call load(modelFile, delegate) first."
-        }
-        // Per-model sampler (Task W2): pass samplerConfig only when an override is
-        // set; null leaves litertlm's default sampler in place (prior behavior).
-        val samplerConfig = sampler.toSamplerConfig()
-        val config = if (samplerConfig != null) {
-            ConversationConfig(
-                tools = tools.map { tool(openApiToolFor(it)) },
-                samplerConfig = samplerConfig,
-                automaticToolCalling = false,
-            )
-        } else {
-            ConversationConfig(
-                tools = tools.map { tool(openApiToolFor(it)) },
-                automaticToolCalling = false,
-            )
-        }
-        val conversation = eng.createConversation(config)
-        try {
-            conversation.sendMessageAsync(prompt).collect { msg ->
-                val text = msg.plainText()
-                if (text.isNotEmpty()) emit(LlmEvent.TextDelta(text))
-                for (tc in msg.toolCalls) {
-                    emit(LlmEvent.ToolCall(tc.name, argsToJsonObject(tc.arguments)))
-                }
+        withLeasedEngine("generateWithTools") { eng ->
+            // Per-model sampler (Task W2): pass samplerConfig only when an override is
+            // set; null leaves litertlm's default sampler in place (prior behavior).
+            val samplerConfig = sampler.toSamplerConfig()
+            val config = if (samplerConfig != null) {
+                ConversationConfig(
+                    tools = tools.map { tool(openApiToolFor(it)) },
+                    samplerConfig = samplerConfig,
+                    automaticToolCalling = false,
+                )
+            } else {
+                ConversationConfig(
+                    tools = tools.map { tool(openApiToolFor(it)) },
+                    automaticToolCalling = false,
+                )
             }
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            // I2 (review): abort the in-flight native generation on cancellation.
-            // TODO(2.6b): confirm close() alone aborts; cancelProcess() defensive.
-            runCatching { conversation.cancelProcess() }
-            throw c
-        } finally {
-            runCatching { conversation.close() }
+            val conversation = eng.createConversation(config)
+            try {
+                conversation.sendMessageAsync(prompt).collect { msg ->
+                    val text = msg.plainText()
+                    if (text.isNotEmpty()) emit(LlmEvent.TextDelta(text))
+                    for (tc in msg.toolCalls) {
+                        emit(LlmEvent.ToolCall(tc.name, argsToJsonObject(tc.arguments)))
+                    }
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                // I2 (review): abort the in-flight native generation on cancellation.
+                // TODO(2.6b): confirm close() alone aborts; cancelProcess() defensive.
+                runCatching { conversation.cancelProcess() }
+                throw c
+            } finally {
+                runCatching { conversation.close() }
+            }
         }
     }
 
@@ -479,77 +518,75 @@ class LiteRtEngine(
      */
     @OptIn(ExperimentalApi::class)
     override fun generateWithToolsNative(prompt: String, tools: List<NativeTool>): Flow<LlmEvent> = callbackFlow {
-        val eng = engine
-        check(eng != null && eng.isInitialized()) {
-            "LiteRtEngine.generateWithToolsNative called before load(); call load(modelFile, delegate) first."
-        }
-        // Per-model sampler (Task W2): pass samplerConfig only when an override is set.
-        val samplerConfig = sampler.toSamplerConfig()
-        // App-side defensive step cap (Task W3 hardening): a per-INVOCATION counter
-        // shared by every tool wrapper below, so the total tool executions in THIS
-        // native turn are bounded even if the engine's own recurring-tool-call guard
-        // were ever weakened/absent. Fresh per generateWithToolsNative call (resets
-        // each turn). See [MAX_NATIVE_TOOL_CALLS] / the pure [overCap] decision.
-        val nativeCallCount = AtomicInteger(0)
-        // App-side per-turn tool-RESULT budget (snapshot-ledger Task 9): cumulative
-        // chars of the (trimmed) tool results fed back this turn. The window is ~16K
-        // and each result re-enters it, so a turn with several big results can still
-        // overflow even under the step cap. Fresh per generateWithToolsNative call
-        // (resets each turn). See [MAX_TURN_TOOL_RESULT_CHARS] / the pure
-        // [overTurnBudget] decision (an ADDITIONAL soft-stop gate OR'd with overCap).
-        val nativeToolResultChars = AtomicInteger(0)
-        // Build engine-driven OpenApiTools: each `execute` runs the NativeTool body
-        // AND bridges ToolCall(before)/ToolOutcome(after) into this flow's channel.
-        // The shared counter lets each wrapper refuse to run its side-effecting body
-        // once the cap is exceeded (returns a terminal "step limit reached" result).
-        val providers = tools.map {
-            tool(nativeOpenApiToolFor(it, nativeCallCount, nativeToolResultChars) { event -> trySendBlocking(event) })
-        }
-        // Constrained decoding (Gallery pattern): enable around createConversation,
-        // reset after. Reduces malformed tool-call tokens from the small model.
-        val priorConstrained = ExperimentalFlags.enableConversationConstrainedDecoding
-        val conversation = try {
-            ExperimentalFlags.enableConversationConstrainedDecoding = true
-            val config = if (samplerConfig != null) {
-                ConversationConfig(
-                    tools = providers,
-                    samplerConfig = samplerConfig,
-                    automaticToolCalling = true,
-                )
-            } else {
-                ConversationConfig(
-                    tools = providers,
-                    automaticToolCalling = true,
-                )
+        withLeasedEngine("generateWithToolsNative") { eng ->
+            // Per-model sampler (Task W2): pass samplerConfig only when an override is set.
+            val samplerConfig = sampler.toSamplerConfig()
+            // App-side defensive step cap (Task W3 hardening): a per-INVOCATION counter
+            // shared by every tool wrapper below, so the total tool executions in THIS
+            // native turn are bounded even if the engine's own recurring-tool-call guard
+            // were ever weakened/absent. Fresh per generateWithToolsNative call (resets
+            // each turn). See [MAX_NATIVE_TOOL_CALLS] / the pure [overCap] decision.
+            val nativeCallCount = AtomicInteger(0)
+            // App-side per-turn tool-RESULT budget (snapshot-ledger Task 9): cumulative
+            // chars of the (trimmed) tool results fed back this turn. The window is ~16K
+            // and each result re-enters it, so a turn with several big results can still
+            // overflow even under the step cap. Fresh per generateWithToolsNative call
+            // (resets each turn). See [MAX_TURN_TOOL_RESULT_CHARS] / the pure
+            // [overTurnBudget] decision (an ADDITIONAL soft-stop gate OR'd with overCap).
+            val nativeToolResultChars = AtomicInteger(0)
+            // Build engine-driven OpenApiTools: each `execute` runs the NativeTool body
+            // AND bridges ToolCall(before)/ToolOutcome(after) into this flow's channel.
+            // The shared counter lets each wrapper refuse to run its side-effecting body
+            // once the cap is exceeded (returns a terminal "step limit reached" result).
+            val providers = tools.map {
+                tool(nativeOpenApiToolFor(it, nativeCallCount, nativeToolResultChars) { event -> trySendBlocking(event) })
             }
-            eng.createConversation(config)
-        } finally {
-            ExperimentalFlags.enableConversationConstrainedDecoding = priorConstrained
-        }
-        // Engine-driven streaming via MessageCallback: text deltas -> TextDelta,
-        // onDone -> complete the flow, onError -> fail the flow. The engine calls
-        // each tool's execute() itself between onMessage events (auto tool loop).
-        conversation.sendMessageAsync(
-            prompt,
-            object : MessageCallback {
-                override fun onMessage(message: Message) {
-                    val text = message.plainText()
-                    if (text.isNotEmpty()) trySendBlocking(LlmEvent.TextDelta(text))
+            // Constrained decoding (Gallery pattern): enable around createConversation,
+            // reset after. Reduces malformed tool-call tokens from the small model.
+            val priorConstrained = ExperimentalFlags.enableConversationConstrainedDecoding
+            val conversation = try {
+                ExperimentalFlags.enableConversationConstrainedDecoding = true
+                val config = if (samplerConfig != null) {
+                    ConversationConfig(
+                        tools = providers,
+                        samplerConfig = samplerConfig,
+                        automaticToolCalling = true,
+                    )
+                } else {
+                    ConversationConfig(
+                        tools = providers,
+                        automaticToolCalling = true,
+                    )
                 }
-                override fun onDone() {
-                    channel.close()
-                }
-                override fun onError(throwable: Throwable) {
-                    channel.close(throwable)
-                }
-            },
-            emptyMap(),
-        )
-        awaitClose {
-            // Collector cancelled or flow completed: abort in-flight native compute
-            // and release the conversation (mirrors generate()/generateWithTools()).
-            runCatching { conversation.cancelProcess() }
-            runCatching { conversation.close() }
+                eng.createConversation(config)
+            } finally {
+                ExperimentalFlags.enableConversationConstrainedDecoding = priorConstrained
+            }
+            // Engine-driven streaming via MessageCallback: text deltas -> TextDelta,
+            // onDone -> complete the flow, onError -> fail the flow. The engine calls
+            // each tool's execute() itself between onMessage events (auto tool loop).
+            conversation.sendMessageAsync(
+                prompt,
+                object : MessageCallback {
+                    override fun onMessage(message: Message) {
+                        val text = message.plainText()
+                        if (text.isNotEmpty()) trySendBlocking(LlmEvent.TextDelta(text))
+                    }
+                    override fun onDone() {
+                        channel.close()
+                    }
+                    override fun onError(throwable: Throwable) {
+                        channel.close(throwable)
+                    }
+                },
+                emptyMap(),
+            )
+            awaitClose {
+                // Collector cancelled or flow completed: abort in-flight native compute
+                // and release the conversation (mirrors generate()/generateWithTools()).
+                runCatching { conversation.cancelProcess() }
+                runCatching { conversation.close() }
+            }
         }
     }
 

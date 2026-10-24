@@ -11,17 +11,17 @@ package com.aiblackbox.portal.data.local
  * PROCESS level so it survives a VM teardown, and [LocalModelService] (a foreground
  * service) keeps the process alive so Android does not reclaim it while backgrounded.
  *
- * **Ownership.** The engine here is owned by [LocalModelService]: the service
- * [set]s it after a warm load and [clearAndClose]s it on stop/destroy. A consumer
- * ([com.aiblackbox.portal.ui.chat.ChatViewModel]) only READS it via [getOrNull] and
- * must NEVER close it (it does not own it) -- closing the held engine out from under
- * the service would break a future turn. The ViewModel's own fallback engine (built
- * when this holder is empty / mismatched -- see [engineSourceFor]) is VM-owned and
- * still closed in `onCleared`, exactly as before.
+ * **Ownership (audit rank 63).** This holder is the engine's ONE owner. Every load in
+ * the process -- the service warm, the control_phone wake and the chat's own load --
+ * goes through [pinWarmEngine], which runs under [warmMutex] and [set]s the loaded
+ * engine here; nobody else keeps or closes a loaded engine. Consumers READ it via
+ * [getOrNull]; [clearAndClose] (service destroy, settings apply) is safe under a
+ * running generation because [LiteRtEngine] defers its native close until the last
+ * generation's lease is released.
  *
  * **Graceful fallback (the R2-C safety guarantee).** This whole path is ADDITIVE:
  * if the service never starts, the holder stays empty and [getOrNull] returns null,
- * so the consumer builds + uses its OWN engine exactly as it did before R2-C. The
+ * so the consumer builds a new engine and loads it through [pinWarmEngine] itself. The
  * worst case of any holder/service failure is therefore "no startup-latency win",
  * NEVER a broken chat.
  *
@@ -60,6 +60,13 @@ object LocalEngineHolder {
     @Volatile
     var warmingPath: String? = null
         private set
+
+    /**
+     * Serializes EVERY engine load in the process ([pinWarm]): the service warm, the
+     * control_phone wake and the chat's load can never run two multi-GB GPU loads at
+     * once, and a second warmer finds the first one's engine pinned when it gets in.
+     */
+    val warmMutex = kotlinx.coroutines.sync.Mutex()
 
     /** The held warm engine, or null when nothing is held (consumer falls back). */
     fun getOrNull(): LiteRtEngine? = engine
@@ -188,6 +195,6 @@ enum class EngineSource {
     /** Reuse the warm process-held engine ([LocalEngineHolder]) -- matches the active model. */
     USE_HOLDER,
 
-    /** Build (and own) a VM-local engine -- the pre-R2-C path / graceful fallback. */
+    /** Build a new engine for the active bundle and load it through [pinWarmEngine] (which pins it here). */
     BUILD_OWN,
 }

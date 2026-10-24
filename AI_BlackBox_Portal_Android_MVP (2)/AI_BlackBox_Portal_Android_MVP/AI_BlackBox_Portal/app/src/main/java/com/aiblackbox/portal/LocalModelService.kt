@@ -13,27 +13,18 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import com.aiblackbox.portal.data.api.LocalModelDownloader
-import com.aiblackbox.portal.data.local.LiteRtEngine
 import com.aiblackbox.portal.data.local.LocalEngineHolder
-import com.aiblackbox.portal.data.local.LocalModelManager
-import com.aiblackbox.portal.data.local.SamplerSettings
-import com.aiblackbox.portal.data.local.WarmInflightStore
+import com.aiblackbox.portal.data.local.pinWarmEngine
+import com.aiblackbox.portal.data.local.resolveActiveEngine
 import com.aiblackbox.portal.data.local.shouldWarm
-import com.aiblackbox.portal.data.model.AttestRequest
-import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.remote.RemoteTaskHandlerHolder
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
-import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
  * Foreground service that PINS the on-device Gemma engine in RAM (Task R2-C).
@@ -73,7 +64,7 @@ class LocalModelService : Service() {
 
     // Service-owned scope for the warm load (NOT viewModelScope — this outlives any
     // VM). SupervisorJob so one failed child can't tear the scope down; cancelled in
-    // onDestroy. The warm runs on Dispatchers.IO via withContext inside the launch.
+    // onDestroy. The disk scan and the load run on Dispatchers.IO inside pinWarmEngine.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     // Guards against a second concurrent warm if START is delivered twice. Volatile:
@@ -87,12 +78,6 @@ class LocalModelService : Service() {
     // through it when a model is resident, then cleared on STOP/destroy so /task falls
     // back to the no-op. This service no longer binds the socket itself.
     private var remoteTaskHandler: com.aiblackbox.portal.data.remote.RemoteTaskHandler? = null
-
-    // Warm-loop guard, SHARED with ChatViewModel.preloadLocalEngine (same dedicated
-    // SharedPreferences file). The SERVICE is the PRIMARY warmer, so its load() is
-    // bracketed with setInflight(true/false) below: an OOM SIGKILL mid-service-warm
-    // leaves the flag set, so the next launch's auto-warm is skipped (no crash loop).
-    private val warmInflightStore by lazy { WarmInflightStore.fromContext(this) }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -148,7 +133,7 @@ class LocalModelService : Service() {
         if (warmJob?.isActive == true) return // a warm is already running
         warmJob = scope.launch {
             try {
-                val resolved = withContext(Dispatchers.IO) { resolveActiveBundle() }
+                val resolved = resolveActiveEngine(applicationContext)
                 if (resolved == null) {
                     // No installed model (or nothing resolvable) — nothing to pin.
                     Log.d(TAG, "no installed on-device model to pin; stopping")
@@ -174,88 +159,26 @@ class LocalModelService : Service() {
                     Log.d(TAG, "on-device model already pinned for this bundle; warm skipped")
                     return@launch
                 }
-                // M3: publish that THIS bundle is now cold-loading BEFORE the ~10-75s
-                // load, so a concurrent ChatViewModel warm WAITS for us (borrows the
-                // holder when we finish) instead of building a SECOND engine in parallel
-                // — two 3.66GB GPU loads at once OOM'd the device ("model can't finish").
-                LocalEngineHolder.beginWarming(modelPath)
-                // Warm-loop guard (SERVICE warm path, mirroring ChatViewModel.preloadLocalEngine):
-                // the SERVICE is the PRIMARY warmer, so its load() is where a device OOM most
-                // likely SIGKILLs the whole process mid-warm. Persist "in-flight" to disk
-                // (commit() = synchronous, so it is on disk BEFORE load begins) so that, if
-                // this load OOM-kills the process, the flag survives still-set and the next
-                // launch's preloadLocalEngine shouldAutoWarm() returns false -> skips the
-                // auto-warm (no crash/restart loop). Cleared on SUCCESS (after set()) and on a
-                // GRACEFUL (caught) failure below, exactly like the VM bracketing.
-                warmInflightStore.setInflight(true)
-                try {
-                    withContext(Dispatchers.IO) { engine.load(File(modelPath), delegate) }
-                    // Hand the WARM engine to the process holder (service owns it now).
-                    // set() also clears the warming marker so waiters borrow it.
-                    LocalEngineHolder.set(engine, modelPath, delegate)
-                    // Warm completed cleanly -> clear the in-flight flag (re-arm auto-warm).
-                    warmInflightStore.setInflight(false)
-                } finally {
-                    // If load() threw (set() never ran), release the marker so a waiting
-                    // consumer stops waiting and falls back to BUILD_OWN. No-op on success.
-                    LocalEngineHolder.endWarming(modelPath)
-                }
+                // The ONE process warm (audit rank 63): under the shared warm lock it
+                // publishes the warming marker the chat waits on, brackets the load with
+                // the crash-loop flag (a SIGKILL mid-load leaves it set, so the next
+                // launch skips its auto-warm), pins the engine in the holder, and closes
+                // it if the load fails. A chat or control_phone warm that is already
+                // loading this bundle is reused instead of loaded twice.
+                pinWarmEngine(applicationContext, engine, modelPath, delegate)
                 updateNotification(buildNotification(TEXT_READY))
                 Log.d(TAG, "on-device model pinned + ready (process-resident)")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Throwable) {
-                // GRACEFUL: a warm failure must never crash; leave the holder empty
-                // so the ViewModel builds its own engine. Log the CLASS name only
-                // (never a message — it could carry a device/path detail).
+                // GRACEFUL: a warm failure must never crash. pinWarmEngine already
+                // closed the engine it could not load and cleared the marker and the
+                // crash-loop flag; an engine another warmer pinned is left alone. Log the
+                // CLASS name only (never a message — it could carry a device/path detail).
                 Log.w(TAG, "warm-load failed (${e.javaClass.simpleName}); VM fallback still works")
-                // GRACEFUL (caught) failure -> clear the disk flag: this was NOT a process
-                // kill, so the next launch may auto-warm again. (A real OOM SIGKILL never
-                // reaches here, leaving the flag set = the loop guard we want.)
-                runCatching { warmInflightStore.setInflight(false) }
-                runCatching { LocalEngineHolder.clearAndClose() }
                 stopSelfGracefully()
             }
         }
-    }
-
-    /**
-     * Resolve the ACTIVE installed bundle and build (NOT yet load) its engine on IO.
-     * Mirrors [com.aiblackbox.portal.ui.chat.ChatViewModel.localProviderOrWire]'s
-     * resolution: honor the `model_local` slug pref, else the alphabetically-first
-     * installed bundle. Returns (engine, absoluteModelPath, delegate) or null when
-     * there is no installed model. [installedModels] is hermetic (never touches the
-     * network), so the [LocalModelDownloader] passed to the manager is a no-op stub
-     * — the service has no hub origin and needs none for a disk scan.
-     */
-    private suspend fun resolveActiveBundle(): Triple<LiteRtEngine, String, String>? {
-        val activeSlug = runCatching {
-            BlackBoxStore(applicationContext).getString(PREF_ACTIVE_LOCAL_MODEL).first()
-        }.getOrDefault("")
-        val manager = LocalModelManager.fromContext(
-            applicationContext,
-            NoopDownloader,
-            deviceId = "android-device",
-        )
-        val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
-        val bundle = installed.firstOrNull { it.slug == activeSlug }
-            ?: installed.firstOrNull()
-            ?: return null
-        val cfg = bundle.config
-        // GPU (Edge Gallery parity, ~10x faster than CPU); LiteRtEngine.load falls back
-        // to CPU if GPU init fails on a limited device.
-        val delegate = "gpu"
-        val engine = LiteRtEngine.fromInstalled(
-            applicationContext,
-            bundle.file,
-            delegate = delegate,
-            maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS,
-            sampler = SamplerSettings(
-                topK = cfg.topK,
-                topP = cfg.topP,
-                temperature = cfg.temperature,
-            ),
-            supportImage = cfg.supportImage,
-        )
-        return Triple(engine, bundle.file.absolutePath, delegate)
     }
 
     /** Leave the foreground + stop, keeping any (empty) holder state. */
@@ -366,21 +289,6 @@ class LocalModelService : Service() {
             .build()
     }
 
-    /**
-     * No-op [LocalModelDownloader] for the disk-only [installedModels] scan. Its
-     * methods are never reached by the scan (verified against LocalModelManager); a
-     * defensive call returns an empty/false result rather than throwing.
-     */
-    private object NoopDownloader : LocalModelDownloader {
-        override suspend fun download(
-            bundle: LocalBundle,
-            destFile: File,
-            onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
-        ): Result<File> = Result.failure(UnsupportedOperationException("download not supported in LocalModelService"))
-
-        override suspend fun attest(req: AttestRequest): Boolean = false
-    }
-
     companion object {
         private const val TAG = "LocalModelService"
         const val CHANNEL_ID = "blackbox_local_model"
@@ -388,11 +296,6 @@ class LocalModelService : Service() {
         const val ACTION_START = "com.aiblackbox.portal.START_LOCAL_MODEL"
         const val ACTION_START_LISTENER = "com.aiblackbox.portal.START_LISTENER"
         const val ACTION_STOP = "com.aiblackbox.portal.STOP_LOCAL_MODEL"
-
-        // The DataStore key the Model Manager persists the active on-device slug under
-        // (mirrors ChatViewModel's "model_local"). Read here so the pinned engine is
-        // the SAME bundle the chat will use.
-        private const val PREF_ACTIVE_LOCAL_MODEL = "model_local"
 
         private const val TEXT_PREPARING = "Loading on-device model…"
         private const val TEXT_READY = "On-device model ready"
