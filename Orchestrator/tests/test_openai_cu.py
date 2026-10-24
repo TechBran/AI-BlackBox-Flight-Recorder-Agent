@@ -626,3 +626,45 @@ async def test_batched_actions_one_output_per_call(patched_loop):
     action_events = [e for e in events if e["type"] == "cu_action"]
     assert [e["data"]["action"] for e in action_events] == ["click", "type"]
     assert any(e["type"] == "done" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_failed_action_is_reported_and_stops_its_batch(patched_loop, monkeypatch):
+    """A real input failure (O13-computer-use-04) reaches the model: the rest of
+    that call's batch is skipped (typing after a failed click lands elsewhere),
+    and a user-role note follows the screenshot outputs so the model knows."""
+    def _execute(self, action, **params):
+        FakeExecutor.calls.append((action, params))
+        if action == "left_click":
+            return {"success": False,
+                    "message": "Action 'left_click' failed: xdotool click failed: boom"}
+        return {"success": True, "message": "ok"}
+
+    monkeypatch.setattr(FakeExecutor, "execute", _execute)
+    r1 = SimpleNamespace(
+        id="resp_f1",
+        output=[SimpleNamespace(
+            type="computer_call", call_id="call_f1", action=None,
+            actions=[SimpleNamespace(type="click", x=10, y=20, button="left"),
+                     SimpleNamespace(type="type", text="secret words")],
+            pending_safety_checks=[],
+        )],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=2),
+    )
+    r2 = SimpleNamespace(
+        id="resp_f2",
+        output=[SimpleNamespace(type="message",
+                                content=[SimpleNamespace(type="output_text", text="ok")])],
+        usage=SimpleNamespace(input_tokens=5, output_tokens=1),
+    )
+    FakeAsyncOpenAI._scripted = [r1, r2]
+    await _collect(O.run_openai_cu_loop(FakeSession(), "fill the form"))
+
+    assert patched_loop["executor_calls"] == [("left_click", {"coordinate": [10, 20]})]
+    second = FakeAsyncOpenAI.last.responses.calls[1]["input"]
+    assert [i.get("type") for i in second][:1] == ["computer_call_output"]
+    notes = [i for i in second if i.get("role") == "user"]
+    assert len(notes) == 1 and second.index(notes[0]) > 0
+    text = " ".join(p["text"] for p in notes[0]["content"] if p["type"] == "input_text")
+    assert "click" in text and "boom" in text and "not executed" in text
+    assert "secret words" not in text

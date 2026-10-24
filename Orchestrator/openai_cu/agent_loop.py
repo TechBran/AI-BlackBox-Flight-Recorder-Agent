@@ -512,6 +512,7 @@ async def run_openai_cu_loop(
 
         # ── Execute calls, reply with computer_call_output items ──
         input_items = []
+        failures = []
         for call in computer_calls:
             # gpt-5.5 batches multiple actions into one computer_call via the
             # `actions` array; the deprecated preview model sent a single
@@ -522,7 +523,7 @@ async def run_openai_cu_loop(
             if not batch and single is not None:
                 batch = [single]
 
-            for action in batch:
+            for idx, action in enumerate(batch):
                 a_type = getattr(action, "type", "unknown")
                 _evt = {"type": "cu_action",
                         "data": {"action": a_type, "params": _action_params(action),
@@ -539,7 +540,16 @@ async def run_openai_cu_loop(
 
                 result = await _execute_openai_action(action, session.actions)
                 if not result.get("success", True):
+                    # A real input failure (O13-computer-use-04): stop this
+                    # call's batch (a `type` after a failed click lands
+                    # elsewhere) and tell the model below.
                     print(f"[OPENAI CU] Action {a_type} failed: {result}")
+                    reason = str(result.get("message") or result.get("error") or "failed")
+                    skipped = len(batch) - idx - 1
+                    failures.append(f"{a_type}: {reason[:300]}"
+                                    + (f" ({skipped} later action(s) in that batch were "
+                                       f"not executed)" if skipped else ""))
+                    break
                 await asyncio.sleep(0.5)
 
             output_item = {
@@ -595,6 +605,15 @@ async def run_openai_cu_loop(
                 "detail": "original",
             }
             input_items.append(output_item)
+        if failures:
+            # computer_call_output carries only a screenshot, so the failure
+            # rides in a user note after the outputs (they answer every call).
+            input_items.append({"role": "user", "content": [{
+                "type": "input_text",
+                "text": ("The last computer action failed and did not take effect: "
+                         + "; ".join(failures)
+                         + ". Check the screenshot before trying again."),
+            }]})
     else:
         # for-else: MAX_ITERATIONS exhausted without a clean done/stop break —
         # the last response's computer_calls were never answered (C1).

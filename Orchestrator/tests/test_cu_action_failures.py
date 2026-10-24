@@ -381,3 +381,160 @@ async def test_gemini_type_text_at_reports_a_failed_type():
 
     r = await G._execute_predefined_action(S(), "type_text_at", {"x": 1, "y": 1, "text": "hi"})
     assert r["success"] is False
+
+
+# ── moves onto the pointer's current position ───────────────────────────────
+# xdotool 3.20160805's `mousemove --sync` waits for the pointer to LEAVE its
+# start position, so a move to where the pointer already is never returns. Once
+# a timeout became a failed action, a second scroll at one spot, a click after a
+# hover, and the first Gemini scroll_document on a fresh Xvfb (whose pointer
+# starts at the centre) all failed after 10 s without acting (review blocker).
+
+def _at(x, y):
+    return subprocess.CompletedProcess([], 0, stdout=f"X={x}\nY={y}\nSCREEN=0\nWINDOW=1\n",
+                                       stderr="")
+
+
+def test_move_onto_the_current_pointer_position_is_skipped(xdo):
+    ex, calls, results = xdo
+    results["getmouselocation"] = _at(300, 300)
+    r = ex.execute("left_click", coordinate=[300, 300])
+    assert r["success"] is True
+    assert not [c for c in calls if c[0] == "mousemove"], \
+        "a --sync move onto the pointer's own position hangs; it must not be issued"
+    assert ("click", "1") in calls
+
+
+def test_sync_timeout_with_the_pointer_on_target_is_success(xdo, monkeypatch):
+    ex, calls, _ = xdo
+    where = {"pos": (5, 5)}
+
+    def _run(*args, **kw):
+        calls.append(args)
+        if args[0] == "getmouselocation":
+            return _at(*where["pos"])
+        if args[0] == "mousemove":
+            where["pos"] = (int(args[-2]), int(args[-1]))   # the warp lands...
+            return subprocess.CompletedProcess(               # ...but --sync never returns
+                [], -1, stdout="", stderr="ACTION_TIMEOUT: xdotool command timed out after 10s")
+        return _ok()
+
+    monkeypatch.setattr(act, "_run_xdotool", _run)
+    r = ex.execute("mouse_move", coordinate=[40, 50])
+    assert r["success"] is True, r
+
+
+def test_sync_timeout_with_the_pointer_elsewhere_still_fails(xdo, monkeypatch):
+    ex, calls, _ = xdo
+
+    def _run(*args, **kw):
+        calls.append(args)
+        if args[0] == "getmouselocation":
+            return _at(5, 5)                                  # never moved
+        if args[0] == "getdisplaygeometry":
+            return subprocess.CompletedProcess([], 0, stdout="1280 720\n", stderr="")
+        if args[0] == "mousemove":
+            return subprocess.CompletedProcess(
+                [], -1, stdout="", stderr="ACTION_TIMEOUT: xdotool command timed out after 10s")
+        return _ok()
+
+    monkeypatch.setattr(act, "_run_xdotool", _run)
+    r = ex.execute("left_click", coordinate=[40, 50])
+    assert r["success"] is False
+    assert "timed out" in r["message"]
+    assert not [c for c in calls if c[0] == "click"], "the click must not land elsewhere"
+
+
+def test_sync_timeout_at_a_clamped_screen_edge_is_success(xdo, monkeypatch):
+    """A target past the screen edge clamps to the last pixel; when the pointer
+    already sits there --sync never sees a move, yet the pointer IS on target."""
+    ex, calls, _ = xdo
+
+    def _run(*args, **kw):
+        calls.append(args)
+        if args[0] == "getmouselocation":
+            return _at(1279, 400)
+        if args[0] == "getdisplaygeometry":
+            return subprocess.CompletedProcess([], 0, stdout="1280 800\n", stderr="")
+        if args[0] == "mousemove":
+            return subprocess.CompletedProcess(
+                [], -1, stdout="", stderr="ACTION_TIMEOUT: xdotool command timed out after 10s")
+        return _ok()
+
+    monkeypatch.setattr(act, "_run_xdotool", _run)
+    assert ex.execute("mouse_move", coordinate=[1280, 400])["success"] is True
+
+
+def _free_display():
+    import os
+    for n in range(420, 480):
+        if not os.path.exists(f"/tmp/.X11-unix/X{n}") and not os.path.exists(f"/tmp/.X{n}-lock"):
+            return n
+    return None
+
+
+@pytest.fixture
+def real_xvfb(tmp_path, monkeypatch):
+    """A throwaway Xvfb (no TCP) for the xdotool behaviour fakes cannot show.
+
+    The suite refuses the host's xdotool (conftest.py isolation), so a copy of
+    the binary under tmp_path drives this test's own display and nothing else.
+    """
+    import os
+    import shutil
+    import time as _t
+    xdotool = shutil.which("xdotool")
+    if not (shutil.which("Xvfb") and xdotool):
+        pytest.skip("Xvfb/xdotool not installed")
+    local = tmp_path / "xdotool"
+    shutil.copy2(xdotool, local)
+    real_run = subprocess.run
+
+    def _run(cmd, *a, **kw):
+        if cmd and cmd[0] == "xdotool":
+            cmd = [str(local)] + list(cmd[1:])
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(act.subprocess, "run", _run)
+    n = _free_display()
+    if n is None:
+        pytest.skip("no free X display number")
+    proc = subprocess.Popen(["Xvfb", f":{n}", "-screen", "0", "1440x900x24",
+                             "-nolisten", "tcp", "-noreset"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            if os.path.exists(f"/tmp/.X11-unix/X{n}"):
+                break
+            _t.sleep(0.1)
+        else:
+            pytest.skip("Xvfb did not start")
+        yield n
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_real_xdotool_same_point_actions_succeed_quickly(real_xvfb):
+    import time as _t
+    ex = act.ActionExecutor(display_number=real_xvfb, coord_space=act.COORD_SPACE_GEMINI,
+                            native_mode=False, resolution=(1440, 900))
+    assert ex.use_ydotool is False
+    steps = [
+        # Gemini scroll_document always scrolls at [500,500] = the fresh pointer.
+        ("scroll", {"coordinate": [500, 500], "direction": "down", "amount": 2}),
+        ("scroll", {"coordinate": [500, 500], "direction": "down", "amount": 2}),
+        ("mouse_move", {"coordinate": [200, 300]}),
+        ("left_click", {"coordinate": [200, 300]}),
+        ("left_click_drag", {"start_coordinate": [200, 300], "coordinate": [200, 300]}),
+    ]
+    for action, params in steps:
+        t0 = _t.monotonic()
+        r = ex.execute(action, **params)
+        took = _t.monotonic() - t0
+        assert r["success"] is True, (action, r)
+        assert took < 5, f"{action} took {took:.1f}s"
+    assert ex.execute("cursor_position")["coordinate"] == [200, 300]

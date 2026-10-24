@@ -531,6 +531,25 @@ async def test_cursor_position_answers_with_text_on_both_protocols(driver_env, m
 
 
 @pytest.mark.asyncio
+async def test_local_actions_run_off_the_event_loop(driver_env, monkeypatch):
+    """A long `type` now types every chunk (O13-computer-use-04): run on the
+    server loop it froze the Portal, Android and /chat/stream for its whole
+    typing time. The executor runs in a worker thread, as on Gemini/OpenAI."""
+    import threading
+    loop_thread = threading.get_ident()
+
+    class _Where(_RecordingActions):
+        def execute(self, action, **params):
+            self.calls.append((action, threading.get_ident()))
+            return {"success": True, "message": "ok"}
+
+    actions = _Where()
+    await _run(monkeypatch, [_turn(_tool("t", "type", {"text": "hello"})), END_TURN],
+               actions=actions)
+    assert actions.calls and all(tid != loop_thread for _, tid in actions.calls)
+
+
+@pytest.mark.asyncio
 async def test_unanswered_tool_use_is_filled_after_display_dies(driver_env, monkeypatch):
     """3 consecutive screenshot failures break the tool loop; any block it
     skipped still gets a result so the next request is not rejected."""

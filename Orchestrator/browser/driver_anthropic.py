@@ -421,7 +421,10 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     if session.device_id != "blackbox":
                         action_result = await execute_remote_action(session.device_id, action, **action_params)
                     else:
-                        action_result = session.actions.execute(action, **action_params)
+                        # Off the event loop: the executor blocks on input-tool
+                        # subprocesses, and a long `type` runs for tens of seconds.
+                        action_result = await asyncio.to_thread(
+                            session.actions.execute, action, **action_params)
 
                     # A failed action is reported as failed on both protocols: the
                     # executor surfaces real input-tool failures (O13-computer-use-04),

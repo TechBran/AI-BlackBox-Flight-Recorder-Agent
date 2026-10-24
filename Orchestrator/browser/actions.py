@@ -404,8 +404,50 @@ class ActionExecutor:
     def _move(self, x: int, y: int) -> None:
         if self.use_ydotool:
             self._ydo("mousemove", "--absolute", "--", str(x), str(y))
-        else:
-            self._xdo("mousemove", "--sync", str(x), str(y))
+            return
+        # xdotool 3.20160805's `mousemove --sync` waits for the pointer to LEAVE
+        # where it started, so a move onto the pointer's own position never
+        # returns: a second scroll at one spot, a click after a hover, or the
+        # first scroll_document on a fresh Xvfb (pointer at the centre) timed
+        # out and failed without acting. Skip a move that is already done, and
+        # accept a timed-out one when the pointer did land on the target.
+        if self._pointer_at(x, y):
+            return
+        proc = _run_xdotool("mousemove", "--sync", str(x), str(y),
+                            display_number=self.display_number, native=self.native_mode)
+        if proc.returncode != 0 and self._pointer_at(x, y, clamp=True):
+            return
+        _check(proc, "xdotool", "mousemove")
+
+    def _pointer_xy(self) -> Optional[tuple]:
+        """The live pointer in native pixels, or None when xdotool can't say."""
+        proc = _run_xdotool("getmouselocation", "--shell",
+                            display_number=self.display_number, native=self.native_mode)
+        if proc is None or proc.returncode != 0:
+            return None
+        fields = dict(line.split("=", 1) for line in (proc.stdout or "").splitlines()
+                      if "=" in line)
+        try:
+            return int(fields["X"]), int(fields["Y"])
+        except (KeyError, ValueError):
+            return None
+
+    def _pointer_at(self, x: int, y: int, clamp: bool = False) -> bool:
+        """True when the pointer is on native pixel (x, y). With ``clamp`` the
+        target is first clamped to the screen, as the X server clamps a warp
+        past the edge."""
+        pos = self._pointer_xy()
+        if pos is None:
+            return False
+        if clamp:
+            proc = _run_xdotool("getdisplaygeometry",
+                                display_number=self.display_number, native=self.native_mode)
+            try:
+                w, h = (int(v) for v in (proc.stdout or "").split()[:2])
+                x, y = max(0, min(w - 1, x)), max(0, min(h - 1, y))
+            except (TypeError, ValueError):
+                pass
+        return pos == (int(x), int(y))
 
     def _move_to(self, coordinate) -> None:
         """Move to a MODEL-space coordinate and remember it for cursor_position."""
