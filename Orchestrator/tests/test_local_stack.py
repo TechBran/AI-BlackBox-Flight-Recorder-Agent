@@ -239,20 +239,23 @@ def test_member_gguf_present_true_when_file_on_disk(monkeypatch, tmp_path):
     assert local_stack.model_downloaded("embed-qwen3-8b") is True
 
 
-def test_member_gguf_absent_falls_back_to_state_file(monkeypatch, tmp_path):
+def test_member_gguf_absent_is_not_downloaded_whatever_the_state_file_says(monkeypatch, tmp_path):
+    """W36: for a single-file member the disk is the truth. The state file
+    used to win when the GGUF was gone, so a dev box with no localstack
+    weights reported five models downloaded."""
     from Orchestrator import localstack_downloads
     models = tmp_path / "models"
     models.mkdir()
     monkeypatch.setattr(localstack_downloads, "MODELS_DIR", models)
-    # No GGUF on disk -> _member_gguf_present False, model_downloaded falls back
-    # to the (absent) state file -> False.
     monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", tmp_path / "downloads.json")
     assert local_stack._member_gguf_present("embed-qwen3-8b") is False
     assert local_stack.model_downloaded("embed-qwen3-8b") is False
-    # State file records a terminal success -> the fallback reports True.
-    (tmp_path / "downloads.json").write_text(
-        json.dumps({"embed-qwen3-8b": {"state": "downloaded"}}), encoding="utf-8")
-    assert local_stack.model_downloaded("embed-qwen3-8b") is True
+    # A stale "downloaded" record no longer overrides the missing file.
+    (tmp_path / "downloads.json").write_text(json.dumps({
+        "embed-qwen3-8b": {"state": "downloaded"}, "silero-vad": {"state": "downloaded"},
+        "rerank-qwen3-8b": {"state": "downloaded"}}), encoding="utf-8")
+    for member in ("embed-qwen3-8b", "silero-vad", "rerank-qwen3-8b"):
+        assert local_stack.model_downloaded(member) is False, member
 
 
 def test_member_gguf_present_zero_byte_is_not_downloaded(monkeypatch, tmp_path):
@@ -275,17 +278,72 @@ def test_member_gguf_present_selfconvert_reranker(monkeypatch, tmp_path):
     assert local_stack.model_downloaded("rerank-qwen3-8b") is True
 
 
-def test_member_gguf_present_multifile_member_falls_back(monkeypatch, tmp_path):
-    # qwen-tts is an hf_snapshot (multi-file) with no single presence-checkable
-    # GGUF -> _member_gguf_present False, model_downloaded uses the state file.
+@pytest.fixture
+def snapshot_roots(monkeypatch, tmp_path):
+    """The hf_snapshot dest roots (qwen-tts variants, the Speaches HF cache)
+    and the state file, all under tmp_path."""
     from Orchestrator import localstack_downloads
-    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", tmp_path)
-    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", tmp_path / "downloads.json")
+    qwen, hub = tmp_path / "qwen3-tts", tmp_path / "hf-cache" / "hub"
+    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setenv("QWEN_TTS_MODEL_DIR", str(qwen))
+    monkeypatch.setenv("SPEACHES_CACHE_DIR", str(hub))
+    state = tmp_path / "downloads.json"
+    monkeypatch.setattr(local_stack, "DOWNLOAD_STATE_PATH", state)
+    return qwen, hub, state
+
+
+def _record(state, *members):
+    state.write_text(json.dumps({m: {"state": "done"} for m in members}), encoding="utf-8")
+
+
+def test_multifile_member_needs_its_files_and_a_recorded_success(snapshot_roots):
+    """W36: an hf_snapshot member is downloaded only when every repo it pulls
+    is on disk AND the download recorded a terminal success (a half-pulled
+    snapshot leaves files but no record, so the wizard still offers a resume)."""
+    qwen, _hub, state = snapshot_roots
     assert local_stack._member_gguf_present("qwen-tts") is False
-    assert local_stack.model_downloaded("qwen-tts") is False
-    (tmp_path / "downloads.json").write_text(
-        json.dumps({"qwen-tts": {"state": "done"}}), encoding="utf-8")
+    _record(state, "qwen-tts", "qwen-tts-base")
+    assert local_stack.model_downloaded("qwen-tts") is False        # stale record, no files
+    assert local_stack.model_downloaded("qwen-tts-base") is False
+    (qwen / "base").mkdir(parents=True)
+    (qwen / "base" / "config.json").write_text("{}")
+    assert local_stack.model_downloaded("qwen-tts-base") is True
+    assert local_stack.model_downloaded("qwen-tts") is False         # 2 of 3 variants missing
+    for variant in ("custom_voice", "voice_design"):
+        (qwen / variant).mkdir()
+        (qwen / variant / "config.json").write_text("{}")
     assert local_stack.model_downloaded("qwen-tts") is True
+    state.write_text("{}", encoding="utf-8")
+    assert local_stack.model_downloaded("qwen-tts") is False         # files without a record
+
+
+def test_an_empty_or_metadata_only_variant_dir_is_not_a_download(snapshot_roots):
+    qwen, _hub, state = snapshot_roots
+    _record(state, "qwen-tts-base")
+    (qwen / "base" / ".cache" / "huggingface").mkdir(parents=True)
+    (qwen / "base" / ".cache" / "huggingface" / ".gitignore").write_text("*")
+    assert local_stack.model_downloaded("qwen-tts-base") is False
+
+
+def test_whisper_needs_both_repos_in_the_speaches_hf_cache(snapshot_roots):
+    _qwen, hub, state = snapshot_roots
+    _record(state, "whisper")
+    assert local_stack.model_downloaded("whisper") is False
+    for repo in ("models--deepdml--faster-whisper-large-v3-turbo-ct2",
+                 "models--Systran--faster-whisper-large-v3"):
+        snap = hub / repo / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "model.bin").write_bytes(b"x")
+        assert local_stack.model_downloaded("whisper") is (repo.endswith("large-v3"))
+    assert local_stack.model_downloaded("whisper") is True
+
+
+def test_a_member_with_nothing_to_check_keeps_the_state_file_contract(snapshot_roots):
+    """speaches (auto-pulled, no manifest entry) still reads the record."""
+    _qwen, _hub, state = snapshot_roots
+    assert local_stack.model_downloaded("speaches") is False
+    _record(state, "speaches")
+    assert local_stack.model_downloaded("speaches") is True
 
 
 # ── A3: record_download_state persists the contract ───────────────────────────

@@ -26,7 +26,8 @@ def _artifact_row(key: str) -> dict:
     is False while `repo_pending_g3` (placeholder repo ids pinned on MS02 at
     G3/G4) so the wizard renders a disabled button with a reason instead of a
     live 404 button; the raw flag is surfaced too. `downloaded` is the canonical
-    model_downloaded() truth (state-file for these multi-file artifacts)."""
+    model_downloaded() truth (for these multi-file artifacts: the files on disk
+    AND a recorded terminal success — W36)."""
     entry = _dl.DOWNLOAD_MANIFEST[key]
     pending = bool(entry.get("repo_pending_g3"))
     return {

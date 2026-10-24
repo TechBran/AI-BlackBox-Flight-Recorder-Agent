@@ -455,24 +455,63 @@ def member_built(model_id: str) -> dict:
     return {"built": True, "reason": None}
 
 
+def _has_payload(d: Path) -> bool:
+    """`d` is a directory holding at least one entry that is not hidden (a
+    snapshot_download local_dir always gets a .cache/ of metadata first)."""
+    try:
+        return d.is_dir() and any(not p.name.startswith(".") for p in d.iterdir())
+    except OSError:
+        return False
+
+
+def _snapshot_present(entry: dict) -> bool:
+    """Every repo of an hf_snapshot manifest entry has files where the download
+    put them: <dest root>/<variant> (a per-variant local_dir), or for the
+    Speaches HF cache layout <cache>/models--<org>--<name>/snapshots/<rev>/.
+    Never raises."""
+    from Orchestrator.localstack_downloads import _SPEACHES_CACHE_BUCKET, _artifact_dest_root
+    try:
+        root = _artifact_dest_root(entry.get("dest_dir"))
+        cache_layout = entry.get("dest_dir") == _SPEACHES_CACHE_BUCKET
+        for variant, repo in (entry.get("repos") or {}).items():
+            if cache_layout:
+                snaps = root / ("models--" + repo.replace("/", "--")) / "snapshots"
+                if not (snaps.is_dir() and any(_has_payload(s) for s in snaps.iterdir())):
+                    return False
+            elif not _has_payload(root / variant):
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def model_downloaded(model_id: str) -> bool:
-    """True iff `model_id`'s weights are present — ON-DISK PRESENCE FIRST, the
-    download-state bookkeeping file only as a fallback.
+    """True iff `model_id`'s weights are present. Wherever the files can be
+    checked, ABSENCE IS AUTHORITATIVE (W36: a stale downloads.json had a box
+    with no localstack weights reporting five models downloaded):
+      * single-file members (a manifest "file" entry, or a self-converted GGUF
+        in _SELFCONVERT_GGUF): the file on disk is the whole answer — present
+        counts even when downloads.json was never written (the active, serving
+        embedder used to read as "not downloaded"), absent is False whatever
+        the state file says;
+      * hf_snapshot members: every repo's files are on disk AND the download
+        recorded a terminal success — files alone may be a half-pulled
+        snapshot, which must still offer the (resuming) Download button;
+      * members with nothing to check (speaches, auto-pulled): the state-file
+        contract ("downloaded" / "done").
+    Fail-soft: never raises.
 
-    A GGUF physically on disk (_member_gguf_present) counts as downloaded even
-    when Manifest/local_models/downloads.json was never written (the pre-existing
-    production bug: that file is never written, so a state-file-only check
-    reported the ACTIVE, serving qwen3-embedding-8b-local as "not downloaded").
-    Multi-file / auto-pulled members with no presence-checkable single GGUF fall
-    back to the state-file contract (a recorded terminal success "downloaded" or
-    "done"). Fail-soft: absent/corrupt state + no on-disk GGUF => False.
-
-    Consumed by the localstack embeddings/rerank preflight (M3 Task 3.5 / M4);
-    those tests monkeypatch it, but a real installed+healthy box calls THIS."""
-    if _member_gguf_present(model_id):
-        return True
-    entry = read_download_state().get(model_id)
-    return isinstance(entry, dict) and entry.get("state") in ("downloaded", "done")
+    Consumed by the localstack embeddings/rerank preflight (M3 Task 3.5 / M4)
+    and the per-artifact rows of GET /local-models/status."""
+    from Orchestrator.localstack_downloads import DOWNLOAD_MANIFEST
+    entry = DOWNLOAD_MANIFEST.get(model_id)
+    if (entry and entry.get("kind") == "file") or model_id in _SELFCONVERT_GGUF:
+        return _member_gguf_present(model_id)
+    state = read_download_state().get(model_id)
+    recorded = isinstance(state, dict) and state.get("state") in ("downloaded", "done")
+    if entry and entry.get("kind") == "hf_snapshot":
+        return recorded and _snapshot_present(entry)
+    return recorded
 
 
 # Keep-warm maps to a llama-swap member ttl (§6): 0 = immune to the 10-min idle
