@@ -2768,7 +2768,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 include_base64 = func_args.get("include_base64", True)
                                 print(f"[OPENAI-STREAM] Executing get_media: url={media_url}, task_id={media_task_id}")
 
-                                result = execute_get_media(url=media_url, task_id=media_task_id)
+                                result = await run_blocking(execute_get_media, url=media_url, task_id=media_task_id)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Retrieved media: {media_url or media_task_id}"}
 
@@ -2777,7 +2777,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 limit = func_args.get("limit", 20)
                                 print(f"[OPENAI-STREAM] Executing list_media: type={media_type}, limit={limit}")
 
-                                result = execute_list_media(media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Listed {result.get('count', 0)} media files"}
 
@@ -2787,7 +2787,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 limit = func_args.get("limit", 10)
                                 print(f"[OPENAI-STREAM] Executing search_media: query='{query}', type={media_type}")
 
-                                result = execute_search_media(query=query, media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
 
@@ -3624,7 +3624,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 include_base64 = tool_input.get("include_base64", True)
                                 print(f"[ANTHROPIC-STREAM] Executing get_media: url={media_url}, task_id={media_task_id}")
 
-                                result = execute_get_media(url=media_url, task_id=media_task_id)
+                                result = await run_blocking(execute_get_media, url=media_url, task_id=media_task_id)
                                 result_message = json.dumps(result, indent=2)
 
                                 tool_results.append({
@@ -3638,7 +3638,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 limit = tool_input.get("limit", 20)
                                 print(f"[ANTHROPIC-STREAM] Executing list_media: type={media_type}, limit={limit}")
 
-                                result = execute_list_media(media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
                                 result_message = json.dumps(result, indent=2)
 
                                 tool_results.append({
@@ -3653,7 +3653,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 limit = tool_input.get("limit", 10)
                                 print(f"[ANTHROPIC-STREAM] Executing search_media: query='{query}', type={media_type}")
 
-                                result = execute_search_media(query=query, media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
                                 result_message = json.dumps(result, indent=2)
 
                                 tool_results.append({
@@ -5674,7 +5674,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 include_base64 = func_args.get("include_base64", True)
                                 print(f"[GEMINI-STREAM] Executing get_media: url={media_url}, task_id={media_task_id}")
 
-                                result = execute_get_media(url=media_url, task_id=media_task_id)
+                                result = await run_blocking(execute_get_media, url=media_url, task_id=media_task_id)
                                 result_message = json.dumps(result, indent=2)
 
                                 function_responses.append({
@@ -5690,7 +5690,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 limit = func_args.get("limit", 20)
                                 print(f"[GEMINI-STREAM] Executing list_media: type={media_type}, limit={limit}")
 
-                                result = execute_list_media(media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
                                 result_message = json.dumps(result, indent=2)
 
                                 function_responses.append({
@@ -5707,7 +5707,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 limit = func_args.get("limit", 10)
                                 print(f"[GEMINI-STREAM] Executing search_media: query='{query}', type={media_type}")
 
-                                result = execute_search_media(query=query, media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
                                 result_message = json.dumps(result, indent=2)
 
                                 function_responses.append({
@@ -6373,7 +6373,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 include_base64 = func_args.get("include_base64", True)
                                 print(f"[XAI-STREAM] Executing get_media: url={media_url}, task_id={media_task_id}")
 
-                                result = execute_get_media(url=media_url, task_id=media_task_id)
+                                result = await run_blocking(execute_get_media, url=media_url, task_id=media_task_id)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Retrieved media: {media_url or media_task_id}"}
 
@@ -6382,7 +6382,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 limit = func_args.get("limit", 20)
                                 print(f"[XAI-STREAM] Executing list_media: type={media_type}, limit={limit}")
 
-                                result = execute_list_media(media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Listed {result.get('count', 0)} media files"}
 
@@ -6392,7 +6392,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 limit = func_args.get("limit", 10)
                                 print(f"[XAI-STREAM] Executing search_media: query='{query}', type={media_type}")
 
-                                result = execute_search_media(query=query, media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
 
@@ -6955,7 +6955,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 include_base64 = func_args.get("include_base64", True)
                                 print(f"[CUSTOM-STREAM] Executing get_media: url={media_url}, task_id={media_task_id}")
 
-                                result = execute_get_media(url=media_url, task_id=media_task_id)
+                                result = await run_blocking(execute_get_media, url=media_url, task_id=media_task_id)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Retrieved media: {media_url or media_task_id}"}
 
@@ -6964,7 +6964,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 limit = func_args.get("limit", 20)
                                 print(f"[CUSTOM-STREAM] Executing list_media: type={media_type}, limit={limit}")
 
-                                result = execute_list_media(media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Listed {result.get('count', 0)} media files"}
 
@@ -6974,7 +6974,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 limit = func_args.get("limit", 10)
                                 print(f"[CUSTOM-STREAM] Executing search_media: query='{query}', type={media_type}")
 
-                                result = execute_search_media(query=query, media_type=media_type, limit=limit)
+                                result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
 
