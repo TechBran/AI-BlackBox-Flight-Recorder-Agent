@@ -37,7 +37,7 @@ from Orchestrator.artifacts import artifact_download_name
 from Orchestrator.utils.boot_id import BOOT_ID
 from Orchestrator.utils.models_cache import get_cached_or_fetch as _models_cache_get
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
-from Orchestrator.fossils import extract_snap_ids, get_recent_fossils_for_operator, hybrid_retrieve, rebuild_snapshot_index
+from Orchestrator.fossils import extract_snap_ids, get_recent_fossils_for_operator, hybrid_retrieve, load_snapshot_index, rebuild_snapshot_index
 import Orchestrator.models as models_module  # Import module for dynamic access to models_module.worker_running
 from Orchestrator.models import task_queue
 from Orchestrator.monitoring import drift_state_global, get_disk_usage
@@ -312,8 +312,49 @@ def _resolve_tailnet_origin() -> str:
     return ""
 
 
+# /health's `latest_manifest`, keyed on the manifest file's (mtime, size).
+_manifest_summary_cache: tuple = (None, None)
+
+
+def _manifest_summary() -> dict:
+    """The manifest's latest-volume fields plus how many archives it lists.
+
+    /health used to embed the whole manifest - one entry per archived volume,
+    1.7 MB on the dev box and growing with every mint - and the Portal polls
+    /health every 60 s per tab (audit O05-ledger-persistence-09). The Portal's
+    Manifest dialog is the only reader of `latest_manifest`; ?full=1 still
+    returns all of it. Re-parsed only when the file changes; a missing or
+    unreadable manifest (a fresh box) reads as empty.
+    """
+    global _manifest_summary_cache
+    try:
+        st = MANIFEST.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _manifest_summary_cache[0] == key:
+        return dict(_manifest_summary_cache[1])
+    man = {}
+    if key is not None:
+        try:
+            man = json.loads(MANIFEST.read_text())
+        except (OSError, ValueError):
+            man = {}
+    if not isinstance(man, dict):
+        man = {}
+    archive = man.get("archive")
+    summary = {
+        "latest_path": man.get("latest_path", ""),
+        "latest_sha256": man.get("latest_sha256", ""),
+        "latest_utc": man.get("latest_utc", ""),
+        "archive_count": len(archive) if isinstance(archive, list) else 0,
+    }
+    _manifest_summary_cache = (key, summary)
+    return dict(summary)
+
+
 @app.get("/health")
-def health():
+def health(full: bool = False):
     try:
         gm_digest, gm_bytes = verify_gm_or_halt()
         status = "ok"
@@ -323,11 +364,19 @@ def health():
         status = "GM FAIL"
         detail = str(e)
     vol_bytes = VOL_PATH.stat().st_size if VOL_PATH.exists() else 0
-    # Count snapshots from index
+    # Count snapshots from the mtime-cached index every retrieval shares,
+    # instead of parsing the 17 MB index file on every poll.
     try:
-        snapshot_count = len(json.loads(SNAPSHOT_INDEX.read_text())) if SNAPSHOT_INDEX.exists() else 0
+        snapshot_count = len(load_snapshot_index())
     except Exception:
         snapshot_count = 0
+    if full:
+        try:
+            latest_manifest = json.loads(MANIFEST.read_text())
+        except (OSError, ValueError):
+            latest_manifest = {}
+    else:
+        latest_manifest = _manifest_summary()
     try:
         from Orchestrator import config as _config
         pairing = {
@@ -362,7 +411,7 @@ def health():
         "status": status, "detail": detail, "gm_sha256": gm_digest,"worker_running": models_module.worker_running,"queue_size": len(task_queue),
         "gm_bytes": gm_bytes, "volume_bytes": vol_bytes, "snapshot_count": snapshot_count, "drift": drift_state_global(),
         "ctx_used": max((s.context_used for s in state_by_op.values()), default=0),
-        "ctx_max": CTX_MAX, "latest_manifest": json.loads(MANIFEST.read_text()),
+        "ctx_max": CTX_MAX, "latest_manifest": latest_manifest,
         "audio_engine": AUDIO_ENGINE, "tts_model": TTS_MODEL, "stt_model": STT_MODEL,
         "users": {"list": USERS_LIST, "default": current_default()}, "pairing": pairing,
         "operator_turns": operator_turns,  # Per-operator turn counts, checkpoint countdown, and cumulative tokens
