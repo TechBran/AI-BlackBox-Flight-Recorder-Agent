@@ -16,6 +16,7 @@ NOTE: ``execute_tool`` and ``meta_tool`` are imported at MODULE TOP (not inside
 the handlers) so tests can monkeypatch them on this module.
 """
 
+import asyncio
 import hashlib
 import uuid
 from typing import Optional
@@ -149,7 +150,9 @@ async def local_models_catalog():
               sha256, min_ram_gb, recommended_for, download_url, gated}, ...]}.
     """
     try:
-        return {"bundles": catalog.list_bundles()}
+        # A cache miss makes 1+N blocking Hugging Face requests (20 s timeout
+        # each): in a worker thread (audit O19-local-stack-01).
+        return {"bundles": await asyncio.to_thread(catalog.list_bundles)}
     except Exception as e:
         print(f"[LOCAL PROVIDER] catalog failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
@@ -188,7 +191,8 @@ async def local_tools_search(request: Request):
         # Shared discovery->specs helper (also used by /local/turn/prepare). It
         # is total (never raises) and applies the same fault isolation: stale/
         # renamed hits whose `read` fails are skipped, not 500'd for the batch.
-        tools = build_injected_tools(query, k)
+        # Discovery embeds the query (a provider round trip): in a thread.
+        tools = await asyncio.to_thread(build_injected_tools, query, k)
         return {"success": True, "tools": tools}
     except Exception as e:
         print(f"[LOCAL PROVIDER] search failed: {e}")
@@ -326,7 +330,11 @@ async def local_turn_prepare(request: Request):
         # semantic_k/checkpoint_count knobs remain (config-tunable via [context] so the
         # live box can be tuned post-device WITHOUT an APK/backend rebuild) for the
         # small contextual seed they provide, but the package is kept deliberately lean.
-        fossil, prov = build_fossil_context(
+        # Retrieval (embed + search + rerank) and tool injection (a query
+        # embed) block for a provider round trip each: in worker threads, off
+        # the server's loop (audit O17-toolvault-runtime-02).
+        fossil, prov = await asyncio.to_thread(
+            build_fossil_context,
             prompt,
             operator=operator,
             provider="local",
@@ -336,7 +344,9 @@ async def local_turn_prepare(request: Request):
             include_keyword=False,
             include_media=False,  # lean tool-caller: no pushed RECENT MEDIA block (tools-only)
         )
-        tools = build_injected_tools(prompt, k=CFG.getint("context", "local_injected_tools_k", fallback=5))
+        tools = await asyncio.to_thread(
+            build_injected_tools, prompt,
+            k=CFG.getint("context", "local_injected_tools_k", fallback=5))
         # The on-device model is a lean tool-caller, so it gets the MINIMAL
         # tool-caller instruction (LOCAL_TOOL_CALLER_SYSTEM_PROMPT) instead of
         # the heavy shared behavioral_core persona — that frees ~1000 tokens in
