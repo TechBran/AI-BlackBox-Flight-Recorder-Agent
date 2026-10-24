@@ -220,9 +220,23 @@ async function populateOperatorSelector(selectedOperator) {
         sel.appendChild(opt);
     });
 
+    // An edited job's operator may be off the roster (the reserved Flight
+    // Recorder operator, an operator deleted since). Keep it listed and
+    // selected: otherwise the browser selects the first option and a save
+    // re-homes the job to that person (P05-ops-panels-web-03).
+    if (selectedOperator && !_operatorList.includes(selectedOperator)) {
+        const opt = document.createElement('option');
+        opt.value = selectedOperator;
+        opt.textContent = `${selectedOperator} (not on roster)`;
+        sel.appendChild(opt);
+    }
+    // The operator the job had when the form opened; save sends operator
+    // only when the user changed it.
+    sel.dataset.original = selectedOperator || '';
+
     // Default to selected operator, or current operator, or first in list
     const target = selectedOperator || getOperator() || (_operatorList[0] || '');
-    if (target && _operatorList.includes(target)) {
+    if (target && [...sel.options].some(o => o.value === target)) {
         sel.value = target;
     }
 }
@@ -330,9 +344,10 @@ async function handleJobAction(e) {
     try {
         switch (action) {
             case 'run':
-                toast('Running job...');
+                // The route only starts the run (202); its outcome lands in
+                // the job's history, so never claim it succeeded here.
                 await runJobNow(jobId);
-                toastSuccess('Job executed successfully');
+                toast('Job started; its result will appear in History');
                 await refreshJobList();
                 break;
             case 'pause':
@@ -379,6 +394,8 @@ async function openEditModal(jobId) {
     $('cronJobPrompt').value = '';
     $('cronFrequency').value = 'daily';
     $('cronTime').value = '07:00';
+    $('cronIntervalUnit').value = 'minutes';
+    populateIntervalOptions('minutes', 30);
     $('cronDelivery').value = 'snapshot';
     $('cronDeliveryTarget').value = '';
     if ($('cronDeliverySource')) $('cronDeliverySource').value = 'manual';
@@ -424,7 +441,7 @@ async function openEditModal(jobId) {
         await hydrateCronModelSelect(provider, job.model || '');
 
         // Populate operator selector with existing job's operator
-        populateOperatorSelector(job.operator);
+        await populateOperatorSelector(job.operator);
 
         if (['sms', 'voice_call'].includes(job.delivery)) {
             $('cronDeliveryTargetWrap').classList.remove('hide');
@@ -450,110 +467,190 @@ async function openEditModal(jobId) {
         // Hydrate models; selectedId undefined → picks up last-used per provider.
         await hydrateCronModelSelect(provider);
         // Populate operator selector defaulting to current operator
-        populateOperatorSelector();
+        await populateOperatorSelector();
     }
 
     updateSchedulePreview();
     modal.classList.remove('hide');
 }
 
+/**
+ * Map a stored cron expression onto the Simple editor, or return false (the
+ * caller then opens the Advanced tab with the expression verbatim).
+ * @param {string} cron
+ * @returns {boolean}
+ */
 function parseToSimple(cron) {
-    // Try to parse a cron expression back into simple mode fields
-    const parts = cron.split(' ');
-    if (parts.length !== 5) return false;
+    const fields = parseSimpleSchedule(cron);
+    if (!fields) return false;
+    applySimpleFields(fields);
+    return true;
+}
 
-    const [min, hour, dom, mon, dow] = parts;
-
-    // Every hour: 0 * * * *
-    if (min === '0' && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
-        $('cronFrequency').value = 'hourly';
-        $('cronTimeWrap').classList.add('hide');
-        $('cronDayWrap').classList.add('hide');
-        $('cronIntervalWrap').classList.add('hide');
-        return true;
+/** Show a parsed Simple schedule in the form controls. */
+function applySimpleFields(fields) {
+    const { frequency } = fields;
+    $('cronFrequency').value = frequency;
+    if (frequency === 'daily' || frequency === 'weekly') {
+        $('cronTime').value = `${String(fields.hour).padStart(2, '0')}:${String(fields.minute).padStart(2, '0')}`;
     }
-
-    // Every N minutes: */N * * * *
-    if (min.startsWith('*/') && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
-        $('cronFrequency').value = 'custom_interval';
-        $('cronIntervalValue').value = min.slice(2);
-        $('cronIntervalUnit').value = 'minutes';
-        $('cronTimeWrap').classList.add('hide');
-        $('cronDayWrap').classList.add('hide');
-        $('cronIntervalWrap').classList.remove('hide');
-        return true;
+    if (frequency === 'weekly') $('cronDay').value = String(fields.day);
+    if (frequency === 'custom_interval') {
+        $('cronIntervalUnit').value = fields.intervalUnit;
+        populateIntervalOptions(fields.intervalUnit, fields.intervalValue);
     }
-
-    // Every N hours: 0 */N * * *
-    if (min === '0' && hour.startsWith('*/') && dom === '*' && mon === '*' && dow === '*') {
-        $('cronFrequency').value = 'custom_interval';
-        $('cronIntervalValue').value = hour.slice(2);
-        $('cronIntervalUnit').value = 'hours';
-        $('cronTimeWrap').classList.add('hide');
-        $('cronDayWrap').classList.add('hide');
-        $('cronIntervalWrap').classList.remove('hide');
-        return true;
-    }
-
-    // Daily: M H * * *
-    if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && mon === '*' && dow === '*') {
-        $('cronFrequency').value = 'daily';
-        $('cronTime').value = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
-        $('cronTimeWrap').classList.remove('hide');
-        $('cronDayWrap').classList.add('hide');
-        $('cronIntervalWrap').classList.add('hide');
-        return true;
-    }
-
-    // Weekly: M H * * D
-    if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && mon === '*' && /^\d+$/.test(dow)) {
-        $('cronFrequency').value = 'weekly';
-        $('cronTime').value = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
-        $('cronDay').value = dow;
-        $('cronTimeWrap').classList.remove('hide');
-        $('cronDayWrap').classList.remove('hide');
-        $('cronIntervalWrap').classList.add('hide');
-        return true;
-    }
-
-    return false;
+    $('cronTimeWrap').classList.toggle('hide', frequency === 'hourly' || frequency === 'custom_interval');
+    $('cronDayWrap').classList.toggle('hide', frequency !== 'weekly');
+    $('cronIntervalWrap').classList.toggle('hide', frequency !== 'custom_interval');
 }
 
 // =============================================================================
 // Schedule Builder
 // =============================================================================
 
-function simpleToCron() {
-    const freq = $('cronFrequency')?.value;
-    const time = $('cronTime')?.value || '07:00';
-    const [hours, minutes] = time.split(':').map(Number);
-    const day = $('cronDay')?.value;
+// The "every N" periods cron can repeat exactly. A step of N in the minute
+// or hour field restarts every hour or day, so N must divide 60 or 24: a
+// 45-minute step fires at :00 and :45, a 90-minute one once an hour
+// (P05-ops-panels-web-04).
+export const INTERVAL_DIVISORS = Object.freeze({
+    minutes: Object.freeze([1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30]),
+    hours: Object.freeze([1, 2, 3, 4, 6, 8, 12]),
+});
 
-    switch (freq) {
+const _isInt = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+
+/**
+ * Build the cron expression for a Simple schedule, or null when the fields do
+ * not describe one (out-of-range time or day, an interval cron cannot repeat
+ * exactly). Days are standard cron: 0 = Sunday .. 6 = Saturday.
+ * @param {{frequency: string, hour?: number, minute?: number, day?: number,
+ *          intervalValue?: number, intervalUnit?: string}} f
+ * @returns {string|null}
+ */
+export function buildSimpleCron(f) {
+    switch (f.frequency) {
         case 'hourly':
-            return { cron: '0 * * * *', hint: 'Every hour' };
+            return '0 * * * *';
         case 'daily':
-            return { cron: `${minutes} ${hours} * * *`, hint: `Daily at ${formatTimeStr(hours, minutes)}` };
+            return _isInt(f.hour, 0, 23) && _isInt(f.minute, 0, 59) ? `${f.minute} ${f.hour} * * *` : null;
         case 'weekly':
-            return { cron: `${minutes} ${hours} * * ${day}`, hint: `Weekly on ${dayName(day)} at ${formatTimeStr(hours, minutes)}` };
+            return _isInt(f.hour, 0, 23) && _isInt(f.minute, 0, 59) && _isInt(f.day, 0, 6)
+                ? `${f.minute} ${f.hour} * * ${f.day}` : null;
         case 'custom_interval': {
-            const val = parseInt($('cronIntervalValue')?.value || '30');
-            const unit = $('cronIntervalUnit')?.value || 'minutes';
-            if (unit === 'minutes') return { cron: `*/${val} * * * *`, hint: `Every ${val} minutes` };
-            return { cron: `0 */${val} * * *`, hint: `Every ${val} hours` };
+            const allowed = INTERVAL_DIVISORS[f.intervalUnit];
+            if (!allowed || !allowed.includes(f.intervalValue)) return null;
+            return f.intervalUnit === 'minutes' ? `*/${f.intervalValue} * * * *` : `0 */${f.intervalValue} * * *`;
         }
         default:
-            return { cron: '0 7 * * *', hint: 'Daily at 7:00 AM' };
+            return null;
     }
+}
+
+/**
+ * Parse a cron expression into Simple-editor fields, ONLY when the Simple
+ * editor rebuilds exactly the same expression. Anything else (a weekday range,
+ * a month, a non-divisor interval, '7' for Sunday, leading zeros) returns null,
+ * so opening and saving a job can never rewrite its schedule.
+ * @param {string} cron
+ * @returns {object|null}
+ */
+export function parseSimpleSchedule(cron) {
+    const parts = String(cron || '').trim().split(/\s+/);
+    if (parts.length !== 5) return null;
+    const [min, hour, dom, mon, dow] = parts;
+    if (dom !== '*' || mon !== '*') return null;
+
+    let fields = null;
+    const step = /^\*\/(\d+)$/;
+    if (min === '0' && hour === '*' && dow === '*') {
+        fields = { frequency: 'hourly' };
+    } else if (step.test(min) && hour === '*' && dow === '*') {
+        fields = { frequency: 'custom_interval', intervalUnit: 'minutes', intervalValue: Number(min.slice(2)) };
+    } else if (min === '0' && step.test(hour) && dow === '*') {
+        fields = { frequency: 'custom_interval', intervalUnit: 'hours', intervalValue: Number(hour.slice(2)) };
+    } else if (/^\d+$/.test(min) && /^\d+$/.test(hour)) {
+        if (dow === '*') fields = { frequency: 'daily', hour: Number(hour), minute: Number(min) };
+        else if (/^\d$/.test(dow)) fields = { frequency: 'weekly', hour: Number(hour), minute: Number(min), day: Number(dow) };
+    }
+    return fields && buildSimpleCron(fields) === parts.join(' ') ? fields : null;
+}
+
+/** Human label for Simple fields (the form's preview line). */
+function describeSimple(f) {
+    switch (f.frequency) {
+        case 'hourly':
+            return 'Every hour';
+        case 'daily':
+            return `Daily at ${formatTimeStr(f.hour, f.minute)}`;
+        case 'weekly':
+            return `Weekly on ${dayName(f.day)} at ${formatTimeStr(f.hour, f.minute)}`;
+        case 'custom_interval':
+            return `Every ${f.intervalValue} ${f.intervalUnit}`;
+        default:
+            return '';
+    }
+}
+
+/**
+ * Fill the interval picker with the divisors for [unit], keeping [selected]
+ * when it is one of them. Works on the shipped <select>; an older cached page
+ * with a number <input> keeps its free value and is validated on build.
+ */
+function populateIntervalOptions(unit, selected) {
+    const ctl = $('cronIntervalValue');
+    if (!ctl || ctl.tagName !== 'SELECT') {
+        if (ctl && selected !== undefined) ctl.value = String(selected);
+        return;
+    }
+    const allowed = INTERVAL_DIVISORS[unit] || INTERVAL_DIVISORS.minutes;
+    const keep = selected !== undefined ? Number(selected) : Number(ctl.value);
+    ctl.replaceChildren(...allowed.map(n => {
+        const opt = document.createElement('option');
+        opt.value = String(n);
+        opt.textContent = String(n);
+        return opt;
+    }));
+    const fallback = unit === 'hours' ? 1 : 30;
+    ctl.value = String(allowed.includes(keep) ? keep : fallback);
+}
+
+/** Read the Simple-editor controls into fields for buildSimpleCron. */
+function simpleFieldsFromForm() {
+    const time = $('cronTime')?.value || '07:00';
+    const [hour, minute] = time.split(':').map(Number);
+    return {
+        frequency: $('cronFrequency')?.value || 'daily',
+        hour,
+        minute,
+        day: Number($('cronDay')?.value),
+        intervalValue: parseInt($('cronIntervalValue')?.value || '', 10),
+        intervalUnit: $('cronIntervalUnit')?.value || 'minutes',
+    };
+}
+
+/**
+ * The Simple form's schedule: { cron, hint }. cron is null when the form does
+ * not describe a schedule cron can express (hint then says why).
+ */
+function simpleToCron() {
+    const fields = simpleFieldsFromForm();
+    const cron = buildSimpleCron(fields);
+    if (cron === null) {
+        const hint = fields.frequency === 'custom_interval'
+            ? `an interval of ${INTERVAL_DIVISORS[fields.intervalUnit]?.join(', ') || '…'} ${fields.intervalUnit}`
+            : 'a valid time';
+        return { cron: null, hint: `Pick ${hint}` };
+    }
+    return { cron, hint: describeSimple(fields) };
 }
 
 function updateSchedulePreview() {
     // Check which tab is active
     const simpleActive = !$('cronSimpleSchedule')?.classList.contains('hide');
     if (simpleActive) {
-        const { hint } = simpleToCron();
+        const { cron, hint } = simpleToCron();
         const preview = $('cronPreviewText');
-        if (preview) preview.textContent = `Runs ${hint.toLowerCase()}`;
+        if (preview) preview.textContent = cron ? `Runs ${hint.toLowerCase()}` : hint;
     } else {
         const expr = $('cronExpression')?.value || '';
         const preview = $('cronExpressionPreview');
@@ -578,12 +675,12 @@ let _previewSeq = 0;
  * Resolve the cron expression the form currently describes, using the SAME
  * schedule-building logic the save path uses: simpleToCron() for the simple
  * tab, the raw #cronExpression for the advanced tab. Returns '' when there's
- * nothing to preview yet (advanced tab, empty field).
+ * nothing to preview yet (advanced tab, empty field, an invalid Simple form).
  * @returns {string}
  */
 function currentScheduleExpr() {
     const simpleActive = !$('cronSimpleSchedule')?.classList.contains('hide');
-    if (simpleActive) return simpleToCron().cron;
+    if (simpleActive) return simpleToCron().cron || '';
     return $('cronExpression')?.value?.trim() || '';
 }
 
@@ -683,21 +780,11 @@ function formatPreviewTime(isoStr) {
 function describeCron(cron) {
     const parts = cron.trim().split(/\s+/);
     if (parts.length !== 5) return 'Invalid cron expression';
-    try {
-        const [min, hour, dom, mon, dow] = parts;
-        if (min === '0' && hour === '*') return 'Every hour';
-        if (min.startsWith('*/')) return `Every ${min.slice(2)} minutes`;
-        if (hour.startsWith('*/')) return `Every ${hour.slice(2)} hours`;
-        if (dom === '*' && mon === '*' && dow === '*' && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
-            return `Daily at ${formatTimeStr(parseInt(hour), parseInt(min))}`;
-        }
-        if (dom === '*' && mon === '*' && /^\d+$/.test(dow) && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
-            return `${dayName(dow)} at ${formatTimeStr(parseInt(hour), parseInt(min))}`;
-        }
-        return `Cron: ${cron}`;
-    } catch {
-        return `Cron: ${cron}`;
-    }
+    // Name only the shapes the Simple editor owns exactly; anything else is
+    // echoed, so the hint can never claim "Every 45 minutes" for */45 or
+    // "Every hour" for a weekday-only hourly schedule.
+    const fields = parseSimpleSchedule(cron);
+    return fields ? describeSimple(fields) : `Cron: ${cron.trim()}`;
 }
 
 function handleScheduleTab(e) {
@@ -713,14 +800,21 @@ function handleScheduleTab(e) {
     } else {
         $('cronSimpleSchedule')?.classList.add('hide');
         $('cronAdvancedSchedule')?.classList.remove('hide');
-        // Sync cron expression from simple mode
+        // Sync cron expression from simple mode (an invalid Simple form leaves
+        // the Advanced field as it was).
         const { cron } = simpleToCron();
-        if ($('cronExpression')) $('cronExpression').value = cron;
+        if (cron && $('cronExpression')) $('cronExpression').value = cron;
     }
     updateSchedulePreview();
 }
 
 function setupScheduleBuilder() {
+    // Interval picker: only the divisors of the chosen unit (P05-04).
+    populateIntervalOptions($('cronIntervalUnit')?.value || 'minutes', 30);
+    $('cronIntervalUnit')?.addEventListener('change', () => {
+        populateIntervalOptions($('cronIntervalUnit').value);
+    });
+
     // Frequency change
     const freq = $('cronFrequency');
     if (freq) {
@@ -810,6 +904,10 @@ async function _doSaveJob() {
     const simpleActive = !$('cronSimpleSchedule')?.classList.contains('hide');
     if (simpleActive) {
         const result = simpleToCron();
+        if (!result.cron) {
+            toastError(result.hint);
+            return;
+        }
         schedule = result.cron;
         frequencyHint = result.hint;
     } else {
@@ -826,18 +924,23 @@ async function _doSaveJob() {
         // Fresh-box-safe operator fallback: the server-driven #cronOperator
         // dropdown is the primary source; fall back to current operator, then
         // the server operator list head, then empty (never a hardcoded name).
-        const operator = $('cronOperator')?.value || getOperator() || (_operatorList && _operatorList[0]) || '';
+        const operatorSel = $('cronOperator');
+        const operator = operatorSel?.value || getOperator() || (_operatorList && _operatorList[0]) || '';
 
         if (jobId) {
-            // Update existing
-            await updateJob(jobId, {
+            // Update existing. The operator is sent only when the user changed
+            // it, so an edit can never re-home a job by accident (P05-03).
+            const updates = {
                 name, prompt, schedule,
                 frequency_hint: frequencyHint,
                 provider, model, delivery,
                 delivery_target: deliveryTarget || null,
-                operator,
                 one_shot: oneShot
-            });
+            };
+            if (operator && operator !== (operatorSel?.dataset.original || '')) {
+                updates.operator = operator;
+            }
+            await updateJob(jobId, updates);
             toastSuccess('Job updated');
         } else {
             // Create new
@@ -863,6 +966,10 @@ async function _doSaveJob() {
 // =============================================================================
 // History Modal
 // =============================================================================
+
+// A run the scheduler could not see the end of (O15-02/-03): it may have
+// delivered, so it is neither a success nor a plain failure.
+const HISTORY_STATUS_LABELS = { outcome_unknown: 'outcome unknown' };
 
 async function openHistoryModal(jobId) {
     const modal = $('cronHistoryModal');
@@ -890,7 +997,7 @@ async function openHistoryModal(jobId) {
                 <div class="cron-history-meta">
                     <span class="cron-history-model">${escapeHtml(friendlyModelName(hProvider, h.model))}</span>
                     <span class="cron-history-duration">${escapeHtml(String(h.duration_ms))}ms</span>
-                    <span class="cron-history-status">${escapeHtml(h.delivery_status || 'completed')}</span>
+                    <span class="cron-history-status">${escapeHtml(HISTORY_STATUS_LABELS[h.delivery_status] || h.delivery_status || 'completed')}</span>
                 </div>
                 ${h.result ? `<div class="cron-history-result">${escapeHtml(h.result.substring(0, 300))}${h.result.length > 300 ? '...' : ''}</div>` : ''}
                 ${h.error ? `<div class="cron-history-error-text">${escapeHtml(h.error)}</div>` : ''}
