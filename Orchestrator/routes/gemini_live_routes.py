@@ -186,10 +186,8 @@ async def execute_search_snapshots(session: GeminiLiveSession, arguments: Dict) 
         return "Error: No search query provided."
 
     try:
-        vol_txt = read_text_safe(VOL_PATH)
-
         # Use hybrid retrieval for best results
-        results = hybrid_retrieve(vol_txt, query, k=k, operator=session.operator)
+        results = hybrid_retrieve("", query, k=k, operator=session.operator)
 
         if not results:
             return f"No snapshots found matching: {query}"

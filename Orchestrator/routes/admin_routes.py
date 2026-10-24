@@ -1001,10 +1001,9 @@ def debug_context_retrieval(operator: str = "", query: str = "test query"):
         KF  = CFG.getint("context", "keyword_fossils_per_user", fallback=33)
         CAP = CFG.getint("context", "max_fossil_chars", fallback=4000)
 
-        vol_txt = read_text_safe(VOL_PATH)
-        recent_snaps  = get_recent_fossils_for_operator(vol_txt, operator, RF, CAP)
+        recent_snaps  = get_recent_fossils_for_operator("", operator, RF, CAP)
         # Use hybrid search (keyword + semantic embeddings) for better retrieval
-        keyword_snaps = hybrid_retrieve(vol_txt, query, KF, operator=operator)
+        keyword_snaps = hybrid_retrieve("", query, KF, operator=operator)
 
         recent_ids = list(set(extract_snap_ids(recent_snaps)))
         relevant_ids = extract_snap_ids(keyword_snaps)

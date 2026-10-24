@@ -50,7 +50,6 @@ def _patch_builder(monkeypatch, recent_blocks, keyword_blocks, semantic_blocks,
                    checkpoint_blocks=(), **cfg_overrides):
     """Patch the four retrievers with pre-built BLOCKS (rank-honoring [:k])."""
     monkeypatch.setattr(cb, "CFG", _FakeCFG(**cfg_overrides))
-    monkeypatch.setattr(cb, "read_text_safe", lambda p: "")
     monkeypatch.setattr(cb, "get_recent_media_artifacts", lambda op, limit=10: [])
     recorded = {}
 

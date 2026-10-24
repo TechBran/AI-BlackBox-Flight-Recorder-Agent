@@ -1,0 +1,269 @@
+"""How much of the ledger a chat turn, a memory search and a snapshot fetch read.
+
+Audit rank 45 (X05-architecture-14, O02-chat-routes-A-04, O03-chat-routes-B-01):
+the volume is a single append-only file (58 MB on the dev box, growing with
+every mint). A /chat/stream turn read it whole five times - once decoded to a
+str for a parameter every index-backed helper ignores, then once more per
+section - and every search_snapshots tool call read and decoded it again only
+to hand hybrid_retrieve an argument it never used. The snapshot index already
+carries each snapshot's byte range, so everything but the keyword scan (which
+scores the operator's whole corpus) now reads just the snapshots it returns.
+
+These tests run against a real ledger and index written under tmp_path and
+count the bytes actually read from the volume file, so they hold whatever the
+implementation reads through.
+"""
+from __future__ import annotations
+
+import asyncio
+import builtins
+import io
+
+import pytest
+
+from Orchestrator import fossils
+from Orchestrator.config import VOL_PATH
+
+OPS = ("Ana", "Ben", "Cy")
+
+
+def _block(snap_id: str, utc: str, operator: str, body: str) -> str:
+    start = f"=== START SNAPSHOT — UTC {utc} — {snap_id} (7.1) ===\r\n"
+    end = f"=== END SNAPSHOT — {snap_id} — UTC {utc} ===\r\n"
+    return (f"{start}OPERATOR: {operator}\r\nTYPE: normal\r\n"
+            f"Raw Session Log\r\n[1] {utc} operator={operator} user: {body}\r\n{end}")
+
+
+@pytest.fixture
+def ledger(isolated_stores):
+    """A 120-snapshot ledger for three operators (multi-byte text throughout,
+    so a char/byte offset mix-up shows) plus its byte-offset index."""
+    parts = []
+    for i in range(1, 121):
+        op = OPS[i % 3]
+        body = (f"turn {i} for {op} — reranker latency and the event loop "
+                f"{'déjà vu ' * (i % 5)}🙂 " + "filler words " * 40)
+        if i % 7 == 0:
+            body = "[CHECKPOINT] compressed summary " + body
+        parts.append(_block(f"SNAP-20261001-{i}", f"2026-10-01T{i // 60:02d}:{i % 60:02d}:00Z", op, body))
+    VOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VOL_PATH.write_bytes("".join(parts).encode("utf-8"))
+    index = fossils.rebuild_snapshot_index()
+    assert len(index) == 120
+    assert sum(1 for m in index.values() if m["type"] == "checkpoint") == 17
+    return index
+
+
+@pytest.fixture
+def volume_reads(monkeypatch):
+    """Bytes read from the volume file while the test runs (open() and io.open
+    are both wrapped, so a pathlib read counts too)."""
+    counter = {"bytes": 0}
+    real_open = builtins.open
+
+    def counting_open(file, mode="r", *a, **k):
+        f = real_open(file, mode, *a, **k)
+        name = str(file) if not isinstance(file, int) else ""
+        if name.endswith("SNAPSHOT_VOLUME.txt") and "r" in mode:
+            real_read = f.read
+
+            def read(n=-1):
+                data = real_read(n)
+                counter["bytes"] += len(data)
+                return data
+            f.read = read
+        return f
+
+    monkeypatch.setattr(builtins, "open", counting_open)
+    monkeypatch.setattr(io, "open", counting_open)
+    return counter
+
+
+def _fake_retrieve(index):
+    """retrieve() without an embedding provider: each operator's newest ids."""
+    def retrieve(query, operator="", k=10, **kw):
+        ids = sorted((s for s, m in index.items() if not operator or m["operator"] == operator),
+                     key=lambda s: int(s.rsplit("-", 1)[1]), reverse=True)[:k]
+        rows = [(s, 1.0 / (n + 1)) for n, s in enumerate(ids)]
+        return [(s, sc, None) for s, sc in rows] if kw.get("return_provenance") else rows
+    return retrieve
+
+
+def _size(index, ids):
+    return sum(index[s]["byte_end"] - index[s]["byte_start"] for s in ids)
+
+
+# -- the per-turn context build ------------------------------------------------
+
+def test_stream_turn_reads_the_ledger_whole_at_most_once(ledger, volume_reads, monkeypatch):
+    """Only the keyword channel scans the whole volume; every other section
+    reads just its own snapshots (plus the semantic over-fetch). Before: the
+    volume was read whole 5 times per turn."""
+    from Orchestrator import context_builder, retrieval
+    monkeypatch.setattr(retrieval, "retrieve", _fake_retrieve(ledger))
+    vol_size = VOL_PATH.stat().st_size
+
+    _ctx, prov = context_builder.build_fossil_context(
+        "reranker latency", "Ana", provider="anthropic", include_media=False)
+
+    assert prov["recent"] and prov["semantic"] and prov["checkpoint"] and prov["keyword"]
+    assert vol_size <= volume_reads["bytes"] < 1.5 * vol_size, (
+        f"read {volume_reads['bytes']:,} bytes of a {vol_size:,}-byte volume")
+
+
+def test_context_without_the_keyword_channel_never_reads_the_whole_volume(
+        ledger, volume_reads, monkeypatch):
+    from Orchestrator import context_builder, retrieval
+    monkeypatch.setattr(retrieval, "retrieve", _fake_retrieve(ledger))
+
+    _ctx, prov = context_builder.build_fossil_context(
+        "reranker latency", "Ben", provider="anthropic", include_keyword=False,
+        include_media=False)
+
+    delivered = [s for ids in prov.values() for s in ids]
+    assert delivered
+    # The semantic over-fetch decodes a few more ids than survive dedupe.
+    assert volume_reads["bytes"] < VOL_PATH.stat().st_size // 2
+    assert volume_reads["bytes"] >= _size(ledger, delivered)
+
+
+# -- memory search tool calls --------------------------------------------------
+
+def test_search_snapshots_tool_reads_no_volume_text(ledger, volume_reads, monkeypatch):
+    """The ToolVault executor (MCP, chat tool loops, phone) used to read and
+    decode the whole volume before every search for an argument that is unused."""
+    from Orchestrator.toolvault.context import ToolContext
+    from ToolVault.tools.search_snapshots import executor
+    seen = []
+
+    def fake_hybrid(vol_txt, query, k=3, operator="", window_budget_chars=None):
+        seen.append(vol_txt)
+        return []
+    monkeypatch.setattr(fossils, "hybrid_retrieve", fake_hybrid)
+
+    out = asyncio.run(executor.execute({"query": "reranker"}, ToolContext(operator="Ana")))
+
+    assert out.success and seen == [""]
+    assert volume_reads["bytes"] == 0
+
+
+def test_list_recent_snapshots_tool_reads_only_what_it_returns(ledger, volume_reads):
+    from Orchestrator.toolvault.context import ToolContext
+    from ToolVault.tools.list_recent_snapshots import executor
+
+    out = asyncio.run(executor.execute({"count": 3}, ToolContext(operator="Ben")))
+
+    assert out.success and out.data["count"] == 3
+    newest_ben = sorted((s for s, m in ledger.items() if m["operator"] == "Ben"),
+                        key=lambda s: int(s.rsplit("-", 1)[1]))[-3:]
+    assert volume_reads["bytes"] == _size(ledger, newest_ben)
+
+
+def test_hybrid_retrieve_defaults_vol_txt_and_reads_only_its_results(
+        ledger, volume_reads, monkeypatch):
+    from Orchestrator import retrieval
+    monkeypatch.setattr(retrieval, "retrieve", _fake_retrieve(ledger))
+
+    texts = fossils.hybrid_retrieve(query="reranker", k=4, operator="Ana")
+
+    ids = fossils.extract_snap_ids(texts)
+    assert len(ids) == 4
+    assert volume_reads["bytes"] == _size(ledger, ids)
+
+
+# Files whose hot paths fed vol_txt to helpers that ignore it. A whole-volume
+# read must not come back into any of them.
+_NO_VOLUME_TEXT = [
+    "Orchestrator/context_builder.py",
+    "Orchestrator/routes/chat_routes.py",
+    "Orchestrator/routes/gemini_live_routes.py",
+    "Orchestrator/routes/grok_live_routes.py",
+    "Orchestrator/routes/realtime_routes.py",
+    "Orchestrator/browser/driver_anthropic.py",
+    "ToolVault/tools/search_snapshots/executor.py",
+    "ToolVault/tools/list_recent_snapshots/executor.py",
+]
+
+
+@pytest.mark.parametrize("rel", _NO_VOLUME_TEXT)
+def test_no_whole_volume_text_read_on_the_hot_paths(rel):
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / rel).read_text(encoding="utf-8")
+    for needle in ("read_text_safe(VOL_PATH)", "read_text_safe, VOL_PATH"):
+        assert needle not in src, f"{rel} still reads the whole volume as text ({needle})"
+
+
+# -- the index-backed helpers ignore vol_txt, the no-index fallback reads lazily
+
+def _all_helpers(vol_txt):
+    out = {}
+    for op in OPS + ("system",):
+        out[f"recent:{op}"] = fossils.get_recent_fossils_for_operator(vol_txt, op, 5, None)
+        out[f"recent_all:{op}"] = fossils.get_recent_fossils_for_operator(vol_txt, op, 0, None)
+        out[f"recent_cap:{op}"] = fossils.get_recent_fossils_for_operator(vol_txt, op, 3, 120)
+        out[f"ckpt:{op}"] = fossils.get_recent_checkpoints_for_operator(vol_txt, op, count=2)
+        out[f"latest_ckpt:{op}"] = fossils.get_latest_checkpoint_for_operator(vol_txt, op)
+        out[f"kw:{op}"] = fossils.keyword_retrieve_for_operator(vol_txt, "reranker latency déjà", 6, op)
+    return out
+
+
+def test_index_backed_helpers_give_the_same_answer_without_vol_txt(ledger):
+    full = fossils.read_text_safe(VOL_PATH)
+    with_text = _all_helpers(full)
+    assert with_text["recent:Ana"] and with_text["ckpt:Ben"] and with_text["kw:Ana"]
+    assert _all_helpers("") == with_text
+
+
+def test_no_index_fallback_reads_the_volume_itself(ledger, monkeypatch):
+    """A box whose index is missing still answers when the caller passes ""."""
+    full = fossils.read_text_safe(VOL_PATH)
+    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: {})
+    with_text = _all_helpers(full)
+    assert with_text["recent:Ana"] and with_text["kw:Ana"]
+    assert _all_helpers("") == with_text
+
+
+def test_recent_fossils_cap_and_count_match_the_whole_read(ledger):
+    newest = fossils.get_recent_fossils_for_operator("", "Ana", 2, None)
+    assert fossils.extract_snap_ids(newest) == ["SNAP-20261001-117", "SNAP-20261001-120"]
+    capped = fossils.get_recent_fossils_for_operator("", "Ana", 2, 120)
+    assert [len(t) <= 120 + 64 for t in capped] == [True, True]
+
+
+def test_index_past_eof_keeps_the_old_partial_and_missing_rules(ledger, monkeypatch, volume_reads):
+    """Index/volume drift (a truncated volume): a snapshot that starts inside
+    the file comes back partial, one that starts past it comes back empty."""
+    size = VOL_PATH.stat().st_size
+    drifted = {
+        "SNAP-20261001-1": dict(ledger["SNAP-20261001-1"]),
+        "SNAP-20261002-1": {"byte_start": size - 10, "byte_end": size + 500,
+                            "operator": "Ben", "timestamp": "x", "type": "normal"},
+        "SNAP-20261002-2": {"byte_start": size + 10, "byte_end": size + 900,
+                            "operator": "Ben", "timestamp": "x", "type": "normal"},
+    }
+    drifted["SNAP-20261001-1"]["operator"] = "Ben"
+    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: drifted)
+    raw = VOL_PATH.read_bytes()
+
+    texts = fossils.get_recent_fossils_for_operator("", "Ben", 0, None)
+
+    lo, hi = ledger["SNAP-20261001-1"]["byte_start"], ledger["SNAP-20261001-1"]["byte_end"]
+    assert texts == [raw[lo:hi].decode(), raw[size - 10:].decode("utf-8", "replace"), ""]
+    assert fossils.get_snapshot_by_id("SNAP-20261002-1") is None
+    assert fossils.get_snapshot_by_id("SNAP-20261002-2") is None
+
+
+# -- the per-id snapshot fetch (Portal Timeline, Android Timeline, SNAP-id links)
+
+def test_get_snapshot_by_id_reads_only_that_snapshot(ledger, volume_reads):
+    meta = ledger["SNAP-20261001-17"]
+    got = fossils.get_snapshot_by_id("SNAP-20261001-17")
+
+    raw = VOL_PATH.read_bytes()
+    volume_reads["bytes"] -= len(raw)  # the test's own comparison read
+    assert got["content"] == raw[meta["byte_start"]:meta["byte_end"]].decode("utf-8")
+    assert got["metadata"] == {"operator": "Cy", "timestamp": "2026-10-01T00:17:00Z",
+                               "type": "normal", "byte_start": meta["byte_start"],
+                               "byte_end": meta["byte_end"]}
+    assert volume_reads["bytes"] == meta["byte_end"] - meta["byte_start"]
+    assert fossils.get_snapshot_by_id("SNAP-19990101-1") is None

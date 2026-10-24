@@ -74,7 +74,6 @@ class _FakeCFG:
 def _patch_builder(monkeypatch, recent_blocks=(), keyword_blocks=(),
                    semantic_blocks=(), checkpoint_blocks=(), **cfg_overrides):
     monkeypatch.setattr(cb, "CFG", _FakeCFG(**cfg_overrides))
-    monkeypatch.setattr(cb, "read_text_safe", lambda p: "")
     monkeypatch.setattr(cb, "get_recent_media_artifacts", lambda op, limit=10: [])
     monkeypatch.setattr(cb, "get_recent_fossils_for_operator",
                         lambda vol, op, n, cap: list(recent_blocks)[:n])

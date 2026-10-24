@@ -8,13 +8,10 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     try:
         from Orchestrator.fossils import get_recent_fossils_for_operator
-        from Orchestrator.volume import read_text_safe
-        from Orchestrator.config import VOL_PATH
 
-        vol_txt = read_text_safe(VOL_PATH)
-
-        # Get recent snapshots (cap each at 10000 chars for readability)
-        snapshots = get_recent_fossils_for_operator(vol_txt, ctx.operator, count, cap_chars_each=10000)
+        # Get recent snapshots (cap each at 10000 chars for readability). Only
+        # their byte ranges are read; no whole-volume text is needed.
+        snapshots = get_recent_fossils_for_operator("", ctx.operator, count, cap_chars_each=10000)
 
         if not snapshots:
             return ToolResult(

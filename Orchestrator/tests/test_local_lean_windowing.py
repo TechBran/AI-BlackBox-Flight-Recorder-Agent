@@ -282,7 +282,7 @@ def _fake_volume(texts_by_id):
     return index, blob
 
 
-def test_semantic_retrieve_windows_only_when_budget_passed(monkeypatch):
+def test_semantic_retrieve_windows_only_when_budget_passed(monkeypatch, isolated_stores):
     text = _big_snapshot()
     ordinal = _needle_ordinal(text)
     index, blob = _fake_volume({"SNAP-20260703-0001": text})
@@ -299,7 +299,9 @@ def test_semantic_retrieve_windows_only_when_budget_passed(monkeypatch):
 
     monkeypatch.setattr("Orchestrator.retrieval.retrieve", _fake_retrieve)
     monkeypatch.setattr(fossils, "load_snapshot_index", lambda: index)
-    monkeypatch.setattr(fossils, "read_volume_bytes", lambda path: blob)
+    # The decode reads each result's byte range from the volume file itself.
+    fossils.VOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fossils.VOL_PATH.write_bytes(blob)
     # Hermetic model_key: the fixture ordinal was derived with model_key=None,
     # so the delivery-side re-derivation must use the same tokenizer backend.
     monkeypatch.setattr(
@@ -350,7 +352,6 @@ def test_build_fossil_context_passes_local_cap_as_window_budget():
          mock.patch.object(cb, "get_recent_checkpoints_for_operator", return_value=[]), \
          mock.patch.object(cb, "get_recent_fossils_for_operator", return_value=[]), \
          mock.patch.object(cb, "keyword_retrieve_for_operator", return_value=[]), \
-         mock.patch.object(cb, "read_text_safe", return_value=""), \
          mock.patch.object(cb, "get_recent_media_artifacts", return_value=[]):
         cb.build_fossil_context(
             "q", "Brandon", provider="local",

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from Orchestrator.config import CFG, VOL_PATH
+from Orchestrator.config import CFG
 from Orchestrator.fossils import (
     extract_snap_ids,
     format_snapshot_for_delivery,
@@ -32,7 +32,6 @@ from Orchestrator.fossils import (
     semantic_retrieve,
 )
 from Orchestrator.media import get_recent_media_artifacts
-from Orchestrator.volume import read_text_safe
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,10 +262,12 @@ def build_fossil_context(
     is_local = bool(provider) and provider.lower() == "local"
     CAP = CFG.getint("context", "max_fossil_chars", fallback=10000) if is_local else None
 
-    # Read volume once
-    vol_txt = read_text_safe(VOL_PATH)
-
-    # Four separate retrieval sources, all scoped to `operator`.
+    # Four separate retrieval sources, all scoped to `operator`. None of them
+    # needs the volume text: with a snapshot index each reads only the byte
+    # ranges it returns (the keyword scan still covers the operator's corpus),
+    # and without one each reads the volume itself when handed "". Reading and
+    # decoding the whole 58 MB volume here every turn fed nothing (audit
+    # X05-architecture-14).
     # include_recent / include_keyword let lean profiles (e.g. on-device
     # `local`) skip these sources entirely; cloud callers leave them True.
     #
@@ -276,13 +277,13 @@ def build_fossil_context(
     # to be filter-only, which silently SHRANK the keyword/semantic sections
     # exactly when channels agreed on a snapshot's relevance.
     recent_snaps = (
-        get_recent_fossils_for_operator(vol_txt, operator, RF, CAP)
+        get_recent_fossils_for_operator("", operator, RF, CAP)
         if include_recent else []
     )
     recent_ids = set(extract_snap_ids(recent_snaps))
 
     keyword_snaps_raw = (
-        keyword_retrieve_for_operator(vol_txt, user_text, KF + len(recent_ids), operator)
+        keyword_retrieve_for_operator("", user_text, KF + len(recent_ids), operator)
         if (include_keyword and user_text) else []
     )
     keyword_snaps = fill_unseen(keyword_snaps_raw, KF, recent_ids)
@@ -304,7 +305,7 @@ def build_fossil_context(
     semantic_snaps = fill_unseen(semantic_snaps_raw, SF, seen_ids)
 
     # Checkpoints stay UN-deduped: they are a pinned section, not a discovery channel.
-    checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CP)
+    checkpoint_snaps = get_recent_checkpoints_for_operator("", operator, count=CP)
 
     # Flight Recorder (design 2026-07-23 §2.4): its turns additionally pin the
     # most recent flight report(s) + a LIVE watchtower digest, so "is

@@ -88,8 +88,9 @@ def test_executor_on_device_is_body_only_and_within_budget(monkeypatch):
 
 # ── /fossil/hybrid: snippet is BODY head, not START/BEACON envelope ──────────
 
-def test_fossil_hybrid_snippet_is_body_not_envelope(monkeypatch):
+def test_fossil_hybrid_snippet_is_body_not_envelope(monkeypatch, isolated_stores):
     import Orchestrator.routes.task_routes as tr
+    from Orchestrator.config import VOL_PATH
 
     sid = "SNAP-20260704-7980"
     monkeypatch.setattr(tr, "retrieve", lambda q, operator="", k=10: [(sid, 0.91)])
@@ -99,7 +100,9 @@ def test_fossil_hybrid_snippet_is_body_not_envelope(monkeypatch):
                                        "operator": "Anna",
                                        "timestamp": "2026-07-04T22:37:21Z",
                                        "type": "normal"}})
-    monkeypatch.setattr(tr, "read_volume_bytes", lambda p: FULL_SNAPSHOT.encode())
+    # The route reads each result's own byte range from the volume file.
+    VOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VOL_PATH.write_bytes(FULL_SNAPSHOT.encode())
 
     resp = tr.fossil_hybrid_search(q="reranker", operator="Anna", limit=10)
     assert resp["count"] == 1

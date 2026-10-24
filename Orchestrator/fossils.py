@@ -363,7 +363,6 @@ def _decode_scored_snapshots(scored, operator: str,
     store) — resolved once, config-read only, no provider/network call.
     """
     index = load_snapshot_index()
-    vol_bytes = read_volume_bytes(VOL_PATH)
 
     model_key = None
     content_mode = "full"
@@ -379,30 +378,31 @@ def _decode_scored_snapshots(scored, operator: str,
         # raises (degrades to "full").
         content_mode = _resolve_active_content_mode()
 
+    from Orchestrator.config import reads_all_operators
     results = []
-    for row in scored:
-        snap_id = row[0]
-        best_ordinal = row[2] if len(row) > 2 else None
-        meta = index.get(snap_id)
-        if not meta:
-            continue
-        from Orchestrator.config import reads_all_operators
-        if not reads_all_operators(operator) and meta.get("operator") != operator:
-            continue
-        start = meta["byte_start"]
-        end = meta["byte_end"]
-        if start < len(vol_bytes) and end <= len(vol_bytes):
-            text = vol_bytes[start:end].decode('utf-8', errors='replace')
-            if window_budget_chars is not None:
-                text = window_snapshot_text(
-                    text, best_ordinal, window_budget_chars, model_key,
-                    content_mode=content_mode,
-                )
-            results.append(text)
+    with VolumeRanges() as vol:
+        for row in scored:
+            snap_id = row[0]
+            best_ordinal = row[2] if len(row) > 2 else None
+            meta = index.get(snap_id)
+            if not meta:
+                continue
+            if not reads_all_operators(operator) and meta.get("operator") != operator:
+                continue
+            start = meta["byte_start"]
+            end = meta["byte_end"]
+            if start < vol.size and end <= vol.size:
+                text = vol.read(start, end).decode('utf-8', errors='replace')
+                if window_budget_chars is not None:
+                    text = window_snapshot_text(
+                        text, best_ordinal, window_budget_chars, model_key,
+                        content_mode=content_mode,
+                    )
+                results.append(text)
     return results
 
 
-def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "",
+def hybrid_retrieve(vol_txt: str = "", query: str = "", k: int = 3, operator: str = "",
                     window_budget_chars: Optional[int] = None) -> List[str]:
     """Hybrid retrieval — thin shim over the canonical retrieve() (Phase 3b).
 
@@ -414,7 +414,10 @@ def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "",
     a list of decoded snapshot texts, highest-ranked first).
 
     `vol_txt` is retained for signature/caller compatibility but is UNUSED —
-    retrieve() reads VOL_PATH itself (and embeds the query) internally.
+    retrieve() reads what it needs itself (and embeds the query) internally.
+    It defaults to "" and every caller passes "": reading the whole volume to
+    fill it cost a ~58 MB read + decode per search for nothing (audit
+    O02-chat-routes-A-04).
 
     window_budget_chars (keyword-use, M8/WI-7a): None (every cloud caller —
     default) delivers decoded texts WHOLE, byte-identical to before. A positive
@@ -570,6 +573,12 @@ TECHNICAL_TERMS = set([
     'hash', 'sha', 'checksum', 'verify', 'validate', 'parse', 'regex'
 ])
 
+# The OPERATOR: header line of a snapshot block. filter_by_operator (the
+# no-index fallbacks) used this name without it ever being defined here, so a
+# box with a volume but no index raised NameError instead of answering.
+OP_RX = re.compile(r"^OPERATOR:\s*(.+)$", re.M)
+
+
 def fossil_operator(text: str) -> str:
     m = OP_RX.search(text or "")
     return (m.group(1).strip() if m else "")
@@ -660,6 +669,78 @@ def load_snapshot_index() -> Dict[str, Dict[str, Any]]:
     return {}
 
 
+class VolumeRanges:
+    """Byte-range reads of the volume: just the snapshots a caller returns.
+
+    The index maps every snapshot to its byte range, so slicing out a handful
+    never needs the whole append-only file in memory (58 MB on the dev box and
+    growing with every mint; audit X05-architecture-14). ``size`` is the file
+    length when the context opened, and ``read(start, end)`` returns exactly
+    what ``read_volume_bytes(VOL_PATH)[start:end]`` returned at that moment,
+    so the bounds checks callers already make against the length still hold.
+    A missing volume reads as empty, as read_volume_bytes does.
+    """
+
+    def __init__(self, path: Optional[Path] = None):
+        self._path = path if path is not None else VOL_PATH
+        self._file = None
+        self.size = 0
+
+    def __enter__(self) -> "VolumeRanges":
+        try:
+            self._file = open(self._path, "rb")
+            self.size = os.fstat(self._file.fileno()).st_size
+        except OSError:
+            self._file, self.size = None, 0
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def read(self, start: int, end: int) -> bytes:
+        start, end = max(0, start), min(end, self.size)
+        if self._file is None or start >= end:
+            return b""
+        self._file.seek(start)
+        return self._file.read(end - start)
+
+
+def _fallback_volume_text(vol_txt: str) -> str:
+    """The corpus for the no-index fallbacks below: the caller's text when it
+    passed one, else the volume read here. The index-backed paths never touch
+    vol_txt, so callers pass "" and only a box without a snapshot index pays
+    for the whole-volume read + decode."""
+    return vol_txt or read_text_safe(VOL_PATH)
+
+
+_SHORT_SNAP_ID_RX = re.compile(r"SNAP-(\d+)")
+
+
+def resolve_snapshot_id(snap_id: str) -> Optional[str]:
+    """The index id `snap_id` names: itself when indexed, else for a short
+    ``SNAP-<n>`` (how models cite SNAP-<date>-<n> in prose) the newest id with
+    that sequence number. None when nothing matches."""
+    index = load_snapshot_index()
+    if snap_id in index:
+        return snap_id
+    m = _SHORT_SNAP_ID_RX.fullmatch(snap_id or "")
+    if not m:
+        return None
+    suffix = f"-{m.group(1)}"
+    matches = [sid for sid in index if sid.endswith(suffix) and sid.count("-") == 2]
+    if not matches:
+        return None
+
+    def _date(sid: str) -> int:
+        try:
+            return int(sid.split("-")[1])
+        except (ValueError, IndexError):
+            return 0
+    return max(matches, key=_date)
+
+
 def get_snapshot_by_id(snap_id: str) -> Optional[Dict[str, Any]]:
     """
     Retrieve a specific snapshot by its ID.
@@ -676,15 +757,16 @@ def get_snapshot_by_id(snap_id: str) -> Optional[Dict[str, Any]]:
         return None
 
     meta = index[snap_id]
-    vol_bytes = read_volume_bytes(VOL_PATH)
 
     start = meta.get("byte_start", 0)
     end = meta.get("byte_end", 0)
 
-    if start >= len(vol_bytes) or end > len(vol_bytes):
-        return None
-
-    snap_bytes = vol_bytes[start:end]
+    # One snapshot's bytes, not the whole volume: this serves every Timeline
+    # click (Portal + Android) and every SNAP-id link.
+    with VolumeRanges() as vol:
+        if start >= vol.size or end > vol.size:
+            return None
+        snap_bytes = vol.read(start, end)
     content = snap_bytes.decode('utf-8', errors='replace')
 
     return {
@@ -1040,9 +1122,8 @@ def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars
     index = load_snapshot_index()
 
     if index:
-        # Use index for fast retrieval - MUST use bytes for byte-offset slicing
-        # Read file as bytes to allow proper byte-offset indexing
-        vol_bytes = read_volume_bytes(VOL_PATH)
+        # Use index for fast retrieval - MUST use bytes for byte-offset slicing.
+        # Only the returned snapshots' byte ranges are read (VolumeRanges).
 
         # Filter by operator - "system" and the Flight Recorder see all
         # operators. DELIBERATELY NOT reads_all_operators(): this site's
@@ -1070,49 +1151,53 @@ def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars
 
         matching.sort(key=lambda x: snapshot_sort_key(x[0]))
 
-        # Validate index consistency
-        if matching:
-            max_byte_end = max(meta["byte_end"] for _, meta in matching)
-            if max_byte_end > len(vol_bytes):
-                print(f"[WARNING] Index expects file to be at least {max_byte_end} bytes, but vol_bytes is only {len(vol_bytes)} bytes")
-
-        # Get all snapshots (no limit)
-        recent = matching[:]
+        # Only the newest `count` are returned, so only they are read and
+        # decoded (count <= 0 = all of them).
+        recent = matching[-count:] if count > 0 else matching[:]
         texts = []
 
-        for snap_id, meta in recent:
-            start = meta["byte_start"]
-            end = meta["byte_end"]
-            # Direct byte-range read using BYTE offsets on BYTES
-            if start < len(vol_bytes) and end <= len(vol_bytes):
-                snap_bytes = vol_bytes[start:end]
-                # Decode the snapshot bytes to text
-                snap_text = snap_bytes.decode('utf-8', errors='replace')
+        with VolumeRanges() as vol:
+            vol_len = vol.size
 
-                # Verify snapshot integrity
-                m = START_RX.search(snap_text)
-                if m:
-                    extracted_id = m.group("snap")
-                    if extracted_id != snap_id:
-                        print(f"[ERROR] Index mismatch! Expected {snap_id} at bytes {start}-{end}, but got {extracted_id}")
+            # Validate index consistency
+            if matching:
+                max_byte_end = max(meta["byte_end"] for _, meta in matching)
+                if max_byte_end > vol_len:
+                    print(f"[WARNING] Index expects file to be at least {max_byte_end} bytes, but the volume is only {vol_len} bytes")
+
+            for snap_id, meta in recent:
+                start = meta["byte_start"]
+                end = meta["byte_end"]
+                # Direct byte-range read using BYTE offsets
+                if start < vol_len and end <= vol_len:
+                    snap_bytes = vol.read(start, end)
+                    # Decode the snapshot bytes to text
+                    snap_text = snap_bytes.decode('utf-8', errors='replace')
+
+                    # Verify snapshot integrity
+                    m = START_RX.search(snap_text)
+                    if m:
+                        extracted_id = m.group("snap")
+                        if extracted_id != snap_id:
+                            print(f"[ERROR] Index mismatch! Expected {snap_id} at bytes {start}-{end}, but got {extracted_id}")
+                    else:
+                        print(f"[ERROR] No START marker found for {snap_id} at bytes {start}-{end}")
+
+                elif start < vol_len:
+                    # Partial snapshot available
+                    snap_bytes = vol.read(start, vol_len)
+                    snap_text = snap_bytes.decode('utf-8', errors='replace')
+                    print(f"[WARNING] Snapshot {snap_id} byte_end ({end}) exceeds the volume length ({vol_len}), text may be incomplete")
                 else:
-                    print(f"[ERROR] No START marker found for {snap_id} at bytes {start}-{end}")
+                    snap_text = ""
+                    print(f"[WARNING] Snapshot {snap_id} byte_start ({start}) exceeds the volume length ({vol_len})")
 
-            elif start < len(vol_bytes):
-                # Partial snapshot available
-                snap_bytes = vol_bytes[start:]
-                snap_text = snap_bytes.decode('utf-8', errors='replace')
-                print(f"[WARNING] Snapshot {snap_id} byte_end ({end}) exceeds vol_bytes length ({len(vol_bytes)}), text may be incomplete")
-            else:
-                snap_text = ""
-                print(f"[WARNING] Snapshot {snap_id} byte_start ({start}) exceeds vol_bytes length ({len(vol_bytes)})")
+                texts.append(cap_chars(snap_text, cap_chars_each) if cap_chars_each and cap_chars_each > 0 else snap_text)
 
-            texts.append(cap_chars(snap_text, cap_chars_each) if cap_chars_each and cap_chars_each > 0 else snap_text)
-
-        final_texts = texts[-count:] if count > 0 else texts
-        return final_texts
+        return texts
     else:
         # Fallback to old method if index not available
+        vol_txt = _fallback_volume_text(vol_txt)
         snaps = split_snapshots(vol_txt)
         texts = [t for (t, _s, _e) in snaps[:]]  # Get all snapshots (no limit)
         if cap_chars_each and cap_chars_each > 0:
@@ -1464,7 +1549,7 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
             base.append((sids[i], t))
     else:
         # Fallback to old method if index not available
-        base_texts = keyword_retrieve(vol_txt, query, k=999999) if query else []  # Get all results (no limit)
+        base_texts = keyword_retrieve(_fallback_volume_text(vol_txt), query, k=999999) if query else []  # Get all results (no limit)
         base_texts = filter_by_operator(base_texts, op)
         # Recover the canonical snap_id from each block's START marker.
         base = []
@@ -1522,6 +1607,7 @@ def get_latest_checkpoint_for_operator(vol_txt: str, op: str) -> Optional[str]:
 
     if not index:
         # Fallback: parse volume text to find checkpoints
+        vol_txt = _fallback_volume_text(vol_txt)
         blocks = split_snapshots(vol_txt)
         checkpoints = []
         for snap_id, start, end in blocks:
@@ -1554,13 +1640,12 @@ def get_latest_checkpoint_for_operator(vol_txt: str, op: str) -> Optional[str]:
     matching.sort(key=lambda x: x[0])
     snap_id, meta = matching[-1]
 
-    # Read the checkpoint snapshot
-    vol_bytes = read_volume_bytes(VOL_PATH)
-    byte_start = meta.get("byte_start", 0)
-    byte_end = meta.get("byte_end", len(vol_bytes))
-
+    # Read the checkpoint snapshot (its byte range only)
     try:
-        snapshot_bytes = vol_bytes[byte_start:byte_end]
+        with VolumeRanges() as vol:
+            byte_start = meta.get("byte_start", 0)
+            byte_end = meta.get("byte_end", vol.size)
+            snapshot_bytes = vol.read(byte_start, byte_end)
         return snapshot_bytes.decode('utf-8', errors='replace')
     except Exception as e:
         print(f"[CHECKPOINT] Error reading checkpoint {snap_id}: {e}")
@@ -1585,6 +1670,7 @@ def get_recent_checkpoints_for_operator(vol_txt: str, op: str, count: int = 1) -
 
     if not index:
         # Fallback: parse volume text to find checkpoints
+        vol_txt = _fallback_volume_text(vol_txt)
         blocks = split_snapshots(vol_txt)
         checkpoints = []
         for snap_id, start, end in blocks:
@@ -1617,19 +1703,19 @@ def get_recent_checkpoints_for_operator(vol_txt: str, op: str, count: int = 1) -
     matching.sort(key=lambda x: x[0])
     recent_matches = matching[-count:]
 
-    # Read the checkpoint snapshots
-    vol_bytes = read_volume_bytes(VOL_PATH)
+    # Read the checkpoint snapshots (their byte ranges only)
     checkpoints = []
 
-    for snap_id, meta in recent_matches:
-        byte_start = meta.get("byte_start", 0)
-        byte_end = meta.get("byte_end", len(vol_bytes))
+    with VolumeRanges() as vol:
+        for snap_id, meta in recent_matches:
+            byte_start = meta.get("byte_start", 0)
+            byte_end = meta.get("byte_end", vol.size)
 
-        try:
-            snapshot_bytes = vol_bytes[byte_start:byte_end]
-            checkpoint_text = snapshot_bytes.decode('utf-8', errors='replace')
-            checkpoints.append(checkpoint_text)
-        except Exception as e:
-            print(f"[CHECKPOINT] Error reading checkpoint {snap_id}: {e}")
+            try:
+                snapshot_bytes = vol.read(byte_start, byte_end)
+                checkpoint_text = snapshot_bytes.decode('utf-8', errors='replace')
+                checkpoints.append(checkpoint_text)
+            except Exception as e:
+                print(f"[CHECKPOINT] Error reading checkpoint {snap_id}: {e}")
 
     return checkpoints

@@ -467,11 +467,10 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
     from Orchestrator.state import mint_lock
     from Orchestrator.checkpoint import _embed_for_index
     try:
-        vol_txt = read_text_safe(VOL_PATH)
         # Widened gate: as the FR, this returns the most recent snapshots
-        # across EVERY operator.
+        # across EVERY operator (their byte ranges only; no volume text).
         recent = get_recent_fossils_for_operator(
-            vol_txt, FLIGHT_RECORDER_OPERATOR,
+            "", FLIGHT_RECORDER_OPERATOR,
             count=FR_REPORT_SOURCE_COUNT, cap_chars_each=10000)
 
         # Min-activity skip: how many snapshots are NEW since the last report?

@@ -36,14 +36,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             format_snapshot_for_delivery,
             hybrid_retrieve,
         )
-        from Orchestrator.volume import read_text_safe
-        from Orchestrator.config import VOL_PATH
-
-        vol_txt = read_text_safe(VOL_PATH)
 
         # Fetch WHOLE snapshots (window_budget_chars=None); the reranked ranking
         # is identical for every caller. Formatting/bounding happens below.
-        results = hybrid_retrieve(vol_txt, query, k=limit, operator=ctx.operator)
+        # No volume text: hybrid_retrieve never used it, and reading it cost a
+        # whole-volume read + decode per search (audit O02-chat-routes-A-04).
+        results = hybrid_retrieve("", query, k=limit, operator=ctx.operator)
 
         if not results:
             return ToolResult(

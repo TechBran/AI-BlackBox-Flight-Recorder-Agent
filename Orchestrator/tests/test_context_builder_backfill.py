@@ -77,7 +77,6 @@ def _patch_builder(monkeypatch, recent, keyword_ranked, semantic_ranked,
     fakes: each returns its ranked list truncated to the REQUESTED k, exactly
     like the real retrievers."""
     monkeypatch.setattr(cb, "CFG", _FakeCFG(**cfg_overrides))
-    monkeypatch.setattr(cb, "read_text_safe", lambda p: "")
     monkeypatch.setattr(cb, "get_recent_media_artifacts", lambda op, limit=10: [])
     monkeypatch.setattr(cb, "get_recent_fossils_for_operator",
                         lambda vol, op, n, cap: [_blk(s) for s in recent][:n])

@@ -1089,8 +1089,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                         result_message = "Error: No search query provided."
                     else:
                         try:
-                            vol_txt = read_text_safe(VOL_PATH)
-                            results = hybrid_retrieve(vol_txt, query, k=k, operator=operator)
+                            results = hybrid_retrieve("", query, k=k, operator=operator)
 
                             if not results:
                                 result_message = f"No snapshots found matching: {query}"
@@ -1704,8 +1703,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                         result = "Error: No search query provided."
                     else:
                         try:
-                            vol_txt = read_text_safe(VOL_PATH)
-                            results = hybrid_retrieve(vol_txt, query, k=k, operator=operator)
+                            results = hybrid_retrieve("", query, k=k, operator=operator)
 
                             if not results:
                                 result = f"No snapshots found matching: {query}"
@@ -2819,8 +2817,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                     tool_result = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
+                                        search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
 
                                         if not search_results:
                                             tool_result = f"No snapshots found matching: {query}"
@@ -3691,8 +3688,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     result_message = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
+                                        search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
 
                                         if not search_results:
                                             result_message = f"No snapshots found matching: {query}"
@@ -5750,8 +5746,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                     result_message = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
+                                        search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
 
                                         if not search_results:
                                             result_message = f"No snapshots found matching: {query}"
@@ -6420,8 +6415,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                     tool_result = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
+                                        search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
 
                                         if not search_results:
                                             tool_result = f"No snapshots found matching: {query}"
@@ -7000,8 +6994,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                     tool_result = "Error: No search query provided."
                                 else:
                                     try:
-                                        vol_txt = await asyncio.to_thread(read_text_safe, VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
+                                        search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
 
                                         if not search_results:
                                             tool_result = f"No snapshots found matching: {query}"
@@ -7287,20 +7280,21 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
 
     from Orchestrator.context_builder import fill_unseen  # lazy: matches build_streaming_context's import pattern
 
-    vol_txt = read_text_safe(VOL_PATH)
-    recent_snaps = get_recent_fossils_for_operator(vol_txt, operator, CU_RF, CU_CAP)
+    # No volume text: the index-backed helpers read only what they return
+    # (audit X05-architecture-14; see build_fossil_context).
+    recent_snaps = get_recent_fossils_for_operator("", operator, CU_RF, CU_CAP)
     recent_ids = set(extract_snap_ids(recent_snaps))
 
     # WI-7b dedupe-with-backfill (same pattern as build_fossil_context):
     # over-fetch each channel by len(seen_so_far), then fill the section with
     # the first section_k UNSEEN snaps — dedupe no longer shrinks sections.
-    keyword_snaps_raw = keyword_retrieve_for_operator(vol_txt, user_text, CU_KF + len(recent_ids), operator) if user_text else []
+    keyword_snaps_raw = keyword_retrieve_for_operator("", user_text, CU_KF + len(recent_ids), operator) if user_text else []
     keyword_snaps = fill_unseen(keyword_snaps_raw, CU_KF, recent_ids)
     seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
     semantic_snaps_raw = semantic_retrieve(user_text, operator=operator, k=CU_SF + len(seen_ids), threshold=CU_ST) if user_text else []
     semantic_snaps = fill_unseen(semantic_snaps_raw, CU_SF, seen_ids)
     # Checkpoints stay UN-deduped: pinned section, not a discovery channel.
-    checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CU_CP)
+    checkpoint_snaps = get_recent_checkpoints_for_operator("", operator, count=CU_CP)
 
     print(f"[CU-CONTEXT] Operator: {operator} | Recent: {len(recent_snaps)}, Keyword: {len(keyword_snaps)}, Semantic: {len(semantic_snaps)}, Checkpoints: {len(checkpoint_snaps)}")
 

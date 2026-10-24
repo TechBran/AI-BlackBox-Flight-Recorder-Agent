@@ -596,8 +596,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                         result_msg = "Error: No search query provided."
                     else:
                         try:
-                            vol_txt = read_text_safe(VOL_PATH)
-                            search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
+                            search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
                             if not search_results:
                                 result_msg = f"No snapshots found matching: {query}"
                             else:

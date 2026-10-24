@@ -148,7 +148,6 @@ def _patch_channels(monkeypatch, semantic_fills_telemetry: bool):
     context_builder namespace (where the names are bound)."""
     import Orchestrator.context_builder as cb
 
-    monkeypatch.setattr(cb, "read_text_safe", lambda *a, **k: "")
     monkeypatch.setattr(cb, "get_recent_media_artifacts", lambda *a, **k: [])
     monkeypatch.setattr(cb, "get_recent_fossils_for_operator", lambda *a, **k: [_RECENT])
     monkeypatch.setattr(cb, "keyword_retrieve_for_operator", lambda *a, **k: [_KEYWORD])

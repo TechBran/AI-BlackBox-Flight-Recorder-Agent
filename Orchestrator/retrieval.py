@@ -34,7 +34,6 @@ from Orchestrator.fossils import (
     keyword_retrieve_ids_for_operator,
     load_snapshot_index,
 )
-from Orchestrator.volume import read_text_safe
 
 
 # ── pure ranking primitives ───────────────────────────────────────────────────
@@ -565,12 +564,11 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     if include_keyword and keyword_mode != "off":
         try:
             # The index-backed keyword path decodes snapshots from byte offsets on
-            # demand and IGNORES vol_txt entirely; vol_txt is only consumed in the
-            # no-index fallback. So pay the ~35MB full-volume read+decode (a ~250MB
-            # transient spike) ONLY when there is no index — otherwise pass "".
-            vol_txt = read_text_safe(VOL_PATH) if not index else ""
+            # demand and IGNORES vol_txt entirely; the no-index fallback reads
+            # the volume itself when handed "" (fossils._fallback_volume_text),
+            # so the full-volume read+decode is paid ONLY when there is no index.
             raw_kw = keyword_retrieve_ids_for_operator(
-                vol_txt, query, candidate_n, operator or ""
+                "", query, candidate_n, operator or ""
             )
         except Exception as e:  # noqa: BLE001 - keyword channel is best-effort
             print(f"[RETRIEVAL] keyword channel unavailable ({e}); semantic-only")

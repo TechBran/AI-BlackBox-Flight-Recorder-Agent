@@ -21,7 +21,6 @@ def test_local_profile_is_lean_and_capped():
                            return_value=[_blk("SNAP-20260617-0050")]) as rec, \
          mock.patch.object(cb, "keyword_retrieve_for_operator",
                            return_value=[_blk("SNAP-20260617-0060")]) as kw, \
-         mock.patch.object(cb, "read_text_safe", return_value=""), \
          mock.patch.object(cb, "get_recent_media_artifacts", return_value=[]):
         text, prov = cb.build_fossil_context(
             "roll dice", "Brandon", provider="local",
@@ -58,7 +57,6 @@ def test_include_media_false_omits_recent_media_block():
     )
     with mock.patch.object(cb, "semantic_retrieve", return_value=[]), \
          mock.patch.object(cb, "get_recent_checkpoints_for_operator", return_value=[]), \
-         mock.patch.object(cb, "read_text_safe", return_value=""), \
          mock.patch.object(cb, "get_recent_media_artifacts", return_value=fake_media):
         lean_text, _ = cb.build_fossil_context(
             "hi", "Brandon", provider="local", include_media=False, **common)
