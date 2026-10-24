@@ -274,7 +274,8 @@ class BlackBoxToolExecutor:
                 success=False,
                 result=f"Unknown tool: {tool_name}"
             )
-        spec = registry.get_tool(tool_name)
+        # The canonical schema (an alias such as search_memory shares it).
+        spec = registry.get_tool(registry.resolve_alias(tool_name))
 
         # Models sometimes emit array/object params as JSON strings; parse back.
         tool_input = _coerce_stringified_json_args(tool_name, tool_input, spec=spec)

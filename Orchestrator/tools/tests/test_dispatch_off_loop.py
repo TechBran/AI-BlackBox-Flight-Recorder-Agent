@@ -167,6 +167,22 @@ def test_get_executor_hands_every_caller_an_awaitable(tools_dir):
     assert ticks >= 8
 
 
+def test_a_sync_def_returning_a_coroutine_is_awaited(tools_dir):
+    """An async body behind a sync decorator is awaited, never dropped."""
+    _write(tools_dir, "shimmed", (
+        "from Orchestrator.toolvault.context import ToolResult\n"
+        "async def _body(params, ctx):\n"
+        "    return ToolResult(True, 'awaited')\n"
+        "def _shim(fn):\n"
+        "    def shim(params, ctx):\n"
+        "        return fn(params, ctx)\n"
+        "    return shim\n"
+        "execute = _shim(_body)\n"
+    ))
+    result = asyncio.run(_execute("shimmed", {}))
+    assert result.success is True and result.result == "awaited"
+
+
 def test_a_sync_generator_is_still_refused(tools_dir):
     _write(tools_dir, "gen_tool", (
         "def execute(params, ctx):\n"
@@ -212,6 +228,16 @@ def test_schema_timeout_bounds_a_hung_sync_executor(tools_dir):
     # The outcome is unknown, so the model is told not to assume either way.
     assert "may still" in result.result
     assert elapsed < 1.0, f"the caller waited {elapsed:.2f}s for an abandoned tool"
+
+
+def test_an_alias_gets_its_canonical_tools_timeout(tools_dir):
+    """search_memory is an alias of search_snapshots and shares its schema."""
+    _write(tools_dir, "search_snapshots", _SYNC_SLEEPER, timeout_s=0.2)
+    t0 = time.monotonic()
+    result = asyncio.run(_execute("search_memory", {"sleep": 1.5}))
+    assert result.success is False
+    assert "did not finish within 0.2" in result.result
+    assert time.monotonic() - t0 < 1.0
 
 
 def test_default_timeout_applies_to_a_sync_executor_without_one(tools_dir, monkeypatch):

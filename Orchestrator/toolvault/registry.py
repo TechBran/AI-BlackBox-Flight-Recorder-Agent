@@ -99,7 +99,12 @@ def _run_in_thread(fn: Callable) -> Callable:
     async def run_in_thread(params, ctx):
         loop = asyncio.get_running_loop()
         call = functools.partial(contextvars.copy_context().run, fn, params, ctx)
-        return await loop.run_in_executor(_sync_pool, call)
+        result = await loop.run_in_executor(_sync_pool, call)
+        if inspect.isawaitable(result):
+            # A plain def that hands back a coroutine (an async body behind a
+            # sync decorator): await it here rather than drop it unawaited.
+            result = await result
+        return result
 
     run_in_thread.runs_in_thread = True
     return run_in_thread
