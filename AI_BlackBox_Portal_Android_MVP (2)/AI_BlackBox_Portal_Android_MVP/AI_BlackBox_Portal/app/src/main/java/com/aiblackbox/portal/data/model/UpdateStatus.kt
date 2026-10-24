@@ -80,6 +80,16 @@ data class UpdateState(
         get() = phase in setOf("complete", "failed", "rolled_back")
 }
 
+/** Response from GET /update/state: the persisted state and the update lock,
+ *  without the git calls /update/status makes. */
+@Serializable
+data class UpdateStateResponse(
+    @SerialName("has_state") val hasState: Boolean = false,
+    val state: UpdateState? = null,
+    @SerialName("is_interrupted") val isInterrupted: Boolean = false,
+    @SerialName("in_progress") val inProgress: Boolean = false,
+)
+
 /** Body for POST /update/start. */
 @Serializable
 data class UpdateStartRequest(

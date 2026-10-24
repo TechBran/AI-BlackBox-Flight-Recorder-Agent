@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.ui.updates
 
+import com.aiblackbox.portal.data.model.UpdateStateResponse
 import com.aiblackbox.portal.data.model.UpdateStatus
 import kotlinx.coroutines.delay
 
@@ -14,6 +15,11 @@ import kotlinx.coroutines.delay
  *
  * Probe values: a boot id, "" for a 200 from a backend without the field, or
  * null when /health did not answer 200.
+ *
+ * When the log stream drops mid-update (A13-ui-ops-06), GET /update/state says
+ * what THIS task is doing ([taskVerdict]): the update lock is free ~2 s before
+ * the restart fires while the old process still answers, so "nothing is in
+ * progress" alone is not "no restart is coming".
  */
 object RestartWait {
     /** Fallback for a backend without boot_id: accept a 200 only once the
@@ -21,6 +27,25 @@ object RestartWait {
     const val GRACE_MS = 10_000L
     const val TIMEOUT_MS = 180_000L
     const val INTERVAL_MS = 2_000L
+    /** How long a still-running update can keep the wait going (see [await]). */
+    const val MAX_MS = 3_600_000L
+
+    /** What /update/state says about one update task. */
+    enum class TaskVerdict {
+        /** The update lock is held: it is still working. */
+        Running,
+        /** It finished and scheduled the restart (coming ~2 s after the lock is free). */
+        Restarting,
+        /** It failed, was refused or had nothing to do: no restart is coming. */
+        Ended,
+    }
+
+    fun taskVerdict(state: UpdateStateResponse, taskId: String): TaskVerdict = when {
+        state.inProgress -> TaskVerdict.Running
+        state.state?.taskId == taskId &&
+            state.state.phase in setOf("restart_pending", "complete", "rolled_back") -> TaskVerdict.Restarting
+        else -> TaskVerdict.Ended
+    }
 
     /** Has the service restarted since [priorBootId] was read? A null prior
      *  means it could not be read; "" means that backend had no boot_id. */
@@ -48,14 +73,22 @@ object RestartWait {
         data class NotRestarted(override val elapsedMs: Long) : Outcome()
         /** Nothing answered by the end of the wait. */
         data class StillDown(override val elapsedMs: Long) : Outcome()
-        /** [await]'s giveUp said no restart is coming (the update ended without one). */
+        /** [await]'s taskState said the update ended without a restart. */
         data class GaveUp(override val elapsedMs: Long) : Outcome()
+        /** The update was still running when the wait hit its cap. */
+        data class StillRunning(override val elapsedMs: Long) : Outcome()
     }
 
     /**
      * Poll [probe] every [intervalMs] until the service has restarted or
-     * [timeoutMs] passes. [giveUp] is asked, after the grace period, each time
-     * the OLD process answers; true ends the wait with [Outcome.GaveUp].
+     * [timeoutMs] passes.
+     *
+     * [taskState], when given (the log stream dropped), is asked each time the
+     * OLD process answers. [TaskVerdict.Ended] ends the wait with
+     * [Outcome.GaveUp]. [TaskVerdict.Running] keeps it going until [timeoutMs]
+     * after the task was last seen running (a pip phase alone can take 10
+     * minutes), at most [maxMs]; reaching that cap while the update still runs
+     * is [Outcome.StillRunning]. null (no answer) changes nothing.
      */
     suspend fun await(
         priorBootId: String?,
@@ -64,18 +97,26 @@ object RestartWait {
         sleep: suspend (Long) -> Unit = { delay(it) },
         initiallySeenDown: Boolean = false,
         timeoutMs: Long = TIMEOUT_MS,
+        maxMs: Long = MAX_MS,
         intervalMs: Long = INTERVAL_MS,
         graceMs: Long = GRACE_MS,
         onTick: (Long) -> Unit = {},
-        giveUp: (suspend () -> Boolean)? = null,
+        taskState: (suspend () -> TaskVerdict?)? = null,
     ): Outcome {
         val start = now()
         var seenDown = initiallySeenDown
         var lastUp = false
+        var verdict: TaskVerdict? = null
+        var runningAt: Long? = null // elapsed when the task was last seen running
         while (true) {
             val elapsed = now() - start
-            if (elapsed > timeoutMs) {
-                return if (lastUp) Outcome.NotRestarted(elapsed) else Outcome.StillDown(elapsed)
+            val deadline = runningAt?.let { maxOf(timeoutMs, minOf(maxMs, it + timeoutMs)) } ?: timeoutMs
+            if (elapsed > deadline) {
+                return when {
+                    lastUp && verdict == TaskVerdict.Running -> Outcome.StillRunning(elapsed)
+                    lastUp -> Outcome.NotRestarted(elapsed)
+                    else -> Outcome.StillDown(elapsed)
+                }
             }
             onTick(elapsed)
             val bootId = probe()
@@ -84,8 +125,10 @@ object RestartWait {
                 seenDown = true
             } else if (restartObserved(priorBootId, bootId, seenDown, elapsed, graceMs)) {
                 return Outcome.Restarted(elapsed)
-            } else if (giveUp != null && elapsed >= graceMs && giveUp()) {
-                return Outcome.GaveUp(elapsed)
+            } else if (taskState != null) {
+                verdict = taskState()
+                if (verdict == TaskVerdict.Ended) return Outcome.GaveUp(elapsed)
+                if (verdict == TaskVerdict.Running) runningAt = elapsed
             }
             sleep(intervalMs)
         }

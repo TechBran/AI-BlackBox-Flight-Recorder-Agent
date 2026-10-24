@@ -54,5 +54,7 @@ object SystemActions {
         is RestartWait.Outcome.StillDown ->
             "BlackBox is still down after ${outcome.elapsedMs / 1000}s. Check journalctl -u blackbox.service on the box."
         is RestartWait.Outcome.GaveUp -> "BlackBox did not restart."
+        is RestartWait.Outcome.StillRunning ->
+            "An update is still running on BlackBox; it restarts the service when it finishes."
     }
 }

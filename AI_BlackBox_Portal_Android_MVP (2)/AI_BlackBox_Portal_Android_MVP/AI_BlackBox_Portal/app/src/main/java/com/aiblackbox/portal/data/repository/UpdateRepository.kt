@@ -11,6 +11,7 @@ import com.aiblackbox.portal.data.model.UpdateRollbackRequest
 import com.aiblackbox.portal.data.model.UpdateRollbackResponse
 import com.aiblackbox.portal.data.model.UpdateStartRequest
 import com.aiblackbox.portal.data.model.UpdateStartResponse
+import com.aiblackbox.portal.data.model.UpdateStateResponse
 import com.aiblackbox.portal.data.model.UpdateStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
@@ -31,6 +32,8 @@ import java.io.IOException
  * - rollback() reverts to the last pre-update-<ts> tag (newer backends return
  *   a task_id to stream, like start()).
  * - bootId() reads /health's boot_id (the restart-detection poll compares it).
+ * - getState() reads /update/state (no git call): what a task whose log stream
+ *   dropped is doing.
  */
 class UpdateRepository(private val api: BlackBoxApi) {
 
@@ -40,6 +43,9 @@ class UpdateRepository(private val api: BlackBoxApi) {
     suspend fun getStatus(): UpdateStatus = decode(api.get("/update/status"))
 
     suspend fun preflight(): UpdateStatus = decode(api.post("/update/preflight", "{}"))
+
+    suspend fun getState(): UpdateStateResponse =
+        json.decodeFromString(UpdateStateResponse.serializer(), api.get("/update/state"))
 
     /** A dirty tree without [discardLocalChanges] answers 409 (ApiHttpException). */
     suspend fun start(confirmSha: String? = null, discardLocalChanges: Boolean = false): UpdateStartResponse {

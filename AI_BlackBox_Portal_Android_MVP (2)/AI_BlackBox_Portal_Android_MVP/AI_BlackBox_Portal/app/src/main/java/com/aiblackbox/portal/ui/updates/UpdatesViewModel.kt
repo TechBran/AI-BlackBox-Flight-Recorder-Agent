@@ -48,6 +48,8 @@ import kotlinx.serialization.json.jsonPrimitive
  *     until its boot_id CHANGES (A13-ui-ops-01), with progressive copy
  *   - on 'complete' without one (failed, refused, up to date): refresh, so the
  *     Failed state surfaces
+ *   - when the stream drops first: the same wait, asking /update/state what the
+ *     task is doing (A13-ui-ops-06; see RestartWait.taskVerdict)
  */
 class UpdatesViewModel(application: Application) : AndroidViewModel(application) {
     private var api: BlackBoxApi? = null
@@ -295,7 +297,8 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
                 append(LogLine.error("Failed to start: ${e.message}"))
                 _actionInFlight.value = false
                 if ((e as? ApiHttpException)?.code == 409) {
-                    afterConflict(discardLocalChanges) { fresh ->
+                    // A fresh fetch: the 409 may say origin/main moved.
+                    afterConflict(discardLocalChanges, refresh = { r.preflight() }) { fresh ->
                         UpdateConfirm.Install(
                             text = UpdateConfirmText.stashRetry(fresh.dirtyFiles, "Installing"),
                             confirmSha = fresh.latestSha,
@@ -331,7 +334,9 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
                 append(LogLine.error("Rollback failed: ${e.message}"))
                 _actionInFlight.value = false
                 if ((e as? ApiHttpException)?.code == 409) {
-                    afterConflict(discardLocalChanges) { fresh ->
+                    // Never preflight here: it deletes a failed state, and with
+                    // it the tag this rollback needs.
+                    afterConflict(discardLocalChanges, refresh = { r.getStatus() }) { fresh ->
                         UpdateConfirm.Rollback(
                             text = UpdateConfirmText.stashRetry(fresh.dirtyFiles, "Rolling back"),
                             discardLocalChanges = true,
@@ -343,15 +348,21 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * After a 409: refresh the panel from a fresh preflight (A13-ui-ops-02), and
-     * when the refusal was local changes the request had no consent for, ask
-     * again with the backend's own list of files.
+     * After a 409: refresh the panel with [refresh] (A13-ui-ops-02), and when
+     * the refusal was local changes the request had no consent for, ask again
+     * with the backend's own list of files.
      */
-    private suspend fun afterConflict(consentSent: Boolean, retry: (UpdateStatus) -> UpdateConfirm) {
+    private suspend fun afterConflict(
+        consentSent: Boolean,
+        refresh: suspend () -> UpdateStatus,
+        retry: (UpdateStatus) -> UpdateConfirm,
+    ) {
         val fresh = try {
-            repo?.preflight()
+            refresh()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(TAG, "preflight after 409 failed: ${e.message}")
+            Log.w(TAG, "status after 409 failed: ${e.message}")
             null
         } ?: return
         _state.value = mapStatusToState(fresh)
@@ -380,10 +391,17 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
             }
             if (!completeSeen) {
                 // A13-ui-ops-06: the runner keeps going without the stream (Doze,
-                // a network blip). Wait for the restart, but stop once the old
-                // process says nothing is running: the update ended without one.
-                awaitRestart(priorBootId, giveUp = {
-                    try { !r.getStatus().inProgress } catch (_: Exception) { false }
+                // a network blip). Wait for the restart, asking /update/state
+                // about THIS task: keep waiting while it runs or once it
+                // scheduled its restart, stop once it ended without one.
+                awaitRestart(priorBootId, taskState = {
+                    try {
+                        RestartWait.taskVerdict(r.getState(), taskId)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
                 })
             }
         }
@@ -438,7 +456,10 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
      * from [priorBootId] (A13-ui-ops-01). The old process answers for ~2 s
      * after the complete event; that answer is not "back online".
      */
-    private fun awaitRestart(priorBootId: String?, giveUp: (suspend () -> Boolean)? = null) {
+    private fun awaitRestart(
+        priorBootId: String?,
+        taskState: (suspend () -> RestartWait.TaskVerdict?)? = null,
+    ) {
         val r = repo ?: return
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
@@ -446,7 +467,7 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
                 priorBootId = priorBootId,
                 probe = { r.bootId() },
                 onTick = { _restartPollLabel.value = RestartWait.stageLabel(it) },
-                giveUp = giveUp,
+                taskState = taskState,
             )
             _restartPollLabel.value = null
             _actionInFlight.value = false
@@ -458,13 +479,18 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
                     refreshStatus(forceFresh = true)
                 }
                 is RestartWait.Outcome.GaveUp -> {
-                    append(LogLine.system("The update is no longer running and the service did not restart. See the Updates panel for what happened."))
+                    append(LogLine.system("The update ended and the service did not restart. See the Updates panel for what happened."))
+                    refreshStatus(forceFresh = false)
+                }
+                is RestartWait.Outcome.StillRunning -> {
+                    append(LogLine.system("The update is still running on the box after ${outcome.elapsedMs / 60_000} min. " +
+                        "The Updates panel shows its progress; the service restarts when it finishes."))
                     refreshStatus(forceFresh = false)
                 }
                 is RestartWait.Outcome.NotRestarted -> append(LogLine.error(
-                    "⚠ After 180s the service is still the process that was running before: the restart did not happen. " +
+                    "⚠ After ${outcome.elapsedMs / 1000}s the service is still the process that was running before: the restart did not happen. " +
                         "Restart it from Settings → System, or run `sudo systemctl restart blackbox.service` on the box."))
-                is RestartWait.Outcome.StillDown -> append(LogLine.error("⚠ Still down after 180s. Check the logs manually."))
+                is RestartWait.Outcome.StillDown -> append(LogLine.error("⚠ Still down after ${outcome.elapsedMs / 1000}s. Check the logs manually."))
             }
         }
     }

@@ -41,5 +41,6 @@ class SystemActionsTest {
         assertTrue(SystemActions.restartOutcomeMessage(RestartWait.Outcome.Restarted(64_000)).contains("back online"))
         assertTrue(SystemActions.restartOutcomeMessage(RestartWait.Outcome.NotRestarted(182_000)).contains("did not restart"))
         assertTrue(SystemActions.restartOutcomeMessage(RestartWait.Outcome.StillDown(182_000)).contains("still down"))
+        assertTrue(SystemActions.restartOutcomeMessage(RestartWait.Outcome.StillRunning(3_600_000)).contains("still running"))
     }
 }

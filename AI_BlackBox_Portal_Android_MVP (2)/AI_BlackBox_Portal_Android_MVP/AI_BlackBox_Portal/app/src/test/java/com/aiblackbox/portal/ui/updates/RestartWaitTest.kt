@@ -1,7 +1,10 @@
 package com.aiblackbox.portal.ui.updates
 
+import com.aiblackbox.portal.data.model.UpdateState
+import com.aiblackbox.portal.data.model.UpdateStateResponse
 import com.aiblackbox.portal.data.model.UpdateStatus
 import com.aiblackbox.portal.data.repository.UpdateRepository
+import com.aiblackbox.portal.ui.updates.RestartWait.TaskVerdict
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -34,15 +37,30 @@ class RestartWaitTest {
     private suspend fun Script.await(
         prior: String?,
         timeoutMs: Long = RestartWait.TIMEOUT_MS,
-        giveUp: (suspend () -> Boolean)? = null,
+        taskState: (suspend () -> TaskVerdict?)? = null,
     ) = RestartWait.await(
         priorBootId = prior,
         probe = { probe() },
         now = { t },
         sleep = { t += it },
         timeoutMs = timeoutMs,
-        giveUp = giveUp,
+        taskState = taskState,
     )
+
+    /** A clock-driven box: /health answers boot(t), /update/state task(t). */
+    private class Timeline(val boot: (Long) -> String?, val task: (Long) -> TaskVerdict?) {
+        var t = 0L
+        suspend fun await(prior: String?, timeoutMs: Long = RestartWait.TIMEOUT_MS,
+                          maxMs: Long = RestartWait.MAX_MS, probeTask: Boolean = true) = RestartWait.await(
+            priorBootId = prior,
+            probe = { boot(t) },
+            now = { t },
+            sleep = { t += it },
+            timeoutMs = timeoutMs,
+            maxMs = maxMs,
+            taskState = if (probeTask) ({ task(t) }) else null,
+        )
+    }
 
     @Test
     fun `the old process answering is not a restart`() {
@@ -101,13 +119,73 @@ class RestartWaitTest {
         assertTrue(s.await(prior = "A", timeoutMs = 20_000) is RestartWait.Outcome.StillDown)
     }
 
+    // ── a dropped log stream (A13-ui-ops-06) ────────────────────────────
+
     @Test
-    fun `give up once the old process says nothing is running`() = runTest {
-        val s = Script("A")
-        var asked = 0
-        val out = s.await(prior = "A", giveUp = { asked++; s.t >= 12_000 })
-        assertTrue(out is RestartWait.Outcome.GaveUp)
-        assertTrue(asked >= 1 && out.elapsedMs in 12_000 until 20_000)
+    fun `taskVerdict - running under the lock, restarting once its task finished, else ended`() {
+        fun st(inProgress: Boolean, taskId: String? = null, phase: String = "") = UpdateStateResponse(
+            inProgress = inProgress, state = taskId?.let { UpdateState(taskId = it, phase = phase) })
+        assertEquals(TaskVerdict.Running, RestartWait.taskVerdict(st(true), "update-1"))
+        for (phase in listOf("restart_pending", "complete", "rolled_back")) {
+            assertEquals(TaskVerdict.Restarting, RestartWait.taskVerdict(st(false, "update-1", phase), "update-1"))
+        }
+        assertEquals(TaskVerdict.Ended, RestartWait.taskVerdict(st(false, "update-1", "failed"), "update-1"))
+        // An older update's "complete" says nothing about this one (refused, or up to date).
+        assertEquals(TaskVerdict.Ended, RestartWait.taskVerdict(st(false, "update-0", "complete"), "update-1"))
+        assertEquals(TaskVerdict.Ended, RestartWait.taskVerdict(st(false), "update-1"))
+    }
+
+    @Test
+    fun `GET update-state decodes, including a box that never updated`() {
+        val json = Json { ignoreUnknownKeys = true; isLenient = true }
+        val busy = json.decodeFromString(UpdateStateResponse.serializer(),
+            """{"has_state":true,"state":{"task_id":"update-1","phase":"pip_install"},"is_interrupted":false,"in_progress":true}""")
+        assertTrue(busy.inProgress)
+        assertEquals("update-1", busy.state?.taskId)
+        val fresh = json.decodeFromString(UpdateStateResponse.serializer(),
+            """{"has_state":false,"state":null,"is_interrupted":false,"in_progress":false}""")
+        assertNull(fresh.state)
+    }
+
+    @Test
+    fun `the review regression - the lock is free 2 s before the restart, keep waiting`() = runTest {
+        // The update completes at 20 s and releases the lock, the restart fires
+        // at 22 s, the new process answers at 80 s. Giving up on !inProgress
+        // alone ended the wait at 20 s with "the service did not restart".
+        val box = Timeline(
+            boot = { t -> if (t < 22_000) "OLD" else if (t < 80_000) null else "NEW" },
+            task = { t -> if (t < 20_000) TaskVerdict.Running else TaskVerdict.Restarting },
+        )
+        assertEquals(RestartWait.Outcome.Restarted(80_000), box.await(prior = "OLD"))
+    }
+
+    @Test
+    fun `give up once the task ended without a restart`() = runTest {
+        val box = Timeline(boot = { "A" }, task = { t -> if (t >= 12_000) TaskVerdict.Ended else TaskVerdict.Running })
+        assertEquals(RestartWait.Outcome.GaveUp(12_000), box.await(prior = "A"))
+    }
+
+    @Test
+    fun `a long pip phase keeps the wait going past the timeout`() = runTest {
+        val box = Timeline(
+            boot = { t -> if (t < 602_000) "A" else if (t < 650_000) null else "B" },
+            task = { t -> if (t < 600_000) TaskVerdict.Running else TaskVerdict.Restarting },
+        )
+        assertEquals(RestartWait.Outcome.Restarted(650_000), box.await(prior = "A"))
+    }
+
+    @Test
+    fun `an update that never finishes is reported as still running, at the cap`() = runTest {
+        val box = Timeline(boot = { "A" }, task = { TaskVerdict.Running })
+        val out = box.await(prior = "A", timeoutMs = 20_000, maxMs = 60_000)
+        assertTrue(out.toString(), out is RestartWait.Outcome.StillRunning)
+        assertTrue(out.elapsedMs in 60_001..62_000)
+    }
+
+    @Test
+    fun `without a task probe the timeout is not extended`() = runTest {
+        val box = Timeline(boot = { "A" }, task = { TaskVerdict.Running })
+        assertTrue(box.await(prior = "A", timeoutMs = 20_000, probeTask = false) is RestartWait.Outcome.NotRestarted)
     }
 
     @Test

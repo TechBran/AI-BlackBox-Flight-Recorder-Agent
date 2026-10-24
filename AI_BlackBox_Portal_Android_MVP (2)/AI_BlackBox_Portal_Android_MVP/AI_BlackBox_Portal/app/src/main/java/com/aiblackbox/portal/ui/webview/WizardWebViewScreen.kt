@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.ui.webview
 
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -50,7 +51,8 @@ import com.aiblackbox.portal.ui.theme.BbxWhite
  *
  * Only PortalActivity's WebSettings block is mirrored (javaScriptEnabled,
  * domStorageEnabled, MIXED_CONTENT_COMPATIBILITY_MODE) plus a plain
- * [WebViewClient] so navigation stays inside this WebView.
+ * [WebViewClient] so navigation stays inside this WebView, and a default
+ * [WebChromeClient] so the wizard's confirm()/alert() dialogs show.
  *
  * KNOWN LIMITATION (m1): the onboarding SPA intercepts `target="_blank"`
  * links — the API-key "get your key" links and the Google-OAuth console /
@@ -130,6 +132,11 @@ fun WizardWebViewScreen(
                     // Plain WebViewClient keeps same-origin SPA navigation inside
                     // the WebView (no external-browser bounce on internal links).
                     webViewClient = WebViewClient()
+                    // Without a WebChromeClient a WebView cancels every JS
+                    // dialog: confirm() returns false, so the hub's Install Now
+                    // and the wizard's remove/delete confirms silently did
+                    // nothing. The default one shows the stock dialogs.
+                    webChromeClient = WebChromeClient()
                     loadUrl("$origin/onboarding/$suffix")
                     webViewRef.value = this
                 }
