@@ -139,6 +139,8 @@ fun SettingsSheet(
     onDismiss: () -> Unit,
     onNavigate: (String) -> Unit = {},
     onClearHistory: () -> Unit = {},
+    // False while a chat reply is streaming: an operator pick then waits (the chat says why).
+    canSwitchOperator: () -> Boolean = { true },
     viewModel: SettingsViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -879,7 +881,7 @@ fun SettingsSheet(
                         },
                         onClick = {
                             feedback()
-                            viewModel.setOperator(op)
+                            if (canSwitchOperator()) viewModel.setOperator(op)
                             showOperatorMenu = false
                         }
                     )
@@ -921,7 +923,7 @@ fun SettingsSheet(
                         TextButton(onClick = {
                             feedback()
                             val name = newOperatorName.trim()
-                            if (name.isNotBlank()) {
+                            if (name.isNotBlank() && canSwitchOperator()) {
                                 viewModel.addOperator(name)
                                 showAddOperatorDialog = false
                             }

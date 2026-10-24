@@ -4,6 +4,8 @@ import com.aiblackbox.portal.data.api.WebSocketClient
 import com.aiblackbox.portal.data.api.WsMessage
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.ui.chat.PendingAgentPrompt
+import com.aiblackbox.portal.ui.chat.agentPromptOperator
+import com.aiblackbox.portal.ui.chat.deliverHeldAgentPrompts
 import com.aiblackbox.portal.ui.chat.finishStreamingBubble
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -119,13 +121,76 @@ class AgentSessionLifecycleTest {
         assertFalse("a second take (recomposition) gets nothing", pending.compareAndSet(p, null))
     }
 
-    @Test fun `the chat view model holds an agent prompt until the screen consumes it`() {
-        // Wiring: the AGENT route queues into a StateFlow (no SharedFlow with replay 0).
+    /**
+     * The review repro (A05-chat-ui-01): a send with the agents provider navigates to a
+     * NEW agent screen, whose client is not built and whose operator is still "" for its
+     * first frames. The prompt must wait for the client, not be taken and refused.
+     */
+    @Test fun `a prompt queued before the agent screen exists is sent once its client is up`() = runTest {
+        val pending = MutableStateFlow<PendingAgentPrompt?>(PendingAgentPrompt("run the tests", operator = "op-a"))
+        val ready = MutableStateFlow(false)
+        val screenOperator = MutableStateFlow("") // the new screen's store read has not landed
+        val sent = mutableListOf<Pair<String, String>>()
+        backgroundScope.launch {
+            deliverHeldAgentPrompts(
+                pending = pending,
+                ready = ready,
+                take = { pending.compareAndSet(it, null) },
+                send = { sent += it.text to agentPromptOperator(it.operator, screenOperator.value) },
+            )
+        }
+        runCurrent()
+        assertTrue("nothing is sent before the client exists", sent.isEmpty())
+        assertTrue("and the prompt is still held", pending.value != null)
+
+        ready.value = true
+        runCurrent()
+        assertEquals("sent once, as the operator it was queued under", listOf("run the tests" to "op-a"), sent)
+        assertNull(pending.value)
+
+        ready.value = false
+        ready.value = true
+        runCurrent()
+        assertEquals("never twice", 1, sent.size)
+    }
+
+    @Test fun `a prompt queued while the screen is up is sent at once`() = runTest {
+        val pending = MutableStateFlow<PendingAgentPrompt?>(null)
+        val ready = MutableStateFlow(true)
+        val sent = mutableListOf<String>()
+        backgroundScope.launch {
+            deliverHeldAgentPrompts(pending, ready, take = { pending.compareAndSet(it, null) }, send = { sent += it.text })
+        }
+        runCurrent()
+        pending.value = PendingAgentPrompt("first", "op-a")
+        runCurrent()
+        pending.value = PendingAgentPrompt("first", "op-a") // the same text again is a new prompt
+        runCurrent()
+        assertEquals(listOf("first", "first"), sent)
+    }
+
+    @Test fun `the queued operator wins over the screen's, which only fills a blank`() {
+        assertEquals("op-a", agentPromptOperator("op-a", ""))
+        assertEquals("op-a", agentPromptOperator("op-a", "op-b"))
+        assertEquals("op-b", agentPromptOperator("", "op-b"))
+        assertEquals("", agentPromptOperator("", ""))
+    }
+
+    @Test fun `the chat view model holds an agent prompt until the screen can send it`() {
+        // Wiring: the AGENT route queues into a StateFlow (no SharedFlow with replay 0),
+        // with the operator read at send time.
         val src = java.io.File(sourceRoot(), "ui/chat/ChatViewModel.kt").readText()
         assertFalse("no lossy SharedFlow handoff", "_agentPromptEvent" in src)
         assertTrue("ChatRoute.AGENT -> queueAgentPrompt(text)" in src)
-        val screen = java.io.File(sourceRoot(), "ui/chat/AgentChatScreen.kt").readText()
-        assertTrue("the screen consumes once", "consumeAgentPrompt(pending)" in screen)
+        assertTrue("the prompt carries the send-time operator", "PendingAgentPrompt(text, operator = currentOperator)" in src)
+        val screen = java.io.File(sourceRoot(), "ui/chat/AgentChatScreen.kt").readText().replace("\r\n", "\n")
+        assertTrue("the screen waits for its client", "ready = viewModel.clientReady" in screen)
+        assertTrue("and takes each prompt once", "take = chat::consumeAgentPrompt" in screen)
+        assertTrue("sending under the queued operator", "viewModel.sendPrompt(prompt.text, agentPromptOperator(prompt.operator" in screen)
+        val init = screen.substring(screen.indexOf("fun initialize(origin: String"))
+        assertTrue("the client marks itself ready", "_clientReady.value = true" in init.substring(0, init.indexOf("\n    }")))
+        val send = screen.substring(screen.indexOf("fun sendPrompt(text: String, operator: String"))
+        assertTrue("the operator guard reads the resolved operator", "if (op.isBlank())" in send.substring(0, 600))
     }
 
     @Test fun `an error at idle leaves the finished answer alone`() {

@@ -1067,9 +1067,12 @@ class NativeMainActivity : ComponentActivity() {
                             // taps straight to the Updates screen.
                             showUpdatesBadge = updatesVm.attention.collectAsState().value,
                             onUpdatesClick = { navController.navigate(Routes.UPDATES) },
-                            onOperatorChange = { scope.launch { store.setOperator(it) } },
+                            // A pick waits while a reply streams (it would cancel it unminted).
+                            onOperatorChange = {
+                                if (!chatViewModel.operatorSwitchBlocked()) scope.launch { store.setOperator(it) }
+                            },
                             onAddOperator = { name ->
-                                scope.launch {
+                                if (!chatViewModel.operatorSwitchBlocked()) scope.launch {
                                     try {
                                         val api = chatViewModel.getApi() ?: return@launch
                                         val body = """{"name":"$name"}"""
@@ -1504,7 +1507,8 @@ class NativeMainActivity : ComponentActivity() {
                         onNavigate = { route ->
                             navController.navigate(route)
                         },
-                        onClearHistory = { chatViewModel.clearHistory() }
+                        onClearHistory = { chatViewModel.clearHistory() },
+                        canSwitchOperator = { !chatViewModel.operatorSwitchBlocked() },
                     )
                 }
             }

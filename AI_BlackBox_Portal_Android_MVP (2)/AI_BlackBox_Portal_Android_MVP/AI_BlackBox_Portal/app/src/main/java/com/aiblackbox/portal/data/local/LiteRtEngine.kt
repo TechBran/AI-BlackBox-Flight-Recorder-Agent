@@ -116,6 +116,10 @@ class LiteRtEngine(
     private val supportImage: Boolean = false,
 ) : LocalLlm, ToolCallingLlm, NativeToolCallingLlm, VisionLlm {
 
+    /** What this engine was built as ([engineConfigKey]): fixed for its lifetime. */
+    val configKey: String
+        get() = engineConfigKey(modelFile.absolutePath, maxTokens, sampler, supportImage)
+
     // The native engine, leased by every generation (A09-data-local-model-03): close()
     // and a model switch retire it, and its native close waits for the last running
     // generation instead of freeing it under a multi-second sendMessageAsync.

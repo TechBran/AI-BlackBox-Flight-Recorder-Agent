@@ -2,6 +2,8 @@ package com.aiblackbox.portal.data.local
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
@@ -32,7 +34,7 @@ import java.io.File
  */
 class EngineSingleOwnerTest {
 
-    private class Res(val name: String) {
+    private class Res(val name: String, val cfg: String = "") {
         var closed = 0
     }
 
@@ -170,7 +172,112 @@ class EngineSingleOwnerTest {
         assertFalse(inflight.flag)
     }
 
+    // ── a cancelled caller, and a settings change (review follow-up) ─────────
+
+    @Test fun `a STOP during the cold load keeps the loaded engine for the next send`() = runTest {
+        val slot = FakeSlot()
+        val inflight = FakeInflight()
+        val engine = Res("a")
+        val nativeLoad = CompletableDeferred<Unit>()
+        val send = launch {
+            pinWarm(Mutex(), slot, inflight, engine, "/m/a", load = { nativeLoad.await() },
+                close = { it.closed++ }, keepIfCancelled = { true })
+        }
+        runCurrent()
+        send.cancel()             // STOP while the native load is still running
+        nativeLoad.complete(Unit) // the load cannot be interrupted and finishes
+        send.join()
+
+        assertTrue("the send itself is still cancelled", send.isCancelled)
+        assertEquals("the loaded engine is not thrown away", 0, engine.closed)
+        assertSame("it is pinned, so the next send reuses it", engine, slot.held)
+        assertNull(slot.warming)
+        assertFalse(inflight.flag)
+    }
+
+    @Test fun `a caller that no longer wants the engine closes it when cancelled`() = runTest {
+        val slot = FakeSlot()
+        val inflight = FakeInflight()
+        val engine = Res("a")
+        val nativeLoad = CompletableDeferred<Unit>()
+        val stopping = launch {
+            pinWarm(Mutex(), slot, inflight, engine, "/m/a", load = { nativeLoad.await() }, close = { it.closed++ })
+        }
+        runCurrent()
+        stopping.cancel()
+        nativeLoad.complete(Unit)
+        stopping.join()
+
+        assertEquals("a stopping service releases what it loaded", 1, engine.closed)
+        assertNull("nothing stays pinned without an owner", slot.held)
+        assertNull(slot.warming)
+        assertFalse(inflight.flag)
+    }
+
+    @Test fun `a failed load is closed even when a cancelled caller would keep it`() = runTest {
+        val slot = FakeSlot()
+        val engine = Res("a")
+        try {
+            pinWarm(Mutex(), slot, FakeInflight(), engine, "/m/a", load = { error("GPU init failed") },
+                close = { it.closed++ }, keepIfCancelled = { true })
+            fail("the failure must reach the caller")
+        } catch (e: IllegalStateException) {
+            assertEquals("GPU init failed", e.message)
+        }
+        assertEquals(1, engine.closed)
+        assertNull(slot.held)
+    }
+
+    @Test fun `an engine pinned with older settings is retired, not reused`() = runTest {
+        // The race: Local Model Settings applied while the service warm was loading the
+        // old window. The re-warm's new engine must win over the one pinned meanwhile.
+        val slot = FakeSlot()
+        val stale = Res("stale", cfg = "window=4096")
+        slot.held = stale
+        slot.path = "/m/a"
+        val fresh = Res("fresh", cfg = "window=8192")
+        var loads = 0
+        val out = pinWarm(Mutex(), slot, FakeInflight(), fresh, "/m/a", load = { loads++ },
+            close = { it.closed++ }, sameConfig = { held, wanted -> held.cfg == wanted.cfg })
+
+        assertSame(fresh, out)
+        assertEquals("the new settings are loaded", 1, loads)
+        assertEquals("the stale engine is released", 1, stale.closed)
+        assertSame(fresh, slot.held)
+        assertEquals(0, fresh.closed)
+    }
+
+    @Test fun `the engine config key changes with every setting an engine is built with`() {
+        val base = engineConfigKey("/m/a", 4096, SamplerSettings(), supportImage = false)
+        assertEquals(base, engineConfigKey("/m/a", 4096, SamplerSettings(), supportImage = false))
+        for (other in listOf(
+            engineConfigKey("/m/b", 4096, SamplerSettings(), false),
+            engineConfigKey("/m/a", 8192, SamplerSettings(), false),
+            engineConfigKey("/m/a", 4096, SamplerSettings(topK = 40), false),
+            engineConfigKey("/m/a", 4096, SamplerSettings(topP = 0.9f), false),
+            engineConfigKey("/m/a", 4096, SamplerSettings(temperature = 0.2f), false),
+            engineConfigKey("/m/a", 4096, SamplerSettings(), true),
+        )) assertFalse(other, other == base)
+    }
+
+    @Test fun `a held engine with stale settings is rebuilt, not borrowed`() {
+        assertEquals(EngineSource.USE_HOLDER, engineSourceFor(true, "/m/a", "/m/a"))
+        assertEquals(EngineSource.BUILD_OWN, engineSourceFor(true, "/m/a", "/m/a", holderConfigMatches = false))
+    }
+
     // ── wiring: every load goes through the one warm ─────────────────────────
+
+    @Test fun `the chat keeps a cancelled load, matches config and refuses stale borrows`() {
+        val vm = source("$root/ui/chat/ChatViewModel.kt")
+        val load = vm.substring(vm.indexOf("private suspend fun loadWiredLocalEngine("))
+        val body = load.substring(0, load.indexOf("\n    }\n"))
+        assertTrue("a STOP keeps the engine while the VM lives", "keepIfCancelled = { viewModelScope.isActive }" in body)
+        assertTrue("and still ends the turn", "ensureActive()" in body)
+        assertTrue("the borrow checks the held engine's settings", "engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath, heldConfigMatches)" in vm)
+        val warm = source("$root/data/local/EngineWarm.kt")
+        assertTrue("the process warm reuses only a same-config engine", "sameConfig = { held, wanted -> held.configKey == wanted.configKey }" in warm)
+    }
+
 
     private fun source(rel: String): String {
         var dir: File? = File(".").absoluteFile
