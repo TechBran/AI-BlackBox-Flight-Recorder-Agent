@@ -204,6 +204,23 @@ def test_open_breaker_reports_degraded_with_the_last_error(client, monkeypatch):
     assert tts["breaker"]["consecutive_failures"] == local_stack.BREAKER_THRESHOLD
 
 
+def test_report_only_breakers_keep_routing_on_box_and_say_why(client, monkeypatch):
+    """The embeddings / rerank breakers only report: routing still goes
+    on-box (their own retry / evidence regimes gate them), and a flipped
+    decision would turn the wizard card into "Use on-box", whose click
+    starts a corpus re-embed."""
+    _wire(monkeypatch, enabled_caps=("embeddings", "rerank"))
+    for _ in range(local_stack.BREAKER_THRESHOLD):
+        local_stack.report_failure("embeddings", "HTTP 500: cudaMalloc failed")
+    routing = client.get("/local-models/status").json()["routing"]
+    emb = routing["embeddings"]
+    assert emb["decision"] == "on-box"
+    assert emb["reason"] == "member failing: HTTP 500: cudaMalloc failed"
+    assert emb["breaker"]["state"] == "open"
+    assert routing["rerank"]["reason"] is None
+    assert local_stack.capability_problem("embeddings") is None
+
+
 def test_self_converted_reranker_row_says_how_it_gets_built(client, monkeypatch):
     """O19-local-stack-10: a silent `downloadable: false` row left the operator
     nowhere; the row now names the build command and the runbook, and whether

@@ -196,6 +196,11 @@ def should_route_onbox(cap: str) -> bool:
 # embeddings and rerank still work on CPU, slowly; they stay available.
 GPU_REQUIRED_CAPS = ("tts",)
 
+# Capabilities whose availability the breaker decides (their gates read
+# capability_problem). The embeddings and rerank breakers are fed too, but
+# only to report "member failing" in GET /local-models/status.
+BREAKER_GATED_CAPS = ("tts", "stt")
+
 BREAKER_THRESHOLD = 3
 BREAKER_COOLDOWN_S = 60.0
 BREAKER_COOLDOWN_MAX_S = 900.0
@@ -315,9 +320,12 @@ def gpu_ready() -> dict:
 def capability_problem(cap: str) -> "str | None":
     """Why on-box `cap` must be reported unavailable right now, or None. Read
     by the TTS and STT gates and should_route_onbox(); liveness (is_healthy)
-    and seeding (enabled) are checked separately by those callers."""
+    and seeding (enabled) are checked separately by those callers. Only the
+    BREAKER_GATED_CAPS breakers count here: embeddings and rerank keep their
+    own gates (the provider retry envelope, the rerank real-traffic evidence)
+    and their breakers only report (GET /local-models/status)."""
     st = breaker_state(cap)
-    if st["state"] == "open":
+    if st["state"] == "open" and cap in BREAKER_GATED_CAPS:
         return (f"on-box {cap} is failing ({st['last_error']}); retrying in "
                 f"{st['retry_in_s']}s")
     if cap in GPU_REQUIRED_CAPS:

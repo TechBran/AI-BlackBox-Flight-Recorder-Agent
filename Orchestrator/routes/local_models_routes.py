@@ -50,12 +50,17 @@ def _routing_decision(cap: str, healthy: bool, gpu: dict) -> dict:
                          refuses to start it on a dead driver)
       "unhealthy"        seeded but the stack is down -> per-capability degradation
       "degraded"         seeded + reachable, but the capability's breaker is
-                         open: the member fails real requests (O19-local-stack-05)
+                         open: the member fails real requests and the TTS / STT
+                         gate reports it unavailable (O19-local-stack-05)
       "off"              not seeded -> an explicit pick / cloud owns it.
     Every frontend treats anything but "on-box" as inactive, so the two new
-    values are backward-compatible (plan Task 10). Additive `reason` (None when
-    all is well; "running on CPU: ..." for an on-box capability on a dead
-    driver) and `breaker` (local_stack.breaker_state)."""
+    values are backward-compatible (plan Task 10). The embeddings and rerank
+    breakers only report: routing still goes on-box, so their decision stays
+    "on-box" with the failure in `reason` (flipping it would also turn the
+    wizard card back into "Use on-box", whose click starts a re-embed).
+    Additive `reason` (None when all is well; "running on CPU: ..." for an
+    on-box capability on a dead driver) and `breaker`
+    (local_stack.breaker_state)."""
     seeded = local_stack.enabled(cap)
     breaker = local_stack.breaker_state(cap)
     reason = None
@@ -67,11 +72,13 @@ def _routing_decision(cap: str, healthy: bool, gpu: dict) -> dict:
         decision = "unhealthy"
         reason = ("the llama-swap front door (blackbox-models.service) is not "
                   "answering — check systemctl status blackbox-models.service")
-    elif breaker["state"] == "open":
+    elif breaker["state"] == "open" and cap in local_stack.BREAKER_GATED_CAPS:
         decision, reason = "degraded", local_stack.capability_problem(cap)
     else:
         decision = "on-box"
-        if not gpu["ok"]:
+        if breaker["state"] == "open":
+            reason = f"member failing: {breaker['last_error']}"
+        elif not gpu["ok"]:
             reason = f"running on CPU: {gpu['reason']}"
     return {"enabled": seeded, "healthy": healthy, "decision": decision,
             "reason": reason, "breaker": breaker}
