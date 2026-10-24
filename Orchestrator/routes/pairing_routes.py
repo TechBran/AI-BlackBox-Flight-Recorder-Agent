@@ -235,7 +235,7 @@ def pair_claim(req: PairClaimRequest, request: Request) -> PairClaimResponse:
     meta = _pair_tokens.get(req.token)
     if not meta:
         raise HTTPException(status_code=404, detail="token unknown or expired")
-    if meta["claimed_at"]:  # noqa: race-acceptable for human-paced QR flow
+    if meta["claimed_at"]:  # a check-then-act race is acceptable for the human-paced QR flow
         logger.warning(
             "pair_claim_rejected_already_claimed token_id=%s by=%s",
             req.token[:6], req.device_name,

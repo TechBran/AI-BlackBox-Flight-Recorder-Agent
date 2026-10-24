@@ -55,7 +55,7 @@ class _ChatSave:
     async def __call__(self, body, log_prefix):
         self.bodies.append(body)
         if self.ledger is not None:   # the server minted it, whatever the client sees
-            with open(self.ledger, "ab") as f:
+            with open(self.ledger, "ab") as f:  # noqa: ASYNC230 - a test double appending a few bytes
                 f.write(("\n" + body["assistant_response"] + "\n").encode())
         if self.hang:
             await asyncio.sleep(3600)
