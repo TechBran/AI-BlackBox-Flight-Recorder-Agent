@@ -262,3 +262,154 @@ def test_cli_is_stdlib_only_and_runs_isolated(box):
                         "--localstack-home", str(box), "--blackbox-root", str(REPO)],
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0 and "unchanged" in r.stdout
+
+
+# ── one owner: the checkout the installer rendered the live config for ───────
+#
+# ~/.blackbox/localstack/llama-swap-config.yaml is ONE file per box, but any
+# Orchestrator can boot on that box: the service from the main checkout, and a
+# test backend started from a worktree (`cd <worktree> && uvicorn ... --port
+# 9099`). Rendering with whichever checkout happens to be running repointed the
+# qwen-tts member's PYTHONPATH into the worktree, swapped in that branch's
+# template, and restarted the whole proxy (--watch-config), until the service's
+# next boot flipped it back.
+
+def _checkout(tmp_path, name, *, marker=None):
+    """A second checkout with its own template (`marker` replaces the
+    embedder's "-b 8192", so a render from it is recognisable)."""
+    root = tmp_path / name
+    tpl = lr.template_path(str(root))
+    tpl.parent.mkdir(parents=True)
+    text = _template()
+    if marker:
+        assert "-b 8192" in text
+        text = text.replace("-b 8192", marker, 1)
+    tpl.write_text(text, encoding="utf-8")
+    return root
+
+
+def _sidecar(box):
+    return json.loads((box / lr.OVERRIDES_NAME).read_text(encoding="utf-8"))
+
+
+def test_reconcile_records_the_checkout_it_rendered_for(box):
+    lr.reconcile(str(box), str(REPO))
+    assert _sidecar(box)["blackbox_root"] == str(REPO)
+    assert lr.config_owner(str(box)) == str(REPO)
+
+
+def test_reconcile_from_another_checkout_leaves_the_live_config_alone(box, tmp_path):
+    lr.reconcile(str(box), str(REPO))
+    dest = box / lr.CONFIG_NAME
+    before, mtime = dest.read_bytes(), dest.stat().st_mtime_ns
+    side_before = (box / lr.OVERRIDES_NAME).read_bytes()
+    worktree = _checkout(tmp_path, "worktree", marker="-b 512")
+    res = lr.reconcile(str(box), str(worktree))
+    assert res["changed"] is False and res["owner"] == str(REPO)
+    assert res["skipped"] and str(REPO) in res["skipped"]
+    assert dest.read_bytes() == before and dest.stat().st_mtime_ns == mtime
+    assert (box / lr.OVERRIDES_NAME).read_bytes() == side_before
+
+
+def test_the_owner_of_a_pre_sidecar_config_is_its_qwen_tts_path(box):
+    """MS02 and the dev box were rendered before the sidecar existed: the
+    owner is the checkout the qwen-tts member's PYTHONPATH names."""
+    golden = GOLDEN.read_text(encoding="utf-8")
+    assert lr.config_owner(str(box), golden) == MS02_ROOT
+    (box / lr.CONFIG_NAME).write_text(golden, encoding="utf-8")
+    assert lr.config_owner(str(box)) == MS02_ROOT
+
+
+def test_a_pre_sidecar_config_is_adopted_only_by_its_own_checkout(box, tmp_path):
+    dest = box / lr.CONFIG_NAME
+    dest.write_text(lr.render(_template(), str(box), str(REPO)), encoding="utf-8")
+    before = dest.read_bytes()
+    worktree = _checkout(tmp_path, "worktree", marker="-b 512")
+    res = lr.reconcile(str(box), str(worktree))
+    assert res["skipped"] and res["owner"] == str(REPO)
+    assert dest.read_bytes() == before
+    assert not (box / lr.OVERRIDES_NAME).exists()      # nothing claimed for the worktree
+    res = lr.reconcile(str(box), str(REPO))
+    assert res["skipped"] is None and res["changed"] is False
+    assert dest.read_bytes() == before
+    assert _sidecar(box) == {"blackbox_root": str(REPO), "ttl": {}}
+
+
+def test_a_config_whose_owner_cannot_be_told_is_not_rewritten_at_boot(box):
+    """No sidecar and no qwen-tts path to read the checkout from: a boot
+    reconcile must not guess (it could be a worktree's)."""
+    dest = box / lr.CONFIG_NAME
+    dest.write_text("models:\n  \"embed-qwen3-8b\":\n    ttl: 600\n", encoding="utf-8")
+    res = lr.reconcile(str(box), str(REPO))
+    assert res["changed"] is False and res["owner"] is None and res["skipped"]
+    assert "re-run" in res["skipped"]
+    assert dest.read_text(encoding="utf-8").startswith("models:")
+
+
+def test_the_installer_moves_the_config_to_its_checkout(box, tmp_path):
+    """An installer run is the operator saying "this checkout": it claims the
+    config, whoever owned it."""
+    lr.reconcile(str(box), str(REPO))
+    lr.set_ttl_override(str(box), "speaches", 0, blackbox_root=str(REPO))
+    moved = _checkout(tmp_path, "moved")
+    assert lr.main(["--localstack-home", str(box), "--blackbox-root", str(moved)]) == 0
+    text = (box / lr.CONFIG_NAME).read_text(encoding="utf-8")
+    assert f"PYTHONPATH={moved}/LocalModels exec" in text
+    assert _sidecar(box) == {"blackbox_root": str(moved), "ttl": {"speaches": 0}}
+
+
+def test_a_symlinked_path_to_the_owner_is_the_same_checkout(box, tmp_path):
+    lr.reconcile(str(box), str(REPO))
+    before = (box / lr.CONFIG_NAME).read_bytes()
+    link = tmp_path / "repo-link"
+    link.symlink_to(REPO)
+    res = lr.reconcile(str(box), str(link))
+    assert res["skipped"] is None and res["changed"] is False
+    assert (box / lr.CONFIG_NAME).read_bytes() == before
+
+
+def test_set_ttl_override_keeps_the_recorded_owner(box):
+    lr.reconcile(str(box), str(REPO))
+    lr.set_ttl_override(str(box), "qwen-tts", 0, blackbox_root=str(REPO))
+    assert _sidecar(box) == {"blackbox_root": str(REPO), "ttl": {"qwen-tts": 0}}
+
+
+def test_an_owner_that_is_not_a_path_makes_the_sidecar_unreadable(box):
+    (box / lr.OVERRIDES_NAME).write_text('{"ttl": {}, "blackbox_root": 7}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        lr.reconcile(str(box), str(REPO))
+
+
+@pytest.fixture
+def worktree_process(installed, tmp_path, monkeypatch):
+    """An Orchestrator booted from a worktree on a box whose live config the
+    main checkout (REPO here) installed."""
+    from Orchestrator.utils import paths
+    worktree = _checkout(tmp_path, "worktree", marker="-b 512")
+    monkeypatch.setattr(paths, "blackbox_root", lambda: worktree)
+    return installed[0], installed[1], worktree
+
+
+def test_boot_reconcile_from_a_worktree_never_rewrites_the_live_config(worktree_process, caplog):
+    local_stack, dest, worktree = worktree_process
+    before, mtime = dest.read_bytes(), dest.stat().st_mtime_ns
+    caplog.set_level("WARNING", logger=local_stack.logger.name)
+    res = local_stack.reconcile_llama_swap_config()
+    assert res["changed"] is False and res["skipped"]
+    assert dest.read_bytes() == before and dest.stat().st_mtime_ns == mtime
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert str(REPO) in warnings[0] and str(worktree) in warnings[0]
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_keep_warm_from_a_worktree_renders_for_the_owning_checkout(worktree_process):
+    local_stack, dest, worktree = worktree_process
+    local_stack.set_member_ttl("embed-qwen3-8b", local_stack.TTL_WARM)
+    assert local_stack.get_member_ttl("embed-qwen3-8b") == 0
+    text = dest.read_text(encoding="utf-8")
+    assert f"PYTHONPATH={REPO}/LocalModels exec" in text
+    assert str(worktree) not in text
+    assert "-b 512" not in text                       # REPO's template, not the worktree's
+    assert dest.read_text(encoding="utf-8") == lr.render(
+        _template(), str(dest.parent), str(REPO), {"embed-qwen3-8b": 0})

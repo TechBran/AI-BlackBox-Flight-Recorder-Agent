@@ -571,6 +571,12 @@ def set_member_ttl(member: str, ttl: int) -> None:
     config, so an installer re-run or a boot re-render keeps it, and the
     template's comments survive (yaml.safe_dump used to drop them all).
 
+    Renders for the checkout that OWNS the live config (the one the installer
+    rendered it for), not the one this process runs from: a keep-warm toggle
+    on a test backend started from a worktree must not repoint the qwen-tts
+    member into that worktree. Only a config whose owner cannot be told is
+    rendered for (and then owned by) this process's checkout.
+
     WARNING (§6): the service runs with --watch-config, which auto-restarts the
     WHOLE proxy on any edit (unloads every member — there is no in-place reload,
     llama-swap #160/#547). Batch config writes; one keep-warm toggle is one
@@ -582,10 +588,12 @@ def set_member_ttl(member: str, ttl: int) -> None:
     path = llama_swap_config_path()
     if path is None:
         raise RuntimeError("local stack not installed — no llama-swap config to edit")
-    home, root = str(path.parent), str(blackbox_root())
+    home = str(path.parent)
     try:
+        root = (localstack_render.config_owner(home, path.read_text(encoding="utf-8"))
+                or str(blackbox_root()))
         localstack_render.set_ttl_override(home, member, int(ttl), blackbox_root=root)
-        localstack_render.reconcile(home, root, dest=path)
+        localstack_render.reconcile(home, root, dest=path, claim=True)
     except localstack_render.UnknownMember:
         raise                      # a ValueError: the caller named a non-member
     except (OSError, ValueError) as exc:
@@ -595,8 +603,11 @@ def set_member_ttl(member: str, ttl: int) -> None:
 def reconcile_llama_swap_config() -> "dict | None":
     """Re-render the live llama-swap config from the template + overrides
     (the boot step that lands a pulled template change on this box). None
-    when the stack is not installed (no live config). Never raises: a render
-    failure is logged and the live file is left as it was."""
+    when the stack is not installed (no live config). Writes nothing when
+    another checkout owns the config (an Orchestrator booted from a worktree)
+    or its owner cannot be told: one WARNING says which, and the result's
+    "skipped" carries it. Never raises: a render failure is logged and the
+    live file is left as it was."""
     path = llama_swap_config_path()
     if path is None:
         return None
@@ -608,7 +619,10 @@ def reconcile_llama_swap_config() -> "dict | None":
         logger.error("[LOCAL STACK] could not re-render the llama-swap config at %s "
                      "(left as it was): %s", path, exc)
         return None
-    if res["changed"]:
+    if res.get("skipped"):
+        logger.warning("[LOCAL STACK] llama-swap config not re-rendered (left as it "
+                       "was): %s", res["skipped"])
+    elif res["changed"]:
         logger.warning("[LOCAL STACK] llama-swap config re-rendered from the template "
                        "(%d line(s) changed, keep-warm overrides %s); llama-swap "
                        "--watch-config reloads it", res["lines_changed"],
@@ -620,7 +634,8 @@ def boot_sweep() -> None:
     """Startup capability sweep (plan Task 12a): say at boot, loudly, when an
     NVIDIA card's driver is dead — the Aug 7-11 outage ran four days with
     nothing in the journal — then converge the llama-swap config onto the
-    template. Blocking (subprocess + file IO): run it off the event loop.
+    template (only when this checkout owns it: reconcile_llama_swap_config).
+    Blocking (subprocess + file IO): run it off the event loop.
     Never raises."""
     try:
         from Orchestrator import hardware

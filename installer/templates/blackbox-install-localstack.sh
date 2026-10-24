@@ -502,8 +502,10 @@ fi
 # installer). It keeps the box's keep-warm overrides (llama-swap-overrides.json
 # beside the config) instead of resetting every member to ttl 600, and writes
 # nothing when the render is unchanged (--watch-config restarts the proxy on
-# any write). Stdlib-only, so the system python runs it isolated (-I), as the
-# box's user, before any venv exists. ${PORT}/${llama-server}/${models-dir}
+# any write). This run also records $BLACKBOX_ROOT as the checkout that owns
+# the config: a boot from any other checkout (a worktree test backend) then
+# leaves it alone. Stdlib-only, so the system python runs it isolated (-I), as
+# the box's user, before any venv exists. ${PORT}/${llama-server}/${models-dir}
 # stay literal for llama-swap.
 if ! sudo -u "$REAL_USER" "$PYBIN" -I "$BLACKBOX_ROOT/Orchestrator/localstack_render.py" \
         --localstack-home "$LOCALSTACK_HOME" --blackbox-root "$BLACKBOX_ROOT" \
