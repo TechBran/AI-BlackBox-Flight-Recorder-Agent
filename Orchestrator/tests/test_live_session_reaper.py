@@ -14,6 +14,7 @@ These tests pin the reaper's safety invariants (the load-bearing one being
 "never reap a session that isn't explicitly disconnected", which protects
 in-flight phone-bridge realtime sessions that legitimately have no portal_ws).
 """
+import asyncio
 from datetime import datetime, timezone, timedelta
 
 from Orchestrator.models import GeminiLiveSession, GrokLiveSession, RealtimeSession
@@ -106,11 +107,11 @@ def test_reap_removes_only_stale_disconnected_entries():
         "active": active,
     }
 
-    removed = reap(sessions, NOW_TS)
+    removed = asyncio.run(reap(sessions, NOW_TS))
 
     assert removed == ["old_disconnected"]
     assert set(sessions) == {"fresh_disconnected", "active"}
 
 
 def test_reap_empty_registry_is_noop():
-    assert reap({}, NOW_TS) == []
+    assert asyncio.run(reap({}, NOW_TS)) == []

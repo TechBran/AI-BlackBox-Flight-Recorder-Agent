@@ -37,12 +37,15 @@ class _Recorder:
         return f"fetched {url}"
 
 
-def _run_and_get_loop_thread(coro_factory):
+def _run_and_get_loop_thread(coro_factory, session=None):
     loop_thread = {}
 
     async def main():
         loop_thread["id"] = threading.get_ident()
         await coro_factory()
+        if session is not None:
+            # Voice tool calls run as session tasks off the listener (rank 51).
+            await asyncio.gather(*session.tool_tasks)
 
     asyncio.run(main())
     return loop_thread["id"]
@@ -58,7 +61,8 @@ def test_realtime_web_fetch_runs_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(rt, "perform_web_fetch", rec)
     session = RealtimeSession(session_id="t-wf-rt", operator="system")
     session.openai_ws = FakeUpstreamWS()
-    loop = _run_and_get_loop_thread(lambda: rt.handle_openai_message(session, _openai_style_event()))
+    loop = _run_and_get_loop_thread(lambda: rt.handle_openai_message(session, _openai_style_event()),
+                                    session)
     assert rec.threads and rec.threads[0] != loop
     assert "fetched https://example.com/" in session.openai_ws.sent[0]["item"]["output"]
 
@@ -68,7 +72,8 @@ def test_grok_live_web_fetch_runs_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(gk, "perform_web_fetch", rec)
     session = GrokLiveSession(session_id="t-wf-gk", operator="system")
     session.grok_ws = FakeUpstreamWS()
-    loop = _run_and_get_loop_thread(lambda: gk.handle_grok_message(session, _openai_style_event()))
+    loop = _run_and_get_loop_thread(lambda: gk.handle_grok_message(session, _openai_style_event()),
+                                    session)
     assert rec.threads and rec.threads[0] != loop
     assert "fetched https://example.com/" in session.grok_ws.sent[0]["item"]["output"]
 
@@ -80,7 +85,7 @@ def test_gemini_live_web_fetch_runs_off_the_event_loop(monkeypatch):
     session.gemini_ws = FakeUpstreamWS()
     event = {"toolCall": {"functionCalls": [
         {"id": "fc-wf", "name": "web_fetch", "args": {"url": "https://example.com/"}}]}}
-    loop = _run_and_get_loop_thread(lambda: gm.handle_gemini_message(session, event))
+    loop = _run_and_get_loop_thread(lambda: gm.handle_gemini_message(session, event), session)
     assert rec.threads and rec.threads[0] != loop
     responses = session.gemini_ws.sent[0]["toolResponse"]["functionResponses"]
     assert "fetched https://example.com/" in str(responses[0]["response"])

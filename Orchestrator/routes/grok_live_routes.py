@@ -78,7 +78,9 @@ from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 from Orchestrator.routes.voice_ws_shared import (
     cancel_task,
+    cancel_voice_tools,
     claim_session,
+    dispatch_voice_tool,
     reset_for_connect,
     retire_upstream,
     save_voice_transcript,
@@ -155,14 +157,17 @@ Messages: {len(session.conversation)}
         session_summary=session_summary,
         model_label="grok-live-voice",
         log_prefix="[GROK-LIVE]",
+        session_id=session.session_id,
     )
 
     # P1b BUGFIX: previously cleared UNCONDITIONALLY — a failed save
-    # permanently lost the transcript. Clear only on confirmed 200.
+    # permanently lost the transcript. Clear only once it is safe: saved, or
+    # in the retry spool (rank 51 write-ahead spool).
     if saved:
         session.conversation = []
     else:
-        print(f"[GROK-LIVE] Save FAILED — keeping {len(session.conversation)} turns for a later retry")
+        print(f"[GROK-LIVE] Save FAILED and the retry spool is unavailable — keeping "
+              f"{len(session.conversation)} turns in memory for the next save attempt")
 
 
 # =============================================================================
@@ -792,378 +797,19 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
                 "data": {"name": name, "arguments": arguments}
             })
 
-        # Execute the tool
-        if name == "search_snapshots":
-            result = await execute_grok_search_snapshots(session, arguments)
-        elif name == "web_fetch":
-            url = arguments.get("url", "")
-            max_chars = arguments.get("max_chars", 80000)
-            print(f"[GROK-LIVE] Executing web fetch: {url}")
-            # Off the event loop: a fetch can take its whole time budget.
-            result = await run_blocking(perform_web_fetch, url, max_chars)
-            print(f"[GROK-LIVE] Web fetch result length: {len(result)} chars")
-        elif name in IMAGE_TOOL_PROVIDERS:
-            provider = IMAGE_TOOL_PROVIDERS[name]
-            prompt = arguments.get("prompt", "")
-            aspect_ratio = arguments.get("aspectRatio", "16:9")
-            resolution = arguments.get("resolution", "1K")
-            num_images = arguments.get("numberOfImages", 1)
-            reference_images = arguments.get("reference_images", [])  # For image-to-image
-
-            mode = "image-to-image" if reference_images else "text-to-image"
-            print(f"[GROK-LIVE] Executing image generation ({mode}): {prompt[:100]}... ({num_images} @ {resolution})")
-
-            # Create image generation task
-            image_options = {
-                "aspectRatio": aspect_ratio,
-                "resolution": resolution,
-                "numberOfImages": num_images,
-                "provider": provider,
-            }
-            if arguments.get("size"):  # openai gpt-image / local z-image size
-                image_options["size"] = arguments["size"]
-            if reference_images:
-                image_options["reference_images"] = reference_images
-
-            task = create_task(
-                TaskType.IMAGE_GENERATION,
-                operator=session.operator or "system",
-                prompt=prompt,
-                result_data={"options": image_options}
-            )
-
-            img_count = num_images
-            ref_desc = f" (using {len(reference_images)} reference image{'s' if len(reference_images) > 1 else ''})" if reference_images else ""
-            result = f"Image generation started ({mode}){ref_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {img_count} image{'s' if img_count > 1 else ''} at {resolution}."
-
-            # Notify Portal about image task
-            print(f"[GROK-LIVE] Sending image_task event to portal...")
-            if session.portal_ws:
-                await _safe_ws_send(session.portal_ws, {
-                    "type": "image_task",
-                    "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images}
-                })
-                print(f"[GROK-LIVE] ✓ image_task event sent successfully")
-            else:
-                print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
-
-            print(f"[GROK-LIVE] Image generation task created: {task.task_id}")
-        elif name == "generate_video":
-            prompt = arguments.get("prompt", "")
-            aspect_ratio = arguments.get("aspectRatio", "16:9")
-            duration = arguments.get("duration", 8)
-            resolution = arguments.get("resolution", "720p")
-            negative_prompt = arguments.get("negativePrompt", "")
-            image_url = arguments.get("image_url")  # For image-to-video
-            video_url = arguments.get("video_url")  # For video extension
-
-            mode = "text-to-video"
-            if image_url:
-                mode = "image-to-video"
-            elif video_url:
-                mode = "video-extension"
-
-            print(f"[GROK-LIVE] Executing video generation ({mode}): {prompt[:100]}... ({duration}s @ {resolution})")
-
-            # Create video generation task
-            video_options = {
-                "aspectRatio": aspect_ratio,
-                "duration": duration,
-                "resolution": resolution,
-            }
-            if negative_prompt:
-                video_options["negativePrompt"] = negative_prompt
-            if image_url:
-                video_options["image_url"] = image_url
-            if video_url:
-                video_options["video_url"] = video_url
-
-            task = create_task(
-                TaskType.VIDEO_GENERATION,
-                operator=session.operator or "system",
-                prompt=prompt,
-                result_data={"options": video_options}
-            )
-
-            mode_desc = f" (animating image: {image_url})" if image_url else (f" (extending video: {video_url})" if video_url else "")
-            result = f"Video generation started ({mode}){mode_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution}. Takes 5-20 minutes."
-
-            # Notify Portal about video task
-            print(f"[GROK-LIVE] Sending video_task event to portal...")
-            if session.portal_ws:
-                await _safe_ws_send(session.portal_ws, {
-                    "type": "video_task",
-                    "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration, "resolution": resolution}
-                })
-                print(f"[GROK-LIVE] ✓ video_task event sent successfully")
-            else:
-                print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
-
-            print(f"[GROK-LIVE] Video generation task created: {task.task_id}")
-        elif name == "lyria_music":
-            prompt = arguments.get("prompt", "")
-            negative_prompt = arguments.get("negativePrompt", "")
-            sample_count = arguments.get("sampleCount", 1)
-            print(f"[GROK-LIVE] Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
-
-            # Create music generation task
-            music_options = {
-                "prompt": prompt,
-                "operator": session.operator or "system",
-            }
-            if negative_prompt:
-                music_options["negative_prompt"] = negative_prompt
-            if sample_count and sample_count > 1:
-                music_options["sample_count"] = sample_count
-
-            task = create_task(
-                TaskType.LYRIA_MUSIC,
-                operator=session.operator or "system",
-                prompt=prompt,
-                result_data=music_options
-            )
-
-            variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
-            result = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
-
-            # Notify Portal about music task
-            print(f"[GROK-LIVE] Sending music_task event to portal...")
-            if session.portal_ws:
-                await _safe_ws_send(session.portal_ws, {
-                    "type": "music_task",
-                    "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}
-                })
-                print(f"[GROK-LIVE] ✓ music_task event sent successfully")
-            else:
-                print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
-
-            print(f"[GROK-LIVE] Music generation task created: {task.task_id}")
-        elif name == "get_media":
-            from Orchestrator.routes.chat_routes import execute_get_media
-            url = arguments.get("url")
-            task_id_param = arguments.get("task_id")
-            print(f"[GROK-LIVE] Executing get_media: url={url}, task_id={task_id_param}")
-            media_result = execute_get_media(url=url, task_id=task_id_param)
-            result = json.dumps(media_result, indent=2)
-        elif name == "list_media":
-            from Orchestrator.routes.chat_routes import execute_list_media
-            media_type = arguments.get("media_type")
-            limit = arguments.get("limit", 20)
-            print(f"[GROK-LIVE] Executing list_media: type={media_type}, limit={limit}")
-            list_result = execute_list_media(media_type=media_type, limit=limit)
-            result = json.dumps(list_result, indent=2)
-        elif name == "search_media":
-            from Orchestrator.routes.chat_routes import execute_search_media
-            query = arguments.get("query", "")
-            media_type = arguments.get("media_type")
-            limit = arguments.get("limit", 10)
-            print(f"[GROK-LIVE] Executing search_media: query='{query}', type={media_type}")
-            search_result = execute_search_media(query=query, media_type=media_type, limit=limit)
-            result = json.dumps(search_result, indent=2)
-        elif name == "send_sms":
-            # Send SMS using unified tool executor
-            from Orchestrator.tools import BlackBoxToolExecutor
-            phone_number = arguments.get("phone_number", "")
-            message = arguments.get("message", "")
-            print(f"[GROK-LIVE] Executing send_sms to {phone_number}: {message[:50]}...")
-            executor = BlackBoxToolExecutor(operator=session.operator or "system")
-            tool_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
-            result = tool_result.rich_result()
-            print(f"[GROK-LIVE] SMS result: {result}")
-        elif name == "make_phone_call":
-            # Initiate outbound phone call through the unified tool executor: the
-            # box's call route (Asterisk/TG200 or Twilio), an E.164 number, and a
-            # 200 {"error": ...} counted as a failure (Orchestrator.telephony).
-            from Orchestrator.tools import BlackBoxToolExecutor
-            phone_number = arguments.get("phone_number", "")
-            print(f"[GROK-LIVE] Executing make_phone_call to {phone_number}")
-            executor = BlackBoxToolExecutor(operator=session.operator or "system")
-            tool_result = await executor.execute("make_phone_call", {
-                "phone_number": phone_number,
-                "greeting": arguments.get("greeting", ""),
-                "role": arguments.get("role", ""),
-                "backend": arguments.get("backend", "openai_realtime"),
-            })
-            result = tool_result.rich_result()
-            print(f"[GROK-LIVE] Call result: {result}")
-        elif name == "make_voice_call":
-            # Call with pre-generated TTS message
-            from Orchestrator.tools import BlackBoxToolExecutor
-            phone_number = arguments.get("phone_number", "")
-            message = arguments.get("message", "")
-            voice = arguments.get("voice", "onyx")
-            print(f"[GROK-LIVE] Executing make_voice_call to {phone_number}: {message[:50]}...")
-            executor = BlackBoxToolExecutor(operator=session.operator or "system")
-            tool_result = await executor.execute("make_voice_call", {
-                "phone_number": phone_number,
-                "message": message,
-                "voice": voice
-            })
-            result = tool_result.rich_result()
-            print(f"[GROK-LIVE] Voice call result: {result}")
-        elif name in ("get_recent_snapshots", "list_recent_snapshots"):
-            # list_recent_snapshots is the declared ToolVault name; legacy
-            # get_recent_snapshots is kept as a dispatch alias for list_recent_snapshots
-            # so this specialized handler (system-sees-all scoping for
-            # outbound-call context handoff) serves both instead of falling
-            # to the catch-all.
-            count = min(arguments.get("count", 3), 5)
-            operator = session.operator or "system"
-
-            # System operator sees ALL snapshots (for outbound calls/context handoff)
-            # Regular operators only see their own snapshots (no context bleed)
-            see_all = (operator == "system")
-
-            print(f"[GROK-LIVE] Getting {count} recent snapshots for {operator} (see_all={see_all})")
-            try:
-                from Orchestrator.fossils import load_snapshot_index, read_volume_bytes
-                index = load_snapshot_index()
-
-                if index:
-                    # Sort all snapshots by ID (date + sequence)
-                    def snapshot_sort_key(snap_id: str) -> tuple:
-                        try:
-                            parts = snap_id.split('-')
-                            date_part = int(parts[1]) if len(parts) > 1 else 0
-                            seq_part = int(parts[2]) if len(parts) > 2 else 0
-                            return (date_part, seq_part)
-                        except (ValueError, IndexError):
-                            return (0, 0)
-
-                    # Filter by operator unless system (which sees all)
-                    if see_all:
-                        matching = list(index.items())
-                    else:
-                        matching = [(sid, meta) for sid, meta in index.items()
-                                   if meta.get("operator") == operator]
-
-                    matching.sort(key=lambda x: snapshot_sort_key(x[0]), reverse=True)
-
-                    # Get the most recent N
-                    recent = matching[:count]
-
-                    if not recent:
-                        result = f"No recent snapshots found for operator '{operator}'."
-                    else:
-                        vol_bytes = read_volume_bytes(VOL_PATH)
-                        scope_desc = "all operators" if see_all else f"operator: {operator}"
-                        result_parts = [f"Found {len(recent)} recent snapshot(s) ({scope_desc}):\n"]
-
-                        for snap_id, meta in recent:
-                            start = meta.get("byte_start", 0)
-                            end = meta.get("byte_end", start + 5000)
-                            snap_bytes = vol_bytes[start:end]
-                            snap_text = snap_bytes.decode('utf-8', errors='replace')
-                            operator_name = meta.get("operator", "unknown")
-
-                            # WI-10 (M7): deliver recent snapshots WHOLE — no delivery truncation
-                            result_parts.append(f"--- {snap_id} (operator: {operator_name}) ---\n{snap_text}")
-
-                        result = "\n\n".join(result_parts)
-                        print(f"[GROK-LIVE] Retrieved {len(recent)} recent snapshots")
-                else:
-                    result = "No snapshots found in index."
-            except Exception as e:
-                print(f"[GROK-LIVE] Error getting recent snapshots: {e}")
-                result = f"Error retrieving recent snapshots: {str(e)}"
-        elif name == "search_contacts":
-            from Orchestrator.contacts import search_contacts
-            query = arguments.get("query", "")
-            operator = session.operator or "system"
-            print(f"[GROK-LIVE] Executing search_contacts: query='{query}', operator={operator}")
-            contacts = search_contacts(query, operator)
-            if contacts:
-                result = json.dumps(contacts, indent=2)
-            else:
-                result = f"No contacts found matching '{query}'."
-            print(f"[GROK-LIVE] search_contacts result: {len(contacts)} contacts found")
-        elif name == "save_contact":
-            from Orchestrator.contacts import upsert_contact
-            operator = session.operator or "system"
-            contact_name = arguments.get("name", "")
-            notes = arguments.get("notes", "")
-            tags = arguments.get("tags", [])
-            phone = arguments.get("phone")
-            email = arguments.get("email")
-            relationship = arguments.get("relationship")
-            print(f"[GROK-LIVE] Executing save_contact: name='{contact_name}', operator={operator}")
-            saved = upsert_contact(
-                name=contact_name, notes=notes, tags=tags,
-                operator=operator, created_by="grok-live",
-                phone=phone, email=email, relationship=relationship
-            )
-            result = f"Contact saved: {json.dumps(saved, indent=2)}"
-            print(f"[GROK-LIVE] save_contact result: saved '{contact_name}'")
-        elif name == "create_cron_job":
-            from Orchestrator.tools import BlackBoxToolExecutor
-            operator = session.operator or "system"
-            executor = BlackBoxToolExecutor(operator=operator)
-            cron_result = await executor.execute("create_cron_job", arguments)
-            result = cron_result.rich_result()
-            print(f"[GROK-LIVE] create_cron_job result: {result}")
-        elif name == "edit_cron_job":
-            from Orchestrator.tools import BlackBoxToolExecutor
-            operator = session.operator or "system"
-            executor = BlackBoxToolExecutor(operator=operator)
-            cron_result = await executor.execute("edit_cron_job", arguments)
-            result = cron_result.rich_result()
-            print(f"[GROK-LIVE] edit_cron_job result: {result}")
-        elif name == "search_cron_jobs":
-            from Orchestrator.tools import BlackBoxToolExecutor
-            operator = session.operator or "system"
-            executor = BlackBoxToolExecutor(operator=operator)
-            cron_result = await executor.execute("search_cron_jobs", arguments)
-            result = cron_result.rich_result()
-            print(f"[GROK-LIVE] search_cron_jobs result: {result}")
-        elif name in ("use_computer", "list_devices", "control_android_device"):
-            from Orchestrator.tools import BlackBoxToolExecutor
-            operator = session.operator or "system"
-            executor = BlackBoxToolExecutor(operator=operator)
-            tool_result = await executor.execute(name, arguments)
-            result = tool_result.result
-            print(f"[GROK-LIVE] {name}: {result[:100]}")
-        elif name == "get_current_time":
-            from datetime import datetime
-            now = datetime.now()
-            result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-            print(f"[GROK-LIVE] get_current_time: {result}")
-        else:
-            # Catch-all: route ANY other tool (incl. the per-provider web
-            # search tools and dynamically-injected ToolVault tools) through
-            # BlackBoxToolExecutor instead of reporting "Unknown tool".
-            from Orchestrator.tools import BlackBoxToolExecutor
-            operator = session.operator or "system"
-            executor = BlackBoxToolExecutor(operator=operator)
-            tool_result = await executor.execute(name, arguments)
-            result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
-            if not result:
-                result = f"Tool '{name}' executed successfully (no output)."
-            print(f"[GROK-LIVE] {name} (catch-all): {result[:100]}")
-
-        # Send result back to Grok
-        if session.grok_ws:
-            tool_response = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": result
-                }
-            }
-            print(f"[GROK-LIVE] Sending tool response for {name}, call_id: {call_id}")
-            await session.grok_ws.send(json.dumps(tool_response))
-            # Request response with tool result
-            await session.grok_ws.send(json.dumps({
-                "type": "response.create"
-            }))
-            print(f"[GROK-LIVE] Requested response.create after tool result")
-
-        # Notify Portal
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "tool_result",
-                "data": {"name": name, "result_length": len(result)}
-            })
+        # Run the tool OFF this listener so it keeps draining provider events
+        # while the tool works: inline, a long tool held the socket unread
+        # (audit O08-stt-realtime-02). The answer goes back on the socket the
+        # call came from, never on a reconnected one that has no such call id.
+        upstream = session.grok_ws
+        dispatch_voice_tool(
+            session,
+            lambda: _execute_grok_tool(session, name, arguments),
+            lambda result: _deliver_grok_tool_result(session, upstream, call_id, name, result),
+            lambda exc: _fail_grok_tool(session, upstream, event, exc),
+            label=f"[GROK-LIVE] {name} (call_id={call_id})",
+            call_id=call_id,
+        )
 
     elif event_type == "response.done":
         # Response complete
@@ -1264,6 +910,400 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
     else:
         # Log unhandled event types to help debug
         print(f"[GROK-LIVE] Unhandled event type: {event_type}")
+
+
+async def _execute_grok_tool(session: 'GrokLiveSession', name: str, arguments: Dict) -> str:
+    """Run ONE tool call of the session and return its result text.
+
+    Runs as a task tracked on the session (voice_ws_shared.dispatch_voice_tool),
+    never inside the listener, which used to sit on a tool for its whole run.
+    """
+    if name == "search_snapshots":
+        result = await execute_grok_search_snapshots(session, arguments)
+    elif name == "web_fetch":
+        url = arguments.get("url", "")
+        max_chars = arguments.get("max_chars", 80000)
+        print(f"[GROK-LIVE] Executing web fetch: {url}")
+        # Off the event loop: a fetch can take its whole time budget.
+        result = await run_blocking(perform_web_fetch, url, max_chars)
+        print(f"[GROK-LIVE] Web fetch result length: {len(result)} chars")
+    elif name in IMAGE_TOOL_PROVIDERS:
+        provider = IMAGE_TOOL_PROVIDERS[name]
+        prompt = arguments.get("prompt", "")
+        aspect_ratio = arguments.get("aspectRatio", "16:9")
+        resolution = arguments.get("resolution", "1K")
+        num_images = arguments.get("numberOfImages", 1)
+        reference_images = arguments.get("reference_images", [])  # For image-to-image
+
+        mode = "image-to-image" if reference_images else "text-to-image"
+        print(f"[GROK-LIVE] Executing image generation ({mode}): {prompt[:100]}... ({num_images} @ {resolution})")
+
+        # Create image generation task
+        image_options = {
+            "aspectRatio": aspect_ratio,
+            "resolution": resolution,
+            "numberOfImages": num_images,
+            "provider": provider,
+        }
+        if arguments.get("size"):  # openai gpt-image / local z-image size
+            image_options["size"] = arguments["size"]
+        if reference_images:
+            image_options["reference_images"] = reference_images
+
+        task = create_task(
+            TaskType.IMAGE_GENERATION,
+            operator=session.operator or "system",
+            prompt=prompt,
+            result_data={"options": image_options}
+        )
+
+        img_count = num_images
+        ref_desc = f" (using {len(reference_images)} reference image{'s' if len(reference_images) > 1 else ''})" if reference_images else ""
+        result = f"Image generation started ({mode}){ref_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {img_count} image{'s' if img_count > 1 else ''} at {resolution}."
+
+        # Notify Portal about image task
+        print(f"[GROK-LIVE] Sending image_task event to portal...")
+        if session.portal_ws:
+            await _safe_ws_send(session.portal_ws, {
+                "type": "image_task",
+                "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images}
+            })
+            print(f"[GROK-LIVE] ✓ image_task event sent successfully")
+        else:
+            print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
+
+        print(f"[GROK-LIVE] Image generation task created: {task.task_id}")
+    elif name == "generate_video":
+        prompt = arguments.get("prompt", "")
+        aspect_ratio = arguments.get("aspectRatio", "16:9")
+        duration = arguments.get("duration", 8)
+        resolution = arguments.get("resolution", "720p")
+        negative_prompt = arguments.get("negativePrompt", "")
+        image_url = arguments.get("image_url")  # For image-to-video
+        video_url = arguments.get("video_url")  # For video extension
+
+        mode = "text-to-video"
+        if image_url:
+            mode = "image-to-video"
+        elif video_url:
+            mode = "video-extension"
+
+        print(f"[GROK-LIVE] Executing video generation ({mode}): {prompt[:100]}... ({duration}s @ {resolution})")
+
+        # Create video generation task
+        video_options = {
+            "aspectRatio": aspect_ratio,
+            "duration": duration,
+            "resolution": resolution,
+        }
+        if negative_prompt:
+            video_options["negativePrompt"] = negative_prompt
+        if image_url:
+            video_options["image_url"] = image_url
+        if video_url:
+            video_options["video_url"] = video_url
+
+        task = create_task(
+            TaskType.VIDEO_GENERATION,
+            operator=session.operator or "system",
+            prompt=prompt,
+            result_data={"options": video_options}
+        )
+
+        mode_desc = f" (animating image: {image_url})" if image_url else (f" (extending video: {video_url})" if video_url else "")
+        result = f"Video generation started ({mode}){mode_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution}. Takes 5-20 minutes."
+
+        # Notify Portal about video task
+        print(f"[GROK-LIVE] Sending video_task event to portal...")
+        if session.portal_ws:
+            await _safe_ws_send(session.portal_ws, {
+                "type": "video_task",
+                "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration, "resolution": resolution}
+            })
+            print(f"[GROK-LIVE] ✓ video_task event sent successfully")
+        else:
+            print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
+
+        print(f"[GROK-LIVE] Video generation task created: {task.task_id}")
+    elif name == "lyria_music":
+        prompt = arguments.get("prompt", "")
+        negative_prompt = arguments.get("negativePrompt", "")
+        sample_count = arguments.get("sampleCount", 1)
+        print(f"[GROK-LIVE] Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
+
+        # Create music generation task
+        music_options = {
+            "prompt": prompt,
+            "operator": session.operator or "system",
+        }
+        if negative_prompt:
+            music_options["negative_prompt"] = negative_prompt
+        if sample_count and sample_count > 1:
+            music_options["sample_count"] = sample_count
+
+        task = create_task(
+            TaskType.LYRIA_MUSIC,
+            operator=session.operator or "system",
+            prompt=prompt,
+            result_data=music_options
+        )
+
+        variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
+        result = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
+
+        # Notify Portal about music task
+        print(f"[GROK-LIVE] Sending music_task event to portal...")
+        if session.portal_ws:
+            await _safe_ws_send(session.portal_ws, {
+                "type": "music_task",
+                "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}
+            })
+            print(f"[GROK-LIVE] ✓ music_task event sent successfully")
+        else:
+            print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
+
+        print(f"[GROK-LIVE] Music generation task created: {task.task_id}")
+    elif name == "get_media":
+        from Orchestrator.routes.chat_routes import execute_get_media
+        url = arguments.get("url")
+        task_id_param = arguments.get("task_id")
+        print(f"[GROK-LIVE] Executing get_media: url={url}, task_id={task_id_param}")
+        media_result = execute_get_media(url=url, task_id=task_id_param)
+        result = json.dumps(media_result, indent=2)
+    elif name == "list_media":
+        from Orchestrator.routes.chat_routes import execute_list_media
+        media_type = arguments.get("media_type")
+        limit = arguments.get("limit", 20)
+        print(f"[GROK-LIVE] Executing list_media: type={media_type}, limit={limit}")
+        list_result = execute_list_media(media_type=media_type, limit=limit)
+        result = json.dumps(list_result, indent=2)
+    elif name == "search_media":
+        from Orchestrator.routes.chat_routes import execute_search_media
+        query = arguments.get("query", "")
+        media_type = arguments.get("media_type")
+        limit = arguments.get("limit", 10)
+        print(f"[GROK-LIVE] Executing search_media: query='{query}', type={media_type}")
+        search_result = execute_search_media(query=query, media_type=media_type, limit=limit)
+        result = json.dumps(search_result, indent=2)
+    elif name == "send_sms":
+        # Send SMS using unified tool executor
+        from Orchestrator.tools import BlackBoxToolExecutor
+        phone_number = arguments.get("phone_number", "")
+        message = arguments.get("message", "")
+        print(f"[GROK-LIVE] Executing send_sms to {phone_number}: {message[:50]}...")
+        executor = BlackBoxToolExecutor(operator=session.operator or "system")
+        tool_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
+        result = tool_result.rich_result()
+        print(f"[GROK-LIVE] SMS result: {result}")
+    elif name == "make_phone_call":
+        # Initiate outbound phone call through the unified tool executor: the
+        # box's call route (Asterisk/TG200 or Twilio), an E.164 number, and a
+        # 200 {"error": ...} counted as a failure (Orchestrator.telephony).
+        from Orchestrator.tools import BlackBoxToolExecutor
+        phone_number = arguments.get("phone_number", "")
+        print(f"[GROK-LIVE] Executing make_phone_call to {phone_number}")
+        executor = BlackBoxToolExecutor(operator=session.operator or "system")
+        tool_result = await executor.execute("make_phone_call", {
+            "phone_number": phone_number,
+            "greeting": arguments.get("greeting", ""),
+            "role": arguments.get("role", ""),
+            "backend": arguments.get("backend", "openai_realtime"),
+        })
+        result = tool_result.rich_result()
+        print(f"[GROK-LIVE] Call result: {result}")
+    elif name == "make_voice_call":
+        # Call with pre-generated TTS message
+        from Orchestrator.tools import BlackBoxToolExecutor
+        phone_number = arguments.get("phone_number", "")
+        message = arguments.get("message", "")
+        voice = arguments.get("voice", "onyx")
+        print(f"[GROK-LIVE] Executing make_voice_call to {phone_number}: {message[:50]}...")
+        executor = BlackBoxToolExecutor(operator=session.operator or "system")
+        tool_result = await executor.execute("make_voice_call", {
+            "phone_number": phone_number,
+            "message": message,
+            "voice": voice
+        })
+        result = tool_result.rich_result()
+        print(f"[GROK-LIVE] Voice call result: {result}")
+    elif name in ("get_recent_snapshots", "list_recent_snapshots"):
+        # list_recent_snapshots is the declared ToolVault name; legacy
+        # get_recent_snapshots is kept as a dispatch alias for list_recent_snapshots
+        # so this specialized handler (system-sees-all scoping for
+        # outbound-call context handoff) serves both instead of falling
+        # to the catch-all.
+        count = min(arguments.get("count", 3), 5)
+        operator = session.operator or "system"
+
+        # System operator sees ALL snapshots (for outbound calls/context handoff)
+        # Regular operators only see their own snapshots (no context bleed)
+        see_all = (operator == "system")
+
+        print(f"[GROK-LIVE] Getting {count} recent snapshots for {operator} (see_all={see_all})")
+        try:
+            from Orchestrator.fossils import load_snapshot_index, read_volume_bytes
+            index = load_snapshot_index()
+
+            if index:
+                # Sort all snapshots by ID (date + sequence)
+                def snapshot_sort_key(snap_id: str) -> tuple:
+                    try:
+                        parts = snap_id.split('-')
+                        date_part = int(parts[1]) if len(parts) > 1 else 0
+                        seq_part = int(parts[2]) if len(parts) > 2 else 0
+                        return (date_part, seq_part)
+                    except (ValueError, IndexError):
+                        return (0, 0)
+
+                # Filter by operator unless system (which sees all)
+                if see_all:
+                    matching = list(index.items())
+                else:
+                    matching = [(sid, meta) for sid, meta in index.items()
+                               if meta.get("operator") == operator]
+
+                matching.sort(key=lambda x: snapshot_sort_key(x[0]), reverse=True)
+
+                # Get the most recent N
+                recent = matching[:count]
+
+                if not recent:
+                    result = f"No recent snapshots found for operator '{operator}'."
+                else:
+                    vol_bytes = read_volume_bytes(VOL_PATH)
+                    scope_desc = "all operators" if see_all else f"operator: {operator}"
+                    result_parts = [f"Found {len(recent)} recent snapshot(s) ({scope_desc}):\n"]
+
+                    for snap_id, meta in recent:
+                        start = meta.get("byte_start", 0)
+                        end = meta.get("byte_end", start + 5000)
+                        snap_bytes = vol_bytes[start:end]
+                        snap_text = snap_bytes.decode('utf-8', errors='replace')
+                        operator_name = meta.get("operator", "unknown")
+
+                        # WI-10 (M7): deliver recent snapshots WHOLE — no delivery truncation
+                        result_parts.append(f"--- {snap_id} (operator: {operator_name}) ---\n{snap_text}")
+
+                    result = "\n\n".join(result_parts)
+                    print(f"[GROK-LIVE] Retrieved {len(recent)} recent snapshots")
+            else:
+                result = "No snapshots found in index."
+        except Exception as e:
+            print(f"[GROK-LIVE] Error getting recent snapshots: {e}")
+            result = f"Error retrieving recent snapshots: {str(e)}"
+    elif name == "search_contacts":
+        from Orchestrator.contacts import search_contacts
+        query = arguments.get("query", "")
+        operator = session.operator or "system"
+        print(f"[GROK-LIVE] Executing search_contacts: query='{query}', operator={operator}")
+        contacts = search_contacts(query, operator)
+        if contacts:
+            result = json.dumps(contacts, indent=2)
+        else:
+            result = f"No contacts found matching '{query}'."
+        print(f"[GROK-LIVE] search_contacts result: {len(contacts)} contacts found")
+    elif name == "save_contact":
+        from Orchestrator.contacts import upsert_contact
+        operator = session.operator or "system"
+        contact_name = arguments.get("name", "")
+        notes = arguments.get("notes", "")
+        tags = arguments.get("tags", [])
+        phone = arguments.get("phone")
+        email = arguments.get("email")
+        relationship = arguments.get("relationship")
+        print(f"[GROK-LIVE] Executing save_contact: name='{contact_name}', operator={operator}")
+        saved = upsert_contact(
+            name=contact_name, notes=notes, tags=tags,
+            operator=operator, created_by="grok-live",
+            phone=phone, email=email, relationship=relationship
+        )
+        result = f"Contact saved: {json.dumps(saved, indent=2)}"
+        print(f"[GROK-LIVE] save_contact result: saved '{contact_name}'")
+    elif name == "create_cron_job":
+        from Orchestrator.tools import BlackBoxToolExecutor
+        operator = session.operator or "system"
+        executor = BlackBoxToolExecutor(operator=operator)
+        cron_result = await executor.execute("create_cron_job", arguments)
+        result = cron_result.rich_result()
+        print(f"[GROK-LIVE] create_cron_job result: {result}")
+    elif name == "edit_cron_job":
+        from Orchestrator.tools import BlackBoxToolExecutor
+        operator = session.operator or "system"
+        executor = BlackBoxToolExecutor(operator=operator)
+        cron_result = await executor.execute("edit_cron_job", arguments)
+        result = cron_result.rich_result()
+        print(f"[GROK-LIVE] edit_cron_job result: {result}")
+    elif name == "search_cron_jobs":
+        from Orchestrator.tools import BlackBoxToolExecutor
+        operator = session.operator or "system"
+        executor = BlackBoxToolExecutor(operator=operator)
+        cron_result = await executor.execute("search_cron_jobs", arguments)
+        result = cron_result.rich_result()
+        print(f"[GROK-LIVE] search_cron_jobs result: {result}")
+    elif name in ("use_computer", "list_devices", "control_android_device"):
+        from Orchestrator.tools import BlackBoxToolExecutor
+        operator = session.operator or "system"
+        executor = BlackBoxToolExecutor(operator=operator)
+        tool_result = await executor.execute(name, arguments)
+        result = tool_result.result
+        print(f"[GROK-LIVE] {name}: {result[:100]}")
+    elif name == "get_current_time":
+        from datetime import datetime
+        now = datetime.now()
+        result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
+        print(f"[GROK-LIVE] get_current_time: {result}")
+    else:
+        # Catch-all: route ANY other tool (incl. the per-provider web
+        # search tools and dynamically-injected ToolVault tools) through
+        # BlackBoxToolExecutor instead of reporting "Unknown tool".
+        from Orchestrator.tools import BlackBoxToolExecutor
+        operator = session.operator or "system"
+        executor = BlackBoxToolExecutor(operator=operator)
+        tool_result = await executor.execute(name, arguments)
+        result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
+        if not result:
+            result = f"Tool '{name}' executed successfully (no output)."
+        print(f"[GROK-LIVE] {name} (catch-all): {result[:100]}")
+
+    return result
+
+
+async def _deliver_grok_tool_result(session: 'GrokLiveSession', upstream, call_id: str,
+                                    name: str, result: str) -> None:
+    """Answer the model with a tool result, on the upstream the call came from."""
+    if upstream is not None and session.grok_ws is upstream:
+        tool_response = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result
+            }
+        }
+        print(f"[GROK-LIVE] Sending tool response for {name}, call_id: {call_id}")
+        await upstream.send(json.dumps(tool_response))
+        # Request response with tool result
+        await upstream.send(json.dumps({
+            "type": "response.create"
+        }))
+        print(f"[GROK-LIVE] Requested response.create after tool result")
+    else:
+        print(f"[GROK-LIVE] Dropping the {name} result (call_id: {call_id}): the upstream "
+              f"it was called on is gone")
+
+    # Notify Portal
+    if session.portal_ws:
+        await _safe_ws_send(session.portal_ws, {
+            "type": "tool_result",
+            "data": {"name": name, "result_length": len(result)}
+        })
+
+
+async def _fail_grok_tool(session: 'GrokLiveSession', upstream, event: Dict,
+                          exc: BaseException) -> None:
+    """Answer the model with an error payload in place of a result."""
+    live = upstream if (upstream is not None and session.grok_ws is upstream) else None
+    await send_openai_style_tool_error(live, session.portal_ws, event, exc)
 
 # =============================================================================
 # WebSocket Bridge Tasks

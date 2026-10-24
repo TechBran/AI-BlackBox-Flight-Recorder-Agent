@@ -10,7 +10,9 @@ P1b hardening (2026-07-11 voice-agent upgrade pass, workstream 6):
   the model waits forever on a tool result and the user hears dead air).
 - save_voice_transcript(): transcript persistence via POST /chat/save
   (direct persistence + turns_threshold=1 auto-mint) instead of POST /chat
-  (full LLM round-trip, ~400x more expensive — CLAUDE.md anti-pattern).
+  (full LLM round-trip, ~400x more expensive — CLAUDE.md anti-pattern),
+  write-ahead through the retry spool (Orchestrator/voice_transcript_spool.py)
+  so a failed save is retried instead of lost (audit rank 51).
 
 Keep this module LIGHT (json/aiohttp/starlette only): it is imported by all
 three voice routes and, through them, the phone bridge chain.
@@ -19,6 +21,7 @@ three voice routes and, through them, the phone bridge chain.
 import asyncio
 import json
 import os
+import time
 
 import aiohttp
 from typing import Dict, Optional, Set
@@ -88,11 +91,12 @@ def spawn_reconnect(session, coro) -> "asyncio.Task":
 async def retire_upstream(session, ws_attr: str) -> None:
     """Stop everything a previous connect left live on `session`.
 
-    Cancels the pending reconnect, the keepalive loop and the upstream
-    listener, then closes the upstream socket named by `ws_attr`
-    (``gemini_ws`` / ``grok_ws`` / ``openai_ws``). Listener before socket:
-    left running it would observe the close and start a reconnect. A no-op on
-    a fresh session.
+    Cancels the pending reconnect, the keepalive loop, the upstream listener
+    and the in-flight tool calls (their call ids belong to this upstream; no
+    later socket can be answered for them), then closes the upstream socket
+    named by `ws_attr` (``gemini_ws`` / ``grok_ws`` / ``openai_ws``).
+    Listener before socket: left running it would observe the close and start
+    a reconnect. A no-op on a fresh session.
     """
     reconnect = getattr(session, "reconnect_task", None)
     if reconnect is not asyncio.current_task():
@@ -102,6 +106,7 @@ async def retire_upstream(session, ws_attr: str) -> None:
     session.keepalive_task = None
     await cancel_task(getattr(session, "listener_task", None))
     session.listener_task = None
+    await cancel_voice_tools(session)
     ws = getattr(session, ws_attr, None)
     if ws is not None:
         try:
@@ -117,6 +122,87 @@ def reset_for_connect(session) -> None:
     session.is_reconnecting = False
     session.reconnect_count = 0
     session.status = "connecting"
+
+
+# =============================================================================
+# Voice tool calls run off the listener (audit rank 51)
+# =============================================================================
+# A tool call used to run INLINE in the upstream listener, so nothing was read
+# from the provider while it ran: control_phone's 300 s budget, a CU or CLI
+# task, a phone call or a slow web_fetch held the socket unread, and under the
+# old 60 s stale timer the reconnect cancelled the tool mid-call so the function
+# call never got an answer (O08-stt-realtime-02, O09-live-voice-providers-05).
+# Each call now runs as a task tracked on its session.
+
+# Ceiling for ONE voice tool call, above control_phone's default 300 s blocking
+# budget so a tool that finishes by its own rules is never cut short; a wedged
+# one is answered with an error instead of holding the session's tool lane
+# forever. Read at call time.
+VOICE_TOOL_DEADLINE_S = 330.0
+
+
+def _tool_lock(session) -> asyncio.Lock:
+    lock = getattr(session, "tool_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        session.tool_lock = lock
+    return lock
+
+
+def dispatch_voice_tool(session, execute, deliver, fail, *, label: str, call_id: str = "",
+                        deadline: Optional[float] = None) -> "asyncio.Task":
+    """Run one tool call as a task tracked on `session`, off the listener.
+
+    ``execute()`` produces the result text and runs under the deadline
+    (VOICE_TOOL_DEADLINE_S unless given); ``deliver(result)`` answers the model
+    and the client; ``fail(exc)`` answers with an error payload when execute
+    raises or overruns, so no call id is ever left dangling. A session's calls
+    run one at a time in arrival order (asyncio.Lock is FIFO), which keeps the
+    old inline ordering of their results and of the response.create after each.
+    The task sits in ``session.tool_tasks`` (keyed to `call_id`) until it
+    ends; teardown cancels it (cancel_voice_tools / retire_upstream).
+    """
+    limit = VOICE_TOOL_DEADLINE_S if deadline is None else deadline
+
+    async def _run():
+        async with _tool_lock(session):
+            try:
+                result = await asyncio.wait_for(execute(), timeout=limit)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                print(f"[VOICE-TOOLS] {label} gave no result within {limit:.0f}s — "
+                      f"answering the model with an error")
+                await _quietly(fail, TimeoutError(f"no result within {limit:.0f} seconds"))
+                return
+            except Exception as exc:
+                print(f"[VOICE-TOOLS] {label} failed: {type(exc).__name__}: {exc}")
+                await _quietly(fail, exc)
+                return
+            await _quietly(deliver, result)
+
+    task = asyncio.create_task(_run(), name=f"voice-tool {label}")
+    tasks = session.tool_tasks
+    tasks[task] = call_id
+    task.add_done_callback(lambda t: tasks.pop(t, None))
+    return task
+
+
+async def _quietly(fn, arg) -> None:
+    try:
+        await fn(arg)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"[VOICE-TOOLS] could not deliver a tool answer: {type(e).__name__}: {e}")
+
+
+async def cancel_voice_tools(session, call_ids=None) -> None:
+    """Cancel the in-flight tool calls of `session` (only those whose provider
+    call id is in `call_ids`, when given) and wait for them."""
+    for task, call_id in list((getattr(session, "tool_tasks", None) or {}).items()):
+        if call_ids is None or call_id in call_ids:
+            await cancel_task(task)
 
 
 def voice_debug_enabled() -> bool:
@@ -244,9 +330,36 @@ def _chat_save_url() -> str:
     return orchestrator_url("/chat/save")
 
 
+# Transcript ids whose POST is in flight in this process. The spool retry skips
+# them, so a save and its retry can never both reach /chat/save.
+_SAVES_IN_FLIGHT: Set[str] = set()
+
+
+async def _post_chat_save(body: dict, log_prefix: str) -> Optional[int]:
+    """POST /chat/save; returns the HTTP status, or None when no response came."""
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.post(
+                _chat_save_url(),
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    reply = await resp.json()
+                    print(f"{log_prefix} Transcript saved via /chat/save "
+                          f"(minted={reply.get('minted')}, snap_id={reply.get('snap_id')})")
+                else:
+                    error = await resp.text()
+                    print(f"{log_prefix} /chat/save failed: {resp.status} - {error[:200]}")
+                return resp.status
+    except Exception as e:
+        print(f"{log_prefix} /chat/save error: {e}")
+        return None
+
+
 async def save_voice_transcript(operator: str, user_message: str,
                                 session_summary: str, model_label: str,
-                                log_prefix: str) -> bool:
+                                log_prefix: str, session_id: str = "") -> bool:
     """Persist a voice-session transcript via POST /chat/save.
 
     Direct persistence: the backend's turns_threshold=1 auto-mint fires
@@ -254,31 +367,100 @@ async def save_voice_transcript(operator: str, user_message: str,
     when the 200 returns. NEVER POST /chat here (full LLM round-trip) and
     NEVER call /mint afterward (duplicate snapshot).
 
-    Returns True ONLY on HTTP 200 — callers must clear their conversation
-    buffer only when this returns True, so a failed save can be retried by
-    a later teardown path.
+    Write-ahead: the transcript is written to the retry spool
+    (voice_transcript_spool, keyed by `session_id`) BEFORE the POST and taken
+    out after the 200. A failed, timed-out or cancelled save, or a crash in the
+    middle of one, leaves it spooled, and the live-session reaper retries it on
+    its sweeps and right after startup. A failed save used to be "kept for a
+    later retry" that nothing ran (O09-live-voice-providers-13).
+
+    Returns True when the transcript is safe — in the ledger, or durably queued
+    for it — and False only when the save failed AND the spool could not be
+    written. Callers clear their conversation buffer only on True: a False
+    keeps it in memory for the next teardown path or the reaper.
     """
+    from Orchestrator import voice_transcript_spool as spool
+
+    record = spool.new_record(session_id=session_id, operator=operator,
+                              user_message=user_message, session_summary=session_summary,
+                              model_label=model_label, log_prefix=log_prefix)
+    spooled = False
     try:
-        async with aiohttp.ClientSession() as http_session:
-            async with http_session.post(
-                _chat_save_url(),
-                json={
-                    "operator": operator,
-                    "user_message": user_message,
-                    "assistant_response": session_summary,
-                    "model": model_label,
-                    "tokens": {"prompt": 0, "completion": 0},
-                },
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    body = await resp.json()
-                    print(f"{log_prefix} Transcript saved via /chat/save "
-                          f"(minted={body.get('minted')}, snap_id={body.get('snap_id')})")
-                    return True
-                error = await resp.text()
-                print(f"{log_prefix} /chat/save failed: {resp.status} - {error[:200]}")
-                return False
+        await asyncio.to_thread(spool.write, record)
+        spooled = True
     except Exception as e:
-        print(f"{log_prefix} /chat/save error: {e}")
-        return False
+        print(f"{log_prefix} could not spool the transcript for retry: {e}")
+
+    _SAVES_IN_FLIGHT.add(record["transcript_id"])
+    try:
+        status = await _post_chat_save(spool.chat_save_body(record), log_prefix)
+    finally:
+        _SAVES_IN_FLIGHT.discard(record["transcript_id"])
+
+    if status == 200:
+        if spooled:
+            try:
+                await asyncio.to_thread(spool.remove, record)
+            except Exception as e:
+                # The retry finds the marker in the ledger and drops it then.
+                print(f"{log_prefix} saved, but the retry copy could not be removed: {e}")
+        return True
+    if spooled:
+        print(f"{log_prefix} transcript kept in the retry spool "
+              f"({spool.record_path(record).name}); the live-session reaper retries it")
+        return True
+    return False
+
+
+async def retry_spooled_transcripts(now: Optional[float] = None, *,
+                                    ignore_schedule: bool = False) -> Dict[str, int]:
+    """Retry every spooled transcript that is due (live-session reaper, startup).
+
+    Per entry: skip it while its own save is still in flight in this process;
+    drop it when the ledger already holds its marker (a save whose 200 never
+    arrived may have been minted all the same); otherwise POST it again. A 200
+    removes it; a 4xx other than 408/429 is a refusal no retry can fix and
+    parks it (kept on disk as *.rejected.json); anything else backs off
+    (1 min, doubling to 1 h). `ignore_schedule` (the startup pass) retries
+    entries whose backoff has not run out: the save they waited on died with
+    the old process.
+    """
+    from Orchestrator import voice_transcript_spool as spool
+
+    now = time.time() if now is None else now
+    counts = {"saved": 0, "already_saved": 0, "failed": 0, "rejected": 0}
+    records = await asyncio.to_thread(lambda: list(spool.pending()))
+    for record in records:
+        transcript_id = record["transcript_id"]
+        if transcript_id in _SAVES_IN_FLIGHT:
+            continue
+        if not ignore_schedule and float(record.get("next_attempt_at") or 0) > now:
+            continue
+        prefix = record.get("log_prefix") or "[VOICE-SPOOL]"
+        _SAVES_IN_FLIGHT.add(transcript_id)
+        try:
+            if await asyncio.to_thread(spool.ledger_has, record):
+                await asyncio.to_thread(spool.remove, record)
+                counts["already_saved"] += 1
+                print(f"{prefix} spooled transcript of {record.get('session_id')} is already "
+                      f"in the ledger; dropped the retry copy")
+                continue
+            status = await _post_chat_save(spool.chat_save_body(record), prefix)
+            if status == 200:
+                await asyncio.to_thread(spool.remove, record)
+                counts["saved"] += 1
+            elif status is not None and 400 <= status < 500 and status not in (408, 429):
+                parked = await asyncio.to_thread(spool.park_rejected, record)
+                counts["rejected"] += 1
+                print(f"{prefix} /chat/save refused the spooled transcript of "
+                      f"{record.get('session_id')} ({status}); parked as {parked.name}, "
+                      f"not retried")
+            else:
+                spool.mark_failed(record, now)
+                await asyncio.to_thread(spool.write, record)
+                counts["failed"] += 1
+        except Exception as e:
+            print(f"[VOICE-SPOOL] retry of transcript {transcript_id} failed: {e}")
+        finally:
+            _SAVES_IN_FLIGHT.discard(transcript_id)
+    return counts

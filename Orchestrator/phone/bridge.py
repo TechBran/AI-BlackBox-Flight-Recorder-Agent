@@ -548,6 +548,11 @@ class PhoneAIBridge:
 
         # Save session using existing route's save function
         if self._ai_session:
+            # The Gemini leg runs the route's handle_gemini_message, so its tool
+            # calls are session tasks (voice_ws_shared.dispatch_voice_tool):
+            # hanging up cancels them, as a portal teardown does.
+            from Orchestrator.routes.voice_ws_shared import cancel_voice_tools
+            await cancel_voice_tools(self._ai_session)
             await self._save_session()
             # Evict this call's entry from the live-session registry it was
             # inserted into (REALTIME/GEMINI_LIVE/GROK_LIVE depending on backend).

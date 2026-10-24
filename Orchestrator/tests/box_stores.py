@@ -55,6 +55,8 @@ STORE_PATHS = [
     ("Orchestrator.state", "OPERATOR_PREFS_FILE", "Manifest/operator_preferences.json"),
     ("Orchestrator.state", "APPS_REGISTRY_FILE", "Manifest/apps_registry.json"),
     ("Orchestrator.media_index", "MEDIA_INDEX_FILE", "Manifest/media_index.json"),
+    # Failed voice-transcript saves spool here (under the ledger root, cwd-relative).
+    ("Orchestrator.voice_transcript_spool", "SPOOL_DIR", "Volumes/pending_transcripts"),
 ]
 
 # Singletons that captured a store path (or a store's contents) at

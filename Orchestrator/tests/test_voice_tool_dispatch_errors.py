@@ -62,6 +62,8 @@ def test_realtime_normal_dispatch_still_answers():
             "call_id": "call-1", "name": "get_current_time", "arguments": "{}",
         }
         await rt.handle_openai_message(session, event)
+        # The call runs as a session task off the listener (audit rank 51).
+        await asyncio.gather(*session.tool_tasks)
         assert [m["type"] for m in session.openai_ws.sent] == \
             ["conversation.item.create", "response.create"]
         assert "Current date and time" in session.openai_ws.sent[0]["item"]["output"]
@@ -149,6 +151,8 @@ def test_gemini_dispatch_records_answered_ids():
             {"id": "fc-t", "name": "get_current_time", "args": {}},
         ]}}
         await gm.handle_gemini_message(session, event)
+        # The call runs as a session task off the listener (audit rank 51).
+        await asyncio.gather(*session.tool_tasks)
         assert session.answered_tool_call_ids == {"fc-t"}, \
             "dispatch must record answered ids so the error responder never double-answers"
         responses = session.gemini_ws.sent[0]["toolResponse"]["functionResponses"]

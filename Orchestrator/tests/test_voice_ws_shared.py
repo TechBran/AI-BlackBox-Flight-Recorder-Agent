@@ -1,6 +1,8 @@
 """Unit tests for Orchestrator/routes/voice_ws_shared.py (P1b cross-route hardening)."""
 import asyncio
 
+import pytest
+
 from Orchestrator.routes import voice_ws_shared as vs
 from Orchestrator.tests.voice_ws_fakes import FakeUpstreamWS, FakePortalWS
 
@@ -97,8 +99,16 @@ def test_gemini_tool_error_noop_when_all_answered():
 
 
 # ---------------------------------------------------------------------------
-# save_voice_transcript (POST /chat/save, clear-only-on-200 contract)
+# save_voice_transcript (POST /chat/save; True = saved or durably spooled)
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _spool(tmp_path, monkeypatch):
+    from Orchestrator import voice_transcript_spool as spool
+    monkeypatch.setattr(spool, "SPOOL_DIR", tmp_path / "pending_transcripts")
+    monkeypatch.setattr(spool, "LEDGER_PATH", tmp_path / "SNAPSHOT_VOLUME.txt")
+    return spool
+
 
 class _FakeResp:
     def __init__(self, status):
@@ -173,15 +183,16 @@ def test_save_voice_transcript_true_on_200(monkeypatch):
     assert body["tokens"] == {"prompt": 0, "completion": 0}
 
 
-def test_save_voice_transcript_false_on_500(monkeypatch):
+def test_save_voice_transcript_on_500_is_spooled_not_lost(monkeypatch, _spool):
     monkeypatch.setattr(vs, "aiohttp", _fake_aiohttp([], 500))
     ok = asyncio.run(vs.save_voice_transcript(
         operator="system", user_message="m", session_summary="s",
-        model_label="test-voice", log_prefix="[TEST]"))
-    assert ok is False
+        model_label="test-voice", log_prefix="[TEST]", session_id="t-500"))
+    assert ok is True, "a spooled transcript is safe: the caller may drop its copy"
+    assert [r["session_id"] for r in _spool.pending()] == ["t-500"]
 
 
-def test_save_voice_transcript_false_on_exception(monkeypatch):
+def test_save_voice_transcript_on_exception_is_spooled_not_lost(monkeypatch, _spool):
     class Exploding:
         ClientTimeout = staticmethod(lambda total=None: None)
 
@@ -190,6 +201,20 @@ def test_save_voice_transcript_false_on_exception(monkeypatch):
                 raise ConnectionError("no server")
 
     monkeypatch.setattr(vs, "aiohttp", Exploding)
+    ok = asyncio.run(vs.save_voice_transcript(
+        operator="system", user_message="m", session_summary="s",
+        model_label="test-voice", log_prefix="[TEST]", session_id="t-down"))
+    assert ok is True
+    assert [r["session_id"] for r in _spool.pending()] == ["t-down"]
+
+
+def test_save_voice_transcript_false_when_neither_saved_nor_spooled(monkeypatch, _spool):
+    monkeypatch.setattr(vs, "aiohttp", _fake_aiohttp([], 500))
+
+    def unwritable(record):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(_spool, "write", unwritable)
     ok = asyncio.run(vs.save_voice_transcript(
         operator="system", user_message="m", session_summary="s",
         model_label="test-voice", log_prefix="[TEST]"))
