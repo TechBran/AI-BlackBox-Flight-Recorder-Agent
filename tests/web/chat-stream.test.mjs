@@ -271,3 +271,120 @@ test("normalizeReplyFromAny keeps interior code fences and unwraps only a whole-
     const codeOnly = "```bash\nls -la\n```";
     assert.equal(normalizeReplyFromAny(codeOnly), codeOnly, "a reply that IS a code block stays one");
 });
+
+// ── Retry re-sends the turn's attachments ────────────────────────────────
+// The retry chip re-fired send() with the prompt text alone, so a turn that
+// died mid-stream lost its files on retry (the model answered a different
+// question), and a turn with files but no text got no retry at all.
+let uploadCount = 0;
+function stubUploads(url) {
+    globalThis.XMLHttpRequest = window.XMLHttpRequest = class {
+        constructor() { this.upload = { addEventListener() {} }; this._l = {}; }
+        addEventListener(type, fn) { this._l[type] = fn; }
+        open() {}
+        send() {
+            uploadCount += 1;
+            setTimeout(() => {
+                this.status = 200;
+                this.responseText = JSON.stringify({ url });
+                this._l.load && this._l.load();
+            }, 0);
+        }
+    };
+}
+
+const dyingStream = () => sseResponse(frame("stream_start", {}) + frame("content", "partial"),
+    { size: 64, failAfter: 1 });
+const streamBodies = (calls) => calls.filter((c) => c.url === "/chat/stream").map((c) => JSON.parse(c.opts.body));
+const imageParts = (content) => (Array.isArray(content) ? content : []).filter((p) => p.type === "image_url");
+
+test("retrying a failed turn re-sends its attachments, without uploading them again", async () => {
+    resetPage();
+    uploadCount = 0;
+    stubUploads("/ui/uploads/cat.png");
+    const calls = stubFetch([["/chat/stream", () => dyingStream()], ["/chat/save", () => json({})]]);
+    addAttachedFile(new File(["x"], "cat.png", { type: "image/png" }));
+    await sendText("what breed is this cat?");
+    const user = document.querySelector("#history .bubble.user");
+    assert.ok(user.querySelector(".bubble-retry"), "the retry chip is offered");
+    assert.equal(uploadCount, 1);
+
+    await chat.retryFailedTurn(user, "what breed is this cat?");
+    await settle();
+    const [first, second] = streamBodies(calls).map((b) => b.messages[0].content);
+    assert.deepEqual(imageParts(first).map((p) => p.image_url.url), ["/ui/uploads/cat.png"]);
+    assert.deepEqual(second, first, "the retry sends exactly what the failed attempt sent");
+    assert.equal(uploadCount, 1, "the already-uploaded file is reused, not uploaded again");
+    const users = document.querySelectorAll("#history .bubble.user");
+    assert.equal(users.length, 1, "the retried turn replaces the failed one");
+    assert.match(users[0].textContent, /\[Attached: cat\.png\]/);
+});
+
+test("a turn with only an attachment gets a retry, and the retry carries the file", async () => {
+    resetPage();
+    stubUploads("/ui/uploads/photo.jpg");
+    const calls = stubFetch([["/chat/stream", () => dyingStream()], ["/chat/save", () => json({})]]);
+    addAttachedFile(new File(["x"], "photo.jpg", { type: "image/jpeg" }));
+    await sendText("");
+    const user = document.querySelector("#history .bubble.user");
+    const chip = user.querySelector(".bubble-retry");
+    assert.ok(chip, "an attachment-only turn is retryable too");
+    chip.click();
+    await settle(120);
+    const bodies = streamBodies(calls);
+    assert.equal(bodies.length, 2);
+    assert.deepEqual(imageParts(bodies[1].messages[0].content).map((p) => p.image_url.url), ["/ui/uploads/photo.jpg"]);
+});
+
+test("after a reload the retry still re-sends the saved attachments and the original text", async () => {
+    resetPage();
+    stubUploads("/ui/uploads/chart.png");
+    const calls = stubFetch([["/chat/stream", () => dyingStream()], ["/chat/save", () => json({})]]);
+    addAttachedFile(new File(["x"], "chart.png", { type: "image/png" }));
+    await sendText("explain this chart");
+    const { getHistoryData } = await import("../../Portal/modules/state-management.js");
+    const saved = JSON.parse(JSON.stringify(getHistoryData()));   // what localStorage holds
+    const entry = saved.find((e) => e.role === "user");
+    assert.ok(entry.failed);
+
+    // The restore paths re-attach the chip with the entry's displayed content.
+    resetPage();
+    setHistoryData(saved);
+    const { addBubble, attachRetryChip } = await import("../../Portal/modules/chat-bubbles.js");
+    const restored = addBubble("user", entry.content);
+    restored.dataset.sendKey = entry.sendKey;
+    attachRetryChip(restored, entry.content);
+    await chat.retryFailedTurn(restored, entry.content);
+    await settle();
+    const last = streamBodies(calls).pop().messages[0].content;
+    assert.equal(last.find((p) => p.type === "text").text, "explain this chart",
+        "the text sent is the prompt, not the bubble's '[Attached: ...]' rendering");
+    assert.deepEqual(imageParts(last).map((p) => p.image_url.url), ["/ui/uploads/chart.png"]);
+});
+
+// ── Coalesced renders cancel with the API that scheduled them ────────────
+// cancelPendingRender handed the requestAnimationFrame id to clearTimeout too.
+// rAF and timer ids are separate counters, so that cancelled whichever
+// unrelated timer shared the number (a poller's next tick, a toast, the stall
+// watchdog), on nearly every streamed turn.
+test("cancelling a pending render never clears an unrelated timer", () => {
+    resetPage();
+    const real = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, clear: globalThis.clearTimeout };
+    const cancelled = [];
+    const cleared = [];
+    globalThis.requestAnimationFrame = () => 4242;
+    globalThis.cancelAnimationFrame = (id) => { cancelled.push(id); };
+    globalThis.clearTimeout = (id) => { cleared.push(id); return real.clear(id); };
+    try {
+        const bubble = chat.createStreamingThinkingBubble();
+        document.getElementById("history").appendChild(bubble);
+        chat.appendResponseContent(bubble, "hi", "hi");      // schedules a coalesced render
+        chat.finalizeStreamingBubble(bubble, "hi", "");      // supersedes it
+    } finally {
+        globalThis.requestAnimationFrame = real.raf;
+        globalThis.cancelAnimationFrame = real.caf;
+        globalThis.clearTimeout = real.clear;
+    }
+    assert.deepEqual(cancelled, [4242], "the frame is cancelled as a frame");
+    assert.ok(!cleared.includes(4242), "and its id is never handed to clearTimeout");
+});

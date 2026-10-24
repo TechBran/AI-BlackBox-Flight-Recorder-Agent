@@ -770,7 +770,7 @@ export function appendResponseContent(bubble, text, fullResponse = null) {
         bubble._pendingRender = fullResponse;
         if (!bubble._renderFrame) {
             bubble._renderFrame = requestFrame(() => {
-                bubble._renderFrame = 0;
+                bubble._renderFrame = null;
                 const latest = bubble._pendingRender;
                 bubble._pendingRender = null;
                 if (latest === null || latest === undefined) return;
@@ -788,10 +788,20 @@ export function appendResponseContent(bubble, text, fullResponse = null) {
     scrollToBottomIfNeeded();
 }
 
-/** requestAnimationFrame, or a ~16 ms timer where there is none. */
+/**
+ * requestAnimationFrame, or a ~16 ms timer where there is none.
+ * @param {Function} fn - The frame callback
+ * @returns {() => void} Cancels it, with the API that scheduled it (frame ids
+ *   and timer ids are separate counters: clearTimeout(frameId) cancels some
+ *   unrelated timer that shares the number)
+ */
 function requestFrame(fn) {
-    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(fn);
-    return setTimeout(fn, 16);
+    if (typeof requestAnimationFrame === 'function') {
+        const id = requestAnimationFrame(fn);
+        return () => cancelAnimationFrame(id);
+    }
+    const id = setTimeout(fn, 16);
+    return () => clearTimeout(id);
 }
 
 /**
@@ -801,9 +811,8 @@ function requestFrame(fn) {
  */
 function cancelPendingRender(bubble) {
     if (!bubble || !bubble._renderFrame) return;
-    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(bubble._renderFrame);
-    clearTimeout(bubble._renderFrame);
-    bubble._renderFrame = 0;
+    bubble._renderFrame();
+    bubble._renderFrame = null;
     bubble._pendingRender = null;
 }
 
@@ -1026,20 +1035,6 @@ function streamFailure(stage, cause, status) {
     return err;
 }
 
-/** The controller of the /chat/stream request in flight (abortActiveStream). */
-let _activeStreamController = null;
-
-/**
- * Abort the /chat/stream request in flight, if any. The turn then fails like
- * any mid-stream failure (partial bubble removed, retry chip offered).
- * @returns {boolean} Whether there was a stream to abort
- */
-export function abortActiveStream() {
-    if (!_activeStreamController) return false;
-    _activeStreamController.abort();
-    return true;
-}
-
 /**
  * Tidy the UI after a failed stream: the Signal line, any pending render and
  * the floating reasoning panel go; the partial bubble is removed (a Computer
@@ -1144,7 +1139,6 @@ export async function sendStreamingChat(messages, provider, model, operator) {
     // aborted and the turn fails instead of leaving this bubble hanging.
     const STALL_TIMEOUT_MS = 300000;
     const controller = new AbortController();
-    _activeStreamController = controller;
     let stallTimer = null;
     let stalled = false;
     const armStallWatchdog = () => {
@@ -1601,14 +1595,12 @@ export async function sendStreamingChat(messages, provider, model, operator) {
         }
     } catch (err) {
         if (stallTimer) clearTimeout(stallTimer); // watchdog dies with the stream
-        if (_activeStreamController === controller) _activeStreamController = null;
         if (err.stage === 'stalled') toast('Stream stalled — no data received for 5 minutes.');
         console.error(`[STREAM] Stream failed (${err.stage}):`, err.cause || err);
         cleanupFailedStream(bubble, provider, err);
         throw err;
     }
     if (stallTimer) clearTimeout(stallTimer);
-    if (_activeStreamController === controller) _activeStreamController = null;
 
     // If this was a queued request (bubble was removed), resolve silently
     if (!bubble.parentNode && provider === 'computer-use') {
@@ -1914,10 +1906,14 @@ function addExtendButtonToVideo(videoElement) {
 export async function send() {
     console.log('[v101] send() called - provider:', window.__provider, 'attachedFiles:', getAttachedFiles().length);
 
-    const txt = ($("prompt") ? $("prompt").value : "").trim();
-    const attachedFiles = getAttachedFiles();
+    // A retry (retryFailedTurn) re-sends the failed turn's own text and
+    // already-uploaded parts; the composer's attachments are not part of it.
+    const resend = _resendTurn;
+    _resendTurn = null;
+    const txt = resend ? resend.text : ($("prompt") ? $("prompt").value : "").trim();
+    const attachedFiles = resend ? [] : getAttachedFiles();
 
-    if (!txt && attachedFiles.length === 0) {
+    if (!txt && attachedFiles.length === 0 && !(resend && resend.content.length)) {
         toast("Type something or attach a file.");
         return;
     }
@@ -2303,7 +2299,13 @@ export async function send() {
     // =========================================================================
     let userContent = [];
     let bubbleContent = txt;
-    if (txt) userContent.push({ type: "text", text: txt });
+    if (resend) {
+        // The parts the failed attempt sent, its uploads included.
+        userContent = resend.content.map((part) => ({ ...part }));
+        if (resend.bubble) bubbleContent = resend.bubble;
+    } else if (txt) {
+        userContent.push({ type: "text", text: txt });
+    }
 
     if (attachedFiles.length > 0) {
         let imageUrls = [];  // Track image URLs for tool usage
@@ -2352,8 +2354,10 @@ export async function send() {
     const userTurnBubble = addBubble("user", bubbleContent);
     tagUserTurn(userTurnBubble);
     if ($("prompt")) $("prompt").value = "";
-    clearAttachedFiles();
-    renderPreviews();
+    if (!resend) { // a retry leaves files attached since the failure where they are
+        clearAttachedFiles();
+        renderPreviews();
+    }
 
     // =========================================================================
     // STREAMING MODE: Use SSE with thinking/reasoning display
@@ -2390,7 +2394,7 @@ export async function send() {
                     checkCUBackgroundStatus();
                 } else {
                     addBubble("assistant", "Chat error: " + (streamError?.message || String(streamError)));
-                    markSendFailed(userTurnBubble, txt);
+                    markSendFailed(userTurnBubble, txt, userContent);
                 }
                 return;
             }
@@ -2412,7 +2416,7 @@ export async function send() {
                     }
                 }
                 addBubble("assistant", "Chat error: " + result.errorText);
-                markSendFailed(userTurnBubble, txt);
+                markSendFailed(userTurnBubble, txt, userContent);
                 return;
             }
 
@@ -2607,7 +2611,7 @@ export async function send() {
         }
         // FINAL outcome is failure (streaming already fell back here, or standard
         // mode failed directly): flag the user turn + offer retry under its bubble.
-        markSendFailed(userTurnBubble, txt);
+        markSendFailed(userTurnBubble, txt, userContent);
     }
 }
 
@@ -2800,6 +2804,13 @@ export function findUserTurnIndex(historyData, sendKey) {
 }
 
 /**
+ * The turn send() re-sends next (set by retryFailedTurn, read and cleared at
+ * send()'s entry): {text, content, bubble}.
+ * @type {?{text: string, content: Array<Object>, bubble: ?string}}
+ */
+let _resendTurn = null;
+
+/**
  * Mark the just-sent user turn as FAILED: flag its historyData entry
  * ({failed: true, failedAt}) so the state survives reload (state-management owns
  * historyData/saveHistory), stamp the DOM bubble so retry can find the exact
@@ -2807,14 +2818,21 @@ export function findUserTurnIndex(historyData, sendKey) {
  * the per-send key stamped at addBubble time (tagUserTurn); the last-user-entry
  * fallback only covers an untagged bubble (shouldn't happen in practice).
  *
+ * What a retry re-sends is kept with the entry ({retry: {text, content}}):
+ * the prompt and the parts the attempt sent, whose files are already
+ * uploaded. A retry used to re-send the text alone, so the model answered
+ * without the files, and a files-only turn had no retry at all.
+ *
  * @param {HTMLElement|null} userBubbleEl - The user turn's bubble (may be null
  *   if the send failed before the bubble was appended — then there is nothing
  *   to retry from and this is a no-op).
- * @param {string} retryText - The raw prompt text to re-send. Empty (e.g. an
- *   attachment-only send — Files are gone after clearAttachedFiles) → no retry.
+ * @param {string} retryText - The raw prompt text to re-send
+ * @param {Array<Object>} [content] - The user message parts the attempt sent
+ *   (text and uploaded-file URLs). With no text and no parts → no retry.
  */
-function markSendFailed(userBubbleEl, retryText) {
-    if (!userBubbleEl || !retryText) return;
+function markSendFailed(userBubbleEl, retryText, content = []) {
+    const parts = Array.isArray(content) ? content : [];
+    if (!userBubbleEl || (!retryText && !parts.length)) return;
 
     const failedAt = Date.now();
     const hd = getHistoryData();
@@ -2824,15 +2842,19 @@ function markSendFailed(userBubbleEl, retryText) {
             if (hd[i].role === 'user') { idx = i; break; }
         }
     }
+    const retry = { text: retryText || '', content: parts };
     if (idx !== -1) {
         hd[idx].failed = true;
         hd[idx].failedAt = failedAt;
+        hd[idx].retry = retry;
     }
     setHistoryData(hd);
     saveHistory();
 
     userBubbleEl.dataset.failedAt = String(failedAt);
-    attachRetryChip(userBubbleEl, retryText);
+    userBubbleEl._retry = retry;
+    // The chip needs some text to carry; a files-only turn carries its bubble's.
+    attachRetryChip(userBubbleEl, retryText || (idx !== -1 && hd[idx].content) || ' ');
 }
 
 /**
@@ -2843,19 +2865,22 @@ function markSendFailed(userBubbleEl, retryText) {
  *  1. remove the error assistant bubble that follows the failed user bubble
  *     (DOM) and its historyData entry;
  *  2. remove the failed user bubble + its historyData entry;
- *  3. re-fire the SAME text through send() (the one true send path), which
- *     appends the user turn exactly once. /chat/save only runs on success, so
- *     replace-not-append also guarantees no double-mint.
+ *  3. re-fire the SAME turn through send() (the one true send path), which
+ *     appends the user turn exactly once: the text and already-uploaded parts
+ *     markSendFailed kept, or (an entry saved before those were kept) the
+ *     text alone. /chat/save only runs on success, so replace-not-append also
+ *     guarantees no double-mint.
  *
  * Re-fire mechanism: rather than extracting a core from the ~800-line send()
  * (4 provider branches all reading shared UI state — high regression risk),
  * the retry sets $("prompt").value = retryText and calls send(); send() reads
  * the prompt synchronously at entry, and any draft the user typed since the
  * failure is restored right after (send clears the prompt in its synchronous
- * prefix when no attachments are pending — the retry path never has any).
+ * prefix when no attachments are pending — a retry uploads nothing).
  *
  * @param {HTMLElement} userBubbleEl - The failed user bubble
- * @param {string} retryText - The raw prompt text to re-send
+ * @param {string} retryText - The raw prompt text to re-send (used when the
+ *   entry kept no retry record)
  */
 export async function retryFailedTurn(userBubbleEl, retryText) {
     // 1. Error assistant bubble(s) (DOM): everything the failed turn produced
@@ -2889,6 +2914,8 @@ export async function retryFailedTurn(userBubbleEl, retryText) {
             if (hd[i].role === 'user' && hd[i].failed) { idx = i; break; }
         }
     }
+    const retry = (idx !== -1 && hd[idx].retry) || userBubbleEl._retry || null;
+    const bubbleText = idx !== -1 ? hd[idx].content : null;
     if (idx !== -1) {
         if (idx + 1 < hd.length && hd[idx + 1].role === 'assistant') {
             hd.splice(idx + 1, 1);
@@ -2898,12 +2925,16 @@ export async function retryFailedTurn(userBubbleEl, retryText) {
         saveHistory();
     }
 
-    // 3. Remove the failed user bubble and re-fire the same prompt.
+    // 3. Remove the failed user bubble and re-fire the same turn.
     userBubbleEl.remove();
 
+    const text = retry ? String(retry.text || '') : retryText;
+    if (retry && Array.isArray(retry.content) && retry.content.length) {
+        _resendTurn = { text, content: retry.content, bubble: bubbleText };
+    }
     const promptEl = $("prompt");
     const draft = promptEl ? promptEl.value : "";
-    if (promptEl) promptEl.value = retryText;
+    if (promptEl) promptEl.value = text;
     const sending = send(); // reads the prompt synchronously at entry
     if (promptEl && draft && !promptEl.value) promptEl.value = draft; // restore draft typed since the failure
     await sending;

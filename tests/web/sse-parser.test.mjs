@@ -93,10 +93,14 @@ test("CRLF and lone CR line endings, including a CR/LF pair split across reads",
     const p = createSseParser((ev) => events.push(ev));
     p.feed("event: a\r\ndata: 1\r");
     p.feed("\n\r\nevent: b\rdata: 2\r\r");
-    assert.deepEqual(events.map((e) => [e.event, e.data]), [["a", "1"]],
-        "a CR that ends a read waits: it may be half of a CRLF");
+    assert.deepEqual(events.map((e) => [e.event, e.data]), [["a", "1"], ["b", "2"]],
+        "a CR that ends a read ends its line at once");
+    // ...and the LF opening the next read is that CR's pair, not a blank line:
+    // the two data: lines below are ONE event.
+    p.feed("data: x\r");
+    p.feed("\ndata: y\r\n\r\n");
     p.end();
-    assert.deepEqual(events.map((e) => [e.event, e.data]), [["a", "1"], ["b", "2"]]);
+    assert.deepEqual(events.map((e) => [e.event, e.data]), [["a", "1"], ["b", "2"], ["message", "x\ny"]]);
 });
 
 test("an event without event: is a 'message'; one without data: is not dispatched", () => {
@@ -140,4 +144,45 @@ test("an aborted signal stops reading and rejects with AbortError", async () => 
     }, { signal: ctrl.signal });
     await assert.rejects(run, (err) => err.name === "AbortError");
     assert.equal(events.length, 1);
+});
+
+// ── Linear in the size of a read ─────────────────────────────────────────
+// feed() searched for a CR from every line start to the end of the buffer, so
+// a CR-free stream (the normal case) cost O(lines x size) per read: a backlog
+// delivered in one read when a backgrounded tab or WebView resumes stalled the
+// main thread for seconds (2.6 MB took ~2.4 s).
+test("one large read is parsed in linear time", () => {
+    let frames = "";
+    for (let i = 0; i < 80000; i++) frames += `event: content\ndata: "tok${i}"\n\n`;
+    assert.ok(frames.length > 2_000_000);
+    let n = 0;
+    const parser = createSseParser(() => { n += 1; });
+    const t0 = performance.now();
+    parser.feed(frames);
+    const ms = performance.now() - t0;
+    assert.equal(n, 80000);
+    assert.ok(ms < 750, `2.6 MB in one read took ${ms.toFixed(0)} ms`);
+});
+
+test("one huge frame arriving in many small reads is parsed in linear time", () => {
+    const body = "x".repeat(2_000_000);
+    const text = `event: done\ndata: ${body}\n\n`;
+    const got = [];
+    const parser = createSseParser((ev) => got.push(ev));
+    const t0 = performance.now();
+    for (let i = 0; i < text.length; i += 512) parser.feed(text.slice(i, i + 512));
+    const ms = performance.now() - t0;
+    assert.equal(got.length, 1);
+    assert.equal(got[0].data.length, body.length);
+    assert.ok(ms < 1500, `a 2 MB frame in 512-byte reads took ${ms.toFixed(0)} ms`);
+});
+
+test("a CR split across reads still ends exactly one line", () => {
+    const got = [];
+    const parser = createSseParser((ev) => got.push(ev));
+    parser.feed("event: a\r");
+    parser.feed("\ndata: 1\r");
+    parser.feed("\r");                      // CR then CR: two line ends, the second blank
+    parser.feed("data: 2\r\n\r\n");
+    assert.deepEqual(got.map((e) => [e.event, e.data]), [["a", "1"], ["message", "2"]]);
 });

@@ -275,7 +275,7 @@ export function attachRetryChip(bubbleEl, retryText) {
     btn.className = "bubble-retry";
     btn.type = "button";
     btn.textContent = "↻ Retry";
-    btn.title = "Message failed to send — retry (attachments are not re-sent)";
+    btn.title = "Message failed to send — retry";
     btn.onclick = async () => {
         btn.disabled = true;
         try {

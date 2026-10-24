@@ -11,8 +11,8 @@
  * reads and follows the WHATWG event-stream line rules, the same contract as
  * Android's SSEClient (BufferedReader.forEachLine + StringBuilder):
  *
- *   - lines end in "\n", "\r\n" or "\r" (a "\r" at the end of a read waits for
- *     the next read, in case it is half of a "\r\n");
+ *   - lines end in "\n", "\r\n" or "\r" (a "\r" at the end of a read ends its
+ *     line; an "\n" opening the next read is the other half of that "\r\n");
  *   - a blank line dispatches the event; a line starting with ":" is a comment
  *     (the server's ": keepalive" heartbeat) and dispatches nothing;
  *   - every data: line is kept, joined with "\n";
@@ -37,7 +37,10 @@
  * @returns {{feed: (text: string) => void, end: () => void}}
  */
 export function createSseParser(onEvent) {
-    let buffer = '';
+    // The current line's text so far, when it spans reads.
+    let partial = [];
+    // The last read ended in a CR: an LF opening the next read is its pair.
+    let skipLF = false;
     let eventType = '';
     let data = [];
     let lastId = '';
@@ -78,38 +81,52 @@ export function createSseParser(onEvent) {
     return {
         feed(text) {
             if (!text) return;
-            buffer += text;
             let start = 0;
-            for (;;) {
-                const lf = buffer.indexOf('\n', start);
-                const cr = buffer.indexOf('\r', start);
-                if (lf === -1 && cr === -1) break;
+            if (skipLF) {
+                skipLF = false;
+                if (text.charCodeAt(0) === 10 /* '\n' */) start = 1;
+            }
+            // Only THIS read is searched, and each terminator once, reused
+            // until the scan passes it. Searching the whole carried buffer for
+            // a CR from every line start was quadratic in the size of a read
+            // (a CR-free stream rescanned to the end per line), and appending
+            // to one buffer re-searched a long unfinished line on every read.
+            let lf = text.indexOf('\n', start);
+            let cr = text.indexOf('\r', start);
+            while (lf !== -1 || cr !== -1) {
                 let end;
                 let next;
                 if (cr !== -1 && (lf === -1 || cr < lf)) {
-                    // A CR as the very last char may be the first half of CRLF.
-                    if (cr === buffer.length - 1) break;
                     end = cr;
-                    next = buffer[cr + 1] === '\n' ? cr + 2 : cr + 1;
+                    if (cr + 1 === text.length) {
+                        skipLF = true; // the next read may open with this CR's LF
+                        next = cr + 1;
+                    } else {
+                        next = text.charCodeAt(cr + 1) === 10 ? cr + 2 : cr + 1;
+                    }
                 } else {
                     end = lf;
                     next = lf + 1;
                 }
-                processLine(buffer.slice(start, end));
+                let line = text.slice(start, end);
+                if (partial.length) {
+                    partial.push(line);
+                    line = partial.join('');
+                    partial = [];
+                }
+                processLine(line);
                 start = next;
+                if (lf !== -1 && lf < start) lf = text.indexOf('\n', start);
+                if (cr !== -1 && cr < start) cr = text.indexOf('\r', start);
             }
-            buffer = buffer.slice(start);
+            if (start < text.length) partial.push(text.slice(start));
         },
         end() {
-            if (buffer === '\r') {
-                buffer = '';
-                processLine(''); // the trailing CR was a whole line end after all
-                return;
-            }
-            // Text after the last line break is a truncated line: drop it and
+            skipLF = false;
+            // Text after the last line end is a truncated line: drop it and
             // the event it belonged to.
-            if (buffer !== '') {
-                buffer = '';
+            if (partial.length) {
+                partial = [];
                 eventType = '';
                 data = [];
                 pending = false;
