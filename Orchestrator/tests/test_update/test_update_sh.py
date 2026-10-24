@@ -16,9 +16,12 @@ proves the fake is the `sudo` the script will find before it starts it.
 from __future__ import annotations
 
 import os
+import pty
+import select
 import shutil
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -33,6 +36,9 @@ INSTALL_STUB = textwrap.dedent("""\
     # as a half-finished install could.
     echo "[install-stub] ran"
     if [ -n "$STUB_TOUCH" ]; then echo "touched by install" >> app.py; fi
+    # An intent-to-add entry: `git stash` refuses it ("Cannot save the
+    # current worktree state"), so the rollback cannot keep it.
+    if [ -n "$STUB_ITA" ]; then echo "half-added" > ita.txt; git add -N ita.txt; fi
     exit "${STUB_INSTALL_RC:-0}"
 """)
 
@@ -49,7 +55,11 @@ FAKE_SUDO = textwrap.dedent("""\
 FAKE_PIP = textwrap.dedent("""\
     #!/bin/sh
     echo "$*" >> "$FAKE_PIP_LOG"
-    if [ "$1" = "freeze" ]; then echo "aiohttp==3.13.2"; echo "torch==2.11.0+cpu"; fi
+    if [ "$1" = "freeze" ]; then
+        # FREEZE_TOUCH: a tracked file is edited while the venvs are frozen.
+        if [ -n "$FREEZE_TOUCH" ]; then echo "edit saved during the freeze" > notes.txt; fi
+        echo "aiohttp==3.13.2"; echo "torch==2.11.0+cpu"
+    fi
     exit 0
 """)
 
@@ -192,3 +202,134 @@ def test_failed_install_stashes_what_it_left_before_the_rollback_reset(sh):
     entries = stash_entries(box.root)
     assert entries and "auto-stash-rollback-pre-update-" in entries[0]
     assert "touched by install" in git(box.root, "stash", "show", "-p", "stash@{0}")
+
+
+# ── review follow-ups ────────────────────────────────────────────────────
+
+def run_on_a_tty(box, steps, *args, **env):
+    """Run update.sh on a pseudo-terminal, so its `read -p` prompts show.
+    `steps` is a list of (prompt text, action): wait for the prompt, run
+    `action()` when it is callable, then type `answer`. Returns (rc, output)."""
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        ["bash", str(box.root / "Scripts" / "update.sh"), *args], cwd=str(box.root),
+        env={**box.env, "GIT_PAGER": "cat", "PAGER": "cat", "TERM": "dumb", **env},
+        stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+    os.close(slave)
+    out, seen = "", 0
+
+    def read_more(deadline):
+        nonlocal out
+        ready, _, _ = select.select([master], [], [], max(0.0, deadline - time.monotonic()))
+        if not ready:
+            return False
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:  # EIO: the script exited and closed the terminal
+            chunk = b""
+        out += chunk.decode("utf-8", "replace")
+        return bool(chunk)
+
+    try:
+        for prompt, action, answer in steps:
+            deadline = time.monotonic() + 30
+            while prompt not in out[seen:]:
+                assert read_more(deadline), f"no {prompt!r} prompt; got:\n{out}"
+            seen = out.index(prompt, seen) + len(prompt)
+            if action:
+                action()
+            os.write(master, answer.encode())
+        deadline = time.monotonic() + 60
+        while proc.poll() is None or read_more(time.monotonic() + 0.2):
+            if time.monotonic() > deadline:
+                raise AssertionError(f"update.sh did not finish; got:\n{out}")
+            read_more(time.monotonic() + 0.2)
+        return proc.wait(timeout=5), out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        os.close(master)
+
+
+APPLY = "Apply this update? (y/N)"
+STASH = "Stash these edits and continue? (y/N)"
+
+
+def test_an_edit_made_while_the_apply_prompt_is_open_is_asked_about(sh):
+    """The tree was checked before the operator read the changelog at the
+    prompt; an edit saved meanwhile was reset over with no stash (the base
+    script checked after the prompt). Declining keeps it, and nothing moved."""
+    box = sh()
+    edit = lambda: (box.root / "notes.txt").write_text("edit saved while the prompt was open\n")
+    rc, out = run_on_a_tty(box, [(APPLY, edit, "y"), (STASH, None, "n")])
+
+    assert rc == 2, out
+    assert "notes.txt" in out
+    assert (box.root / "notes.txt").read_text() == "edit saved while the prompt was open\n"
+    assert head(box.root) == box.v1
+    assert stash_entries(box.root) == [] and tags(box.root) == []
+    assert sudo_calls(box) == []
+
+
+def test_agreeing_after_the_apply_prompt_stashes_that_edit(sh):
+    box = sh()
+    edit = lambda: (box.root / "notes.txt").write_text("edit saved while the prompt was open\n")
+    rc, out = run_on_a_tty(box, [(APPLY, edit, "y"), (STASH, None, "y")])
+
+    assert rc == 0, out
+    assert head(box.root) == box.v2
+    assert "edit saved while the prompt was open" in git(box.root, "stash", "show", "-p", "stash@{0}")
+
+
+def test_an_edit_made_during_the_freeze_is_stashed_not_reset_over(sh):
+    box = sh()
+    _write_exec(box.root / "Orchestrator" / "venv" / "bin" / "pip", FAKE_PIP)
+    r = run_update(box, "--yes", FREEZE_TOUCH="1")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == box.v2
+    entries = stash_entries(box.root)
+    assert len(entries) == 1 and "auto-stash-pre-update-" in entries[0]
+    assert "edit saved during the freeze" in git(box.root, "stash", "show", "-p", "stash@{0}")
+    assert git(box.root, "rev-parse", "stash@{0}") in r.stdout
+
+
+def test_an_untracked_file_where_the_update_adds_one_is_moved_aside(sh):
+    box = sh()
+    (box.seed / "docs").mkdir()
+    (box.seed / "docs" / "audit.md").write_text("upstream version\n")
+    git(box.seed, "add", "-A")
+    git(box.seed, "commit", "-q", "-m", "v3 adds docs/audit.md")
+    git(box.seed, "push", "-q", "origin", "main")
+    (box.root / "docs").mkdir()
+    (box.root / "docs" / "audit.md").write_text("operator's only copy\n")
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (box.root / "docs" / "audit.md").read_text() == "upstream version\n"
+    kept = list((box.root / "Manifest" / "displaced").glob("pre-update-*/docs/audit.md"))
+    assert len(kept) == 1 and kept[0].read_text() == "operator's only copy\n"
+    assert "docs/audit.md" in r.stdout
+
+
+def test_a_rollback_that_cannot_stash_leaves_the_code_and_says_so(sh):
+    box = sh()
+    r = run_update(box, "--yes", STUB_INSTALL_RC="1", STUB_ITA="1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert head(box.root) == box.v2, "no reset may run once the stash failed"
+    assert (box.root / "ita.txt").read_text() == "half-added\n"
+    assert "NOT rolled back" in r.stderr
+    assert "systemctl restart blackbox.service" not in sudo_calls(box)
+
+
+def test_the_freeze_names_the_run_it_belongs_to(sh):
+    """The in-app Rollback reinstalls a freeze only for the tag it rolls back
+    to; this script writes the same file for its own tag."""
+    box = sh()
+    _write_exec(box.root / "Orchestrator" / "venv" / "bin" / "pip", FAKE_PIP)
+    r = run_update(box, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    (tag,) = tags(box.root)
+    freeze = (box.root / "Manifest" / "pre_update_pip_freeze.txt").read_text()
+    assert freeze.splitlines()[0] == f"# blackbox-freeze-for: {tag}"
+    assert "aiohttp==3.13.2" in freeze.splitlines()

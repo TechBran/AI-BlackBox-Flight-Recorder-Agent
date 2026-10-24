@@ -20,8 +20,12 @@
 #
 # Local edits to TRACKED files block the update (the reset would destroy
 # them; the in-app updater refuses the same way). Interactive runs ask to
-# stash them; --yes exits 2 unless --stash is given. A stash is named
-# auto-stash-<tag> and its SHA printed. Untracked files never block.
+# stash them, again after the "Apply" prompt if files changed meanwhile;
+# --yes exits 2 unless --stash is given. A stash is named auto-stash-<tag>
+# and its SHA printed. Untracked files never block, but one where the update
+# adds a file is moved under Manifest/displaced/<tag>/ before the reset (which
+# would overwrite it). Edits saved during the venv freezes, after the last
+# question, are stashed rather than reset over.
 #
 # Exit codes:
 #   0 — updated successfully (or "already up to date")
@@ -113,18 +117,12 @@ echo "[update] ─────────────────────�
 # ── Local edits to tracked files (audit M2, O16-01) ──
 # The reset below destroys them; the pre-update tag protects committed work
 # only. Untracked files (ledger, uploads, Manifest/) survive a reset, so only
-# tracked changes count. Decided before anything is tagged or reset.
-DIRTY="$(git status --porcelain --untracked-files=no)"
-if [[ -n "$DIRTY" ]]; then
-    echo "[update] Local edits to tracked files (the update would overwrite them):"
-    printf '%s\n' "$DIRTY"
-fi
+# tracked changes count (keep_local_work moves aside the few untracked files
+# a reset would overwrite). Decided before anything is tagged or reset.
+tracked_edits() { git status --porcelain --untracked-files=no; }
 
-if [[ "$STATUS_ONLY" -eq 1 ]]; then
-    exit 0
-fi
-
-if [[ -n "$DIRTY" && "$STASH_MODE" -ne 1 ]]; then
+# --yes refuses local edits without --stash; an interactive run asks.
+refuse_or_ask_to_stash() {
     if [[ "$YES_MODE" -eq 1 ]]; then
         echo "[update] Refusing to update over local edits in --yes mode." >&2
         echo "[update] Commit or stash them yourself, or re-run with --yes --stash." >&2
@@ -137,6 +135,20 @@ if [[ -n "$DIRTY" && "$STASH_MODE" -ne 1 ]]; then
         exit 2
     fi
     STASH_MODE=1
+}
+
+DIRTY="$(tracked_edits)"
+if [[ -n "$DIRTY" ]]; then
+    echo "[update] Local edits to tracked files (the update would overwrite them):"
+    printf '%s\n' "$DIRTY"
+fi
+
+if [[ "$STATUS_ONLY" -eq 1 ]]; then
+    exit 0
+fi
+
+if [[ -n "$DIRTY" && "$STASH_MODE" -ne 1 ]]; then
+    refuse_or_ask_to_stash
 fi
 
 # ── User confirm ──
@@ -149,29 +161,42 @@ if [[ "$YES_MODE" -ne 1 ]]; then
     fi
 fi
 
+# ── Look again: the operator may have read the changelog for minutes ──
+# An edit saved while the prompt was open was reset over unseen. Nothing has
+# been tagged or frozen yet, so declining still changes nothing.
+DIRTY="$(tracked_edits)"
+if [[ -n "$DIRTY" && "$STASH_MODE" -ne 1 ]]; then
+    echo "[update] These tracked files changed after the check above (the update would overwrite them):"
+    printf '%s\n' "$DIRTY"
+    refuse_or_ask_to_stash
+fi
+
 # ── Rollback anchors (audit M1 + audit C2 staging discipline) ──
 PRE_TAG="pre-update-$(date +%s)"
 git tag "$PRE_TAG"
 echo "[update] Tagged $PRE_TAG (rollback anchor)"
 
+# Each freeze's first line names this run's tag: the in-app Rollback
+# (Orchestrator/update/runner.py, FREEZE_HEADER) reinstalls a freeze only for
+# the tag it rolls back to, and this script writes the same files without its
+# update_state.json. A failed freeze leaves no file, never an older one.
+freeze_venv() {  # <pip> <freeze file>
+    local frozen
+    if frozen="$("$1" freeze 2>/dev/null)"; then
+        printf '# blackbox-freeze-for: %s\n%s\n' "$PRE_TAG" "$frozen" > "$2"
+        echo "[update] Saved $2 for venv rollback"
+    else
+        rm -f "$2"
+        echo "[update] WARNING: could not freeze the venv behind $1; a rollback keeps its packages." >&2
+    fi
+}
+
 mkdir -p Manifest
 if [[ -x Orchestrator/venv/bin/pip ]]; then
-    Orchestrator/venv/bin/pip freeze > Manifest/pre_update_pip_freeze.txt 2>/dev/null || true
-    echo "[update] Saved Manifest/pre_update_pip_freeze.txt for venv rollback"
+    freeze_venv Orchestrator/venv/bin/pip Manifest/pre_update_pip_freeze.txt
 fi
 if [[ -x MCP/venv/bin/pip ]]; then
-    MCP/venv/bin/pip freeze > Manifest/pre_update_mcp_freeze.txt 2>/dev/null || true
-    echo "[update] Saved Manifest/pre_update_mcp_freeze.txt for MCP venv rollback"
-fi
-
-# ── Stash local edits (agreed above) ──
-if [[ -n "$DIRTY" ]]; then
-    if ! git stash push -m "auto-stash-${PRE_TAG}"; then
-        echo "[update] ERROR: git stash failed; nothing was reset." >&2
-        exit 1
-    fi
-    echo "[update] Stashed local edits as auto-stash-${PRE_TAG} ($(git rev-parse -q --verify refs/stash))."
-    echo "[update] Recover them with: git stash list && git stash apply <that SHA>"
+    freeze_venv MCP/venv/bin/pip Manifest/pre_update_mcp_freeze.txt
 fi
 
 # Which venvs this update touches: a failed run restores only those (a full
@@ -185,12 +210,63 @@ restore_venv() {  # <pip> <freeze file>
     # Same rule as the in-app runner: a pin with a local version label
     # (torch==2.11.0+cpu) came from another index, PyPI cannot serve it, and
     # one such line makes pip refuse the whole file. Updates never touch them.
+    # Comments (the freeze's tag line) and blank lines go too.
     restore="${freeze%.txt}_restore.txt"
-    grep -Ev '^[A-Za-z0-9][A-Za-z0-9._-]*==[^[:space:]]*\+' "$freeze" > "$restore" || true
+    grep -Ev '^(#|$)|^[A-Za-z0-9][A-Za-z0-9._-]*==[^[:space:]]*\+' "$freeze" > "$restore" || true
+    [[ -s "$restore" ]] || return 0
     echo "[update] Restoring the venv behind $pip from $freeze..."
     if ! "$pip" install -r "$restore" --quiet --force-reinstall; then
         echo "[update] WARNING: venv restore failed; retry: $pip install -r $restore --force-reinstall" >&2
     fi
+}
+
+# ── Keep what a reset would destroy (O16-01; the in-app runner's _keep_then_reset) ──
+# Stash local edits to tracked files as <message>: the ones agreed to above,
+# and any saved since the last question (during the freezes), which are
+# stashed rather than reset over. Then move aside untracked files where
+# <target> has a file, or needs a directory: `git reset --hard` overwrites
+# them without a word and no stash or tag holds them. Returns non-zero, having
+# reset nothing, when either step fails.
+keep_local_work() {  # <stash message> <reset target> <displaced dir name>
+    local message="$1" target="$2" aside="Manifest/displaced/$3" rel part seg
+    local -a in_way=() segs=()
+    if [[ -n "$(tracked_edits)" ]]; then
+        if [[ "$STASH_MODE" -ne 1 ]]; then
+            echo "[update] Tracked files changed after the last check:"
+            tracked_edits
+        fi
+        if ! git stash push -q -m "$message"; then
+            echo "[update] ERROR: git stash failed, so nothing was reset." >&2
+            return 1
+        fi
+        echo "[update] Stashed local edits to tracked files as $message ($(git rev-parse -q --verify refs/stash))."
+        echo "[update] Recover them with: git stash list && git stash apply <that SHA>"
+    fi
+    while IFS= read -r -d '' rel; do
+        if [[ -e "$rel" || -L "$rel" ]]; then
+            in_way+=("$rel")
+            continue
+        fi
+        # A file (or symlink) where the target needs a directory.
+        IFS=/ read -r -a segs <<< "$rel"
+        part=""
+        for seg in "${segs[@]:0:${#segs[@]}-1}"; do
+            part="${part:+$part/}$seg"
+            if [[ -L "$part" || ( -e "$part" && ! -d "$part" ) ]]; then
+                in_way+=("$part")
+                break
+            fi
+        done
+    done < <(git diff --name-only -z --no-renames --diff-filter=A HEAD "$target")
+    for rel in ${in_way[@]+"${in_way[@]}"}; do
+        [[ -e "$rel" || -L "$rel" ]] || continue  # already moved (a shared parent)
+        if [[ -e "$aside/$rel" || -L "$aside/$rel" ]] \
+                || ! mkdir -p "$aside/$(dirname -- "$rel")" || ! mv -- "$rel" "$aside/$rel"; then
+            echo "[update] ERROR: could not move $rel aside to $aside/, so nothing was reset." >&2
+            return 1
+        fi
+        echo "[update] Moved untracked $rel (the update has a file there) to $aside/$rel."
+    done
 }
 
 rollback_to_pre_tag() {
@@ -200,16 +276,20 @@ rollback_to_pre_tag() {
     if grep -qx 'MCP/requirements.txt' <<< "$CHANGED_FILES"; then
         restore_venv MCP/venv/bin/pip Manifest/pre_update_mcp_freeze.txt
     fi
-    # A reset like any other: stash what the failed run left in tracked files.
-    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-        if git stash push -m "auto-stash-rollback-${PRE_TAG}"; then
-            echo "[update] Stashed edits left by the failed run as auto-stash-rollback-${PRE_TAG} ($(git rev-parse -q --verify refs/stash))."
-        fi
+    # A reset like any other: keep what the failed run left first, and never
+    # reset when that fails.
+    if ! STASH_MODE=1 keep_local_work "auto-stash-rollback-${PRE_TAG}" "$PRE_TAG" "rollback-${PRE_TAG}"; then
+        echo "[update] The code was NOT rolled back to $PRE_TAG: the new code is still on disk." >&2
+        echo "[update] Commit or stash the changed files, then run: git reset --hard $PRE_TAG" >&2
+        return 1
     fi
     git reset --hard "$PRE_TAG"
 }
 
 # ── Atomic code swap ──
+if ! keep_local_work "auto-stash-${PRE_TAG}" origin/main "$PRE_TAG"; then
+    exit 1
+fi
 echo "[update] Resetting to origin/main ($LATEST_SHORT)..."
 git reset --hard origin/main
 
@@ -221,8 +301,11 @@ git reset --hard origin/main
 echo "[update] Re-running install.sh to apply system-level changes..."
 if ! sudo "$BLACKBOX_ROOT/Scripts/install.sh"; then
     echo "[update] ERROR: install.sh failed. Rolling back venvs and code to $PRE_TAG..." >&2
-    rollback_to_pre_tag
-    echo "[update] Rolled back. Service was NOT restarted (still at old SHA)." >&2
+    if rollback_to_pre_tag; then
+        echo "[update] Rolled back. Service was NOT restarted (still at old SHA)." >&2
+    else
+        echo "[update] Service was NOT restarted. Do not restart it until the code is back at $PRE_TAG." >&2
+    fi
     echo "[update] Investigate: journalctl -u blackbox.service -n 50 | tail" >&2
     exit 1
 fi
