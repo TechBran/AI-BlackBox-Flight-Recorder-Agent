@@ -290,10 +290,11 @@ function autoLabel(provider) {
 }
 
 /** Fill the model select from [provider]'s live catalog and show [selectedId]: a stored
- *  id the catalog does not list is shown as itself, never as Auto or another model. */
-async function renderModelOptions(provider, selectedId) {
+ *  id the catalog does not list is shown as itself, never as Auto or another model.
+ *  [catalog] is a fetch of that catalog already under way, to wait on instead. */
+async function renderModelOptions(provider, selectedId, catalog = null) {
     const seq = ++_modelSeq;
-    await fetchAvailableModels(provider);
+    await (catalog || fetchAvailableModels(provider));
     const sel = $('smsModelSelect');
     if (seq !== _modelSeq || !sel) return;  // a newer provider pick won
     sel.textContent = '';
@@ -320,9 +321,13 @@ async function loadPreferences() {
     const prefs = await fetchPreferences();
     const provider = smsProviderId(prefs.sms_provider);
     _resolved = { provider, model: prefs.sms_model_resolved || '' };
-    await fetchAvailableModels('custom');  // is a LAN server set up? (never cached)
+    // The saved provider shows at once. Whether "custom" is offered waits on a LAN
+    // probe (/models/custom is never cached, and an unreachable server takes seconds),
+    // so the list gains it when the probe answers, keeping what is picked by then.
     renderProviderOptions(provider);
-    await renderModelOptions(provider, prefs.sms_model || '');
+    const customProbe = fetchAvailableModels('custom');
+    customProbe.then(() => renderProviderOptions($('smsProviderSelect')?.value || provider));
+    await renderModelOptions(provider, prefs.sms_model || '', provider === 'custom' ? customProbe : null);
 }
 
 // ============================================================================
@@ -513,7 +518,7 @@ function _startNewConversation() {
     // number without its punctuation (the gateway refuses spaces and dashes).
     const parsed = parsePhoneInput(val);
     if (!parsed) {
-        toastError('Enter a phone number with at least 10 digits');
+        toastError('Enter a phone number or short code (3 to 15 digits)');
         phoneInput.focus();
         return;
     }

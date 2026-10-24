@@ -294,16 +294,36 @@ test("a number that is not one is refused before anything is read or sent", asyn
     const calls = serve({ threads: [] });
     await open(t);
     try {
-        for (const raw of ["555-0123", "call me", "+1 555 010 0123 ext 4"]) {
+        for (const raw of ["12", "call me", "+1 555 010 0123 ext 4"]) {
             $("smsNewMsgBtn").click();
             $("smsNewPhone").value = raw;
             $("btnNewMsgStart").click();
             await settle();
-            assert.match($("toast").textContent, /10 digits/i, raw);
+            assert.match($("toast").textContent, /3 to 15 digits/i, raw);
             $("toast").textContent = "";
             $("smsNewMsg").style.display = "none";
         }
         assert.deepEqual(calls.filter((c) => c.url.startsWith("/sms/messages") || c.url === "/sms/send"), []);
+    } finally {
+        close();
+    }
+});
+
+// The gateway takes 3 to 15 digits, so a short code (a carrier's 611, a service's
+// 5- or 6-digit code) can still be texted from the inbox, as before the number check.
+test("a short code opens its thread and is sent to as typed", async (t) => {
+    const calls = serve({ threads: [], thread: {} });
+    await open(t);
+    try {
+        $("smsNewMsgBtn").click();
+        $("smsNewPhone").value = "22000";
+        $("btnNewMsgStart").click();
+        await settle();
+        assert.match(calls.find((c) => c.url.startsWith("/sms/messages")).url, /phone=22000\b/);
+        $("smsInput").value = "STOP";
+        $("btnSMSSend").click();
+        await settle();
+        assert.equal(calls.find((c) => c.url === "/sms/send").body.to, "22000");
     } finally {
         close();
     }
@@ -378,6 +398,39 @@ test("no LAN server, no custom option; a stored model the catalog lacks is shown
         assert.equal($("smsProviderSelect").value, "openai");
         assert.equal($("smsModelSelect").value, "gpt-retired-3", "never shown as Auto or another id");
     } finally {
+        close();
+    }
+});
+
+// /models/custom probes every LAN server live (never cached; an unreachable one takes
+// seconds). The saved provider used to wait for that probe, so the bar showed the
+// first provider (Anthropic) and no models meanwhile.
+test("the saved provider and its models show before the LAN custom catalog answers", async (t) => {
+    const box = {
+        threads: [],
+        prefs: { sms_provider: "xai", sms_model: "" },
+        catalogs: { xai: { models: [{ id: "grok-9", name: "Grok 9" }], default_id: "grok-9" }, custom: { models: [] } },
+    };
+    serve(box);
+    await state.fetchAvailableModels("custom");  // start with no LAN server known
+    box.catalogs.custom = { models: [{ id: "lan::gemma", name: "gemma", server: "lan" }] };
+    const served = globalThis.fetch;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    globalThis.fetch = (url, opts) =>
+        String(url).startsWith("/models/custom") ? gate.then(() => served(url, opts)) : served(url, opts);
+    await open(t);
+    try {
+        const providers = () => Array.from($("smsProviderSelect").options).map((o) => o.value);
+        assert.equal($("smsProviderSelect").value, "xai", "shown while the custom probe is out");
+        assert.ok(Array.from($("smsModelSelect").options).some((o) => o.value === "grok-9"), "its models too");
+        assert.ok(!providers().includes("custom"));
+        release();
+        await settle();
+        assert.ok(providers().includes("custom"), "custom joins the list when its catalog answers");
+        assert.equal($("smsProviderSelect").value, "xai", "the saved provider is kept");
+    } finally {
+        release();
         close();
     }
 });

@@ -3,6 +3,8 @@
 // the send target: the box files threads under the last 10 digits, so the open
 // thread never matched its row after the next poll, and the gateway refuses a
 // destination with spaces or punctuation (ami_client.is_valid_sms_destination).
+// What the gateway takes is what the box accepts: 3 to 15 digits, so a short code
+// (a carrier's 611, a 5- or 6-digit service code) can still be texted.
 //
 // Run: cd tests/web && npm ci && node --test
 import test from "node:test";
@@ -30,8 +32,17 @@ test("a typed number gives the thread key and a destination the gateway takes", 
     }
 });
 
+test("a short code is a number the gateway takes, filed under all its digits", () => {
+    assert.deepEqual(parsePhoneInput("611"), { key: "611", to: "611" });
+    assert.deepEqual(parsePhoneInput("22000"), { key: "22000", to: "22000" });
+    assert.deepEqual(parsePhoneInput(" 72-9725 "), { key: "729725", to: "729725" });
+    for (const raw of ["611", "22000", "729725", "+15550100123", "123456789012345"]) {
+        assert.match(parsePhoneInput(raw).to, /^\+?[0-9]{3,15}$/, "is_valid_sms_destination's rule");
+    }
+});
+
 test("anything that is not a phone number is refused", () => {
-    for (const raw of ["", "   ", "555-0123", "12345", "call me", "555O100123", "+1 555 010 0123 ext 4",
+    for (const raw of ["", "   ", "12", "1-2", "+", "call me", "555O100123", "+1 555 010 0123 ext 4",
         "1+5550100123", "++15550100123", "5550100123;", "+1234567890123456", "١٢٣٤٥٦٧٨٩٠",
         "+1\n5550100123\r\nAction: Logoff", null, undefined]) {
         assert.equal(parsePhoneInput(raw), null, `refused: ${JSON.stringify(raw)}`);

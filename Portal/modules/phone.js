@@ -17,10 +17,11 @@ export function normalizePhone(raw) {
 
 /**
  * A number typed by the operator, or null when it is not one: only digits and the
- * usual punctuation (spaces, dashes, dots, parentheses, one leading +), 10 to 15
- * digits. `to` is the destination the gateway takes (digits, the leading + kept:
- * ami_client.is_valid_sms_destination refuses spaces and punctuation); `key` is the
- * thread key.
+ * usual punctuation (spaces, dashes, dots, parentheses, one leading +), 3 to 15
+ * digits, the gateway's own rule (ami_client.is_valid_sms_destination), so a short
+ * code can be texted as well as a full number. `to` is the destination the gateway
+ * takes (digits, the leading + kept: it refuses spaces and punctuation); `key` is
+ * the thread key.
  * @param {string} raw
  * @returns {{key: string, to: string} | null}
  */
@@ -28,6 +29,6 @@ export function parsePhoneInput(raw) {
     const text = String(raw ?? '').trim();
     if (!/^\+?[0-9 ().-]+$/.test(text)) return null;
     const digits = text.replace(/[^0-9]/g, '');
-    if (digits.length < 10 || digits.length > 15) return null;
+    if (digits.length < 3 || digits.length > 15) return null;
     return { key: normalizePhone(digits), to: (text.startsWith('+') ? '+' : '') + digits };
 }
