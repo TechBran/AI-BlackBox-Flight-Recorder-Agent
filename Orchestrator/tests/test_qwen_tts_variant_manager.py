@@ -238,3 +238,50 @@ def test_fake_backend_without_seed_hook_is_fine(tmp_path, monkeypatch):
     mgr = _mgr(be, tmp_path, monkeypatch)
     pcm, sr = asyncio.run(mgr.synthesize_full("custom_voice", "hi", preset="Vivian"))
     assert sr == 22050 and pcm
+
+
+# ── no CUDA: a loud, typed refusal (2026-08-11 plan Task 8) ──────────────────
+
+class NoGpuBackend(FakeBackend):
+    """free_vram_mb() is None without CUDA, so free-before-load passes and the
+    failure surfaces at load — exactly as on a box whose driver died."""
+    def __init__(self):
+        super().__init__(free_mb=None)
+
+    def load(self, variant, model_dir):
+        from qwen_tts_server.variant_manager import NoGpuError
+        self.events.append(("load", variant))
+        raise NoGpuError("no cuda")
+
+
+def test_no_gpu_error_propagates_and_is_not_swallowed_by_free_before_load(tmp_path, monkeypatch):
+    from qwen_tts_server.variant_manager import NoGpuError
+    mgr = _mgr(NoGpuBackend(), tmp_path, monkeypatch)
+    with pytest.raises(NoGpuError):
+        asyncio.run(mgr.synthesize_full("custom_voice", "hi", preset="Vivian"))
+
+
+def test_no_gpu_error_is_not_a_vram_error():
+    """A VRAM shortage is retryable (another member may unload); a missing
+    GPU is not. app.py maps VramError to a VRAM message, so NoGpuError must
+    never be caught as one."""
+    from qwen_tts_server.variant_manager import NoGpuError
+    assert not issubclass(NoGpuError, VramError)
+    assert issubclass(NoGpuError, RuntimeError)
+
+
+def test_torch_backend_refuses_to_load_without_cuda(monkeypatch):
+    """The guard runs before the model import, so a driver-dead box gets the
+    actionable refusal instead of transformers' bare CUDA RuntimeError."""
+    import types
+    from qwen_tts_server.variant_manager import NoGpuError, TorchQwenBackend
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False), bfloat16=None)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "qwen_tts", None)   # must not be reached
+    with pytest.raises(NoGpuError) as exc:
+        TorchQwenBackend().load("custom_voice", "/nonexistent")
+    msg = str(exc.value)
+    assert "nvidia-smi" in msg and "CUDA" in msg
+    # qwen_tts.py truncates the body at 200 chars: remediation must fit.
+    assert len(msg) <= 180

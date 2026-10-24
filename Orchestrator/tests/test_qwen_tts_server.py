@@ -395,3 +395,61 @@ def test_generation_seed_default_and_off(monkeypatch):
     assert s.generation_seed() is None
     monkeypatch.setenv("QWEN_TTS_SEED", "-1")
     assert s.generation_seed() is None
+
+
+# ── failures reach the caller with a reason (2026-08-11 plan Task 8) ─────────
+
+class _RaisingManager(FakeManager):
+    def __init__(self, exc):
+        super().__init__()
+        self.exc = exc
+
+    async def synthesize_full(self, *a, **k):
+        raise self.exc
+
+    async def synthesize_batch(self, *a, **k):
+        raise self.exc
+
+
+@pytest.fixture
+def raising_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("QWEN_TTS_VOICES_DIR", str(tmp_path / "qwen"))
+
+    def make(exc):
+        app.dependency_overrides[get_manager] = lambda: _RaisingManager(exc)
+        # raise_server_exceptions=False: see what uvicorn would send.
+        return TestClient(app, raise_server_exceptions=False)
+    yield make
+    app.dependency_overrides.clear()
+
+
+def test_no_gpu_error_maps_to_503_with_a_machine_code(raising_client):
+    from qwen_tts_server.variant_manager import NoGpuError
+    c = raising_client(NoGpuError("No CUDA GPU: the NVIDIA driver is not loaded (check nvidia-smi)."))
+    for path, body in (("/v1/audio/speech", {"input": "hi", "voice": "qwen:Vivian"}),
+                       ("/v1/audio/speech/batch", {"inputs": ["hi"], "voice": "qwen:Vivian"})):
+        r = c.post(path, json=body)
+        assert r.status_code == 503
+        assert r.json()["code"] == "no_gpu"
+        assert "nvidia-smi" in r.json()["detail"]
+
+
+def test_vram_error_stays_503_and_is_coded_as_contention(raising_client):
+    from qwen_tts_server.variant_manager import VramError
+    r = raising_client(VramError("insufficient free VRAM after unload: 900MB < 5000MB floor")).post(
+        "/v1/audio/speech", json={"input": "hi", "voice": "qwen:Vivian"})
+    assert r.status_code == 503
+    assert r.json() == {"detail": "insufficient free VRAM after unload: 900MB < 5000MB floor",
+                        "code": "vram"}
+
+
+def test_bare_exception_reaches_the_client_not_internal_server_error(raising_client):
+    """The outage's 21-byte 'Internal Server Error' told the Orchestrator
+    nothing. Any unhandled error now carries its type and message (never a
+    traceback)."""
+    r = raising_client(RuntimeError("No CUDA GPUs are available")).post(
+        "/v1/audio/speech", json={"input": "hi", "voice": "qwen:Vivian"})
+    assert r.status_code == 500
+    assert r.text != "Internal Server Error"
+    assert r.json()["detail"] == "RuntimeError: No CUDA GPUs are available"
+    assert "Traceback" not in r.text

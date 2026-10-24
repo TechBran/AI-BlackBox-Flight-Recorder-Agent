@@ -20,12 +20,12 @@ import wave
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from . import profile_store, settings
-from .variant_manager import VariantManager, VramError
+from .variant_manager import NoGpuError, VariantManager, VramError
 
 
 @asynccontextmanager
@@ -37,6 +37,31 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="qwen-tts", version="1.0", lifespan=_lifespan)
+
+
+# ---- error mapping (2026-08-11 plan Task 8) ---------------------------------
+# Every failure leaves with a reason the Orchestrator can act on. `code` tells
+# a hardware fault from contention without matching on message text: the
+# Orchestrator retries "vram" (another member may unload) and stops on
+# "no_gpu" (Orchestrator/qwen_tts.py, tts_queue._is_transient). llama-swap
+# forwards none of this server's logs to journald, so the response body is
+# the only place the reason survives.
+@app.exception_handler(NoGpuError)
+async def _no_gpu(request: Request, exc: NoGpuError):
+    return JSONResponse(status_code=503, content={"detail": str(exc), "code": "no_gpu"})
+
+
+@app.exception_handler(VramError)
+async def _vram(request: Request, exc: VramError):
+    return JSONResponse(status_code=503, content={"detail": str(exc), "code": "vram"})
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    # Type + message, never a traceback (uvicorn still logs the traceback).
+    # This replaced a bare 21-byte "Internal Server Error" that said nothing.
+    return JSONResponse(status_code=500, content={
+        "detail": f"{type(exc).__name__}: {exc}"[:400], "code": "internal"})
 
 
 def get_manager() -> VariantManager:
@@ -150,21 +175,16 @@ async def audio_speech(req: SpeechRequest, mgr: VariantManager = Depends(get_man
     stream = bool(req.stream)
     variant, kwargs, _id = _resolve_voice(req.voice)
 
+    # VramError / NoGpuError from the manager map to coded 503s (handlers above).
     if stream and settings.streaming_enabled():
         # G3-gated TRUE chunked streaming (OFF by default) — Task 6.5.
-        try:
-            sr, aiter = await mgr.stream_true(variant, str(text), **kwargs)
-        except VramError as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
+        sr, aiter = await mgr.stream_true(variant, str(text), **kwargs)
         return StreamingResponse(
             aiter, media_type="application/octet-stream",
             headers={"X-Sample-Rate": str(sr), "X-Audio-Format": "pcm_s16le"},
         )
 
-    try:
-        pcm, sr = await mgr.synthesize_full(variant, str(text), **kwargs)
-    except VramError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    pcm, sr = await mgr.synthesize_full(variant, str(text), **kwargs)
 
     if stream:
         # Default shipping path: StreamingResponse OVER a full generation (correction [8]).
@@ -202,10 +222,7 @@ async def audio_speech_batch(req: BatchSpeechRequest,
     if response_format not in ("wav", "pcm"):
         raise HTTPException(status_code=400, detail="response_format must be 'wav' or 'pcm'")
     variant, kwargs, _id = _resolve_voice(req.voice)
-    try:
-        pcms, sr = await mgr.synthesize_batch(variant, texts, **kwargs)
-    except VramError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    pcms, sr = await mgr.synthesize_batch(variant, texts, **kwargs)   # coded 503s: handlers above
     if response_format == "pcm":
         wavs = [base64.b64encode(p).decode("ascii") for p in pcms]
     else:
@@ -289,10 +306,7 @@ async def voices_design(body: dict = Body(...), mgr: VariantManager = Depends(ge
     if not description:
         raise HTTPException(status_code=400, detail="voice_description is required")
     text = (body or {}).get("text") or "The quick brown fox jumps over the lazy dog."
-    try:
-        previews = await mgr.design_preview(str(description), str(text))
-    except VramError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    previews = await mgr.design_preview(str(description), str(text))   # coded 503s: handlers above
     out = []
     for p in previews:
         gid = p["generated_voice_id"]

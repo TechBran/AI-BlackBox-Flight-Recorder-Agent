@@ -33,6 +33,20 @@ class VramError(RuntimeError):
     """Free VRAM is below the safety floor after a free-before-load."""
 
 
+class NoGpuError(RuntimeError):
+    """No usable CUDA device: the NVIDIA driver is not loaded. Deliberately
+    NOT a VramError — a VRAM shortage is retryable contention, a missing GPU
+    is a hardware fault (app.py maps the two to different 503 codes, and the
+    Orchestrator retries only the former). There is no CPU fallback (plan D4:
+    CPU synthesis would blow every timeout while starving the other members)."""
+
+
+# Kept under ~180 chars, remediation first: the Orchestrator truncates the
+# upstream body at 200 (qwen_tts.py) and it reaches the user as the TTS error.
+NO_GPU_MESSAGE = ("No CUDA GPU: the NVIDIA driver is not loaded (check nvidia-smi). "
+                  "On-box TTS has no CPU path; torch.cuda.is_available() is False.")
+
+
 def _next_or_none(it):
     """next(it) or None on StopIteration — pulled via asyncio.to_thread so a
     blocking model .step() never stalls the event loop during streaming."""
@@ -295,6 +309,11 @@ class TorchQwenBackend:
 
     def load(self, variant, model_dir):
         import torch
+        # Before the model import: device_map="cuda:0" on a driver-dead box
+        # used to die inside transformers with a bare RuntimeError the client
+        # saw as a 21-byte "Internal Server Error" (plan Task 8).
+        if not torch.cuda.is_available():
+            raise NoGpuError(NO_GPU_MESSAGE)
         from pathlib import Path
         from qwen_tts import Qwen3TTSModel
 
