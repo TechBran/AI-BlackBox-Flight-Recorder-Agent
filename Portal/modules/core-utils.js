@@ -139,7 +139,10 @@ export const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
  *  - waits intervalMs from the END of one tick to the start of the next, so a
  *    tick never overlaps itself (poke() while one is in flight is a no-op);
  *  - pauses while the page is hidden (no timer is even armed) and runs once
- *    as soon as it is visible again;
+ *    as soon as it is visible again. A poller whose tick raises a
+ *    notification (the task pollers) passes hiddenIntervalMs instead: it keeps
+ *    polling while hidden at that slower pace, since a paused poller only
+ *    learns a job finished once the operator is already back on the page;
  *  - backs off exponentially while tick() throws or rejects, up to
  *    maxIntervalMs, and returns to intervalMs on the next success.
  *
@@ -152,6 +155,8 @@ export const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
  * @param {number} [opts.maxIntervalMs] - Backoff ceiling (default 8x intervalMs)
  * @param {boolean} [opts.immediate=true] - First tick on start() (else after one interval)
  * @param {boolean} [opts.pauseWhenHidden=true] - Pause while document.hidden
+ * @param {?number} [opts.hiddenIntervalMs=null] - Keep polling while hidden,
+ *   this far apart (pauseWhenHidden is then moot)
  * @param {(err: *, failures: number) => void} [opts.onError] - After each failed tick
  * @param {() => void} [opts.onRecover] - After the first success that follows a failure
  * @param {{setTimeout: Function, clearTimeout: Function}} [opts.timers] - Injectable for tests
@@ -162,6 +167,7 @@ export function createPoller(tick, {
     maxIntervalMs = intervalMs * 8,
     immediate = true,
     pauseWhenHidden = true,
+    hiddenIntervalMs = null,
     onError = null,
     onRecover = null,
     timers = null,
@@ -174,7 +180,11 @@ export function createPoller(tick, {
     let timer = null;
     let failures = 0;
 
-    const hidden = () => pauseWhenHidden && !!doc && doc.hidden === true;
+    const slowWhenHidden = typeof hiddenIntervalMs === 'number' && hiddenIntervalMs > 0;
+    const watchVisibility = !!doc && (pauseWhenHidden || slowWhenHidden);
+    const pageHidden = () => !!doc && doc.hidden === true;
+    // Paused: hidden, and no hidden pace to keep.
+    const hidden = () => pauseWhenHidden && !slowWhenHidden && pageHidden();
 
     const clearTimer = () => {
         if (timer !== null) {
@@ -189,9 +199,12 @@ export function createPoller(tick, {
         timer = setT(run, delay);
     };
 
-    const nextDelay = () => (failures
-        ? Math.min(intervalMs * Math.pow(2, failures), maxIntervalMs)
-        : intervalMs);
+    const nextDelay = () => {
+        const base = slowWhenHidden && pageHidden() ? hiddenIntervalMs : intervalMs;
+        return failures
+            ? Math.min(base * Math.pow(2, failures), Math.max(maxIntervalMs, base))
+            : base;
+    };
 
     async function run() {
         timer = null;
@@ -216,22 +229,28 @@ export function createPoller(tick, {
 
     const onVisibility = () => {
         if (!running) return;
-        if (hidden()) clearTimer();
-        else if (!inFlight) run();
+        if (pageHidden()) {
+            // A slow-paced poller lets its armed timer fire; the next delay
+            // is the hidden one.
+            if (hidden()) clearTimer();
+        } else if (!inFlight) {
+            clearTimer(); // the hidden-pace timer, if one is armed
+            run();
+        }
     };
 
     return {
         start() {
             if (running) return;
             running = true;
-            if (doc && pauseWhenHidden) doc.addEventListener('visibilitychange', onVisibility);
+            if (watchVisibility) doc.addEventListener('visibilitychange', onVisibility);
             if (immediate) run();
             else schedule(intervalMs);
         },
         stop() {
             running = false;
             clearTimer();
-            if (doc && pauseWhenHidden) doc.removeEventListener('visibilitychange', onVisibility);
+            if (watchVisibility) doc.removeEventListener('visibilitychange', onVisibility);
         },
         poke() {
             if (!running || inFlight) return;

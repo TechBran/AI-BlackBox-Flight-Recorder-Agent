@@ -184,3 +184,93 @@ test("the Portal's network pollers run on createPoller, not bare setInterval", a
         /\bsetInterval\s*\(/.test(stripComments(readFileSync(resolve(PORTAL, "modules", `${m}.js`), "utf8"))));
     assert.deepEqual(offenders, [], "a bare setInterval polls a hidden tab forever and overlaps slow requests");
 });
+
+// ── Pollers that notify keep a slow pace while hidden ────────────────────
+// The task pollers raise the "Task Complete" OS / Android notification. A
+// paused poller only learned a 5-20 minute video had finished once the
+// operator was already looking at the page, so the notification came too late
+// to matter (review of rank 67).
+test("hiddenIntervalMs keeps polling while hidden, at the slower pace, and catches up on return", async () => {
+    setHidden(false);
+    const timers = manualTimers();
+    let calls = 0;
+    const p = createPoller(() => { calls += 1; }, { intervalMs: 1000, hiddenIntervalMs: 15000, timers });
+    p.start();
+    await flush();
+    assert.equal(calls, 1);
+    setHidden(true);
+    await timers.advance(1000);
+    assert.equal(calls, 2, "the timer already armed still fires");
+    assert.deepEqual(timers.delays(), [15000], "then the hidden pace");
+    await timers.advance(15000);
+    assert.equal(calls, 3);
+    await timers.advance(45000);
+    assert.equal(calls, 6);
+    setHidden(false);
+    await flush();
+    assert.equal(calls, 7, "an immediate tick on return");
+    assert.deepEqual(timers.delays(), [1000], "and the visible pace again");
+    p.stop();
+    assert.deepEqual(timers.delays(), []);
+});
+
+test("a hidden-pace poller backs off from its hidden interval on failure", async () => {
+    setHidden(true);
+    const timers = manualTimers();
+    const p = createPoller(() => { throw new Error("down"); },
+        { intervalMs: 1000, hiddenIntervalMs: 10000, maxIntervalMs: 30000, timers });
+    p.start();
+    await flush();
+    assert.deepEqual(timers.delays(), [20000]);
+    await timers.advance(20000);
+    assert.deepEqual(timers.delays(), [30000], "capped at maxIntervalMs");
+    p.stop();
+    setHidden(false);
+});
+
+test("a task that finishes while the page is hidden still notifies, exactly once", async () => {
+    setHidden(false);
+    localStorage.setItem("bbx_operator", "tester");
+    const { TaskManager } = await import("../../Portal/modules/task-manager.js");
+    let notified = 0;
+    globalThis.AndroidBridge = window.AndroidBridge = { showNotification() { notified += 1; } };
+    let status = "processing";
+    const polls = [];
+    globalThis.fetch = window.fetch = async (url) => {
+        polls.push(String(url));
+        return new Response(JSON.stringify({ status, task_type: "video_generation", progress: 50,
+            result_url: "/ui/uploads/v.mp4" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const tm = new TaskManager();
+    tm.pollInterval = 10;
+    tm.hiddenPollInterval = 30;
+    tm.addBubble = () => document.createElement("div");
+    tm.displayVideoResult = () => {};
+    tm.activeTasks.set("vid-1", { type: "video_generation", prompt: "p", operator: "tester", startTime: Date.now() });
+    setHidden(true);
+    tm.startPolling();
+    await new Promise((r) => setTimeout(r, 80));
+    assert.ok(polls.length >= 1, "the hidden page still asks how its task is doing");
+    assert.equal(notified, 0);
+    status = "completed";
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(notified, 1, "the operator hears about it while away");
+    assert.equal(tm.activeTasks.size, 0);
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(notified, 1, "and only once");
+    tm.poller.stop();
+    delete globalThis.AndroidBridge;
+    delete window.AndroidBridge;
+    setHidden(false);
+});
+
+test("both task-notification pollers keep a hidden pace", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const { PORTAL } = await import("./helpers/portal-dom.mjs");
+    const { stripComments } = await import("./helpers/sink-scan.mjs");
+    for (const m of ["ui-setup", "task-manager"]) {
+        const src = stripComments(readFileSync(resolve(PORTAL, "modules", `${m}.js`), "utf8"));
+        assert.match(src, /hiddenIntervalMs\s*:/, `${m}.js: its poller raises the task-complete notification`);
+    }
+});

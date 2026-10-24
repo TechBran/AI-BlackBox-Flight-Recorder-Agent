@@ -56,6 +56,7 @@ export class TaskManager {
     constructor() {
         this.activeTasks = new Map(); // task_id -> task info
         this.pollInterval = 3000; // Poll every 3 seconds
+        this.hiddenPollInterval = 15000; // ...and every 15 s while the page is hidden
         this.poller = null;       // createPoller (startPolling)
         this.addBubble = null; // Set by init to avoid circular deps
         this.attachGeneratedAudioPlayer = null; // Set by init
@@ -242,11 +243,15 @@ export class TaskManager {
      * Start the polling loop
      */
     startPolling() {
-        // createPoller: paused while the page is hidden, never overlapping a
-        // slow sweep, backing off while the box is unreachable.
+        // createPoller: never overlapping a slow sweep, backing off while the
+        // box is unreachable. It keeps a slower pace while the page is hidden
+        // rather than pausing: the "Task Complete" notification is for the
+        // operator who switched away from a long job. With no task tracked a
+        // tick makes no request.
         if (this.poller) return;
         this.poller = createPoller(() => this.pollActiveTasks(), {
             intervalMs: this.pollInterval,
+            hiddenIntervalMs: this.hiddenPollInterval,
             immediate: false,
         });
         this.poller.start();

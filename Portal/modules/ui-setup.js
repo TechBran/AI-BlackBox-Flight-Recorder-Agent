@@ -457,8 +457,10 @@ function startTaskPolling() {
     console.log('[DEBUG] Task polling started');
     if (taskMonitorPoller) return;
 
-    // Every 2 seconds while the page is visible; a failing box (a restart)
-    // backs the poll off instead of hammering it every 2 s.
+    // Every 2 seconds while the page is visible, every 30 s while it is hidden
+    // (it raises the "Tasks Completed" notification, which is for an operator
+    // who is away from the page); a failing box (a restart) backs the poll
+    // off instead of hammering it every 2 s.
     taskMonitorPoller = createPoller(async () => {
         const response = await fetch(TASK_MONITOR_URL);
         if (!response.ok) throw new Error(`Task list fetch not OK: ${response.status}`);
@@ -468,6 +470,7 @@ function startTaskPolling() {
         updateTaskMonitor(tasks);
     }, {
         intervalMs: 2000,
+        hiddenIntervalMs: 30000,
         maxIntervalMs: 30000,
         onError: (error, failures) => {
             if (failures === 1) console.error('[TaskMonitor] Error fetching tasks:', error);
