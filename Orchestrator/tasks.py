@@ -36,7 +36,7 @@ from Orchestrator.artifacts import parse_and_process_artifacts_with_meta
 from Orchestrator.checkpoint import create_checkpoint_async, perform_mint, should_create_checkpoint
 from Orchestrator.config import ANTHROPIC_MODEL_DEFAULT, AUTO_ENABLE, CFG, DEBOUNCE_MS, DEFAULT_PROVIDER, GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_IMAGEN_MODEL, GOOGLE_VEO_MODEL, ON_RED, ON_YELLOW, OPENAI_MODEL_DEFAULT, TOOLVAULT_ENABLED, TOKENS_THRESHOLD, TURNS_THRESHOLD, UPLOADS_DIR, current_default, set_current_operator, VOL_PATH, XAI_MODEL_DEFAULT
 from Orchestrator.fossils import extract_snap_ids, get_recent_checkpoints_for_operator, get_recent_fossils_for_operator, hybrid_retrieve, keyword_retrieve_for_operator, semantic_retrieve, _extract_terms, _generate_ngrams
-from Orchestrator.context_builder import fill_unseen  # WI-7b dedupe-with-backfill (shared helper)
+from Orchestrator.context_builder import build_fossil_context  # the ONE fossil-context builder (/chat/stream parity)
 from Orchestrator.monitoring import drift_state_for, extract_plan
 from Orchestrator.startup import ChatIn, GeminiProTTSIn, GoogleSSMLIn, LyriaMusicIn
 from Orchestrator.state import get_state, save_operator_state, task_lock, state_lock
@@ -2186,86 +2186,6 @@ def process_chat_task(task: Task):
                     user_text = str(content)
                 break
 
-        RF  = CFG.getint("context", "recent_fossils_per_user", fallback=8)
-        KF  = CFG.getint("context", "keyword_fossils_per_user", fallback=6)
-        SF  = CFG.getint("context", "semantic_fossils_per_user", fallback=15)
-        ST  = CFG.getfloat("context", "semantic_threshold", fallback=0.60)
-        from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
-        # ST is display/log-only: it feeds semantic_retrieve's retained-but-
-        # unused threshold param (and the [CONTEXT]/[SEMANTIC] log lines). The
-        # ranking floor lives in retrieval.py's junk-floor resolution (M9/WI-3).
-        ST = active_threshold(ST)
-        CP  = CFG.getint("context", "checkpoint_snapshots", fallback=1)
-        # WI-10 (M7): cloud delivery is cap-free — [context] max_fossil_chars is
-        # no longer consumed on this (non-stream worker) path; every snapshot is
-        # delivered WHOLE. The count knobs above are the only budget.
-        CAP = None
-
-        print(f"[CONTEXT] Config - Recent: {RF}, Keyword: {KF}, Semantic: {SF} (threshold={ST}), Checkpoints: {CP}, Cap: {CAP} (uncapped, WI-10)")
-
-        actual_file_size = VOL_PATH.stat().st_size if VOL_PATH.exists() else 0
-
-        vol_txt = read_text_safe(VOL_PATH)
-
-        vol_txt_len = len(vol_txt.encode('utf-8'))
-        if vol_txt_len != actual_file_size:
-            print(f"[WARNING] File size mismatch: read {vol_txt_len} bytes but file is {actual_file_size} bytes")
-
-        update_task(task.task_id, progress=20)
-
-        recent_snaps  = get_recent_fossils_for_operator(vol_txt, active_operator, RF, CAP)
-        recent_ids = set(extract_snap_ids(recent_snaps))
-        # Separate keyword and semantic searches for better control.
-        # WI-7b dedupe-with-backfill (shared with context_builder / CU): each
-        # channel over-fetches by len(seen_so_far), then the section is filled
-        # with the first section_k UNSEEN snaps — dedupe no longer shrinks it.
-        # Semantic is fetched AFTER the keyword fill because its over-fetch
-        # amount depends on how many ids the earlier sections claimed.
-        keyword_snaps_before = keyword_retrieve_for_operator(vol_txt, user_text, KF + len(recent_ids), active_operator) if user_text else []
-
-        # Checkpoints stay UN-deduped: pinned section, not a discovery channel.
-        checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, active_operator, count=CP)
-        if checkpoint_snaps:
-            checkpoint_ids = extract_snap_ids(checkpoint_snaps)
-            print(f"[CHECKPOINT] Retrieved {len(checkpoint_snaps)} checkpoint(s) for {active_operator}: {checkpoint_ids}")
-        else:
-            print(f"[CHECKPOINT] No checkpoints found for {active_operator}")
-
-        extracted_terms = _extract_terms(user_text)
-        extracted_bigrams = _generate_ngrams(user_text, 2)
-        extracted_trigrams = _generate_ngrams(user_text, 3)
-        print(f"[KEYWORD] Extracted terms: {extracted_terms[:10]}")
-        print(f"[KEYWORD] Extracted bigrams: {extracted_bigrams[:5]}")
-        print(f"[KEYWORD] Extracted trigrams: {extracted_trigrams[:3]}")
-
-        keyword_ids_before = extract_snap_ids(keyword_snaps_before)
-        print(f"[KEYWORD] Fetched {len(keyword_snaps_before)} keyword candidates (over-fetch +{len(recent_ids)}): {keyword_ids_before}")
-
-        # Fill keyword section: first KF unseen from the channel's ranking
-        keyword_snaps = fill_unseen(keyword_snaps_before, KF, recent_ids)
-        duplicates_removed = [sid for sid in keyword_ids_before if sid in recent_ids]
-        if duplicates_removed:
-            print(f"[KEYWORD] Deduped {len(duplicates_removed)} against earlier sections; section filled to {len(keyword_snaps)}/{KF}: {duplicates_removed}")
-
-        # Semantic fills against recent AND keyword
-        seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
-        semantic_snaps_before = semantic_retrieve(user_text, operator=active_operator, k=SF + len(seen_ids), threshold=ST) if user_text else []
-        semantic_ids_before = extract_snap_ids(semantic_snaps_before)
-        print(f"[SEMANTIC] Fetched {len(semantic_snaps_before)} semantic candidates (over-fetch +{len(seen_ids)}, threshold={ST}): {semantic_ids_before}")
-
-        semantic_snaps = fill_unseen(semantic_snaps_before, SF, seen_ids)
-        semantic_duplicates_removed = [sid for sid in semantic_ids_before if sid in seen_ids]
-        if semantic_duplicates_removed:
-            print(f"[SEMANTIC] Deduped {len(semantic_duplicates_removed)} against earlier sections; section filled to {len(semantic_snaps)}/{SF}: {semantic_duplicates_removed}")
-
-        keyword_ids = extract_snap_ids(keyword_snaps)
-        semantic_ids = extract_snap_ids(semantic_snaps)
-        print(f"[CONTEXT] Operator: {active_operator}")
-        print(f"[CONTEXT] Recent snapshots ({len(recent_snaps)}): {list(recent_ids)}")
-        print(f"[CONTEXT] Keyword snapshots ({len(keyword_snaps)}): {keyword_ids}")
-        print(f"[CONTEXT] Semantic snapshots ({len(semantic_snaps)}): {semantic_ids}")
-        print(f"[CONTEXT] Query: {user_text[:100]}...")
-
         # --- Custom server resolution (Task 5.1) -------------------------------
         # Resolve ONCE per turn; reused by the window guard below (its
         # context_tokens sizes the budget) and by the default-model block.
@@ -2288,86 +2208,49 @@ def process_chat_task(task: Task):
                 if _discovered:
                     _custom_bare_final = _discovered[0]
 
-        update_task(task.task_id, progress=30)
+        # --- Provider for this turn ---------------------------------------------
+        # Routed BEFORE the context build so the window guard budgets for the
+        # provider that actually runs. The media auto-route is the one rule
+        # every chat path applies (chat_routes.media_auto_route; audit W12).
+        from Orchestrator.routes.chat_routes import media_auto_route
+        provider = (inp.provider or DEFAULT_PROVIDER).lower()
+        # Normalize provider aliases
+        if provider == "gemini":
+            provider = "google"
+        provider, provider_switched = media_auto_route(inp.messages, provider)
 
-        context_parts = []
+        # Computer Use is streaming-only; fall back to Anthropic for non-streaming path
+        cu_fallback = provider == "computer-use"
+        if cu_fallback:
+            provider = "anthropic"
+            print("[AUTO-ROUTE] Switched from computer-use to anthropic (non-streaming fallback)")
 
-        # Get recent media artifacts (images, videos, music) - inject first so model sees them
-        media_artifacts = get_recent_media_artifacts(active_operator, limit=10)
-        if media_artifacts:
-            media_lines = ["=== RECENT MEDIA (Available for Reference) ===",
-                           "These are recently generated media files you can reference by URL:"]
-            for artifact in media_artifacts:
-                media_type = artifact.get("type", "media")
-                url = artifact.get("url", "")
-                prompt = artifact.get("prompt", "")[:80]
-                created = artifact.get("created_at", "")[:19]  # Trim to datetime
-                media_lines.append(f"- [{media_type.upper()}] {url}")
-                media_lines.append(f"  Prompt: \"{prompt}...\"")
-                media_lines.append(f"  Created: {created}")
-            media_lines.append("")
-            media_lines.append("To use an image for video generation, pass its URL to generate_video with image_url parameter.")
-            context_parts.append("\n".join(media_lines))
-            print(f"[CONTEXT] Media artifacts ({len(media_artifacts)}): {[a.get('url') for a in media_artifacts[:3]]}")
+        update_task(task.task_id, progress=20)
 
-        def _fossil_sections() -> list:
-            """Assemble the four fossil sections. Single source for BOTH the
-            delivered block below and the custom window guard's re-assembly
-            loop (identical strings for every provider)."""
-            parts = []
-            if checkpoint_snaps:
-                if len(checkpoint_snaps) == 1:
-                    parts.append("=== CHECKPOINT SUMMARY (Compressed Memory) ===\n" + checkpoint_snaps[0])
-                else:
-                    checkpoint_blocks = []
-                    for i, checkpoint in enumerate(checkpoint_snaps, 1):
-                        checkpoint_blocks.append(f"=== CHECKPOINT #{i} (Older) ===" if i == 1 else f"=== CHECKPOINT #{i} ===" if i < len(checkpoint_snaps) else f"=== CHECKPOINT #{i} (Most Recent) ===")
-                        checkpoint_blocks.append(checkpoint)
-                    parts.append("\n\n".join(checkpoint_blocks))
-            if recent_snaps: parts.append("Recent snapshots:\n" + "\n\n".join(recent_snaps))
-            if keyword_snaps: parts.append("Keyword-matched snapshots:\n" + "\n\n".join(keyword_snaps))
-            if semantic_snaps: parts.append("Semantically relevant snapshots:\n" + "\n\n".join(semantic_snaps))
-            return parts
-
-        # --- Custom-provider window guard (non-stream path) -------------------
-        # The fossil assembly here is uncapped (CAP=None, WI-10) — fine for
-        # 200K+ cloud windows, fatal for e.g. a 32K llama.cpp window (the
-        # measured worst case is ≈119k floor-tokens). Provider "custom" binds
-        # the SAME metric as the stream-path guard (context_builder):
-        # estimate_tokens(assembled fossils) vs custom_servers.
-        # window_guard_tokens(server), and the SAME shared drop ladder
-        # (context_builder.drop_snapshots_to_budget): whole snapshots,
-        # lowest-value-first — keyword, then semantic, then recent
-        # oldest-first, then checkpoints — never mid-snapshot truncation;
-        # every drop logged. The media-artifacts block: parity on
-        # never-dropping; NOT counted (bounded ≤ ~2k chars) and never handed
-        # to the ladder. Other providers are untouched.
-        if _is_custom:
-            from Orchestrator.tokenization import estimate_tokens  # lazy: avoid startup cycle
-            from Orchestrator.context_builder import drop_snapshots_to_budget  # shared drop ladder
-            _budget = custom_servers.window_guard_tokens(_custom_server, _custom_bare_final)
-            _est = estimate_tokens("\n\n".join(_fossil_sections()))
-
-            def _over_budget():
-                nonlocal _est
-                _est = estimate_tokens("\n\n".join(_fossil_sections()))
-                return _est > _budget
-
-            def _log_drop(vid, section, victim):
-                print(f"[TASKS] custom window guard dropped {vid} ({section}, whole snapshot, "
-                      f"{len(victim):,} chars): est {_est:,} > budget {_budget:,} tokens "
-                      f"(server '{(_custom_server or {}).get('alias', '?')}')")
-
-            _guard_dropped = drop_snapshots_to_budget(
-                {"keyword": keyword_snaps, "semantic": semantic_snaps,
-                 "recent": recent_snaps, "checkpoint": checkpoint_snaps},
-                _over_budget, _log_drop,
+        # --- Fossil context ----------------------------------------------------
+        # The SAME builder /chat/stream uses (context_builder.build_fossil_context):
+        # fenced, numbered, body-only sections in checkpoint -> recent ->
+        # semantic -> keyword order (the window guard's drop precedence), the
+        # recent media block, Flight Recorder pins, and the window guard for
+        # every provider - a custom server's own window via window_guard_tokens.
+        # This worker (/chat, cron, inbound SMS) used to hand-build a drifted
+        # copy: raw envelopes, keyword before semantic, a custom-only guard
+        # (audit O04-tasks-retrieval-04).
+        fossil_context = ""
+        provenance = {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}
+        if active_operator:
+            fossil_context, provenance = build_fossil_context(
+                user_text,
+                active_operator,
+                log_prefix="[CONTEXT]",
+                provider=provider,
+                window_guard_tokens=(
+                    custom_servers.window_guard_tokens(_custom_server, _custom_bare_final)
+                    if _is_custom else None
+                ),
             )
-            if _guard_dropped:
-                print(f"[TASKS] custom window guard summary: dropped {len(_guard_dropped)} whole "
-                      f"snapshot(s) to fit budget {_budget:,} tokens: {_guard_dropped}")
 
-        hybrid_context_block = "\n\n".join(context_parts + _fossil_sections())
+        update_task(task.task_id, progress=30)
 
         # SMS mode: inject SMS-specific system prompt
         sms_mode = inp_dict.get("sms_mode", False)
@@ -2418,55 +2301,8 @@ def process_chat_task(task: Task):
 
         sys_msg = {"role": "system", "content": sms_prompt_prefix + dynamic_core}
         msg_list = [sys_msg]
-        if hybrid_context_block: msg_list.append({"role":"system","content": hybrid_context_block})
+        if fossil_context: msg_list.append({"role":"system","content": fossil_context})
         msg_list.extend(inp.messages)
-
-        has_video = False
-        has_audio = False
-        has_pdf = False
-
-        for msg in inp.messages:
-            content = msg.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    part_type = part.get("type", "")
-                    if part_type == "video_url":
-                        has_video = True
-                    elif part_type == "audio_url":
-                        has_audio = True
-                    elif part_type == "document_url":
-                        url = part.get("document_url", {}).get("url", "")
-                        if url.lower().endswith(".pdf"):
-                            has_pdf = True
-
-        provider = (inp.provider or DEFAULT_PROVIDER).lower()
-        # Normalize provider aliases
-        if provider == "gemini":
-            provider = "google"
-        original_provider = provider
-        provider_switched = False
-
-        if has_video or has_audio:
-            # provider "custom" is EXEMPT from the google auto-route: llama.cpp
-            # servers have no audio/video path (INTEGRATION.md §7), and a
-            # custom-only box has no Google key — the switch would hard-fail
-            # the task instead of replying. Audio/video attachments on custom
-            # get a normal text reply. Every other provider keeps today's
-            # behavior byte-identically.
-            if provider not in ("google", "custom"):
-                provider = "google"
-                provider_switched = True
-                print(f"[AUTO-ROUTE] Switched from {original_provider} to google (video/audio detected)")
-        elif has_pdf and provider == "openai":
-            provider = "google"
-            provider_switched = True
-            print(f"[AUTO-ROUTE] Switched from openai to google (PDF document detected)")
-
-        # Computer Use is streaming-only; fall back to Anthropic for non-streaming path
-        cu_fallback = provider == "computer-use"
-        if cu_fallback:
-            provider = "anthropic"
-            print("[AUTO-ROUTE] Switched from computer-use to anthropic (non-streaming fallback)")
 
         if provider in ("anthropic", "google", "openai", "xai"):
             # Empty/"Auto" -> the provider's configured *_MODEL_DEFAULT, a retired
@@ -2494,10 +2330,10 @@ def process_chat_task(task: Task):
 
         with state_lock:
             s.last_context_meta.update({
-                # Post-guard re-extraction: provenance reflects what is DELIVERED
-                # (the custom window guard may have dropped whole snapshots).
-                "recent_ids": extract_snap_ids(recent_snaps),
-                "relevant_ids": extract_snap_ids(keyword_snaps), "gm_excerpt": True,
+                # Provenance reflects what is DELIVERED (build_fossil_context's
+                # window guard may have dropped whole snapshots).
+                "recent_ids": provenance["recent"],
+                "relevant_ids": provenance["keyword"], "gm_excerpt": True,
                 "provider": provider, "model": selected_model, "operator": active_operator,
                 "usage_last": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             })
@@ -2775,7 +2611,7 @@ def process_chat_task(task: Task):
             "snapshot_perspective": "", "usage": usage,
             "conv_turns_since": s.conv_turns_since, "conv_tokens_since": s.conv_tokens_since,
             "ctx_tokens_since": s.ctx_tokens_since, "drift": drift_state_for(s),
-            "retrieved": len(keyword_snaps) + len(recent_snaps),
+            "retrieved": len(provenance["keyword"]) + len(provenance["recent"]),
             "inline_media": media_urls,
             # 2-media: structured (task_id,type,prompt) for native non-stream media
             # the model created in a tool loop. Portal renders/polls via the divs

@@ -275,7 +275,8 @@ def _run_chat_task(monkeypatch, db, task_id, tool_names, pool):
     for name in ("get_recent_fossils_for_operator", "keyword_retrieve_for_operator",
                  "semantic_retrieve", "get_recent_checkpoints_for_operator", "hybrid_retrieve"):
         monkeypatch.setattr(tasks, name, lambda *a, **k: [])
-    monkeypatch.setattr(tasks, "read_text_safe", lambda *a, **k: "")
+    monkeypatch.setattr(tasks, "build_fossil_context", lambda *a, **k: (
+        "", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}))
     monkeypatch.setattr(tasks, "AUTO_ENABLE", False)
     monkeypatch.setattr(tasks, "should_create_checkpoint", lambda *a, **k: False)
     monkeypatch.setattr(tasks, "perform_mint", lambda *a, **k: {"snap_id": "SNAP-TEST"})

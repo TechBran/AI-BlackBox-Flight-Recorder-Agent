@@ -218,7 +218,8 @@ def _run_worker(monkeypatch, provider, fake_call, *, task_id):
 
     monkeypatch.setattr(cr, "call_" + provider_fn(provider), fake_call)
 
-    monkeypatch.setattr(tasks, "read_text_safe", lambda *a, **k: "")
+    monkeypatch.setattr(tasks, "build_fossil_context", lambda *a, **k: (
+        "", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}))
     monkeypatch.setattr(tasks, "get_recent_fossils_for_operator", lambda *a, **k: [])
     monkeypatch.setattr(tasks, "keyword_retrieve_for_operator", lambda *a, **k: [])
     monkeypatch.setattr(tasks, "semantic_retrieve", lambda *a, **k: [])

@@ -435,7 +435,8 @@ def _run_worker(monkeypatch, *, provider, model, task_id, messages=None):
     monkeypatch.setattr(cr, "call_anthropic", fake_call_anthropic)
     monkeypatch.setattr(cr, "call_gemini", fake_call_gemini)
     monkeypatch.setattr(tasks, "TOOLVAULT_ENABLED", False)
-    monkeypatch.setattr(tasks, "read_text_safe", lambda *a, **k: "")
+    monkeypatch.setattr(tasks, "build_fossil_context", lambda *a, **k: (
+        "", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}))
     monkeypatch.setattr(tasks, "get_recent_fossils_for_operator", lambda *a, **k: [])
     monkeypatch.setattr(tasks, "keyword_retrieve_for_operator", lambda *a, **k: [])
     monkeypatch.setattr(tasks, "semantic_retrieve", lambda *a, **k: [])

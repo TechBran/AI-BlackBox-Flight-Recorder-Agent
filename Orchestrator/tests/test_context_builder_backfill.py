@@ -17,11 +17,9 @@ Coverage map for the three sectioned context builders (sibling sweep):
    test.
 3. ``chat_routes.build_cu_context`` — a separate inline assembly (Computer
    Use, reduced counts); tested directly here (TestBuildCuContextBackfill).
-4. ``tasks.process_chat_task`` (non-stream worker) — the assembly is inline
-   in a worker that is not hermetically callable (spins the full task/LLM
-   pipeline). It now uses the SAME shared ``context_builder.fill_unseen``
-   helper with the same over-fetch pattern as (1) and (3); the helper's
-   behavior is unit-tested directly here (TestFillUnseen).
+4. ``tasks.process_chat_task`` (non-stream worker) — no assembly of its own
+   since rank 68: it calls ``build_fossil_context``, so (1) covers it
+   (parity pinned in test_worker_context_parity.py).
 
 All retriever fakes HONOR the requested k (``ranked[:k]``) — exactly like the
 real ranked retrievers — so these tests fail if an implementation fetches
@@ -161,7 +159,7 @@ class TestBuildFossilContextBackfill:
         assert prov["recent"] == [A, B]
 
 
-# --- fill_unseen (shared helper; also covers the tasks.py worker site) -------
+# --- fill_unseen (shared helper) ---------------------------------------------
 
 class TestFillUnseen:
 

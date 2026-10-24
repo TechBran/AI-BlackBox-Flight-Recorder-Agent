@@ -175,6 +175,7 @@ def test_hybrid_retrieve_defaults_vol_txt_and_reads_only_its_results(
 # read must not come back into any of them.
 _NO_VOLUME_TEXT = [
     "Orchestrator/context_builder.py",
+    "Orchestrator/tasks.py",
     "Orchestrator/routes/chat_routes.py",
     "Orchestrator/routes/gemini_live_routes.py",
     "Orchestrator/routes/grok_live_routes.py",

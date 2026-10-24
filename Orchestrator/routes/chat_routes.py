@@ -7393,6 +7393,51 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
     return cu_context, provenance
 
 
+# Providers a media auto-route never moves: Google reads audio and video
+# itself, and "custom" is exempt because a LAN llama.cpp server has no audio/
+# video path and a custom-only box has no Google key - the switch would fail
+# the turn instead of replying (custom turns get a text note per part).
+_MEDIA_ROUTE_KEEP = frozenset({"google", "gemini", "custom"})
+
+
+def media_auto_route(messages: list, provider: str) -> Tuple[str, bool]:
+    """The provider a chat turn runs on, given what is attached to it.
+
+    An audio or video part moves the turn to Google, which reads both; a PDF
+    moves an OpenAI turn there too. Returns (provider, switched): `provider` is
+    unchanged unless switched, and a switched caller resolves Google's own
+    default model, since the requested id belongs to the original provider.
+
+    The one rule for every chat path - /chat/stream (Portal, Android, cron)
+    and the non-stream worker (/chat, inbound SMS). It used to live only in
+    the worker, so a streamed OpenAI or Anthropic turn sent the recording to
+    a provider that cannot read it (audit W12).
+    """
+    has_audio_or_video = False
+    has_pdf = False
+    for msg in messages or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type", "")
+            if part_type in ("video_url", "audio_url"):
+                has_audio_or_video = True
+            elif part_type == "document_url":
+                url = (part.get("document_url") or {}).get("url", "")
+                if isinstance(url, str) and url.lower().endswith(".pdf"):
+                    has_pdf = True
+    if has_audio_or_video and provider not in _MEDIA_ROUTE_KEEP:
+        print(f"[AUTO-ROUTE] Switched from {provider} to google (video/audio detected)")
+        return "google", True
+    if has_pdf and provider == "openai":
+        print("[AUTO-ROUTE] Switched from openai to google (PDF document detected)")
+        return "google", True
+    return provider, False
+
+
 def build_streaming_context(messages: list, operator: str, provider: str = "openai",
                             window_guard_tokens: int | None = None) -> Tuple[list, dict, dict]:
     """Build context-enriched messages for streaming chat with fossil retrieval.
@@ -7627,6 +7672,15 @@ async def chat_stream_post(request: Request):
 
         if not messages:
             return JSONResponse(status_code=400, content={"error": "messages required"})
+
+        # The media auto-route every chat path shares (media_auto_route): an
+        # audio/video turn moves to Google BEFORE the context build, so the
+        # window guard and the default model follow the provider that runs. A
+        # computer-use turn drives a desktop session and is never re-routed.
+        if provider != "computer-use":
+            provider, media_switched = media_auto_route(messages, provider)
+            if media_switched:
+                model = None  # the requested id belongs to the original provider
 
         # Default models with thinking support
         guard = None  # non-custom providers use context_builder's provider window table

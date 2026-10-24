@@ -1,7 +1,8 @@
 """Shared fossil-context retrieval builder.
 
 Single source of truth for the four-source fossil retrieval pipeline used by
-`/chat/stream` (and, going forward, by voice / agent-WebSocket routes).
+`/chat/stream`, the non-stream worker (tasks.process_chat_task: /chat, cron,
+inbound SMS) and the voice / agent-WebSocket routes.
 
 Transport-agnostic: this module does NOT build the final message list, does NOT
 add device-registry context, and does NOT assemble a system prompt. Those
@@ -139,9 +140,8 @@ def fill_unseen(ranked_snaps: list[str], k: int, seen_ids: set[str]) -> list[str
     build_fossil_context's historical filter semantics (the old tasks.py loop
     dropped id-less blocks). `seen_ids` is not mutated.
 
-    Shared by build_fossil_context (all streaming/voice/agent transports via
-    chat_routes.build_streaming_context), chat_routes.build_cu_context, and
-    the non-stream worker in tasks.process_chat_task.
+    Shared by build_fossil_context (every transport, including the non-stream
+    worker in tasks.process_chat_task) and chat_routes.build_cu_context.
     """
     filled: list[str] = []
     local_seen = set(seen_ids)
@@ -171,9 +171,8 @@ def drop_snapshots_to_budget(sections: dict, over_budget, log_drop) -> list:
     section, victim)` emits the caller's own per-drop line. Returns
     ["SNAP-…(section)", …] for the caller's summary log.
 
-    The two custom-capable window guards share this ladder: the stream path
-    (build_fossil_context below) and the non-stream worker's custom guard
-    (tasks.process_chat_task).
+    Used by build_fossil_context's window guard below, which every chat path
+    (stream and non-stream worker alike) goes through.
     """
     dropped: list = []
     while over_budget():
@@ -348,8 +347,8 @@ def build_fossil_context(
     print(f"{log_prefix} Checkpoints ({len(checkpoint_snaps)}): {checkpoint_ids}")
     print(f"{log_prefix} Query: {user_text[:100]}...")
 
-    # Build the context block — same format as process_chat_task /
-    # build_streaming_context so downstream prompts see identical text.
+    # Build the context block — every transport (build_streaming_context, the
+    # non-stream worker) delivers this exact text.
     context_parts = []
 
     # Recent media artifacts first (images/videos/music) so the model sees
@@ -484,8 +483,7 @@ def build_fossil_context(
         )
         est = estimate_tokens(fossil_context)
 
-        # Drop order lives in drop_snapshots_to_budget (shared with the
-        # non-stream custom guard in tasks.process_chat_task): keyword →
+        # Drop order lives in drop_snapshots_to_budget: keyword →
         # semantic → recent (oldest first) → checkpoint (last resort). The
         # media block is never droppable here (only snapshot sections are
         # handed to the ladder).

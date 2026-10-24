@@ -675,13 +675,16 @@ def _run_chat_worker(monkeypatch, *, provider, model, task_id, messages,
         monkeypatch.setattr(cr, name, _boom)
 
     monkeypatch.setattr(tasks, "TOOLVAULT_ENABLED", False)
-    monkeypatch.setattr(tasks, "read_text_safe", lambda *a, **k: "")
-    monkeypatch.setattr(tasks, "get_recent_fossils_for_operator",
+    # The worker builds its context with the shared builder (rank 68), so the
+    # retrievers are faked at context_builder's seams.
+    from Orchestrator import context_builder as cb
+    monkeypatch.setattr(cb, "CFG", _TasksCFG(cb.CFG))
+    monkeypatch.setattr(cb, "get_recent_fossils_for_operator",
                         lambda vol, op, n, cap: list(recent_blocks)[:n])
-    monkeypatch.setattr(tasks, "keyword_retrieve_for_operator", lambda *a, **k: [])
-    monkeypatch.setattr(tasks, "semantic_retrieve", lambda *a, **k: [])
-    monkeypatch.setattr(tasks, "get_recent_checkpoints_for_operator", lambda *a, **k: [])
-    monkeypatch.setattr(tasks, "get_recent_media_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(cb, "keyword_retrieve_for_operator", lambda *a, **k: [])
+    monkeypatch.setattr(cb, "semantic_retrieve", lambda *a, **k: [])
+    monkeypatch.setattr(cb, "get_recent_checkpoints_for_operator", lambda *a, **k: [])
+    monkeypatch.setattr(cb, "get_recent_media_artifacts", lambda *a, **k: [])
     monkeypatch.setattr(tasks, "AUTO_ENABLE", False)
     monkeypatch.setattr(tasks, "should_create_checkpoint", lambda *a, **k: False)
     monkeypatch.setattr(tasks, "perform_mint", lambda *a, **k: {"snap_id": "SNAP-TEST"})
@@ -822,7 +825,7 @@ def test_worker_custom_fossil_guard_trims_oldest_first(custom_registry, monkeypa
     assert "SNAP-20260709-0010" in context  # newest survives
     assert "SNAP-20260709-0001" not in context  # oldest dropped whole
     out = capsys.readouterr().out
-    assert "custom window guard dropped" in out
+    assert "window guard dropped" in out and "provider='custom'" in out
     assert "> budget" in out  # overage logged per drop (context_builder style)
 
 
@@ -843,7 +846,7 @@ def test_worker_custom_fossil_guard_uses_per_model_window(per_model_registry, mo
     context = recorded["messages"][1]["content"]
     assert estimate_tokens(context) <= 9830  # per-model budget, NOT 78,643
     assert "SNAP-20260709-0001" not in context  # oldest dropped whole
-    assert "custom window guard dropped" in capsys.readouterr().out
+    assert "window guard dropped" in capsys.readouterr().out
 
 
 def test_worker_custom_fossil_guard_model_not_in_map_server_window(per_model_registry, monkeypatch):

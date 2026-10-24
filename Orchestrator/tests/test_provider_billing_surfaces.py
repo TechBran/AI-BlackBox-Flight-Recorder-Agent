@@ -329,7 +329,8 @@ def test_chat_task_row_records_the_kind(ledger, monkeypatch, tmp_path):
     for name in ("get_recent_fossils_for_operator", "keyword_retrieve_for_operator",
                  "semantic_retrieve", "get_recent_checkpoints_for_operator", "hybrid_retrieve"):
         monkeypatch.setattr(tasks, name, lambda *a, **k: [])
-    monkeypatch.setattr(tasks, "read_text_safe", lambda *a, **k: "")
+    monkeypatch.setattr(tasks, "build_fossil_context", lambda *a, **k: (
+        "", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}))
     monkeypatch.setattr(tasks, "AUTO_ENABLE", False)
     monkeypatch.setattr(tasks, "should_create_checkpoint", lambda *a, **k: False)
     monkeypatch.setattr(tasks, "save_operator_state", lambda *a, **k: None)
