@@ -1,9 +1,15 @@
-fastapi
-uvicorn[standard]
-python-multipart
-soundfile
-numpy
-torch
+# qwen-tts member venv (installed by installer/templates/blackbox-install-localstack.sh
+# with `-c requirements.lock.txt`). Exact pins: the set running on MS02
+# (Python 3.12, NVIDIA driver 595, CUDA 13), read from its venv 2026-10-23
+# (audit O19-local-stack-11). torch 2.14.1 from PyPI is the CUDA 13.0 build
+# (torch.__version__ 2.14.1+cu130); it must match the box's driver. Bump these
+# together with requirements.lock.txt, and only after a synth works on the GPU box.
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+soundfile==0.14.0
+numpy==2.4.6
+torch==2.14.1
 transformers==4.57.3
 accelerate==1.12.0
 # Qwen3-TTS streaming fork (kunzite-app/Qwen3-TTS-streaming) — package name

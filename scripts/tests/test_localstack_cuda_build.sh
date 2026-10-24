@@ -56,6 +56,10 @@ done
 # Step 5's config renderer (Orchestrator/localstack_render.py, stdlib only).
 mkdir -p "$ROOT/Orchestrator"
 cp "$REPO_ROOT/Orchestrator/localstack_render.py" "$ROOT/Orchestrator/"
+# Step 4's pinned qwen-tts requirements + lock.
+mkdir -p "$ROOT/LocalModels/qwen_tts_server"
+cp "$REPO_ROOT/LocalModels/qwen_tts_server/requirements.txt" \
+   "$REPO_ROOT/LocalModels/qwen_tts_server/requirements.lock.txt" "$ROOT/LocalModels/qwen_tts_server/"
 LS_VER="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/installer/templates/llama-swap-version" | head -n1 | tr -d '[:space:]')"
 LC_VER="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/installer/templates/llamacpp-version" | head -n1 | tr -d '[:space:]')"
 BIN="$HOME_DIR/.blackbox/localstack/bin"
@@ -87,6 +91,12 @@ built || fail "1: llama.cpp was not configured with cmake"
     || fail "1: build marker is '$(cat "$MARKER")', expected ${LC_VER}-cuda-sm86"
 grep -q "PYTHONPATH=$ROOT/LocalModels exec" "$HOME_DIR/.blackbox/localstack/llama-swap-config.yaml" \
     || fail "1: llama-swap config did not template the install root"
+# qwen-tts venv: pinned requirements under the lock, then a CUDA check on a GPU box.
+QWEN_DIR="$ROOT/LocalModels/qwen_tts_server"
+stub_log_has "^pip\[$HOME_DIR/.blackbox/localstack/qwen-tts-venv\] install --upgrade -r $QWEN_DIR/requirements.txt -c $QWEN_DIR/requirements.lock.txt\$" \
+    || fail "1: the qwen-tts venv was not installed under the lock: $(grep 'qwen-tts-venv' "$STUB_LOG")"
+stub_log_has "^venv-python\[$HOME_DIR/.blackbox/localstack/qwen-tts-venv\] -c .*torch.cuda.is_available" \
+    || fail "1: the qwen-tts venv's torch was not checked against the GPU"
 
 # ── 2. same GPU: no rebuild ───────────────────────────────────────────────────
 rc="$(run_stack 8.6)"
@@ -104,6 +114,14 @@ rc="$(run_stack 8.6)"
 grep -A 40 '^  "embed-qwen3-8b":' "$CFG" | grep -m 1 -E '^    ttl:' | grep -qE '^    ttl: 0 ' \
     || fail "2b: the installer re-run reset the keep-warm embed member: $(grep -E '^    ttl:' "$CFG")"
 grep -q 'keep-warm' "$CFG" || fail "2b: the rendered config lost the template comments"
+
+# ── 2c. a qwen-tts torch that cannot reach the GPU is said out loud ───────────
+: > "$STUB_LOG"
+STUB_VENV_PYTHON_RC=1 STUB_COMPUTE_CAP=8.6 STUB_VRAM_MB=16380 \
+    bash "$LOCALSTACK_SH" "$USER_NAME" "$HOME_DIR" "$ROOT" > "$WORK/nocuda.log" 2>&1; rc=$?
+[[ "$rc" == 0 ]] || fail "2c: a CUDA-less qwen-tts venv must not fail the whole stack (rc=$rc)"
+grep -q 'torch.cuda.is_available() is False' "$WORK/nocuda.log" \
+    || fail "2c: a qwen-tts torch that cannot use the GPU was not reported: $(grep -i qwen "$WORK/nocuda.log")"
 
 # ── 3. GPU swap: rebuild ──────────────────────────────────────────────────────
 rc="$(run_stack 8.9)"

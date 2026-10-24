@@ -22,6 +22,7 @@
 #   STUB_NVIDIA_SMI_FAIL exit code every nvidia-smi call fails with, printing the
 #                        driver-dead message (unset: the driver answers)
 #   STUB_LSPCI           lspci output (default: one NVIDIA VGA line; "" = no card)
+#   STUB_VENV_PYTHON_RC  exit code of a stub venv's bin/python (default 0)
 #   STUB_NVCC_ARCHS      `nvcc --list-gpu-arch` output, space-separated (default:
 #                        Ubuntu 24.04's apt CUDA 12.0, compute_50 .. compute_90);
 #                        "none" makes it fail like an nvcc without the option
@@ -173,7 +174,7 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
     echo "python -m venv ${3:-}" >> "$STUB_LOG"
     mkdir -p "$3/bin"
     printf '#!/usr/bin/env bash\necho "pip[%s] $*" >> "$STUB_LOG"\n' "$3" > "$3/bin/pip"
-    printf '#!/usr/bin/env bash\necho "venv-python[%s] $*" >> "$STUB_LOG"\n' "$3" > "$3/bin/python"
+    printf '#!/usr/bin/env bash\necho "venv-python[%s] $*" >> "$STUB_LOG"\nexit "${STUB_VENV_PYTHON_RC:-0}"\n' "$3" > "$3/bin/python"
     chmod +x "$3/bin/pip" "$3/bin/python"
     exit 0
 fi

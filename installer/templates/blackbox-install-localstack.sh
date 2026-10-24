@@ -468,10 +468,24 @@ if [[ ! -x "$QWEN_TTS_VENV/bin/pip" ]]; then
     fi
 fi
 QWEN_REQ="$BLACKBOX_ROOT/LocalModels/qwen_tts_server/requirements.txt"
-if (( QWEN_OK )) && [[ -f "$QWEN_REQ" ]]; then
-    echo "[install-localstack] Installing qwen-tts requirements..."
-    if ! sudo -u "$REAL_USER" "$QWEN_TTS_VENV/bin/pip" install --upgrade -r "$QWEN_REQ"; then
+# Exact pins + a lock of everything they pull in (audit O19-local-stack-11):
+# unpinned, a fresh box got whatever torch was current, whose bundled CUDA
+# runtime need not match the driver, and the mismatch only showed at the
+# first synthesis inside llama-swap, after this script reported success.
+QWEN_LOCK="$BLACKBOX_ROOT/LocalModels/qwen_tts_server/requirements.lock.txt"
+if (( QWEN_OK )) && [[ -f "$QWEN_REQ" && -f "$QWEN_LOCK" ]]; then
+    echo "[install-localstack] Installing qwen-tts requirements (pinned)..."
+    if ! sudo -u "$REAL_USER" "$QWEN_TTS_VENV/bin/pip" install --upgrade -r "$QWEN_REQ" -c "$QWEN_LOCK"; then
         echo "[install-localstack] WARNING: qwen-tts requirements install failed — TTS audio member unavailable (retrieval group unaffected). Re-run to retry." >&2
+        QWEN_OK=0
+    fi
+    # On a GPU box, prove the venv's torch can reach the driver now, not at
+    # the first synthesis (on-box TTS has no CPU path).
+    if (( QWEN_OK && USE_CUDA )) && ! sudo -u "$REAL_USER" "$QWEN_TTS_VENV/bin/python" -c \
+            'import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)'; then
+        echo "[install-localstack] WARNING: the qwen-tts venv's torch cannot use this GPU (torch.cuda.is_available() is False):" >&2
+        echo "[install-localstack] its CUDA runtime does not match the NVIDIA driver. On-box TTS will refuse every request" >&2
+        echo "[install-localstack] until the pins in LocalModels/qwen_tts_server/requirements*.txt match this box." >&2
         QWEN_OK=0
     fi
 elif (( QWEN_OK )); then
