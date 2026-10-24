@@ -1460,7 +1460,7 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                                                    stt_errors.AUTH_FAILED))
         return
     try:
-        with open(creds_path, "r") as f:
+        with open(creds_path, "r") as f:  # noqa: ASYNC230
             project_id = json.load(f).get("project_id")
     except (OSError, ValueError) as e:
         await websocket.send_json(stt_errors.frame(f"invalid Google credentials file: {e}",

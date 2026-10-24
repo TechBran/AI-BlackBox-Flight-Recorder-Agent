@@ -127,7 +127,7 @@ class ADBCommands:
             )
             if rc != 0:
                 raise RuntimeError(f"ADB pull failed: {stderr}")
-            with open(tmp_path, "rb") as f:
+            with open(tmp_path, "rb") as f:  # noqa: ASYNC230
                 png_bytes = f.read()
             return png_bytes
         finally:

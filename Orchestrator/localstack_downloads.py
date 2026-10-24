@@ -310,7 +310,7 @@ async def _stream(artifact: str):
                 total = int(resp.headers.get("content-length", 0) or 0)
                 _set(status="downloading", completed=0, total=total)
                 yield _line()
-                with open(part, "wb") as fh:
+                with open(part, "wb") as fh:  # noqa: ASYNC230
                     async for chunk in resp.aiter_bytes(CHUNK):
                         fh.write(chunk)
                         completed += len(chunk)

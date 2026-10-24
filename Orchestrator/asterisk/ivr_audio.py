@@ -386,7 +386,7 @@ async def ensure_all_prompts():
 
     # Reload Asterisk sounds index so newly generated WAVs are found by ARI
     try:
-        subprocess.run(
+        subprocess.run(  # noqa: ASYNC221
             ['sudo', 'asterisk', '-rx', 'core reload'],
             capture_output=True, timeout=10,
         )

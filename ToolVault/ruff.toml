@@ -1,0 +1,4 @@
+# Event-loop blocking gate for the ToolVault executors (2026-10-09 audit,
+# rank 46). Executors are awaited on the server's event loop, so the same
+# flake8-async rules as the Orchestrator apply. See Orchestrator/ruff.toml.
+extend = "../Orchestrator/ruff.toml"

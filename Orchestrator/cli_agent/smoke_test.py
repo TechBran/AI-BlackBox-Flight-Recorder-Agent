@@ -79,7 +79,7 @@ async def kill_via_rest(session_id: str) -> None:
         method="DELETE",
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as r:
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: ASYNC210
             r.read()
     except Exception:
         pass

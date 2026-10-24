@@ -987,7 +987,7 @@ async def restart_blackbox_service() -> dict:
     import subprocess
     logger.info("restart: customer triggered service restart from wizard")
     # Use Popen so we don't await — the restart will SIGTERM us mid-Popen.wait
-    subprocess.Popen(
+    subprocess.Popen(  # noqa: ASYNC220
         ["sudo", "-n", "/usr/bin/systemctl", "restart", "blackbox.service"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1194,7 +1194,7 @@ async def open_external_url(req: OpenUrlRequest) -> dict:
             # success (browser stayed up). subprocess.run with timeout is
             # the simplest way to detect "exited immediately = error" vs
             # "still running = launched ok".
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: ASYNC221
                 [browser_bin, url],
                 env=env, capture_output=True, text=True, timeout=4,
                 start_new_session=True,
@@ -1214,7 +1214,7 @@ async def open_external_url(req: OpenUrlRequest) -> dict:
     if os.path.exists(firefox_desktop):
         logger.info("open-url: trying gio launch firefox snap for %s", url)
         try:
-            gio = subprocess.run(
+            gio = subprocess.run(  # noqa: ASYNC221
                 ["gio", "launch", firefox_desktop, url],
                 env=env, capture_output=True, text=True, timeout=10,
             )
@@ -1230,7 +1230,7 @@ async def open_external_url(req: OpenUrlRequest) -> dict:
     # handler being set correctly; may route to text editor if not)
     logger.info("open-url: falling back to xdg-portal for %s", url)
     try:
-        portal = subprocess.run(
+        portal = subprocess.run(  # noqa: ASYNC221
             ["gdbus", "call", "--session",
              "--dest", "org.freedesktop.portal.Desktop",
              "--object-path", "/org/freedesktop/portal/desktop",

@@ -265,7 +265,7 @@ class CellularHotplugMonitor:
             # Flush and send AT
             s.reset_input_buffer()
             s.write(b"AT\r\n")
-            time.sleep(0.5)
+            time.sleep(0.5)  # noqa: ASYNC251
 
             # Read response
             response = ""

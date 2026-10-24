@@ -859,7 +859,7 @@ async def initiate_outbound_call(call_request: OutboundCallRequest):
 
     # Make the Twilio REST API call
     try:
-        response = requests.post(
+        response = requests.post(  # noqa: ASYNC210
             f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json",
             auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
             data={
@@ -1063,7 +1063,7 @@ async def cli_initiate_call(call_request: CLICallRequest):
 
     # Initiate Twilio call
     try:
-        response = requests.post(
+        response = requests.post(  # noqa: ASYNC210
             f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json",
             auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
             data={
@@ -1679,7 +1679,7 @@ async def cli_hangup(cli_session_id: str):
     if phone_session and phone_session.call_id:
         try:
             # Use Twilio API to end the call
-            response = requests.post(
+            response = requests.post(  # noqa: ASYNC210
                 f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{phone_session.call_id}.json",
                 auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
                 data={"Status": "completed"},

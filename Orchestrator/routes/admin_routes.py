@@ -73,7 +73,7 @@ async def upload_file(file: UploadFile = File(...)):
 
         # Stream file to disk in chunks to avoid loading entire file into memory
         total_written = 0
-        with open(save_path, "wb") as f:
+        with open(save_path, "wb") as f:  # noqa: ASYNC230
             while True:
                 chunk = await file.read(UPLOAD_CHUNK_SIZE)
                 if not chunk:
@@ -151,7 +151,7 @@ async def upload_session_file(
 
         # Stream file to disk in chunks to avoid loading entire file into memory
         total_written = 0
-        with open(save_path, "wb") as f:
+        with open(save_path, "wb") as f:  # noqa: ASYNC230
             while True:
                 chunk = await file.read(UPLOAD_CHUNK_SIZE)
                 if not chunk:

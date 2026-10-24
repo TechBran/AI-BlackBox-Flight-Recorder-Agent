@@ -2660,7 +2660,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                     for img_url in reference_images[:14]:  # Max 14 images
                                         file_path = _resolve_attachment(img_url, IMAGE_EXTS)
                                         if file_path is not None:
-                                            with open(file_path, "rb") as f:
+                                            with open(file_path, "rb") as f:  # noqa: ASYNC230
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
                                             mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
@@ -3511,7 +3511,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     for img_url in reference_images[:14]:  # Max 14 images
                                         file_path = _resolve_attachment(img_url, IMAGE_EXTS)
                                         if file_path is not None:
-                                            with open(file_path, "rb") as f:
+                                            with open(file_path, "rb") as f:  # noqa: ASYNC230
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
                                             mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
@@ -5686,7 +5686,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                     for img_url in reference_images[:14]:  # Max 14 images
                                         file_path = _resolve_attachment(img_url, IMAGE_EXTS)
                                         if file_path is not None:
-                                            with open(file_path, "rb") as f:
+                                            with open(file_path, "rb") as f:  # noqa: ASYNC230
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
                                             mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
@@ -6397,7 +6397,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                     for img_url in reference_images[:14]:  # Max 14 images
                                         file_path = _resolve_attachment(img_url, IMAGE_EXTS)
                                         if file_path is not None:
-                                            with open(file_path, "rb") as f:
+                                            with open(file_path, "rb") as f:  # noqa: ASYNC230
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
                                             mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
@@ -6979,7 +6979,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                     for img_url in reference_images[:14]:  # Max 14 images
                                         file_path = _resolve_attachment(img_url, IMAGE_EXTS)
                                         if file_path is not None:
-                                            with open(file_path, "rb") as f:
+                                            with open(file_path, "rb") as f:  # noqa: ASYNC230
                                                 img_b64 = b64.b64encode(f.read()).decode()
                                             ext = file_path.suffix.lower()
                                             mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}

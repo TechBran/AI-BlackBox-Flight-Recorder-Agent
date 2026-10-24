@@ -1295,7 +1295,7 @@ async def zellij_attach_file(
         )
 
     total = 0
-    with open(save_path, "wb") as f:
+    with open(save_path, "wb") as f:  # noqa: ASYNC230
         while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
             total += len(chunk)
             if total > _MAX_UPLOAD_SIZE:

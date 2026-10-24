@@ -1202,7 +1202,7 @@ async def list_slash_commands():
             name = md_file.stem  # filename without .md
             description = ""
             try:
-                with open(md_file, 'r') as f:
+                with open(md_file, 'r') as f:  # noqa: ASYNC230
                     first_line = f.readline().strip()
                     # Extract description from first heading or first line
                     if first_line.startswith('#'):

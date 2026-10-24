@@ -151,7 +151,7 @@ async def start_up() -> str:
     # Reviewer I3: start_new_session=True so PID 1 (init) reaps the
     # xdg-open child — prevents zombie accumulation on long-running uvicorn.
     try:
-        subprocess.Popen(["xdg-open", login_url],
+        subprocess.Popen(["xdg-open", login_url],  # noqa: ASYNC220
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
                          start_new_session=True)

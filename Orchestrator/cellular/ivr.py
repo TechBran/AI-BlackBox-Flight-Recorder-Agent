@@ -236,7 +236,7 @@ class CellularIVR:
         cache_path = os.path.join(IVR_CACHE_DIR, f"{cache_key}.pcm16")
 
         if os.path.exists(cache_path):
-            with open(cache_path, "rb") as f:
+            with open(cache_path, "rb") as f:  # noqa: ASYNC230
                 pcm_data = f.read()
             if pcm_data:
                 print(f"[CELLULAR-IVR] Cache hit: {cache_key[:8]}... "
@@ -279,7 +279,7 @@ class CellularIVR:
             samples_8k = resample(samples_24k.astype(np.float64), num_8k)
             pcm_8k = np.clip(samples_8k, -32768, 32767).astype(np.int16).tobytes()
 
-            with open(cache_path, "wb") as f:
+            with open(cache_path, "wb") as f:  # noqa: ASYNC230
                 f.write(pcm_8k)
             duration = len(pcm_8k) / (8000 * 2)
             print(f"[CELLULAR-IVR] TTS cached: {len(pcm_8k)} bytes ({duration:.1f}s @ 8kHz)")
