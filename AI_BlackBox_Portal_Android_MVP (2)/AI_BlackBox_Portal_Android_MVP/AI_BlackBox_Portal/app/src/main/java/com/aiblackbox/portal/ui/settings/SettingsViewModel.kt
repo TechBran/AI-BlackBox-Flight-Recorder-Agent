@@ -2,9 +2,12 @@ package com.aiblackbox.portal.ui.settings
 
 import android.app.Application
 import android.content.Context
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.repository.UpdateRepository
+import com.aiblackbox.portal.ui.updates.RestartWait
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.ui.chat.ChatViewModel
@@ -362,14 +365,25 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** Cancel all stuck tasks (POST /tasks/cancel-all) */
+    /**
+     * Cancel all stuck tasks (POST /tasks/cancel-all). The sheet confirms first;
+     * the result ("N tasks cancelled" or the error) is shown, not dropped
+     * (A11-settings-generation-13).
+     */
     fun cancelAllTasks() {
         val api = api ?: return
         viewModelScope.launch {
-            try {
-                api.post("/tasks/cancel-all", "{}")
-            } catch (_: Exception) {}
+            showToast(try {
+                SystemActions.cancelledMessage(api.post("/tasks/cancel-all", "{}"))
+            } catch (e: Exception) {
+                "Could not cancel tasks: ${e.message}"
+            })
         }
+    }
+
+    /** A Toast from the application context: a restart wait can outlive the sheet. */
+    private fun showToast(message: String) {
+        Toast.makeText(getApplication<Application>(), message, Toast.LENGTH_LONG).show()
     }
 
     /**
@@ -389,15 +403,38 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** Restart the BlackBox service (POST /restart) */
+    /**
+     * Restart the BlackBox service (POST /restart). The sheet confirms first.
+     * A refusal in the 200 body (sudo denied) is reported; otherwise wait for
+     * /health's boot_id to change, so "back online" means a new process
+     * (A11-settings-generation-13, A13-ui-ops-01).
+     */
     fun restartService() {
         val api = api ?: return
         viewModelScope.launch {
-            try {
-                api.post("/restart", "{}")
-            } catch (_: Exception) {}
+            val probe: suspend () -> String? = {
+                try {
+                    UpdateRepository.parseBootId(restartJson, api.get("/health"))
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            val priorBootId = probe()
+            val refusal = try {
+                SystemActions.restartRefusal(api.post("/restart", "{}"))
+            } catch (_: Exception) {
+                null  // the restart can cut this very request off
+            }
+            if (refusal != null) {
+                showToast(refusal)
+                return@launch
+            }
+            showToast("Restart requested. BlackBox will be back in about 60–90 seconds.")
+            showToast(SystemActions.restartOutcomeMessage(RestartWait.await(priorBootId, probe)))
         }
     }
+
+    private val restartJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private fun loadApps() {
         viewModelScope.launch {

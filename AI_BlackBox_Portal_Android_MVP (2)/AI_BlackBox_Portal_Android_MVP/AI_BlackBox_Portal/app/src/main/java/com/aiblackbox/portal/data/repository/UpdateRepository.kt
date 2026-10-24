@@ -7,12 +7,15 @@ import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.model.EmbeddingsMigrateRequest
 import com.aiblackbox.portal.data.model.EmbeddingsStatus
 import com.aiblackbox.portal.data.model.RerankStatus
+import com.aiblackbox.portal.data.model.UpdateRollbackRequest
 import com.aiblackbox.portal.data.model.UpdateRollbackResponse
 import com.aiblackbox.portal.data.model.UpdateStartRequest
 import com.aiblackbox.portal.data.model.UpdateStartResponse
 import com.aiblackbox.portal.data.model.UpdateStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
 
 /**
@@ -25,8 +28,9 @@ import java.io.IOException
  * - streamLog() returns a Flow<SSEEvent> from /update/log/stream — each event
  *   carries a JSON payload to be parsed by the caller (phase / log / heartbeat /
  *   complete events have different shapes).
- * - rollback() reverts to the last pre-update-<ts> tag.
- * - healthOk() probes /health (used by the restart-detection poll loop).
+ * - rollback() reverts to the last pre-update-<ts> tag (newer backends return
+ *   a task_id to stream, like start()).
+ * - bootId() reads /health's boot_id (the restart-detection poll compares it).
  */
 class UpdateRepository(private val api: BlackBoxApi) {
 
@@ -37,28 +41,36 @@ class UpdateRepository(private val api: BlackBoxApi) {
 
     suspend fun preflight(): UpdateStatus = decode(api.post("/update/preflight", "{}"))
 
-    suspend fun start(confirmSha: String? = null): UpdateStartResponse {
+    /** A dirty tree without [discardLocalChanges] answers 409 (ApiHttpException). */
+    suspend fun start(confirmSha: String? = null, discardLocalChanges: Boolean = false): UpdateStartResponse {
         val body = json.encodeToString(
             UpdateStartRequest.serializer(),
-            UpdateStartRequest(confirmSha = confirmSha)
+            UpdateStartRequest(confirmSha = confirmSha, discardLocalChanges = discardLocalChanges)
         )
         return json.decodeFromString(UpdateStartResponse.serializer(), api.post("/update/start", body))
     }
 
-    suspend fun rollback(): UpdateRollbackResponse =
-        json.decodeFromString(UpdateRollbackResponse.serializer(), api.post("/update/rollback", "{}"))
+    suspend fun rollback(discardLocalChanges: Boolean = false): UpdateRollbackResponse {
+        val body = json.encodeToString(
+            UpdateRollbackRequest.serializer(),
+            UpdateRollbackRequest(discardLocalChanges = discardLocalChanges)
+        )
+        return json.decodeFromString(UpdateRollbackResponse.serializer(), api.post("/update/rollback", body))
+    }
 
     fun streamLog(taskId: String): Flow<SSEEvent> =
         sseClient.streamGet("/update/log/stream", mapOf("task_id" to taskId))
 
-    /** Plain GET on /health — caller treats any IOException or non-200 as "not ready yet." */
-    suspend fun healthOk(): Boolean {
-        return try {
-            api.get("/health").isNotBlank()
-        } catch (e: Exception) {
-            Log.d(TAG, "health probe failed (expected during restart): ${e.message}")
-            false
-        }
+    /**
+     * The running process's /health boot_id: the id, "" from a backend that
+     * predates it, or null when /health did not answer (expected while the
+     * service restarts). See [com.aiblackbox.portal.ui.updates.RestartWait].
+     */
+    suspend fun bootId(): String? = try {
+        parseBootId(json, api.get("/health"))
+    } catch (e: Exception) {
+        Log.d(TAG, "health probe failed (expected during restart): ${e.message}")
+        null
     }
 
     // ── Embeddings notification card (pluggable embeddings) ────────────
@@ -100,5 +112,17 @@ class UpdateRepository(private val api: BlackBoxApi) {
     private fun decode(jsonText: String): UpdateStatus =
         json.decodeFromString(UpdateStatus.serializer(), jsonText)
 
-    companion object { private const val TAG = "UpdateRepository" }
+    companion object {
+        private const val TAG = "UpdateRepository"
+
+        /** boot_id from a /health body: "" when the field is absent, null when
+         *  the body is not a JSON object (not a BlackBox answering). */
+        fun parseBootId(json: Json, body: String): String? = try {
+            (json.parseToJsonElement(body) as? JsonObject)?.let { obj ->
+                (obj["boot_id"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: ""
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 }

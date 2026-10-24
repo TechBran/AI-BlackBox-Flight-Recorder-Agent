@@ -113,6 +113,7 @@ import com.aiblackbox.portal.ui.theme.Neutral700
 import com.aiblackbox.portal.ui.theme.RadiusLg
 import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.theme.SolidGreen
+import com.aiblackbox.portal.ui.updates.UpdateConfirmText
 import com.aiblackbox.portal.util.Constants
 
 // =============================================================================
@@ -1314,6 +1315,10 @@ fun SettingsSheet(
 
             val view = LocalView.current
             var showRepairConfirm by remember { mutableStateOf(false) }
+            // Restart Service and Cancel Tasks hit every client and every
+            // operator: they confirm like Re-pair (A11-settings-generation-13).
+            var showRestartConfirm by remember { mutableStateOf(false) }
+            var showCancelTasksConfirm by remember { mutableStateOf(false) }
 
             // Paired device info
             Box(
@@ -1375,7 +1380,7 @@ fun SettingsSheet(
 
                 // Cancel Stuck Tasks
                 MenuButton("\u26D4 Cancel Tasks") {
-                    viewModel.cancelAllTasks()
+                    showCancelTasksConfirm = true
                 }
 
                 // Re-pair Device
@@ -1385,7 +1390,7 @@ fun SettingsSheet(
 
                 // Restart Service
                 MenuButton("\uD83D\uDD04 Restart Service") {
-                    viewModel.restartService()
+                    showRestartConfirm = true
                 }
 
                 // Pair New Device — show QR code for another device to scan
@@ -1442,6 +1447,52 @@ fun SettingsSheet(
                     dismissButton = {
                         TextButton(onClick = { feedback(); showRepairConfirm = false }) {
                             Text("Cancel", color = Neutral500)
+                        }
+                    },
+                    containerColor = Neutral100
+                )
+            }
+
+            if (showRestartConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showRestartConfirm = false },
+                    title = { Text("Restart Service", color = BbxWhite) },
+                    text = { Text(UpdateConfirmText.RESTART, color = BbxDim) },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            feedback()
+                            showRestartConfirm = false
+                            viewModel.restartService()
+                        }) {
+                            Text("Restart", color = BbxAccent)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { feedback(); showRestartConfirm = false }) {
+                            Text("Cancel", color = Neutral500)
+                        }
+                    },
+                    containerColor = Neutral100
+                )
+            }
+
+            if (showCancelTasksConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showCancelTasksConfirm = false },
+                    title = { Text("Cancel Tasks", color = BbxWhite) },
+                    text = { Text(UpdateConfirmText.CANCEL_TASKS, color = BbxDim) },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            feedback()
+                            showCancelTasksConfirm = false
+                            viewModel.cancelAllTasks()
+                        }) {
+                            Text("Cancel tasks", color = BbxAccent)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { feedback(); showCancelTasksConfirm = false }) {
+                            Text("Keep running", color = Neutral500)
                         }
                     },
                     containerColor = Neutral100

@@ -4,11 +4,13 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.EmbeddingsStatus
 import com.aiblackbox.portal.data.model.RerankStatus
 import com.aiblackbox.portal.data.model.UpdateStatus
 import com.aiblackbox.portal.data.repository.UpdateRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,10 +19,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -38,11 +40,14 @@ import kotlinx.serialization.json.jsonPrimitive
  *   Failed              — last_state.phase=failed
  *   Interrupted         — last_state phase non-terminal AND not in_progress
  *
- * Once the user clicks Install:
- *   - status moves to RunningUpdate with a Flow<LogLine> for SSE events
- *   - on 'complete' SSE event with succeeded=true: AwaitingRestart, then
- *     poll /health every 2s up to 180s with progressive copy
- *   - on 'complete' with succeeded=false: back to Failed state
+ * Once the user clicks Install (or Rollback):
+ *   - a confirm dialog names what happens, including local changes to tracked
+ *     files that the backend will stash (audit rank 43, O16-01)
+ *   - the log modal streams the task's SSE events
+ *   - on 'complete' with a restart scheduled: poll /health every 2s up to 180s
+ *     until its boot_id CHANGES (A13-ui-ops-01), with progressive copy
+ *   - on 'complete' without one (failed, refused, up to date): refresh, so the
+ *     Failed state surfaces
  */
 class UpdatesViewModel(application: Application) : AndroidViewModel(application) {
     private var api: BlackBoxApi? = null
@@ -60,6 +65,16 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
 
     private val _restartPollLabel = MutableStateFlow<String?>(null)
     val restartPollLabel: StateFlow<String?> = _restartPollLabel.asStateFlow()
+
+    // Install and Rollback ask first (A13-ui-ops-02): the screen renders this
+    // as an AlertDialog and answers with confirmPending() / dismissConfirm().
+    private val _confirm = MutableStateFlow<UpdateConfirm?>(null)
+    val confirm: StateFlow<UpdateConfirm?> = _confirm.asStateFlow()
+
+    // True from a confirmed Install/Rollback until its flow ends: the buttons
+    // disable, so a second tap cannot send a second /update/start.
+    private val _actionInFlight = MutableStateFlow(false)
+    val actionInFlight: StateFlow<Boolean> = _actionInFlight.asStateFlow()
 
     // Embeddings notification card (parity with the Portal card in
     // updates-manager.js). null = status unavailable or not yet fetched →
@@ -225,71 +240,102 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun startUpdate() {
+    // ── Install / Rollback (audit rank 43) ──────────────────────────────
+
+    /** Install asks first (A13-ui-ops-02); the screen renders [confirm]. */
+    fun requestInstall() {
+        val status = (_state.value as? UpdatesUiState.UpdatesAvailable)?.status ?: return
+        if (_actionInFlight.value) return
+        _confirm.value = UpdateConfirm.Install(
+            text = UpdateConfirmText.install(status),
+            confirmSha = status.latestSha,
+            // The dialog names these files: agreeing to it is the consent the
+            // backend needs to stash them (O16-01).
+            discardLocalChanges = status.dirtyFiles.isNotEmpty(),
+        )
+    }
+
+    /** Rollback asks first, naming any local changes it will stash. */
+    fun requestRollback() {
+        if (_actionInFlight.value) return
+        val status = _state.value.statusOrNull()
+        _confirm.value = UpdateConfirm.Rollback(
+            text = UpdateConfirmText.rollback(status),
+            discardLocalChanges = status?.dirtyFiles?.isNotEmpty() == true,
+        )
+    }
+
+    fun confirmPending() {
+        val pending = _confirm.value ?: return
+        _confirm.value = null
+        when (pending) {
+            is UpdateConfirm.Install -> startUpdate(pending.confirmSha, pending.discardLocalChanges)
+            is UpdateConfirm.Rollback -> rollback(pending.discardLocalChanges)
+        }
+    }
+
+    fun dismissConfirm() {
+        _confirm.value = null
+    }
+
+    private fun startUpdate(confirmSha: String?, discardLocalChanges: Boolean) {
         val r = repo ?: return
-        val current = _state.value
-        val confirmSha = (current as? UpdatesUiState.UpdatesAvailable)?.status?.latestSha
+        if (_actionInFlight.value) return  // double-tap guard
+        _actionInFlight.value = true
         viewModelScope.launch {
+            _logLines.value = listOf(LogLine.system("Starting update…"))
+            _logModalOpen.value = true
+            // Read before the action: the old process's id is what must change.
+            val priorBootId = r.bootId()
             try {
-                _logLines.value = emptyList()
-                _logModalOpen.value = true
-                _logLines.value = _logLines.value + LogLine.system("Starting update…")
-                val response = r.start(confirmSha = confirmSha)
-                streamLog(response.taskId)
+                val response = r.start(confirmSha = confirmSha, discardLocalChanges = discardLocalChanges)
+                streamLog(response.taskId, priorBootId)
             } catch (e: Exception) {
                 Log.e(TAG, "startUpdate failed", e)
-                _logLines.value = _logLines.value + LogLine.error("Failed to start: ${e.message}")
-            }
-        }
-    }
-
-    private fun streamLog(taskId: String) {
-        val r = repo ?: return
-        streamJob?.cancel()
-        streamJob = viewModelScope.launch {
-            try {
-                r.streamLog(taskId).collect { event ->
-                    val parsed = try { json.parseToJsonElement(event.data).jsonObject } catch (_: Exception) { null }
-                    if (parsed != null) {
-                        handleSseEvent(parsed)
+                append(LogLine.error("Failed to start: ${e.message}"))
+                _actionInFlight.value = false
+                if ((e as? ApiHttpException)?.code == 409) {
+                    afterConflict(discardLocalChanges) { fresh ->
+                        UpdateConfirm.Install(
+                            text = UpdateConfirmText.stashRetry(fresh.dirtyFiles, "Installing"),
+                            confirmSha = fresh.latestSha,
+                            discardLocalChanges = true,
+                        )
                     }
                 }
-                Log.d(TAG, "SSE stream completed for task=$taskId")
-            } catch (e: Exception) {
-                Log.e(TAG, "SSE stream error", e)
-                _logLines.value = _logLines.value + LogLine.system("(stream disconnected — service may be restarting)")
-                // If we got a complete event already we'll be in AwaitingRestart anyway.
             }
         }
     }
 
-    private fun handleSseEvent(obj: JsonObject) {
-        val type = obj["type"]?.jsonPrimitive?.content ?: return
-        when (type) {
-            "heartbeat" -> { /* silent keepalive */ }
-            "phase" -> {
-                val phase = obj["phase"]?.jsonPrimitive?.content ?: "?"
-                _logLines.value = _logLines.value + LogLine.phase(phase.uppercase())
-            }
-            "log" -> {
-                val phase = obj["phase"]?.jsonPrimitive?.content
-                val text = obj["text"]?.jsonPrimitive?.content ?: ""
-                _logLines.value = _logLines.value + LogLine.line(text, phase)
-            }
-            "complete" -> {
-                val ok = obj["succeeded"]?.jsonPrimitive?.content == "true"
-                if (ok) {
-                    val from = obj["sha_before"]?.jsonPrimitive?.content ?: ""
-                    val to = obj["sha_after"]?.jsonPrimitive?.content ?: ""
-                    _logLines.value = _logLines.value + LogLine.success("✓ COMPLETE: $from → $to")
-                    awaitRestart()
+    private fun rollback(discardLocalChanges: Boolean) {
+        val r = repo ?: return
+        if (_actionInFlight.value) return
+        _actionInFlight.value = true
+        viewModelScope.launch {
+            _logLines.value = listOf(LogLine.system("Rolling back…"))
+            _logModalOpen.value = true
+            val priorBootId = r.bootId()
+            try {
+                val response = r.rollback(discardLocalChanges)
+                if (response.taskId.isNotEmpty()) {
+                    // Newer backends run the rollback as a task (venv restore +
+                    // reset under the update lock): stream it like an install.
+                    append(LogLine.system("Rolling back to ${response.revertedTo}…"))
+                    streamLog(response.taskId, priorBootId)
                 } else {
-                    val err = obj["error"]?.jsonPrimitive?.content ?: "(no error msg)"
-                    _logLines.value = _logLines.value + LogLine.error("✕ FAILED: $err")
-                    // Refresh panel state so Failed branch surfaces with rollback button
-                    viewModelScope.launch {
-                        delay(1500)
-                        refreshStatus(forceFresh = false)
+                    append(LogLine.system("Rolled back to ${response.revertedTo}. Restarting service…"))
+                    awaitRestart(priorBootId)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "rollback failed", e)
+                append(LogLine.error("Rollback failed: ${e.message}"))
+                _actionInFlight.value = false
+                if ((e as? ApiHttpException)?.code == 409) {
+                    afterConflict(discardLocalChanges) { fresh ->
+                        UpdateConfirm.Rollback(
+                            text = UpdateConfirmText.stashRetry(fresh.dirtyFiles, "Rolling back"),
+                            discardLocalChanges = true,
+                        )
                     }
                 }
             }
@@ -297,51 +343,134 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * After 'complete' event: poll /health every 2s up to 180s with progressive
-     * copy (mirrors web Portal audit C5).
+     * After a 409: refresh the panel from a fresh preflight (A13-ui-ops-02), and
+     * when the refusal was local changes the request had no consent for, ask
+     * again with the backend's own list of files.
      */
-    private fun awaitRestart() {
-        val r = repo ?: return
-        pollJob?.cancel()
-        pollJob = viewModelScope.launch {
-            val start = System.currentTimeMillis()
-            val timeoutMs = 180_000L
-            while (isActive && System.currentTimeMillis() - start < timeoutMs) {
-                val elapsed = System.currentTimeMillis() - start
-                val label = when {
-                    elapsed < 30_000 -> "Restarting service…"
-                    elapsed < 90_000 -> "Rebuilding snapshot index (60–90s typical)…"
-                    else -> "Still warming. Check logs via journalctl if this hangs."
-                }
-                _restartPollLabel.value = label
-                if (r.healthOk()) {
-                    _logLines.value = _logLines.value + LogLine.success("✓ Service back online after ${elapsed / 1000}s.")
-                    _restartPollLabel.value = null
-                    delay(1500)
-                    _logModalOpen.value = false
-                    refreshStatus(forceFresh = true)
-                    return@launch
-                }
-                delay(2000)
-            }
-            _restartPollLabel.value = null
-            _logLines.value = _logLines.value + LogLine.error("⚠ Still down after 180s. Check the logs manually.")
+    private suspend fun afterConflict(consentSent: Boolean, retry: (UpdateStatus) -> UpdateConfirm) {
+        val fresh = try {
+            repo?.preflight()
+        } catch (e: Exception) {
+            Log.w(TAG, "preflight after 409 failed: ${e.message}")
+            null
+        } ?: return
+        _state.value = mapStatusToState(fresh)
+        if (!consentSent && fresh.dirtyFiles.isNotEmpty()) {
+            _logModalOpen.value = false
+            _confirm.value = retry(fresh)
         }
     }
 
-    fun rollback() {
+    private fun streamLog(taskId: String, priorBootId: String?) {
         val r = repo ?: return
-        viewModelScope.launch {
+        streamJob?.cancel()
+        streamJob = viewModelScope.launch {
+            var completeSeen = false
             try {
-                val response = r.rollback()
-                _logLines.value = listOf(LogLine.system("Rolled back to ${response.revertedTo}. Restarting service…"))
-                _logModalOpen.value = true
-                awaitRestart()
+                r.streamLog(taskId).collect { event ->
+                    val parsed = try { json.parseToJsonElement(event.data).jsonObject } catch (_: Exception) { null }
+                    if (parsed != null && handleSseEvent(parsed, priorBootId)) completeSeen = true
+                }
+                Log.d(TAG, "SSE stream completed for task=$taskId")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.e(TAG, "rollback failed", e)
-                _logLines.value = _logLines.value + LogLine.error("Rollback failed: ${e.message}")
+                Log.e(TAG, "SSE stream error", e)
+                append(LogLine.system("(stream disconnected — service may be restarting)"))
+            }
+            if (!completeSeen) {
+                // A13-ui-ops-06: the runner keeps going without the stream (Doze,
+                // a network blip). Wait for the restart, but stop once the old
+                // process says nothing is running: the update ended without one.
+                awaitRestart(priorBootId, giveUp = {
+                    try { !r.getStatus().inProgress } catch (_: Exception) { false }
+                })
             }
         }
+    }
+
+    /** Applies one SSE event; true when it was the final 'complete' event. */
+    private fun handleSseEvent(obj: JsonObject, priorBootId: String?): Boolean {
+        val type = obj["type"]?.jsonPrimitive?.content ?: return false
+        when (type) {
+            "heartbeat" -> { /* silent keepalive */ }
+            "phase" -> {
+                val phase = obj["phase"]?.jsonPrimitive?.content ?: "?"
+                append(LogLine.phase(phase.uppercase()))
+            }
+            "log" -> {
+                val phase = obj["phase"]?.jsonPrimitive?.content
+                val text = obj["text"]?.jsonPrimitive?.content ?: ""
+                append(LogLine.line(text, phase))
+            }
+            "complete" -> {
+                val ok = obj["succeeded"]?.jsonPrimitive?.booleanOrNull == true
+                val from = obj["sha_before"]?.jsonPrimitive?.content ?: ""
+                val to = obj["sha_after"]?.jsonPrimitive?.content ?: ""
+                if (ok) {
+                    append(LogLine.success("✓ COMPLETE: $from → $to"))
+                } else {
+                    val err = obj["error"]?.jsonPrimitive?.content ?: "(no error msg)"
+                    append(LogLine.error("✕ FAILED: $err"))
+                }
+                val scheduled = obj["restart_scheduled"]?.jsonPrimitive?.booleanOrNull
+                if (RestartWait.restartExpected(ok, scheduled, from, to)) {
+                    awaitRestart(priorBootId)
+                } else {
+                    // Nothing restarts (already up to date, refused, failed):
+                    // refresh so the Failed card and its Rollback button surface.
+                    if (ok) append(LogLine.system("No restart needed."))
+                    _actionInFlight.value = false
+                    viewModelScope.launch {
+                        delay(1500)
+                        refreshStatus(forceFresh = false)
+                    }
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * After a restart was requested: poll /health every 2s up to 180s with
+     * progressive copy (mirrors web Portal audit C5) until its boot_id differs
+     * from [priorBootId] (A13-ui-ops-01). The old process answers for ~2 s
+     * after the complete event; that answer is not "back online".
+     */
+    private fun awaitRestart(priorBootId: String?, giveUp: (suspend () -> Boolean)? = null) {
+        val r = repo ?: return
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
+            val outcome = RestartWait.await(
+                priorBootId = priorBootId,
+                probe = { r.bootId() },
+                onTick = { _restartPollLabel.value = RestartWait.stageLabel(it) },
+                giveUp = giveUp,
+            )
+            _restartPollLabel.value = null
+            _actionInFlight.value = false
+            when (outcome) {
+                is RestartWait.Outcome.Restarted -> {
+                    append(LogLine.success("✓ Service back online after ${outcome.elapsedMs / 1000}s."))
+                    delay(1500)
+                    _logModalOpen.value = false
+                    refreshStatus(forceFresh = true)
+                }
+                is RestartWait.Outcome.GaveUp -> {
+                    append(LogLine.system("The update is no longer running and the service did not restart. See the Updates panel for what happened."))
+                    refreshStatus(forceFresh = false)
+                }
+                is RestartWait.Outcome.NotRestarted -> append(LogLine.error(
+                    "⚠ After 180s the service is still the process that was running before: the restart did not happen. " +
+                        "Restart it from Settings → System, or run `sudo systemctl restart blackbox.service` on the box."))
+                is RestartWait.Outcome.StillDown -> append(LogLine.error("⚠ Still down after 180s. Check the logs manually."))
+            }
+        }
+    }
+
+    private fun append(line: LogLine) {
+        _logLines.value = _logLines.value + line
     }
 
     fun closeLogModal() {
@@ -374,6 +503,33 @@ sealed class UpdatesUiState {
         val status: UpdateStatus,
         val lastState: com.aiblackbox.portal.data.model.UpdateState,
     ) : UpdatesUiState()
+}
+
+/** The status a UI state carries, or null for Loading/Error/GitNotInitialized. */
+fun UpdatesUiState.statusOrNull(): UpdateStatus? = when (this) {
+    is UpdatesUiState.UpToDate -> status
+    is UpdatesUiState.LocalAhead -> status
+    is UpdatesUiState.UpdatesAvailable -> status
+    is UpdatesUiState.InProgress -> status
+    is UpdatesUiState.Failed -> status
+    is UpdatesUiState.Interrupted -> status
+    else -> null
+}
+
+/** A destructive action waiting for the operator's yes (A13-ui-ops-02). */
+sealed class UpdateConfirm(val title: String, val confirmLabel: String) {
+    abstract val text: String
+
+    data class Install(
+        override val text: String,
+        val confirmSha: String?,
+        val discardLocalChanges: Boolean,
+    ) : UpdateConfirm("Install update", "Install")
+
+    data class Rollback(
+        override val text: String,
+        val discardLocalChanges: Boolean,
+    ) : UpdateConfirm("Roll back", "Roll back")
 }
 
 /** Single log-modal entry. kind drives styling (success=green, error=red, etc.). */

@@ -102,6 +102,8 @@ fun UpdatesScreen(
     val embeddingsUpdateInFlight by viewModel.embeddingsUpdateInFlight.collectAsState()
     val embeddingsError by viewModel.embeddingsError.collectAsState()
     val rerankStatus by viewModel.rerankStatus.collectAsState()
+    val pendingConfirm by viewModel.confirm.collectAsState()
+    val actionInFlight by viewModel.actionInFlight.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val view = LocalView.current
@@ -179,9 +181,10 @@ fun UpdatesScreen(
                 )
                 is UpdatesUiState.UpdatesAvailable -> UpdatesAvailableCard(
                     s.status,
+                    enabled = !actionInFlight,
                     onInstall = {
                         view.performPressFeedback()
-                        viewModel.startUpdate()
+                        viewModel.requestInstall()
                     },
                 )
                 is UpdatesUiState.InProgress -> StatusCard(
@@ -191,16 +194,18 @@ fun UpdatesScreen(
                 )
                 is UpdatesUiState.Failed -> FailedCard(
                     s.lastState,
+                    enabled = !actionInFlight,
                     onRollback = {
                         view.performPressFeedback()
-                        viewModel.rollback()
+                        viewModel.requestRollback()
                     },
                 )
                 is UpdatesUiState.Interrupted -> InterruptedCard(
                     s.lastState,
+                    enabled = !actionInFlight,
                     onRollback = {
                         view.performPressFeedback()
-                        viewModel.rollback()
+                        viewModel.requestRollback()
                     },
                 )
             }
@@ -250,6 +255,28 @@ fun UpdatesScreen(
                 lines = logLines,
                 restartLabel = restartLabel,
                 onClose = { viewModel.closeLogModal() },
+            )
+        }
+
+        // Install / Rollback confirmation (A13-ui-ops-02): same wording as the
+        // Portal, including the CLI-session and local-changes warnings.
+        pendingConfirm?.let { c ->
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissConfirm() },
+                title = { Text(c.title, color = BbxWhite) },
+                text = { Text(c.text, color = BbxDim) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        view.performPressFeedback()
+                        viewModel.confirmPending()
+                    }) { Text(c.confirmLabel, color = BbxAccent) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissConfirm() }) {
+                        Text("Cancel", color = Neutral500)
+                    }
+                },
+                containerColor = Neutral100,
             )
         }
     }
@@ -323,7 +350,7 @@ private fun GitNotInitializedCard(onInit: () -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun UpdatesAvailableCard(status: UpdateStatus, onInstall: () -> Unit) {
+private fun UpdatesAvailableCard(status: UpdateStatus, enabled: Boolean, onInstall: () -> Unit) {
     Card(BbxAccent) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -371,16 +398,37 @@ private fun UpdatesAvailableCard(status: UpdateStatus, onInstall: () -> Unit) {
             Spacer(Modifier.height(12.dp))
         }
 
+        DirtyFilesNote(status.dirtyFiles)
+
         Button(
             onClick = onInstall,
+            enabled = enabled,
             colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
             shape = RoundedCornerShape(RadiusSm),
         ) { Text("Install update  →", color = BbxWhite, fontWeight = FontWeight.SemiBold) }
     }
 }
 
+/** Local changes to tracked files that Install/Rollback will stash (O16-01). */
 @Composable
-private fun FailedCard(lastState: com.aiblackbox.portal.data.model.UpdateState, onRollback: () -> Unit) {
+private fun DirtyFilesNote(dirty: List<String>) {
+    if (dirty.isEmpty()) return
+    val shown = dirty.take(5).joinToString(", ") + if (dirty.size > 5) " and ${dirty.size - 5} more" else ""
+    Text(
+        "⚠ ${dirty.size} tracked file${if (dirty.size == 1) " has" else "s have"} local changes ($shown). " +
+            "Install and Rollback stash them first (git stash list shows them later).",
+        color = WarnAmber,
+        fontSize = 12.sp,
+    )
+    Spacer(Modifier.height(12.dp))
+}
+
+@Composable
+private fun FailedCard(
+    lastState: com.aiblackbox.portal.data.model.UpdateState,
+    enabled: Boolean,
+    onRollback: () -> Unit,
+) {
     Card(ErrRed) {
         Text(
             "✕ Last update failed during ${lastState.failedPhase ?: lastState.phase}",
@@ -398,6 +446,7 @@ private fun FailedCard(lastState: com.aiblackbox.portal.data.model.UpdateState, 
         Spacer(Modifier.height(12.dp))
         Button(
             onClick = onRollback,
+            enabled = enabled,
             colors = ButtonDefaults.buttonColors(containerColor = WarnAmber, contentColor = BbxBlack),
             shape = RoundedCornerShape(RadiusSm),
         ) { Text("Rollback to last good SHA") }
@@ -405,7 +454,11 @@ private fun FailedCard(lastState: com.aiblackbox.portal.data.model.UpdateState, 
 }
 
 @Composable
-private fun InterruptedCard(lastState: com.aiblackbox.portal.data.model.UpdateState, onRollback: () -> Unit) {
+private fun InterruptedCard(
+    lastState: com.aiblackbox.portal.data.model.UpdateState,
+    enabled: Boolean,
+    onRollback: () -> Unit,
+) {
     Card(WarnAmber) {
         Text("⚠ Update interrupted", color = WarnAmber, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         Spacer(Modifier.height(8.dp))
@@ -424,6 +477,7 @@ private fun InterruptedCard(lastState: com.aiblackbox.portal.data.model.UpdateSt
         Spacer(Modifier.height(12.dp))
         Button(
             onClick = onRollback,
+            enabled = enabled,
             colors = ButtonDefaults.buttonColors(containerColor = WarnAmber, contentColor = BbxBlack),
             shape = RoundedCornerShape(RadiusSm),
         ) { Text("Rollback now") }

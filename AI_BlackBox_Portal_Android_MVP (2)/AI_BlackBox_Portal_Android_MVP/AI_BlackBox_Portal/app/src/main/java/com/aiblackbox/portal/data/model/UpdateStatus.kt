@@ -25,6 +25,10 @@ data class UpdateStatus(
     @SerialName("active_cli_sessions") val activeCliSessions: Int = 0,
     @SerialName("fetch_error") val fetchError: String? = null,
     val message: String? = null,
+    // Tracked files with local changes that Install/Rollback would overwrite
+    // (audit O16-01). The backend refuses both unless the request consents to
+    // stashing them; the confirm dialog names them first.
+    @SerialName("dirty_files") val dirtyFiles: List<String> = emptyList(),
 )
 
 @Serializable
@@ -80,6 +84,14 @@ data class UpdateState(
 @Serializable
 data class UpdateStartRequest(
     @SerialName("confirm_sha") val confirmSha: String? = null,
+    /** Consent to stash local changes to tracked files (shown in the confirm). */
+    @SerialName("discard_local_changes") val discardLocalChanges: Boolean = false,
+)
+
+/** Body for POST /update/rollback. */
+@Serializable
+data class UpdateRollbackRequest(
+    @SerialName("discard_local_changes") val discardLocalChanges: Boolean = false,
 )
 
 /** Response from POST /update/start. */
@@ -89,9 +101,11 @@ data class UpdateStartResponse(
     val status: String = "",
 )
 
-/** Response from POST /update/rollback. */
+/** Response from POST /update/rollback. task_id (newer backends) names the
+ *  rollback task to stream from /update/log/stream, like an install. */
 @Serializable
 data class UpdateRollbackResponse(
+    @SerialName("task_id") val taskId: String = "",
     @SerialName("reverted_to") val revertedTo: String = "",
     @SerialName("current_sha") val currentSha: String = "",
     @SerialName("restart_scheduled") val restartScheduled: Boolean = false,
