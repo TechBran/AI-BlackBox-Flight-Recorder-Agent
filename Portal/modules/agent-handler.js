@@ -375,6 +375,7 @@ export class AgentChatHandler {
     attemptReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
             console.log('[Agent] Max reconnect attempts reached');
+            this._finalizeFailure('Lost the connection to Claude Code.');
             this.updateBannerStatus('Connection Lost');
             return;
         }
@@ -1563,7 +1564,8 @@ export class AgentChatHandler {
                 const wsUrl = `${wsProtocol}//${window.location.host}/ws/agent/${this.sessionId}`;
 
                 try {
-                    this.ws = new WebSocket(wsUrl);
+                    const ws = new WebSocket(wsUrl);
+                    this.ws = ws;
                     this.ws.onopen = () => {
                         this.reconnectAttempts = 0;
                         console.log('[Agent] Reconnected, sending follow-up prompt');
@@ -1590,21 +1592,22 @@ export class AgentChatHandler {
                     };
                     this.ws.onclose = (e) => {
                         console.log('[Agent] WebSocket closed after follow-up:', e.code);
+                        if (this.ws !== ws) return; // replaced by a later turn's socket: not this turn's end
                         if (e.code !== 1000 && this.sessionId) {
                             this.attemptReconnect();
                         } else {
-                            this.isStreaming = false;
-                            statusLine.endSession();
+                            this._finalizeFailure();
                         }
                     };
                     this.ws.onerror = (err) => {
                         console.error('[Agent] WebSocket error:', err);
-                        this.isStreaming = false;
-                        statusLine.endSession();
+                        if (this.ws !== ws) return;
+                        this._finalizeFailure('Could not reach Claude Code.');
                     };
                 } catch (err) {
                     console.error('[Agent] Reconnect failed:', err);
                     toast('Failed to continue session');
+                    this._finalizeFailure('Could not reach Claude Code.');
                 }
                 return;
             } else {
@@ -1890,9 +1893,7 @@ export class AgentChatHandler {
                 if (e.code !== 1000 && this.sessionId) {
                     this.attemptReconnect();
                 } else {
-                    this.isStreaming = false;
-                    this.currentBubble?.classList.remove('agent-streaming');
-                    statusLine.endSession();
+                    this._finalizeFailure();
                 }
             };
         } else {
@@ -1945,7 +1946,10 @@ export function setAgentHandler(handler) {
     window.agentHandler = handler;
 }
 
-/** The restore in flight, shared by concurrent callers (boot + an operator switch). */
+/**
+ * The restore in flight, shared by concurrent callers for the SAME operator
+ * (boot + a re-select): {operator, promise}.
+ */
 let _agentSessionCheck = null;
 
 /**
@@ -1975,15 +1979,25 @@ function handlerForRestore(operator) {
  * there is nobody's session to look for, so it neither probes nor restores.
  */
 export function checkExistingAgentSession() {
-    if (!_agentSessionCheck) {
-        _agentSessionCheck = _checkExistingAgentSession().finally(() => { _agentSessionCheck = null; });
-    }
-    return _agentSessionCheck;
+    const operator = getOperator();
+    const inFlight = _agentSessionCheck;
+    if (inFlight && inFlight.operator === operator) return inFlight.promise;
+    // Another operator's probe (an operator switch mid-probe) is never shared:
+    // this one runs after it, so the last operator picked is the one restored.
+    const prior = inFlight ? inFlight.promise.catch(() => {}) : Promise.resolve();
+    const entry = { operator, promise: null };
+    entry.promise = prior
+        .then(() => _checkExistingAgentSession(operator))
+        .finally(() => { if (_agentSessionCheck === entry) _agentSessionCheck = null; });
+    _agentSessionCheck = entry;
+    return entry.promise;
 }
 
-async function _checkExistingAgentSession() {
-    const operator = getOperator();
-    if (!operator) return;
+/** Whether a restore for `operator` is still wanted (no switch since it began). */
+const stillOperator = (operator) => getOperator() === operator;
+
+async function _checkExistingAgentSession(operator) {
+    if (!operator || !stillOperator(operator)) return;
     // A turn that is streaming keeps its session; nothing to restore over it.
     if (agentHandler && agentHandler.isStreaming) return;
 
@@ -1996,6 +2010,7 @@ async function _checkExistingAgentSession() {
         const resp = await fetch(`/agent/session/${encodeURIComponent(operator)}`);
         if (resp.ok) {
             const data = await resp.json();
+            if (!stillOperator(operator)) return; // switched away mid-probe
             if (data.session && data.session.status !== 'completed') {
                 console.log('[Agent] Found active backend session:', data.session.session_id);
                 const handler = handlerForRestore(operator);
@@ -2018,7 +2033,7 @@ async function _checkExistingAgentSession() {
         console.log('[Agent] Backend session check failed:', e.message);
     }
 
-    if (persistedSessionId) {
+    if (persistedSessionId && stillOperator(operator)) {
         const handler = handlerForRestore(operator);
         if (handler.sessionId === persistedSessionId && handler.hasActiveSession) return; // already restored
         console.log('[Agent] Pre-loading persisted session ID for operator:', operator);

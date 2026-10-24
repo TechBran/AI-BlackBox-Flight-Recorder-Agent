@@ -1025,7 +1025,8 @@ export class GeminiAgentHandler {
                 const wsUrl = `${wsProtocol}//${window.location.host}/ws/gemini-agent/${this.sessionId}`;
 
                 try {
-                    this.ws = new WebSocket(wsUrl);
+                    const ws = new WebSocket(wsUrl);
+                    this.ws = ws;
                     this.ws.onopen = () => {
                         console.log('[GeminiAgent] Reconnected, sending follow-up prompt');
                         this.ws.send(JSON.stringify({
@@ -1044,15 +1045,18 @@ export class GeminiAgentHandler {
                     };
                     this.ws.onclose = () => {
                         console.log('[GeminiAgent] WebSocket closed after follow-up');
+                        if (this.ws !== ws) return; // replaced by a later turn's socket: not this turn's end
                         this._finalizeFailure();
                     };
                     this.ws.onerror = (err) => {
                         console.error('[GeminiAgent] WebSocket error:', err);
+                        if (this.ws !== ws) return;
                         this._finalizeFailure('Could not reach Gemini CLI.');
                     };
                 } catch (err) {
                     console.error('[GeminiAgent] Reconnect failed:', err);
                     toast('Failed to continue Gemini session');
+                    this._finalizeFailure('Could not reach Gemini CLI.');
                 }
                 return;
             } else {
@@ -1188,7 +1192,10 @@ export function setGeminiAgentHandler(handler) {
     window.geminiAgentHandler = handler;
 }
 
-/** The restore in flight, shared by concurrent callers (boot + an operator switch). */
+/**
+ * The restore in flight, shared by concurrent callers for the SAME operator
+ * (boot + a re-select): {operator, promise}.
+ */
 let _geminiSessionCheck = null;
 
 /**
@@ -1216,15 +1223,25 @@ function geminiHandlerForRestore(operator) {
  * nobody's session to look for, so it neither probes nor restores.
  */
 export function checkExistingGeminiAgentSession() {
-    if (!_geminiSessionCheck) {
-        _geminiSessionCheck = _checkExistingGeminiAgentSession().finally(() => { _geminiSessionCheck = null; });
-    }
-    return _geminiSessionCheck;
+    const operator = getOperator();
+    const inFlight = _geminiSessionCheck;
+    if (inFlight && inFlight.operator === operator) return inFlight.promise;
+    // Another operator's probe (an operator switch mid-probe) is never shared:
+    // this one runs after it, so the last operator picked is the one restored.
+    const prior = inFlight ? inFlight.promise.catch(() => {}) : Promise.resolve();
+    const entry = { operator, promise: null };
+    entry.promise = prior
+        .then(() => _checkExistingGeminiAgentSession(operator))
+        .finally(() => { if (_geminiSessionCheck === entry) _geminiSessionCheck = null; });
+    _geminiSessionCheck = entry;
+    return entry.promise;
 }
 
-async function _checkExistingGeminiAgentSession() {
-    const operator = getOperator();
-    if (!operator) return;
+/** Whether a restore for `operator` is still wanted (no switch since it began). */
+const stillOperator = (operator) => getOperator() === operator;
+
+async function _checkExistingGeminiAgentSession(operator) {
+    if (!operator || !stillOperator(operator)) return;
     // A turn that is streaming keeps its session; nothing to restore over it.
     if (geminiAgentHandler && geminiAgentHandler.isStreaming) return;
 
@@ -1237,6 +1254,7 @@ async function _checkExistingGeminiAgentSession() {
         const resp = await fetch(`/gemini-agent/session/${encodeURIComponent(operator)}`);
         if (resp.ok) {
             const data = await resp.json();
+            if (!stillOperator(operator)) return; // switched away mid-probe
             if (data.session && data.session.status !== 'completed') {
                 console.log('[GeminiAgent] Found active backend session:', data.session.session_id);
                 const handler = geminiHandlerForRestore(operator);
@@ -1253,7 +1271,7 @@ async function _checkExistingGeminiAgentSession() {
         console.log('[GeminiAgent] Backend session check failed:', e.message);
     }
 
-    if (persistedSessionId) {
+    if (persistedSessionId && stillOperator(operator)) {
         const handler = geminiHandlerForRestore(operator);
         if (handler.sessionId === persistedSessionId && handler.hasActiveSession) return; // already restored
         console.log('[GeminiAgent] Pre-loading persisted session ID for operator:', operator);

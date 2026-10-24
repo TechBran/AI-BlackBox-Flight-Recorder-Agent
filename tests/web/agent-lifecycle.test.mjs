@@ -19,7 +19,8 @@ installDom();
 loadPurify();
 loadMarked();
 
-for (const [id, cls] of [["claudeCodeBanner", ""], ["permissionModeIndicator", ""], ["thinkingIndicator", "hide"]]) {
+for (const [id, cls] of [["claudeCodeBanner", ""], ["permissionModeIndicator", ""], ["thinkingIndicator", "hide"],
+    ["todoPanel", ""], ["agentStatusLine", ""]]) {
     const el = document.createElement("div");
     el.id = id;
     if (cls) el.className = cls;
@@ -65,7 +66,7 @@ test("restoring a session twice reuses ONE handler: Shift+Tab cycles once", asyn
     assert.equal(first.permissionMode, before, "and again cycles it back: exactly one listener");
 });
 
-test("concurrent restores (boot + an operator switch) share one probe", async () => {
+test("concurrent restores for the same operator (boot + a re-select) share one probe", async () => {
     let probes = 0;
     globalThis.fetch = window.fetch = async () => { probes += 1; return json({ session: null }); };
     state.setOperator("Ana");
@@ -120,4 +121,127 @@ test("a Gemini CLI error also ends its streaming state", () => {
     assert.ok(!bubble.classList.contains("agent-streaming"));
     assert.equal(bubble.querySelector(".agent-loading"), null);
     g.dispose();
+});
+
+// ── An operator switch mid-probe restores the NEW operator's session ─────
+// The shared in-flight probe was handed to every caller whoever it was for:
+// switching operator while the previous operator's probe was in flight got
+// the OLD probe back, so the old operator's session was attached under the
+// new operator and the new one's was never looked up.
+function slowSessions(probed, sessions) {
+    globalThis.fetch = window.fetch = async (url) => {
+        probed.push(String(url));
+        await new Promise((r) => setTimeout(r, 30));
+        return json({ session: null });
+    };
+    localStorage.clear();
+    for (const [op, id] of sessions) state.saveOperatorSession(op, id);
+}
+
+test("switching operator during the boot probe restores the new operator's Claude session", async () => {
+    const probed = [];
+    slowSessions(probed, [["Ana", "sess-ana"], ["Ben", "sess-ben"]]);
+    state.setOperator("Ana");
+    const boot = agent.checkExistingAgentSession();
+    state.setOperator("Ben");
+    await agent.restoreAgentSessionForOperatorSwitch();
+    await boot;
+    const h = agent.getAgentHandler();
+    assert.equal(h.currentOperator, "Ben");
+    assert.equal(h.sessionId, "sess-ben");
+    assert.ok(probed.includes("/agent/session/Ben"), "the new operator's session is looked up");
+});
+
+test("switching operator during the boot probe restores the new operator's Gemini session", async () => {
+    const probed = [];
+    slowSessions(probed, [["Ana-gemini", "g-ana"], ["Ben-gemini", "g-ben"]]);
+    state.setOperator("Ana");
+    const boot = gemini.checkExistingGeminiAgentSession();
+    state.setOperator("Ben");
+    await gemini.restoreGeminiSessionForOperatorSwitch();
+    await boot;
+    const g = gemini.getGeminiAgentHandler();
+    assert.equal(g.currentOperator, "Ben");
+    assert.equal(g.sessionId, "g-ben");
+    assert.ok(probed.includes("/gemini-agent/session/Ben"));
+});
+
+// ── Every exit from the Claude handler's streaming state is finalized ─────
+class FakeSocket {
+    constructor(url) { this.url = url; this.readyState = 0; FakeSocket.last = this; }
+    send() {}
+    close() { this.readyState = 3; }
+}
+FakeSocket.CONNECTING = 0;
+FakeSocket.OPEN = 1;
+FakeSocket.CLOSING = 2;
+FakeSocket.CLOSED = 3;
+
+async function withFakeSocket(fn) {
+    const real = globalThis.WebSocket;
+    globalThis.WebSocket = window.WebSocket = FakeSocket;
+    try { return await fn(); } finally { globalThis.WebSocket = window.WebSocket = real; }
+}
+
+function assertFinalized(h, bubble) {
+    assert.equal(h.isStreaming, false);
+    assert.ok(!bubble.classList.contains("agent-streaming"), "no stale .agent-streaming scroll target");
+    assert.equal(bubble.querySelector(".agent-loading"), null, "the loader is replaced");
+}
+
+for (const [name, fire] of [
+    ["errors", (ws) => ws.onerror(new Event("error"))],
+    ["closes cleanly", (ws) => ws.onclose({ code: 1000 })],
+]) {
+    test(`a Claude follow-up socket that ${name} leaves the streaming state`, async () => {
+        await withFakeSocket(async () => {
+            const h = new agent.AgentChatHandler();
+            h.sessionId = "s1";
+            h.hasActiveSession = true;
+            h.currentOperator = "Ana";
+            await h.sendInput("continue please");
+            const bubble = h.currentBubble;
+            assert.ok(bubble.querySelector(".agent-loading"), "the follow-up shows its loader");
+            fire(FakeSocket.last);
+            assertFinalized(h, bubble);
+            h.dispose();
+        });
+    });
+}
+
+test("giving up on reconnecting leaves the streaming state", () => {
+    const h = new agent.AgentChatHandler();
+    h.sessionId = "s2";
+    h.isStreaming = true;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble assistant agent-streaming";
+    bubble.innerHTML = '<div class="bubble-text"><div class="agent-loading">Continuing conversation...</div></div>';
+    h.currentBubble = bubble;
+    h.reconnectAttempts = h.maxReconnectAttempts;
+    h.attemptReconnect();
+    assertFinalized(h, bubble);
+    assert.match(bubble.textContent, /connection/i);
+    h.dispose();
+});
+
+test("a follow-up socket a later turn replaced does not end that later turn", async () => {
+    await withFakeSocket(async () => {
+        for (const h of [new agent.AgentChatHandler(), new gemini.GeminiAgentHandler()]) {
+            h.sessionId = "s3";
+            h.hasActiveSession = true;
+            h.currentOperator = "Ana";
+            await h.sendInput("first");
+            const first = FakeSocket.last;
+            first.readyState = FakeSocket.CLOSING;          // closing as the next prompt goes out
+            await h.sendInput("second");
+            assert.notEqual(FakeSocket.last, first);
+            const bubble = h.currentBubble;
+            first.onclose({ code: 1000 });                   // the old socket finishes closing
+            assert.equal(h.isStreaming, true, "the second turn is still streaming");
+            assert.ok(bubble.querySelector(".agent-loading"));
+            FakeSocket.last.onclose({ code: 1000 });
+            assertFinalized(h, bubble);
+            h.dispose();
+        }
+    });
 });
