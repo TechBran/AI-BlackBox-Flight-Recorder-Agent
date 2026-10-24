@@ -31,6 +31,7 @@ def _pins(name):
 
 FAKE_GIT = r"""#!/usr/bin/env bash
 echo "git $*" >> "$FAKE_LOG"
+[[ "${FAKE_GIT_RC:-0}" == 0 ]] || exit "$FAKE_GIT_RC"
 for last; do :; done
 mkdir -p "$last/requirements" "$last/gguf-py"
 : > "$last/requirements/requirements-convert_hf_to_gguf.txt"
@@ -84,6 +85,19 @@ fi
 """
 
 
+# A move across filesystems is a copy: FAKE_MV_INTERRUPT=1 makes the FIRST mv
+# leave a partial file at its destination and fail, as a crash mid-copy would.
+FAKE_MV = r"""#!/usr/bin/env bash
+if [[ "${FAKE_MV_INTERRUPT:-0}" == 1 && ! -e "$FAKE_LOG.mv" ]]; then
+    : > "$FAKE_LOG.mv"
+    for last; do :; done
+    echo partial > "$last"
+    exit 1
+fi
+exec /bin/mv "$@"
+"""
+
+
 @pytest.fixture
 def sandbox(tmp_path):
     """A copy of the script + its pins under a sandbox root (so a test can
@@ -99,6 +113,7 @@ def sandbox(tmp_path):
     (fake / "python3").write_text(FAKE_PY)
     (fake / "python3.12").write_text(FAKE_PY)
     (fake / "cmake").write_text(FAKE_CMAKE)
+    (fake / "mv").write_text(FAKE_MV)
     for f in fake.iterdir():
         f.chmod(0o755)
     models = tmp_path / "models"
@@ -135,8 +150,8 @@ def test_happy_path_builds_at_the_pinned_revisions_and_lands_atomically(sandbox)
     assert prov["llama_cpp"] == lc_tag and prov["hf_revision"] == hf_rev
     assert prov["matches_g2_reference"] is False      # fake bytes != the MS02 artifact
     assert "Run the G2 gate" in r.stdout
-    assert not (models / ".reranker-gguf-build").exists()   # scratch cleaned up
-    assert not list(models.glob("*.part"))
+    assert not list(models.glob(".reranker-gguf-build*"))   # scratch cleaned up
+    assert not list(models.glob("*.part")) and not list(models.glob(".*.part"))
 
 
 def test_an_existing_gguf_is_kept_without_force(sandbox):
@@ -197,3 +212,69 @@ def test_pins_are_real_pins():
     assert hf_repo == "Qwen/Qwen3-Reranker-8B"
     assert len(hf_rev) == 40 and all(c in "0123456789abcdef" for c in hf_rev)
     assert len(ref_sha) == 64 and all(c in "0123456789abcdef" for c in ref_sha)
+
+
+# ── --work-dir is the caller's directory: build beside its contents, never in place
+
+def _user_work_dir(tmp_path):
+    wd = tmp_path / "bigdisk"
+    (wd / "precious").mkdir(parents=True)
+    (wd / "precious" / "notes.txt").write_text("keep me")
+    (wd / "llama.cpp").mkdir()                      # the user's own checkout
+    (wd / "llama.cpp" / "README.md").write_text("mine")
+    return wd
+
+
+def test_a_work_dir_and_everything_in_it_survive_a_failed_build(sandbox, tmp_path):
+    """--work-dir used to BE the scratch dir: the EXIT trap ran rm -rf on it,
+    and step 1 deleted any llama.cpp checkout already there."""
+    root, models, run = sandbox
+    wd = _user_work_dir(tmp_path)
+    r, _log = run("--work-dir", wd, FAKE_GIT_RC=1)
+    assert r.returncode == 4 and "clone" in r.stderr
+    assert (wd / "precious" / "notes.txt").read_text() == "keep me"
+    assert (wd / "llama.cpp" / "README.md").read_text() == "mine"
+    assert sorted(p.name for p in wd.iterdir()) == ["llama.cpp", "precious"]
+
+
+def test_a_work_dir_survives_a_successful_build_and_is_left_as_it_was(sandbox, tmp_path):
+    root, models, run = sandbox
+    wd = _user_work_dir(tmp_path)
+    r, log = run("--work-dir", wd)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (models / OUT_NAME).read_text() == "F16\nQ8_0\n"
+    assert f"{wd}/.reranker-gguf-build." in log          # built in a private subdir
+    assert sorted(p.name for p in wd.iterdir()) == ["llama.cpp", "precious"]
+    assert (wd / "llama.cpp" / "README.md").read_text() == "mine"
+
+
+def test_a_work_dir_the_script_created_is_removed_again(sandbox, tmp_path):
+    root, models, run = sandbox
+    wd = tmp_path / "fresh-scratch"
+    r, _log = run("--work-dir", wd)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not wd.exists()
+
+
+def test_keep_work_keeps_only_the_private_build_dir(sandbox, tmp_path):
+    root, models, run = sandbox
+    wd = _user_work_dir(tmp_path)
+    r, _log = run("--work-dir", wd, "--keep-work")
+    assert r.returncode == 0, r.stdout + r.stderr
+    kept = [p for p in wd.iterdir() if p.name.startswith(".reranker-gguf-build.")]
+    assert len(kept) == 1 and str(kept[0]) in r.stdout
+    assert (kept[0] / "llama.cpp" / "convert_hf_to_gguf.py").is_file()
+
+
+def test_an_interrupted_move_never_leaves_a_file_that_counts_as_built(sandbox, tmp_path):
+    """From a work dir on another filesystem the final mv is a copy; a crash
+    mid-copy used to leave a partial, non-empty GGUF that the next run kept
+    ("already exists") and member_built() accepted."""
+    root, models, run = sandbox
+    r, _log = run("--work-dir", tmp_path / "otherfs", FAKE_MV_INTERRUPT=1)
+    assert r.returncode != 0
+    assert not (models / OUT_NAME).exists()
+    assert not [p for p in models.iterdir() if p.name.endswith(".part")]
+    r, _log = run()
+    assert r.returncode == 0 and "already exists" not in r.stdout
+    assert (models / OUT_NAME).read_text() == "F16\nQ8_0\n"

@@ -18,6 +18,8 @@
 #   4. convert to f16, build llama-quantize (CPU is enough), quantize to Q8_0;
 #   5. check the reranker head (cls.output.weight) survived, compare against
 #      the G2-validated reference sha256, move the file into place atomically
+#      (staged beside it in the models dir first, so a crash mid-copy from
+#      another filesystem never leaves a partial GGUF under the final name)
 #      and write <gguf>.provenance.json beside it.
 # Then run the G2 gate (eval/rerank_g2.py) before selecting the reranker.
 #
@@ -28,6 +30,11 @@
 #
 # Usage: bash installer/templates/blackbox-build-reranker-gguf.sh \
 #            [--models-dir DIR] [--work-dir DIR] [--keep-work] [--force]
+#   --work-dir DIR  where the ~42 GB of scratch goes (default: the models dir).
+#                   The build runs in a private .reranker-gguf-build.XXXXXX
+#                   directory the script creates inside DIR, and only that is
+#                   removed afterwards: nothing already in DIR is touched.
+#   --keep-work     keep that private build directory (its path is printed).
 # Environment: REQUIRED_FREE_GB (default 42) for the scratch-space check.
 #
 # Exit codes:
@@ -80,26 +87,45 @@ fi
 
 mkdir -p "$MODELS_DIR"
 # Scratch on the models filesystem by default, so the final move is atomic.
-[[ -n "$WORK_DIR" ]] || WORK_DIR="$MODELS_DIR/.reranker-gguf-build"
-mkdir -p "$WORK_DIR"
+# --work-dir names the CALLER's directory (a big disk, a home dir): the build
+# gets a private directory of its own inside it, and only that is ever removed.
+WORK_DIR_CREATED=0
+[[ -n "$WORK_DIR" ]] || WORK_DIR="$MODELS_DIR"
+if [[ ! -d "$WORK_DIR" ]]; then
+    mkdir -p "$WORK_DIR"
+    WORK_DIR_CREATED=1
+fi
 need_gb="${REQUIRED_FREE_GB:-42}"
 free_kb="$(df -Pk "$WORK_DIR" | awk 'NR==2 {print $4}')"
 if [[ ! "$free_kb" =~ ^[0-9]+$ ]] || (( free_kb < need_gb * 1024 * 1024 )); then
+    [[ "$WORK_DIR_CREATED" -eq 0 ]] || rmdir "$WORK_DIR" 2>/dev/null || true
     die 2 "need ${need_gb} GB free under $WORK_DIR for the download + f16 + Q8_0 files (have $(( ${free_kb:-0} / 1024 / 1024 )) GB)"
 fi
-cleanup() { [[ "$KEEP_WORK" -eq 1 ]] || rm -rf "$WORK_DIR"; }
+BUILD_DIR="$(mktemp -d "$WORK_DIR/.reranker-gguf-build.XXXXXX")" \
+    || die 4 "could not create a build directory under $WORK_DIR"
+# Staged beside the final file: the models filesystem, so its rename is atomic.
+STAGE="$MODELS_DIR/.$OUT_NAME.part"
+cleanup() {
+    rm -f "$STAGE"
+    if [[ "$KEEP_WORK" -eq 1 ]]; then
+        log "Kept the build directory: $BUILD_DIR"
+    else
+        rm -rf "$BUILD_DIR"
+        # Only a work dir this run created, and only if nothing else is in it.
+        [[ "$WORK_DIR_CREATED" -eq 0 ]] || rmdir "$WORK_DIR" 2>/dev/null || true
+    fi
+}
 trap cleanup EXIT
 
-LC_DIR="$WORK_DIR/llama.cpp"
-HF_DIR="$WORK_DIR/hf"
-VENV="$WORK_DIR/convert-venv"
-F16="$WORK_DIR/Qwen3-Reranker-8B-f16.gguf"
-PART="$WORK_DIR/$OUT_NAME.part"
+LC_DIR="$BUILD_DIR/llama.cpp"
+HF_DIR="$BUILD_DIR/hf"
+VENV="$BUILD_DIR/convert-venv"
+F16="$BUILD_DIR/Qwen3-Reranker-8B-f16.gguf"
+PART="$BUILD_DIR/$OUT_NAME.part"
 PYBIN="$(command -v python3.12 || command -v python3)"
 
 # ── 1. llama.cpp at the pinned tag, with the Qwen3-Reranker convert fix ──────
 log "Cloning llama.cpp $LC_VER..."
-rm -rf "$LC_DIR"
 git clone --depth 1 --branch "$LC_VER" https://github.com/ggml-org/llama.cpp "$LC_DIR" \
     || die 4 "llama.cpp clone at $LC_VER failed"
 CONVERT="$LC_DIR/convert_hf_to_gguf.py"
@@ -157,7 +183,10 @@ fi
 SHA="$(sha256sum "$PART" | awk '{print $1}')"
 MATCH=false
 [[ "$SHA" == "$REF_SHA" ]] && MATCH=true
-mv -f "$PART" "$OUT"
+# A copy when the work dir is on another filesystem; only the rename below,
+# within the models dir, puts the file under the name llama-swap loads.
+mv -f "$PART" "$STAGE" || die 4 "could not move the GGUF into $MODELS_DIR"
+mv -f "$STAGE" "$OUT" || die 4 "could not rename the GGUF into place at $OUT"
 "$PYBIN" - "$OUT.provenance.json" "$LC_VER" "$HF_REPO" "$HF_REV" "$SHA" "$MATCH" <<'PY'
 import json, sys, datetime
 path, tag, repo, rev, sha, match = sys.argv[1:7]
