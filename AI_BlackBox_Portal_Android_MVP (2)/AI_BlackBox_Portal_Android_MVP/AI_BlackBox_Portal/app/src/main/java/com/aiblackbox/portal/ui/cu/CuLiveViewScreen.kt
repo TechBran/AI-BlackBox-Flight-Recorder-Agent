@@ -19,6 +19,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.aiblackbox.portal.ui.webview.BbxWebChromeClient
 import com.aiblackbox.portal.ui.webview.BbxWebViewClient
+import com.aiblackbox.portal.ui.webview.RendererCrashBudget
+import com.aiblackbox.portal.ui.webview.RendererCrashedPanel
 
 /** CU live view (D9: WebView reuse): loads ${baseUrl}/cu/view/{sessionId} — the
  *  Orchestrator-served noVNC viewer page. Every gesture/cursor/extra-keys
@@ -47,15 +49,28 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
         WindowInsets.navigationBars.getBottom(this).toDp().value.toInt()
     } + 118
     // Bumped when the renderer dies (a heavy noVNC canvas on a low-memory device), which
-    // remounts a fresh viewer instead of the app being killed (A13-ui-ops-11).
+    // remounts a fresh viewer instead of the app being killed (A13-ui-ops-11). A renderer
+    // that keeps dying shows a Reload button instead of reloading forever.
     var rendererGeneration by remember { mutableIntStateOf(0) }
+    val crashBudget = remember { RendererCrashBudget() }
+    var rendererCrashed by remember { mutableStateOf(false) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     // Pause the viewer's stream and timers while the app is in the background.
     LifecycleResumeEffect(webView) {
         webView?.onResume()
         onPauseOrDispose { webView?.onPause() }
     }
-    key(rendererGeneration) {
+    if (rendererCrashed) {
+        RendererCrashedPanel(
+            what = "The live view",
+            onReload = {
+                crashBudget.reset()
+                rendererCrashed = false
+                rendererGeneration++
+            },
+            modifier = modifier,
+        )
+    } else key(rendererGeneration) {
         AndroidView(
             modifier = modifier.fillMaxSize(),
             factory = { ctx ->
@@ -117,7 +132,9 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
                     setBackgroundColor(android.graphics.Color.BLACK)
                     // Shared clients (audit rank 62): a renderer crash remounts the viewer,
                     // and the page's dialogs answer instead of silently failing.
-                    webViewClient = BbxWebViewClient(onRendererGone = { rendererGeneration++ })
+                    webViewClient = BbxWebViewClient(onRendererGone = {
+                        if (crashBudget.recordCrash()) rendererGeneration++ else rendererCrashed = true
+                    })
                     webChromeClient = BbxWebChromeClient()
                     loadUrl("${baseUrl.trimEnd('/')}/cu/view/$sessionId" +
                             "?ti=$topInsetDp&bi=$bottomInsetDp")

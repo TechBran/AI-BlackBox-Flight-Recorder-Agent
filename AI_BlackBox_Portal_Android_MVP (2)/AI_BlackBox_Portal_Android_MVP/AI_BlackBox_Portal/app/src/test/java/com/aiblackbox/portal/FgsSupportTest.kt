@@ -72,4 +72,29 @@ class FgsSupportTest {
             assertTrue("$name posts under a registered id", "NotificationIds." in src)
         }
     }
+
+    // ── the download's time limit (review follow-up) ─────────────────────────
+
+    @Test fun `a download stopped at the time limit says so, not that it was cancelled`() {
+        // onTimeout cancels the download; its catch turns the CancellationException into a
+        // failure whose message is the generic "...was cancelled", published LAST.
+        val cancelled = Result.failure<Any>(kotlinx.coroutines.CancellationException("StandaloneCoroutine was cancelled"))
+        val state = ModelDownloadService.terminalDownloadState("gemma", cancelled, timedOut = true)
+        assertEquals(com.aiblackbox.portal.data.local.DownloadProgressBus.Status.FAILED, state.status)
+        assertEquals(ModelDownloadService.TEXT_TIMED_OUT, state.error)
+    }
+
+    @Test fun `other download outcomes are published as before`() {
+        val ok = ModelDownloadService.terminalDownloadState("gemma", Result.success(Unit), timedOut = true)
+        assertEquals("a download that finished keeps its result", com.aiblackbox.portal.data.local.DownloadProgressBus.Status.SUCCESS, ok.status)
+        val failed = ModelDownloadService.terminalDownloadState("gemma", Result.failure<Any>(java.io.IOException("disk full")), timedOut = false)
+        assertEquals("disk full", failed.error)
+    }
+
+    @Test fun `the download publishes its terminal state through the time-limit aware helper`() {
+        val src = source("src/main/java/com/aiblackbox/portal/ModelDownloadService.kt")
+        assertTrue("DownloadProgressBus.update(terminalDownloadState(bundle.slug, result, timedOut))" in src)
+        val timeout = src.substring(src.indexOf("override fun onTimeout("))
+        assertTrue("the flag is set before the cancel", timeout.indexOf("timedOut = true") in 0 until timeout.indexOf("scope.cancel()"))
+    }
 }

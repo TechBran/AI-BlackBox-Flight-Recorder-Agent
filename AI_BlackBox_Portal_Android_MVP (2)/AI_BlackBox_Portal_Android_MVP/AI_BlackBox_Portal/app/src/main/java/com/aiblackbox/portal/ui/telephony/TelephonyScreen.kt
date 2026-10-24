@@ -46,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -566,6 +567,22 @@ private fun copyToClipboard(context: Context, text: String, label: String) {
     cm.setPrimaryClip(ClipData.newPlainText(label, text))
 }
 
+/** What a gateway save's answer does to the Add/Edit form (see [gatewaySaveOutcome]). */
+internal enum class GatewaySaveOutcome { IGNORE, CLOSE, SHOW_ERROR }
+
+/**
+ * A save answers only the form that sent it. [savedFrom] is the form's generation when
+ * Save was tapped and [openNow] the generation now; every open and every cancel starts a
+ * new one. A save that lands after its form was cancelled, or after another Add/Edit was
+ * opened, is ignored, so it can never close the newer form (dropping what was typed in
+ * it) or show it the older form's error.
+ */
+internal fun gatewaySaveOutcome(savedFrom: Int, openNow: Int, error: String?): GatewaySaveOutcome = when {
+    savedFrom != openNow -> GatewaySaveOutcome.IGNORE
+    error == null -> GatewaySaveOutcome.CLOSE
+    else -> GatewaySaveOutcome.SHOW_ERROR
+}
+
 // =============================================================================
 // Screen
 // =============================================================================
@@ -594,8 +611,17 @@ fun TelephonyScreen(
     // The open form's save in flight, and its error (shown in the form, which stays open).
     var formSaving by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
+    // Which form is open: a save's answer only reaches the form it came from.
+    var formGeneration by remember { mutableIntStateOf(0) }
     var prefillIp by remember { mutableStateOf("") }
     var prefillModel by remember { mutableStateOf("TG200") }
+    val openForm: (Gateway?) -> Unit = { gw ->
+        editingGateway = gw
+        formGeneration++
+        formSaving = false
+        formError = null
+        showForm = true
+    }
 
     var wizardGateway by remember { mutableStateOf<Gateway?>(null) }
     var confirmRemove by remember { mutableStateOf<Gateway?>(null) }
@@ -618,10 +644,9 @@ fun TelephonyScreen(
                 }) { Text(if (isDiscovering) "Scanning…" else "Discover", color = BbxAccent) }
                 TextButton(onClick = {
                     view.performPressFeedback()
-                    editingGateway = null
                     prefillIp = ""
                     prefillModel = "TG200"
-                    showForm = true
+                    openForm(null)
                 }) { Text("+ Add", color = SolidGreen) }
                 TextButton(onClick = {
                     view.performPressFeedback()
@@ -669,10 +694,9 @@ fun TelephonyScreen(
                     ip = ip,
                     model = model,
                     onAdd = {
-                        editingGateway = null
                         prefillIp = ip
                         prefillModel = model
-                        showForm = true
+                        openForm(null)
                     }
                 )
             }
@@ -684,10 +708,7 @@ fun TelephonyScreen(
                         viewModel.resetWizard()
                         wizardGateway = gw
                     },
-                    onEdit = {
-                        editingGateway = gw
-                        showForm = true
-                    },
+                    onEdit = { openForm(gw) },
                     onRemove = {
                         confirmRemove = gw
                     }
@@ -707,20 +728,29 @@ fun TelephonyScreen(
             error = formError,
             onDismiss = {
                 showForm = false
+                formGeneration++
+                formSaving = false
                 formError = null
             },
             onSave = { payload ->
                 // The form stays open (fields kept) until the box accepts the save.
                 formSaving = true
                 formError = null
+                val sentFrom = formGeneration
                 val done: (String?) -> Unit = { error ->
-                    formSaving = false
-                    if (error == null) {
-                        viewModel.clearDiscovered()
-                        showForm = false
-                    } else if (showForm) {
-                        // (A form cancelled while saving does not carry the error over.)
-                        formError = error
+                    when (gatewaySaveOutcome(sentFrom, formGeneration, error)) {
+                        GatewaySaveOutcome.CLOSE -> {
+                            formSaving = false
+                            viewModel.clearDiscovered()
+                            showForm = false
+                        }
+                        GatewaySaveOutcome.SHOW_ERROR -> {
+                            formSaving = false
+                            formError = error
+                        }
+                        // The form it came from is gone; a success still empties the
+                        // discovered list (the gateway is configured now).
+                        GatewaySaveOutcome.IGNORE -> if (error == null) viewModel.clearDiscovered()
                     }
                 }
                 val ed = editingGateway

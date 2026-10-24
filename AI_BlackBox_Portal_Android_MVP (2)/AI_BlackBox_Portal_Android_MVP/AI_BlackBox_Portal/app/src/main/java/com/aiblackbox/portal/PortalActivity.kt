@@ -55,6 +55,7 @@ import com.aiblackbox.portal.overlay.OverlayService
 import com.aiblackbox.portal.ui.webview.BbxWebChromeClient
 import com.aiblackbox.portal.ui.webview.BbxWebViewClient
 import com.aiblackbox.portal.ui.webview.FileChooserLauncher
+import com.aiblackbox.portal.ui.webview.RendererCrashBudget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -69,6 +70,9 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
+
+// Renderer crashes counted across recreate(), which is how a crash is recovered here.
+private val portalRendererCrashes = RendererCrashBudget()
 
 class PortalActivity : AppCompatActivity() {
 
@@ -405,7 +409,7 @@ class PortalActivity : AppCompatActivity() {
 
         // BbxWebViewClient (audit rank 62): a renderer crash recreates the activity (a fresh
         // WebView reloads the Portal) instead of Android killing the whole app.
-        web.webViewClient = object : BbxWebViewClient(onRendererGone = { recreate() }) {
+        web.webViewClient = object : BbxWebViewClient(onRendererGone = { onPortalRendererGone() }) {
             /**
              * (A01-activities-root-01) Only the paired box stays in this WebView — a link in a chat
              * reply, a target=_blank, a redirect off-box all go to the system (a browser, the
@@ -1774,6 +1778,30 @@ class PortalActivity : AppCompatActivity() {
                 Log.d("UploadWhisper", "Deleted temp file ${file.name}: $deleted")
             }
         }
+    }
+
+    /**
+     * The Portal's renderer died: recreate the activity for a fresh WebView, but only as
+     * often as [portalRendererCrashes] allows, so a page that kills its renderer on every
+     * load is not reloaded forever. Past that the dead WebView is taken off screen (it is
+     * destroyed in onDestroy) and the user chooses Reload or Close.
+     */
+    private fun onPortalRendererGone() {
+        if (portalRendererCrashes.recordCrash()) {
+            recreate()
+            return
+        }
+        (web.parent as? android.view.ViewGroup)?.removeView(web)
+        if (isFinishing || isDestroyed) return
+        android.app.AlertDialog.Builder(this)
+            .setMessage("The BlackBox page crashed.")
+            .setPositiveButton("Reload") { _, _ ->
+                portalRendererCrashes.reset()
+                recreate()
+            }
+            .setNegativeButton("Close") { _, _ -> finish() }
+            .setCancelable(false)
+            .show()
     }
 
     override fun onDestroy() {

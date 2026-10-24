@@ -77,8 +77,11 @@ fun WizardWebViewScreen(
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
     // The page's <input type=file> opens the platform picker.
     val fileChooser = rememberWebFileChooser()
-    // Bumped when the renderer dies, which remounts a fresh WebView.
+    // Bumped when the renderer dies, which remounts a fresh WebView; a renderer that keeps
+    // dying shows a Reload button instead of reloading forever.
     var rendererGeneration by remember { mutableIntStateOf(0) }
+    val crashBudget = remember { RendererCrashBudget() }
+    var rendererCrashed by remember { mutableStateOf(false) }
 
     BackHandler {
         val web = webViewRef.value
@@ -120,7 +123,17 @@ fun WizardWebViewScreen(
         }
 
         // A renderer crash replaces the WebView with a fresh one instead of killing the app.
-        key(rendererGeneration) {
+        if (rendererCrashed) {
+            RendererCrashedPanel(
+                what = "The setup page",
+                onReload = {
+                    crashBudget.reset()
+                    rendererCrashed = false
+                    rendererGeneration++
+                },
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+        } else key(rendererGeneration) {
             AndroidView(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -141,7 +154,9 @@ fun WizardWebViewScreen(
                         // Keeps same-origin SPA navigation inside the WebView (no
                         // external-browser bounce on internal links) and survives a
                         // renderer crash (audit rank 62).
-                        webViewClient = BbxWebViewClient(onRendererGone = { rendererGeneration++ })
+                        webViewClient = BbxWebViewClient(onRendererGone = {
+                            if (crashBudget.recordCrash()) rendererGeneration++ else rendererCrashed = true
+                        })
                         // confirm()/alert() dialogs and <input type=file> pickers: the
                         // hub's Install Now, the wizard's "Remove operator", credential-file
                         // upload and update alerts silently did nothing without a chrome

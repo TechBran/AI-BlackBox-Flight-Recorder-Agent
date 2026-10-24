@@ -16,9 +16,23 @@ import android.webkit.WebViewClient
 import android.widget.EditText
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.aiblackbox.portal.ui.theme.BbxBlack
+import com.aiblackbox.portal.ui.theme.BbxWhite
 import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "BbxWebView"
@@ -139,6 +153,46 @@ open class BbxWebViewClient(private val onRendererGone: () -> Unit) : WebViewCli
         Log.w(TAG, "WebView renderer gone (crashed=${detail.didCrash()}); replacing the WebView")
         runCatching { onRendererGone() }
         return true
+    }
+}
+
+/**
+ * How often a host replaces a dead WebView on its own (review follow-up to
+ * A13-ui-ops-11). A page whose renderer dies on every load (a noVNC canvas that runs the
+ * renderer out of memory on this device) would otherwise be reloaded forever, burning
+ * CPU and battery. Up to [maxAutoReplacements] crashes within [windowMs] are replaced at
+ * once; past that the host shows [RendererCrashedPanel] and waits for a tap.
+ */
+class RendererCrashBudget(
+    private val maxAutoReplacements: Int = 2,
+    private val windowMs: Long = 60_000L,
+    private val now: () -> Long = { System.nanoTime() / 1_000_000L },
+) {
+    private val crashes = ArrayDeque<Long>()
+
+    /** Record a renderer crash; true when the host may replace the WebView at once. */
+    @Synchronized
+    fun recordCrash(): Boolean {
+        val t = now()
+        while (crashes.isNotEmpty() && t - crashes.first() > windowMs) crashes.removeFirst()
+        crashes.addLast(t)
+        return crashes.size <= maxAutoReplacements
+    }
+
+    /** The user asked for a reload: count afresh. */
+    @Synchronized
+    fun reset() = crashes.clear()
+}
+
+/** Shown in place of a WebView whose renderer kept crashing; [onReload] mounts a new one. */
+@Composable
+fun RendererCrashedPanel(what: String, onReload: () -> Unit, modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxSize().background(BbxBlack), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("$what crashed.", color = BbxWhite, fontSize = 16.sp)
+            Spacer(Modifier.height(12.dp))
+            TextButton(onClick = onReload) { Text("Reload", fontSize = 16.sp) }
+        }
     }
 }
 

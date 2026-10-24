@@ -65,4 +65,41 @@ class BbxWebViewTest {
             assertTrue("$rel remounts a fresh WebView", "key(rendererGeneration)" in source("$root/$rel"))
         }
     }
+
+    // ── review follow-up: a renderer that dies on every load is not reloaded forever ──
+
+    @Test fun `a crash or two is replaced at once, a crash loop waits for a tap`() {
+        var now = 0L
+        val budget = RendererCrashBudget(maxAutoReplacements = 2, windowMs = 60_000L, now = { now })
+        assertTrue(budget.recordCrash())
+        now += 1_000
+        assertTrue(budget.recordCrash())
+        now += 1_000
+        assertFalse("the third crash in a minute stops the reload loop", budget.recordCrash())
+        assertFalse("and so does every one after it", budget.recordCrash())
+
+        budget.reset() // the user tapped Reload
+        assertTrue(budget.recordCrash())
+    }
+
+    @Test fun `crashes far apart are each replaced`() {
+        var now = 0L
+        val budget = RendererCrashBudget(maxAutoReplacements = 2, windowMs = 60_000L, now = { now })
+        repeat(10) {
+            assertTrue("crash $it", budget.recordCrash())
+            now += 61_000
+        }
+    }
+
+    @Test fun `every WebView host stops replacing a renderer that keeps crashing`() {
+        for (rel in listOf("ui/webview/WizardWebViewScreen.kt", "ui/cu/CuLiveViewScreen.kt")) {
+            val src = source("$root/$rel")
+            assertTrue("$rel counts crashes", "if (crashBudget.recordCrash()) rendererGeneration++ else rendererCrashed = true" in src)
+            assertTrue("$rel shows a Reload state", "RendererCrashedPanel(" in src)
+        }
+        val portal = source("$root/PortalActivity.kt")
+        val gone = portal.substring(portal.indexOf("private fun onPortalRendererGone()"))
+        assertTrue("PortalActivity recreates only within the budget", "if (portalRendererCrashes.recordCrash())" in gone.substring(0, 300))
+        assertTrue("PortalActivity's client goes through it", "BbxWebViewClient(onRendererGone = { onPortalRendererGone() })" in portal)
+    }
 }

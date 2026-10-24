@@ -81,6 +81,26 @@ class GatewayPayloadTest {
         val onSave = s.substring(s.indexOf("onSave = { payload ->"))
         val block = onSave.substring(0, onSave.indexOf("\n            }\n"))
         assertFalse("the form is not closed before the result", Regex("^\\s*showForm = false", RegexOption.MULTILINE).containsMatchIn(block.substringBefore("{ error ->")))
-        assertTrue("it closes on success only", "if (error == null)" in block)
+        assertTrue("the answer is routed by the form it came from", "gatewaySaveOutcome(sentFrom, formGeneration, error)" in block)
+        val close = block.substring(block.indexOf("GatewaySaveOutcome.CLOSE ->"))
+        assertTrue("it closes on success only", "showForm = false" in close.substring(0, close.indexOf("GatewaySaveOutcome.SHOW_ERROR")))
+        val dismiss = s.substring(s.indexOf("onDismiss = {", s.indexOf("GatewayFormDialog(")))
+        assertTrue("cancelling starts a new generation", "formGeneration++" in dismiss.substring(0, dismiss.indexOf("},")))
+        val open = s.substring(s.indexOf("val openForm: (Gateway?) -> Unit"))
+        assertTrue("opening starts a new generation and clears the old save", Regex("formGeneration\\+\\+[\\s\\S]*formSaving = false").containsMatchIn(open.substring(0, open.indexOf("\n    }\n"))))
+    }
+
+    // ── review follow-up: a save answers only its own form ───────────────────
+
+    @Test fun `a save answers the form that sent it`() {
+        assertEquals(GatewaySaveOutcome.CLOSE, gatewaySaveOutcome(savedFrom = 3, openNow = 3, error = null))
+        assertEquals(GatewaySaveOutcome.SHOW_ERROR, gatewaySaveOutcome(3, 3, "Failed to add: 422"))
+    }
+
+    @Test fun `a save that lands after the form was cancelled and another opened is ignored`() {
+        // Add -> Save -> Cancel (gen 4) -> Edit another gateway (gen 5) -> the Add returns.
+        assertEquals("success must not close the new form", GatewaySaveOutcome.IGNORE, gatewaySaveOutcome(3, 5, null))
+        assertEquals("nor show it the old form's error", GatewaySaveOutcome.IGNORE, gatewaySaveOutcome(3, 5, "Failed to add: 500"))
+        assertEquals("a cancel alone is enough", GatewaySaveOutcome.IGNORE, gatewaySaveOutcome(3, 4, "Failed to add: 500"))
     }
 }

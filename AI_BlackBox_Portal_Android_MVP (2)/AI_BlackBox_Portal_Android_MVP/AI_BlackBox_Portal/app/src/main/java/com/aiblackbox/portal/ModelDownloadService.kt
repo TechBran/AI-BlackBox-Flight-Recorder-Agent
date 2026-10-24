@@ -18,6 +18,7 @@ import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.local.DownloadProgressBus
 import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.model.LocalBundle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,6 +63,11 @@ class ModelDownloadService : Service() {
     // The bundle being downloaded, so onTimeout can mark it FAILED (retryable).
     @Volatile
     private var activeSlug: String? = null
+
+    // Set by onTimeout before it cancels the download, so the download's own terminal
+    // publish says "time limit" instead of the cancellation's generic message.
+    @Volatile
+    private var timedOut = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -141,18 +147,7 @@ class ModelDownloadService : Service() {
                 Result.failure<Any>(e)
             }
 
-            DownloadProgressBus.update(
-                if (result.isSuccess) {
-                    DownloadProgressBus.State(bundle.slug, 1f, DownloadProgressBus.Status.SUCCESS)
-                } else {
-                    DownloadProgressBus.State(
-                        bundle.slug,
-                        0f,
-                        DownloadProgressBus.Status.FAILED,
-                        result.exceptionOrNull()?.message ?: "download failed",
-                    )
-                },
-            )
+            DownloadProgressBus.update(terminalDownloadState(bundle.slug, result, timedOut))
             stopForegroundCompat()
             stopSelf()
         }
@@ -172,11 +167,11 @@ class ModelDownloadService : Service() {
      * before the system kills the app.
      */
     override fun onTimeout(startId: Int, fgsType: Int) {
+        timedOut = true
         scope.cancel()
-        activeSlug?.let { slug ->
-            DownloadProgressBus.update(
-                DownloadProgressBus.State(slug, 0f, DownloadProgressBus.Status.FAILED, TEXT_TIMED_OUT),
-            )
+        // Only over a download still running: one that just finished keeps its result.
+        activeSlug?.takeIf { DownloadProgressBus.flow.value[it]?.status == DownloadProgressBus.Status.RUNNING }?.let { slug ->
+            DownloadProgressBus.update(terminalDownloadState(slug, Result.failure<Any>(CancellationException()), timedOut = true))
         }
         FgsSupport.stopOnTimeout(this, TAG, fgsType)
     }
@@ -237,8 +232,25 @@ class ModelDownloadService : Service() {
 
         private const val TEXT_REFUSED =
             "Android did not let the download start in the background. Open the app and tap Download again."
-        private const val TEXT_TIMED_OUT =
+        internal const val TEXT_TIMED_OUT =
             "Android stopped the download at its background time limit. Tap Download to resume where it left off."
+
+        /**
+         * The bus state a finished download publishes. A download the platform stopped
+         * at its time limit ([timedOut]) says so: the cancellation that stopped it would
+         * otherwise publish its own generic message last and hide that.
+         */
+        internal fun terminalDownloadState(slug: String, result: Result<*>, timedOut: Boolean): DownloadProgressBus.State =
+            when {
+                result.isSuccess -> DownloadProgressBus.State(slug, 1f, DownloadProgressBus.Status.SUCCESS)
+                timedOut -> DownloadProgressBus.State(slug, 0f, DownloadProgressBus.Status.FAILED, TEXT_TIMED_OUT)
+                else -> DownloadProgressBus.State(
+                    slug,
+                    0f,
+                    DownloadProgressBus.Status.FAILED,
+                    result.exceptionOrNull()?.message ?: "download failed",
+                )
+            }
 
         // The bundle crosses the Intent boundary as JSON (LocalBundle is @Serializable);
         // ignoreUnknownKeys keeps it forward-compatible with future catalog fields.
