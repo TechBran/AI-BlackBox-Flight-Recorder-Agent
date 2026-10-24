@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from Orchestrator.config import (
     CFG, FLIGHT_RECORDER_OPERATOR, VOL_PATH,
 )
+from Orchestrator.utils import atomic_json
 
 STATE_PATH = Path("Manifest/flight_recorder_state.json")
 
@@ -54,10 +55,9 @@ def _snap_key(snap_id: str) -> tuple:
 def load_flight_recorder_state() -> Dict[str, Any]:
     global _state
     with _state_lock:
-        try:
-            _state = json.loads(STATE_PATH.read_text())
-        except Exception:
-            _state = {}
+        # A file that does not parse is quarantined (*.corrupt-<ts>) rather
+        # than overwritten by the next save (Orchestrator/utils/atomic_json.py).
+        _state = atomic_json.read_json(STATE_PATH, {}, valid=lambda d: isinstance(d, dict))
         _state.setdefault("last_report_id", None)
         _state.setdefault("last_report_at", None)
         _state.setdefault("adopted_preexisting", False)
@@ -71,8 +71,7 @@ def load_flight_recorder_state() -> Dict[str, Any]:
 def _save_state() -> None:
     with _state_lock:
         try:
-            STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            STATE_PATH.write_text(json.dumps(_state, indent=2))
+            atomic_json.write_json(STATE_PATH, _state)
         except Exception as e:
             print(f"[FLIGHT-RECORDER] state save failed: {e}")
 

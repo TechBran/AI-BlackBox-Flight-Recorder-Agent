@@ -163,3 +163,17 @@ def test_agent_session_only_state_entry_loads(op_state):
     state.load_operator_state()
     assert state.get_state("Bob").total_turns == 5
     assert state.PERSISTED_AGENT_SESSIONS["Ann"]["message_count"] == 2
+
+
+def test_corrupt_flight_recorder_state_is_quarantined_not_overwritten(tmp_path, monkeypatch):
+    from Orchestrator import oversight
+    path = tmp_path / "flight_recorder_state.json"
+    monkeypatch.setattr(oversight, "STATE_PATH", path)
+    path.write_text('{"seeded_at": "2026-07-23T00:00:00+00:00", "last_report_id": "SNAP-2026')
+    snapshot = oversight.load_flight_recorder_state()
+    assert snapshot["last_report_id"] is None
+    oversight._save_state()
+    (moved,) = _quarantined(path)
+    assert moved.read_text().startswith('{"seeded_at"')
+    assert json.loads(path.read_text())["mints_since_report"] == 0
+    assert path.stat().st_mode & 0o077 == 0
