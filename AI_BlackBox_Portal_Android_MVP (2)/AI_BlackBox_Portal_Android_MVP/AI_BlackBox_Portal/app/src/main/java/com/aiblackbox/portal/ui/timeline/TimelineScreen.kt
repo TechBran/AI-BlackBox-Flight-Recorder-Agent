@@ -35,7 +35,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -89,25 +90,26 @@ fun TimelineScreen(
 ) {
     val view = LocalView.current
     var searchQuery by remember { mutableStateOf("") }
-    val results by viewModel.results.collectAsState()
-    val isSearching by viewModel.isSearching.collectAsState()
-    val selectedSnapshot by viewModel.selectedSnapshot.collectAsState()
+    val results by viewModel.results.collectAsStateWithLifecycle()
+    val isSearching by viewModel.isSearching.collectAsStateWithLifecycle()
+    val selectedSnapshot by viewModel.selectedSnapshot.collectAsStateWithLifecycle()
 
     // Operator filter
     var selectedOperator by remember { mutableStateOf("") } // "" = all
     var showOperatorFilter by remember { mutableStateOf(false) }
 
-    // Initialize and start auto-polling for live updates
+    // Initialize and load the live feed
     LaunchedEffect(origin, operator) {
         if (origin.isNotBlank()) {
             viewModel.initialize(origin)
             viewModel.loadRecent(operator)
-            viewModel.startPolling(operator)
         }
     }
-    // Stop polling when screen leaves composition
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { viewModel.stopPolling() }
+    // Auto-poll for live updates only while the screen is RESUMED (A14-ui-misc-09): it
+    // polled every 10s with the app in the background or the screen off.
+    LifecycleResumeEffect(origin, operator) {
+        if (origin.isNotBlank()) viewModel.startPolling(operator)
+        onPauseOrDispose { viewModel.stopPolling() }
     }
 
     Column(modifier = modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, bottom = 16.dp, top = 100.dp)) {
@@ -236,8 +238,8 @@ fun TimelineScreen(
         Spacer(Modifier.height(8.dp))
 
         // ── Detail view or list ──
-        val fullContent by viewModel.fullContent.collectAsState()
-        val isLoadingContent by viewModel.isLoadingContent.collectAsState()
+        val fullContent by viewModel.fullContent.collectAsStateWithLifecycle()
+        val isLoadingContent by viewModel.isLoadingContent.collectAsStateWithLifecycle()
 
         if (selectedSnapshot != null) {
             SnapshotDetail(

@@ -51,7 +51,8 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.LifecycleStartEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -131,6 +132,9 @@ enum class WaveSpeaker { USER, AI, IDLE }
 class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
     private val audioManager = application.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
+    // True while connect()'s in-call routing (MODE_IN_COMMUNICATION + loudspeaker) is on.
+    @Volatile
+    private var audioRoutingApplied = false
     private var voiceClient: VoiceClient? = null
 
     // P3.12: per-provider catalogs hydrated from GET {statusPath} at screen open.
@@ -424,10 +428,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                             _error.value = "Audio init failed: ${e.message}"
                         }
                     }
-                    // Clean up audio on disconnect
+                    // Clean up audio on disconnect — including a server-side end or
+                    // exhausted reconnects, after which the Disconnect button is gone:
+                    // put the phone back on its normal audio path (A12-voice-cron-02).
                     if (state == VoiceState.DISCONNECTED || state == VoiceState.ERROR) {
                         stopMic()
                         stopAudioPlayback()
+                        restoreAudioRouting()
                     }
                 }
             }
@@ -563,6 +570,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         _localEntries.value = emptyList()
         _provenance.value = null
         // Enable communication mode for strong system-level AEC
+        audioRoutingApplied = true
         audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
         // Force loudspeaker output (not earpiece) — use modern API on Android 12+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
@@ -587,15 +595,30 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             android.util.Log.e("VoiceVM", "Disconnect: ${e.message}")
         }
-        // Restore normal audio routing
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            audioManager.clearCommunicationDevice()
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.isSpeakerphoneOn = false
-        }
-        audioManager.mode = android.media.AudioManager.MODE_NORMAL
+        restoreAudioRouting()
         _voiceState.value = VoiceState.DISCONNECTED
+    }
+
+    /**
+     * Undo connect()'s routing: clear the loudspeaker communication device (or the
+     * speakerphone flag below API 31) and leave MODE_IN_COMMUNICATION. Only when connect()
+     * applied it, so stopping a screen that never connected leaves the app's audio alone.
+     * Called on every way a session ends (A12-voice-cron-02).
+     */
+    private fun restoreAudioRouting() {
+        if (!audioRoutingApplied) return
+        audioRoutingApplied = false
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                audioManager.clearCommunicationDevice()
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.isSpeakerphoneOn = false
+            }
+            audioManager.mode = android.media.AudioManager.MODE_NORMAL
+        } catch (e: Exception) {
+            android.util.Log.w("VoiceVM", "restore audio routing: ${e.javaClass.simpleName}")
+        }
     }
 
     fun toggleMic() {
@@ -1210,10 +1233,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         stopMic()
         stopAudioPlayback()
         try { voiceClient?.disconnect() } catch (_: Exception) {}
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            audioManager.clearCommunicationDevice()
-        }
-        audioManager.mode = android.media.AudioManager.MODE_NORMAL
+        // Also resets the speakerphone flag below API 31, which this used to skip.
+        restoreAudioRouting()
     }
 }
 
@@ -1260,11 +1281,11 @@ private fun VoiceRibbon(
     isMicActive: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val mic by micBands.collectAsState()
-    val ai by aiBands.collectAsState()
-    val micSpectrum by micBins.collectAsState()
-    val aiSpectrum by aiBins.collectAsState()
-    val aiIsAudible by aiAudible.collectAsState()
+    val mic by micBands.collectAsStateWithLifecycle()
+    val ai by aiBands.collectAsStateWithLifecycle()
+    val micSpectrum by micBins.collectAsStateWithLifecycle()
+    val aiSpectrum by aiBins.collectAsStateWithLifecycle()
+    val aiIsAudible by aiAudible.collectAsStateWithLifecycle()
     VoiceVisualizer(
         // The persisted global style (aurora by default); resolved + dispatched by
         // VoiceVisualizer, unknown/absent → aurora, so this screen is unchanged until picked.
@@ -1289,6 +1310,20 @@ private fun VoiceRibbon(
     )
 }
 
+/**
+ * Whether stopping the Voice screen (navigating away, or the app going to the background)
+ * ends the session: yes for any live or failed session, except across a configuration
+ * change. Pure for unit tests (A12-voice-cron-08).
+ */
+internal fun endVoiceSessionOnStop(changingConfigurations: Boolean, state: VoiceState): Boolean =
+    !changingConfigurations && state != VoiceState.DISCONNECTED
+
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 @Composable
 fun VoiceScreen(
     origin: String,
@@ -1297,15 +1332,15 @@ fun VoiceScreen(
 ) {
     val view = LocalView.current
     val context = LocalContext.current
-    val backend by viewModel.backend.collectAsState()
-    val catalogs by viewModel.catalogs.collectAsState()
-    val voice by viewModel.voice.collectAsState()
-    val voiceState by viewModel.voiceState.collectAsState()
-    val transcript by viewModel.transcript.collectAsState()
-    val provenance by viewModel.provenance.collectAsState()
-    val error by viewModel.error.collectAsState()
-    val statusText by viewModel.statusText.collectAsState()
-    val isMicActive by viewModel.isMicActive.collectAsState()
+    val backend by viewModel.backend.collectAsStateWithLifecycle()
+    val catalogs by viewModel.catalogs.collectAsStateWithLifecycle()
+    val voice by viewModel.voice.collectAsStateWithLifecycle()
+    val voiceState by viewModel.voiceState.collectAsStateWithLifecycle()
+    val transcript by viewModel.transcript.collectAsStateWithLifecycle()
+    val provenance by viewModel.provenance.collectAsStateWithLifecycle()
+    val error by viewModel.error.collectAsStateWithLifecycle()
+    val statusText by viewModel.statusText.collectAsStateWithLifecycle()
+    val isMicActive by viewModel.isMicActive.collectAsStateWithLifecycle()
     // micBands/aiBands/aiAudible are deliberately NOT collected here — see [VoiceRibbon].
     val listState = rememberLazyListState()
     val settingsScroll = rememberScrollState()
@@ -1327,6 +1362,19 @@ fun VoiceScreen(
     }
 
     LaunchedEffect(origin) { viewModel.initialize(origin) }
+
+    // Leaving the screen or backgrounding the app ends the live session
+    // (A12-voice-cron-08): without a microphone foreground service Android silences the
+    // mic in the background, while the provider socket kept billing and the in-call
+    // audio mode stayed applied to the rest of the app. disconnect() only signals the
+    // capture loop (it releases its own recorder). A configuration change (a Fold
+    // unfold, a rotation) is not a stop: the view model and the session survive it.
+    LifecycleStartEffect(viewModel) {
+        onStopOrDispose {
+            val changing = context.findActivity()?.isChangingConfigurations == true
+            if (endVoiceSessionOnStop(changing, viewModel.voiceState.value)) viewModel.disconnect()
+        }
+    }
 
     // Toast feedback on every state change so user always knows what's happening
     LaunchedEffect(voiceState) {
@@ -1360,23 +1408,23 @@ fun VoiceScreen(
     LaunchedEffect(isConnected) { if (isConnected) settingsExpanded = false }
 
     // ── Live-models config — hoisted to the ViewModel, DataStore-persisted (P3.13) ──
-    val realtimeModel by viewModel.realtimeModel.collectAsState()
-    val realtimeVadType by viewModel.realtimeVadType.collectAsState()
-    val realtimeVadEagerness by viewModel.realtimeVadEagerness.collectAsState()
-    val realtimeIdleTimeoutText by viewModel.realtimeIdleTimeoutText.collectAsState()
-    val geminiModel by viewModel.geminiModel.collectAsState()
-    val geminiVadStart by viewModel.geminiVadStart.collectAsState()
-    val geminiVadEnd by viewModel.geminiVadEnd.collectAsState()
-    val geminiThinkingLevel by viewModel.geminiThinkingLevel.collectAsState()
-    val geminiAffective by viewModel.geminiAffective.collectAsState()
-    val geminiProactive by viewModel.geminiProactive.collectAsState()
-    val grokModel by viewModel.grokModel.collectAsState()
-    val grokReasoningEffort by viewModel.grokReasoningEffort.collectAsState()
-    val selectedPresetId by viewModel.selectedPresetId.collectAsState()
-    val translateEnabled by viewModel.translateEnabled.collectAsState()
-    val translateLang by viewModel.translateLang.collectAsState()
-    val translateLangOther by viewModel.translateLangOther.collectAsState()
-    val presets by viewModel.presets.collectAsState()
+    val realtimeModel by viewModel.realtimeModel.collectAsStateWithLifecycle()
+    val realtimeVadType by viewModel.realtimeVadType.collectAsStateWithLifecycle()
+    val realtimeVadEagerness by viewModel.realtimeVadEagerness.collectAsStateWithLifecycle()
+    val realtimeIdleTimeoutText by viewModel.realtimeIdleTimeoutText.collectAsStateWithLifecycle()
+    val geminiModel by viewModel.geminiModel.collectAsStateWithLifecycle()
+    val geminiVadStart by viewModel.geminiVadStart.collectAsStateWithLifecycle()
+    val geminiVadEnd by viewModel.geminiVadEnd.collectAsStateWithLifecycle()
+    val geminiThinkingLevel by viewModel.geminiThinkingLevel.collectAsStateWithLifecycle()
+    val geminiAffective by viewModel.geminiAffective.collectAsStateWithLifecycle()
+    val geminiProactive by viewModel.geminiProactive.collectAsStateWithLifecycle()
+    val grokModel by viewModel.grokModel.collectAsStateWithLifecycle()
+    val grokReasoningEffort by viewModel.grokReasoningEffort.collectAsStateWithLifecycle()
+    val selectedPresetId by viewModel.selectedPresetId.collectAsStateWithLifecycle()
+    val translateEnabled by viewModel.translateEnabled.collectAsStateWithLifecycle()
+    val translateLang by viewModel.translateLang.collectAsStateWithLifecycle()
+    val translateLangOther by viewModel.translateLangOther.collectAsStateWithLifecycle()
+    val presets by viewModel.presets.collectAsStateWithLifecycle()
 
     // Pulse animation for mic recording + AI speaking
     val pulse = rememberInfiniteTransition(label = "pulse")

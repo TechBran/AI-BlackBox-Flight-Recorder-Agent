@@ -34,9 +34,9 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,25 +68,28 @@ fun SmsInboxScreen(
     modifier: Modifier = Modifier,
     viewModel: SmsViewModel = viewModel()
 ) {
-    val threads by viewModel.threads.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
-    val selectedPhone by viewModel.selectedPhone.collectAsState()
-    val messages by viewModel.messages.collectAsState()
-    val isSending by viewModel.isSending.collectAsState()
-    val connected by viewModel.connected.collectAsState()
-    val selectedContactName by viewModel.selectedContactName.collectAsState()
-    val smsProvider by viewModel.smsProvider.collectAsState()
-    val smsModel by viewModel.smsModel.collectAsState()
-    val lines by viewModel.lines.collectAsState()
-    val selectedFromNumber by viewModel.selectedFromNumber.collectAsState()
-    val drafts by viewModel.draftTexts.collectAsState()
+    val threads by viewModel.threads.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val selectedPhone by viewModel.selectedPhone.collectAsStateWithLifecycle()
+    val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val isSending by viewModel.isSending.collectAsStateWithLifecycle()
+    val connected by viewModel.connected.collectAsStateWithLifecycle()
+    val selectedContactName by viewModel.selectedContactName.collectAsStateWithLifecycle()
+    val smsProvider by viewModel.smsProvider.collectAsStateWithLifecycle()
+    val smsModel by viewModel.smsModel.collectAsStateWithLifecycle()
+    val lines by viewModel.lines.collectAsStateWithLifecycle()
+    val selectedFromNumber by viewModel.selectedFromNumber.collectAsStateWithLifecycle()
+    val drafts by viewModel.draftTexts.collectAsStateWithLifecycle()
 
     // The view model reads the operator from the store at every request and reloads on a
     // switch (A14-ui-misc-07), so only the origin is handed over here.
     LaunchedEffect(origin) { viewModel.initialize(origin) }
-    DisposableEffect(Unit) {
+    // Poll only while the screen is RESUMED (A14-ui-misc-09): not with the app in the
+    // background or the screen off, where each poll cost data and battery and fetching
+    // the open thread marked texts read that nobody had seen.
+    LifecycleResumeEffect(Unit) {
         viewModel.startPolling()
-        onDispose { viewModel.stopPolling() }
+        onPauseOrDispose { viewModel.stopPolling() }
     }
 
     // ONE snackbar host above both views: the conversation had none, so "Failed to send"
