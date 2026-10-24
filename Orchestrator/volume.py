@@ -22,6 +22,7 @@ from typing import Dict, Any, Optional, List
 # External library imports
 import shutil
 import traceback
+from fastapi import HTTPException  # verify_gm_or_halt raises it; /health catches it
 
 # Local imports
 from Orchestrator.config import ARTIFACTS_DIR, ARTIFACT_RETENTION_DAYS

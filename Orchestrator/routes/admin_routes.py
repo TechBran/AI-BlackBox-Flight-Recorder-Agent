@@ -34,6 +34,7 @@ from Orchestrator.config import (
     XAI_API_KEY, XAI_MODEL_DEFAULT,
 )
 from Orchestrator.artifacts import artifact_download_name
+from Orchestrator.utils.boot_id import BOOT_ID
 from Orchestrator.utils.models_cache import get_cached_or_fetch as _models_cache_get
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from Orchestrator.fossils import extract_snap_ids, get_recent_fossils_for_operator, hybrid_retrieve, rebuild_snapshot_index
@@ -365,6 +366,7 @@ def health():
         "audio_engine": AUDIO_ENGINE, "tts_model": TTS_MODEL, "stt_model": STT_MODEL,
         "users": {"list": USERS_LIST, "default": current_default()}, "pairing": pairing,
         "operator_turns": operator_turns,  # Per-operator turn counts, checkpoint countdown, and cumulative tokens
+        "boot_id": BOOT_ID,  # changes on every restart: clients wait for it after Install/Rollback/Restart
         "checkpoint_config": {
             "turns_to_compress": CHECKPOINT_TURNS_TO_COMPRESS,
             "auto_create_interval": CHECKPOINT_AUTO_CREATE_INTERVAL,
