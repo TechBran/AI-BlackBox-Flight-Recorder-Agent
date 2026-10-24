@@ -4124,6 +4124,10 @@ _BASH_DRAIN_GRACE_S = 0.3
 _BASH_CAPTURE_BYTES = 4 * 10000 + 4
 # Pipes still held by launched apps, kept open (and drained) until they exit.
 _bash_drains: set = set()
+# Output a launched app may write after its step before its pipes are closed
+# (it then gets SIGPIPE): draining runs on the server's loop, and an app that
+# floods its output (`yes &`) must not keep the loop busy forever.
+_BASH_DETACHED_DRAIN_BYTES = 64 * 1024 * 1024
 
 
 class _BashStepProtocol(asyncio.SubprocessProtocol):
@@ -4137,8 +4141,18 @@ class _BashStepProtocol(asyncio.SubprocessProtocol):
         self.exited = loop.create_future()
         self.pipes_closed = loop.create_future()
         self._open_pipes = {1, 2}
+        self._transport = None
+        self.detached_bytes = None  # counted once the step has returned
+
+    def connection_made(self, transport):
+        self._transport = transport
 
     def pipe_data_received(self, fd, data):
+        if self.detached_bytes is not None:
+            self.detached_bytes += len(data)
+            if self.detached_bytes > _BASH_DETACHED_DRAIN_BYTES and self._transport is not None:
+                self._transport.close()
+            return
         buf = self.out if fd == 1 else self.err
         room = _BASH_CAPTURE_BYTES - len(buf)
         if room > 0:
@@ -4219,6 +4233,7 @@ def _close_after_drain(transport, protocol) -> None:
     if protocol.pipes_closed.done():
         transport.close()
         return
+    protocol.detached_bytes = 0
     task = asyncio.ensure_future(_drain_until_closed(transport, protocol))
     _bash_drains.add(task)
     task.add_done_callback(_bash_drains.discard)

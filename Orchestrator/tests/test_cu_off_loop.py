@@ -163,6 +163,24 @@ def test_a_launched_app_that_writes_later_is_not_killed_by_sigpipe(pidfile):
     assert _pid_alive(_read_pid(pidfile)), "the launched app died after writing"
 
 
+def test_a_launched_app_flooding_its_output_is_cut_off(pidfile):
+    """The drain must not keep the server's loop busy forever: past a cap, the
+    pipes close and a writer that floods them gets SIGPIPE."""
+    from Orchestrator.routes import chat_routes
+
+    async def go():
+        result = await chat_routes.execute_bash_command(f"yes & echo $! > {pidfile}", timeout=5)
+        deadline = time.monotonic() + 10
+        while chat_routes._bash_drains and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        return result, set(chat_routes._bash_drains)
+
+    result, left = asyncio.run(go())
+    assert result["exit_code"] == 0
+    assert not left, "the drain of a flooding app never stopped"
+    assert _wait_dead(_read_pid(pidfile), within=5), "the flooding writer kept running"
+
+
 @pytest.mark.parametrize("run", _loop_runners())
 def test_background_launch_leaves_no_transport_behind(pidfile, run, monkeypatch):
     """A headless CU run ends its own loop with the launched app still holding
