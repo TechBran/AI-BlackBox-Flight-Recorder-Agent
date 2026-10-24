@@ -194,6 +194,24 @@ def test_marker_and_a_genuinely_missed_fire_catch_up_once(db_path, monkeypatch):
     assert restarted.get_job_history(job["id"])[0]["delivery_status"] == "outcome_unknown"
 
 
+def test_a_failed_reconciliation_never_keeps_the_scheduler_down(db_path, monkeypatch):
+    mgr = CronJobManager()
+    job = mgr.create_job(name="j", prompt="hi", schedule="0 15 * * *", operator="system")
+
+    async def _boom():
+        raise sqlite3.OperationalError("database is locked")
+
+    async def _run():
+        monkeypatch.setattr(mgr, "_reconcile_interrupted_runs", _boom)
+        await mgr.start()
+        try:
+            return mgr.scheduler.get_job(job["id"])
+        finally:
+            await mgr.shutdown()
+
+    assert asyncio.run(_run()) is not None, "jobs are still registered"
+
+
 def test_scheduler_awaits_the_run_on_its_loop(db_path):
     """No thread hop and no 300/660 s wrapper timeout: APScheduler awaits the
     async _execute_job directly, so a long run is never logged as an exception

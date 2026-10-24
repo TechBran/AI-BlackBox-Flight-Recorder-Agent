@@ -508,7 +508,11 @@ class CronJobManager:
         was moved to the next future fire when the run started, so the
         catch-up below only fires for a fire genuinely missed while down.
         """
-        await self._reconcile_interrupted_runs()
+        try:
+            await self._reconcile_interrupted_runs()
+        except Exception:
+            # Never let the bookkeeping of past runs keep the scheduler down.
+            logger.exception("[CRON] startup: reconciling interrupted runs failed")
 
         # Start the scheduler BEFORE registering jobs so that each add_job
         # computes a live next_run_time, which _register_job_with_scheduler
