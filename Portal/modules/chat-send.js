@@ -1016,7 +1016,10 @@ export function shouldFallBackToStandard(err) {
 
 /** An Error tagged with the stage of the stream it failed in (see shouldFallBackToStandard). */
 function streamFailure(stage, cause, status) {
-    const err = new Error(cause && cause.message ? cause.message : String(cause || 'stream failed'));
+    const message = stage === 'stalled'
+        ? 'Stream stalled: no data received for 5 minutes'
+        : (cause && cause.message ? cause.message : String(cause || 'stream failed'));
+    const err = new Error(message);
     err.stage = stage;
     err.cause = cause;
     if (status !== undefined) err.status = status;
