@@ -116,17 +116,24 @@ def ensure_flight_recorder() -> None:
                 print(f"[FLIGHT-RECORDER] near-collision: existing operator(s) "
                       f"{variants} resemble the reserved name; seeding the "
                       f"canonical '{FLIGHT_RECORDER_OPERATOR}' alongside them")
-            new_list = _cfg.USERS_LIST + [FLIGHT_RECORDER_OPERATOR]
+            from Orchestrator.utils.config_ini import update_config_ini, users_list
             config_path = Path("config.ini")
-            if not CFG.has_section("users"):
-                CFG.add_section("users")
-            CFG.set("users", "list", ", ".join(new_list))
-            with open(config_path, "w") as f:
-                CFG.write(f)
+
+            # Fresh read under the config.ini lock, written atomically
+            # (audit O06-frontier-agent-11): appends to the roster as it is
+            # on disk now, and keeps every other key there.
+            def _seed(parser):
+                roster = users_list(parser, fallback=", ".join(_cfg.USERS_LIST))
+                if FLIGHT_RECORDER_OPERATOR not in roster:
+                    roster.append(FLIGHT_RECORDER_OPERATOR)
+                if not parser.has_section("users"):
+                    parser.add_section("users")
+                parser.set("users", "list", ", ".join(roster))
+                return roster
+
+            roster = update_config_ini(_seed, config_path)
             CFG.read(config_path)
-            _cfg.USERS_LIST[:] = [u.strip() for u in
-                                  CFG.get("users", "list", fallback="").split(",")
-                                  if u.strip()]
+            _cfg.USERS_LIST[:] = roster
             print(f"[FLIGHT-RECORDER] seeded operator '{FLIGHT_RECORDER_OPERATOR}' "
                   f"(operators now: {_cfg.USERS_LIST})")
         with _state_lock:

@@ -41,7 +41,7 @@ from Orchestrator.fossils import load_snapshot_index
 from Orchestrator.tts_sanitize import sanitize_for_speech
 from Orchestrator.secret_redaction import response_error, upstream_error
 from Orchestrator.models import TaskType
-from Orchestrator.state import get_operator_preference, save_operator_preferences, set_operator_preference, OPERATOR_PREFERENCES
+from Orchestrator.state import get_operator_preference, get_operator_preferences, merge_operator_preferences, set_operator_preference
 from Orchestrator.tasks import create_task
 from Orchestrator.utils.paths import (
     AUDIO_EXTS, IMAGE_EXTS, INLINE_MAX_BYTES, UploadNotFoundError, UploadPathError, resolve_upload_path,
@@ -51,7 +51,7 @@ from Orchestrator.utils.paths import (
 @app.get("/operator/preferences/{operator}")
 def get_preferences(operator: str):
     """Get all preferences for an operator (voice, model, etc.)"""
-    prefs = OPERATOR_PREFERENCES.get(operator, {})
+    prefs = get_operator_preferences(operator)
     return {"status": "ok", "operator": operator, "preferences": prefs}
 
 
@@ -59,18 +59,12 @@ def get_preferences(operator: str):
 def set_preferences(operator: str, body: dict = Body(...)):
     """Set preferences for an operator. Body should contain key-value pairs."""
     try:
-        if operator not in OPERATOR_PREFERENCES:
-            OPERATOR_PREFERENCES[operator] = {}
-
-        # Merge new preferences
-        for key, value in body.items():
-            OPERATOR_PREFERENCES[operator][key] = value
-
-        save_operator_preferences()
+        # Merge new preferences (locked, persisted atomically)
+        prefs = merge_operator_preferences(operator, dict(body))
         return {
             "status": "ok",
             "operator": operator,
-            "preferences": OPERATOR_PREFERENCES[operator]
+            "preferences": prefs
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}

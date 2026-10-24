@@ -5,16 +5,17 @@ Per-operator contact storage with fuzzy search.
 Storage: Contacts/contacts.json
 """
 
+import contextlib
 import hashlib
 import json
 import logging
-import os
 import stat
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Iterator, List, Optional, Tuple
+
+from Orchestrator.utils import atomic_json
 
 log = logging.getLogger("contacts")
 
@@ -87,26 +88,47 @@ def _apply_inbound_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+def _valid_book(data) -> bool:
+    return isinstance(data, dict)
+
+
 def load_contacts() -> Dict[str, Any]:
     """Read contacts.json. Creates file with {} if missing.
 
     Applies read-time inbound-SMS defaults (see ``_apply_inbound_defaults``);
-    the read itself does not rewrite the file.
+    the read itself does not rewrite the file. Never raises: a file that does
+    not parse is quarantined (contacts.json.corrupt-<ts>) and reads as empty,
+    so the next save cannot write one contact over every book (audit
+    O12-messaging-08).
     """
     CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
     if not CONTACTS_FILE.exists():
-        CONTACTS_FILE.write_text("{}")
+        with atomic_json.locked(CONTACTS_FILE):  # never over a concurrent first save
+            if not CONTACTS_FILE.exists():
+                atomic_json.write_json(CONTACTS_FILE, {})
         return {}
-    try:
-        return _apply_inbound_defaults(json.loads(CONTACTS_FILE.read_text()))
-    except (json.JSONDecodeError, IOError):
-        return {}
+    return _apply_inbound_defaults(atomic_json.read_json(CONTACTS_FILE, {}, valid=_valid_book))
 
 
 def save_contacts(data: Dict[str, Any]) -> None:
-    """Write full contacts dict to disk."""
+    """Write full contacts dict to disk, atomically and owner-only. A caller
+    that read the book first should hold editing_contacts() instead, so a
+    concurrent save cannot land between its read and this write."""
     CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
-    CONTACTS_FILE.write_text(json.dumps(data, indent=2))
+    atomic_json.write_json(CONTACTS_FILE, data)
+
+
+@contextlib.contextmanager
+def editing_contacts() -> Iterator[Dict[str, Any]]:
+    """Locked read-modify-write of every book: yields the books (read-time
+    defaults applied) and saves them when the block exits cleanly. An
+    exception in the block saves nothing; an unreadable file raises instead
+    of being overwritten."""
+    CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
+    with atomic_json.locked(CONTACTS_FILE):
+        data = _apply_inbound_defaults(atomic_json.load_json(CONTACTS_FILE, {}, valid=_valid_book))
+        yield data
+        save_contacts(data)
 
 
 def _gateways_file() -> Path:
@@ -250,7 +272,10 @@ def ensure_book_for_read(data: Dict[str, Any], operator: str) -> None:
     if ensure_operator_book(data, operator):
         from Orchestrator import config as _cfg  # lazy: keep this module import-light
         if operator in _cfg.USERS_LIST:
-            save_contacts(data)
+            # Re-read under the lock: `data` may be older than a save that
+            # landed since, which a plain save would undo.
+            with editing_contacts() as fresh:
+                fresh.setdefault(operator, data[operator])
 
 
 def search_contacts(query: str, operator: str) -> List[Dict[str, Any]]:
@@ -345,7 +370,14 @@ def upsert_contact(
     operator's self-flag for the same number, a ``warning`` key is included on
     the returned contact (it still saves).
     """
-    data = load_contacts()
+    with editing_contacts() as data:
+        return _upsert_into(data, name, notes, tags, operator, created_by, phone,
+                            email, relationship, inbound_allowed, is_operator_self)
+
+
+def _upsert_into(data, name, notes, tags, operator, created_by, phone, email,
+                 relationship, inbound_allowed, is_operator_self) -> Dict[str, Any]:
+    """upsert_contact's edit of `data`, under editing_contacts()."""
     ensure_operator_book(data, operator)
     book = data[operator]
     now = datetime.now(timezone.utc).isoformat()
@@ -411,7 +443,6 @@ def upsert_contact(
         }
         book[contact_id] = contact
 
-    save_contacts(data)
     if warning:
         return {**contact, "warning": warning}
     return contact
@@ -443,24 +474,6 @@ def _is_retired_seed(contact_id: str, contact: Any) -> bool:
     return variant in _RETIRED_SEED_VARIANTS
 
 
-def _atomic_write(path: Path, payload: bytes, mode: int) -> None:
-    """Write ``payload`` to ``path`` via a synced temp file in the same dir."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def strip_retired_seed_contacts(path: Optional[Path] = None) -> int:
     """Startup migration: remove the seeded 'self' records earlier releases put
     in every book (exact matches only, see _is_retired_seed) and give each such
@@ -473,6 +486,12 @@ def strip_retired_seed_contacts(path: Optional[Path] = None) -> int:
     written. Returns how many records it removed.
     """
     path = Path(path or CONTACTS_FILE)
+    with atomic_json.locked(path):
+        return _strip_retired_seeds(path)
+
+
+def _strip_retired_seeds(path: Path) -> int:
+    """strip_retired_seed_contacts' body, under the store's lock."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -505,7 +524,7 @@ def strip_retired_seed_contacts(path: Optional[Path] = None) -> int:
     mode = stat.S_IMODE(path.stat().st_mode)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup = path.with_name(f"{path.name}.bak-seed-{stamp}")
-    _atomic_write(backup, raw, mode)
-    _atomic_write(path, json.dumps(data, indent=2).encode(), mode)
+    atomic_json.write_bytes(backup, raw, mode=mode)
+    atomic_json.write_bytes(path, json.dumps(data, indent=2).encode(), mode=mode)
     log.info("contacts: removed %d retired seed contact(s); backup at %s", removed, backup)
     return removed

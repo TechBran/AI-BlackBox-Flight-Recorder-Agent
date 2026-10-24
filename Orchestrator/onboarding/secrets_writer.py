@@ -1,17 +1,53 @@
 """Atomic .env file writer with backup."""
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import time
 from pathlib import Path
+from typing import Callable, List, Optional, Tuple
 
+from Orchestrator.utils import atomic_json
 from Orchestrator.utils.paths import resolve
 
 ENV_FILE = resolve(".env")
 
 _KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _atomic_rewrite(transform: Callable[[List[str]], Tuple[Optional[List[str]], object]]) -> Tuple[Optional[str], object]:
+    """The one .env read-modify-write: under the store lock, read the lines,
+    let `transform` return (new lines, result) or (None, result) for no
+    change, back the old file up (0600 from creation, 5 most recent kept) and
+    replace it atomically (0600 temp file, fsync, os.replace). Two concurrent
+    saves used to interleave on a fixed .env.tmp and drop each other's keys
+    (audit X03-security-backend-14, O16-onboarding-update-14). Returns
+    (backup path or None, result)."""
+    with atomic_json.locked(ENV_FILE):
+        try:
+            lines = ENV_FILE.read_text().splitlines(keepends=True)
+        except FileNotFoundError:
+            lines = []
+        new_lines, result = transform(lines)
+        if new_lines is None:
+            return None, result
+        backup = None
+        if ENV_FILE.exists():
+            ts = int(time.time())
+            backup = ENV_FILE.with_suffix(f".backup.{ts}")
+            atomic_json.write_bytes(backup, ENV_FILE.read_bytes(), mode=0o600)
+            # Keep only the 5 most recent backups; older ones are noise.
+            backups = sorted(
+                ENV_FILE.parent.glob(".env.backup.*"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old in backups[5:]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass  # best-effort cleanup, never fatal
+        atomic_json.write_text(ENV_FILE, "".join(new_lines), mode=0o600)
+        return (str(backup) if backup else None), result
 
 
 def update_env(updates: dict[str, str]) -> dict:
@@ -33,31 +69,12 @@ def update_env(updates: dict[str, str]) -> dict:
     if not updates:
         return {"backup": None, "updated_keys": []}
 
-    if not ENV_FILE.exists():
-        ENV_FILE.touch()
-        os.chmod(ENV_FILE, 0o600)
+    backup, _ = _atomic_rewrite(lambda lines: (_apply_updates(lines, updates), None))
+    return {"backup": backup, "updated_keys": list(updates.keys())}
 
-    # NOTE: this backup→chmod→prune→atomic-rewrite block is duplicated in
-    # remove_env_keys below. If a third .env mutator lands, extract a shared
-    # `_atomic_rewrite(transform_fn)` helper (rule of three).
-    ts = int(time.time())
-    backup = ENV_FILE.with_suffix(f".backup.{ts}")
-    shutil.copy2(ENV_FILE, backup)
-    os.chmod(backup, 0o600)
 
-    # Keep only the 5 most recent backups; older ones are noise.
-    backups = sorted(
-        ENV_FILE.parent.glob(".env.backup.*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    for old in backups[5:]:
-        try:
-            old.unlink()
-        except OSError:
-            pass  # best-effort cleanup, never fatal
-
-    lines = ENV_FILE.read_text().splitlines(keepends=True)
+def _apply_updates(lines: List[str], updates: dict[str, str]) -> List[str]:
+    """update_env's transform: replace existing keys in place, append new ones."""
     seen_keys: set[str] = set()
     new_lines: list[str] = []
     for line in lines:
@@ -78,13 +95,7 @@ def update_env(updates: dict[str, str]) -> dict:
         new_lines.append("\n# Added by onboarding wizard\n")
         for k in new_keys:
             new_lines.append(f"{k}={updates[k]}\n")
-
-    tmp = ENV_FILE.with_suffix(".tmp")
-    tmp.write_text("".join(new_lines))
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, ENV_FILE)
-
-    return {"backup": str(backup), "updated_keys": list(updates.keys())}
+    return new_lines
 
 
 def remove_env_keys(keys: list[str]) -> dict:
@@ -106,44 +117,20 @@ def remove_env_keys(keys: list[str]) -> dict:
         return {"backup": None, "removed_keys": []}
 
     keys_set = set(keys)
-    lines = ENV_FILE.read_text().splitlines(keepends=True)
 
-    # Scan first — if nothing matches, no backup + no rewrite needed.
-    out: list[str] = []
-    removed: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            k = stripped.split("=", 1)[0].strip()
-            if k in keys_set:
-                removed.append(k)
-                continue  # drop the line entirely
-        out.append(line)
-    if not removed:
-        return {"backup": None, "removed_keys": []}
+    def transform(lines: List[str]):
+        # Scan first — if nothing matches, no backup + no rewrite needed.
+        out: list[str] = []
+        removed: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                k = stripped.split("=", 1)[0].strip()
+                if k in keys_set:
+                    removed.append(k)
+                    continue  # drop the line entirely
+            out.append(line)
+        return (out if removed else None), removed
 
-    # NOTE: this backup→chmod→prune→atomic-rewrite block mirrors update_env above.
-    # See the note there for the extraction trigger if a third mutator lands.
-    ts = int(time.time())
-    backup = ENV_FILE.with_suffix(f".backup.{ts}")
-    shutil.copy2(ENV_FILE, backup)
-    os.chmod(backup, 0o600)
-
-    # Prune to 5 most recent backups (matches update_env behavior)
-    backups = sorted(
-        ENV_FILE.parent.glob(".env.backup.*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    for old in backups[5:]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
-
-    tmp = ENV_FILE.with_suffix(".tmp")
-    tmp.write_text("".join(out))
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, ENV_FILE)
-
-    return {"backup": str(backup), "removed_keys": removed}
+    backup, removed = _atomic_rewrite(transform)
+    return {"backup": backup, "removed_keys": removed}

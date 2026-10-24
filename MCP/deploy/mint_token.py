@@ -21,7 +21,6 @@ import argparse
 import json
 import os
 import secrets
-import stat
 import sys
 import urllib.request
 import urllib.error
@@ -40,6 +39,12 @@ except Exception:  # pragma: no cover - fallback keeps the script standalone
         if len(operators) > 1:
             return (default or operators[0]), True
         return (default or "Operator"), False
+
+# The backend's store helper (stdlib only): the same atomic, locked,
+# corrupt-safe write the /mcp/tokens routes use, so one minting path never
+# clobbers the other (audit O20-mcp-server-23).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from Orchestrator.utils import atomic_json  # noqa: E402
 
 
 def _repo_root() -> Path:
@@ -96,18 +101,12 @@ def _pick_operator(operators, default, requested, assume_yes):
 
 
 def _write_token(tokens_file: Path, token: str, operator: str):
-    tokens_file.parent.mkdir(parents=True, exist_ok=True)
-    existing = {}
-    if tokens_file.exists():
-        try:
-            existing = json.loads(tokens_file.read_text(encoding="utf-8")) or {}
-            if not isinstance(existing, dict):
-                existing = {}
-        except Exception:
-            existing = {}
-    existing[token] = operator
-    tokens_file.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tokens_file, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    """Merge one token into the store: locked against the backend (which
+    writes the same file), atomic, 0600 from creation. A store that does not
+    parse is moved aside to <name>.corrupt-<UTC>, never overwritten."""
+    with atomic_json.update_json(tokens_file, {}, valid=lambda d: isinstance(d, dict),
+                                 trailing_newline=True, cross_process=True) as existing:
+        existing[token] = operator
 
 
 def main():

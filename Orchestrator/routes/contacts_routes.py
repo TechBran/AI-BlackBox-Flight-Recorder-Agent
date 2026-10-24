@@ -62,11 +62,10 @@ async def upsert_contact(req: ContactUpsertRequest):
 @router.delete("/{contact_id}")
 async def delete_contact(contact_id: str, operator: str = Query(...)):
     """Delete a contact by ID."""
-    from Orchestrator.contacts import load_contacts, save_contacts
-    data = load_contacts()
-    book = data.get(operator, {})
-    if contact_id not in book:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    del book[contact_id]
-    save_contacts(data)
+    from Orchestrator.contacts import editing_contacts
+    with editing_contacts() as data:   # locked; the 404 saves nothing
+        book = data.get(operator, {})
+        if contact_id not in book:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        del book[contact_id]
     return {"success": True, "deleted": contact_id}

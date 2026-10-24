@@ -6,7 +6,7 @@ Provides searchable index of all media files (images, videos, audio) in the uplo
 Each entry includes metadata like prompt, type, created_at, file_size for easy discovery.
 """
 
-import json
+import contextlib
 import os
 import re
 from pathlib import Path
@@ -14,31 +14,46 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 
 from Orchestrator.config import UPLOADS_DIR
+from Orchestrator.utils import atomic_json
 
 # Index file location
 MEDIA_INDEX_FILE = Path("Manifest/media_index.json")
 
 
+def _valid_index(data) -> bool:
+    return isinstance(data, dict)
+
+
 def load_media_index() -> Dict[str, Any]:
-    """Load the media index from disk."""
-    if MEDIA_INDEX_FILE.exists():
-        try:
-            with open(MEDIA_INDEX_FILE, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[MEDIA INDEX] Error loading index: {e}")
-            return {}
-    return {}
+    """Load the media index from disk. Never raises: a file that does not
+    parse is quarantined (media_index.json.corrupt-<ts>) and reads as empty."""
+    return atomic_json.read_json(MEDIA_INDEX_FILE, {}, valid=_valid_index)
 
 
 def save_media_index(index: Dict[str, Any]):
-    """Save the media index to disk."""
-    MEDIA_INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+    """Replace the media index on disk, atomically."""
     try:
-        with open(MEDIA_INDEX_FILE, 'w') as f:
-            json.dump(index, f, indent=2)
+        atomic_json.write_json(MEDIA_INDEX_FILE, index)
     except Exception as e:
         print(f"[MEDIA INDEX] Error saving index: {e}")
+
+
+@contextlib.contextmanager
+def _editing_index():
+    """Locked read-modify-write of the index (audit O05-ledger-persistence-12):
+    the worker thread and request threads add entries concurrently, and each
+    add used to load, modify and save with no lock, losing entries. The write
+    is atomic, so a crash mid-save cannot truncate the catalog. When the file
+    on disk is corrupt it is quarantined and the index is rebuilt from the
+    files in Portal/uploads before the edit, instead of the edit's single
+    entry replacing the whole catalog."""
+    with atomic_json.locked(MEDIA_INDEX_FILE):
+        existed = MEDIA_INDEX_FILE.exists()
+        with atomic_json.update_json(MEDIA_INDEX_FILE, {}, valid=_valid_index) as index:
+            if existed and not MEDIA_INDEX_FILE.exists():
+                rebuilt = _index_uploads_into(index)
+                print(f"[MEDIA INDEX] Index did not parse (quarantined); rebuilt {rebuilt} entries from {UPLOADS_DIR}")
+            yield index
 
 
 def add_media_entry(
@@ -62,8 +77,6 @@ def add_media_entry(
         file_size: File size in bytes
         extra_metadata: Additional metadata (aspect_ratio, resolution, duration, etc.)
     """
-    index = load_media_index()
-
     # Extract filename from URL if not provided
     if not filename:
         filename = url.split('/')[-1]
@@ -94,9 +107,14 @@ def add_media_entry(
     if extra_metadata:
         entry.update(extra_metadata)
 
-    # Use URL as the key
-    index[url] = entry
-    save_media_index(index)
+    # Use URL as the key. Best-effort: the media is already saved, so an
+    # index write failure is logged rather than failing its generation.
+    try:
+        with _editing_index() as index:
+            index[url] = entry
+    except Exception as e:
+        print(f"[MEDIA INDEX] Error saving index: {e}")
+        return entry
 
     print(f"[MEDIA INDEX] Added: {url} ({media_type})")
     return entry
@@ -104,13 +122,12 @@ def add_media_entry(
 
 def remove_media_entry(url: str) -> bool:
     """Remove a media entry from the index."""
-    index = load_media_index()
-    if url in index:
+    with _editing_index() as index:
+        if url not in index:
+            return False
         del index[url]
-        save_media_index(index)
-        print(f"[MEDIA INDEX] Removed: {url}")
-        return True
-    return False
+    print(f"[MEDIA INDEX] Removed: {url}")
+    return True
 
 
 def list_media(
@@ -226,7 +243,20 @@ def sync_uploads_folder():
     Scan the uploads folder and add any unindexed files to the index.
     Useful for bootstrapping or recovering the index.
     """
-    index = load_media_index()
+    if not UPLOADS_DIR.exists():
+        return 0
+    with _editing_index() as index:
+        added = _index_uploads_into(index)
+
+    if added > 0:
+        print(f"[MEDIA INDEX] Synced {added} files from uploads folder")
+
+    return added
+
+
+def _index_uploads_into(index: Dict[str, Any]) -> int:
+    """Add an entry to `index` for every media file in Portal/uploads it does
+    not list yet. Returns how many were added."""
     added = 0
 
     if not UPLOADS_DIR.exists():
@@ -292,10 +322,6 @@ def sync_uploads_folder():
 
         index[url] = entry
         added += 1
-
-    if added > 0:
-        save_media_index(index)
-        print(f"[MEDIA INDEX] Synced {added} files from uploads folder")
 
     return added
 

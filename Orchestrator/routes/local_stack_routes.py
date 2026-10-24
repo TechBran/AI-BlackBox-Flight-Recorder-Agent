@@ -16,9 +16,7 @@ restart. config.ini is a gitignored per-box file — never committed.
 """
 from __future__ import annotations
 
-import configparser
 import logging
-import os
 import subprocess
 
 from fastapi import APIRouter, HTTPException
@@ -54,16 +52,16 @@ class CapabilityRequest(BaseModel):
 
 
 def _set_local_flag(capability: str, enabled: bool) -> None:
-    """Atomic fresh read-modify-write of config.ini [local_models].<cap>."""
-    cp = configparser.ConfigParser()
-    cp.read(CONFIG_INI)
-    if not cp.has_section("local_models"):
-        cp.add_section("local_models")
-    cp.set("local_models", capability, "true" if enabled else "false")
-    tmp = str(CONFIG_INI) + ".tmp"
-    with open(tmp, "w") as f:
-        cp.write(f)
-    os.replace(tmp, CONFIG_INI)
+    """Atomic fresh read-modify-write of config.ini [local_models].<cap>,
+    under the lock every config.ini writer shares."""
+    from Orchestrator.utils.config_ini import update_config_ini
+
+    def edit(cp):
+        if not cp.has_section("local_models"):
+            cp.add_section("local_models")
+        cp.set("local_models", capability, "true" if enabled else "false")
+
+    update_config_ini(edit, CONFIG_INI)
 
 
 @router.post("/capability")

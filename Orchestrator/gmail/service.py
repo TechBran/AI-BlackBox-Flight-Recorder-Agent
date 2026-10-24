@@ -4,7 +4,6 @@ import base64
 import json
 import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -18,6 +17,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from Orchestrator.config import GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET
+from Orchestrator.utils import atomic_json
 from Orchestrator.utils.paths import resolve
 
 SCOPES = [
@@ -184,23 +184,13 @@ def save_tokens(operator: str, token_data: dict):
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(token_data, fh, indent=2)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_json.write_json(path, token_data, mode=0o600)
 
 
 def load_tokens(operator: str) -> Optional[dict]:
-    """Load OAuth tokens from disk for an operator."""
+    """Load OAuth tokens from disk for an operator. A file that does not parse
+    raises (ValueError): probe_connection reports it as token_unreadable, and
+    the next save_tokens moves it aside before writing (atomic_json)."""
     path = _token_path(operator)
     if path.exists():
         return json.loads(path.read_text())

@@ -278,6 +278,15 @@ Orchestrator/device_registry/devices.json
 # On-device (local Gemma) provider attestation registry — written at runtime
 # as phones attest; per-install device-trust state, never commit.
 Orchestrator/local_provider/local_devices.json
+# Runtime-store sidecars outside Manifest/ (Orchestrator/utils/atomic_json.py):
+# a store that did not parse is kept as <name>.corrupt-<UTC> instead of being
+# overwritten, and writes go through a private temp sibling. None may make the
+# serving tree look dirty to the updater.
+Contacts/contacts.json.corrupt-*
+Orchestrator/local_provider/local_devices.json.corrupt-*
+Orchestrator/local_provider/.local_devices.json.*.tmp
+/.env.*.tmp
+/.config.ini.*.tmp
 
 # Zellij CLI Agent state: (operator, provider, app) -> session_name +
 # token_name mapping. Per-install runtime data; NEVER stores raw token

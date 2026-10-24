@@ -443,6 +443,9 @@ from Orchestrator.utils.paths import (  # noqa: E402
 # The per-boot /internal/reload secret (stdlib only), shared with the
 # Orchestrator caller (Orchestrator/routes/mcp_routes.py::_trigger_reload).
 from Orchestrator.utils import internal_secret  # noqa: E402
+# The atomic, locked, corrupt-safe store helper (stdlib only) the backend's
+# stores use too: the OAuth client and access-token stores below go through it.
+from Orchestrator.utils import atomic_json  # noqa: E402
 
 # Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
@@ -2023,18 +2026,12 @@ def _load_oauth_clients() -> Dict[str, dict]:
     """Load the registered-client store (client_id -> registration dict).
 
     Returns {} if the file is missing or unreadable -- a fresh box simply has no
-    registered clients yet (registration creates the file on first POST).
+    registered clients yet (registration creates the file on first POST). A
+    store that does not parse is quarantined (<name>.corrupt-<ts>) rather than
+    left for the next registration to overwrite.
     """
-    try:
-        p = Path(BLACKBOX_MCP_OAUTH_CLIENTS_FILE)
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-    except Exception as e:
-        logger.error("Failed to load OAuth client store %s: %s",
-                     BLACKBOX_MCP_OAUTH_CLIENTS_FILE, e)
-    return {}
+    return atomic_json.read_json(BLACKBOX_MCP_OAUTH_CLIENTS_FILE, {},
+                                 valid=lambda d: isinstance(d, dict))
 
 
 def _persist_oauth_client(client_id: str, record: dict) -> None:
@@ -2045,23 +2042,14 @@ def _persist_oauth_client(client_id: str, record: dict) -> None:
     parent Manifest/ is gitignored, as is **/*token*.json, so the store is doubly
     excluded from git and never world-readable.
     """
-    p = Path(BLACKBOX_MCP_OAUTH_CLIENTS_FILE)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    clients = _load_oauth_clients()
-    clients[client_id] = record
-    payload = json.dumps(clients, indent=2)
-    # Create with 0600 from the start (umask-independent) so the secret-bearing
-    # store is never briefly world-readable. os.open + O_CREAT|O_TRUNC|O_WRONLY.
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(payload)
-    finally:
-        # Re-assert 0600 even if the file pre-existed with looser perms.
-        try:
-            os.chmod(str(p), 0o600)
-        except OSError:
-            pass
+    # Locked read-modify-write, then an atomic replace from a temp file that
+    # is 0600 from creation (audit O20-mcp-server-12): a crash mid-write can
+    # no longer leave a truncated store that silently reads as {}, and two
+    # concurrent /register calls can no longer drop each other's client.
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_CLIENTS_FILE, {},
+                                 valid=lambda d: isinstance(d, dict),
+                                 cross_process=True) as clients:
+        clients[client_id] = record
 
 
 def _oauth_as_metadata() -> dict:
@@ -2314,32 +2302,16 @@ def _persist_access_token(token: str, operator: str, expiry: float) -> None:
     must never be world-readable, and Manifest/ + **/*token*.json keep it out of
     git. Chunk 6c reads this file (and/or the in-process mirror) to validate.
     """
-    p = Path(BLACKBOX_MCP_OAUTH_TOKENS_FILE)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    # Load existing, prune expired, add the new one.
-    existing: Dict[str, dict] = {}
-    try:
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                existing = data
-    except Exception as e:
-        logger.error("Failed to read OAuth token store %s: %s",
-                     BLACKBOX_MCP_OAUTH_TOKENS_FILE, e)
+    # Load existing, prune expired, add the new one: locked, atomic, 0600
+    # from creation (see _persist_oauth_client).
     now = _time.time()
-    existing = {t: b for t, b in existing.items()
-                if isinstance(b, dict) and b.get("expiry", 0) > now}
-    existing[token] = {"operator": operator, "expiry": expiry}
-    payload = json.dumps(existing, indent=2)
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(payload)
-    finally:
-        try:
-            os.chmod(str(p), 0o600)
-        except OSError:
-            pass
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_TOKENS_FILE, {},
+                                 valid=lambda d: isinstance(d, dict),
+                                 cross_process=True) as existing:
+        for t in [t for t, b in existing.items()
+                  if not (isinstance(b, dict) and b.get("expiry", 0) > now)]:
+            del existing[t]
+        existing[token] = {"operator": operator, "expiry": expiry}
 
 
 def _match_oauth_access_token(presented: str):

@@ -1268,34 +1268,40 @@ def add_operator(body: dict = Body(...)):
         )
 
     try:
-        # Read current operators from config (module-global read; no rebind — see below)
-        current_list = USERS_LIST.copy()
+        from Orchestrator.utils.config_ini import update_config_ini, users_list
+        import Orchestrator.config as _cfg
+        config_path = Path("config.ini")
+
+        # The roster comes from the file as it is NOW, read under the
+        # config.ini lock (audit O05-ledger-persistence-21): two concurrent
+        # adds each see the other's operator, and a key changed on disk since
+        # boot is kept instead of reverted to the boot-time CFG.
+        def _add(parser):
+            current = users_list(parser, fallback=", ".join(_cfg.USERS_LIST))
+            if operator_name in current:
+                return current, False
+            current.append(operator_name)
+            if not parser.has_section("users"):
+                parser.add_section("users")
+            parser.set("users", "list", ", ".join(current))
+            return current, True
+
+        current_list, added = update_config_ini(_add, config_path)
 
         # Check if operator already exists
-        if operator_name in current_list:
+        if not added:
             return {
                 "status": "exists",
                 "message": f"Operator '{operator_name}' already exists",
                 "operators": current_list
             }
 
-        # Add new operator
-        current_list.append(operator_name)
-
-        # Update config.ini file
-        config_path = Path("config.ini")
-        CFG.set("users", "list", ", ".join(current_list))
-
-        with open(config_path, "w") as f:
-            CFG.write(f)
-
         # Reload config, then mutate the SHARED USERS_LIST object IN PLACE so every
         # importer (device_routes._live_operators, notification_routes, GET /operators)
         # sees the new operator with NO restart. Rebinding would only update THIS
         # module's alias and leave config.USERS_LIST stale (the restart-lag bug).
         CFG.read(config_path)
-        import Orchestrator.config as _cfg
-        _cfg.USERS_LIST[:] = [u.strip() for u in CFG.get("users", "list", fallback="").split(",") if u.strip()]
+        _cfg.USERS_LIST[:] = current_list
 
         return {
             "status": "success",
@@ -1328,38 +1334,52 @@ def remove_operator(name: str):
             detail=f"'{name}' is a permanent system operator and cannot be removed",
         )
 
-    current_list = USERS_LIST.copy()
+    import Orchestrator.config as _cfg
+    from Orchestrator.utils.config_ini import ConfigIniError, update_config_ini, users_list
+    config_path = Path("config.ini")
+    _default_was_removed = _cfg.USERS_DEFAULT == name
 
-    if name not in current_list:
-        return {
-            "status": "not_present",
-            "message": f"Operator '{name}' not in list",
-            "operators": current_list,
-        }
+    class _Refused(Exception):
+        pass
 
-    if len(current_list) == 1:
+    # Fresh read under the config.ini lock, like add_operator.
+    def _remove(parser):
+        current = users_list(parser, fallback=", ".join(_cfg.USERS_LIST))
+        if name not in current:
+            raise _Refused("not_present", current)
+        if len(current) == 1:
+            raise _Refused("last", current)
+        current.remove(name)
+        if not parser.has_section("users"):
+            parser.add_section("users")
+        parser.set("users", "list", ", ".join(current))
+        # If the removed operator was this box's default, re-point it to a surviving
+        # operator and PERSIST that in the SAME write, so a restart reloads the correct
+        # default instead of re-deriving the stale (now-phantom) one.
+        if _default_was_removed:
+            parser.set("users", "default", current[0])
+        return current
+
+    try:
+        current_list = update_config_ini(_remove, config_path)
+    except _Refused as refused:
+        reason, current = refused.args
+        if reason == "not_present":
+            return {
+                "status": "not_present",
+                "message": f"Operator '{name}' not in list",
+                "operators": current,
+            }
         raise HTTPException(
             status_code=400,
             detail="Cannot remove the last operator — at least one must remain",
         )
-
-    current_list.remove(name)
-
-    import Orchestrator.config as _cfg
-    config_path = Path("config.ini")
-    CFG.set("users", "list", ", ".join(current_list))
-    # If the removed operator was this box's default, re-point it to a surviving
-    # operator and PERSIST that in the SAME write, so a restart reloads the correct
-    # default instead of re-deriving the stale (now-phantom) one.
+    except ConfigIniError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     _fallback = current_list[0] if current_list else "Operator"
-    _default_was_removed = _cfg.USERS_DEFAULT == name
-    if _default_was_removed:
-        CFG.set("users", "default", _fallback)
-    with open(config_path, "w") as f:
-        CFG.write(f)
     CFG.read(config_path)
     # In-place mutation of the shared object — seen by every importer with no restart.
-    _cfg.USERS_LIST[:] = [u.strip() for u in CFG.get("users", "list", fallback="").split(",") if u.strip()]
+    _cfg.USERS_LIST[:] = current_list
     # Re-point the LIVE default/current operator too (default persisted above for the
     # restart path; CURRENT_OPERATOR is runtime-only, updated on each /chat).
     if _default_was_removed:

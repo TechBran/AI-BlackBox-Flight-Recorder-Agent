@@ -34,9 +34,7 @@ def put_op_persona(operator: str, body: PersonaBody):
 
 @app.delete("/operator/persona/{operator}")
 def delete_op_persona(operator: str):
-    if operator in state.OPERATOR_PREFERENCES:
-        state.OPERATOR_PREFERENCES[operator].pop(PERSONA_PREF_KEY, None)
-        state.save_operator_preferences()
+    state.delete_operator_preference(operator, PERSONA_PREF_KEY)
     return {
         "status": "ok",
         "operator": operator,

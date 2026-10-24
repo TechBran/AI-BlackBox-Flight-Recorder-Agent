@@ -8,15 +8,13 @@ design; Tailscale is the perimeter (do not add app-layer auth here).
 from __future__ import annotations
 
 import copy
-import json
 import logging
-import os
 import re
-import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
 
+from Orchestrator.utils import atomic_json
 from Orchestrator.utils.paths import resolve  # canonical root resolver: honors
 # BLACKBOX_ROOT env var FIRST (state.py precedent; stdlib-only, lean-venv-safe).
 # Do NOT hand-roll dirname math -- installed boxes relocate the tree.
@@ -46,18 +44,12 @@ _EMPTY = {"version": 1, "servers": []}
 
 
 # ---------------------------------------------------------------- persistence
+# The shared store helper (Orchestrator/utils/atomic_json.py) was extracted
+# from the code that lived here: atomic 0600 writes, and a corrupt or
+# wrong-shape registry quarantined to *.corrupt-<ts> instead of overwritten.
 
-def _quarantine(path: str) -> str | None:
-    """Best-effort rename of a corrupt registry so the next _write can't destroy it.
-
-    Returns the quarantine path, or None if the rename failed (fail-soft).
-    """
-    dest = f"{path}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    try:
-        os.replace(path, dest)
-        return dest
-    except OSError:
-        return None
+def _valid_registry(data) -> bool:
+    return isinstance(data, dict) and isinstance(data.get("servers"), list)
 
 
 def _read() -> dict:
@@ -67,29 +59,7 @@ def _read() -> dict:
     Corrupt/wrong-shape files are quarantined (renamed *.corrupt-<ts>) first so
     a subsequent add_server can't permanently overwrite stored servers/keys.
     """
-    path = str(REGISTRY_PATH)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return copy.deepcopy(_EMPTY)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        quarantined = _quarantine(path)
-        logger.warning(
-            "custom_servers: corrupt registry at %s (%s) -- quarantined to %s, treating as empty",
-            path, exc, quarantined or "<quarantine failed>",
-        )
-        return copy.deepcopy(_EMPTY)
-    except OSError as exc:
-        logger.warning("custom_servers: unreadable registry at %s (%s) -- treating as empty", path, exc)
-        return copy.deepcopy(_EMPTY)
-    if not isinstance(data, dict) or not isinstance(data.get("servers"), list):
-        quarantined = _quarantine(path)
-        logger.warning(
-            "custom_servers: registry at %s has wrong shape -- quarantined to %s, treating as empty",
-            path, quarantined or "<quarantine failed>",
-        )
-        return copy.deepcopy(_EMPTY)
+    data = atomic_json.read_json(REGISTRY_PATH, _EMPTY, valid=_valid_registry)
     # A hand-edited file with stray non-dict entries must not crash readers.
     data["servers"] = [s for s in data["servers"] if isinstance(s, dict)]
     return data
@@ -97,27 +67,7 @@ def _read() -> dict:
 
 def _write(data: dict) -> None:
     """Atomically persist the registry (tmp file + os.replace), 0600 perms."""
-    path = str(REGISTRY_PATH)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=directory,
-        prefix=".custom_models.", suffix=".tmp", delete=False,
-    )
-    try:
-        json.dump(data, tmp, indent=2)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp.close()
-        os.replace(tmp.name, path)
-    except BaseException:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
-    os.chmod(path, 0o600)
+    atomic_json.write_json(REGISTRY_PATH, data, mode=0o600)
 
 
 # ----------------------------------------------------------------- validation

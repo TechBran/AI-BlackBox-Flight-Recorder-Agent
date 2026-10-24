@@ -18,8 +18,8 @@ import json
 import logging
 import os
 import secrets
-import stat
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from Orchestrator.config import USERS_LIST
 from Orchestrator.onboarding import mcp_actuator
-from Orchestrator.utils import internal_secret
+from Orchestrator.utils import atomic_json, internal_secret
 
 logger = logging.getLogger(__name__)
 
@@ -57,26 +57,36 @@ def _token_id(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
+def _valid_tokens(data) -> bool:
+    return isinstance(data, dict)
+
+
 def _load_tokens() -> dict:
+    """The {token: operator} map, for a reader. A store that does not parse is
+    quarantined (mcp_tokens.json.corrupt-<ts>) and reads as empty, so the next
+    mint can never write one token over every operator's (audit
+    O15-scheduler-admin-07)."""
+    data = atomic_json.read_json(MCP_TOKENS_FILE, {}, valid=_valid_tokens)
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+@contextmanager
+def _editing_tokens():
+    """Locked read-modify-write of the store, written atomically 0600 from
+    creation. Cross-process: MCP/deploy/mint_token.py writes it too. A store
+    that cannot be read is refused (500) rather than overwritten."""
     try:
-        if MCP_TOKENS_FILE.exists():
-            data = json.loads(MCP_TOKENS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return {k: v for k, v in data.items()
-                        if isinstance(k, str) and isinstance(v, str)}
-    except Exception as e:
-        logger.error("MCP tokens load failed: %s", e)
-    return {}
+        with atomic_json.update_json(MCP_TOKENS_FILE, {}, valid=_valid_tokens,
+                                     trailing_newline=True, cross_process=True) as tokens:
+            yield tokens
+    except atomic_json.StoreError as e:
+        logger.error("MCP token store refused: %s", e)
+        raise HTTPException(500, f"MCP token store {e.path} cannot be read safely: {e}")
 
 
 def _write_tokens(tokens: dict) -> None:
     """Atomic 0600 write (tmp -> os.replace), mirroring the MCP store's perms."""
-    MCP_TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(MCP_TOKENS_FILE) + ".tmp")
-    tmp.write_text(json.dumps(tokens, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # 0600
-    os.replace(tmp, MCP_TOKENS_FILE)
-    os.chmod(MCP_TOKENS_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    atomic_json.write_json(MCP_TOKENS_FILE, tokens, trailing_newline=True, cross_process=True)
 
 
 def _trigger_reload() -> bool:
@@ -128,12 +138,8 @@ def _derive_public_url() -> str:
 
 def _write_runtime_public_url(url: str) -> None:
     """Atomic 0644 write of Manifest/mcp_runtime.json (public_url is not a secret)."""
-    MCP_RUNTIME_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "public_url": url.strip().rstrip("/"), "updated_by": "onboarding"}
-    tmp = Path(str(MCP_RUNTIME_FILE) + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, MCP_RUNTIME_FILE)
+    atomic_json.write_json(MCP_RUNTIME_FILE, payload, mode=0o644, trailing_newline=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -218,9 +224,8 @@ def mint_token(body: MintBody):
         raise HTTPException(400, f"operator {operator!r} is not a live operator on "
                                  f"this box. Valid operators: {sorted(operators)}")
     token = TOKEN_PREFIX + secrets.token_urlsafe(48)
-    tokens = _load_tokens()
-    tokens[token] = operator           # merge -- never clobber other operators' tokens
-    _write_tokens(tokens)
+    with _editing_tokens() as tokens:
+        tokens[token] = operator       # merge -- never clobber other operators' tokens
     reloaded = _trigger_reload()
     return {
         "token": token,
@@ -248,13 +253,12 @@ def revoke_token(token_id: str):
     tid = (token_id or "").strip()
     if not tid:
         raise HTTPException(400, "token_id is required")
-    tokens = _load_tokens()
-    match = [tok for tok in tokens if _token_id(tok) == tid]
-    if not match:
-        raise HTTPException(404, "no token with that token_id")
-    for tok in match:
-        del tokens[tok]
-    _write_tokens(tokens)
+    with _editing_tokens() as tokens:
+        match = [tok for tok in tokens if isinstance(tok, str) and _token_id(tok) == tid]
+        if not match:
+            raise HTTPException(404, "no token with that token_id")
+        for tok in match:
+            del tokens[tok]
     _trigger_reload()
     return {"ok": True, "revoked": len(match)}
 
