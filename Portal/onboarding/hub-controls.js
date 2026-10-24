@@ -331,6 +331,7 @@ export async function mountUpdatesBadge(hostEl) {
 
     if (!isMajor) {
         hostEl.querySelector("[data-ob-update-install]").addEventListener("click", async () => {
+            if (!window.confirm(`Install ${n} update${n === 1 ? "" : "s"} now?\n\nThis restarts the BlackBox service (60–90 s of downtime).`)) return;
             try {
                 const r = await fetch("/update/start", {
                     method: "POST",

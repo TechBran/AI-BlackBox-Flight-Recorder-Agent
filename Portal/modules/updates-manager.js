@@ -38,6 +38,14 @@
 //
 // (Embedding compute/placement selection — GPU/CPU pins — also lives in the
 // onboarding wizard now; the updates panel no longer renders that card.)
+//
+// Destructive actions (audit rank 43): Install, Rollback and Restart Service
+// ask first. Local changes to tracked files (status.dirty_files) are named in
+// the Install/Rollback confirm, and confirming sends discard_local_changes so
+// the backend stashes them; a 409 that lists dirty_files asks again. After any
+// action that restarts the service the modal waits for /health's boot_id to
+// CHANGE (A13-ui-ops-01) instead of trusting the first 200, which the old
+// process answers for the ~2 s before the restart fires.
 
 import { escapeHtml, toastError } from "./core-utils.js";
 
@@ -163,7 +171,7 @@ function _setState(newState, ctx = {}) {
         case "up-to-date": {
             const { status } = ctx;
             row.innerHTML = `<span class="updates-status-ok">✓ Up to date</span> <code class="updates-sha">${escapeHtml(status.current_short)}</code>`;
-            list.innerHTML = "";
+            list.innerHTML = _renderDirtyNote(status);
             btnRollback.disabled = !status.last_state;
             break;
         }
@@ -171,7 +179,8 @@ function _setState(newState, ctx = {}) {
         case "local-ahead": {
             const { status } = ctx;
             row.innerHTML = `<span class="updates-status-info">Local ahead of origin by ${status.commits_ahead} commit(s)</span> <code class="updates-sha">${escapeHtml(status.current_short)}</code>`;
-            list.innerHTML = "<p class='updates-hint-inline'>Unpushed local work. Nothing to pull from GitHub right now.</p>";
+            list.innerHTML = "<p class='updates-hint-inline'>Unpushed local work. Nothing to pull from GitHub right now.</p>"
+                + _renderDirtyNote(status);
             btnRollback.disabled = !status.last_state;
             break;
         }
@@ -182,7 +191,7 @@ function _setState(newState, ctx = {}) {
                 <span class="updates-status-update">⬆ ${status.commits_behind} update${status.commits_behind === 1 ? "" : "s"} available</span>
                 <code class="updates-sha">${escapeHtml(status.current_short)} → ${escapeHtml(status.latest_short)}</code>
             `;
-            list.innerHTML = _renderCommits(status);
+            list.innerHTML = _renderCommits(status) + _renderDirtyNote(status);
             btnInstall.disabled = false;
             btnRollback.disabled = !status.last_state;
             break;
@@ -238,6 +247,124 @@ function _renderCommits(status) {
     return `<ul class="updates-commits-list">${items}${more}</ul>${catsHtml}`;
 }
 
+// Local changes an Install or Rollback would overwrite (status.dirty_files).
+// File names come from the box's checkout: escaped like every other field.
+function _renderDirtyNote(status) {
+    const dirty = (status && status.dirty_files) || [];
+    if (!dirty.length) return "";
+    return `<p class="updates-hint-inline updates-status-warn">⚠ ${dirty.length} tracked file${dirty.length === 1 ? " has" : "s have"} local changes: `
+        + `${dirty.slice(0, 5).map((f) => `<code>${escapeHtml(f)}</code>`).join(", ")}${dirty.length > 5 ? ` and ${dirty.length - 5} more` : ""}. `
+        + `Install and Rollback stash them first (<code>git stash list</code> shows them later).</p>`;
+}
+
+// ── Confirm wording (plain text for window.confirm) ────────────────────
+
+function _dirtyLine(dirty, action) {
+    const shown = dirty.slice(0, 5).join(", ") + (dirty.length > 5 ? ` and ${dirty.length - 5} more` : "");
+    return `${dirty.length} tracked file(s) on this box have local changes (${shown}). `
+        + `${action} stashes them first, so they can be restored later with git stash apply.`;
+}
+
+export function installConfirmText(status) {
+    const n = status.commits_behind;
+    let text = `Install ${n} update(s)?\n\nThis will restart the BlackBox service. Expect 60–90 seconds of downtime.`;
+    const activeSessions = status.active_cli_sessions || 0;
+    if (activeSessions > 0) {
+        text = `WARNING: ${activeSessions} active CLI agent session(s) will be disconnected.\n\n` + text;
+    }
+    const dirty = status.dirty_files || [];
+    if (dirty.length) text += `\n\n${_dirtyLine(dirty, "Installing")}`;
+    return text;
+}
+
+export function rollbackConfirmText(status) {
+    let text = "Roll back to the pre-update tag and restart the service?\n\n"
+        + "User data is unaffected — only application code (and the Python packages that update changed) reverts.";
+    const dirty = (status && status.dirty_files) || [];
+    if (dirty.length) text += `\n\n${_dirtyLine(dirty, "Rolling back")}`;
+    return text;
+}
+
+export const RESTART_CONFIRM_TEXT = "Restart the BlackBox service now?\n\n"
+    + "Every connected client is cut off for 60–90 seconds while it comes back.";
+
+function _stashRetryText(dirty, action) {
+    return `${action} was refused: ${_dirtyLine(dirty, action)}\n\nStash them and continue?`;
+}
+
+// ── Restart detection (A13-ui-ops-01) ──────────────────────────────────
+
+// Fallback for a backend without boot_id: accept a 200 only after the
+// service was seen down, or this long after the wait began (the restart fires
+// 2 s after the complete event, and the old process stops answering then).
+export const RESTART_GRACE_MS = 10_000;
+
+/**
+ * The running process's /health boot_id: the string, "" from a backend that
+ * predates it, or null when /health did not answer 200.
+ */
+export async function readBootId(fetchImpl = (...a) => fetch(...a)) {
+    try {
+        const r = await fetchImpl("/health", { cache: "no-store" });
+        if (!r.ok) return null;
+        const body = await r.json();
+        return typeof body.boot_id === "string" ? body.boot_id : "";
+    } catch (_) {
+        return null;
+    }
+}
+
+/**
+ * Has the service restarted since `priorBootId` was read? `bootId` is what a
+ * 200 /health just returned ("" = no boot_id field). priorBootId is the id
+ * read before the action, "" when that backend had none, or null when it
+ * could not be read.
+ */
+export function restartObserved({ priorBootId, bootId, seenDown, elapsedMs, graceMs = RESTART_GRACE_MS }) {
+    if (priorBootId) return bootId !== priorBootId;  // "" too: an older build answered
+    if (priorBootId === "" && bootId) return true;    // a newer build answered
+    return !!seenDown || elapsedMs >= graceMs;        // nothing to compare
+}
+
+/** Does a complete event promise a restart? Older backends omit the flag;
+ * their only no-restart success is "Already up to date" (equal SHAs). */
+export function restartExpected(event) {
+    if (typeof event.restart_scheduled === "boolean") return event.restart_scheduled;
+    return !!event.succeeded && event.sha_before !== event.sha_after;
+}
+
+/**
+ * Poll /health until the service has restarted, or `timeoutMs` passes.
+ * Resolves { restarted, elapsedMs, lastUp } — lastUp says the final probe was
+ * answered (by the old process, if not restarted). `giveUp({elapsedMs})`, when
+ * given, is asked after the grace period each time the OLD process answers;
+ * true ends the wait early with { restarted: false, gaveUp: true }.
+ */
+export async function waitForRestart({
+    priorBootId, seenDown = false, readBoot = readBootId,
+    now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    timeoutMs = 180_000, intervalMs = 2000, graceMs = RESTART_GRACE_MS,
+    onTick = null, giveUp = null,
+} = {}) {
+    const start = now();
+    let lastUp = false;
+    for (;;) {
+        const elapsedMs = now() - start;
+        if (elapsedMs > timeoutMs) return { restarted: false, elapsedMs, lastUp };
+        if (onTick) onTick(elapsedMs);
+        const bootId = await readBoot();
+        lastUp = bootId !== null;
+        if (bootId === null) {
+            seenDown = true;
+        } else if (restartObserved({ priorBootId, bootId, seenDown, elapsedMs, graceMs })) {
+            return { restarted: true, elapsedMs, lastUp };
+        } else if (giveUp && elapsedMs >= graceMs && await giveUp({ elapsedMs })) {
+            return { restarted: false, gaveUp: true, elapsedMs, lastUp };
+        }
+        await sleep(intervalMs);
+    }
+}
+
 // ── Action handlers ────────────────────────────────────────────────────
 
 function _wireButtons() {
@@ -249,6 +376,40 @@ function _wireButtons() {
     if (btnInstall) btnInstall.addEventListener("click", _onInstallClick);
     if (btnLog) btnLog.addEventListener("click", _onViewLogClick);
     if (btnRollback) btnRollback.addEventListener("click", _onRollbackClick);
+    // System Controls' Restart Service sits in the same menu and needs the
+    // same restart detection, so it is wired here.
+    const btnRestart = document.getElementById("btnRestart");
+    if (btnRestart) btnRestart.addEventListener("click", _onRestartClick);
+}
+
+/**
+ * POST an update action; on a 409 that lists dirty_files, ask once to stash
+ * them and retry with discard_local_changes. Resolves the JSON body, or null
+ * when the operator declined or the request failed (already reported).
+ */
+async function _postUpdateAction(url, body, action) {
+    const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    if (r.status === 409) {
+        const detail = await r.json().catch(() => ({}));
+        const dirty = Array.isArray(detail.dirty_files) ? detail.dirty_files : [];
+        if (dirty.length && !body.discard_local_changes) {
+            if (!window.confirm(_stashRetryText(dirty, action))) return null;
+            return _postUpdateAction(url, { ...body, discard_local_changes: true }, action);
+        }
+        window.alert(`${action} conflict: ${detail.detail || "another update may be in progress."}`);
+        await refreshPanel(true);
+        return null;
+    }
+    if (!r.ok) {
+        const txt = await r.text().catch(() => "");
+        window.alert(`${action} failed: HTTP ${r.status} ${txt.substring(0, 300)}`);
+        return null;
+    }
+    return r.json();
 }
 
 async function _onInitClick() {
@@ -261,30 +422,17 @@ async function _onInitClick() {
 
 async function _onInstallClick() {
     if (!_lastStatus || !_lastStatus.commits_behind) return;
-    const activeSessions = _lastStatus.active_cli_sessions || 0;
-    let confirm = `Install ${_lastStatus.commits_behind} update(s)?\n\nThis will restart the BlackBox service. Expect 60–90 seconds of downtime.`;
-    if (activeSessions > 0) {
-        confirm = `WARNING: ${activeSessions} active CLI agent session(s) will be disconnected.\n\n` + confirm;
-    }
-    if (!window.confirm(confirm)) return;
+    if (!window.confirm(installConfirmText(_lastStatus))) return;
     try {
-        const r = await fetch("/update/start", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ confirm_sha: _lastStatus.latest_sha }),
-        });
-        if (r.status === 409) {
-            const body = await r.json();
-            window.alert(`Update conflict: ${body.detail || "another update may be in progress."}`);
-            await refreshPanel(true);
-            return;
-        }
-        if (!r.ok) {
-            window.alert(`Failed to start update: HTTP ${r.status}`);
-            return;
-        }
-        const { task_id } = await r.json();
-        openUpdateLogModal(task_id);
+        // Read before the action: the old process's id is what must change.
+        const priorBootId = await readBootId();
+        const body = await _postUpdateAction("/update/start", {
+            confirm_sha: _lastStatus.latest_sha,
+            // The confirm just named these files; agreeing to it is consent.
+            discard_local_changes: (_lastStatus.dirty_files || []).length > 0,
+        }, "Update");
+        if (!body) return;
+        openUpdateLogModal(body.task_id, { priorBootId });
     } catch (e) {
         window.alert(`Network error starting update: ${e.message}`);
     }
@@ -298,21 +446,43 @@ function _onViewLogClick() {
 }
 
 async function _onRollbackClick() {
-    if (!window.confirm("Roll back to the pre-update tag and restart the service?\n\nUser data is unaffected — only application code reverts.")) return;
+    if (!window.confirm(rollbackConfirmText(_lastStatus))) return;
     try {
-        const r = await fetch("/update/rollback", { method: "POST" });
-        if (!r.ok) {
-            const txt = await r.text();
-            window.alert(`Rollback failed: ${txt.substring(0, 300)}`);
-            return;
-        }
-        const body = await r.json();
+        const priorBootId = await readBootId();
+        const body = await _postUpdateAction("/update/rollback", {
+            discard_local_changes: ((_lastStatus && _lastStatus.dirty_files) || []).length > 0,
+        }, "Rollback");
+        if (!body) return;
         const tag = body.reverted_to || "(unknown)";
-        // Show the same restart-detection UI as after a successful update.
-        openHealthPollModal(`Rolled back to ${tag}. Restarting service…`);
+        if (body.task_id) {
+            // The rollback runs as a task (venv restore + reset under the
+            // update lock): stream it, then wait for the restart.
+            openUpdateLogModal(body.task_id, { priorBootId, title: `Rolling back to ${tag}` });
+        } else {
+            openHealthPollModal(`Rolled back to ${tag}. Restarting service…`, { priorBootId });
+        }
     } catch (e) {
         window.alert(`Rollback error: ${e.message}`);
     }
+}
+
+async function _onRestartClick() {
+    if (!window.confirm(RESTART_CONFIRM_TEXT)) return;
+    const priorBootId = await readBootId();
+    try {
+        const r = await fetch("/restart", { method: "POST" });
+        const body = await r.json().catch(() => ({}));
+        // /restart answers 200 with status "error" when sudo refuses. Any
+        // other answer (a proxy's 502 included) may be the restart itself:
+        // the wait below tells the two apart by boot_id.
+        if (body.status === "error") {
+            window.alert(`Restart failed: ${body.message || body.error || "unknown error"}`);
+            return;
+        }
+    } catch (_) {
+        // Expected: the restart can cut this very request off.
+    }
+    openHealthPollModal("Restart requested. Waiting for the service…", { priorBootId });
 }
 
 // ── Embeddings notification card (pluggable embeddings, Task 14) ───────
@@ -590,15 +760,19 @@ function _stopEmbedPoll() {
  * Open the update log modal, stream SSE from /update/log/stream?task_id=X,
  * and on completion transition to the health-poll restart-detection UI.
  */
-export function openUpdateLogModal(taskId) {
+export function openUpdateLogModal(taskId, { priorBootId, title } = {}) {
     const modal = _ensureLogModal();
     const log = modal.querySelector(".updates-log-pre");
     const header = modal.querySelector(".updates-log-header");
     log.textContent = "";
-    header.textContent = `Update in progress (task ${taskId.substring(0, 20)}…)`;
+    header.textContent = title || `Update in progress (task ${taskId.substring(0, 20)}…)`;
     modal.classList.remove("hide");
 
-    let succeeded = false;
+    // The id the restart must change. A caller that read it before starting
+    // passes it; otherwise read it now, while the runner is still working
+    // (the restart comes only after the complete event).
+    const prior = priorBootId !== undefined ? Promise.resolve(priorBootId) : readBootId();
+
     let completeReceived = false;
     const evt = new EventSource(`/update/log/stream?task_id=${encodeURIComponent(taskId)}`);
     evt.onmessage = (e) => {
@@ -619,18 +793,25 @@ export function openUpdateLogModal(taskId) {
         }
         if (data.type === "complete") {
             completeReceived = true;
-            succeeded = !!data.succeeded;
+            const succeeded = !!data.succeeded;
             evt.close();
             _appendLog(log,
                 succeeded
                     ? `\n✓ COMPLETE: ${data.sha_before} → ${data.sha_after}`
                     : `\n✕ FAILED: ${data.error || "(no error msg)"}`);
-            if (succeeded) {
+            if (succeeded && restartExpected(data)) {
                 // Service will restart in ~2s. Switch to health-poll modal.
-                setTimeout(() => {
+                setTimeout(async () => {
                     modal.classList.add("hide");
-                    openHealthPollModal("Update applied. Restarting service…");
+                    openHealthPollModal(data.phase === "rolled_back"
+                        ? "Rollback applied. Restarting service…"
+                        : "Update applied. Restarting service…", { priorBootId: await prior });
                 }, 1500);
+            } else {
+                // Nothing restarts (already up to date, refused, failed):
+                // show the panel's new state behind the log.
+                if (succeeded) _appendLog(log, "No restart needed.");
+                refreshPanel(false).catch(() => {});
             }
         }
     };
@@ -638,21 +819,35 @@ export function openUpdateLogModal(taskId) {
         if (completeReceived) return;  // expected end-of-stream
         _appendLog(log, "\n(stream disconnected — service may be restarting)");
         evt.close();
-        if (succeeded || _state !== "in-progress") {
-            // Best-effort transition to health-poll if we got a complete event
-            setTimeout(() => {
-                modal.classList.add("hide");
-                openHealthPollModal("Service appears to be restarting…");
-            }, 2000);
-        }
+        // The runner keeps going without the stream. Wait for the restart,
+        // but stop waiting once the old process says nothing is running any
+        // more (the update failed or was refused, so no restart is coming).
+        setTimeout(async () => {
+            modal.classList.add("hide");
+            openHealthPollModal("Service appears to be restarting…", {
+                priorBootId: await prior,
+                giveUp: _updateNoLongerRunning,
+            });
+        }, 2000);
     };
 }
 
+async function _updateNoLongerRunning() {
+    try {
+        const r = await fetch("/update/status", { cache: "no-store" });
+        if (!r.ok) return false;
+        return !(await r.json()).in_progress;
+    } catch (_) {
+        return false;
+    }
+}
+
 /**
- * After restart, poll /health every 2s for up to 180s with progressive
- * copy (audit C5). On HTTP 200 → success toast + refresh panel.
+ * After a restart was requested, poll /health every 2s for up to 180s with
+ * progressive copy (audit C5) until boot_id differs from `priorBootId`
+ * (A13-ui-ops-01), then refresh the panel.
  */
-export function openHealthPollModal(initialMsg) {
+export function openHealthPollModal(initialMsg, { priorBootId, giveUp = null } = {}) {
     const modal = _ensureLogModal();
     const log = modal.querySelector(".updates-log-pre");
     const header = modal.querySelector(".updates-log-header");
@@ -660,35 +855,44 @@ export function openHealthPollModal(initialMsg) {
     header.textContent = "Waiting for service…";
     modal.classList.remove("hide");
 
-    const start = Date.now();
     const timeoutMs = 180_000;
-    const tick = async () => {
-        const elapsed = Date.now() - start;
-        if (elapsed > timeoutMs) {
-            _appendLog(log, `\n⚠ Still down after ${Math.round(timeoutMs / 1000)}s. Check the logs manually.`);
-            return;
+    (async () => {
+        let prior = priorBootId;
+        let seenDown = false;
+        if (prior === undefined) {
+            // No id from before the action: read it now. A failed read means
+            // the service is already down, which is what the wait needs.
+            prior = await readBootId();
+            seenDown = prior === null;
         }
-        // Progressive 3-stage copy (audit C5)
-        const stage = elapsed < 30000
-            ? "Restarting service…"
-            : elapsed < 90000
-                ? "Rebuilding snapshot index (60–90s typical)…"
-                : "Still warming. If this hangs, run `journalctl -u blackbox.service`.";
-        header.textContent = stage;
-        try {
-            const r = await fetch("/health", { cache: "no-store" });
-            if (r.ok) {
-                _appendLog(log, `\n✓ Service back online after ${Math.round(elapsed / 1000)}s.`);
-                setTimeout(() => {
-                    modal.classList.add("hide");
-                    refreshPanel(true).catch(() => {});
-                }, 1500);
-                return;
-            }
-        } catch (_) { /* fetch fails while service is down — expected */ }
-        setTimeout(tick, 2000);
-    };
-    tick();
+        const result = await waitForRestart({
+            priorBootId: prior, seenDown, timeoutMs, giveUp,
+            onTick: (elapsed) => {
+                // Progressive 3-stage copy (audit C5)
+                header.textContent = elapsed < 30000
+                    ? "Restarting service…"
+                    : elapsed < 90000
+                        ? "Rebuilding snapshot index (60–90s typical)…"
+                        : "Still warming. If this hangs, run `journalctl -u blackbox.service`.";
+            },
+        });
+        if (result.restarted) {
+            _appendLog(log, `\n✓ Service back online after ${Math.round(result.elapsedMs / 1000)}s.`);
+            setTimeout(() => {
+                modal.classList.add("hide");
+                refreshPanel(true).catch(() => {});
+            }, 1500);
+        } else if (result.gaveUp) {
+            header.textContent = "No restart";
+            _appendLog(log, "\nThe update is no longer running and the service did not restart. See the Updates panel for what happened.");
+            refreshPanel(false).catch(() => {});
+        } else if (result.lastUp) {
+            header.textContent = "Not restarted";
+            _appendLog(log, `\n⚠ After ${Math.round(timeoutMs / 1000)}s the service is still the process that was running before: the restart did not happen. Restart it from System Controls, or run \`sudo systemctl restart blackbox.service\` on the box.`);
+        } else {
+            _appendLog(log, `\n⚠ Still down after ${Math.round(timeoutMs / 1000)}s. Check the logs manually.`);
+        }
+    })();
 }
 
 function _ensureLogModal() {

@@ -1200,6 +1200,7 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
 
     // Cancel stuck tasks
     safeSetOnClick("btnCancelTasks", async () => {
+        if (!window.confirm("Cancel every pending and running task, for every operator?\n\nLong renders (video, music) and running CLI agents stop too.")) return;
         try {
             const r = await fetch("/tasks/cancel-all", { method: "POST" });
             const j = await r.json();
