@@ -199,14 +199,15 @@ class AMISMSClient:
         """Gracefully disconnect from AMI."""
         self._shutting_down = True
 
-        # Cancel multipart flush timers (and drop the parts they guarded).
-        # Texts already being answered are left to finish: a gateway re-add or
-        # reconnect must not drop a reply mid-write, and the reply goes out
-        # through whichever client the manager holds for the gateway by then.
+        # Cancel multipart flush timers (and drop the parts they guarded), and
+        # the replies in flight: they used to run inside the read task this
+        # cancels below, so a disconnect ends them as it always did.
         for task in self._multipart_flush_tasks.values():
             task.cancel()
         self._multipart_flush_tasks.clear()
         self._multipart_buf.clear()
+        for task in list(self._deliveries):
+            task.cancel()
 
         # Send Logoff if still connected
         if self._connected and self._writer and not self._writer.is_closing():

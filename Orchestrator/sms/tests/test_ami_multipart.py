@@ -358,3 +358,29 @@ def test_a_new_connection_stops_the_previous_connections_loops(monkeypatch):
             await c.disconnect()
 
     asyncio.run(run())
+
+
+def test_disconnect_ends_a_reply_in_flight():
+    """Replies used to run inside the read task disconnect cancels; as their own
+    tasks they are cancelled with it, never left running past the client."""
+    async def run():
+        c = AMISMSClient(host="h", username="u", secret="s")
+        started, cancelled = asyncio.Event(), []
+
+        async def slow_reply(*args):
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        c.on_sms(slow_reply)
+        await c._handle_received_sms(_event(content="hi"))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await c.disconnect()
+        await asyncio.sleep(0)
+        assert cancelled == [True]
+        assert not any(not t.done() for t in c._deliveries)
+
+    asyncio.run(run())
