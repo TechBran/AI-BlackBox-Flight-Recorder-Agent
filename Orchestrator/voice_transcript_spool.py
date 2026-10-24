@@ -18,6 +18,13 @@ save whose 200 never arrived may still have been minted, so before re-posting,
 the retry looks for that line in the part of the ledger written since the
 transcript was spooled, and drops the entry instead of minting a duplicate.
 
+Retries end. /chat/save appends the turns to the operator's log before it
+mints and answers 500 when the mint raises, so a transcript the server keeps
+failing was appended again on every hourly re-post. After MAX_SERVER_ERRORS
+error answers, or MAX_ATTEMPTS failed retries of any kind (about a day of
+backoff), the entry is parked as ``*.gave-up.json`` for an operator to
+recover, as a 4xx refusal is parked as ``*.rejected.json``; neither is re-posted.
+
 Stdlib only; Orchestrator.config is read lazily (paths are cwd-relative there).
 """
 from __future__ import annotations
@@ -41,12 +48,20 @@ SPOOL_SUBDIR = "pending_transcripts"
 LEDGER_PATH: Optional[Path] = None
 
 MARKER_PREFIX = "Voice-Transcript-ID: "
-REJECTED_SUFFIX = ".rejected.json"
+REJECTED_SUFFIX = ".rejected.json"     # the server refused it (4xx)
+GAVE_UP_SUFFIX = ".gave-up.json"       # retried until MAX_SERVER_ERRORS / MAX_ATTEMPTS
+_PARKED_SUFFIXES = (REJECTED_SUFFIX, GAVE_UP_SUFFIX)
 _SCAN_CHUNK = 4 * 1024 * 1024
 # A fresh entry is not retried before this: its own POST may still be minting
 # server-side after the client gave up (30 s timeout; the phone bridge cancels
 # at 10 s), and the ledger check can only see a mint that has finished.
 RETRY_SETTLE_SEC = 120.0
+# Error answers (HTTP 5xx) after which a transcript is given up on, counting
+# the first save's: each may have appended the turns before the mint failed.
+MAX_SERVER_ERRORS = 5
+# Failed retries of any kind (no answer included) before it is given up on;
+# with the backoff capped at 1 h this is about a day.
+MAX_ATTEMPTS = 24
 
 
 def spool_dir() -> Path:
@@ -92,6 +107,7 @@ def new_record(*, session_id: str, operator: str, user_message: str,
         # be at or past this offset.
         "ledger_offset": _ledger_size(),
         "attempts": 0,
+        "server_errors": 0,
         "next_attempt_at": time.time() + RETRY_SETTLE_SEC,
     }
 
@@ -144,16 +160,23 @@ def remove(record: dict) -> None:
         pass
 
 
-def park_rejected(record: dict) -> Path:
-    """Move a transcript the server refused for good out of the retry set.
+def park(record: dict, suffix: str = REJECTED_SUFFIX) -> Path:
+    """Move a transcript out of the retry set: refused for good
+    (``*.rejected.json``) or retried until the caps (``*.gave-up.json``).
 
-    The file stays on disk (renamed ``*.rejected.json``) for an operator to
-    recover; it is never re-posted.
+    The file stays on disk, renamed, for an operator to recover; it is never
+    re-posted. The record is rewritten into it, so its attempt counts are there.
     """
     path = record_path(record)
-    parked = path.with_name(path.name[: -len(".json")] + REJECTED_SUFFIX)
+    parked = path.with_name(path.name[: -len(".json")] + suffix)
+    write(record)
     os.replace(path, parked)
     return parked
+
+
+def park_rejected(record: dict) -> Path:
+    """park() for a transcript the server refused for good (4xx)."""
+    return park(record, REJECTED_SUFFIX)
 
 
 def pending() -> Iterator[dict]:
@@ -163,7 +186,7 @@ def pending() -> Iterator[dict]:
         return iter(())
     records = []
     for path in directory.glob("*.json"):
-        if path.name.endswith(REJECTED_SUFFIX) or path.name.startswith(".tmp-"):
+        if path.name.endswith(_PARKED_SUFFIXES) or path.name.startswith(".tmp-"):
             continue
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -216,9 +239,24 @@ def backoff_seconds(attempts: int, base: float = 60.0, cap: float = 3600.0) -> f
     return min(base * (2 ** max(0, attempts - 1)), cap)
 
 
-def mark_failed(record: dict, now: Optional[float] = None) -> dict:
-    """Count a failed retry and schedule the next one."""
+def count_server_error(record: dict, status: Optional[int]) -> dict:
+    """Count an error answer (5xx) to a save or a retry of `record`."""
+    if status is not None and status >= 500:
+        record["server_errors"] = int(record.get("server_errors") or 0) + 1
+    return record
+
+
+def mark_failed(record: dict, now: Optional[float] = None,
+                status: Optional[int] = None) -> dict:
+    """Count a failed retry (answered `status`, None for no answer) and schedule the next one."""
     now = time.time() if now is None else now
     record["attempts"] = int(record.get("attempts") or 0) + 1
+    count_server_error(record, status)
     record["next_attempt_at"] = now + backoff_seconds(record["attempts"])
     return record
+
+
+def exhausted(record: dict) -> bool:
+    """True once `record` has used up its retries (MAX_SERVER_ERRORS / MAX_ATTEMPTS)."""
+    return (int(record.get("server_errors") or 0) >= MAX_SERVER_ERRORS
+            or int(record.get("attempts") or 0) >= MAX_ATTEMPTS)

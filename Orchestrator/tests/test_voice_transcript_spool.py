@@ -232,6 +232,55 @@ def test_permanent_refusal_is_parked_not_retried_forever(box, monkeypatch):
     assert len(fake.bodies) == 1
 
 
+def test_a_server_that_keeps_failing_gets_the_transcript_parked(box, monkeypatch):
+    """/chat/save appends the turns to the operator's log BEFORE it mints and
+    answers 500 when the mint raises, so every re-post of such a transcript
+    appended it again: it was retried hourly with no end (review of rank 51)."""
+    fake = _ChatSave(monkeypatch, status=500)
+    asyncio.run(rt.save_session_to_blackbox(_session(RealtimeSession)))
+
+    async def sweeps():
+        now = time.time()
+        for _ in range(40):
+            now += 4000                      # every sweep is past the 1 h backoff cap
+            await shared.retry_spooled_transcripts(now)
+
+    asyncio.run(sweeps())
+    assert len(fake.bodies) == spool.MAX_SERVER_ERRORS, \
+        "the first save and its retries stop once the server has failed it MAX_SERVER_ERRORS times"
+    assert list(spool.pending()) == []
+    parked = list((box.parent / "pending_transcripts").glob("*" + spool.GAVE_UP_SUFFIX))
+    assert len(parked) == 1, "a transcript given up on stays on disk for recovery"
+    assert "remind me at noon" in parked[0].read_text()
+
+
+def test_retries_without_any_answer_end_too(box, monkeypatch):
+    fake = _ChatSave(monkeypatch, status=None)
+    asyncio.run(rt.save_session_to_blackbox(_session(RealtimeSession)))
+
+    async def sweeps():
+        now = time.time()
+        for _ in range(spool.MAX_ATTEMPTS + 10):
+            now += 4000
+            await shared.retry_spooled_transcripts(now)
+
+    asyncio.run(sweeps())
+    assert len(fake.bodies) == spool.MAX_ATTEMPTS + 1   # the first save + its retries
+    assert list(spool.pending()) == []
+    assert len(list((box.parent / "pending_transcripts").glob("*" + spool.GAVE_UP_SUFFIX))) == 1
+
+
+def test_a_transient_server_error_is_still_retried(box, monkeypatch):
+    _ChatSave(monkeypatch, status=503)
+    asyncio.run(rt.save_session_to_blackbox(_session(RealtimeSession)))
+    [record] = list(spool.pending())
+    assert record["server_errors"] == 1, "the first save's 5xx counts"
+    fake = _ChatSave(monkeypatch, status=200)
+    counts = asyncio.run(shared.retry_spooled_transcripts(now=time.time() + 3600))
+    assert counts["saved"] == 1 and len(fake.bodies) == 1
+    assert list(spool.pending()) == []
+
+
 def test_startup_pass_retries_without_waiting_for_the_schedule(box, monkeypatch):
     _ChatSave(monkeypatch, status=503)
     asyncio.run(rt.save_session_to_blackbox(_session(RealtimeSession)))

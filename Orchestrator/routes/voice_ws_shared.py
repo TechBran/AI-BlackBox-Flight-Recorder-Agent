@@ -568,6 +568,13 @@ async def save_voice_transcript(operator: str, user_message: str,
     _SAVES_IN_FLIGHT.add(record["transcript_id"])
     try:
         status = await _post_chat_save(spool.chat_save_body(record), log_prefix)
+        if spooled and status is not None and status >= 500:
+            # The server may have appended the turns before failing: that
+            # counts toward the transcript's retry cap (see the spool module).
+            try:
+                await asyncio.to_thread(spool.write, spool.count_server_error(record, status))
+            except Exception as e:
+                print(f"{log_prefix} could not record the failed save in the spool: {e}")
     finally:
         _SAVES_IN_FLIGHT.discard(record["transcript_id"])
 
@@ -597,14 +604,17 @@ async def retry_spooled_transcripts(now: Optional[float] = None, *,
     arrived may have been minted all the same); otherwise POST it again. A 200
     removes it; a 4xx other than 408/429 is a refusal no retry can fix and
     parks it (kept on disk as *.rejected.json); anything else backs off
-    (1 min, doubling to 1 h). `ignore_schedule` (the startup pass) retries
+    (1 min, doubling to 1 h) until the spool's caps, then is parked as
+    *.gave-up.json (a 5xx may have appended the turns before failing, so a
+    transcript the server keeps failing is not re-posted forever).
+    `ignore_schedule` (the startup pass) retries
     entries whose backoff has not run out: the save they waited on died with
     the old process.
     """
     from Orchestrator import voice_transcript_spool as spool
 
     now = time.time() if now is None else now
-    counts = {"saved": 0, "already_saved": 0, "failed": 0, "rejected": 0}
+    counts = {"saved": 0, "already_saved": 0, "failed": 0, "rejected": 0, "gave_up": 0}
     records = await asyncio.to_thread(lambda: list(spool.pending()))
     for record in records:
         transcript_id = record["transcript_id"]
@@ -632,9 +642,17 @@ async def retry_spooled_transcripts(now: Optional[float] = None, *,
                       f"{record.get('session_id')} ({status}); parked as {parked.name}, "
                       f"not retried")
             else:
-                spool.mark_failed(record, now)
-                await asyncio.to_thread(spool.write, record)
-                counts["failed"] += 1
+                spool.mark_failed(record, now, status)
+                if spool.exhausted(record):
+                    parked = await asyncio.to_thread(spool.park, record, spool.GAVE_UP_SUFFIX)
+                    counts["gave_up"] += 1
+                    print(f"{prefix} gave up on the spooled transcript of "
+                          f"{record.get('session_id')} after {record['attempts']} retries "
+                          f"({record.get('server_errors', 0)} server errors); parked as "
+                          f"{parked.name}, not retried")
+                else:
+                    await asyncio.to_thread(spool.write, record)
+                    counts["failed"] += 1
         except Exception as e:
             print(f"[VOICE-SPOOL] retry of transcript {transcript_id} failed: {e}")
         finally:
