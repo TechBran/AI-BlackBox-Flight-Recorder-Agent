@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.aiblackbox.portal.data.model.UiMessage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -17,8 +19,16 @@ import java.io.File
  *
  * Portal equivalent: localStorage key "bb_history_{operator}"
  * Max items: 100 (matches Portal MAX_HISTORY_ITEMS)
+ *
+ * Writes are atomic ([AtomicTextFile]: temp sibling, fsync, rename), so a kill
+ * mid-save can no longer truncate the file, and a file that does not parse is
+ * moved aside as `history_<op>.json.corrupt-<millis>` instead of loading as
+ * empty and then being overwritten by the next save (audit
+ * A09-data-local-model-11).
  */
-class ChatHistoryStore(private val context: Context) {
+class ChatHistoryStore internal constructor(private val dirProvider: () -> File) {
+
+    constructor(context: Context) : this({ File(context.filesDir, DIR_NAME) })
 
     companion object {
         private const val TAG = "ChatHistory"
@@ -33,7 +43,11 @@ class ChatHistoryStore(private val context: Context) {
     }
 
     private val historyDir: File
-        get() = File(context.filesDir, DIR_NAME).also { it.mkdirs() }
+        get() = dirProvider().also { it.mkdirs() }
+
+    /** One file operation at a time: the temp sibling has a fixed name, and a
+     *  quarantine or clear must not interleave with a save. Not reentrant. */
+    private val fileLock = Mutex()
 
     private fun fileForOperator(operator: String): File {
         val safe = operator.replace(Regex("[^a-zA-Z0-9_-]"), "_")
@@ -51,14 +65,24 @@ class ChatHistoryStore(private val context: Context) {
             val text = file.readText()
             if (text.isBlank()) return@withContext emptyList()
 
-            val messages = json.decodeFromString<List<UiMessage>>(text)
+            val messages = try {
+                json.decodeFromString<List<UiMessage>>(text)
+            } catch (e: Exception) {
+                // Truncated, or an older schema (e.g. provenance once a String):
+                // keep the bytes aside so the next save cannot destroy them --
+                // unless a save replaced them since they were read.
+                val moved = fileLock.withLock {
+                    if (file.exists() && file.readText() == text) AtomicTextFile.quarantine(file) else null
+                }
+                Log.e(TAG, "History for $operator does not parse (${e.message}); moved aside to ${moved?.name}")
+                return@withContext emptyList()
+            }
             Log.d(TAG, "Loaded ${messages.size} messages for $operator")
 
             // Filter out any streaming/thinking artifacts from a crash
             messages.filter { !it.isStreaming && !it.isThinking }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load history for $operator: ${e.message}")
-            Log.w(TAG, "Possible cause: provenance schema upgraded from String to Provenance — old persisted history is no longer parseable. Stale history will reset to empty.")
             emptyList()
         }
     }
@@ -74,7 +98,7 @@ class ChatHistoryStore(private val context: Context) {
                 .takeLast(MAX_HISTORY_ITEMS)
 
             val text = json.encodeToString(toSave)
-            fileForOperator(operator).writeText(text)
+            fileLock.withLock { AtomicTextFile.write(fileForOperator(operator), text) }
             Log.d(TAG, "Saved ${toSave.size} messages for $operator")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save history for $operator: ${e.message}")
@@ -86,7 +110,7 @@ class ChatHistoryStore(private val context: Context) {
      */
     suspend fun clear(operator: String) = withContext(Dispatchers.IO) {
         try {
-            fileForOperator(operator).delete()
+            fileLock.withLock { fileForOperator(operator).delete() }
             Log.d(TAG, "Cleared history for $operator")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to clear history for $operator: ${e.message}")
@@ -98,7 +122,7 @@ class ChatHistoryStore(private val context: Context) {
      */
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         try {
-            historyDir.listFiles()?.forEach { it.delete() }
+            fileLock.withLock { historyDir.listFiles()?.forEach { it.delete() } }
             Log.d(TAG, "Cleared all history")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to clear all history: ${e.message}")
