@@ -60,6 +60,8 @@ import com.aiblackbox.portal.data.repository.TtsQueue
 import com.aiblackbox.portal.data.repository.TtsQueueFailedException
 import com.aiblackbox.portal.data.repository.TtsQueueUnavailableException
 import com.aiblackbox.portal.data.repository.TtsRepository
+import com.aiblackbox.portal.data.repository.transcribeUploadedRecording
+import com.aiblackbox.portal.data.repository.uploadFileName
 import com.aiblackbox.portal.data.location.LocationPermissionUx
 import com.aiblackbox.portal.data.location.LocationProvider
 import com.aiblackbox.portal.data.notifications.NotificationPermissionUx
@@ -1225,9 +1227,11 @@ class NativeMainActivity : ComponentActivity() {
                                         val uploadedUrls = alreadyUploaded.toMutableList()
                                         for (item in toUpload) {
                                             try {
-                                                // Copy URI content to temp file
+                                                // Copy URI content to temp file. The name keeps (or gains,
+                                                // from the MIME type) an extension: /upload stores the file
+                                                // under it and the chat part is typed from it (W13).
                                                 val tempFile = withContext(Dispatchers.IO) {
-                                                    val f = File(cacheDir, "upload_${System.currentTimeMillis()}_${item.name}")
+                                                    val f = File(cacheDir, "upload_${System.currentTimeMillis()}_${uploadFileName(item.name, item.mimeType)}")
                                                     applicationContext.contentResolver.openInputStream(item.uri)?.use { input ->
                                                         f.outputStream().use { output -> input.copyTo(output) }
                                                     }
@@ -1290,7 +1294,9 @@ class NativeMainActivity : ComponentActivity() {
                                 if (isRawAudioRecording) {
                                     // Stop recording — matches Portal gemini-recorder.js pipeline:
                                     // 1. Upload audio to /upload
-                                    // 2. Transcribe via /stt (Whisper) → insert text in prompt
+                                    // 2. Transcribe via /stt by that upload's URL (the bytes go up
+                                    //    once; a box without the url form gets the file) → insert
+                                    //    text in prompt
                                     // 3. Add as attachment so it's sent as audio_url to Gemini
                                     isRawAudioRecording = false
                                     Toast.makeText(applicationContext, "Processing audio...", Toast.LENGTH_SHORT).show()
@@ -1314,10 +1320,10 @@ class NativeMainActivity : ComponentActivity() {
                                                         preUploadedUrls.add(fullUrl)
                                                     }
 
-                                                    // Step 2: Transcribe via Whisper STT
+                                                    // Step 2: Transcribe the stored upload (no second upload)
                                                     try {
                                                         val sttResponse = withContext(Dispatchers.IO) {
-                                                            api.uploadFile("/stt", file)
+                                                            transcribeUploadedRecording(api, url, file)
                                                         }
                                                         val sttObj = jsonParser.parseToJsonElement(sttResponse).jsonObject
                                                         val transcript = sttObj["text"]?.jsonPrimitive?.content?.trim()

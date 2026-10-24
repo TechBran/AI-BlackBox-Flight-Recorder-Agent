@@ -853,21 +853,46 @@ async def tts_stitch(chunks: List[UploadFile] = File(...)):
     return StreamingResponse(iter([combined]), media_type="audio/wav")
 
 
+# Content type for a recording /stt reads from Portal/uploads by url (the
+# multipart path takes the client's). Unknown audio types go as generic binary.
+_STT_MIME_BY_EXT = {
+    ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "audio/mp4",
+    ".aac": "audio/aac", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/opus",
+    ".flac": "audio/flac", ".webm": "audio/webm",
+}
+
+
 @app.post("/stt")
 async def stt(
-    file: UploadFile = File(...),
+    file: UploadFile = File(None),
     provider: str = Form(None),
     diarize: bool = Form(False),
+    url: str = Form(None),
 ):
+    """Transcribe a multipart `file`, or by `url` a recording /upload already
+    stored (so a client that attached it does not send the bytes twice; audit
+    W13). The url resolves inside Portal/uploads and must be an audio file."""
     from Orchestrator.stt.file_transcribe import transcribe_bytes
     from Orchestrator.stt.resolve import resolve_stt_provider
-    try:
-        audio_bytes = await file.read()
-    except Exception as e:
-        raise HTTPException(400, f"Failed to read upload: {e}")
-
-    filename = file.filename or "audio.webm"
-    content_type = file.content_type or "audio/webm"
+    if file is not None:
+        try:
+            audio_bytes = await file.read()
+        except Exception as e:
+            raise HTTPException(400, f"Failed to read upload: {e}")
+        filename = file.filename or "audio.webm"
+        content_type = file.content_type or "audio/webm"
+    elif url:
+        try:
+            path = resolve_upload_path(url, allowed_exts=AUDIO_EXTS)
+        except UploadNotFoundError as e:
+            raise HTTPException(404, str(e))
+        except UploadPathError as e:
+            raise HTTPException(400, f"Audio url refused: {e}")
+        audio_bytes = await asyncio.to_thread(path.read_bytes)
+        filename = path.name
+        content_type = _STT_MIME_BY_EXT.get(path.suffix.lower(), "application/octet-stream")
+    else:
+        raise HTTPException(400, "Send the audio as a multipart 'file' or name an upload with 'url'.")
 
     # Diarized rich payload only when ElevenLabs is the resolved provider AND the
     # caller explicitly asked for diarization. Back-compat: flat `text` stays at

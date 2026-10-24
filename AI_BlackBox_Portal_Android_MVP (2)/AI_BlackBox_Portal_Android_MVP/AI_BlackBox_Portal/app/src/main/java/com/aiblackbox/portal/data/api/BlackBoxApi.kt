@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -155,6 +156,24 @@ class BlackBoxApi(private val baseUrl: String) {
     suspend fun post(path: String, body: String): String {
         val request = buildRequest(path)
             .post(body.toRequestBody(jsonMediaType))
+            .build()
+        return client.newCall(request).await().use { response ->
+            if (!response.isSuccessful) throw errorFor(response)
+            response.body?.string() ?: ""
+        }
+    }
+
+    /**
+     * Form POST (application/x-www-form-urlencoded) of plain [fields], for
+     * FastAPI `Form(...)` routes that need no file part, e.g. `/stt` with
+     * `url=` naming an upload already on the box. Non-2xx throws
+     * [ApiHttpException], as [uploadFile] does.
+     */
+    suspend fun postForm(path: String, fields: Map<String, String>): String {
+        val form = FormBody.Builder()
+        fields.forEach { (key, value) -> form.add(key, value) }
+        val request = buildRequest(path)
+            .post(form.build())
             .build()
         return client.newCall(request).await().use { response ->
             if (!response.isSuccessful) throw errorFor(response)
