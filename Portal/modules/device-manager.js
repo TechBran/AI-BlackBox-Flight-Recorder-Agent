@@ -3,7 +3,7 @@
  * Device Manager — browse, pair, connect, and control mesh devices
  */
 
-import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr, createPoller } from './core-utils.js';
 
 // =============================================================================
 // State
@@ -800,15 +800,15 @@ function escapeHtml(str) {
 
 function _startPolling() {
     _stopPolling();
-    _pollInterval = setInterval(() => {
-        refreshDeviceList();
-        refreshSubscriptions();
-    }, 10000);
+    // createPoller: paused while the page is hidden, never overlapping.
+    _pollInterval = createPoller(() => Promise.all([refreshDeviceList(), refreshSubscriptions()]),
+        { intervalMs: 10000, immediate: false });
+    _pollInterval.start();
 }
 
 function _stopPolling() {
     if (_pollInterval) {
-        clearInterval(_pollInterval);
+        _pollInterval.stop();
         _pollInterval = null;
     }
 }

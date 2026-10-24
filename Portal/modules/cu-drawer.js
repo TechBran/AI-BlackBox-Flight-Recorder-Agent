@@ -11,7 +11,7 @@
  */
 
 import { stopCUTask, newCUSession } from './chat-send.js';
-import { toast } from './core-utils.js';
+import { toast, createPoller } from './core-utils.js';
 import { getOperator } from './state-management.js';
 
 // =============================================================================
@@ -488,9 +488,11 @@ function _attachDrawer() {
     fetch('/devices/sync-tailscale', { method: 'POST' }).catch(() => {});
     _populateDevices();
 
-    // Auto-refresh device list every 30 seconds for live updates
-    if (_deviceRefreshInterval) clearInterval(_deviceRefreshInterval);
-    _deviceRefreshInterval = setInterval(_populateDevices, 30000);
+    // Auto-refresh device list every 30 seconds for live updates (createPoller:
+    // paused while the page is hidden)
+    if (_deviceRefreshInterval) _deviceRefreshInterval.stop();
+    _deviceRefreshInterval = createPoller(_populateDevices, { intervalMs: 30000, immediate: false });
+    _deviceRefreshInterval.start();
 
     // Preflight environment check (async, non-blocking, once per attach)
     _fetchPreflight(_drawer);
@@ -528,7 +530,7 @@ function _attachDrawer() {
 function _detachDrawer() {
     // Stop auto-refresh when drawer is removed
     if (_deviceRefreshInterval) {
-        clearInterval(_deviceRefreshInterval);
+        _deviceRefreshInterval.stop();
         _deviceRefreshInterval = null;
     }
     const drawer = document.getElementById('cuDrawer');

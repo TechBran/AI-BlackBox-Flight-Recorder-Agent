@@ -457,7 +457,8 @@ function _startCULiveViewPolling(panel) {
     // Clear any existing timer
     _stopCULiveViewPolling();
 
-    _cuLiveViewPollTimer = setInterval(async () => {
+    // createPoller: paused while the page is hidden, never overlapping.
+    _cuLiveViewPollTimer = createPoller(async () => {
         // Skip if interactive modal is open (it polls at 1.5s already)
         if (isInteractOpen()) return;
         // Skip if panel was marked complete (session ended)
@@ -484,12 +485,13 @@ function _startCULiveViewPolling(panel) {
         } finally {
             _cuLiveViewFetching = false;
         }
-    }, CU_LIVE_VIEW_POLL_MS);
+    }, { intervalMs: CU_LIVE_VIEW_POLL_MS, immediate: false });
+    _cuLiveViewPollTimer.start();
 }
 
 function _stopCULiveViewPolling() {
     if (_cuLiveViewPollTimer) {
-        clearInterval(_cuLiveViewPollTimer);
+        _cuLiveViewPollTimer.stop();
         _cuLiveViewPollTimer = null;
     }
 }
@@ -3083,9 +3085,8 @@ export async function checkCUBackgroundStatus() {
             _cuTodoDescribe('Running in background...', 'Background task');
             // Poll every 3s while running
             if (!_cuStatusPollTimer) {
-                _cuStatusPollTimer = setInterval(async () => {
-                    await _pollCUStatus();
-                }, 3000);
+                _cuStatusPollTimer = createPoller(_pollCUStatus, { intervalMs: 3000, immediate: false });
+                _cuStatusPollTimer.start();
             }
         } else if (status.status === 'complete' && status.final_response) {
             // Check if this result is already in local history
@@ -3136,7 +3137,7 @@ async function _pollCUStatus() {
         } else {
             // Task finished — stop polling and update UI
             if (_cuStatusPollTimer) {
-                clearInterval(_cuStatusPollTimer);
+                _cuStatusPollTimer.stop();
                 _cuStatusPollTimer = null;
             }
             if (status.status === 'complete') {
@@ -3187,7 +3188,7 @@ function _removeCUBackgroundBanner() {
     const banner = document.getElementById('cu-bg-banner');
     if (banner) banner.remove();
     if (_cuStatusPollTimer) {
-        clearInterval(_cuStatusPollTimer);
+        _cuStatusPollTimer.stop();
         _cuStatusPollTimer = null;
     }
     todoTracker.clear();

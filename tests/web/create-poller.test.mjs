@@ -172,3 +172,15 @@ test("a tick may stop its own poller (self-stopping media sweeps)", async () => 
     assert.equal(calls, 3, "and start() revives it");
     p.stop();
 });
+
+test("the Portal's network pollers run on createPoller, not bare setInterval", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const { PORTAL } = await import("./helpers/portal-dom.mjs");
+    const { stripComments } = await import("./helpers/sink-scan.mjs");
+    const modules = ["ui-setup", "app-init", "task-manager", "chat-send", "cellular-manager",
+        "cron-manager", "telephony-manager", "device-manager", "cu-interact"];
+    const offenders = modules.filter((m) =>
+        /\bsetInterval\s*\(/.test(stripComments(readFileSync(resolve(PORTAL, "modules", `${m}.js`), "utf8"))));
+    assert.deepEqual(offenders, [], "a bare setInterval polls a hidden tab forever and overlaps slow requests");
+});

@@ -43,9 +43,13 @@ let _dispatchersInstalled = false;
  * Take the microphone for `owner`, stopping whoever holds it now.
  * @param {string} owner - A stable module id ('dictation', 'realtime', ...)
  * @param {() => (void|Promise<void>)} [release] - Called when ANOTHER owner claims
+ * @param {object} [opts]
+ * @param {number} [opts.settleMs=200] - Pause after a release, so the device is
+ *   actually free before the new owner opens it (Android WebView capture
+ *   otherwise fails with NotReadableError; the old per-module checks waited too)
  * @returns {Promise<void>} Resolves once the previous owner has let go
  */
-export async function claimMic(owner, release = null) {
+export async function claimMic(owner, release = null, { settleMs = 200 } = {}) {
     const previous = _owner;
     _owner = { id: owner, release };
     if (previous && previous.id !== owner && typeof previous.release === 'function') {
@@ -54,6 +58,7 @@ export async function claimMic(owner, release = null) {
         } catch (e) {
             console.warn(`[MIC] ${previous.id} failed to release the mic for ${owner}:`, e);
         }
+        if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs));
     }
 }
 

@@ -5,7 +5,7 @@
  * Captures click, keyboard, and scroll events and sends them to the backend.
  */
 
-import { $ } from './core-utils.js';
+import { $, createPoller } from './core-utils.js';
 import { getCUDeviceId, getCUSessionId } from './cu-drawer.js';
 import {
     createFallbackViewport, fallbackTransformCss, mapViewToScreenshot,
@@ -275,8 +275,9 @@ export function open(initialScreenshotUrl, deviceId) {
 
     _fetchDisplayResolution();
     _syncViewport();
-    refreshScreenshot();
-    pollingInterval = setInterval(refreshScreenshot, POLL_MS);
+    // createPoller: the first tick refreshes now; paused while the page is hidden.
+    pollingInterval = createPoller(refreshScreenshot, { intervalMs: POLL_MS });
+    pollingInterval.start();
     document.addEventListener('keydown', globalEscHandler);
     window.addEventListener('resize', _syncViewport);
 }
@@ -288,7 +289,7 @@ export function close() {
     modal.classList.remove('open');
 
     if (pollingInterval) {
-        clearInterval(pollingInterval);
+        pollingInterval.stop();
         pollingInterval = null;
     }
 
