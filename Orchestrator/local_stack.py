@@ -28,6 +28,8 @@ import configparser
 import json
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from urllib.parse import quote as _quote
 
@@ -160,9 +162,169 @@ def is_healthy(timeout: "httpx.Timeout | None" = None) -> bool:
 
 def should_route_onbox(cap: str) -> bool:
     """The shared on-box availability signal for each capability's resolver:
-    `cap` is seeded on-box (D2) AND the stack is reachable now. The resolver
-    MUST honor an explicit credentialed user pick BEFORE calling this."""
-    return enabled(cap) and is_healthy()
+    `cap` is seeded on-box (D2), nothing says it is broken right now
+    (capability_problem: an open breaker, or a dead GPU driver for a GPU-only
+    capability) AND the stack is reachable now. The resolver MUST honor an
+    explicit credentialed user pick BEFORE calling this."""
+    return enabled(cap) and capability_problem(cap) is None and is_healthy()
+
+
+# ── capability signal, ADDITIVE to liveness (2026-08-11 plan Task 6) ──────────
+#
+# is_healthy() stays process liveness (the anti-flap invariant above). It
+# cannot see a member that fails every request: in the Aug 7-11 outage the
+# llama-swap front door answered 200 while every on-box synthesis 500'd and
+# STT ran on CPU, and nothing routed differently for four days (audit W11 /
+# O19-local-stack-05). Two signals sit beside it, and only the per-capability
+# gates read them (qwen_tts._tts_available, stt.resolve.onbox_stt_available,
+# should_route_onbox) — never is_healthy(), which every retrieval consumer
+# treats as "the whole stack is down":
+#   gpu_ready()   the hardware probe's driver state (60 s cached, local).
+#   the breaker   real request outcomes per capability: BREAKER_THRESHOLD
+#                 consecutive capability failures (a 5xx, a transport error),
+#                 or one fatal one (the member said it has no GPU), open it for
+#                 a cooldown. A group swap cannot open it: swap-time requests
+#                 WAIT in llama-swap's queue and succeed. Contention (429, a
+#                 VRAM 503) and bad requests (4xx) are not failures.
+# An open breaker makes the capability report unavailable FAST and LOUDLY (one
+# [LOCAL STACK] line per trip, plus the reason in /local-models/status). It
+# never picks another provider: the resolvers announce any substitution
+# (Track D), and with nothing else configured the request fails with the reason.
+
+# Capabilities that cannot run at all without the NVIDIA driver (plan D4: no
+# CPU fallback for Qwen TTS — a 30 s reply would take 5-20 minutes). STT,
+# embeddings and rerank still work on CPU, slowly; they stay available.
+GPU_REQUIRED_CAPS = ("tts",)
+
+BREAKER_THRESHOLD = 3
+BREAKER_COOLDOWN_S = 60.0
+BREAKER_COOLDOWN_MAX_S = 900.0
+_BREAKER_ERROR_MAX = 300
+
+_breaker_clock = time.monotonic  # test seam
+_breakers: "dict[str, dict]" = {}
+_breaker_lock = threading.Lock()
+
+
+def _check_cap(cap: str) -> None:
+    if cap not in CAPABILITIES:
+        raise ValueError(f"unknown local-stack capability {cap!r}; one of {CAPABILITIES}")
+
+
+def _breaker_phase(b: dict, now: float) -> str:
+    if b["opened_at"] is None:
+        return "closed"
+    if now - b["opened_at"] < b["cooldown_s"]:
+        return "open"
+    return "half_open"
+
+
+def report_failure(cap: str, error: str, *, fatal: bool = False) -> None:
+    """Record one real on-box `cap` request that failed in a way that says the
+    capability is broken. The BREAKER_THRESHOLD-th consecutive failure — or the
+    first `fatal` one — opens the breaker for its cooldown; a failure while
+    half-open (the one request let through after a cooldown) re-opens it at
+    twice the cooldown, capped at BREAKER_COOLDOWN_MAX_S. Logs ONE error line
+    per trip. Raises ValueError only for an unknown capability."""
+    _check_cap(cap)
+    error = str(error)[:_BREAKER_ERROR_MAX]
+    now = _breaker_clock()
+    with _breaker_lock:
+        b = _breakers.setdefault(cap, {"failures": 0, "opened_at": None,
+                                       "cooldown_s": BREAKER_COOLDOWN_S, "trips": 0,
+                                       "last_error": None})
+        b["failures"] += 1
+        b["last_error"] = error
+        phase = _breaker_phase(b, now)
+        if phase == "open":
+            return
+        if phase == "half_open":
+            b["cooldown_s"] = min(b["cooldown_s"] * 2, BREAKER_COOLDOWN_MAX_S)
+        elif not fatal and b["failures"] < BREAKER_THRESHOLD:
+            return
+        b["opened_at"] = now
+        b["trips"] += 1
+        failures, cooldown = b["failures"], b["cooldown_s"]
+    logger.error(
+        "[LOCAL STACK] %s degraded: %s — on-box %s reports unavailable for %ds "
+        "(%d consecutive failure%s); requests are refused with this reason, "
+        "never silently moved to another provider",
+        cap, error, cap, int(cooldown), failures, "" if failures == 1 else "s")
+
+
+def report_success(cap: str) -> None:
+    """Record one real on-box `cap` request that worked: closes the breaker and
+    resets its cooldown. Silent unless it was open (then one recovery line)."""
+    _check_cap(cap)
+    with _breaker_lock:
+        b = _breakers.get(cap)
+        if b is None or (b["failures"] == 0 and b["opened_at"] is None):
+            return
+        recovered = b["opened_at"] is not None
+        b.update(failures=0, opened_at=None, cooldown_s=BREAKER_COOLDOWN_S)
+    if recovered:
+        logger.warning("[LOCAL STACK] %s recovered: an on-box request succeeded "
+                       "after the breaker opened", cap)
+
+
+def breaker_state(cap: str) -> dict:
+    """{"state": "closed"|"open"|"half_open", "consecutive_failures": int,
+    "last_error": str|None, "retry_in_s": int|None (open only), "trips": int}
+    for GET /local-models/status. Raises ValueError for an unknown capability."""
+    _check_cap(cap)
+    now = _breaker_clock()
+    with _breaker_lock:
+        b = dict(_breakers.get(cap) or {"failures": 0, "opened_at": None,
+                                        "cooldown_s": BREAKER_COOLDOWN_S, "trips": 0,
+                                        "last_error": None})
+    phase = _breaker_phase(b, now)
+    retry = (max(0, int(round(b["opened_at"] + b["cooldown_s"] - now)))
+             if phase == "open" else None)
+    return {"state": phase, "consecutive_failures": b["failures"],
+            "last_error": b["last_error"], "retry_in_s": retry, "trips": b["trips"]}
+
+
+def capability_ok(cap: str) -> bool:
+    """False only while `cap`'s breaker is open (half-open lets a probe through)."""
+    return breaker_state(cap)["state"] != "open"
+
+
+def reset_breakers() -> None:
+    """Forget every breaker (tests; a service restart does the same)."""
+    with _breaker_lock:
+        _breakers.clear()
+
+
+def gpu_ready() -> dict:
+    """{"ok": bool, "reason": str|None} — can the on-box members use the GPU?
+    Sourced from hardware.probe()'s driver_ok (60 s cached, local commands
+    only, so it is safe on a catalog-render path: it never wakes a llama-swap
+    group). Fails OPEN: ok unless the probe positively reports a dead driver
+    (driver_ok False), so a CPU-only box, a card with no driver installed, or
+    a probe error disables nothing. Never raises."""
+    try:
+        from Orchestrator import hardware  # stdlib-only import; cycle-proof
+        hw = hardware.probe()
+    except Exception:
+        return {"ok": True, "reason": None}
+    if hw.get("driver_ok") is False:
+        return {"ok": False, "reason": hw.get("gpu_reason") or "NVIDIA driver not responding"}
+    return {"ok": True, "reason": None}
+
+
+def capability_problem(cap: str) -> "str | None":
+    """Why on-box `cap` must be reported unavailable right now, or None. Read
+    by the TTS and STT gates and should_route_onbox(); liveness (is_healthy)
+    and seeding (enabled) are checked separately by those callers."""
+    st = breaker_state(cap)
+    if st["state"] == "open":
+        return (f"on-box {cap} is failing ({st['last_error']}); retrying in "
+                f"{st['retry_in_s']}s")
+    if cap in GPU_REQUIRED_CAPS:
+        gpu = gpu_ready()
+        if not gpu["ok"]:
+            return f"on-box {cap} needs the GPU: {gpu['reason']}"
+    return None
 
 
 def running_members(timeout: "httpx.Timeout | None" = None) -> "list[dict] | None":
@@ -423,6 +585,12 @@ def resolve_whisper_fit() -> "dict | None":
         return None
     if not hw.get("gpu"):
         # CPU-only — the int8 floor tier (best that fits with no GPU).
+        return WHISPER_FIT[-1]
+    if hw.get("driver_ok") is False:
+        # Card on the bus, driver dead: Speaches runs on CPU, so the box gets
+        # the CPU floor, not the float16 flagship (plan Task 7 — the Aug outage
+        # served large-v3 on CPU at 10-21 s per utterance). `is False`, not
+        # falsiness: a probe without the key keeps the unverifiable-VRAM path.
         return WHISPER_FIT[-1]
     vram = hw.get("vram_mb")
     if not isinstance(vram, int):

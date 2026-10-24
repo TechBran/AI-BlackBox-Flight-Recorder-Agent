@@ -54,15 +54,39 @@ def local_streaming_stt_available() -> bool:
 
 def onbox_stt_available() -> bool:
     """True iff the on-box local stack is installed+healthy AND STT is enabled in
-    [local_models]. Independent of the custom-server registry (local_stt_available)
+    [local_models] AND the stt capability is not known broken (its
+    local_stack breaker is open after repeated real failures — a front door
+    that answers 200 over a Speaches member that 500s used to keep resolving
+    'onbox'). Independent of the custom-server registry (local_stt_available)
     so on a fresh on-box-only box the on-box Speaches member is reachable. Lazy
-    import + fail-soft: a missing/broken local_stack never breaks STT resolution."""
+    import + fail-soft: a missing/broken local_stack never breaks STT
+    resolution, and one that predates the capability signal (getattr) leaves
+    the old answer. A False here never moves STT anywhere silently: the
+    resolver names the dropped pick (Track D)."""
     try:
         import importlib
         local_stack = importlib.import_module("Orchestrator.local_stack")
-        return bool(local_stack.is_healthy() and local_stack.enabled("stt"))
+        problem = getattr(local_stack, "capability_problem", None)
+        return bool(local_stack.is_healthy() and local_stack.enabled("stt")
+                    and (problem is None or problem("stt") is None))
     except Exception:
         return False
+
+
+def onbox_stt_degraded() -> "str | None":
+    """Why on-box STT is running degraded, or None: the GPU driver is dead, so
+    Speaches runs on CPU (the CPU-floor whisper tier, seconds per utterance).
+    STT still WORKS that way, so this marks the catalog entry rather than
+    removing it (plan Task 10; TTS, which has no CPU path, is removed).
+    Fail-soft: None on any error."""
+    try:
+        from Orchestrator import local_stack
+        gpu = local_stack.gpu_ready()
+    except Exception:
+        return None
+    if gpu.get("ok", True):
+        return None
+    return f"running on CPU: {gpu.get('reason')}"
 
 
 def _fresh_stt_provider():

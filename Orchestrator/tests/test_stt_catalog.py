@@ -49,6 +49,29 @@ def test_onbox_provider_absent_when_unavailable(monkeypatch):
     assert "onbox" not in {p["id"] for p in build_stt_catalog()}
 
 
+def test_onbox_provider_marked_degraded_when_the_gpu_driver_is_dead(monkeypatch):
+    """STT still works on CPU, so the entry stays (unlike the TTS group) but
+    says so: the Aug outage looked like a healthy GPU box for four days
+    (plan Task 10). Additive keys; the blurb carries the reason too."""
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: True)
+    monkeypatch.setattr(stt_catalog, "onbox_stt_degraded",
+                        lambda: "running on CPU: NVIDIA driver not responding")
+    g = {p["id"]: p for p in build_stt_catalog()}
+    assert g["onbox"]["available"] is True
+    assert g["onbox"]["degraded"] is True
+    assert g["onbox"]["degraded_reason"] == "running on CPU: NVIDIA driver not responding"
+    assert "NVIDIA driver not responding" in g["onbox"]["blurb"]
+
+
+def test_onbox_provider_not_degraded_normally(monkeypatch):
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)
+    monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: True)
+    monkeypatch.setattr(stt_catalog, "onbox_stt_degraded", lambda: None)
+    g = {p["id"]: p for p in build_stt_catalog()}
+    assert g["onbox"]["degraded"] is False and g["onbox"]["degraded_reason"] is None
+
+
 def test_catalog_route_ok(monkeypatch):
     monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)  # hermetic vs registry
     monkeypatch.setattr(stt_catalog, "onbox_stt_available", lambda: False)  # hermetic vs on-box stack

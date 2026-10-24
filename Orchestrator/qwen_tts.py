@@ -67,12 +67,71 @@ QWEN_STREAM_TIER_NOTE = (
 # importable in a unit test).
 # --------------------------------------------------------------------------
 def _tts_available() -> bool:
-    """True when the on-box stack is healthy AND TTS is enabled."""
+    """True when TTS is enabled, nothing says on-box TTS is broken right now
+    (local_stack.capability_problem: an open tts breaker, or a dead GPU driver
+    — Qwen TTS has no CPU path, plan D4) AND the stack is healthy. Feeds the
+    catalog group, the /tts/queue 503 gate and the Voice Lab zone, so a box
+    whose GPU died stops advertising voices that 500 on every synthesis
+    (plan Task 10). getattr: a half-pulled deploy whose local_stack predates
+    the capability signal must not turn this bare except into "TTS off"."""
     try:
         from Orchestrator import local_stack
-        return bool(local_stack.is_healthy() and local_stack.enabled("tts"))
+        problem = getattr(local_stack, "capability_problem", None)
+        return bool(local_stack.enabled("tts")
+                    and (problem is None or problem("tts") is None)
+                    and local_stack.is_healthy())
     except Exception:
         return False
+
+
+class QwenCapabilityUnavailable(RuntimeError):
+    """On-box TTS cannot work right now: the member answered 503 code
+    "no_gpu" (NVIDIA driver not loaded), or local_stack reports the tts
+    capability broken (breaker open / GPU driver dead) so the request was not
+    sent. A hardware fault, so tts_queue._is_transient never retries it —
+    distinguished by TYPE, never by matching r.text. A VRAM 503 (code "vram")
+    stays a plain RuntimeError: contention IS retryable (plan Task 9)."""
+
+
+def _refuse_if_broken() -> None:
+    """Raise QwenCapabilityUnavailable, before any request, when local_stack
+    says on-box TTS is broken — fast and with the reason, instead of another
+    5-minute wait on a member that 500s (the breaker's half-open state lets
+    one request through after each cooldown)."""
+    from Orchestrator import local_stack
+    problem = getattr(local_stack, "capability_problem", None)
+    reason = problem("tts") if problem is not None else None
+    if reason:
+        raise QwenCapabilityUnavailable(reason)
+
+
+def _error_code(r) -> "str | None":
+    """The member's machine-readable error code ("no_gpu" | "vram" |
+    "internal"), or None for an older member / a non-JSON body."""
+    try:
+        body = r.json()
+    except Exception:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def _report(r) -> None:
+    """Feed one member response into the local_stack tts breaker: 200 is a
+    success; a 5xx is a capability failure (a "no_gpu" 503 a fatal one);
+    contention (429, a "vram" 503) and bad requests (other 4xx) are neither."""
+    from Orchestrator import local_stack
+    status = r.status_code
+    if status == 200:
+        local_stack.report_success("tts")
+        return
+    if status < 500:
+        return
+    code = _error_code(r)
+    if code == "vram":
+        return
+    local_stack.report_failure("tts", f"HTTP {status}: {(r.text or '')[:200]}",
+                               fatal=(code == "no_gpu"))
 
 
 def _base_url() -> str:
@@ -199,17 +258,24 @@ _sleep = time.sleep
 def _post_retry_429(do_post) -> "requests.Response":
     """Run do_post() and retry 429s with capped exponential backoff until the
     QWEN_TTS_429_DEADLINE_S budget is spent; then return the last response
-    (callers surface the 429 like any other non-200)."""
+    (callers surface the 429 like any other non-200). The final outcome — and
+    a transport error, which is re-raised — feeds the tts breaker (_report)."""
     deadline = _429_deadline_s()
     start = _monotonic()
     attempts = 0
     while True:
-        r = do_post()
+        try:
+            r = do_post()
+        except requests.exceptions.RequestException as exc:
+            from Orchestrator import local_stack
+            local_stack.report_failure("tts", f"{type(exc).__name__}: {exc}")
+            raise
         if r.status_code == 429 and (_monotonic() - start) < deadline:
             attempts += 1
             _sleep(min(_QWEN_429_BACKOFF_BASE * (2 ** (attempts - 1)),
                        _QWEN_429_BACKOFF_MAX))
             continue
+        _report(r)
         return r
 
 
@@ -226,7 +292,12 @@ def synthesize(voice: str, text: str, response_format: str = "wav",
     NB: the M6 server emits WAV/PCM only — its /v1/audio/speech 400s any
     response_format not in ('wav','pcm') (Task 6.4, `test_speech_bad_format_400`).
     Default 'wav' (a proper RIFF container the browser plays); callers pass
-    'wav'/'pcm', never 'mp3'/'opus' (there is no mp3/opus encoder in the server)."""
+    'wav'/'pcm', never 'mp3'/'opus' (there is no mp3/opus encoder in the server).
+
+    Raises QwenCapabilityUnavailable WITHOUT posting while local_stack reports
+    on-box TTS broken (open breaker / dead GPU driver); every response and
+    transport error feeds that breaker."""
+    _refuse_if_broken()
     req = {
         "model": QWEN_TTS_MODEL,
         "input": text,
@@ -268,8 +339,13 @@ def synthesize_batch(voice: str, texts: List[str],
     the former and surfaces the latter. 429s back off exactly like
     synthesize() (deadline-based). Timeout scales with the batch size: the
     member holds ONE request for the whole reply (sub-batched internally), so
-    the flat 300s single-chunk budget gets a per-chunk allowance on top."""
+    the flat 300s single-chunk budget gets a per-chunk allowance on top.
+
+    QwenCapabilityUnavailable (a RuntimeError the TTS queue does NOT retry)
+    instead of RuntimeError when the member says it has no GPU, or when
+    local_stack already reports on-box TTS broken (then nothing is sent)."""
     import base64
+    _refuse_if_broken()
     req = {
         "model": QWEN_TTS_MODEL,
         "inputs": list(texts),
@@ -282,7 +358,11 @@ def synthesize_batch(voice: str, texts: List[str],
     if r.status_code in (404, 405):
         raise QwenBatchUnsupported(f"member has no batch endpoint (HTTP {r.status_code})")
     if r.status_code != 200:
-        raise RuntimeError(f"Qwen TTS batch failed (HTTP {r.status_code}): {r.text[:200]}")
+        # blackbox.service's stdout is journald; llama-swap forwards none of
+        # the member's own logs, so this line is where the reason survives.
+        print(f"[QWEN-TTS] synth failed HTTP {r.status_code}: {(r.text or '')[:400]}")
+        err = QwenCapabilityUnavailable if _error_code(r) == "no_gpu" else RuntimeError
+        raise err(f"Qwen TTS batch failed (HTTP {r.status_code}): {r.text[:200]}")
     data = r.json()
     wavs = data.get("wavs_b64")
     if not isinstance(wavs, list) or len(wavs) != len(texts):

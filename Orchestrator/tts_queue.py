@@ -123,9 +123,16 @@ def _unregister_handle(task_id: str) -> None:
 
 def _is_transient(exc: BaseException) -> bool:
     """Transient = worth ONE automatic retry: RuntimeError (incl. the
-    429-exhausted RuntimeError synthesize_batch raises), any requests
-    transport error, and timeouts. ValueError et al. (bad input) are not."""
+    429-exhausted RuntimeError synthesize_batch raises, and a VRAM 503 —
+    another member may unload), any requests transport error, and timeouts.
+    ValueError et al. (bad input) are not, and neither is
+    qwen_tts.QwenCapabilityUnavailable: a missing GPU is a hardware fault, and
+    retrying it only hid the Aug 2026 outage (plan Task 9). By type, never by
+    message text."""
     import requests as _requests
+    from Orchestrator.qwen_tts import QwenCapabilityUnavailable
+    if isinstance(exc, QwenCapabilityUnavailable):
+        return False
     return isinstance(exc, (RuntimeError, TimeoutError, asyncio.TimeoutError,
                             _requests.exceptions.RequestException))
 

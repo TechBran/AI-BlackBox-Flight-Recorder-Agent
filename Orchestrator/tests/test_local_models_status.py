@@ -15,11 +15,14 @@ from Orchestrator.routes.local_models_routes import router
 STATUS_KEYS = {
     "installed", "enabled", "healthy", "base_url",
     "hardware", "disk", "llama_swap", "models", "routing",
+    # additive (2026-08-11 plan Task 10): the GPU capability signal
+    "gpu",
 }
 MODEL_KEYS = {"model", "capability", "group", "label", "running", "state", "download",
               "downloadable"}
 DISK_KEYS = {"free_mb", "required_mb", "ok"}
-ROUTING_KEYS = {"enabled", "healthy", "decision"}
+# additive (plan Task 10 / audit O19-local-stack-05): why, and the breaker
+ROUTING_KEYS = {"enabled", "healthy", "decision", "reason", "breaker"}
 
 FAKE_HW = {
     "gpu": True, "gpu_name": "NVIDIA RTX 2000 Ada Generation", "vram_mb": 16380,
@@ -142,3 +145,65 @@ def test_not_installed(client, monkeypatch):
     assert body["installed"] is False
     assert body["healthy"] is False
     assert all(v["decision"] == "off" for v in body["routing"].values())
+
+
+# ── honest degradation (2026-08-11 plan Task 10, audit O19-local-stack-05) ──
+
+DEAD_DRIVER_HW = dict(FAKE_HW, vram_mb=None, source="lspci", driver_ok=False,
+                      gpu_reason="NVIDIA driver not responding: RTX 2000 Ada is on the PCI bus")
+
+
+def test_gpu_block_and_healthy_routing_carry_no_reason(client, monkeypatch):
+    _wire(monkeypatch, enabled_caps=("tts", "stt"))
+    body = client.get("/local-models/status").json()
+    assert body["gpu"] == {"ok": True, "reason": None}
+    for cap in ("tts", "stt"):
+        assert body["routing"][cap]["decision"] == "on-box"
+        assert body["routing"][cap]["reason"] is None
+        assert body["routing"][cap]["breaker"]["state"] == "closed"
+
+
+def test_dead_driver_reports_gpu_unavailable_for_tts_and_cpu_for_the_rest(client, monkeypatch):
+    """The storm-outage box: the front door is up (healthy), the driver is
+    dead. It used to report every capability on-box. TTS has no CPU path
+    (D4) -> gpu-unavailable; STT/retrieval still serve, on CPU, and say so."""
+    _wire(monkeypatch, enabled_caps=("tts", "stt", "embeddings", "rerank"))
+    monkeypatch.setattr(hardware, "probe", lambda: dict(DEAD_DRIVER_HW))
+    body = client.get("/local-models/status").json()
+    assert body["healthy"] is True
+    assert body["gpu"] == {"ok": False, "reason": DEAD_DRIVER_HW["gpu_reason"]}
+    assert body["routing"]["tts"]["decision"] == "gpu-unavailable"
+    assert body["routing"]["tts"]["reason"] == DEAD_DRIVER_HW["gpu_reason"]
+    for cap in ("stt", "embeddings", "rerank"):
+        assert body["routing"][cap]["decision"] == "on-box"
+        assert "running on CPU" in body["routing"][cap]["reason"]
+
+
+def test_dead_driver_with_the_stack_down_names_the_gpu_not_just_the_service(client, monkeypatch):
+    """With the unit preflight the stack refuses to start on a dead driver, so
+    "unhealthy" alone would send the operator to the wrong place."""
+    _wire(monkeypatch, reachable=False, enabled_caps=("stt",))
+    monkeypatch.setattr(hardware, "probe", lambda: dict(DEAD_DRIVER_HW))
+    stt = client.get("/local-models/status").json()["routing"]["stt"]
+    assert stt["decision"] == "gpu-unavailable"
+    assert "NVIDIA driver not responding" in stt["reason"]
+
+
+def test_open_breaker_reports_degraded_with_the_last_error(client, monkeypatch):
+    """Stack up, member failing: the wizard shows "member failing" instead of
+    green (O19-local-stack-05)."""
+    _wire(monkeypatch, enabled_caps=("tts",))
+    for _ in range(local_stack.BREAKER_THRESHOLD):
+        local_stack.report_failure("tts", "HTTP 500: CUDA error")
+    tts = client.get("/local-models/status").json()["routing"]["tts"]
+    assert tts["decision"] == "degraded"
+    assert "HTTP 500: CUDA error" in tts["reason"]
+    assert tts["breaker"]["state"] == "open"
+    assert tts["breaker"]["consecutive_failures"] == local_stack.BREAKER_THRESHOLD
+
+
+def test_unhealthy_reason_points_at_the_service(client, monkeypatch):
+    _wire(monkeypatch, reachable=False, enabled_caps=("stt",))
+    stt = client.get("/local-models/status").json()["routing"]["stt"]
+    assert stt["decision"] == "unhealthy"
+    assert "blackbox-models.service" in stt["reason"]

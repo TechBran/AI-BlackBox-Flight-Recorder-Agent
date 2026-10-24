@@ -588,6 +588,24 @@ async def test_localstack_http_error_retries_then_raises(_localstack_base):
 
 
 @pytest.mark.asyncio
+async def test_localstack_failures_feed_the_embeddings_breaker(_localstack_base):
+    """GET /local-models/status says "member failing" while the front door
+    is up (audit O19-local-stack-05). Reporting only — the retry envelope
+    above is unchanged — and a success closes it again."""
+    from Orchestrator import local_stack
+    provider = get_provider(LOCALSTACK_SLUG)
+    _record_sleeps(provider)
+    _localstack_with_mock_transport(provider, [], LOCALSTACK_DIMS, status=500)
+    with pytest.raises(EmbeddingProviderError):
+        await provider.embed(["text"], purpose="document")
+    st = local_stack.breaker_state("embeddings")
+    assert st["state"] == "open" and "HTTP 500" in st["last_error"]
+    _localstack_with_mock_transport(provider, [], LOCALSTACK_DIMS)
+    await provider.embed(["text"], purpose="document")
+    assert local_stack.breaker_state("embeddings")["state"] == "closed"
+
+
+@pytest.mark.asyncio
 async def test_localstack_dims_mismatch_raises_without_retry(_localstack_base):
     provider = get_provider(LOCALSTACK_SLUG)
     sleeps = _record_sleeps(provider)

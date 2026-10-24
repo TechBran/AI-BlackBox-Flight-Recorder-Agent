@@ -747,6 +747,24 @@ def _member_gguf_present(model_id: str = "rerank-qwen3-8b") -> bool:
         return False
 
 
+def _report_localstack(outcome: "str | None", error: str = "") -> None:
+    """Feed one on-box rerank outcome into the local_stack "rerank" breaker
+    ("success" | "failure" | None for neither, e.g. a 4xx), so
+    GET /local-models/status can say "member failing" while the front door is
+    up (audit O19-local-stack-05). Reporting only: the real-traffic evidence
+    regime above stays what gates reranking. Never raises."""
+    if outcome is None:
+        return
+    try:
+        from Orchestrator import local_stack
+        if outcome == "success":
+            local_stack.report_success("rerank")
+        else:
+            local_stack.report_failure("rerank", error)
+    except Exception:  # noqa: BLE001 - bookkeeping must never break a search
+        pass
+
+
 def _vllm_reranker_running(timeout_s: float = 1.0) -> bool:
     """Is the legacy vllm-reranker.service answering on its :8091 port? A direct
     ~1s-capped GET of DEFAULT_BASE_URL/v1/models (NOT the shared _probe_localhost
@@ -1166,16 +1184,23 @@ def _do_localstack_rerank(query: str, passages: list[str],
     base = _localstack_base_url()
     if not base:
         return None
-    resp = requests.post(
-        base.rstrip("/") + "/rerank",
-        json={"model": settings["model_id"],
-              "query": settings.get("query_instruction", "") + query,
-              "documents": list(passages)},
-        # (connect, read): a swap is a long READ, never a long connect.
-        timeout=(LOCALSTACK_CONNECT_TIMEOUT_S,
-                 settings.get("localstack_read_timeout_s",
-                              LOCALSTACK_READ_TIMEOUT_S)),
-    )
+    try:
+        resp = requests.post(
+            base.rstrip("/") + "/rerank",
+            json={"model": settings["model_id"],
+                  "query": settings.get("query_instruction", "") + query,
+                  "documents": list(passages)},
+            # (connect, read): a swap is a long READ, never a long connect.
+            timeout=(LOCALSTACK_CONNECT_TIMEOUT_S,
+                     settings.get("localstack_read_timeout_s",
+                                  LOCALSTACK_READ_TIMEOUT_S)),
+        )
+    except requests.exceptions.RequestException as exc:
+        _report_localstack("failure", f"{type(exc).__name__}: {exc}")
+        raise
+    _report_localstack("success" if resp.status_code == 200 else
+                       "failure" if resp.status_code >= 500 else None,
+                       f"HTTP {resp.status_code}")
     if resp.status_code != 200:
         # The batch shape is in the reason on purpose: an oversized batch (the
         # llama.cpp -b/-ub class of failure) 500s while a small one succeeds, so

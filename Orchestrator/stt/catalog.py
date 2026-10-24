@@ -4,6 +4,7 @@ from Orchestrator.stt.resolve import (
     local_stt_available,
     local_streaming_stt_available,
     onbox_stt_available,
+    onbox_stt_degraded,
     resolve_stt_provider_detailed,
 )
 
@@ -93,11 +94,17 @@ def build_stt_catalog() -> list:
             batch_model = local_stack.stt_batch_model()
         except Exception:
             stream_model, batch_model = "whisper (realtime)", "whisper"
+        # Additive (plan Task 10): a dead GPU driver leaves on-box STT working
+        # on CPU, slowly — kept available, but marked, never shown as healthy.
+        degraded = onbox_stt_degraded()
         providers.append({
             "id": "onbox", "label": "On-box (local)", "available": True,
             "blurb": ("On-box faster-whisper via the local model stack — realtime streaming + "
-                      "files, free + fully private (no cloud STT, no API key)."),
+                      "files, free + fully private (no cloud STT, no API key)."
+                      + (f" Degraded: {degraded}." if degraded else "")),
             "models": {"streaming": stream_model, "file": batch_model},
+            "degraded": bool(degraded),
+            "degraded_reason": degraded,
         })
     # Additive (D-3): which path each provider actually serves right now. A
     # provider can be `available` and still serve neither — pinning 'local' on a

@@ -570,6 +570,24 @@ def _isolate_provider_billing_state(tmp_path_factory, monkeypatch):
     yield
     provider_billing._reset_cache()
 
+
+@pytest.fixture(autouse=True)
+def _reset_local_stack_breakers():
+    """The on-box capability breakers (Orchestrator/local_stack.py) are
+    process state fed by every on-box TTS/STT call a test makes, so three
+    failing calls in one test would open a breaker for the next. Each test
+    starts with them closed. Only a module some test already imported is
+    touched (nothing is imported on its behalf)."""
+    local_stack = sys.modules.get("Orchestrator.local_stack")
+    reset = getattr(local_stack, "reset_breakers", None)
+    if reset is not None:
+        reset()
+    yield
+    local_stack = sys.modules.get("Orchestrator.local_stack")
+    reset = getattr(local_stack, "reset_breakers", None)
+    if reset is not None:
+        reset()
+
 # ---------------------------------------------------------------------------
 # Cross-suite settle: live-service tests (chat stream regression, agent WS)
 # each leave background Gemini inferences running. Without a brief pause the

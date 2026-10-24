@@ -148,3 +148,53 @@ def test_substitution_is_logged_naming_both_providers(capsys):
 def test_honoured_pick_logs_nothing(capsys):
     resolve_stt_provider("google", openai_ok=True, google_ok=True)
     assert "OVERRIDE" not in capsys.readouterr().out
+
+
+# ── the stt breaker gates on-box STT, and the swap stays announced ──────────
+
+def _onbox_seeded(monkeypatch):
+    from Orchestrator import local_stack
+    monkeypatch.setattr(local_stack, "is_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(local_stack, "enabled", lambda cap: cap == "stt")
+    return local_stack
+
+
+def test_open_stt_breaker_makes_onbox_unavailable_and_the_swap_is_announced(monkeypatch, capsys):
+    """A Speaches member that 500s every request used to keep resolving
+    'onbox' (the front door was up). Now the breaker reports it unavailable
+    fast — and Track D still holds: the pinned pick is NAMED as dropped."""
+    local_stack = _onbox_seeded(monkeypatch)
+    assert stt_resolve.onbox_stt_available() is True
+    for _ in range(local_stack.BREAKER_THRESHOLD):
+        local_stack.report_failure("stt", "HTTP 500: whisper failed to load")
+    assert stt_resolve.onbox_stt_available() is False
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (True, False, False))
+    monkeypatch.setattr(stt_resolve, "local_stt_available", lambda: False)
+    monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: "onbox")
+    assert stt_resolve.resolve_stt_provider_detailed("") == ("openai", "onbox")
+    assert "provider OVERRIDE: requested 'onbox'" in capsys.readouterr().out
+
+
+def test_open_stt_breaker_with_no_cloud_resolves_nothing_never_a_silent_pick(monkeypatch):
+    local_stack = _onbox_seeded(monkeypatch)
+    local_stack.report_failure("stt", "HTTP 500", fatal=True)
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (False, False, False))
+    monkeypatch.setattr(stt_resolve, "local_stt_available", lambda: False)
+    monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: "onbox")
+    assert stt_resolve.resolve_stt_provider_detailed("") == (None, None)
+
+
+def test_dead_gpu_driver_keeps_onbox_stt_available(monkeypatch):
+    """STT runs on CPU (slowly, on the CPU-floor whisper tier) — unlike TTS
+    it stays available; the catalog marks it degraded instead."""
+    local_stack = _onbox_seeded(monkeypatch)
+    monkeypatch.setattr(local_stack, "gpu_ready", lambda: {
+        "ok": False, "reason": "NVIDIA driver not responding"})
+    assert stt_resolve.onbox_stt_available() is True
+    assert "NVIDIA driver not responding" in stt_resolve.onbox_stt_degraded()
+
+
+def test_onbox_stt_not_degraded_on_a_healthy_or_cpu_box(monkeypatch):
+    local_stack = _onbox_seeded(monkeypatch)
+    monkeypatch.setattr(local_stack, "gpu_ready", lambda: {"ok": True, "reason": None})
+    assert stt_resolve.onbox_stt_degraded() is None

@@ -590,3 +590,28 @@ def test_scoring_base_url_per_provider(monkeypatch):
         assert "voyageai.com" in rerank.scoring_base_url()
     with pin_cfg("rerank", provider="null", model=None):
         assert rerank.scoring_base_url() is None
+
+
+def test_real_rerank_outcomes_feed_the_local_stack_breaker(monkeypatch):
+    """GET /local-models/status says "member failing" while the front door
+    is up (audit O19-local-stack-05): 5xx and transport errors count, a 200
+    closes it. Reporting only — the evidence regime still gates reranking."""
+    from Orchestrator import local_stack
+    _record_posts(monkeypatch, status=500)
+    _pin_localstack(monkeypatch)
+    with _localstack_cfg():
+        for _ in range(local_stack.BREAKER_THRESHOLD):
+            assert rerank.score("q", ["p"]) is None
+        st = local_stack.breaker_state("rerank")
+        assert st["state"] == "open" and st["last_error"] == "HTTP 500"
+
+        def refused(url, json=None, timeout=None):
+            raise rerank.requests.exceptions.ConnectionError("refused")
+        monkeypatch.setattr(rerank.requests, "post", refused)
+        assert rerank.score("q", ["p"]) is None
+        assert local_stack.breaker_state("rerank")["consecutive_failures"] == \
+            local_stack.BREAKER_THRESHOLD + 1
+
+        _record_posts(monkeypatch, status=200)
+        assert rerank.score("q", ["p"]) == [1.0]
+        assert local_stack.breaker_state("rerank")["state"] == "closed"

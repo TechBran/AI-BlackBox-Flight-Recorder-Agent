@@ -39,19 +39,41 @@ def _artifact_row(key: str) -> dict:
     }
 
 
-def _routing_decision(cap: str, healthy: bool) -> dict:
+def _routing_decision(cap: str, healthy: bool, gpu: dict) -> dict:
     """On-box routing view for one capability. `seeded` = the wizard-time D2
-    default (local_stack.enabled). decision: "on-box" (seeded + reachable),
-    "unhealthy" (seeded but the stack is down -> per-capability degradation),
-    or "off" (not seeded -> an explicit pick / cloud owns it)."""
+    default (local_stack.enabled). decision:
+      "on-box"           seeded + reachable + nothing known broken
+      "gpu-unavailable"  seeded, and the NVIDIA driver is dead: always for a
+                         GPU-only capability (TTS, plan D4), and for the rest
+                         when the stack is down too (the unit's GPU preflight
+                         refuses to start it on a dead driver)
+      "unhealthy"        seeded but the stack is down -> per-capability degradation
+      "degraded"         seeded + reachable, but the capability's breaker is
+                         open: the member fails real requests (O19-local-stack-05)
+      "off"              not seeded -> an explicit pick / cloud owns it.
+    Every frontend treats anything but "on-box" as inactive, so the two new
+    values are backward-compatible (plan Task 10). Additive `reason` (None when
+    all is well; "running on CPU: ..." for an on-box capability on a dead
+    driver) and `breaker` (local_stack.breaker_state)."""
     seeded = local_stack.enabled(cap)
+    breaker = local_stack.breaker_state(cap)
+    reason = None
     if not seeded:
         decision = "off"
-    elif healthy:
-        decision = "on-box"
-    else:
+    elif not gpu["ok"] and (cap in local_stack.GPU_REQUIRED_CAPS or not healthy):
+        decision, reason = "gpu-unavailable", gpu["reason"]
+    elif not healthy:
         decision = "unhealthy"
-    return {"enabled": seeded, "healthy": healthy, "decision": decision}
+        reason = ("the llama-swap front door (blackbox-models.service) is not "
+                  "answering — check systemctl status blackbox-models.service")
+    elif breaker["state"] == "open":
+        decision, reason = "degraded", local_stack.capability_problem(cap)
+    else:
+        decision = "on-box"
+        if not gpu["ok"]:
+            reason = f"running on CPU: {gpu['reason']}"
+    return {"enabled": seeded, "healthy": healthy, "decision": decision,
+            "reason": reason, "breaker": breaker}
 
 
 @router.get("/status")
@@ -106,7 +128,10 @@ def local_models_status(response: Response):
             )
         models.append(row)
 
-    routing = {cap: _routing_decision(cap, healthy) for cap in local_stack.CAPABILITIES}
+    # The capability signal beside liveness (plan Task 10): read from the same
+    # 60 s-cached probe as `hardware`, so it never wakes a llama-swap group.
+    gpu = local_stack.gpu_ready()
+    routing = {cap: _routing_decision(cap, healthy, gpu) for cap in local_stack.CAPABILITIES}
 
     return {
         "installed": installed,
@@ -114,6 +139,7 @@ def local_models_status(response: Response):
         "healthy": healthy,
         "base_url": local_stack.base_url(),
         "hardware": hw,               # verbatim probe() shape, incl. tier
+        "gpu": gpu,                   # {"ok", "reason"} — additive
         "disk": disk,
         "llama_swap": {
             "reachable": health["reachable"],

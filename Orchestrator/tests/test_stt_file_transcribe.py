@@ -97,3 +97,69 @@ def test_onbox_transcribe_raises_after_429_exhaustion(monkeypatch):
     monkeypatch.setattr(ft.requests, "post", lambda url, **kw: _Resp())
     with pytest.raises(RuntimeError):
         ft.transcribe_bytes(b"x", "audio/wav", provider="onbox")
+    # Contention, not a broken capability: the stt breaker stays closed.
+    assert local_stack.breaker_state("stt")["consecutive_failures"] == 0
+
+
+# ── on-box outcomes feed the stt breaker (2026-08-11 plan Track B) ──────────
+
+class _StatusResp:
+    def __init__(self, code, body=None):
+        self.status_code = code
+        self.text = str(body)
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def _onbox(monkeypatch, post):
+    from Orchestrator.stt import file_transcribe as ft
+    from Orchestrator import local_stack
+    monkeypatch.setattr(local_stack, "base_url_root", lambda: "http://127.0.0.1:9098")
+    monkeypatch.setattr(local_stack, "stt_batch_model", lambda: "m")
+    monkeypatch.setattr(ft.requests, "post", post)
+    return ft, local_stack
+
+
+def test_onbox_5xx_and_transport_errors_open_the_stt_breaker(monkeypatch):
+    import pytest
+    import requests
+    ft, local_stack = _onbox(monkeypatch, lambda url, **kw: _StatusResp(500, {"detail": "CUDA OOM"}))
+    for _ in range(local_stack.BREAKER_THRESHOLD - 1):
+        with pytest.raises(RuntimeError):
+            ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav")
+
+    def refused(url, **kw):
+        raise requests.exceptions.ConnectionError("refused")
+    monkeypatch.setattr(ft.requests, "post", refused)
+    with pytest.raises(requests.exceptions.ConnectionError):
+        ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav")
+    assert local_stack.breaker_state("stt")["state"] == "open"
+
+
+def test_onbox_refuses_fast_while_the_breaker_is_open(monkeypatch):
+    """No request reaches a member known to be broken (the /ws/stt prime path
+    goes through here too, and turns the reason into an honest stt_error)."""
+    import pytest
+    posts = []
+    ft, local_stack = _onbox(monkeypatch, lambda url, **kw: posts.append(url))
+    local_stack.report_failure("stt", "HTTP 500: whisper failed to load", fatal=True)
+    with pytest.raises(RuntimeError) as exc:
+        ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav")
+    assert posts == []
+    assert "On-box STT unavailable" in str(exc.value)
+    assert "whisper failed to load" in str(exc.value)
+
+
+def test_onbox_success_closes_and_bad_audio_is_not_a_failure(monkeypatch):
+    import pytest
+    ft, local_stack = _onbox(monkeypatch, lambda url, **kw: _StatusResp(400, {"detail": "bad audio"}))
+    for _ in range(local_stack.BREAKER_THRESHOLD + 1):
+        with pytest.raises(RuntimeError):
+            ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav")
+    assert local_stack.breaker_state("stt")["state"] == "closed"
+    local_stack.report_failure("stt", "HTTP 500")
+    monkeypatch.setattr(ft.requests, "post", lambda url, **kw: _StatusResp(200, {"text": "ok"}))
+    assert ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav") == "ok"
+    assert local_stack.breaker_state("stt")["consecutive_failures"] == 0

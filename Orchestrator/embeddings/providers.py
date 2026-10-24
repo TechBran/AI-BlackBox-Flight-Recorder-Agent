@@ -325,12 +325,25 @@ class LocalStackProvider(_BaseProvider):
             texts = [instruction + t for t in texts]
         base_url = local_stack.base_url().rstrip("/")  # fresh per call, no restart
         payload = {"model": self.model_id, "input": texts}
-        async with httpx.AsyncClient(
-            timeout=self.TIMEOUT, transport=self._transport
-        ) as client:
-            resp = await client.post(f"{base_url}/embeddings", json=payload)
-            resp.raise_for_status()
-            data = resp.json()["data"]
+        # Every outcome feeds the local_stack "embeddings" breaker so
+        # GET /local-models/status can say "member failing" while the front
+        # door is up (audit O19-local-stack-05); reporting only, never gating.
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.TIMEOUT, transport=self._transport
+            ) as client:
+                resp = await client.post(f"{base_url}/embeddings", json=payload)
+                resp.raise_for_status()
+                data = resp.json()["data"]
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code >= 500:
+                local_stack.report_failure(
+                    "embeddings", f"HTTP {exc.response.status_code}: {exc.response.text[:200]}")
+            raise
+        except httpx.TransportError as exc:
+            local_stack.report_failure("embeddings", f"{type(exc).__name__}: {exc}")
+            raise
+        local_stack.report_success("embeddings")
         items = sorted(data, key=lambda item: item["index"])
         return [list(item["embedding"]) for item in items]
 

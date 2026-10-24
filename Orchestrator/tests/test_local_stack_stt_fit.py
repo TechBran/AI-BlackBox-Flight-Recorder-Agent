@@ -92,6 +92,21 @@ def test_gpu_with_unverifiable_vram_falls_back_to_flagship_constants(monkeypatch
     assert local_stack.stt_batch_model() == local_stack.ONBOX_STT_BATCH_MODEL
 
 
+def test_driver_dead_gpu_falls_back_to_cpu_floor_tier(monkeypatch, tmp_path):
+    """The second lie of the Aug outage (plan Task 7): lspci saw the card,
+    nvidia-smi was dead, vram_mb was None, and the resolver handed the CPU the
+    float16 large-v3 flagship — 10-21 s per utterance. With driver_ok False the
+    box IS a CPU box for whisper. (The test above has no driver_ok key, so the
+    unverifiable-VRAM flagship path it pins still holds.)"""
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setattr(hardware, "probe", lambda *a, **k: {
+        "gpu": True, "gpu_name": "RTX 2000 Ada (lspci)", "vram_mb": None,
+        "ram_mb": 128000, "source": "lspci", "tier": "HIGH", "driver_ok": False})
+    assert local_stack.resolve_whisper_fit()["tier"] == "cpu"
+    assert local_stack.stt_stream_model() == "Systran/faster-whisper-small"
+    assert local_stack.stt_batch_model() == "Systran/faster-whisper-base"
+
+
 # ── fresh-read sidecar override (future wizard) ──────────────────────────────
 
 def test_sidecar_override_wins_and_is_fresh_read(monkeypatch, tmp_path):

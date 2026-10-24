@@ -196,6 +196,33 @@ def test_transient_failure_auto_retries_once_then_succeeds(q, monkeypatch):
     assert len(calls) == 2   # first attempt + exactly one auto-retry
 
 
+def test_capability_failure_is_not_retried(q, monkeypatch):
+    """A missing GPU is a hardware fault: retrying it only hides it (plan
+    Task 9). The job fails at once, not retryable, with the reason."""
+    calls = []
+
+    def fake_batch(voice, texts, response_format="wav"):
+        calls.append(1)
+        raise qwen_tts.QwenCapabilityUnavailable(
+            "Qwen TTS batch failed (HTTP 503): No CUDA GPU (check nvidia-smi)")
+
+    monkeypatch.setattr(qwen_tts, "synthesize_batch", fake_batch)
+
+    async def scenario():
+        tid = q.submit(text="No GPU here.", voice="Vivian")["task_id"]
+        st = await _poll_until(tid, ("failed",))
+        assert st["retryable"] is False
+        assert "nvidia-smi" in st["error"]
+    asyncio.run(scenario())
+    assert len(calls) == 1
+
+
+def test_is_transient_tells_a_hardware_fault_from_contention():
+    assert tts_queue._is_transient(qwen_tts.QwenCapabilityUnavailable("no gpu")) is False
+    # A VRAM 503 is still a plain RuntimeError: another member may unload.
+    assert tts_queue._is_transient(RuntimeError("Qwen TTS batch failed (HTTP 503): VRAM")) is True
+
+
 def test_transient_failure_twice_marks_failed_retryable(q, monkeypatch):
     calls = []
 

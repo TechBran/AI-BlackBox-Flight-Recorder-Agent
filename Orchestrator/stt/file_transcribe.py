@@ -131,14 +131,27 @@ def onbox_transcribe_upstream(audio_bytes: bytes, content_type: str, filename: s
     `model=None` keeps the batch default (stt_batch_model) for the file path;
     the /ws/stt VAD loop passes stt_stream_model() explicitly — per-utterance
     latency wants the turbo model, not large-v3. `timeout` is overridable so the
-    D10 warm-prime call can bound itself to the remaining ceiling."""
+    D10 warm-prime call can bound itself to the remaining ceiling.
+
+    Every outcome feeds the local_stack stt breaker (a 5xx or a transport
+    error is a failure; 429 contention and 4xx bad audio are neither), and
+    while that breaker is open this raises at once with the reason instead of
+    sending audio to a member known to be broken."""
     from Orchestrator import local_stack
+    problem = getattr(local_stack, "capability_problem", None)
+    reason = problem("stt") if problem is not None else None
+    if reason:
+        raise RuntimeError(f"On-box STT unavailable: {reason}")
     url = f"{local_stack.base_url_root()}/upstream/speaches/v1/audio/transcriptions"
     model = model or local_stack.stt_batch_model()
     attempts = 0
     while True:
         files = {"file": (filename, audio_bytes, content_type)}
-        r = requests.post(url, data={"model": model}, files=files, timeout=timeout)
+        try:
+            r = requests.post(url, data={"model": model}, files=files, timeout=timeout)
+        except requests.exceptions.RequestException as exc:
+            local_stack.report_failure("stt", f"{type(exc).__name__}: {exc}")
+            raise
         if r.status_code == 429 and attempts < _ONBOX_429_RETRIES:
             attempts += 1
             time.sleep(min(_ONBOX_429_BACKOFF_BASE * (2 ** (attempts - 1)), _ONBOX_429_BACKOFF_MAX))
@@ -149,7 +162,10 @@ def onbox_transcribe_upstream(audio_bytes: bytes, content_type: str, filename: s
             detail = r.json()
         except Exception:
             detail = r.text
+        if r.status_code >= 500:
+            local_stack.report_failure("stt", f"HTTP {r.status_code}: {str(detail)[:200]}")
         raise RuntimeError(f"On-box STT error ({r.status_code}): {detail}")
+    local_stack.report_success("stt")
     try:
         return (r.json().get("text") or "").strip()
     except Exception:
