@@ -98,7 +98,7 @@ class LocalModelService : Service() {
                 // EXPLICIT warm request (the chat path pins the engine while the app is
                 // open). Become foreground IMMEDIATELY (startForegroundService contract),
                 // warm the engine, and host the listener.
-                startForegroundWith(buildNotification(TEXT_PREPARING))
+                if (!startForegroundWith(buildNotification(TEXT_PREPARING))) return refusedStart()
                 _isRunning = true
                 startWarmIfNeeded()
                 publishRemoteTaskHandler()
@@ -112,7 +112,7 @@ class LocalModelService : Service() {
                 // loop (the "phone goes crazy" symptom). control_phone wakes the engine on
                 // demand and the chat path re-warms via an explicit ACTION_START, so the
                 // safe restart posture is just the lightweight listener.
-                startForegroundWith(buildNotification(TEXT_LISTENER))
+                if (!startForegroundWith(buildNotification(TEXT_LISTENER))) return refusedStart()
                 _isRunning = true
                 publishRemoteTaskHandler()
             }
@@ -234,17 +234,29 @@ class LocalModelService : Service() {
         super.onDestroy()
     }
 
-    private fun startForegroundWith(notification: Notification) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+    /**
+     * Guarded startForeground (A01-activities-root-09). START_STICKY means the OS
+     * re-creates this service in the background after an OOM kill, where Android 12+
+     * refuses a foreground start; uncaught, that refusal crashed the process in a loop.
+     */
+    private fun startForegroundWith(notification: Notification): Boolean =
+        FgsSupport.startForegroundSafely(
+            this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE, TAG,
+        )
+
+    /** A refused foreground start: stop rather than run on as an unprotected sticky service. */
+    private fun refusedStart(): Int {
+        _isRunning = false
+        clearRemoteTaskHandler()
+        stopSelf()
+        return START_NOT_STICKY
+    }
+
+    // connectedDevice has no time limit today; stop cleanly if the platform ever imposes one.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        _isRunning = false
+        clearRemoteTaskHandler()
+        FgsSupport.stopOnTimeout(this, TAG, fgsType)
     }
 
     private fun updateNotification(notification: Notification) {
@@ -292,7 +304,7 @@ class LocalModelService : Service() {
     companion object {
         private const val TAG = "LocalModelService"
         const val CHANNEL_ID = "blackbox_local_model"
-        const val NOTIFICATION_ID = 9093
+        const val NOTIFICATION_ID = NotificationIds.LOCAL_MODEL
         const val ACTION_START = "com.aiblackbox.portal.START_LOCAL_MODEL"
         const val ACTION_START_LISTENER = "com.aiblackbox.portal.START_LISTENER"
         const val ACTION_STOP = "com.aiblackbox.portal.STOP_LOCAL_MODEL"

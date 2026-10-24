@@ -356,20 +356,18 @@ class NotificationListenerFgs : Service() {
     }
 
     private fun startForegroundWith(notification: Notification) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "startForeground refused (${t.javaClass.simpleName}); not foregrounded", t)
-        }
+        // A refusal is logged and the listener carries on un-foregrounded (it is what
+        // keeps the device reachable; the next foreground start re-promotes it).
+        FgsSupport.startForegroundSafely(
+            this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE, TAG,
+        )
+    }
+
+    // connectedDevice has no time limit today; stop cleanly if the platform ever imposes one.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopListener()
+        _isRunning = false
+        FgsSupport.stopOnTimeout(this, TAG, fgsType)
     }
 
     private fun stopForegroundCompat() {
@@ -412,15 +410,15 @@ class NotificationListenerFgs : Service() {
     companion object {
         private const val TAG = "NotifListenerFgs"
 
-        /** Distinct channel + notification id from the other FGSs (9093 / 9094). */
+        /** Distinct channel + notification id (every id is registered in NotificationIds). */
         const val CHANNEL_ID = "blackbox_remote_notify"
-        const val NOTIFICATION_ID = 9095
+        const val NOTIFICATION_ID = NotificationIds.NOTIFICATION_LISTENER
         const val ACTION_START = "com.aiblackbox.portal.START_NOTIFY_LISTENER"
         const val ACTION_STOP = "com.aiblackbox.portal.STOP_NOTIFY_LISTENER"
 
         /** (M1.4) The consent-banner kill-switch: distinct channel + id + STOP action. */
         const val CONTROL_CHANNEL_ID = "blackbox_remote_control_active"
-        const val CONTROL_NOTIFICATION_ID = 9096
+        const val CONTROL_NOTIFICATION_ID = NotificationIds.REMOTE_CONTROL_BANNER
         const val ACTION_STOP_CONTROL = "com.aiblackbox.portal.STOP_REMOTE_CONTROL"
 
         @Volatile

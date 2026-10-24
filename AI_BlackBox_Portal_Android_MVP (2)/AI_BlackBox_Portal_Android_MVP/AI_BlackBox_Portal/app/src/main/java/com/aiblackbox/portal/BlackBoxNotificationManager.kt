@@ -34,7 +34,6 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
          *  this class posts to, by construction rather than by a duplicated string. */
         const val CHANNEL_ID_NAVIGATION = "blackbox_navigation"
         private const val TAG = "BlackBoxBridge"
-        private const val DOWNLOAD_NOTIFICATION_ID = 9999
 
         /** (A01-activities-root-04) One intent action per notification KIND. The action is
          *  part of a PendingIntent's identity (request codes alone are not: a /notify id can
@@ -130,7 +129,8 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
      * Show download in progress notification
      */
     fun showDownloadStarted(filename: String): Int {
-        val notificationId = DOWNLOAD_NOTIFICATION_ID + (System.currentTimeMillis() % 1000).toInt()
+        // A band no foreground-service id falls in (it used to land on KeepAliveService's 9999).
+        val notificationId = NotificationIds.downloadId(System.currentTimeMillis())
         Log.d(TAG, "showDownloadStarted: Creating notification for $filename with ID $notificationId")
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID_DOWNLOADS)
@@ -267,7 +267,7 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
         // makes the second post UPDATE the first rather than stack a duplicate.
         val tag: String? = notifId?.takeIf { it.isNotBlank() }
         val id: Int = tag?.let { stableNotificationId(it) }
-            ?: (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+            ?: NotificationIds.generalId(System.currentTimeMillis())
 
         val pendingIntent = PendingIntent.getActivity(
             context,
@@ -450,7 +450,7 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
             .build()
 
         // Generate unique notification ID
-        val notificationId = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+        val notificationId = NotificationIds.generalId(System.currentTimeMillis())
 
         try {
             // Check permission before notifying

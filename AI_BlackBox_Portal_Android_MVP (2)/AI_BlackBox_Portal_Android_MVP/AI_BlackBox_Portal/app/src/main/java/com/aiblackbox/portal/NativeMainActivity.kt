@@ -1218,6 +1218,16 @@ class NativeMainActivity : ComponentActivity() {
                                 // M1: first-use location ask. Fire-and-forget — it never
                                 // gates, delays, or blocks the send below.
                                 maybeAskForLocation()
+                                // An agent prompt is held for the agent screen until it
+                                // takes it (A05-chat-ui-01): put that screen on view.
+                                val agentRoute = when (provider) {
+                                    "agents" -> Routes.AGENT
+                                    "gemini-agents" -> Routes.GEMINI_AGENT
+                                    else -> null
+                                }
+                                if (agentRoute != null && currentRoute != agentRoute) {
+                                    navController.navigate(agentRoute) { launchSingleTop = true }
+                                }
                                 // Upload attachments first, then send message with URLs
                                 val hasAttachments = attachments.isNotEmpty()
                                 val hasPreUploaded = preUploadedUrls.isNotEmpty()

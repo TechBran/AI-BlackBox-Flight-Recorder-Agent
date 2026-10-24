@@ -59,6 +59,10 @@ class ModelDownloadService : Service() {
     // work is on Dispatchers.IO. Cancelled in onDestroy.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // The bundle being downloaded, so onTimeout can mark it FAILED (retryable).
+    @Volatile
+    private var activeSlug: String? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -86,7 +90,15 @@ class ModelDownloadService : Service() {
 
         // Become foreground IMMEDIATELY (startForegroundService contract: ~5s) and seed
         // the bus so the ViewModel reflects RUNNING even before the first byte arrives.
-        startForegroundWith(buildNotification(bundle.displayName, 0, indeterminate = true))
+        // A refused start (background) fails the download visibly instead of crashing.
+        if (!startForegroundWith(buildNotification(bundle.displayName, 0, indeterminate = true))) {
+            DownloadProgressBus.update(
+                DownloadProgressBus.State(bundle.slug, 0f, DownloadProgressBus.Status.FAILED, TEXT_REFUSED),
+            )
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        activeSlug = bundle.slug
         DownloadProgressBus.update(
             DownloadProgressBus.State(bundle.slug, 0f, DownloadProgressBus.Status.RUNNING),
         )
@@ -154,18 +166,25 @@ class ModelDownloadService : Service() {
         super.onDestroy()
     }
 
-    private fun startForegroundWith(notification: Notification) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+    /**
+     * dataSync is capped at 6 hours a day on Android 15+, which a multi-GB bundle on slow
+     * Wi-Fi can reach. Publish a retryable FAILED (the .part file resumes) and stop
+     * before the system kills the app.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        scope.cancel()
+        activeSlug?.let { slug ->
+            DownloadProgressBus.update(
+                DownloadProgressBus.State(slug, 0f, DownloadProgressBus.Status.FAILED, TEXT_TIMED_OUT),
             )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
         }
+        FgsSupport.stopOnTimeout(this, TAG, fgsType)
     }
+
+    private fun startForegroundWith(notification: Notification): Boolean =
+        FgsSupport.startForegroundSafely(
+            this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC, TAG,
+        )
 
     private fun updateNotification(notification: Notification) {
         val mgr = getSystemService(NotificationManager::class.java)
@@ -214,7 +233,12 @@ class ModelDownloadService : Service() {
     companion object {
         private const val TAG = "ModelDownloadService"
         const val CHANNEL_ID = "blackbox_model_download"
-        const val NOTIFICATION_ID = 9094
+        const val NOTIFICATION_ID = NotificationIds.MODEL_DOWNLOAD
+
+        private const val TEXT_REFUSED =
+            "Android did not let the download start in the background. Open the app and tap Download again."
+        private const val TEXT_TIMED_OUT =
+            "Android stopped the download at its background time limit. Tap Download to resume where it left off."
 
         // The bundle crosses the Intent boundary as JSON (LocalBundle is @Serializable);
         // ignoreUnknownKeys keeps it forward-compatible with future catalog fields.

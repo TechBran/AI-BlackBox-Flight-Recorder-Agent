@@ -133,6 +133,22 @@ internal fun cliLiveEdgeSection(phase: LiveStreamPhase): LiveTextSection? = when
     LiveStreamPhase.IDLE -> null
 }
 
+/**
+ * Settle the streaming assistant bubble with [content] — only when a reply WAS streaming
+ * ([wasStreaming]). At idle the list is returned untouched: the last bubble is a finished
+ * answer that an error or disconnect must not rewrite (A05-chat-ui-02).
+ */
+internal fun finishStreamingBubble(
+    messages: List<UiMessage>,
+    wasStreaming: Boolean,
+    content: String,
+): List<UiMessage> {
+    if (!wasStreaming) return messages
+    val last = messages.lastOrNull() ?: return messages
+    if (last.role != "assistant") return messages
+    return messages.dropLast(1) + last.copy(content = content, isStreaming = false, isThinking = false)
+}
+
 internal fun reduceActiveTool(
     current: ToolIndicatorData?,
     event: AgentEvent,
@@ -411,12 +427,18 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 _duration.value = event.duration
             }
 
-            // Error — Portal: toast('Agent error:')
+            // Error — Portal: toast('Agent error:'). Only a reply that is streaming takes
+            // the error into its bubble (A05-chat-ui-02): at idle the last bubble is a
+            // finished answer, and a session-close or failed-reconnect error must not be
+            // appended to it, so it goes to the status line instead.
             is AgentEvent.Error -> {
-                _status.value = "Error"
+                val wasStreaming = _isStreaming.value
+                _status.value = if (wasStreaming) "Error" else "Error: ${event.message}"
                 _isStreaming.value = false
-                outputBuffer.append("\n\u26A0\uFE0F ${event.message}")
-                updateLastAssistant(outputBuffer.toString(), streaming = false)
+                _isThinking.value = false
+                _activeTool.value = null
+                if (wasStreaming) outputBuffer.append("\n\u26A0\uFE0F ${event.message}")
+                _messages.value = finishStreamingBubble(_messages.value, wasStreaming, outputBuffer.toString())
             }
 
             // Info — Portal: toast(msg.data)
@@ -453,8 +475,11 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             is AgentEvent.Disconnected -> {
+                val wasStreaming = _isStreaming.value
                 _isStreaming.value = false
-                updateLastAssistant(outputBuffer.toString(), streaming = false)
+                _isThinking.value = false
+                _activeTool.value = null
+                _messages.value = finishStreamingBubble(_messages.value, wasStreaming, outputBuffer.toString())
             }
 
             // Provenance — Plan Task 10: parse-from-WS reaches the streaming bubble
@@ -677,10 +702,15 @@ fun AgentChatScreen(
         com.aiblackbox.portal.ui.components.setChatBaseUrl(origin)
     }
 
-    // Listen for prompts forwarded from Composer via ChatViewModel
+    // Prompts forwarded from the Composer via ChatViewModel. They are HELD until this
+    // screen takes them (A05-chat-ui-01), so one sent while the screen was not composed
+    // is sent when it appears instead of being dropped; consume-once means a
+    // recomposition never sends it twice.
     LaunchedEffect(chatViewModel) {
-        chatViewModel?.agentPromptEvent?.collect { prompt ->
-            viewModel.sendPrompt(prompt)
+        chatViewModel?.pendingAgentPrompt?.collect { pending ->
+            if (pending != null && chatViewModel.consumeAgentPrompt(pending)) {
+                viewModel.sendPrompt(pending.text)
+            }
         }
     }
 

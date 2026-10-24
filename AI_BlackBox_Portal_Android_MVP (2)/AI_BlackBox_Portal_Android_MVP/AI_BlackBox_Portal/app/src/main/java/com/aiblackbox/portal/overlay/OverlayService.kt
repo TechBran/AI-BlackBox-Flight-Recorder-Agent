@@ -87,7 +87,7 @@ class OverlayService : Service() {
     companion object {
         private const val TAG = "OverlayService"
         private const val CHANNEL_ID = "blackbox_overlay"
-        private const val NOTIFICATION_ID = 1001
+        private const val NOTIFICATION_ID = com.aiblackbox.portal.NotificationIds.OVERLAY
 
         // Intent extras
         const val EXTRA_RESULT_CODE = "result_code"
@@ -3209,7 +3209,17 @@ class OverlayService : Service() {
 
     private fun disconnectRealtime() {
         Log.d(TAG, "Disconnecting realtime session")
+        teardownRealtimeSession("Disconnected", closeReason = "User disconnected")
+    }
 
+    /**
+     * End the realtime session completely, whoever ended it (A02-overlay-service-02).
+     * The user's disconnect, the server closing the socket and a dropped connection all
+     * come here: before, onClosing/onFailure only flipped the label, so the mic kept
+     * streaming into a dead socket (privacy indicator lit, mute button disabled), the
+     * screen-share job kept spinning and the AudioTrack stayed open. Main thread only.
+     */
+    private fun teardownRealtimeSession(status: String, closeReason: String? = null) {
         // Stop audio and screen sharing
         stopRealtimeAudioStreaming()
         stopScreenSharing()
@@ -3221,6 +3231,8 @@ class OverlayService : Service() {
         isUserMuted = false
         isAISpeaking = false
         wasMicActiveBeforeAI = false
+        responseCompleteReceived = false
+        isPreBuffering = false
         updateBubbleGlow()  // Clear bubble glow on disconnect
 
         // NOTE: Session transcript is saved by the BACKEND when WebSocket closes
@@ -3228,13 +3240,19 @@ class OverlayService : Service() {
         // Removed duplicate save here to prevent two snapshots from same session
         // saveSessionToBlackBox()
 
-        // Close WebSocket
-        realtimeWebSocket?.close(1000, "User disconnected")
+        // Close WebSocket (completes the close handshake when the server started it)
+        val socket = realtimeWebSocket
         realtimeWebSocket = null
+        if (closeReason != null) socket?.close(1000, closeReason)
 
         isRealtimeConnected = false
         updateRealtimeUI()
-        updateRealtimeStatus("Disconnected")
+        updateRealtimeStatus(status)
+        if (isXrDevice) {
+            OverlayBridge.updateState { it.copy(isConnecting = false) }
+        } else {
+            progressBar?.visibility = View.GONE
+        }
     }
 
     private inner class RealtimeWebSocketListener : WebSocketListener() {
@@ -3288,19 +3306,17 @@ class OverlayService : Service() {
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "Realtime WebSocket closing: $code - $reason")
             handler.post {
-                isRealtimeConnected = false
-                updateRealtimeUI()
-                updateRealtimeStatus("Disconnected")
+                // A late close from a socket the user already replaced is not this session's.
+                if (webSocket !== realtimeWebSocket) return@post
+                teardownRealtimeSession("Disconnected", closeReason = "Closing")
             }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e(TAG, "Realtime WebSocket failed", t)
             handler.post {
-                isRealtimeConnected = false
-                updateRealtimeUI()
-                updateRealtimeStatus("Connection failed")
-                progressBar?.visibility = View.GONE
+                if (webSocket !== realtimeWebSocket) return@post
+                teardownRealtimeSession("Connection failed")
                 showToast("Connection failed: ${t.message}")
             }
         }
@@ -3357,6 +3373,10 @@ class OverlayService : Service() {
                 // Mark response as complete - mic will resume when audio ACTUALLY finishes playing
                 // (detected by audio playback job when queue is empty)
                 responseCompleteReceived = true
+                // A reply shorter than the pre-buffer threshold never ended pre-buffering,
+                // so the playback job waited forever: the reply never played and the mic
+                // never resumed. The whole reply is in; play what there is.
+                isPreBuffering = false
                 Log.d(TAG, "response_complete received - waiting for audio queue to empty")
             }
             "tool_call" -> {
