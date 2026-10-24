@@ -791,6 +791,11 @@ def rebuild_snapshot_index() -> Dict[str, Dict[str, Any]]:
         if snap_id in old_index and "embedding" in old_index[snap_id]:
             index[snap_id]["embedding"] = old_index[snap_id]["embedding"]
             embeddings_preserved += 1
+        # And its media artifacts: they exist only here, and
+        # tasks.collect_pending_media_artifacts reads them so that no
+        # artifact is attached to a second snapshot.
+        if old_index.get(snap_id, {}).get("media_artifacts"):
+            index[snap_id]["media_artifacts"] = old_index[snap_id]["media_artifacts"]
 
         pos = byte_end
         count += 1

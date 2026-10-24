@@ -442,12 +442,28 @@ def create_task(task_type: TaskType, operator: Optional[str] = None, **kwargs) -
     return task
 
 
-def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str] = None) -> List[Dict]:
-    """Collect media artifacts from completed tasks for an operator.
+def _media_task_ids_on_index() -> set:
+    """Task ids of every media artifact already attached to a snapshot."""
+    from Orchestrator import fossils  # lazy, like checkpoint's import of this module
+    attached = set()
+    for entry in fossils.load_snapshot_index().values():
+        for artifact in entry.get("media_artifacts") or ():
+            if isinstance(artifact, dict) and artifact.get("task_id"):
+                attached.add(artifact["task_id"])
+    return attached
 
-    This function retrieves all completed media generation tasks (image, video, music)
-    for the given operator and extracts their artifact metadata for storage in the
-    snapshot index.
+
+def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str] = None) -> List[Dict]:
+    """Collect the media artifacts an operator's next snapshot should carry.
+
+    Pending = the operator's completed media generation tasks (image, video,
+    music) whose artifact is on no snapshot index entry yet. Each artifact
+    rides exactly one snapshot: the first mint after its task completes (an
+    async video that finishes after a mint rides the next one). This used to
+    return the operator's WHOLE media history on every mint, so the index,
+    which is rewritten in full on every mint, grew quadratically; attributing
+    chat media to the requesting operator (audit rank 49) would have made the
+    busiest minters carry the most.
 
     Args:
         operator: Operator/user name to filter tasks
@@ -458,6 +474,7 @@ def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str
     """
     artifacts = []
     media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC, TaskType.ELEVENLABS_MUSIC}
+    attached = _media_task_ids_on_index()
 
     # Get all tasks for this operator
     all_tasks = task_db.get_all_tasks(operator=operator)
@@ -467,6 +484,9 @@ def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str
         if task.task_type not in media_task_types:
             continue
         if task.status != TaskStatus.COMPLETED:
+            continue
+        # Already on an earlier snapshot
+        if task.task_id in attached:
             continue
 
         # Filter by timestamp if provided
