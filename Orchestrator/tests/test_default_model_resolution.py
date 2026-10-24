@@ -45,17 +45,17 @@ def test_current_family_capabilities(model):
     # Adaptive thinking (disabled thinking and budget_tokens 400 on all four),
     # display="summarized" (default "omitted" would blank the thinking UI), and
     # no sampling params (400 on all four).
-    assert model in config.ANTHROPIC_THINKING_MODELS
-    assert model in config.ANTHROPIC_THINKING_DISPLAY_MODELS
+    caps = config.anthropic_caps(model)
+    assert caps.thinking == {"type": "adaptive", "display": "summarized"}
+    assert not caps.sampling
     assert not config.anthropic_accepts_sampling(model)
-    effort = config.ANTHROPIC_EFFORT_MAP.get(model)
-    assert effort in (None, "low", "medium", "high", "xhigh", "max")
+    assert caps.effort in (None, "low", "medium", "high", "xhigh", "max")
 
 
 def test_opus_5_5_pins_an_explicit_effort():
     # Opus 5.5's API default effort is "medium", one level below Opus 5's; the
     # flagship chat path pins its level instead of inheriting that.
-    assert config.ANTHROPIC_EFFORT_MAP["claude-opus-5-5"] in ("high", "xhigh", "max")
+    assert config.anthropic_caps("claude-opus-5-5").effort in ("high", "xhigh", "max")
 
 
 def test_anthropic_window_guard_fits_the_default_family():

@@ -401,6 +401,54 @@ def test_error_envelope_on_timeout():
     assert body["error"]["code"] == "timeout"
 
 
+def _chat_router(states):
+    """POST /chat -> a task id; each GET /tasks/<id> -> the next state."""
+    def router(method, url, kwargs):
+        if method == "POST":
+            assert url.endswith("/chat"), url
+            return _FakeResponse(200, {"task_id": "task-chat-1"})
+        state = states.pop(0) if len(states) > 1 else states[0]
+        return _FakeResponse(200, state)
+    return router
+
+
+def _run_chat(router, timeout, interval=0.0):
+    """chat_with_context with a fast poll clock; returns (result, GET count)."""
+    _stub_operator("alice")
+    saved = srv.CHAT_POLL_TIMEOUT, srv.CHAT_POLL_INTERVAL
+    srv.CHAT_POLL_TIMEOUT, srv.CHAT_POLL_INTERVAL = timeout, interval or 0.001
+    cap = _install_fake_client(router)
+    try:
+        res = asyncio.run(srv.call_tool("chat_with_context", {"message": "hello"}))
+    finally:
+        _restore_client()
+        srv.CHAT_POLL_TIMEOUT, srv.CHAT_POLL_INTERVAL = saved
+    gets = [c for c in cap["client"].calls if c[0] == "GET"]
+    return res, len(gets)
+
+
+def test_chat_with_context_polls_past_the_old_two_minutes():
+    """W21: a non-stream Claude call may take up to 630 s in the backend, so the
+    poll must outlast it; the old cap was 120 polls (2 minutes)."""
+    assert srv.CHAT_POLL_TIMEOUT >= 630
+    pending = {"status": "processing"}
+    done = {"status": "completed", "result_data": {"reply": "late but real"}}
+    # Completes on poll 150, past the old 120-poll cap.
+    res, gets = _run_chat(_chat_router([pending] * 149 + [done]), timeout=200, interval=1.0 / 1000)
+    assert _text(res) == "late but real"
+    assert gets == 150
+
+
+def test_chat_with_context_timeout_names_the_task():
+    """When the poll gives up the task keeps running: say which, so the caller
+    can poll get_task_status instead of losing the reply."""
+    res, _ = _run_chat(_chat_router([{"status": "processing"}]), timeout=0.005, interval=0.001)
+    assert res.isError is True
+    body = json.loads(res.content[0].text)
+    assert body["error"]["code"] == "timeout"
+    assert "task-chat-1" in body["error"]["message"]
+
+
 def test_unknown_tool_envelope():
     """An unknown tool name yields code=unknown_tool."""
     _stub_operator("alice")

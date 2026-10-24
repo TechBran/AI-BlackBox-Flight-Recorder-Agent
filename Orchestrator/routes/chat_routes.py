@@ -67,7 +67,7 @@ from Orchestrator.tools.tool_registry import (
     get_gemini_rest_tools,
 )
 from Orchestrator.config import TOOLVAULT_ENABLED
-from Orchestrator.config import ANTHROPIC_THINKING_MODELS, ANTHROPIC_EFFORT_MAP, ANTHROPIC_THINKING_DISPLAY_MODELS, anthropic_accepts_sampling
+from Orchestrator.config import anthropic_caps
 # Module handle for request-time reads (DEFAULT_PROVIDER, resolve_default_model):
 # the /chat/stream routes resolve "Auto" through the same resolver as /chat.
 from Orchestrator import config as _config
@@ -645,6 +645,75 @@ def _prepare_anthropic_messages(messages: List[Dict]):
     return system_text, convo
 
 
+# -----------------------------------------------------------------------------
+# Shared by call_anthropic and stream_anthropic_with_thinking (audit rank 58).
+# -----------------------------------------------------------------------------
+# (connect, read) for the non-stream Claude call. A non-stream response sends
+# nothing until the whole message is done, so the read timeout is the longest
+# turn it may take: 16K output tokens at xhigh effort could outrun the old
+# flat 200 s (W21). The stream's 300 s is a gap BETWEEN chunks, which a live
+# stream never reaches, so this matches the SDK's 10-minute ceiling instead.
+# MCP chat_with_context polls a /chat task at least this long
+# (BLACKBOX_MCP_CHAT_TIMEOUT in MCP/blackbox_mcp_server.py).
+ANTHROPIC_CONNECT_TIMEOUT_S = 30
+ANTHROPIC_NONSTREAM_TIMEOUT = (ANTHROPIC_CONNECT_TIMEOUT_S, 600)
+ANTHROPIC_STREAM_READ_TIMEOUT_S = 300
+
+# A Claude turn that stopped on its output limit (or the context window) is
+# cut off mid-answer; say so instead of passing it off as complete.
+_ANTHROPIC_TRUNCATED_STOPS = ("max_tokens", "model_context_window_exceeded")
+_TRUNCATION_NOTE = "[Response truncated: the model reached its output limit.]"
+# The tool loops stop after this many rounds; the turn then ends with a note.
+_TOOL_CAP_NOTE = ("(Stopped after {cap} rounds of tool calls without a final answer. "
+                  "Ask me to continue if the task is not finished.)")
+
+
+def _with_note(text: str, note: str) -> str:
+    """``text`` with ``note`` appended as its own paragraph."""
+    return f"{text}\n\n{note}" if text else note
+
+
+def _apply_anthropic_caps(payload: Dict, model: str, temperature: float) -> None:
+    """Add the thinking / effort / sampling fields ``model`` accepts (anthropic_caps)."""
+    caps = anthropic_caps(model)
+    if caps.thinking:
+        payload["thinking"] = caps.thinking
+        if caps.effort:
+            payload["output_config"] = {"effort": caps.effort}
+    # temperature: removed on Opus 4.7+ (400 "deprecated"), and on the models
+    # that still accept it, it must stay at the default 1 whenever thinking is
+    # on (400 "may only be set to 1 when thinking is enabled"). So: thinking-off
+    # legacy only.
+    elif caps.sampling:
+        payload["temperature"] = temperature
+
+
+def _anthropic_refusal(stop_details) -> Dict:
+    """A stop_reason "refusal" as ``{"message", "category"}``. The 5.x safety
+    classifiers decline with HTTP 200 and empty (or partial) content, so the
+    old paths rendered a blank or half-written reply as the answer."""
+    details = stop_details if isinstance(stop_details, dict) else {}
+    category = details.get("category") or ""
+    message = "Claude declined to answer this request"
+    if category:
+        message += f" (category: {category})"
+    message += "."
+    explanation = (details.get("explanation") or "").strip()
+    if explanation:
+        message += f" {explanation}"
+    return {"message": message, "category": category}
+
+
+def _tool_cap_events(content: str, reasoning_key: str, reasoning: str, cap: int) -> List[Dict]:
+    """The content + done events that close a stream whose tool loop used all
+    ``cap`` rounds: the turn still ends, with its partial text and a note."""
+    note = _TOOL_CAP_NOTE.format(cap=cap)
+    return [
+        {"type": "content", "data": ("\n\n" if content else "") + note},
+        {"type": "done", "data": {reasoning_key: reasoning, "content": _with_note(content, note)}},
+    ]
+
+
 def call_anthropic(messages: List[Dict], model: str, operator: str):
     if not ANTHROPIC_API_KEY: raise HTTPException(400, "ANTHROPIC_API_KEY not set")
     # Defense-in-depth: extract system text, then collapse any consecutive
@@ -736,21 +805,9 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
         "messages": amsgs,
         "tools": _get_tools("anthropic", _last_user_msg(messages))
     }
-    # Adaptive thinking + effort for Claude 4.X models that support it.
-    # display="summarized" is gated to Opus 4.7 — older thinking models stream text as-is.
-    if model in ANTHROPIC_THINKING_MODELS:
-        thinking_cfg = {"type": "adaptive"}
-        if model in ANTHROPIC_THINKING_DISPLAY_MODELS:
-            thinking_cfg["display"] = "summarized"
-        payload["thinking"] = thinking_cfg
-        effort = ANTHROPIC_EFFORT_MAP.get(model)
-        if effort:
-            payload["output_config"] = {"effort": effort}
-    # temperature: removed on Opus 4.7+ (400 "deprecated"), and on the models that
-    # still accept it, it must stay at the default 1 whenever thinking is on (400
-    # "may only be set to 1 when thinking is enabled"). So: thinking-off legacy only.
-    elif anthropic_accepts_sampling(model):
-        payload["temperature"] = 0.2
+    # Adaptive thinking, display and effort per model, or temperature for a
+    # thinking-off legacy model (anthropic_caps; same rule as the stream path).
+    _apply_anthropic_caps(payload, model, temperature=0.2)
     if system_text:
         payload["system"] = system_text
 
@@ -758,9 +815,10 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     media_tasks = []  # 2-media: created (task_id,type,prompt) for the worker
     max_tool_calls = 30  # Prevent infinite loops
+    tool_cap_hit = False
 
     for iteration in range(max_tool_calls):
-        r = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=200)
+        r = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=ANTHROPIC_NONSTREAM_TIMEOUT)
         if r.status_code != 200:
             provider_billing.raise_if_exhausted("anthropic", r.status_code, r.text, surface="chat")
             raise HTTPException(r.status_code, r.text)
@@ -1248,6 +1306,17 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
         else:
             # No more tool calls, extract final text
             break
+    else:
+        # Every round ended in tool calls: the model never gave a final answer.
+        tool_cap_hit = True
+
+    # A refusal (HTTP 200, stop_reason "refusal") carries no answer: a non-stream
+    # decline omits the declined partial, and whatever text is there must not
+    # pass for one. Same parenthesized-notice shape as call_gemini's block.
+    if stop_reason == "refusal":
+        refusal = _anthropic_refusal(data.get("stop_details"))
+        print(f"[ANTHROPIC] Refusal ({refusal['category'] or 'no category'})")
+        return f"({refusal['message']})", total_usage, "", media_tasks
 
     # Extract final text response (answer) and native reasoning (thinking blocks).
     # Anthropic returns reasoning in `thinking` / `redacted_thinking` blocks and the
@@ -1266,6 +1335,11 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
         elif btype == "redacted_thinking":
             reasoning_parts.append("[redacted thinking]")
     reasoning = "\n".join(reasoning_parts)
+
+    if tool_cap_hit:
+        text = _with_note(text, _TOOL_CAP_NOTE.format(cap=max_tool_calls))
+    elif stop_reason in _ANTHROPIC_TRUNCATED_STOPS:
+        text = _with_note(text, _TRUNCATION_NOTE)
 
     return text, total_usage, reasoning, media_tasks
 
@@ -2908,11 +2982,10 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
             yield {"type": "error", "data": f"Stream error: {str(e)}"}
             return
 
-    # If we exhaust iterations without producing content
-    if not content_buffer:
-        content_buffer = "(The model executed multiple tool calls but did not produce a final text response. The tool actions were completed successfully.)"
-        yield {"type": "content", "data": content_buffer}
-    yield {"type": "done", "data": {"reasoning": reasoning_buffer, "content": content_buffer}}
+    # Every round ended in tool calls: close the turn with its text, a note
+    # and done (the same terminal events as stream_anthropic_with_thinking).
+    for event in _tool_cap_events(content_buffer, "reasoning", reasoning_buffer, max_tool_iterations):
+        yield event
 
 
 def _detect_tool_intent(messages: List[Dict]) -> bool:
@@ -3055,12 +3128,17 @@ def _guard_anthropic_history(amsgs: List[Dict], system_text: str):
 async def stream_anthropic_with_thinking(messages: List[Dict], model: str, operator: str, force_tools: bool = False):
     """Stream Anthropic Claude responses with tools enabled.
 
-    Adaptive thinking is enabled for Opus 4.7 and Sonnet 4.6 — these models
-    interleave thinking with tool calls automatically, so the old "thinking vs
-    tools" conflict no longer applies. Thinking content streams as `thinking`
-    SSE events; Portal and Android already handle these event names.
+    Adaptive thinking is enabled for every model anthropic_caps says takes it
+    (4.6 and later) — these models interleave thinking with tool calls
+    automatically, so the old "thinking vs tools" conflict no longer applies.
+    Thinking content streams as `thinking` SSE events; Portal and Android
+    already handle these event names.
 
     Yields SSE events: {"type": "thinking"|"content"|"done"|"error", "data": "..."}
+    Every turn ends in exactly one ``done`` or ``error``: a refusal, a mid-stream
+    error event or a stream cut off before message_delta is an error (never a
+    done that would save a fragment as the answer); a max_tokens stop and the
+    tool-round cap end in done with a note in the content.
     """
     if not ANTHROPIC_API_KEY:
         yield {"type": "error", "data": "ANTHROPIC_API_KEY not set"}
@@ -3125,6 +3203,12 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                 if cleaned_content:
                     amsgs.append({"role": m["role"], "content": cleaned_content})
 
+    # Dropping empty and image-only-but-missing turns above can leave two
+    # same-role turns adjacent, which the API 400s ("roles must alternate");
+    # merge them like call_anthropic does (O02-chat-routes-A-14). The window
+    # guard below only drops from the front, so the result still alternates.
+    amsgs = _normalize_alternation(amsgs)
+
     # WI-10 (M7) window guard: history delivered whole; oldest whole messages
     # drop only if the verified anthropic window budget would be exceeded.
     amsgs, _hist_dropped = _guard_anthropic_history(amsgs, system_text)
@@ -3138,23 +3222,18 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
     }
     payload = {
         "model": model,
-        "max_tokens": 32000,
+        # Streaming keeps HTTP timeouts out of the way, so give the model room:
+        # adaptive thinking at xhigh effort spends output tokens before the
+        # answer, and 32K cut long turns off (every model this path serves
+        # takes 64K or more).
+        "max_tokens": 64000,
         "stream": True,
         "messages": amsgs,
         "tools": await asyncio.to_thread(_get_tools, "anthropic", _last_user_msg(messages))
     }
-    # Adaptive thinking + effort for Claude models that support it (Opus 4.7, Sonnet 4.6).
-    # display="summarized" is required on Opus 4.7 — default "omitted" streams empty thinking blocks.
-    if model in ANTHROPIC_THINKING_MODELS:
-        payload["thinking"] = {"type": "adaptive", "display": "summarized"}
-        effort = ANTHROPIC_EFFORT_MAP.get(model)
-        if effort:
-            payload["output_config"] = {"effort": effort}
-    # temperature: removed on Opus 4.7+ (400 "deprecated"), and on the models that
-    # still accept it, it must stay at the default 1 whenever thinking is on (400
-    # "may only be set to 1 when thinking is enabled"). So: thinking-off legacy only.
-    elif anthropic_accepts_sampling(model):
-        payload["temperature"] = 0.7
+    # Adaptive thinking, display and effort per model, or temperature for a
+    # thinking-off legacy model (anthropic_caps; same rule as call_anthropic).
+    _apply_anthropic_caps(payload, model, temperature=0.7)
 
     if system_text:
         payload["system"] = system_text
@@ -3176,10 +3255,13 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
     tool_uses = []
     current_tool_use = None
     max_tool_iterations = 30
+    thinking_buffer = ""
+    content_buffer = ""
+    timeout = httpx.Timeout(ANTHROPIC_STREAM_READ_TIMEOUT_S, connect=ANTHROPIC_CONNECT_TIMEOUT_S)
 
     try:
         for iteration in range(max_tool_iterations):
-            async with httpx.AsyncClient(timeout=300) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream("POST", ANTHROPIC_URL, headers=headers, json=payload) as response:
                     if response.status_code != 200:
                         error_text = await response.aread()
@@ -3195,7 +3277,19 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                     content_buffer = ""
                     current_block_type = None
                     stop_reason = None
+                    stop_details = None
+                    stream_error = None
+                    # The assistant turn as the API produced it, in stream
+                    # order: replayed verbatim after a tool call. Thinking and
+                    # redacted_thinking blocks must come back unchanged, with
+                    # their signatures, or the model loses its reasoning between
+                    # tool calls and the next request can 400 on the signature
+                    # (O02-chat-routes-A-01; the CU driver carries them the same way).
                     response_content_blocks = []
+                    block_thinking = ""
+                    block_signature = ""
+                    block_text = ""
+                    redacted_block = None
                     tool_uses = []
                     current_tool_use = None
 
@@ -3213,8 +3307,16 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 block = event.get("content_block", {})
                                 current_block_type = block.get("type")
                                 if current_block_type == "thinking":
+                                    # Per-block buffers: a response can carry several
+                                    # thinking blocks, each under its own signature.
+                                    block_thinking = block.get("thinking", "") or ""
+                                    block_signature = block.get("signature", "") or ""
                                     yield {"type": "thinking_start", "data": ""}
+                                elif current_block_type == "redacted_thinking":
+                                    # Arrives whole in the start event; replayed verbatim.
+                                    redacted_block = {"type": "redacted_thinking", "data": block.get("data", "")}
                                 elif current_block_type == "text":
+                                    block_text = ""
                                     yield {"type": "content_start", "data": ""}
                                 elif current_block_type == "tool_use":
                                     # Start tracking a tool use
@@ -3234,12 +3336,17 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 if delta_type == "thinking_delta":
                                     thinking_text = delta.get("thinking", "")
                                     if thinking_text:
+                                        block_thinking += thinking_text
                                         thinking_buffer += thinking_text
                                         yield {"type": "thinking", "data": thinking_text}
+
+                                elif delta_type == "signature_delta":
+                                    block_signature += delta.get("signature", "")
 
                                 elif delta_type == "text_delta":
                                     content_text = delta.get("text", "")
                                     if content_text:
+                                        block_text += content_text
                                         content_buffer += content_text
                                         yield {"type": "content", "data": content_text}
 
@@ -3255,6 +3362,20 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                             elif event_type == "content_block_stop":
                                 if current_block_type == "thinking":
                                     yield {"type": "thinking_end", "data": ""}
+                                    # An unsigned thinking block cannot be replayed
+                                    # (the API rejects it); its text still streamed.
+                                    # An EMPTY signed one (display "omitted") is kept.
+                                    if block_signature:
+                                        response_content_blocks.append({
+                                            "type": "thinking", "thinking": block_thinking,
+                                            "signature": block_signature,
+                                        })
+                                elif current_block_type == "redacted_thinking" and redacted_block:
+                                    response_content_blocks.append(redacted_block)
+                                    redacted_block = None
+                                elif current_block_type == "text":
+                                    if block_text:  # the API refuses empty text blocks
+                                        response_content_blocks.append({"type": "text", "text": block_text})
                                 elif current_block_type == "tool_use" and current_tool_use:
                                     # Parse the accumulated JSON input
                                     try:
@@ -3276,6 +3397,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                             elif event_type == "message_delta":
                                 delta = event.get("delta", {})
                                 stop_reason = delta.get("stop_reason")
+                                stop_details = delta.get("stop_details") or event.get("stop_details")
                                 usage = event.get("usage", {})
                                 if usage:
                                     yield {"type": "usage", "data": {
@@ -3286,16 +3408,37 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                             elif event_type == "message_stop":
                                 pass  # Will check stop_reason after loop
 
+                            elif event_type == "error":
+                                # A mid-stream API error (overloaded_error, ...).
+                                stream_error = event.get("error") or {}
+                                break
+
                         except json.JSONDecodeError:
                             continue
+
+                    if stream_error is not None:
+                        detail = stream_error.get("message") or stream_error.get("type") or "unknown error"
+                        yield {"type": "error", "data": f"Anthropic stream error: {detail}"}
+                        return
+                    if stop_reason is None:
+                        # The connection ended before message_delta: whatever
+                        # streamed is a fragment, not an answer to save.
+                        yield {"type": "error", "data": "Anthropic stream ended before the response finished."}
+                        return
+                    if stop_reason == "refusal":
+                        # HTTP 200 with a declined request: report it, and never
+                        # let done save the partial text as the answer.
+                        refusal = _anthropic_refusal(stop_details)
+                        print(f"[ANTHROPIC-STREAM] Refusal ({refusal['category'] or 'no category'})")
+                        yield {"type": "error", "data": refusal["message"],
+                               "error_detail": {"kind": "refusal", "provider": "anthropic",
+                                                "reason": refusal["category"],
+                                                "message": refusal["message"]}}
+                        return
 
                     # Check if we need to handle tool use
                     if stop_reason == "tool_use" and tool_uses:
                         yield {"type": "tool_executing", "data": "Searching the web..."}
-
-                        # Build response content blocks including any text
-                        if content_buffer:
-                            response_content_blocks.insert(0, {"type": "text", "text": content_buffer})
 
                         # Add assistant message with tool uses to conversation
                         payload["messages"].append({"role": "assistant", "content": response_content_blocks})
@@ -3774,14 +3917,25 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                         print(f"[ANTHROPIC-STREAM] Tool iteration {iteration + 1}, continuing...")
                         continue  # Continue to next iteration
                     else:
-                        # No more tools, we're done
+                        # No more tools, we're done. A turn cut off by its
+                        # output limit says so (O02-chat-routes-A-09); a
+                        # tool_use stop on a truncated block lands here too and
+                        # never runs the half-written call.
+                        if stop_reason in _ANTHROPIC_TRUNCATED_STOPS:
+                            marker = ("\n\n" if content_buffer else "") + _TRUNCATION_NOTE
+                            content_buffer += marker
+                            yield {"type": "content", "data": marker}
                         yield {"type": "done", "data": {"thinking": thinking_buffer, "content": content_buffer}}
                         return
 
-            # If we reach here without returning, something went wrong
-            break
+        # Every round ended in tool calls: still close the turn with its text
+        # and done, which the client saves (O02-chat-routes-A-11).
+        for event in _tool_cap_events(content_buffer, "thinking", thinking_buffer, max_tool_iterations):
+            yield event
 
     except Exception as e:
+        import traceback
+        print(f"[ANTHROPIC-STREAM] Stream exception: {e}\n{traceback.format_exc()}")
         yield {"type": "error", "data": f"Stream error: {str(e)}"}
 
 

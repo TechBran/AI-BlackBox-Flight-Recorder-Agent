@@ -1169,50 +1169,41 @@ def _anthropic_model_default() -> str:
 
 ANTHROPIC_MODEL_DEFAULT = _anthropic_model_default()
 
-# Extended thinking config per Claude model.
-# Opus 4.8 (added 2026-05-28): newest Opus; mirrors 4.7's constraints
-# (adaptive thinking, summarized-display, no temperature/top_p/top_k)
-# until Anthropic publishes anything that contradicts. If the API
-# rejects any of these on first call we'll relax.
-# Opus 4.7: adaptive thinking only (budget_tokens returns 400). 1M context is native.
-# display="summarized" streams readable thinking text (default "omitted" = empty blocks — would silently break thinking UI).
-# effort="xhigh" is Opus 4.7's recommended level for agentic/coding work; Sonnet 4.6 maxes at "high".
-# Haiku 4.5 is deliberately omitted — it doesn't support effort or adaptive thinking.
-# Claude 5.x (added 2026-10-07): Opus 5.5/5, Sonnet 5.5/5, Haiku 5.5, Fable/Mythos 5.1
-# all accept {type: "adaptive", display: "summarized"} and every effort level.
-# Opus 5.5 (the built-in default since 2026-10-17), Sonnet 5.5 and Fable 5.1
-# reject {type: "disabled"}, budget_tokens, sampling params and forced
-# tool_choice (any/tool); Haiku 5.5 rejects budget_tokens and sampling params
-# (it takes "disabled" only at effort high or below). Every chat payload here
-# sends adaptive thinking and never forces a tool, so none of those go out.
-# 1M context, 128K output each — context_builder's anthropic window guard
-# budgets for that.
-ANTHROPIC_THINKING_MODELS = {
-    "claude-fable-5-1", "claude-mythos-5-1",
-    "claude-fable-5",   # Mythos-class: thinking always on; explicit {type: "adaptive"} accepted
-    "claude-mythos-5",
-    "claude-opus-5-5", "claude-opus-5",
-    "claude-sonnet-5-5", "claude-sonnet-5",
-    "claude-haiku-5-5",
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-}
-ANTHROPIC_EFFORT_MAP = {
-    "claude-fable-5-1": "xhigh",
-    "claude-mythos-5-1": "xhigh",
-    "claude-fable-5": "xhigh",    # recommended for agentic/coding on the Claude 5 tier
-    "claude-mythos-5": "xhigh",
-    "claude-opus-5-5": "xhigh",   # API default is "medium" on Opus 5.5 — pin the Opus-tier level
-    "claude-opus-5": "xhigh",
-    "claude-sonnet-5-5": "high",
-    "claude-sonnet-5": "high",
-    # claude-haiku-5-5 deliberately unmapped: API default ("medium") keeps the cheap tier cheap.
-    "claude-opus-4-8": "xhigh",   # mirror 4.7 — newest Opus tier
-    "claude-opus-4-7": "xhigh",   # Opus 4.7-only tier between "high" and "max"
-    "claude-opus-4-6": "high",
-    "claude-sonnet-4-6": "high",  # Sonnet caps at "high" — xhigh/max are Opus-tier only
+# Claude request capabilities, parsed from the model id (anthropic_caps below).
+# This replaced three exact-id tables (ANTHROPIC_THINKING_MODELS,
+# ANTHROPIC_EFFORT_MAP, ANTHROPIC_THINKING_DISPLAY_MODELS) that rotted the way
+# the sampling deny-list did (O01-core-runtime-07): the Portal lists models
+# live from /v1/models, so the next point release, or a dated snapshot id, got
+# no thinking config and no effort pin until someone appended it.
+#
+# What the id decides, by claude-<family>-<major>[-<minor>][-<yyyymmdd>]:
+# * 4.6 and later think adaptively ({type: "adaptive"}); budget_tokens 400s on
+#   4.7+ and 5.x, and Opus 5.5 / Sonnet 5.5 / Fable 5.1 reject
+#   {type: "disabled"}, so adaptive is the only setting every one accepts.
+#   Older ids (Haiku 4.5, Sonnet 4.5, Opus 4.5 and before) run without
+#   thinking, as they always did here, and keep sampling params.
+# * 4.7 and later default thinking display to "omitted" (empty thinking
+#   blocks, a silently blank thinking panel), so they get display="summarized".
+#   4.6 already summarizes by default.
+# * Effort is pinned per tier: Opus and the Fable/Mythos class at "xhigh"
+#   (the level for agentic and coding work; it arrived with Opus 4.7, so Opus
+#   4.6 gets "high"; the API default on Opus 5.5 is only "medium"), Sonnet at
+#   "high" (Sonnet 4.6 caps there), Haiku left at the API default so the cheap
+#   tier stays cheap. A family this table has never seen thinks and summarizes
+#   like the rest of its version but keeps the API's default effort.
+# Every chat payload sends adaptive thinking and never forces a tool, so the
+# 5.x rejections (disabled thinking, budget_tokens, sampling params, forced
+# tool_choice) never go out. 1M context, 128K output on the 4.6+ models;
+# context_builder's anthropic window guard budgets for that.
+_CLAUDE_ID_RX = re.compile(
+    r"claude-(?P<family>[a-z]+)-(?P<major>\d+)(?:-(?P<minor>\d{1,2}))?(?:-\d{8})?(?:-latest)?"
+)
+_ANTHROPIC_EFFORT_BY_FAMILY = {
+    "opus": "xhigh",
+    "fable": "xhigh",
+    "mythos": "xhigh",
+    "sonnet": "high",
+    "haiku": None,
 }
 # Sampling params (`temperature`, `top_p`, `top_k`) are an ALLOW-list of the legacy
 # families that still accept them. Opus 4.7 removed them and every model since
@@ -1237,14 +1228,38 @@ def anthropic_accepts_sampling(model: str) -> bool:
     return (model or "").startswith(ANTHROPIC_SAMPLING_MODEL_PREFIXES)
 
 
-# Opus 4.7+ omit thinking text by default — set display="summarized" to get visible thinking.
-# Fable/Mythos 5 and the whole 5.x tier likewise default to "omitted" (summaries only; raw CoT never returned).
-# Other models stream thinking text as-is without the flag.
-ANTHROPIC_THINKING_DISPLAY_MODELS = {
-    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
-    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-sonnet-5",
-    "claude-haiku-5-5", "claude-opus-4-8", "claude-opus-4-7",
-}
+@dataclass(frozen=True)
+class AnthropicCaps:
+    """What a Messages request may carry for one Claude model."""
+    thinking: Optional[dict]   # the request's `thinking` field; None = send none
+    effort: Optional[str]      # output_config.effort to pin; None = API default
+    sampling: bool             # accepts temperature / top_p / top_k
+
+
+def anthropic_caps(model: Optional[str]) -> AnthropicCaps:
+    """The request capabilities of Claude model ``model`` (see the table above).
+
+    Shared by the stream and non-stream chat paths. An id that does not parse
+    as claude-<family>-<major>... (a legacy claude-3-* id, a typo, "") gets no
+    thinking config and no effort pin, and sampling only if it is a legacy id.
+    """
+    model_id = (model or "").strip().lower()
+    sampling = anthropic_accepts_sampling(model_id)
+    match = _CLAUDE_ID_RX.fullmatch(model_id)
+    if match is None:
+        return AnthropicCaps(thinking=None, effort=None, sampling=sampling)
+    version = (int(match["major"]), int(match["minor"] or 0))
+    if version < (4, 6):
+        return AnthropicCaps(thinking=None, effort=None, sampling=sampling)
+    thinking = {"type": "adaptive"}
+    if version >= (4, 7):
+        thinking["display"] = "summarized"
+    effort = _ANTHROPIC_EFFORT_BY_FAMILY.get(match["family"])
+    if effort == "xhigh" and version < (4, 7):
+        effort = "high"
+    return AnthropicCaps(thinking=thinking, effort=effort, sampling=sampling)
+
+
 GEMINI_MODEL_DEFAULT    = os.getenv("GOOGLE_GEMINI_MODEL", "gemini-3.1-pro-preview")
 XAI_MODEL_DEFAULT       = os.getenv("XAI_MODEL", "grok-4.3")  # Bumped 2026-05-18: prior default grok-4-1-fast-reasoning is on xAI's May 2026 deprecation list (auto-redirected to grok-4.3 server-side)
 

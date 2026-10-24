@@ -1,4 +1,4 @@
-"""Anthropic capability sets must track new model families (model-rot guard).
+"""Anthropic capabilities must track new model releases (model-rot guard).
 
 2026-06-11: claude-fable-5 returned 400 "`temperature` is deprecated for this
 model" in chat because ANTHROPIC_NO_SAMPLING_MODELS predated the Claude 5
@@ -6,18 +6,82 @@ tier. 2026-10-07: the same 400 hit the whole 5.x tier (Opus 5.5, Sonnet 5.5,
 Haiku 5.5, Fable 5.1, Opus 5, Sonnet 5) for the same reason — the Portal lists
 models live from /v1/models, so a deny-list rots on every release. Sampling is
 now an allow-list of legacy families (anthropic_accepts_sampling); unknown
-models get no temperature/top_p/top_k. The thinking sets still need extending
-when Anthropic ships a new family — a miss there only hides thinking text, it
-no longer 400s.
+models get no temperature/top_p/top_k.
+
+The thinking/effort/display tables rotted the same way (O01-core-runtime-07):
+an id missing from them ran with no thinking config and no effort pin. They
+are now one parser, anthropic_caps(model), that reads family and version off
+the id, so a release nobody has seen yet (claude-opus-6) still thinks.
 """
 import pytest
 
-from Orchestrator.config import (
-    ANTHROPIC_EFFORT_MAP,
-    ANTHROPIC_THINKING_DISPLAY_MODELS,
-    ANTHROPIC_THINKING_MODELS,
-    anthropic_accepts_sampling,
+from Orchestrator.config import anthropic_accepts_sampling, anthropic_caps
+
+SUMMARIZED = {"type": "adaptive", "display": "summarized"}
+ADAPTIVE = {"type": "adaptive"}
+
+# What every known id must get: the exact behaviour of the old tables.
+KNOWN_CAPS = (
+    ("claude-fable-5-1", SUMMARIZED, "xhigh"),
+    ("claude-mythos-5-1", SUMMARIZED, "xhigh"),
+    ("claude-fable-5", SUMMARIZED, "xhigh"),
+    ("claude-mythos-5", SUMMARIZED, "xhigh"),
+    ("claude-opus-5-5", SUMMARIZED, "xhigh"),   # API default is only "medium"
+    ("claude-opus-5", SUMMARIZED, "xhigh"),
+    ("claude-sonnet-5-5", SUMMARIZED, "high"),
+    ("claude-sonnet-5", SUMMARIZED, "high"),
+    ("claude-haiku-5-5", SUMMARIZED, None),     # cheap tier keeps the API default
+    ("claude-opus-4-8", SUMMARIZED, "xhigh"),
+    ("claude-opus-4-7", SUMMARIZED, "xhigh"),
+    ("claude-opus-4-6", ADAPTIVE, "high"),      # xhigh arrived with Opus 4.7
+    ("claude-sonnet-4-6", ADAPTIVE, "high"),
+    # Legacy budget_tokens models: no thinking, as before.
+    ("claude-haiku-4-5", None, None),
+    ("claude-haiku-4-5-20251001", None, None),
+    ("claude-sonnet-4-5-20250929", None, None),
+    ("claude-opus-4-5-20251101", None, None),
+    ("claude-opus-4-1", None, None),
+    ("claude-opus-4-20250514", None, None),
 )
+
+# Releases nobody had seen when this was written, plus dated / aliased spellings.
+FUTURE_CAPS = (
+    ("claude-opus-6", SUMMARIZED, "xhigh"),
+    ("claude-opus-5-7", SUMMARIZED, "xhigh"),
+    ("claude-sonnet-6-5", SUMMARIZED, "high"),
+    ("claude-haiku-6", SUMMARIZED, None),
+    ("claude-fable-7", SUMMARIZED, "xhigh"),
+    ("claude-opus-4-9", SUMMARIZED, "xhigh"),
+    ("claude-opus-4-6-20260301", ADAPTIVE, "high"),
+    ("claude-sonnet-5-5-20261101", SUMMARIZED, "high"),
+    ("claude-opus-5-5-latest", SUMMARIZED, "xhigh"),
+    ("  Claude-Opus-5-5 ", SUMMARIZED, "xhigh"),
+    ("claude-newfamily-6", SUMMARIZED, None),    # thinks; effort left to the API
+)
+
+
+@pytest.mark.parametrize("model, thinking, effort", KNOWN_CAPS + FUTURE_CAPS)
+def test_anthropic_caps(model, thinking, effort):
+    caps = anthropic_caps(model)
+    assert caps.thinking == thinking, model
+    assert caps.effort == effort, model
+
+
+@pytest.mark.parametrize("model", (
+    "claude-something-new", "claude-3-7-sonnet-20250219", "claude-instant-1",
+    "gpt-5.1", "", None,
+))
+def test_unparseable_ids_send_no_thinking_config(model):
+    caps = anthropic_caps(model)
+    assert caps.thinking is None and caps.effort is None
+
+
+def test_caps_never_share_their_thinking_dict():
+    # A caller adds to payload["thinking"]; that must not leak into the next call.
+    first = anthropic_caps("claude-opus-5-5")
+    first.thinking["budget_tokens"] = 1
+    assert "budget_tokens" not in anthropic_caps("claude-opus-5-5").thinking
+
 
 # Verified live against /v1/messages on 2026-10-07: each of these returns 400
 # "`temperature` is deprecated for this model" for temperature=0.7, and the
@@ -57,25 +121,12 @@ def test_unknown_models_fail_closed(model):
     assert not anthropic_accepts_sampling(model)
 
 
-def test_claude5_tier_in_every_thinking_set():
-    for model in (
-        "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
-        "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-sonnet-5",
-    ):
-        assert model in ANTHROPIC_THINKING_MODELS
-        assert model in ANTHROPIC_THINKING_DISPLAY_MODELS
-        assert model in ANTHROPIC_EFFORT_MAP
-    # Haiku 5.5 thinks and needs display="summarized", but runs at the API's
-    # default effort on purpose.
-    assert "claude-haiku-5-5" in ANTHROPIC_THINKING_MODELS
-    assert "claude-haiku-5-5" in ANTHROPIC_THINKING_DISPLAY_MODELS
-
-
 def test_display_gated_models_also_reject_sampling():
     # The display="omitted"-by-default surface (4.7+) is the same surface that
     # removed temperature/top_p/top_k — these must move together.
-    for model in ANTHROPIC_THINKING_DISPLAY_MODELS:
-        assert not anthropic_accepts_sampling(model), model
+    for model, thinking, _ in KNOWN_CAPS + FUTURE_CAPS:
+        if thinking and "display" in thinking:
+            assert not anthropic_accepts_sampling(model), model
 
 
 # --------------------------------------------------------------------------- #
@@ -87,7 +138,7 @@ def test_display_gated_models_also_reject_sampling():
 # so temperature may only go out when thinking does not.
 
 SAMPLING_KEYS = ("temperature", "top_p", "top_k")
-PAYLOAD_MODELS = REJECTS_SAMPLING + ACCEPTS_SAMPLING + ("claude-opus-6",)
+PAYLOAD_MODELS = REJECTS_SAMPLING + ACCEPTS_SAMPLING + ("claude-opus-6", "claude-sonnet-6-5")
 
 
 def _assert_payload_ok(model, payload):
@@ -96,8 +147,10 @@ def _assert_payload_ok(model, payload):
         assert not sent, f"{model}: sent {sent} with thinking={payload.get('thinking')}"
     else:
         assert sent == ["temperature"], f"{model}: thinking-off legacy model lost temperature"
-    if model in ANTHROPIC_THINKING_MODELS:
-        assert payload["thinking"]["type"] == "adaptive"
+    # Both paths send exactly what anthropic_caps decides.
+    caps = anthropic_caps(model)
+    assert payload.get("thinking") == caps.thinking, model
+    assert payload.get("output_config", {}).get("effort") == caps.effort, model
 
 
 @pytest.fixture

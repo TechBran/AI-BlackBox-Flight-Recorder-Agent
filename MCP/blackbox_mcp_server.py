@@ -175,6 +175,14 @@ BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 # ~90s, then a task_id). Override per-deploy via BLACKBOX_MCP_PROXY_TIMEOUT.
 PROXY_TIMEOUT = float(os.getenv("BLACKBOX_MCP_PROXY_TIMEOUT", "120"))
 
+# How long chat_with_context polls its /chat task (seconds). One non-stream
+# Claude call may take up to (30 s connect + 600 s read) in the backend
+# (chat_routes.ANTHROPIC_NONSTREAM_TIMEOUT, audit W21), so the old 120 s poll
+# reported a timeout for replies that then arrived unseen. Override per-deploy
+# via BLACKBOX_MCP_CHAT_TIMEOUT.
+CHAT_POLL_TIMEOUT = float(os.getenv("BLACKBOX_MCP_CHAT_TIMEOUT", "660"))
+CHAT_POLL_INTERVAL = 1.0
+
 # --- M2: Streamable HTTP transport config -----------------------------------
 # Localhost-only for M2 (auth = M3, public Tailscale = M4). The HTTP runner
 # binds 127.0.0.1 by default; do NOT change the default host to 0.0.0.0 here.
@@ -1223,8 +1231,9 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 # Poll for completion if async
                 if "task_id" in result:
                     task_id = result["task_id"]
-                    for _ in range(120):  # Wait up to 2 minutes
-                        await asyncio.sleep(1)
+                    polls = max(1, int(CHAT_POLL_TIMEOUT / CHAT_POLL_INTERVAL))
+                    for _ in range(polls):
+                        await asyncio.sleep(CHAT_POLL_INTERVAL)
                         task_response = await client.get(f"{BLACKBOX_URL}/tasks/{task_id}")
                         task_data = task_response.json()
                         if task_data.get("status") == "completed":
@@ -1235,7 +1244,10 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                         elif task_data.get("status") == "failed":
                             error_msg = task_data.get("error_message") or task_data.get("error") or "Unknown error"
                             return _error("tool_error", name, f"Chat failed: {error_msg}")
-                    return _error("timeout", name, "Chat request timed out")
+                    # The task keeps running: name it, so the caller can poll it.
+                    return _error("timeout", name,
+                                  f"Chat still running after {CHAT_POLL_TIMEOUT:.0f}s; "
+                                  f"poll get_task_status with task_id {task_id}")
 
                 return [TextContent(type="text", text=result.get("response", json.dumps(result)))]
 
