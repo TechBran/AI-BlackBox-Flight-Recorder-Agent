@@ -588,6 +588,30 @@ def _reset_local_stack_breakers():
     if reset is not None:
         reset()
 
+
+@pytest.fixture(autouse=True)
+def _pin_host_gpu_signal(monkeypatch):
+    """The on-box TTS/STT gates read local_stack.gpu_ready(), which runs the
+    real hardware probe (nvidia-smi, lspci). On a host whose NVIDIA driver is
+    dead, MS02 in an outage, every TTS test that never chose a hardware state
+    would see on-box TTS unavailable. Such tests get a healthy GPU signal; a
+    test that patches hardware.probe gets the state it chose. Only a module
+    some test already imported is touched (box_stores imports local_stack)."""
+    local_stack = sys.modules.get("Orchestrator.local_stack")
+    real_gpu_ready = getattr(local_stack, "gpu_ready", None)
+    if real_gpu_ready is None:
+        yield
+        return
+    from Orchestrator import hardware   # stdlib-only
+    host_probe = hardware.probe
+
+    def gpu_ready():
+        if hardware.probe is host_probe:
+            return {"ok": True, "reason": None}
+        return real_gpu_ready()
+    monkeypatch.setattr(local_stack, "gpu_ready", gpu_ready)
+    yield
+
 # ---------------------------------------------------------------------------
 # Cross-suite settle: live-service tests (chat stream regression, agent WS)
 # each leave background Gemini inferences running. Without a brief pause the

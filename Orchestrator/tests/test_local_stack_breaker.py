@@ -211,3 +211,19 @@ def test_should_route_onbox_reads_the_breaker(clock, monkeypatch, installed_cfg)
     _fail("stt", local_stack.BREAKER_THRESHOLD)
     assert local_stack.should_route_onbox("stt") is False
     assert local_stack.is_healthy() is True          # liveness is a separate signal
+
+
+# ── suite isolation: the host's GPU never decides a test ─────────────────────
+
+def test_a_test_that_chose_no_hardware_never_sees_the_hosts_dead_driver(monkeypatch):
+    """The TTS gate reads the real hardware probe, so on a host whose NVIDIA
+    driver is dead (MS02 during an outage, exactly when these suites get run)
+    every TTS test that leaves hardware alone saw on-box TTS unavailable. The
+    root conftest pins the GPU signal for such tests; a test that patches
+    hardware.probe still gets the state it chose (the tests above)."""
+    monkeypatch.setattr(hardware, "_cache", None)
+    monkeypatch.setattr(hardware, "_probe_gpu", lambda: (
+        True, "RTX 2000 Ada", None, "lspci", False, "NVIDIA driver not responding"))
+    assert hardware.probe()["driver_ok"] is False        # this "host" is dead
+    assert local_stack.gpu_ready() == {"ok": True, "reason": None}
+    assert local_stack.capability_problem("tts") is None
