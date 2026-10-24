@@ -5,9 +5,10 @@
 # subprocess.run, time.sleep, open()) freezes all of them. This config selects
 # only ruff's flake8-async rules (ASYNC*): it is a lint gate, not a style
 # pass, and nothing here formats code. CI runs it from the repo root, with
-# ToolVault/ruff.toml extending this file for the tool executors:
+# ToolVault/ruff.toml (the tool executors) and MCP/ruff.toml (the MCP server)
+# extending this file:
 #
-#     ruff check Orchestrator ToolVault
+#     ruff check Orchestrator ToolVault MCP
 #
 # Baseline: the blocking calls in async functions that predate this gate carry
 # a per-line `# noqa: ASYNCxxx`, so a NEW call anywhere, even in the same file,

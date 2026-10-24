@@ -76,10 +76,10 @@ jobs:
         run: python -m Orchestrator.toolvault.validate
 
       # Event-loop blocking gate (audit rank 46): only the flake8-async rules,
-      # from Orchestrator/ruff.toml (ToolVault/ruff.toml extends it). A lint
-      # check; nothing is reformatted.
+      # from Orchestrator/ruff.toml (ToolVault/ and MCP/ruff.toml extend it).
+      # A lint check; nothing is reformatted.
       - name: Ruff (event-loop blocking rules)
-        run: python -m ruff check Orchestrator ToolVault
+        run: python -m ruff check Orchestrator ToolVault MCP
 
       - name: pytest
         run: python -m pytest -p no:cacheprovider -rfEs

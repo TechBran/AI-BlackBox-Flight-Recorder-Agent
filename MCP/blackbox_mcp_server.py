@@ -589,6 +589,12 @@ def load_snapshot_index(force_refresh: bool = False) -> Dict:
     return _index_cache
 
 
+def _file_base64(path) -> str:
+    import base64
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
 def seek_snapshot_by_offset(snap_id: str) -> Optional[str]:
     """
     Efficiently retrieve a snapshot using byte offsets from the index.
@@ -797,14 +803,17 @@ async def call_tool(name: str, arguments: dict[str, Any]):
     try:
         # === LOCAL TOOLS (Direct file access - faster, no proxy) ===
 
+        # The index helpers re-parse the 16 MB index after every mint and read
+        # the volume: in worker threads, so one session's read never stalls the
+        # others (audit O20-mcp-server-10).
         if name == "seek_snapshot_direct":
             snap_id = arguments["snap_id"]
-            content = seek_snapshot_by_offset(snap_id)
+            content = await asyncio.to_thread(seek_snapshot_by_offset, snap_id)
 
             if content is None:
                 return _error("not_found", name, f"Snapshot {snap_id} not found in index")
 
-            metadata = get_snapshot_metadata(snap_id)
+            metadata = await asyncio.to_thread(get_snapshot_metadata, snap_id)
             # #2A: on the HTTP/bound path, a caller may only read its OWN
             # operator's snapshots. Snapshot ids are predictable, so cross-operator
             # reads are an enumeration vector. Return not_found (do NOT 403 --
@@ -824,7 +833,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             snap_id = arguments["snap_id"]
             include_content = arguments.get("include_content", True)
 
-            metadata = get_snapshot_metadata(snap_id)
+            metadata = await asyncio.to_thread(get_snapshot_metadata, snap_id)
             if metadata is None:
                 return _error("not_found", name, f"Snapshot {snap_id} not found")
 
@@ -834,7 +843,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
             result = {"metadata": metadata}
             if include_content:
-                result["content"] = seek_snapshot_by_offset(snap_id)
+                result["content"] = await asyncio.to_thread(seek_snapshot_by_offset, snap_id)
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -843,11 +852,11 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             count = arguments.get("count", 10)
             _log(logging.INFO, name, "local index read", operator=operator)
 
-            snapshots = list_snapshots_by_operator(operator, count)
+            snapshots = await asyncio.to_thread(list_snapshots_by_operator, operator, count)
             return [TextContent(type="text", text=json.dumps(snapshots, indent=2))]
 
         elif name == "get_index_stats":
-            index = load_snapshot_index()
+            index = await asyncio.to_thread(load_snapshot_index)
 
             # #2A: when bound (HTTP), a caller sees stats for ONLY its operator,
             # never the whole-box roster/counts. On stdio (scope None) -> all.
@@ -896,7 +905,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             limit = arguments.get("limit", 20)
             offset = arguments.get("offset", 0)
 
-            index = load_snapshot_index()
+            index = await asyncio.to_thread(load_snapshot_index)
 
             # Filter and collect
             results = []
@@ -928,7 +937,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             }, indent=2))]
 
         elif name == "list_operators":
-            index = load_snapshot_index()
+            index = await asyncio.to_thread(load_snapshot_index)
 
             # #2A: a bound (HTTP) caller sees ONLY its own operator row, never the
             # full roster of who-else-is-on-this-box. stdio (scope None) -> all.
@@ -968,8 +977,7 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "refresh_index":
-            load_snapshot_index(force_refresh=True)
-            index = load_snapshot_index()
+            index = await asyncio.to_thread(load_snapshot_index, True)
             return [TextContent(type="text", text=f"Index refreshed. {len(index)} snapshots loaded.")]
 
         elif name == "web_fetch":
@@ -984,7 +992,6 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             return [TextContent(type="text", text=result)]
 
         elif name == "get_media":
-            import base64
             import mimetypes
 
             url = arguments.get("url")
@@ -1081,8 +1088,8 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             # Include base64 for images under 10MB
             if include_base64 and media_type == "image":
                 if result["file_size_bytes"] < 10_000_000:
-                    with open(file_path, "rb") as f:
-                        result["base64"] = base64.b64encode(f.read()).decode()
+                    # Up to 10 MB read + encode: in a worker thread.
+                    result["base64"] = await asyncio.to_thread(_file_base64, file_path)
                     _log(logging.INFO, name, f"included base64 for {file_path.name} ({result['file_size_bytes']} bytes)")
                 else:
                     result["base64_skipped"] = "File too large (>10MB)"
@@ -1194,8 +1201,9 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 search_response.raise_for_status()
                 relevant = search_response.json()
 
-                # Get recent snapshots from local index
-                recent = list_snapshots_by_operator(operator, 5)
+                # Get recent snapshots from local index (a thread: the index
+                # re-parses after every mint)
+                recent = await asyncio.to_thread(list_snapshots_by_operator, operator, 5)
 
                 context = {
                     "query": query,
@@ -1287,7 +1295,9 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 }
                 content_type = content_types.get(ext, "audio/wav")
 
-                with open(audio_file_path, "rb") as f:
+                # Streamed: httpx reads the handle in chunks as it uploads (the
+                # file may be up to the 500 MB upload cap; never slurp it).
+                with open(audio_file_path, "rb") as f:  # noqa: ASYNC230
                     files = {"file": (audio_file_path.name, f, content_type)}
                     response = await client.post(
                         f"{BLACKBOX_URL}/stt",
@@ -1386,7 +1396,7 @@ async def read_resource(uri: str) -> ResourceContents:
         # scope is None on stdio (span all), or the CURRENT request's operator.
         scope = _current_bound_operator()
         if uri == "blackbox://index/stats":
-            index = load_snapshot_index()
+            index = await asyncio.to_thread(load_snapshot_index)
 
             operators = {}
             types = {"normal": 0, "checkpoint": 0, "summary": 0}
@@ -1414,7 +1424,7 @@ async def read_resource(uri: str) -> ResourceContents:
             return TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(stats, indent=2))
 
         elif uri == "blackbox://index/operators":
-            index = load_snapshot_index()
+            index = await asyncio.to_thread(load_snapshot_index)
             operators = {}
             for entry in index.values():
                 op = entry.get("operator", "unknown")
@@ -1429,7 +1439,7 @@ async def read_resource(uri: str) -> ResourceContents:
             )
 
         elif uri == "blackbox://index/recent":
-            index = load_snapshot_index()
+            index = await asyncio.to_thread(load_snapshot_index)
 
             entries = []
             for snap_id, entry in index.items():
@@ -1631,7 +1641,8 @@ async def _internal_reload_handler(request):
     tokens = 0
     mw = _AUTH_MIDDLEWARE["instance"]
     if mw is not None:
-        new_map = _validate_token_operators(_load_token_map())
+        # The roster fetch is a blocking HTTP call (10 s timeout): in a thread.
+        new_map = await asyncio.to_thread(_load_validated_token_map)
         mw.token_map.clear()        # in-place: middleware reads the dict by reference
         mw.token_map.update(new_map)
         tokens = len(mw.token_map)
@@ -1726,6 +1737,12 @@ def _roster_enforce_enabled() -> bool:
     synthetic operators not present in a real box's roster."""
     return os.getenv("BLACKBOX_MCP_ROSTER_ENFORCE", "1").strip().lower() not in (
         "0", "false", "no", "off", "")
+
+
+def _load_validated_token_map() -> Dict[str, str]:
+    """The token map from disk, checked against the live roster. Blocking (a
+    file read and the roster fetch): async handlers run it in a thread."""
+    return _validate_token_operators(_load_token_map())
 
 
 def _validate_token_operators(token_map: Dict[str, str]) -> Dict[str, str]:
@@ -2514,7 +2531,7 @@ async def _oauth_authorize_handler(request):
     # ghost-operator token (dropped at /mcp) cannot mint an OAuth token here either.
     operator, _tid = _match_token(
         (params.get("blackbox_token") or "").strip(),
-        _validate_token_operators(_load_token_map()))
+        await asyncio.to_thread(_load_validated_token_map))
     if not operator:
         logger.warning("OAuth authorize: rejected consent (invalid token) client=%s",
                        client_id)

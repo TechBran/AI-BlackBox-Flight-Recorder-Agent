@@ -1,0 +1,5 @@
+# Event-loop blocking gate for the MCP server (2026-10-09 audit, rank 46).
+# One process serves every MCP session and the OAuth endpoints on one event
+# loop, so the same flake8-async rules as the Orchestrator apply. See
+# Orchestrator/ruff.toml.
+extend = "../Orchestrator/ruff.toml"
