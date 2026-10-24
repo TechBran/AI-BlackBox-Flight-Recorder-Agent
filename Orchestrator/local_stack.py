@@ -184,8 +184,10 @@ def should_route_onbox(cap: str) -> bool:
 #                 consecutive capability failures (a 5xx, a transport error),
 #                 or one fatal one (the member said it has no GPU), open it for
 #                 a cooldown. A group swap cannot open it: swap-time requests
-#                 WAIT in llama-swap's queue and succeed. Contention (429, a
-#                 VRAM 503) and bad requests (4xx) are not failures.
+#                 WAIT in llama-swap's queue and succeed, and a caller that
+#                 cut its own deadline short (the /ws/stt D10 warm prime) does
+#                 not count its ReadTimeout. Contention (429, a VRAM 503) and
+#                 bad requests (4xx) are not failures.
 # An open breaker makes the capability report unavailable FAST and LOUDLY (one
 # [LOCAL STACK] line per trip, plus the reason in /local-models/status). It
 # never picks another provider: the resolvers announce any substitution

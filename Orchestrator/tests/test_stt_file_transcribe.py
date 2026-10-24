@@ -163,3 +163,58 @@ def test_onbox_success_closes_and_bad_audio_is_not_a_failure(monkeypatch):
     monkeypatch.setattr(ft.requests, "post", lambda url, **kw: _StatusResp(200, {"text": "ok"}))
     assert ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav") == "ok"
     assert local_stack.breaker_state("stt")["consecutive_failures"] == 0
+
+
+def _read_timeout(url, **kw):
+    import requests
+    raise requests.exceptions.ReadTimeout(f"read timed out (timeout={kw.get('timeout')})")
+
+
+def test_a_read_timeout_under_a_shortened_deadline_never_opens_the_stt_breaker(monkeypatch):
+    """The D10 warm prime bounds itself to what is left of its 30 s ceiling,
+    and a cold whisper load takes ~20 s: its ReadTimeout is the caller's
+    deadline, not a broken member. Three of them in a row used to open the
+    breaker and move the next /ws/stt session off on-box."""
+    import pytest
+    import requests
+    ft, local_stack = _onbox(monkeypatch, _read_timeout)
+    for _ in range(local_stack.BREAKER_THRESHOLD + 1):
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav", timeout=8.0)
+    assert local_stack.breaker_state("stt") == {
+        "state": "closed", "consecutive_failures": 0, "last_error": None,
+        "retry_in_s": None, "trips": 0}
+    assert local_stack.capability_problem("stt") is None
+
+
+def test_the_d10_prime_timing_out_never_trips_the_stt_breaker(monkeypatch):
+    import pytest
+    import requests
+    from Orchestrator.routes import stt_ws_routes
+    ft, local_stack = _onbox(monkeypatch, _read_timeout)
+    monkeypatch.setattr(local_stack, "stt_stream_model", lambda: "turbo")
+    for _ in range(local_stack.BREAKER_THRESHOLD):
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            stt_ws_routes._prime_stt_model_sync(8.0)
+    assert local_stack.breaker_state("stt")["state"] == "closed"
+
+
+def test_a_member_that_hangs_past_the_full_deadline_still_counts(monkeypatch):
+    """A request that used the whole default deadline is evidence (a hung
+    member), and a refused connection is never the caller's deadline."""
+    import pytest
+    import requests
+    ft, local_stack = _onbox(monkeypatch, _read_timeout)
+    for _ in range(local_stack.BREAKER_THRESHOLD):
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav")
+    assert local_stack.breaker_state("stt")["state"] == "open"
+    local_stack.reset_breakers()
+
+    def refused(url, **kw):
+        raise requests.exceptions.ConnectionError("refused")
+    monkeypatch.setattr(ft.requests, "post", refused)
+    for _ in range(local_stack.BREAKER_THRESHOLD):
+        with pytest.raises(requests.exceptions.ConnectionError):
+            ft.onbox_transcribe_upstream(b"x", "audio/wav", "a.wav", timeout=8.0)
+    assert local_stack.breaker_state("stt")["state"] == "open"

@@ -22,6 +22,10 @@ from Orchestrator.stt.resolve import resolve_stt_provider
 
 # Batch 429 contract (correction [28]): a llama-swap concurrency 429 becomes
 # retry-with-backoff (capped) for the non-realtime path.
+# The on-box upstream's own deadline (a cold audio-group load fits well inside).
+# A caller that shortens it (the D10 warm prime, bounded by its 30 s ceiling)
+# owns the ReadTimeout it gets: that is not breaker evidence.
+ONBOX_STT_TIMEOUT_S = 120.0
 _ONBOX_429_RETRIES = 3
 _ONBOX_429_BACKOFF_BASE = 0.5
 _ONBOX_429_BACKOFF_MAX = 4.0
@@ -116,7 +120,7 @@ def _local_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> s
 
 def onbox_transcribe_upstream(audio_bytes: bytes, content_type: str, filename: str,
                               *, model: "str | None" = None,
-                              timeout: float = 120) -> str:
+                              timeout: float = ONBOX_STT_TIMEOUT_S) -> str:
     """SHARED on-box upstream batch transcription (additive refactor, W2 plan
     2026-07-22): transcribe via the on-box Speaches member through the llama-swap
     front door. Uses the UPSTREAM PROXY path
@@ -134,9 +138,11 @@ def onbox_transcribe_upstream(audio_bytes: bytes, content_type: str, filename: s
     D10 warm-prime call can bound itself to the remaining ceiling.
 
     Every outcome feeds the local_stack stt breaker (a 5xx or a transport
-    error is a failure; 429 contention and 4xx bad audio are neither), and
-    while that breaker is open this raises at once with the reason instead of
-    sending audio to a member known to be broken."""
+    error is a failure; 429 contention and 4xx bad audio are neither, and nor
+    is a ReadTimeout under a deadline the caller shortened below
+    ONBOX_STT_TIMEOUT_S — the prime's ~20 s cold load can outlast what is left
+    of its ceiling), and while that breaker is open this raises at once with
+    the reason instead of sending audio to a member known to be broken."""
     from Orchestrator import local_stack
     problem = getattr(local_stack, "capability_problem", None)
     reason = problem("stt") if problem is not None else None
@@ -150,7 +156,9 @@ def onbox_transcribe_upstream(audio_bytes: bytes, content_type: str, filename: s
         try:
             r = requests.post(url, data={"model": model}, files=files, timeout=timeout)
         except requests.exceptions.RequestException as exc:
-            local_stack.report_failure("stt", f"{type(exc).__name__}: {exc}")
+            if not (isinstance(exc, requests.exceptions.ReadTimeout)
+                    and timeout < ONBOX_STT_TIMEOUT_S):
+                local_stack.report_failure("stt", f"{type(exc).__name__}: {exc}")
             raise
         if r.status_code == 429 and attempts < _ONBOX_429_RETRIES:
             attempts += 1
