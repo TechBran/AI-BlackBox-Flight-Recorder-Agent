@@ -51,6 +51,7 @@ def resets(monkeypatch):
     monkeypatch.setattr(runner_mod.git_ops, "current_short", lambda p: TARGET_SHA[:7])
     # A clean tree (the dirty-tree gate has its own tests in test_updater_safety).
     monkeypatch.setattr(runner_mod.git_ops, "tracked_changes", lambda p: [])
+    monkeypatch.setattr(runner_mod.git_ops, "paths_in_the_way", lambda p, ref: [])
     monkeypatch.setattr(runner_mod.git_ops, "reset_hard",
                         lambda p, ref: recorded.append(ref))
     return recorded

@@ -170,6 +170,9 @@ def test_failed_phase_rollback_stashes_what_changed_since_the_reset(box):
     entries = stash_entries(box.root)
     assert entries and entries[0].endswith(f"auto-stash-rollback-{r.pre_update_tag}")
     assert "touched mid-update" in git(box.root, "stash", "show", "-p", "stash@{0}")
+    # The rollback runs before the complete event, which reports it.
+    assert "The update was rolled back." in done["error"]
+    assert done["stash_ref"] == git(box.root, "rev-parse", "stash@{0}")
 
 
 # ── the runner: event loop (O16-09) ─────────────────────────────────────
@@ -219,7 +222,9 @@ def test_git_fetch_and_pip_freeze_run_off_the_event_loop(box, monkeypatch):
     assert max(gaps) < 0.3, f"the loop stalled for {max(gaps):.2f}s"
     # The freeze is pip's stdout only: a warning on stderr must not land in the
     # file a rollback reinstalls from.
-    assert (box.root / "Manifest" / "pre_update_pip_freeze.txt").read_text() == "aiohttp==3.13.2\n"
+    # Its first line names the update it belongs to (see the rollback tests).
+    assert (box.root / "Manifest" / "pre_update_pip_freeze.txt").read_text() == (
+        f"# blackbox-freeze-for: {r.pre_update_tag}\naiohttp==3.13.2\n")
 
 
 def test_a_failed_freeze_never_leaves_a_stale_one_behind(box):
@@ -410,3 +415,214 @@ def test_rollback_needs_a_real_anchor(routes, tag):
     assert r.status_code == 404
     assert head(routes.box.root) == routes.box.v1
 
+
+
+# ── review follow-ups: nothing slips in between the check and the reset ──
+#
+# The dirty check used to run once, seconds (the update: tag, freezes, diff)
+# to minutes (the rollback: a pip --force-reinstall of each venv) before the
+# `git reset --hard`. An edit saved in that window, by a CLI agent in a
+# terminal or over SSH, was reset over with no stash. Every reset now stashes
+# what changed since the check, and moves aside the untracked files it would
+# overwrite, in the same worker-thread step as the reset itself.
+
+class EditDuringFreeze(FakeRunner):
+    """A tracked file is edited while the runner freezes the venvs."""
+
+    def _freeze_venvs(self):
+        (self.root / "notes.txt").write_text("agent edit made during the update\n")
+
+
+def test_an_edit_made_after_the_check_is_stashed_not_reset_over(box):
+    r = EditDuringFreeze(box.root)
+    events = collect(r.run())
+    done = events[-1]
+
+    assert done["succeeded"] is True, done
+    assert head(box.root) == box.v2
+    entries = stash_entries(box.root)
+    assert len(entries) == 1 and entries[0].endswith(f"auto-stash-during-{r.pre_update_tag}")
+    assert "agent edit made during the update" in git(box.root, "stash", "show", "-p", "stash@{0}")
+    assert done["stash_ref"] == git(box.root, "rev-parse", "stash@{0}")
+    logs = [e["text"] for e in events if e["type"] == "log"]
+    assert any("notes.txt" in t and "stash" in t for t in logs), logs
+
+
+def _updated_box(tmp_path, *, requirements=False):
+    """A box after a successful in-app update v1 -> v2 (tag pre-update-1)."""
+    extra = {"requirements.txt": "aiohttp==3.13.2\n"} if requirements else None
+    b = make_box(tmp_path, extra)
+    b.v2 = push_upstream(b, requirements=requirements)
+    git(b.root, "tag", "pre-update-1", "HEAD")
+    git(b.root, "fetch", "-q", "origin")
+    git(b.root, "reset", "-q", "--hard", "origin/main")
+    b.mgr = UpdateManager(b.root)
+    b.mgr.write_state(task_id="update-1", phase="complete", target_sha=b.v2,
+                      from_sha=b.v1, pre_update_tag="pre-update-1")
+    return b
+
+
+def test_an_edit_made_during_the_rollbacks_venv_restore_survives(tmp_path):
+    """The rollback reinstalled the venvs (minutes) and only then reset the
+    code, so an edit saved during the pip run was destroyed. The code now goes
+    back first, and the venv restore can no longer race a reset."""
+    b = _updated_box(tmp_path, requirements=True)
+    (b.root / "Manifest" / "pre_update_pip_freeze.txt").write_text("aiohttp==3.13.2\n")
+
+    def responder(runner, cmd):
+        if "--force-reinstall" in cmd:
+            (runner.root / "notes.txt").write_text("edit saved during the pip restore\n")
+        return 0, ""
+
+    rb = FakeRunner(b.root, b.mgr, responder=responder, kind="rollback")
+    done = collect(rb.rollback("pre-update-1"))[-1]
+
+    assert done["succeeded"] is True, done
+    assert any("--force-reinstall" in c for c in rb.calls), rb.calls
+    assert head(b.root) == b.v1
+    assert (b.root / "notes.txt").read_text() == "edit saved during the pip restore\n"
+
+
+class EditAfterRollbackCheck(FakeRunner):
+    """A tracked file is edited right after the rollback's dirty check."""
+
+    def _write_state(self, phase):
+        super()._write_state(phase)
+        if phase == manager_mod.PHASE_ROLLBACK:
+            (self.root / "notes.txt").write_text("edit saved as the rollback started\n")
+
+
+def test_a_rollback_stashes_an_edit_made_after_its_check(tmp_path):
+    b = _updated_box(tmp_path)
+    rb = EditAfterRollbackCheck(b.root, b.mgr, kind="rollback")
+    done = collect(rb.rollback("pre-update-1"))[-1]
+
+    assert done["succeeded"] is True, done
+    assert head(b.root) == b.v1
+    entries = stash_entries(b.root)
+    assert entries and entries[0].endswith("auto-stash-during-rollback-pre-update-1")
+    assert "edit saved as the rollback started" in git(b.root, "stash", "show", "-p", "stash@{0}")
+
+
+# ── untracked files where the target has one ─────────────────────────────
+
+def _push_adds(box, files):
+    for rel, body in files.items():
+        p = box.seed / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    git(box.seed, "add", "-A")
+    git(box.seed, "commit", "-q", "-m", "upstream adds files")
+    git(box.seed, "push", "-q", "origin", "main")
+    return git(box.seed, "rev-parse", "HEAD")
+
+
+def test_paths_in_the_way_lists_untracked_files_a_reset_would_overwrite(tmp_path):
+    b = make_box(tmp_path)
+    target = _push_adds(b, {"docs/plan.md": "upstream\n", "top.md": "upstream\n"})
+    git(b.root, "fetch", "-q", "origin")
+    (b.root / "docs").write_text("a file where the update needs a directory\n")
+    (b.root / "top.md").write_text("operator's copy\n")
+    (b.root / "scratch.log").write_text("unrelated runtime file\n")
+    assert git_ops.paths_in_the_way(b.root, target) == ["docs", "top.md"]
+    assert git_ops.paths_in_the_way(b.root, "HEAD") == []
+
+
+def test_an_untracked_file_where_the_update_adds_one_is_moved_aside(tmp_path):
+    """`git reset --hard` overwrites an untracked file at a path the target
+    adds, and neither a stash nor a tag holds it: the operator's only copy was
+    gone. It is moved under Manifest/displaced/<tag>/ first."""
+    b = make_box(tmp_path)
+    _push_adds(b, {"docs/audit.md": "upstream version\n"})
+    (b.root / "docs").mkdir()
+    (b.root / "docs" / "audit.md").write_text("operator's only copy\n")
+    assert git_ops.tracked_changes(b.root) == []
+
+    r = FakeRunner(b.root)
+    events = collect(r.run())
+    done = events[-1]
+
+    assert done["succeeded"] is True, done
+    assert (b.root / "docs" / "audit.md").read_text() == "upstream version\n"
+    kept = b.root / "Manifest" / "displaced" / r.pre_update_tag / "docs" / "audit.md"
+    assert kept.read_text() == "operator's only copy\n"
+    logs = [e["text"] for e in events if e["type"] == "log"]
+    assert any("docs/audit.md" in t and "Manifest/displaced" in t for t in logs), logs
+
+
+# ── a failed update never resets when the stash fails ───────────────────
+
+def test_a_failed_update_keeps_the_new_code_when_the_stash_fails(box, monkeypatch):
+    """The rollback after a failed phase reset even when the stash before it
+    failed, destroying what changed in tracked files during the update."""
+    (box.seed / "Scripts" / "onboarding").mkdir(parents=True)
+    (box.seed / "Scripts" / "onboarding" / "system-packages.txt").write_text(
+        "newpkg                # MUST_HAVE # needed\n")
+    git(box.seed, "add", "-A")
+    git(box.seed, "commit", "-q", "-m", "v3 needs a package")
+    git(box.seed, "push", "-q", "origin", "main")
+    target = git(box.seed, "rev-parse", "HEAD")
+
+    def responder(runner, cmd):
+        if cmd[-1] == runner_mod.APT_PREFLIGHT_PROBE_PKG:
+            return runner_mod.APT_HELPER_RC_NOT_ALLOWLISTED, ""
+        if cmd[-1] == "newpkg":
+            (runner.root / "notes.txt").write_text("operator edit during the apt phase\n")
+            return 1, "E: unable to locate package"
+        return 0, ""
+
+    def failing_stash(root, message):
+        raise runner_mod.subprocess.CalledProcessError(
+            1, ["git", "stash"], "", "Cannot save the current worktree state")
+
+    monkeypatch.setattr(runner_mod.git_ops, "stash_push", failing_stash)
+    done = collect(FakeRunner(box.root, responder=responder).run())[-1]
+
+    assert done["succeeded"] is False and done["failed_phase"] == "apt_install"
+    assert head(box.root) == target, "no reset may run once the stash failed"
+    assert (box.root / "notes.txt").read_text() == "operator edit during the apt phase\n"
+    assert "NOT rolled back" in done["error"]
+    assert "Cannot save the current worktree state" in done["error"]
+
+
+# ── tracked_changes: a worktree rename's source path ────────────────────
+
+def test_tracked_changes_reads_a_worktree_rename_as_one_path(box):
+    """An intent-to-add file can pair with a deleted one as a worktree rename
+    (" R new\\0old\\0"): the source path was parsed as an entry of its own."""
+    root = box.root
+    (root / "brand-new-file.txt").write_text("operator notes\n")
+    git(root, "add", "-N", "brand-new-file.txt")
+    (root / "notes.txt").unlink()
+    assert git_ops.tracked_changes(root) == ["brand-new-file.txt"]
+
+
+# ── the pip freeze belongs to one update ────────────────────────────────
+
+def test_a_rollback_skips_a_freeze_taken_for_another_update(tmp_path):
+    """Scripts/update.sh writes the same freeze file but not update_state.json:
+    after a manual run, the in-app Rollback reset the code to the in-app tag
+    and reinstalled the manual run's packages. A freeze now names the update
+    it belongs to, and a rollback to another tag leaves the venv alone."""
+    b = _updated_box(tmp_path, requirements=True)
+    (b.root / "Manifest" / "pre_update_pip_freeze.txt").write_text(
+        "# blackbox-freeze-for: pre-update-999\naiohttp==3.12.0\n")
+    rb = FakeRunner(b.root, b.mgr, kind="rollback")
+    events = collect(rb.rollback("pre-update-1"))
+    done = events[-1]
+
+    assert done["succeeded"] is True, done
+    assert not [c for c in rb.calls if "--force-reinstall" in c], rb.calls
+    assert head(b.root) == b.v1
+    logs = [e["text"] for e in events if e["type"] == "log"]
+    assert any("pre-update-999" in t for t in logs), logs
+
+
+def test_a_rollback_restores_a_freeze_taken_for_its_own_update(tmp_path):
+    b = _updated_box(tmp_path, requirements=True)
+    (b.root / "Manifest" / "pre_update_pip_freeze.txt").write_text(
+        "# blackbox-freeze-for: pre-update-1\naiohttp==3.13.2\n")
+    rb = FakeRunner(b.root, b.mgr, kind="rollback")
+    done = collect(rb.rollback("pre-update-1"))[-1]
+    assert done["succeeded"] is True, done
+    assert [c for c in rb.calls if "--force-reinstall" in c], rb.calls

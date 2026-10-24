@@ -15,8 +15,12 @@ EVENT SHAPES (each yielded as a dict; route serializes to SSE 'data: {json}'):
 
 DIRTY TREE (audit O16-01): the update and the rollback refuse to run while a
 tracked file has local changes, unless the caller passed discard_local_changes;
-then the changes are stashed (`auto-stash-<tag>`) before any `git reset --hard`.
-Untracked runtime files never block. Scripts/update.sh applies the same rule.
+then the changes are stashed (`auto-stash-<tag>`) before anything is changed.
+Untracked runtime files never block. Every `git reset --hard` then runs in one
+worker-thread step with a second look (_keep_then_reset): tracked edits saved
+since the check are stashed (`auto-stash-during-<tag>`) and untracked files the
+reset would overwrite are moved under Manifest/displaced/<tag>/. A reset that
+cannot keep them does not run. Scripts/update.sh applies the same rules.
 
 DESIGN NOTES (audit-driven):
   - audit C2: code reset --hard runs INSIDE the runner's critical section
@@ -116,6 +120,12 @@ PIP_CONSTRAINTS_FILE = "requirements.txt"
 # it, and PyPI does not serve the +cpu build.
 LOCK_EXTRAS = ("sentence-transformers",)
 
+# First line of a pre-update pip freeze: the tag of the update it was taken
+# for. Scripts/update.sh writes the same files with its own tag and no
+# update_state.json, so a rollback reinstalls a freeze only when it names the
+# tag being rolled back to (a freeze without the line predates it: trusted).
+FREEZE_HEADER = "# blackbox-freeze-for: "
+
 # blackbox-apt-install exit codes we react to specifically (its header is the
 # contract): 4 = allowlist file unreadable, 5 = package not in the allowlist.
 APT_HELPER_RC_ALLOWLIST_UNREADABLE = 4
@@ -212,10 +222,16 @@ class UpdateRunner:
         self.from_sha: str = ""
         self.target_sha: str = ""
         self.pre_update_tag: str = ""
-        # SHA of the stash holding the operator's local changes ("" = none).
-        self.stash_ref: str = ""
+        # SHAs of the stashes this run made, oldest first (see stash_ref).
+        self.stash_refs: list[str] = []
         # Path to the staging worktree (audit C2) — None until staging phase.
         self.staging_path: Optional[Path] = None
+
+    @property
+    def stash_ref(self) -> str:
+        """SHA of the first stash this run made ("" = none): the operator's
+        consented one when there was one. stash_refs lists them all."""
+        return self.stash_refs[0] if self.stash_refs else ""
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -340,13 +356,23 @@ class UpdateRunner:
         self._write_state(PHASE_RESET_HARD)
         yield self._phase_event(PHASE_RESET_HARD)
         try:
-            await self._git(git_ops.reset_hard, self.target_sha)
-            short = await self._git(git_ops.current_short)
-            yield self._log(PHASE_RESET_HARD, f"git reset --hard {short} OK")
+            kept = await self._reset_keeping(
+                self.target_sha, f"auto-stash-during-{self.pre_update_tag}",
+                self.pre_update_tag)
+        except _KeepFailed as e:
+            yield self._fail(PHASE_RESET_HARD, f"{e} Nothing was reset.")
+            return
         except _GIT_ERRORS as e:
             yield self._fail(PHASE_RESET_HARD,
                              f"git reset --hard failed: {_git_error(e)}")
             return
+        for note in kept:
+            yield self._log(PHASE_RESET_HARD, note)
+        try:
+            short = await self._git(git_ops.current_short)
+        except _GIT_ERRORS:
+            short = self.target_sha[:7]
+        yield self._log(PHASE_RESET_HARD, f"git reset --hard {short} OK")
 
         # PHASE: apt_install (conditional)
         if buckets["apt"]:
@@ -375,8 +401,8 @@ class UpdateRunner:
                                 if pkg_buckets.get(p, BUCKET_MUST_HAVE)
                                 == BUCKET_MUST_HAVE]
                     if required:
-                        yield self._fail(PHASE_APT_INSTALL, msg)
-                        await self._rollback_code()
+                        async for ev in self._fail_rolled_back(PHASE_APT_INSTALL, msg):
+                            yield ev
                         return
                     # Only optional packages are pending — same call as a
                     # SHOULD_HAVE install failure below: warn, keep the update.
@@ -429,8 +455,8 @@ class UpdateRunner:
                             f"retry the update.")
                     else:
                         err = f"apt install {pkg} failed (rc={rc}): {_tail(out)}"
-                    yield self._fail(PHASE_APT_INSTALL, err)
-                    await self._rollback_code()
+                    async for ev in self._fail_rolled_back(PHASE_APT_INSTALL, err):
+                        yield ev
                     return
                 yield self._log(PHASE_APT_INSTALL, f"{pkg} OK")
 
@@ -445,25 +471,25 @@ class UpdateRunner:
             lock = self.root / PIP_LOCK_FILE
             if not lock.is_file():
                 # Nothing touched the venv yet: put the code back only.
-                yield self._fail(PHASE_PIP_INSTALL,
-                                 f"{PIP_LOCK_FILE} is missing from {self.root}; "
-                                 f"refusing to install Python packages without it. "
-                                 f"The update was rolled back.")
-                await self._rollback_code()
+                async for ev in self._fail_rolled_back(
+                        PHASE_PIP_INSTALL,
+                        f"{PIP_LOCK_FILE} is missing from {self.root}; "
+                        f"refusing to install Python packages without it."):
+                    yield ev
                 return
             cmd = [str(pip), "install", "--require-hashes", "-r", str(lock),
                    "--quiet", "--disable-pip-version-check"]
             rc, out = await self._run(cmd, timeout=600.0)
             if rc != 0:
-                yield self._fail(PHASE_PIP_INSTALL,
-                                 f"pip install --require-hashes -r {PIP_LOCK_FILE} "
-                                 f"failed (rc={rc}): {_tail(out)}\n"
-                                 f"The update was rolled back and the venv restored "
-                                 f"from Manifest/pre_update_pip_freeze.txt; nothing "
-                                 f"was installed unpinned. Re-run `{pip} install "
-                                 f"--require-hashes -r {lock}` to see the full error "
-                                 f"(requirements.in documents the manual fallback).")
-                await self._rollback_pip_and_code()
+                async for ev in self._fail_rolled_back(
+                        PHASE_PIP_INSTALL,
+                        f"pip install --require-hashes -r {PIP_LOCK_FILE} "
+                        f"failed (rc={rc}): {_tail(out)}\n"
+                        f"Nothing was installed unpinned. Re-run `{pip} install "
+                        f"--require-hashes -r {lock}` to see the full error "
+                        f"(requirements.in documents the manual fallback).",
+                        "orch"):
+                    yield ev
                 return
             yield self._log(PHASE_PIP_INSTALL,
                             f"Orchestrator venv updated from {PIP_LOCK_FILE} (hash-checked).")
@@ -475,16 +501,16 @@ class UpdateRunner:
                     [str(pip), "install", "-c", str(constraints), *extras,
                      "--quiet", "--disable-pip-version-check"], timeout=600.0)
                 if rc != 0:
-                    yield self._fail(PHASE_PIP_INSTALL,
-                                     f"Reinstalling {', '.join(extras)} under the new "
-                                     f"pins failed (rc={rc}): {_tail(out)}\n"
-                                     f"Without it the CPU reranker would not import. The "
-                                     f"update was rolled back and the venv restored from "
-                                     f"Manifest/pre_update_pip_freeze.txt. Re-run `{pip} "
-                                     f"install -c {constraints} {' '.join(extras)}` to see "
-                                     f"the full error, or remove the reranker (installer/"
-                                     f"templates/blackbox-install-reranker-cpu.sh installed it).")
-                    await self._rollback_pip_and_code()
+                    async for ev in self._fail_rolled_back(
+                            PHASE_PIP_INSTALL,
+                            f"Reinstalling {', '.join(extras)} under the new "
+                            f"pins failed (rc={rc}): {_tail(out)}\n"
+                            f"Without it the CPU reranker would not import. Re-run "
+                            f"`{pip} install -c {constraints} {' '.join(extras)}` to see "
+                            f"the full error, or remove the reranker (installer/"
+                            f"templates/blackbox-install-reranker-cpu.sh installed it).",
+                            "orch"):
+                        yield ev
                     return
                 yield self._log(PHASE_PIP_INSTALL,
                                 f"Reinstalled {', '.join(extras)} under the new pins "
@@ -510,9 +536,10 @@ class UpdateRunner:
                 "--quiet", "--disable-pip-version-check",
             ], timeout=300.0)
             if rc != 0:
-                yield self._fail(PHASE_MCP_INSTALL,
-                                 f"MCP pip install failed (rc={rc}): {_tail(out)}")
-                await self._rollback_mcp_pip_and_code()
+                async for ev in self._fail_rolled_back(
+                        PHASE_MCP_INSTALL,
+                        f"MCP pip install failed (rc={rc}): {_tail(out)}", "mcp"):
+                    yield ev
                 return
             yield self._log(PHASE_MCP_INSTALL, "MCP venv updated.")
 
@@ -556,6 +583,7 @@ class UpdateRunner:
             "task_id": self.task_id,
             "pre_update_tag": self.pre_update_tag,
             "stash_ref": self.stash_ref,
+            "stash_refs": list(self.stash_refs),
             # Clients wait for /health's boot_id to change only when a restart
             # is actually coming (A13-ui-ops-01).
             "restart_scheduled": True,
@@ -565,10 +593,12 @@ class UpdateRunner:
         _schedule_restart()
 
     async def _rollback_locked(self, tag: str) -> AsyncIterator[dict]:
-        """Rollback under the lock. Order: refuse or stash a dirty tree, restore
+        """Rollback under the lock. Order: refuse or stash a dirty tree, reset
+        the code to the tag (keeping what changed since the check), restore
         the venvs the reverted commits changed (from the freeze taken before
-        that update), reset the code to the tag, persist the TERMINAL
-        rolled_back phase, then schedule the restart."""
+        that update), persist the TERMINAL rolled_back phase, then schedule the
+        restart. The code goes back before the venvs: the restore runs pip for
+        minutes, and a reset after it overwrote edits saved meanwhile."""
         self.pre_update_tag = tag
         try:
             self.from_sha = await self._git(git_ops.current_sha)
@@ -602,8 +632,7 @@ class UpdateRunner:
                 return
             yield self._log(PHASE_ROLLBACK, note)
 
-        # The freeze files hold the venvs as they were before the update being
-        # reverted. Restore only the venvs that update's commits changed: a
+        # Which venvs the reverted commits changed, read before HEAD moves: a
         # --force-reinstall of everything takes minutes for nothing otherwise.
         try:
             changed = await self._git(git_ops.diff_files, self.target_sha, self.from_sha)
@@ -611,6 +640,22 @@ class UpdateRunner:
             yield self._fail(PHASE_ROLLBACK, f"git diff failed: {_git_error(e)}")
             return
         buckets = changes_mod.categorize(changed)
+
+        try:
+            kept = await self._reset_keeping(
+                self.target_sha, f"auto-stash-during-rollback-{tag}", f"rollback-{tag}")
+        except _KeepFailed as e:
+            yield self._fail(PHASE_ROLLBACK, f"{e} Nothing was rolled back.")
+            return
+        except _GIT_ERRORS as e:
+            yield self._fail(PHASE_ROLLBACK, f"git reset --hard {tag} failed: {_git_error(e)}")
+            return
+        for note in kept:
+            yield self._log(PHASE_ROLLBACK, note)
+        yield self._log(PHASE_ROLLBACK, f"git reset --hard {tag} ({self.target_sha[:7]}) OK")
+
+        # The freeze files hold the venvs as they were before the update being
+        # reverted. Restore only the venvs that update's commits changed.
         for bucket, label, restore in (
                 ("pip", "Orchestrator", self._restore_orch_venv),
                 ("mcp_pip", "MCP", self._restore_mcp_venv)):
@@ -618,25 +663,18 @@ class UpdateRunner:
                 continue
             yield self._log(PHASE_ROLLBACK,
                             f"Restoring the {label} venv from its pre-update pip freeze...")
-            result = await restore()
-            if result is None:
+            rc, out = await restore(tag)
+            if rc is None:
                 yield self._log(PHASE_ROLLBACK,
-                                f"WARNING: no pre-update pip freeze for the {label} venv "
-                                f"is on disk; it keeps its current packages.")
-            elif result[0] != 0:
+                                f"WARNING: the {label} venv keeps its current packages: "
+                                f"{out}.")
+            elif rc != 0:
                 yield self._log(PHASE_ROLLBACK,
                                 f"WARNING: restoring the {label} venv failed "
-                                f"(rc={result[0]}); rolling the code back anyway. "
-                                f"Output tail: {_tail(result[1])}")
+                                f"(rc={rc}); the code is back at {tag} anyway. "
+                                f"Output tail: {_tail(out)}")
             else:
                 yield self._log(PHASE_ROLLBACK, f"{label} venv restored.")
-
-        try:
-            await self._git(git_ops.reset_hard, self.target_sha)
-        except _GIT_ERRORS as e:
-            yield self._fail(PHASE_ROLLBACK, f"git reset --hard {tag} failed: {_git_error(e)}")
-            return
-        yield self._log(PHASE_ROLLBACK, f"git reset --hard {tag} ({self.target_sha[:7]}) OK")
 
         self._write_state(PHASE_ROLLED_BACK)
         yield {
@@ -649,6 +687,7 @@ class UpdateRunner:
             "reverted_to": tag,
             "pre_update_tag": tag,
             "stash_ref": self.stash_ref,
+            "stash_refs": list(self.stash_refs),
             "restart_scheduled": True,
         }
         _schedule_restart()
@@ -924,9 +963,10 @@ class UpdateRunner:
                 "iso": _now_iso()}
 
     def _fail(self, phase: str, error: str) -> dict:
-        if self.stash_ref:
-            error += (f"\nYour local changes are saved in stash {self.stash_ref[:7]}; "
-                      f"`git stash list` shows it and `git stash apply` restores it.")
+        if self.stash_refs:
+            shas = ", ".join(sha[:7] for sha in self.stash_refs)
+            error += (f"\nLocal changes are saved in stash {shas}; `git stash list` "
+                      f"shows it and `git stash apply <sha>` restores it.")
         self.mgr.write_state(
             task_id=self.task_id, phase=PHASE_FAILED,
             target_sha=self.target_sha, from_sha=self.from_sha,
@@ -942,6 +982,7 @@ class UpdateRunner:
             "sha_before": self.from_sha[:7],
             "pre_update_tag": self.pre_update_tag,
             "stash_ref": self.stash_ref,
+            "stash_refs": list(self.stash_refs),
             "restart_scheduled": False,
         }
 
@@ -954,12 +995,118 @@ class UpdateRunner:
         """Stash the local changes to tracked files under `message` and return
         the log line naming the stash. Raises a _GIT_ERRORS member when git
         cannot stash; the caller must not reset in that case."""
-        await self._git(git_ops.stash_push, message)
-        self.stash_ref = await self._git(git_ops.latest_stash)
+        return await asyncio.to_thread(self._stash_sync, message, dirty)
+
+    def _stash_sync(self, message: str, dirty: list[str], *,
+                    unasked: bool = False) -> str:
+        """Blocking body of _stash. `unasked`: the changes appeared after the
+        dirty check, so the operator never saw them (the log line says so)."""
+        git_ops.stash_push(self.root, message)
+        sha = git_ops.latest_stash(self.root)
+        self.stash_refs.append(sha)
         noun = "file" if len(dirty) == 1 else "files"
-        return (f"Stashed local changes to {len(dirty)} tracked {noun} as {message} "
-                f"({self.stash_ref[:7]}); `git stash list` shows it and "
-                f"`git stash apply` restores it.")
+        how = f"as {message} ({sha[:7]}); `git stash list` shows it and `git stash apply` restores it."
+        if unasked:
+            return (f"{len(dirty)} tracked {noun} changed after the check for local "
+                    f"changes ({_shown(dirty)}). Stashed them instead of overwriting "
+                    f"them, {how}")
+        return f"Stashed local changes to {len(dirty)} tracked {noun} {how}"
+
+    async def _reset_keeping(self, ref: str, stash_message: str,
+                             aside: str) -> list[str]:
+        """`git reset --hard ref` via _keep_then_reset, in a worker thread."""
+        return await asyncio.to_thread(self._keep_then_reset, ref, stash_message, aside)
+
+    def _keep_then_reset(self, ref: str, stash_message: str,
+                         aside: str) -> list[str]:
+        """`git reset --hard ref`, first keeping what it would destroy (O16-01).
+
+        Blocking, and run as ONE worker-thread step so nothing of the runner's
+        runs between this second look and the reset. The dirty check at the top
+        of the run comes before the tag, the venv freezes or the diff, and an
+        edit saved since then (a CLI agent in a terminal, an SSH session) used
+        to be reset over. Here, tracked files changed since that check are
+        stashed as `stash_message`, then untracked files the reset would
+        overwrite (git_ops.paths_in_the_way) are moved under
+        Manifest/displaced/<aside>/. Neither asks again: a stash or a move
+        loses nothing, and refusing this late would leave the tag or the
+        freezes out of step with the code.
+
+        Returns the log lines naming what was kept. Raises _KeepFailed before
+        the reset when something could not be kept, and the reset then does
+        not run; a failing reset raises its own _GIT_ERRORS member.
+        """
+        notes: list[str] = []
+        try:
+            dirty = git_ops.tracked_changes(self.root)
+            if dirty:
+                notes.append(self._stash_sync(stash_message, dirty, unasked=True))
+        except _GIT_ERRORS as e:
+            raise _KeepFailed(f"Could not stash the local changes to tracked files: "
+                              f"{_git_error(e)}.") from e
+        try:
+            in_way = git_ops.paths_in_the_way(self.root, ref)
+            dest = self.root / "Manifest" / "displaced" / aside
+            for rel in in_way:
+                moved_to = dest / rel
+                if os.path.lexists(moved_to):
+                    raise FileExistsError(f"{moved_to} already exists")
+                moved_to.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(self.root / rel), str(moved_to))
+        except _GIT_ERRORS as e:
+            raise _KeepFailed(f"Could not move aside the untracked files the reset "
+                              f"would overwrite: {_git_error(e)}.") from e
+        if in_way:
+            noun = "file" if len(in_way) == 1 else "files"
+            notes.append(f"Moved {len(in_way)} untracked {noun} the reset would "
+                         f"overwrite ({_shown(in_way)}) to Manifest/displaced/{aside}/.")
+        git_ops.reset_hard(self.root, ref)
+        return notes
+
+    async def _fail_rolled_back(self, phase: str, error: str,
+                                *venvs: str) -> AsyncIterator[dict]:
+        """Roll a failed update back, then report the failure: restore the
+        venvs named in `venvs` ("orch", "mcp") from this update's freezes, reset
+        the code to the pre-update tag (keeping what the reset would destroy),
+        and yield the log lines and then the failed complete event. The
+        rollback runs BEFORE the event, and the event's error ends with what
+        really happened: rolled back, a venv that could not be restored, or
+        code left in place because what the reset would destroy could not be
+        kept (the reset then never runs)."""
+        restored: list[str] = []
+        problems: list[str] = []
+        for which in venvs:
+            label, restore = (("Orchestrator", self._restore_orch_venv) if which == "orch"
+                              else ("MCP", self._restore_mcp_venv))
+            rc, out = await restore(self.pre_update_tag)
+            if rc is None:
+                problems.append(f"the {label} venv was not restored: {out}")
+            elif rc != 0:
+                problems.append(f"restoring the {label} venv failed (rc={rc}): {_tail(out)}")
+            else:
+                restored.append(label)
+        try:
+            kept = await self._reset_keeping(
+                self.pre_update_tag, f"auto-stash-rollback-{self.pre_update_tag}",
+                f"rollback-{self.pre_update_tag}")
+        except (_KeepFailed, *_GIT_ERRORS) as e:
+            why = str(e) if isinstance(e, _KeepFailed) else _git_error(e)
+            outcome = (f"The code was NOT rolled back to {self.pre_update_tag}: "
+                       f"{why.rstrip('.')}. The new code is still on disk, so do not "
+                       f"restart the service yet: commit or stash the changed files, "
+                       f"then run `git reset --hard {self.pre_update_tag}` in {self.root}.")
+        else:
+            for note in kept:
+                yield self._log(phase, note)
+            outcome = "The update was rolled back"
+            if restored:
+                outcome += (f" and the {' and '.join(restored)} venv restored from its "
+                            f"pre-update pip freeze (Manifest/)")
+            outcome += "."
+        error += "\n" + outcome
+        for problem in problems:
+            error += f"\nWARNING: {problem}."
+        yield self._fail(phase, error)
 
     async def _run(self, cmd: list[str],
                     timeout: Optional[float] = 120.0) -> tuple[int, str]:
@@ -982,12 +1129,13 @@ class UpdateRunner:
 
     def _freeze_venvs(self) -> None:
         """Capture pip freeze for Orchestrator + MCP venvs (audit M1).
-        Pre-rollback restore happens via pip-sync-equivalent in _rollback_pip*.
+        Pre-rollback restore happens via pip-sync-equivalent in _restore_*.
 
         Blocking: the runner calls it through asyncio.to_thread (O16-09). An
         older update's freeze is removed first and a failed freeze writes
-        nothing, so a rollback never reinstalls packages from the wrong update.
-        Raises with every venv's problem once both have been tried."""
+        nothing, so a rollback never reinstalls packages from the wrong update;
+        the first line names this update's tag (FREEZE_HEADER) for the same
+        reason. Raises with every venv's problem once both have been tried."""
         problems = []
         for pip_rel, out_rel in (
                 ("Orchestrator/venv/bin/pip", "Manifest/pre_update_pip_freeze.txt"),
@@ -1007,7 +1155,7 @@ class UpdateRunner:
                 problems.append(f"{pip_rel} freeze exited {out.returncode}: "
                                 f"{_tail(out.stderr, 2)}")
                 continue
-            freeze.write_text(out.stdout)
+            freeze.write_text(f"{FREEZE_HEADER}{self.pre_update_tag}\n{out.stdout}")
         if problems:
             raise RuntimeError("; ".join(problems))
 
@@ -1027,27 +1175,6 @@ class UpdateRunner:
         new = (self.root / path).read_text() if (self.root / path).exists() else ""
         return sorted(_parse_pkg_list(new) - _parse_pkg_list(old))
 
-    async def _rollback_code(self) -> None:
-        """git reset --hard pre-update-tag. Used after non-venv failure.
-
-        A reset like any other (O16-01): whatever changed in tracked files
-        since the update's own reset is stashed first. The reset still runs if
-        the stash fails: those changes are the failed update's, not the
-        operator's (theirs were refused or stashed before the first reset),
-        and leaving the new code on the old venv is the bigger risk."""
-        operator_stash = self.stash_ref  # the one the failure message names
-        try:
-            dirty = await self._git(git_ops.tracked_changes)
-            if dirty:
-                await self._stash(f"auto-stash-rollback-{self.pre_update_tag}", dirty)
-        except Exception:
-            pass
-        self.stash_ref = operator_stash or self.stash_ref
-        try:
-            await self._git(git_ops.reset_hard, self.pre_update_tag)
-        except Exception:
-            pass
-
     def _installed_lock_extras(self) -> list[str]:
         """The LOCK_EXTRAS present in the pre-update freeze. The lock install
         removes nothing, so they are still installed."""
@@ -1058,12 +1185,14 @@ class UpdateRunner:
             return []
         return [name for name in LOCK_EXTRAS if name in installed]
 
-    async def _restore_orch_venv(self) -> Optional[tuple[int, str]]:
+    async def _restore_orch_venv(self, tag: str) -> tuple[Optional[int], str]:
         """Reinstall the pre-update freeze into the Orchestrator venv. Returns
-        pip's (returncode, output), or None when no freeze is on disk."""
+        pip's (returncode, output), or (None, why) when nothing was reinstalled:
+        no freeze on disk, or one taken for another update than `tag`."""
         freeze = self.root / "Manifest/pre_update_pip_freeze.txt"
-        if not freeze.is_file():
-            return None
+        problem = _freeze_problem(freeze, tag)
+        if problem:
+            return None, problem
         # Leave out pins with a local version label (torch==2.11.0+cpu):
         # they came from another index, PyPI cannot serve them, and one
         # unservable line makes pip refuse the whole restore. Nothing in
@@ -1081,26 +1210,43 @@ class UpdateRunner:
             "--quiet", "--force-reinstall",
         ], timeout=600.0)
 
-    async def _restore_mcp_venv(self) -> Optional[tuple[int, str]]:
-        """Reinstall the pre-update freeze into the MCP venv; None when no
-        freeze is on disk."""
+    async def _restore_mcp_venv(self, tag: str) -> tuple[Optional[int], str]:
+        """Reinstall the pre-update freeze into the MCP venv; (None, why) when
+        nothing was reinstalled (see _restore_orch_venv)."""
         freeze = self.root / "Manifest/pre_update_mcp_freeze.txt"
-        if not freeze.is_file():
-            return None
+        problem = _freeze_problem(freeze, tag)
+        if problem:
+            return None, problem
         return await self._run([
             str(self.root / "MCP/venv/bin/pip"),
             "install", "-r", str(freeze),
             "--quiet", "--force-reinstall",
         ], timeout=300.0)
 
-    async def _rollback_pip_and_code(self) -> None:
-        """Restore Orchestrator venv to pre-update freeze, then reset code."""
-        await self._restore_orch_venv()
-        await self._rollback_code()
 
-    async def _rollback_mcp_pip_and_code(self) -> None:
-        await self._restore_mcp_venv()
-        await self._rollback_code()
+class _KeepFailed(Exception):
+    """_keep_then_reset could not keep what a reset would destroy, so it did
+    not reset. The message is a sentence for the operator."""
+
+
+def _freeze_problem(freeze: Path, tag: str) -> str:
+    """Why `freeze` must not be reinstalled for a rollback to `tag`, or ""."""
+    try:
+        first = freeze.read_text().split("\n", 1)[0]
+    except OSError:
+        return "no pre-update pip freeze for it is on disk"
+    if first.startswith(FREEZE_HEADER):
+        owner = first[len(FREEZE_HEADER):].strip()
+        if owner != tag:
+            return (f"its pip freeze on disk was taken before {owner} (Scripts/update.sh "
+                    f"writes the same file), not before {tag}")
+    return ""
+
+
+def _shown(paths: list[str]) -> str:
+    """Up to five paths for a log line."""
+    shown = ", ".join(paths[:5])
+    return shown + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
 
 
 def _schedule_restart(delay_s: float = 2.0) -> None:
@@ -1113,11 +1259,8 @@ def _schedule_restart(delay_s: float = 2.0) -> None:
 def dirty_tree_message(dirty: list[str], action: str) -> str:
     """The sentence an operator sees when local changes block `action`
     ("Installing the update", "Rolling back")."""
-    shown = ", ".join(dirty[:5])
-    if len(dirty) > 5:
-        shown += f" and {len(dirty) - 5} more"
     noun = "file" if len(dirty) == 1 else "files"
-    return (f"This box has local changes to {len(dirty)} tracked {noun} ({shown}). "
+    return (f"This box has local changes to {len(dirty)} tracked {noun} ({_shown(dirty)}). "
             f"{action} would overwrite them, so nothing was changed. Commit or "
             f"stash them yourself, or confirm again and let the updater stash "
             f"them (`git stash list` shows them later, `git stash apply` "

@@ -20,6 +20,7 @@ WHY each call sets cwd= explicitly:
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -146,13 +147,15 @@ def status_porcelain(root: Path) -> list[str]:
 
 
 def tracked_changes(root: Path) -> list[str]:
-    """Paths of TRACKED files with local changes, staged or not; [] when a
-    `git reset --hard` would destroy nothing (audit O16-01).
+    """Paths of TRACKED files with local changes, staged or not (audit
+    O16-01). `git reset --hard` destroys every one of them.
 
     Untracked files are left out on purpose: a box's runtime files (ledger,
-    uploads, Manifest/) are untracked or ignored, and a reset keeps them.
-    --no-optional-locks keeps this probe from taking .git/index.lock, so a
-    status poll can never make the runner's reset fail on a held lock.
+    uploads, Manifest/) are untracked or ignored, and a reset keeps them,
+    except where the target commit has a file of its own: see
+    paths_in_the_way(). --no-optional-locks keeps this probe from taking
+    .git/index.lock, so a status poll can never make the runner's reset fail
+    on a held lock.
     """
     out = _git(root, "--no-optional-locks", "status", "--porcelain=v1", "-z",
                "--untracked-files=no").stdout
@@ -164,10 +167,38 @@ def tracked_changes(root: Path) -> list[str]:
         i += 1
         if len(entry) < 4:
             continue
-        if entry[0] in "RC":
-            i += 1  # -z puts a rename's or copy's source path in the next entry
+        # -z puts a rename's or copy's source path in the next entry. The
+        # worktree column can say R too: an intent-to-add file paired with a
+        # deleted one (" R new\0old\0").
+        if entry[0] in "RC" or entry[1] in "RC":
+            i += 1
         paths.append(entry[3:])
     return paths
+
+
+def paths_in_the_way(root: Path, target: str) -> list[str]:
+    """Untracked or ignored paths that `git reset --hard <target>` would
+    overwrite without a word: a file on disk where `target` adds one that HEAD
+    does not have, or a file where it needs a directory. Neither a stash nor a
+    tag holds them, so the runner moves them aside before it resets.
+
+    Run it after stashing: a staged new file is then off the disk, and what is
+    left at those paths is not tracked.
+    """
+    out = _git(root, "diff", "--name-only", "-z", "--no-renames",
+               "--diff-filter=A", "HEAD", target).stdout
+    hits: set[str] = set()
+    for rel in filter(None, out.split("\0")):
+        if os.path.lexists(root / rel):
+            hits.add(rel)
+            continue
+        # A file (or a symlink) where the target puts a directory.
+        for parent in reversed(Path(rel).parents[:-1]):
+            p = root / parent
+            if p.is_symlink() or (p.exists() and not p.is_dir()):
+                hits.add(parent.as_posix())
+                break
+    return sorted(hits)
 
 
 def tag_commit(root: Path, name: str) -> str:
@@ -193,11 +224,14 @@ def delete_tag(root: Path, name: str) -> None:
 def reset_hard(root: Path, ref: str) -> None:
     """git reset --hard <ref>.
 
-    Destroys every local change to a tracked file. Caller MUST hold the update
+    Destroys every local change to a tracked file, and overwrites the
+    untracked files paths_in_the_way() lists. Caller MUST hold the update
     mutex and must have checked tracked_changes() first: refuse a dirty tree,
-    or stash it when the operator agreed to discard the changes (audit O16-01).
-    The runner resets, then installs the new dependencies, then restarts; the
-    old process keeps running the code it already imported until the restart.
+    or stash it when the operator agreed to discard the changes (audit
+    O16-01). The runner (UpdateRunner._keep_then_reset) re-checks both in the
+    same step as the reset. It resets, then installs the new dependencies,
+    then restarts; the old process keeps running the code it already imported
+    until the restart.
     """
     _git(root, "reset", "--hard", ref)
 
