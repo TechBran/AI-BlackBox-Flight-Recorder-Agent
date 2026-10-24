@@ -1,6 +1,6 @@
 {
   "name": "analyze_audio",
-  "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Returns task_id (async).",
+  "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Waits for the analysis and returns it.",
   "category": "analysis",
   "groups": [
     "chat",
@@ -24,7 +24,7 @@
       "file_path"
     ]
   },
-  "returns": "task_id (string) for async status tracking via get_task_status",
+  "returns": "The analysis text. If it runs longer than about 90 seconds, a task_id to check with get_task_status instead.",
   "example": "analyze_audio(file_path=\"...\")",
-  "notes": "Async operation - use get_task_status to check progress."
+  "notes": "Usually returns the analysis directly; only a very long recording comes back as a task_id for get_task_status."
 }

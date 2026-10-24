@@ -1,9 +1,11 @@
 """Executor for gmail_labels (migrated from blackbox_tools._execute_gmail_labels)."""
+import asyncio
+
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
-    """List labels or modify message labels."""
+    """List labels or modify message labels (the Google calls run off the event loop)."""
     import json
     from Orchestrator.gmail.service import get_labels, modify_message, is_error_result
     from Orchestrator.config import current_default
@@ -12,7 +14,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     message_id = params.get("message_id", "")
 
     if action == "list":
-        result = get_labels(operator)
+        result = await asyncio.to_thread(get_labels, operator)
         return ToolResult(success=not is_error_result(result), result=json.dumps(result, indent=2))
 
     if not message_id:
@@ -25,6 +27,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         "star": (["STARRED"], []),
         "unstar": ([], ["STARRED"]),
     }
-    add_labels, remove_labels = label_map.get(action, ([], []))
-    result = modify_message(operator, message_id, add_labels, remove_labels)
+    if action not in label_map:
+        return ToolResult(success=False, result=f"Unknown action {action!r}: use list or one of {', '.join(label_map)}")
+    add_labels, remove_labels = label_map[action]
+    result = await asyncio.to_thread(modify_message, operator, message_id, add_labels, remove_labels)
     return ToolResult(success=not is_error_result(result), result=json.dumps(result))

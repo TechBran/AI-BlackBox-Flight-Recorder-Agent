@@ -3,34 +3,21 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
-    """Analyze a video using multimodal AI via /chat endpoint."""
+    """Analyze a video by calling the multimodal model directly (Orchestrator.media_analysis).
+
+    Not through /chat: that queues a chat turn which answers nothing here and
+    later mints into the operator's ledger (audit O18-toolvault-modules-01).
+    """
+    from Orchestrator.media_analysis import MediaAnalysisError, analyze_media
+
     video_url = params.get("video_url", "")
-    prompt = params.get("prompt", "Describe what happens in this video")
+    prompt = params.get("prompt") or "Describe what happens in this video"
 
     if not video_url:
         return ToolResult(False, "video_url is required")
 
     try:
-        import aiohttp
-        payload = {
-            "operator": ctx.operator,
-            "provider": "gemini",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "video_url", "video_url": {"url": video_url}}
-                ]
-            }]
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{ctx.base_url}/chat",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=180)
-            ) as resp:
-                result = await resp.json()
-                analysis = result.get("response", "")
-                return ToolResult(True, analysis, data={"provider": "gemini"})
-    except Exception as e:
-        return ToolResult(False, f"Analyze video error: {str(e)}")
+        analysis, model = await analyze_media(video_url, prompt, "video", timeout=180)
+    except MediaAnalysisError as e:
+        return ToolResult(False, f"Analyze video error: {e}")
+    return ToolResult(True, analysis, data={"provider": "gemini", "model": model})

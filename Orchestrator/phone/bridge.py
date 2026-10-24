@@ -2864,22 +2864,13 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             traceback.print_exc()
 
     async def _initiate_callback(self, phone_number: str, greeting: str, operator: str, session_id: str) -> Optional[dict]:
-        """Initiate callback via /twilio/call or /cellular/call endpoint with session resumption."""
+        """Initiate callback via the box's call route (Orchestrator.telephony) with session resumption."""
         if not AIOHTTP_AVAILABLE:
             return None
 
-        # Determine call endpoint based on TELEPHONY_PROVIDER
         from Orchestrator.config import orchestrator_url
-        try:
-            from Orchestrator.config import TELEPHONY_PROVIDER, CELLULAR_ENABLED, ASTERISK_ENABLED
-            if TELEPHONY_PROVIDER == "asterisk" and ASTERISK_ENABLED:
-                call_url = orchestrator_url("/asterisk/call")
-            elif TELEPHONY_PROVIDER in ("cellular", "auto") and CELLULAR_ENABLED:
-                call_url = orchestrator_url("/cellular/call")
-            else:
-                call_url = orchestrator_url("/twilio/call")
-        except ImportError:
-            call_url = orchestrator_url("/twilio/call")
+        from Orchestrator.telephony import call_error, call_result_ok, outbound_call_path
+        call_url = orchestrator_url(outbound_call_path())
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -2894,11 +2885,11 @@ The user's speech is being transcribed and sent to you. Respond conversationally
                     },
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    else:
-                        error = await resp.text()
-                        print(f"[PHONE-BRIDGE] Callback API error: {resp.status} - {error}")
+                    result = await resp.json(content_type=None) if resp.status == 200 else None
+                    # Both call routes answer 200 {"error": ...} when they refuse.
+                    if call_result_ok(result):
+                        return result
+                    print(f"[PHONE-BRIDGE] Callback API error: {resp.status} - {call_error(result, resp.status)}")
         except Exception as e:
             print(f"[PHONE-BRIDGE] Callback request error: {e}")
         return None
@@ -3122,28 +3113,30 @@ The user's speech is being transcribed and sent to you. Respond conversationally
         match = re.search(phone_pattern, response_text.lower())
 
         if match:
-            phone_number = match.group(1)
-            # Normalize to E.164
-            if not phone_number.startswith('+'):
-                phone_number = '+1' + phone_number.lstrip('1')
+            from Orchestrator.telephony import normalize_e164
+            phone_number = normalize_e164(match.group(1))
+            if not phone_number:
+                print(f"[PHONE-BRIDGE] Not a dialable number: {match.group(1)!r}")
+                return
             print(f"[PHONE-BRIDGE] Claude requested phone call to: {phone_number}")
 
-            # Actually initiate the call via /twilio/call endpoint
+            # Actually initiate the call via the box's call route
             try:
                 await self._initiate_outbound_call(phone_number)
             except Exception as e:
                 print(f"[PHONE-BRIDGE] Failed to initiate call: {e}")
 
     async def _initiate_outbound_call(self, phone_number: str, greeting: str = "") -> Optional[dict]:
-        """Initiate an outbound phone call via the /twilio/call endpoint."""
+        """Initiate an outbound phone call via the box's call route (Orchestrator.telephony)."""
         if not AIOHTTP_AVAILABLE:
             return None
 
         from Orchestrator.config import orchestrator_url
+        from Orchestrator.telephony import call_error, call_result_ok, outbound_call_path
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    orchestrator_url("/twilio/call"),
+                    orchestrator_url(outbound_call_path()),
                     json={
                         "to": phone_number,
                         "backend": "openai_realtime",  # Default to OpenAI for outbound calls
@@ -3152,13 +3145,11 @@ The user's speech is being transcribed and sent to you. Respond conversationally
                     },
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
+                    result = await resp.json(content_type=None) if resp.status == 200 else None
+                    if call_result_ok(result):
                         print(f"[PHONE-BRIDGE] Outbound call initiated: {result}")
                         return result
-                    else:
-                        error = await resp.text()
-                        print(f"[PHONE-BRIDGE] Outbound call failed: {resp.status} - {error}")
+                    print(f"[PHONE-BRIDGE] Outbound call failed: {resp.status} - {call_error(result, resp.status)}")
         except Exception as e:
             print(f"[PHONE-BRIDGE] Outbound call error: {e}")
         return None

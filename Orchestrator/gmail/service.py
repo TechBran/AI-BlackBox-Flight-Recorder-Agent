@@ -221,6 +221,25 @@ def workspace_connected(operator: str) -> bool:
     return is_connected(operator)
 
 
+class _PersistingCredentials(Credentials):
+    """Credentials that write every refresh back to the operator's token file.
+
+    Both refreshes go through here: the one _get_credentials runs when the token
+    is due, and the one the API client's transport runs when Google answers 401
+    (an access token revoked or expired early). The second used to live only in
+    that one call's object, so every later tool call paid a failed request plus
+    a refresh round trip again (audit O12-messaging-15).
+    """
+
+    _bbx_operator: str = ""
+    _bbx_tokens: Optional[dict] = None
+
+    def refresh(self, request):
+        super().refresh(request)
+        if self._bbx_operator:
+            self._bbx_tokens = _save_refreshed(self._bbx_operator, self._bbx_tokens or {}, self)
+
+
 def _get_credentials(operator: str) -> Optional[Credentials]:
     """Build (and refresh if due) shared OAuth credentials for an operator.
 
@@ -234,7 +253,7 @@ def _get_credentials(operator: str) -> Optional[Credentials]:
     if not tokens or "refresh_token" not in tokens:
         return None
 
-    creds = Credentials(
+    creds = _PersistingCredentials(
         token=tokens.get("access_token"),
         refresh_token=tokens["refresh_token"],
         token_uri=TOKEN_URI,
@@ -243,6 +262,8 @@ def _get_credentials(operator: str) -> Optional[Credentials]:
         scopes=SCOPES,
         expiry=_parse_expiry(tokens.get("expiry")),
     )
+    creds._bbx_operator = operator
+    creds._bbx_tokens = tokens
 
     # Refresh when the access token is expired or missing — and when its age is
     # unknown: a token file written before expiry was persisted is refreshed
@@ -256,16 +277,16 @@ def _get_credentials(operator: str) -> Optional[Credentials]:
                 raise
             print(f"[Google] Token refresh refused for {operator}: {e}")
             raise GoogleReauthRequired(operator, oauth_error_code(e), str(e)) from e
-        _save_refreshed(operator, tokens, creds)
 
     return creds
 
 
-def _save_refreshed(operator: str, tokens: dict, creds: Credentials) -> None:
+def _save_refreshed(operator: str, tokens: dict, creds: Credentials) -> dict:
     """Persist a refreshed access token + its expiry (and a rotated refresh token).
 
     Also drops the client_id/client_secret copies older token files carried.
     A failed write is logged, not raised: the credentials in hand still work.
+    Returns the record as written (the base for the next refresh).
     """
     updated = {k: v for k, v in tokens.items() if k not in ("client_id", "client_secret")}
     updated["access_token"] = creds.token
@@ -276,6 +297,7 @@ def _save_refreshed(operator: str, tokens: dict, creds: Credentials) -> None:
         save_tokens(operator, updated)
     except OSError as e:
         print(f"[Google] Could not save refreshed token for {operator}: {e}")
+    return updated
 
 
 def probe_connection(operator: str) -> Dict[str, Any]:

@@ -4,31 +4,27 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Send an SMS message via the TG200 cellular gateway (Asterisk)."""
-    phone_number = params.get("phone_number", "")
+    from Orchestrator.telephony import normalize_e164, uses_asterisk
+
+    raw_number = params.get("phone_number", "")
     message = params.get("message", "")
     from_number = params.get("from_number") or None
 
-    if not phone_number or not message:
+    if not raw_number or not message:
         return ToolResult(False, "Phone number and message are required")
-
-    # Normalize phone number
-    if not phone_number.startswith("+"):
-        if phone_number.startswith("1") and len(phone_number) == 11:
-            phone_number = f"+{phone_number}"
-        elif len(phone_number) == 10:
-            phone_number = f"+1{phone_number}"
+    phone_number = normalize_e164(raw_number)
+    if not phone_number:
+        return ToolResult(False, f"Not a valid phone number: {raw_number!r} (use E.164, e.g. +15551234567)")
 
     # Truncate message if too long
     if len(message) > 1600:
         message = message[:1597] + "..."
 
-    # Route based on TELEPHONY_PROVIDER config
-    from Orchestrator.config import TELEPHONY_PROVIDER, CELLULAR_ENABLED, ASTERISK_ENABLED
-
-    # Asterisk/TG200 path (preferred when enabled).
-    # Route through the SMS router's send_manual so from-number selection,
-    # span resolution and outbound storage all live in one place.
-    if TELEPHONY_PROVIDER == "asterisk" and ASTERISK_ENABLED:
+    # TG200/Asterisk is the only SMS path (TELEPHONY_PROVIDER asterisk or auto,
+    # with Asterisk enabled). Route through the SMS router's send_manual so
+    # from-number selection, span resolution and outbound storage all live in
+    # one place.
+    if uses_asterisk():
         try:
             from Orchestrator.sms import get_router
             sms_router = get_router()
@@ -52,5 +48,5 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(
         False,
         "SMS unavailable: TG200/Asterisk is not configured "
-        "(set TELEPHONY_PROVIDER=asterisk and enable the gateway).",
+        "(set TELEPHONY_PROVIDER=asterisk or auto and enable the gateway).",
     )

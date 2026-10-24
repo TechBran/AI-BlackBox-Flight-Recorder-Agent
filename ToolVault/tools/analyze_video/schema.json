@@ -13,7 +13,7 @@
     "properties": {
       "video_url": {
         "type": "string",
-        "description": "URL or local path to the video"
+        "description": "A BlackBox upload (e.g. /ui/uploads/clip.mp4) or a public video URL"
       },
       "prompt": {
         "type": "string",
