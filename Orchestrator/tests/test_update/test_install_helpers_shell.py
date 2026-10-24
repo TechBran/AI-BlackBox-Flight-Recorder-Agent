@@ -46,6 +46,10 @@ def _run_shell_suite(script):
     assert path.is_file(), f"missing shell test {path}"
     result = subprocess.run(["bash", str(path)], capture_output=True,
                             text=True, timeout=120, cwd=str(REPO_ROOT))
+    if result.returncode == 0 and result.stdout.lstrip().startswith("SKIP:"):
+        # A suite that cannot run here (no shellcheck, no systemd-analyze) says
+        # so and exits 0; CI's ubuntu runners have both, so the gate runs there.
+        pytest.skip(result.stdout.strip())
     assert result.returncode == 0, (
         f"{script} failed (rc={result.returncode}):\n"
         f"{result.stdout}\n{result.stderr}")

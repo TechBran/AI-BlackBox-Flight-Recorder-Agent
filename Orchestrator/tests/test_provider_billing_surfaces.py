@@ -235,16 +235,9 @@ def test_sse_routes_put_an_error_detail_frame_before_the_error_frame(cr, monkeyp
         return "".join([c if isinstance(c, str) else c.decode()
                         async for c in resp.body_iterator])
 
-    class _GetReq:
-        query_params = {"messages": json.dumps(MSGS), "provider": "anthropic",
-                        "model": "test-model", "operator": "BillingTester"}
-
-    async def go_get():
-        resp = await cr.chat_stream(_GetReq())
-        return "".join([c if isinstance(c, str) else c.decode()
-                        async for c in resp.body_iterator])
-
-    for text in (asyncio.run(go_post()), asyncio.run(go_get())):
+    # GET /chat/stream was deleted (M3 U20: a cross-site <img> could start a
+    # tool-executing turn); every client POSTs, so only the POST route is checked.
+    for text in (asyncio.run(go_post()),):
         frames = [f for f in text.split("\n\n") if f.startswith("event:")]
         names = [f.split("\n", 1)[0][len("event: "):] for f in frames]
         assert "error_detail" in names and "error" in names

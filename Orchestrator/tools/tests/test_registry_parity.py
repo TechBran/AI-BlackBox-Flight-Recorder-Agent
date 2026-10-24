@@ -28,6 +28,7 @@ the ``x-source`` marker never leaks to any provider.
 """
 
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -288,7 +289,7 @@ def _restrict(fmt, entries, names):
         "mcp",
     ],
 )
-def test_format_parity(golden, fmt):
+def test_format_parity(golden, fmt, request):
     # web_search was intentionally removed by the multi-provider web-search
     # feature (replaced by six per-provider tools); the frozen golden predates
     # that removal, so exclude it from BOTH sides of the parity comparison while
@@ -298,6 +299,17 @@ def test_format_parity(golden, fmt):
     # No x-source marker may survive into any provider's output.
     assert _find_xsource_paths(current) == [], f"{fmt} leaked x-source markers"
     normalized = _strip_operator_enums(current)
+    if os.environ.get("REGEN_TOOL_GOLDEN") == "1":
+        # Refresh the golden from INSIDE these fixtures (pinned operators, every
+        # key-gated provider on, the box's stores sandboxed): _capture_golden.py
+        # ran outside pytest and picked up this box's registered custom image
+        # server (local_image), which the suite never sees. Run once with
+        # REGEN_TOOL_GOLDEN=1 after an intentional schema change, then re-run.
+        request.getfixturevalue("checkout_guard").allow(str(GOLDEN_PATH))
+        on_disk = json.loads(GOLDEN_PATH.read_text())
+        on_disk[fmt] = normalized
+        GOLDEN_PATH.write_text(json.dumps(on_disk, indent=2, sort_keys=True) + "\n")
+        pytest.skip(f"golden regenerated for {fmt}; re-run without REGEN_TOOL_GOLDEN")
     golden_names = _names_of(fmt, golden[fmt]) - intentionally_removed
     # No migrated (golden) tool may be LOST (except intentionally-removed ones).
     missing = golden_names - _names_of(fmt, normalized)

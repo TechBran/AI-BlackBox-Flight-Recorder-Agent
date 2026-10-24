@@ -50,4 +50,4 @@ run mcp-unit
 grep -q 'Wrote ' <<<"$OUT" || fail "content drift was not rewritten: $OUT"
 cmp -s "$STORE/mcp-unit" "$DEST" || fail "dest does not match the changed store entry"
 
-echo "PASS: blackbox-write-systemd idempotency (already-current, mode drift, content drift)"
+echo "ALL TESTS PASSED (blackbox-write-systemd idempotency: already-current, mode drift, content drift)"

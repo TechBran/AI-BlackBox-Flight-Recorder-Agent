@@ -177,7 +177,7 @@ class BlackBoxToolExecutor:
     def __init__(self, operator: str = "system", base_url: Optional[str] = None,
                  origin_device_id: Optional[str] = None,
                  caller: Optional[str] = None):
-        from Orchestrator.config import orchestrator_url
+        from Orchestrator.utils.loopback import orchestrator_url  # stdlib-only: the MCP venv has no fastapi
         self.operator = operator
         # Default: this box's own API (ORCHESTRATOR_PORT, never a literal port).
         self.base_url = base_url or orchestrator_url()

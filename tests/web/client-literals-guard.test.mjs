@@ -12,6 +12,7 @@
 // Run: cd tests/web && npm ci && node --test
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { PORTAL, REPO_ROOT } from "./helpers/portal-dom.mjs";
@@ -30,11 +31,28 @@ const OPERATOR_NAME = /(?<![A-Za-z])brandon(?![A-Za-z])/i;
 // not one of them.
 const STALE_MODEL_ID = /(?<![\w.-])(?:claude-sonnet-4-5|claude-haiku-4-5|grok-3-mini-beta)(?![\w.-])/;
 
-function productionFiles(dir = PORTAL, out = []) {
+/** Tracked Portal files, from git: an untracked scratch page on a box (a dev
+ *  smoke test, a download) is not production code and must not fail the gate.
+ *  Falls back to walking the tree where git is unavailable (a tarball). */
+function productionFiles() {
+    try {
+        const out = execFileSync("git", ["ls-files", "-z", "--", "Portal"], { cwd: REPO_ROOT })
+            .toString("utf8").split("\0").filter(Boolean)
+            .filter((rel) => !rel.split("/").slice(1, -1).some((d) => SKIP_DIRS.has(d)))
+            .filter((rel) => SOURCE.test(rel) && !TEST_FILE.test(rel))
+            .map((rel) => join(REPO_ROOT, rel));
+        if (out.length) return out;
+    } catch {
+        // not a git checkout: walk the tree instead
+    }
+    return walkFiles();
+}
+
+function walkFiles(dir = PORTAL, out = []) {
     for (const name of readdirSync(dir)) {
         const path = join(dir, name);
         if (statSync(path).isDirectory()) {
-            if (!SKIP_DIRS.has(name)) productionFiles(path, out);
+            if (!SKIP_DIRS.has(name)) walkFiles(path, out);
         } else if (SOURCE.test(name) && !TEST_FILE.test(name)) {
             out.push(path);
         }

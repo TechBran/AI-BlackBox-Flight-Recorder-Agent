@@ -19,8 +19,6 @@
  */
 
 import { escapeHtml, toastSuccess, toastError } from './modules/core-utils.js';
-import { populateVoiceCatalog } from './modules/tts-stt.js';
-import { toastSuccess, toastError } from './modules/core-utils.js';
 import { populateVoiceCatalog, trackDetachedPlayer } from './modules/tts-stt.js';
 
 const MODAL_ID = 'voiceLibraryModal';

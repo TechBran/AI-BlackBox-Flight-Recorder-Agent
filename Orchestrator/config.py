@@ -562,8 +562,11 @@ def orchestrator_url(path: str = "", *, scheme: str = "http", host: str = "local
     """Loopback URL of THIS Orchestrator: every in-process caller that talks to
     the local app (SMS replies, /chat/save mints, phone/voice bridges, the cron
     executor, tool executors) builds its URL here, so a box served on another
-    ORCHESTRATOR_PORT still reaches itself. Read at call time."""
-    return f"{scheme}://{host}:{ORCHESTRATOR_PORT}{path}"
+    ORCHESTRATOR_PORT still reaches itself. Read at call time. The formatting
+    lives in the stdlib-only Orchestrator.utils.loopback (the MCP venv imports
+    the tool executor without fastapi); this box's port is passed in."""
+    from Orchestrator.utils.loopback import orchestrator_url as _loopback_url
+    return _loopback_url(path, scheme=scheme, host=host, port=ORCHESTRATOR_PORT)
 
 
 # Pairing defaults (/pair/claim, /pair/qr/{token} and /health's pairing block).

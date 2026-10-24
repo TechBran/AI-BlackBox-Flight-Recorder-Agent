@@ -122,9 +122,10 @@ chmod +x "$CPU_ROOT/Orchestrator/venv/bin/"*
 : > "$STUB_LOG"
 bash "$CPU_SH" "$USER_NAME" "$WORK/cpu-home" "$CPU_ROOT" > "$WORK/cpu.log" 2>&1; rc=$?
 [[ "$rc" == 0 ]] || fail "5: CPU reranker script exited $rc: $(cat "$WORK/cpu.log")"
-stub_log_has '^orch-pip install torch==[0-9]+\.[0-9]+\.[0-9]+ --index-url https://download\.pytorch\.org/whl/cpu$' \
+# Both pins resolve under the lock's constraints (-c requirements.txt, audit U14).
+stub_log_has '^orch-pip install torch==[0-9]+\.[0-9]+\.[0-9]+ --index-url https://download\.pytorch\.org/whl/cpu -c .*/requirements\.txt$' \
     || fail "5: CPU torch is not installed at an exact version: $(grep orch-pip "$STUB_LOG")"
-stub_log_has '^orch-pip install sentence-transformers==[0-9]+\.[0-9]+\.[0-9]+ transformers==[0-9]+\.[0-9]+\.[0-9]+$' \
+stub_log_has '^orch-pip install sentence-transformers==[0-9]+\.[0-9]+\.[0-9]+ transformers==[0-9]+\.[0-9]+\.[0-9]+ -c .*/requirements\.txt$' \
     || fail "5: sentence-transformers/transformers are not installed at exact versions: $(grep orch-pip "$STUB_LOG")"
 
 # ── 6. Step 2d then Step 2f, in install.sh order ─────────────────────────────

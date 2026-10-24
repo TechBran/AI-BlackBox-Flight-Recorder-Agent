@@ -215,6 +215,7 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadMessages(phone: String) {
         val sms = sms ?: return
+        val api = api ?: return
         _selectedPhone.value = phone
         _selectedContactName.value = _threads.value.find { it.phoneNumber == phone }?.contactName ?: ""
         val tag = generation.tag()
@@ -249,7 +250,8 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun markThreadRead(api: BlackBoxApi, phone: String) {
         try {
             api.post("/sms/mark-read", buildJsonObject {
-                put("operator", operator)
+                // Resolved per request (U16): never a captured or seeded name.
+                put("operator", store.operator.first())
                 put("phone", phone)
             }.toString())
         } catch (e: CancellationException) {

@@ -113,7 +113,7 @@
       "input_schema": {
         "properties": {
           "device_id": {
-            "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices.",
+            "description": "Device ID from the device registry (e.g., 'my-phone'). Use list_devices to see available devices.",
             "type": "string"
           },
           "prompt": {
@@ -316,7 +316,7 @@
             "type": "string"
           },
           "location": {
-            "description": "Optional. Free-text location.",
+            "description": "Optional. Where the event is, as FREE TEXT \u2014 a street address ('1247 Main St W, Hamilton, ON'), a place or business name, a room, or a meeting URL. Store it exactly as the user says it; do not geocode it or convert it to coordinates. This is the same field list_events reads back and the same form navigate_device(destination=...) takes, so an address saved here can later be pushed straight to the user's phone.",
             "type": "string"
           },
           "operator": {
@@ -1249,6 +1249,20 @@
       "name": "grok_x_search"
     },
     {
+      "description": "End the CURRENT live xAI phone-line call. Only works while an xAI sovereign-line call is active \u2014 use when the conversation is complete or the caller asks to hang up. Does NOT control Twilio calls.",
+      "input_schema": {
+        "properties": {
+          "call_id": {
+            "description": "xAI call id. Omit to target the single active call (the normal case).",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "hangup_call"
+    },
+    {
       "description": "List the calendars on the operator's Google account (the calendar list). Returns each calendar's id (use it as calendar_id with the other calendar tools), summary (name), whether it is the primary calendar, and the operator's accessRole.",
       "input_schema": {
         "properties": {
@@ -1277,7 +1291,7 @@
       "name": "list_devices"
     },
     {
-      "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, htmlLink, attendees, ...).",
+      "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, location, description, htmlLink, attendees, ...). IMPORTANT \u2014 every event carries a free-text 'location' field: that is WHERE the event is, usually a street address the user typed ('1247 Main St W, Hamilton, ON'), sometimes a place or business name or a video-call link. It is the answer to 'where is my meeting / what is the job address', and it is already in the form navigate_device and show_map want \u2014 pass it through VERBATIM, do NOT geocode it, look it up, or rewrite it. 'location' is absent or empty on events with no place set (many meetings have none), so check before using it.",
       "input_schema": {
         "properties": {
           "calendar_id": {
@@ -1403,7 +1417,7 @@
             "type": "string"
           },
           "role": {
-            "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts.",
+            "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts. OR pass 'preset:<id>' to use a saved voice-agent preset (see GET /voice-agents): the preset's instructions become the persona, its provider selects the backend, and its greeting is used when none is given.",
             "type": "string"
           }
         },
@@ -1446,6 +1460,53 @@
         "type": "object"
       },
       "name": "make_voice_call"
+    },
+    {
+      "description": "Start turn-by-turn NAVIGATION on the user's own phone (or tablet/XR device) in ONE shot. Use this for 'navigate me to X', 'take me to X', 'give me directions to X', 'send this address to my phone', 'start navigation to the job site' \u2014 including an address you just read out of a calendar event or an email. It fires ONE deterministic Android navigation intent over Tailscale, so Google Maps opens directly in turn-by-turn mode on the device: no screen watching, no tapping, no on-device model, sub-second. Prefer this over control_device whenever the goal is simply to START navigating somewhere \u2014 control_device drives the whole UI with a slow multi-step loop and is only needed when the task is more than 'navigate there'. The destination is free text (a street address, a place name, a business, or 'lat,lon') and the maps app geocodes it itself, so pass the address through verbatim \u2014 do NOT try to look up coordinates first. If the request is SCHEDULED or UNATTENDED (a cron job, a morning briefing \u2014 the phone will be locked in a pocket), pass delivery='notify' so it arrives as a notification the user taps: Android will not let this open Maps by itself from the background.",
+      "input_schema": {
+        "properties": {
+          "app": {
+            "description": "Optional navigation app: 'google maps' (default), 'waze', 'osmand', 'organic maps', 'here', an explicit Android package id, or 'any' to let the phone's default handler take it. Only set this when the user names an app \u2014 omit otherwise.",
+            "type": "string"
+          },
+          "avoid": {
+            "description": "Optional route restrictions \u2014 a comma-separated subset of 'tolls', 'highways', 'ferries' (e.g. 'tolls,ferries'). Omit for no restrictions.",
+            "type": "string"
+          },
+          "delivery": {
+            "description": "How the navigation reaches the screen. HOW TO TELL WHICH ONE YOU NEED: if this turn is an UNATTENDED SCHEDULED RUN \u2014 the prompt is headed '[Scheduled Task: ...]', or says it is unattended, or it is a cron job / morning briefing / reminder fired while the user is asleep or driving \u2014 then the phone is locked in a pocket and NOBODY is looking at it, so you MUST pass 'notify'. Android silently DISCARDS a background launch: it does not raise an error, it just never opens Maps, so 'direct' (or leaving this alone) on a scheduled run leaves the user with nothing while you report a success that did not happen. 'notify' posts a notification with a Navigate button the user taps when they next pick up the phone \u2014 the one path Android permits \u2014 and you must then say a notification is WAITING, never that navigation started. 'auto' is the right default for a live conversation, and only for one: the phone decides, opening Maps immediately if the app is in the foreground and posting the tappable notification if it isn't. 'direct' forces the immediate launch and is only safe when the user is holding an awake phone right now \u2014 it is the wrong choice for a scheduled run. Read the RESULT before you describe what happened: a notification is NOT a started navigation.",
+            "enum": [
+              "auto",
+              "direct",
+              "notify"
+            ],
+            "type": "string"
+          },
+          "destination": {
+            "description": "Where to navigate to, as free text \u2014 a full street address ('1600 Amphitheatre Parkway, Mountain View, CA'), a place or business name ('CN Tower', 'Home Depot Ancaster'), or coordinates as 'lat,lon' ('37.4224,-122.0841'). Passed to the maps app verbatim; it does the geocoding. Do not invent coordinates for a named place.",
+            "type": "string"
+          },
+          "device": {
+            "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit for origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "Optional travel mode. Omit to let the maps app use the user's default (usually driving). Turn-by-turn navigation has NO transit mode \u2014 if the user asks for transit/public-transport directions, say so rather than substituting another mode.",
+            "enum": [
+              "driving",
+              "walking",
+              "bicycling",
+              "two_wheeler"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "navigate_device"
     },
     {
       "description": "Generate images using OpenAI's gpt-image model. Quality-first defaults (1024x1024, high quality). Returns a task_id that completes asynchronously.",
@@ -1890,7 +1951,9 @@
             "enum": [
               "openai",
               "google",
-              "elevenlabs"
+              "elevenlabs",
+              "local",
+              "onbox"
             ],
             "type": "string"
           }
@@ -1978,6 +2041,26 @@
       "name": "toolvault"
     },
     {
+      "description": "Transfer the CURRENT live xAI phone-line call to another phone number or SIP destination (SIP REFER). Only works while an xAI sovereign-line call is active \u2014 use when the caller asks to be transferred, e.g. 'put me through to +1-555-0100'. Does NOT control Twilio calls.",
+      "input_schema": {
+        "properties": {
+          "call_id": {
+            "description": "xAI call id. Omit to target the single active call (the normal case).",
+            "type": "string"
+          },
+          "target_uri": {
+            "description": "Transfer destination: tel:+15550100 or sip:agent@example.com.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_uri"
+        ],
+        "type": "object"
+      },
+      "name": "transfer_call"
+    },
+    {
       "description": "Update fields of an existing event on the operator's Google Calendar (a partial patch \u2014 only the fields you supply are changed). Identify the event by event_id. start/end accept an RFC3339 datetime OR an all-day date, same as create_event. Returns the updated event.",
       "input_schema": {
         "properties": {
@@ -2005,7 +2088,7 @@
             "type": "string"
           },
           "location": {
-            "description": "Optional. New free-text location.",
+            "description": "Optional. New location, as FREE TEXT \u2014 a street address, place or business name, room, or meeting URL. Replaces the old value (pass it only when it changed). Same field list_events reads back and the same form navigate_device(destination=...) takes, so keep it a real address rather than coordinates.",
             "type": "string"
           },
           "operator": {
@@ -2045,8 +2128,11 @@
             "type": "string"
           },
           "values": {
-            "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
+            "description": "A 2D array of cell values: an array of rows, each row an array of cell strings. Send every cell as a string \u2014 Sheets USER_ENTERED parsing coerces it (\"42\" becomes a number, \"=B2*1.1\" a formula, \"5/1/2026\" a date). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
             "items": {
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             },
             "type": "array"
@@ -2109,6 +2195,36 @@
         "type": "object"
       },
       "name": "web_fetch"
+    },
+    {
+      "description": "Clone a voice from ONE local audio sample file (max 120 seconds) using xAI Custom Voices. The cloned voice_id becomes selectable as a Grok realtime voice-session voice (and on the xAI phone line) \u2014 it is NOT a TTS-picker voice. Use when the user wants a custom Grok voice from a recording they provide (e.g. an uploaded audio sample). REQUIRES explicit consent: you must first confirm the user owns or has permission to clone the voice, then pass confirm_consent=true.",
+      "input_schema": {
+        "properties": {
+          "audio_path": {
+            "description": "Local file path to ONE audio sample to clone from, at most 120 seconds long (e.g. a session-upload path).",
+            "type": "string"
+          },
+          "confirm_consent": {
+            "description": "Set true ONLY after the user has explicitly confirmed they own or have permission to clone this voice. You MUST ask and get confirmation first \u2014 refuse otherwise.",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "Optional short description of the voice.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Display name for the cloned voice (how it will appear in the Grok voice list).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "audio_path",
+          "confirm_consent"
+        ],
+        "type": "object"
+      },
+      "name": "xai_clone_voice"
     }
   ],
   "gemini_live": [
@@ -2168,7 +2284,7 @@
           "parameters": {
             "properties": {
               "device_id": {
-                "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices.",
+                "description": "Device ID from the device registry (e.g., 'my-phone'). Use list_devices to see available devices.",
                 "type": "string"
               },
               "prompt": {
@@ -2317,7 +2433,7 @@
                 "type": "string"
               },
               "location": {
-                "description": "Optional. Free-text location.",
+                "description": "Optional. Where the event is, as FREE TEXT \u2014 a street address ('1247 Main St W, Hamilton, ON'), a place or business name, a room, or a meeting URL. Store it exactly as the user says it; do not geocode it or convert it to coordinates. This is the same field list_events reads back and the same form navigate_device(destination=...) takes, so an address saved here can later be pushed straight to the user's phone.",
                 "type": "string"
               },
               "operator": {
@@ -2905,7 +3021,7 @@
           }
         },
         {
-          "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, htmlLink, attendees, ...).",
+          "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, location, description, htmlLink, attendees, ...). IMPORTANT \u2014 every event carries a free-text 'location' field: that is WHERE the event is, usually a street address the user typed ('1247 Main St W, Hamilton, ON'), sometimes a place or business name or a video-call link. It is the answer to 'where is my meeting / what is the job address', and it is already in the form navigate_device and show_map want \u2014 pass it through VERBATIM, do NOT geocode it, look it up, or rewrite it. 'location' is absent or empty on events with no place set (many meetings have none), so check before using it.",
           "name": "list_events",
           "parameters": {
             "properties": {
@@ -3021,7 +3137,7 @@
                 "type": "string"
               },
               "role": {
-                "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts.",
+                "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts. OR pass 'preset:<id>' to use a saved voice-agent preset (see GET /voice-agents): the preset's instructions become the persona, its provider selects the backend, and its greeting is used when none is given.",
                 "type": "string"
               }
             },
@@ -3537,7 +3653,7 @@
                 "type": "string"
               },
               "location": {
-                "description": "Optional. New free-text location.",
+                "description": "Optional. New location, as FREE TEXT \u2014 a street address, place or business name, room, or meeting URL. Replaces the old value (pass it only when it changed). Same field list_events reads back and the same form navigate_device(destination=...) takes, so keep it a real address rather than coordinates.",
                 "type": "string"
               },
               "operator": {
@@ -3577,8 +3693,11 @@
                 "type": "string"
               },
               "values": {
-                "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
+                "description": "A 2D array of cell values: an array of rows, each row an array of cell strings. Send every cell as a string \u2014 Sheets USER_ENTERED parsing coerces it (\"42\" becomes a number, \"=B2*1.1\" a formula, \"5/1/2026\" a date). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
                 "items": {
+                  "items": {
+                    "type": "string"
+                  },
                   "type": "array"
                 },
                 "type": "array"
@@ -3760,7 +3879,7 @@
           "parameters": {
             "properties": {
               "device_id": {
-                "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices.",
+                "description": "Device ID from the device registry (e.g., 'my-phone'). Use list_devices to see available devices.",
                 "type": "string"
               },
               "prompt": {
@@ -3963,7 +4082,7 @@
                 "type": "string"
               },
               "location": {
-                "description": "Optional. Free-text location.",
+                "description": "Optional. Where the event is, as FREE TEXT \u2014 a street address ('1247 Main St W, Hamilton, ON'), a place or business name, a room, or a meeting URL. Store it exactly as the user says it; do not geocode it or convert it to coordinates. This is the same field list_events reads back and the same form navigate_device(destination=...) takes, so an address saved here can later be pushed straight to the user's phone.",
                 "type": "string"
               },
               "operator": {
@@ -4877,6 +4996,20 @@
           }
         },
         {
+          "description": "End the CURRENT live xAI phone-line call. Only works while an xAI sovereign-line call is active \u2014 use when the conversation is complete or the caller asks to hang up. Does NOT control Twilio calls.",
+          "name": "hangup_call",
+          "parameters": {
+            "properties": {
+              "call_id": {
+                "description": "xAI call id. Omit to target the single active call (the normal case).",
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        },
+        {
           "description": "List the calendars on the operator's Google account (the calendar list). Returns each calendar's id (use it as calendar_id with the other calendar tools), summary (name), whether it is the primary calendar, and the operator's accessRole.",
           "name": "list_calendars",
           "parameters": {
@@ -4905,7 +5038,7 @@
           }
         },
         {
-          "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, htmlLink, attendees, ...).",
+          "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, location, description, htmlLink, attendees, ...). IMPORTANT \u2014 every event carries a free-text 'location' field: that is WHERE the event is, usually a street address the user typed ('1247 Main St W, Hamilton, ON'), sometimes a place or business name or a video-call link. It is the answer to 'where is my meeting / what is the job address', and it is already in the form navigate_device and show_map want \u2014 pass it through VERBATIM, do NOT geocode it, look it up, or rewrite it. 'location' is absent or empty on events with no place set (many meetings have none), so check before using it.",
           "name": "list_events",
           "parameters": {
             "properties": {
@@ -5030,7 +5163,7 @@
                 "type": "string"
               },
               "role": {
-                "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts.",
+                "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts. OR pass 'preset:<id>' to use a saved voice-agent preset (see GET /voice-agents): the preset's instructions become the persona, its provider selects the backend, and its greeting is used when none is given.",
                 "type": "string"
               }
             },
@@ -5069,6 +5202,53 @@
             "required": [
               "phone_number",
               "message"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Start turn-by-turn NAVIGATION on the user's own phone (or tablet/XR device) in ONE shot. Use this for 'navigate me to X', 'take me to X', 'give me directions to X', 'send this address to my phone', 'start navigation to the job site' \u2014 including an address you just read out of a calendar event or an email. It fires ONE deterministic Android navigation intent over Tailscale, so Google Maps opens directly in turn-by-turn mode on the device: no screen watching, no tapping, no on-device model, sub-second. Prefer this over control_device whenever the goal is simply to START navigating somewhere \u2014 control_device drives the whole UI with a slow multi-step loop and is only needed when the task is more than 'navigate there'. The destination is free text (a street address, a place name, a business, or 'lat,lon') and the maps app geocodes it itself, so pass the address through verbatim \u2014 do NOT try to look up coordinates first. If the request is SCHEDULED or UNATTENDED (a cron job, a morning briefing \u2014 the phone will be locked in a pocket), pass delivery='notify' so it arrives as a notification the user taps: Android will not let this open Maps by itself from the background.",
+          "name": "navigate_device",
+          "parameters": {
+            "properties": {
+              "app": {
+                "description": "Optional navigation app: 'google maps' (default), 'waze', 'osmand', 'organic maps', 'here', an explicit Android package id, or 'any' to let the phone's default handler take it. Only set this when the user names an app \u2014 omit otherwise.",
+                "type": "string"
+              },
+              "avoid": {
+                "description": "Optional route restrictions \u2014 a comma-separated subset of 'tolls', 'highways', 'ferries' (e.g. 'tolls,ferries'). Omit for no restrictions.",
+                "type": "string"
+              },
+              "delivery": {
+                "description": "How the navigation reaches the screen. HOW TO TELL WHICH ONE YOU NEED: if this turn is an UNATTENDED SCHEDULED RUN \u2014 the prompt is headed '[Scheduled Task: ...]', or says it is unattended, or it is a cron job / morning briefing / reminder fired while the user is asleep or driving \u2014 then the phone is locked in a pocket and NOBODY is looking at it, so you MUST pass 'notify'. Android silently DISCARDS a background launch: it does not raise an error, it just never opens Maps, so 'direct' (or leaving this alone) on a scheduled run leaves the user with nothing while you report a success that did not happen. 'notify' posts a notification with a Navigate button the user taps when they next pick up the phone \u2014 the one path Android permits \u2014 and you must then say a notification is WAITING, never that navigation started. 'auto' is the right default for a live conversation, and only for one: the phone decides, opening Maps immediately if the app is in the foreground and posting the tappable notification if it isn't. 'direct' forces the immediate launch and is only safe when the user is holding an awake phone right now \u2014 it is the wrong choice for a scheduled run. Read the RESULT before you describe what happened: a notification is NOT a started navigation.",
+                "enum": [
+                  "auto",
+                  "direct",
+                  "notify"
+                ],
+                "type": "string"
+              },
+              "destination": {
+                "description": "Where to navigate to, as free text \u2014 a full street address ('1600 Amphitheatre Parkway, Mountain View, CA'), a place or business name ('CN Tower', 'Home Depot Ancaster'), or coordinates as 'lat,lon' ('37.4224,-122.0841'). Passed to the maps app verbatim; it does the geocoding. Do not invent coordinates for a named place.",
+                "type": "string"
+              },
+              "device": {
+                "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit for origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
+                "type": "string"
+              },
+              "mode": {
+                "description": "Optional travel mode. Omit to let the maps app use the user's default (usually driving). Turn-by-turn navigation has NO transit mode \u2014 if the user asks for transit/public-transport directions, say so rather than substituting another mode.",
+                "enum": [
+                  "driving",
+                  "walking",
+                  "bicycling",
+                  "two_wheeler"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "destination"
             ],
             "type": "object"
           }
@@ -5506,7 +5686,9 @@
                 "enum": [
                   "openai",
                   "google",
-                  "elevenlabs"
+                  "elevenlabs",
+                  "local",
+                  "onbox"
                 ],
                 "type": "string"
               }
@@ -5593,6 +5775,26 @@
           }
         },
         {
+          "description": "Transfer the CURRENT live xAI phone-line call to another phone number or SIP destination (SIP REFER). Only works while an xAI sovereign-line call is active \u2014 use when the caller asks to be transferred, e.g. 'put me through to +1-555-0100'. Does NOT control Twilio calls.",
+          "name": "transfer_call",
+          "parameters": {
+            "properties": {
+              "call_id": {
+                "description": "xAI call id. Omit to target the single active call (the normal case).",
+                "type": "string"
+              },
+              "target_uri": {
+                "description": "Transfer destination: tel:+15550100 or sip:agent@example.com.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_uri"
+            ],
+            "type": "object"
+          }
+        },
+        {
           "description": "Update fields of an existing event on the operator's Google Calendar (a partial patch \u2014 only the fields you supply are changed). Identify the event by event_id. start/end accept an RFC3339 datetime OR an all-day date, same as create_event. Returns the updated event.",
           "name": "update_event",
           "parameters": {
@@ -5621,7 +5823,7 @@
                 "type": "string"
               },
               "location": {
-                "description": "Optional. New free-text location.",
+                "description": "Optional. New location, as FREE TEXT \u2014 a street address, place or business name, room, or meeting URL. Replaces the old value (pass it only when it changed). Same field list_events reads back and the same form navigate_device(destination=...) takes, so keep it a real address rather than coordinates.",
                 "type": "string"
               },
               "operator": {
@@ -5661,8 +5863,11 @@
                 "type": "string"
               },
               "values": {
-                "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
+                "description": "A 2D array of cell values: an array of rows, each row an array of cell strings. Send every cell as a string \u2014 Sheets USER_ENTERED parsing coerces it (\"42\" becomes a number, \"=B2*1.1\" a formula, \"5/1/2026\" a date). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
                 "items": {
+                  "items": {
+                    "type": "string"
+                  },
                   "type": "array"
                 },
                 "type": "array"
@@ -5720,6 +5925,36 @@
             },
             "required": [
               "url"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Clone a voice from ONE local audio sample file (max 120 seconds) using xAI Custom Voices. The cloned voice_id becomes selectable as a Grok realtime voice-session voice (and on the xAI phone line) \u2014 it is NOT a TTS-picker voice. Use when the user wants a custom Grok voice from a recording they provide (e.g. an uploaded audio sample). REQUIRES explicit consent: you must first confirm the user owns or has permission to clone the voice, then pass confirm_consent=true.",
+          "name": "xai_clone_voice",
+          "parameters": {
+            "properties": {
+              "audio_path": {
+                "description": "Local file path to ONE audio sample to clone from, at most 120 seconds long (e.g. a session-upload path).",
+                "type": "string"
+              },
+              "confirm_consent": {
+                "description": "Set true ONLY after the user has explicitly confirmed they own or have permission to clone this voice. You MUST ask and get confirmation first \u2014 refuse otherwise.",
+                "type": "boolean"
+              },
+              "description": {
+                "description": "Optional short description of the voice.",
+                "type": "string"
+              },
+              "name": {
+                "description": "Display name for the cloned voice (how it will appear in the Grok voice list).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "audio_path",
+              "confirm_consent"
             ],
             "type": "object"
           }
@@ -5851,7 +6086,7 @@
       "inputSchema": {
         "properties": {
           "device_id": {
-            "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices.",
+            "description": "Device ID from the device registry (e.g., 'my-phone'). Use list_devices to see available devices.",
             "type": "string"
           },
           "prompt": {
@@ -5998,7 +6233,7 @@
             "type": "string"
           },
           "location": {
-            "description": "Optional. Free-text location.",
+            "description": "Optional. Where the event is, as FREE TEXT \u2014 a street address ('1247 Main St W, Hamilton, ON'), a place or business name, a room, or a meeting URL. Store it exactly as the user says it; do not geocode it or convert it to coordinates. This is the same field list_events reads back and the same form navigate_device(destination=...) takes, so an address saved here can later be pushed straight to the user's phone.",
             "type": "string"
           },
           "operator": {
@@ -6904,7 +7139,7 @@
       "name": "list_devices"
     },
     {
-      "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, htmlLink, attendees, ...).",
+      "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, location, description, htmlLink, attendees, ...). IMPORTANT \u2014 every event carries a free-text 'location' field: that is WHERE the event is, usually a street address the user typed ('1247 Main St W, Hamilton, ON'), sometimes a place or business name or a video-call link. It is the answer to 'where is my meeting / what is the job address', and it is already in the form navigate_device and show_map want \u2014 pass it through VERBATIM, do NOT geocode it, look it up, or rewrite it. 'location' is absent or empty on events with no place set (many meetings have none), so check before using it.",
       "inputSchema": {
         "properties": {
           "calendar_id": {
@@ -7018,6 +7253,53 @@
         "type": "object"
       },
       "name": "mint_snapshot"
+    },
+    {
+      "description": "Start turn-by-turn NAVIGATION on the user's own phone (or tablet/XR device) in ONE shot. Use this for 'navigate me to X', 'take me to X', 'give me directions to X', 'send this address to my phone', 'start navigation to the job site' \u2014 including an address you just read out of a calendar event or an email. It fires ONE deterministic Android navigation intent over Tailscale, so Google Maps opens directly in turn-by-turn mode on the device: no screen watching, no tapping, no on-device model, sub-second. Prefer this over control_device whenever the goal is simply to START navigating somewhere \u2014 control_device drives the whole UI with a slow multi-step loop and is only needed when the task is more than 'navigate there'. The destination is free text (a street address, a place name, a business, or 'lat,lon') and the maps app geocodes it itself, so pass the address through verbatim \u2014 do NOT try to look up coordinates first. If the request is SCHEDULED or UNATTENDED (a cron job, a morning briefing \u2014 the phone will be locked in a pocket), pass delivery='notify' so it arrives as a notification the user taps: Android will not let this open Maps by itself from the background.",
+      "inputSchema": {
+        "properties": {
+          "app": {
+            "description": "Optional navigation app: 'google maps' (default), 'waze', 'osmand', 'organic maps', 'here', an explicit Android package id, or 'any' to let the phone's default handler take it. Only set this when the user names an app \u2014 omit otherwise.",
+            "type": "string"
+          },
+          "avoid": {
+            "description": "Optional route restrictions \u2014 a comma-separated subset of 'tolls', 'highways', 'ferries' (e.g. 'tolls,ferries'). Omit for no restrictions.",
+            "type": "string"
+          },
+          "delivery": {
+            "description": "How the navigation reaches the screen. HOW TO TELL WHICH ONE YOU NEED: if this turn is an UNATTENDED SCHEDULED RUN \u2014 the prompt is headed '[Scheduled Task: ...]', or says it is unattended, or it is a cron job / morning briefing / reminder fired while the user is asleep or driving \u2014 then the phone is locked in a pocket and NOBODY is looking at it, so you MUST pass 'notify'. Android silently DISCARDS a background launch: it does not raise an error, it just never opens Maps, so 'direct' (or leaving this alone) on a scheduled run leaves the user with nothing while you report a success that did not happen. 'notify' posts a notification with a Navigate button the user taps when they next pick up the phone \u2014 the one path Android permits \u2014 and you must then say a notification is WAITING, never that navigation started. 'auto' is the right default for a live conversation, and only for one: the phone decides, opening Maps immediately if the app is in the foreground and posting the tappable notification if it isn't. 'direct' forces the immediate launch and is only safe when the user is holding an awake phone right now \u2014 it is the wrong choice for a scheduled run. Read the RESULT before you describe what happened: a notification is NOT a started navigation.",
+            "enum": [
+              "auto",
+              "direct",
+              "notify"
+            ],
+            "type": "string"
+          },
+          "destination": {
+            "description": "Where to navigate to, as free text \u2014 a full street address ('1600 Amphitheatre Parkway, Mountain View, CA'), a place or business name ('CN Tower', 'Home Depot Ancaster'), or coordinates as 'lat,lon' ('37.4224,-122.0841'). Passed to the maps app verbatim; it does the geocoding. Do not invent coordinates for a named place.",
+            "type": "string"
+          },
+          "device": {
+            "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit for origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "Optional travel mode. Omit to let the maps app use the user's default (usually driving). Turn-by-turn navigation has NO transit mode \u2014 if the user asks for transit/public-transport directions, say so rather than substituting another mode.",
+            "enum": [
+              "driving",
+              "walking",
+              "bicycling",
+              "two_wheeler"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "destination"
+        ],
+        "type": "object"
+      },
+      "name": "navigate_device"
     },
     {
       "description": "Generate images using OpenAI's gpt-image model. Quality-first defaults (1024x1024, high quality). Returns a task_id that completes asynchronously.",
@@ -7352,7 +7634,9 @@
             "enum": [
               "openai",
               "google",
-              "elevenlabs"
+              "elevenlabs",
+              "local",
+              "onbox"
             ],
             "type": "string"
           }
@@ -7467,7 +7751,7 @@
             "type": "string"
           },
           "location": {
-            "description": "Optional. New free-text location.",
+            "description": "Optional. New location, as FREE TEXT \u2014 a street address, place or business name, room, or meeting URL. Replaces the old value (pass it only when it changed). Same field list_events reads back and the same form navigate_device(destination=...) takes, so keep it a real address rather than coordinates.",
             "type": "string"
           },
           "operator": {
@@ -7507,8 +7791,11 @@
             "type": "string"
           },
           "values": {
-            "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
+            "description": "A 2D array of cell values: an array of rows, each row an array of cell strings. Send every cell as a string \u2014 Sheets USER_ENTERED parsing coerces it (\"42\" becomes a number, \"=B2*1.1\" a formula, \"5/1/2026\" a date). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
             "items": {
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             },
             "type": "array"
@@ -7571,6 +7858,36 @@
         "type": "object"
       },
       "name": "web_fetch"
+    },
+    {
+      "description": "Clone a voice from ONE local audio sample file (max 120 seconds) using xAI Custom Voices. The cloned voice_id becomes selectable as a Grok realtime voice-session voice (and on the xAI phone line) \u2014 it is NOT a TTS-picker voice. Use when the user wants a custom Grok voice from a recording they provide (e.g. an uploaded audio sample). REQUIRES explicit consent: you must first confirm the user owns or has permission to clone the voice, then pass confirm_consent=true.",
+      "inputSchema": {
+        "properties": {
+          "audio_path": {
+            "description": "Local file path to ONE audio sample to clone from, at most 120 seconds long (e.g. a session-upload path).",
+            "type": "string"
+          },
+          "confirm_consent": {
+            "description": "Set true ONLY after the user has explicitly confirmed they own or have permission to clone this voice. You MUST ask and get confirmation first \u2014 refuse otherwise.",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "Optional short description of the voice.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Display name for the cloned voice (how it will appear in the Grok voice list).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "audio_path",
+          "confirm_consent"
+        ],
+        "type": "object"
+      },
+      "name": "xai_clone_voice"
     }
   ],
   "openai_realtime": [
@@ -7630,7 +7947,7 @@
       "parameters": {
         "properties": {
           "device_id": {
-            "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices.",
+            "description": "Device ID from the device registry (e.g., 'my-phone'). Use list_devices to see available devices.",
             "type": "string"
           },
           "prompt": {
@@ -7783,7 +8100,7 @@
             "type": "string"
           },
           "location": {
-            "description": "Optional. Free-text location.",
+            "description": "Optional. Where the event is, as FREE TEXT \u2014 a street address ('1247 Main St W, Hamilton, ON'), a place or business name, a room, or a meeting URL. Store it exactly as the user says it; do not geocode it or convert it to coordinates. This is the same field list_events reads back and the same form navigate_device(destination=...) takes, so an address saved here can later be pushed straight to the user's phone.",
             "type": "string"
           },
           "operator": {
@@ -8410,7 +8727,7 @@
       "type": "function"
     },
     {
-      "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, htmlLink, attendees, ...).",
+      "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, location, description, htmlLink, attendees, ...). IMPORTANT \u2014 every event carries a free-text 'location' field: that is WHERE the event is, usually a street address the user typed ('1247 Main St W, Hamilton, ON'), sometimes a place or business name or a video-call link. It is the answer to 'where is my meeting / what is the job address', and it is already in the form navigate_device and show_map want \u2014 pass it through VERBATIM, do NOT geocode it, look it up, or rewrite it. 'location' is absent or empty on events with no place set (many meetings have none), so check before using it.",
       "name": "list_events",
       "parameters": {
         "properties": {
@@ -8532,7 +8849,7 @@
             "type": "string"
           },
           "role": {
-            "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts.",
+            "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts. OR pass 'preset:<id>' to use a saved voice-agent preset (see GET /voice-agents): the preset's instructions become the persona, its provider selects the backend, and its greeting is used when none is given.",
             "type": "string"
           }
         },
@@ -9078,7 +9395,7 @@
             "type": "string"
           },
           "location": {
-            "description": "Optional. New free-text location.",
+            "description": "Optional. New location, as FREE TEXT \u2014 a street address, place or business name, room, or meeting URL. Replaces the old value (pass it only when it changed). Same field list_events reads back and the same form navigate_device(destination=...) takes, so keep it a real address rather than coordinates.",
             "type": "string"
           },
           "operator": {
@@ -9119,8 +9436,11 @@
             "type": "string"
           },
           "values": {
-            "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
+            "description": "A 2D array of cell values: an array of rows, each row an array of cell strings. Send every cell as a string \u2014 Sheets USER_ENTERED parsing coerces it (\"42\" becomes a number, \"=B2*1.1\" a formula, \"5/1/2026\" a date). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
             "items": {
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             },
             "type": "array"
@@ -9318,7 +9638,7 @@
         "parameters": {
           "properties": {
             "device_id": {
-              "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices.",
+              "description": "Device ID from the device registry (e.g., 'my-phone'). Use list_devices to see available devices.",
               "type": "string"
             },
             "prompt": {
@@ -9539,7 +9859,7 @@
               "type": "string"
             },
             "location": {
-              "description": "Optional. Free-text location.",
+              "description": "Optional. Where the event is, as FREE TEXT \u2014 a street address ('1247 Main St W, Hamilton, ON'), a place or business name, a room, or a meeting URL. Store it exactly as the user says it; do not geocode it or convert it to coordinates. This is the same field list_events reads back and the same form navigate_device(destination=...) takes, so an address saved here can later be pushed straight to the user's phone.",
               "type": "string"
             },
             "operator": {
@@ -10579,6 +10899,23 @@
     },
     {
       "function": {
+        "description": "End the CURRENT live xAI phone-line call. Only works while an xAI sovereign-line call is active \u2014 use when the conversation is complete or the caller asks to hang up. Does NOT control Twilio calls.",
+        "name": "hangup_call",
+        "parameters": {
+          "properties": {
+            "call_id": {
+              "description": "xAI call id. Omit to target the single active call (the normal case).",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
         "description": "List the calendars on the operator's Google account (the calendar list). Returns each calendar's id (use it as calendar_id with the other calendar tools), summary (name), whether it is the primary calendar, and the operator's accessRole.",
         "name": "list_calendars",
         "parameters": {
@@ -10613,7 +10950,7 @@
     },
     {
       "function": {
-        "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, htmlLink, attendees, ...).",
+        "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, location, description, htmlLink, attendees, ...). IMPORTANT \u2014 every event carries a free-text 'location' field: that is WHERE the event is, usually a street address the user typed ('1247 Main St W, Hamilton, ON'), sometimes a place or business name or a video-call link. It is the answer to 'where is my meeting / what is the job address', and it is already in the form navigate_device and show_map want \u2014 pass it through VERBATIM, do NOT geocode it, look it up, or rewrite it. 'location' is absent or empty on events with no place set (many meetings have none), so check before using it.",
         "name": "list_events",
         "parameters": {
           "properties": {
@@ -10755,7 +11092,7 @@
               "type": "string"
             },
             "role": {
-              "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts.",
+              "description": "The PERSONA/CHARACTER for the AI voice agent \u2014 define WHO they are. This becomes the agent's system prompt before the call starts. OR pass 'preset:<id>' to use a saved voice-agent preset (see GET /voice-agents): the preset's instructions become the persona, its provider selects the backend, and its greeting is used when none is given.",
               "type": "string"
             }
           },
@@ -10797,6 +11134,56 @@
           "required": [
             "phone_number",
             "message"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Start turn-by-turn NAVIGATION on the user's own phone (or tablet/XR device) in ONE shot. Use this for 'navigate me to X', 'take me to X', 'give me directions to X', 'send this address to my phone', 'start navigation to the job site' \u2014 including an address you just read out of a calendar event or an email. It fires ONE deterministic Android navigation intent over Tailscale, so Google Maps opens directly in turn-by-turn mode on the device: no screen watching, no tapping, no on-device model, sub-second. Prefer this over control_device whenever the goal is simply to START navigating somewhere \u2014 control_device drives the whole UI with a slow multi-step loop and is only needed when the task is more than 'navigate there'. The destination is free text (a street address, a place name, a business, or 'lat,lon') and the maps app geocodes it itself, so pass the address through verbatim \u2014 do NOT try to look up coordinates first. If the request is SCHEDULED or UNATTENDED (a cron job, a morning briefing \u2014 the phone will be locked in a pocket), pass delivery='notify' so it arrives as a notification the user taps: Android will not let this open Maps by itself from the background.",
+        "name": "navigate_device",
+        "parameters": {
+          "properties": {
+            "app": {
+              "description": "Optional navigation app: 'google maps' (default), 'waze', 'osmand', 'organic maps', 'here', an explicit Android package id, or 'any' to let the phone's default handler take it. Only set this when the user names an app \u2014 omit otherwise.",
+              "type": "string"
+            },
+            "avoid": {
+              "description": "Optional route restrictions \u2014 a comma-separated subset of 'tolls', 'highways', 'ferries' (e.g. 'tolls,ferries'). Omit for no restrictions.",
+              "type": "string"
+            },
+            "delivery": {
+              "description": "How the navigation reaches the screen. HOW TO TELL WHICH ONE YOU NEED: if this turn is an UNATTENDED SCHEDULED RUN \u2014 the prompt is headed '[Scheduled Task: ...]', or says it is unattended, or it is a cron job / morning briefing / reminder fired while the user is asleep or driving \u2014 then the phone is locked in a pocket and NOBODY is looking at it, so you MUST pass 'notify'. Android silently DISCARDS a background launch: it does not raise an error, it just never opens Maps, so 'direct' (or leaving this alone) on a scheduled run leaves the user with nothing while you report a success that did not happen. 'notify' posts a notification with a Navigate button the user taps when they next pick up the phone \u2014 the one path Android permits \u2014 and you must then say a notification is WAITING, never that navigation started. 'auto' is the right default for a live conversation, and only for one: the phone decides, opening Maps immediately if the app is in the foreground and posting the tappable notification if it isn't. 'direct' forces the immediate launch and is only safe when the user is holding an awake phone right now \u2014 it is the wrong choice for a scheduled run. Read the RESULT before you describe what happened: a notification is NOT a started navigation.",
+              "enum": [
+                "auto",
+                "direct",
+                "notify"
+              ],
+              "type": "string"
+            },
+            "destination": {
+              "description": "Where to navigate to, as free text \u2014 a full street address ('1600 Amphitheatre Parkway, Mountain View, CA'), a place or business name ('CN Tower', 'Home Depot Ancaster'), or coordinates as 'lat,lon' ('37.4224,-122.0841'). Passed to the maps app verbatim; it does the geocoding. Do not invent coordinates for a named place.",
+              "type": "string"
+            },
+            "device": {
+              "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit for origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
+              "type": "string"
+            },
+            "mode": {
+              "description": "Optional travel mode. Omit to let the maps app use the user's default (usually driving). Turn-by-turn navigation has NO transit mode \u2014 if the user asks for transit/public-transport directions, say so rather than substituting another mode.",
+              "enum": [
+                "driving",
+                "walking",
+                "bicycling",
+                "two_wheeler"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "destination"
           ],
           "type": "object"
         }
@@ -11296,7 +11683,9 @@
               "enum": [
                 "openai",
                 "google",
-                "elevenlabs"
+                "elevenlabs",
+                "local",
+                "onbox"
               ],
               "type": "string"
             }
@@ -11395,6 +11784,29 @@
     },
     {
       "function": {
+        "description": "Transfer the CURRENT live xAI phone-line call to another phone number or SIP destination (SIP REFER). Only works while an xAI sovereign-line call is active \u2014 use when the caller asks to be transferred, e.g. 'put me through to +1-555-0100'. Does NOT control Twilio calls.",
+        "name": "transfer_call",
+        "parameters": {
+          "properties": {
+            "call_id": {
+              "description": "xAI call id. Omit to target the single active call (the normal case).",
+              "type": "string"
+            },
+            "target_uri": {
+              "description": "Transfer destination: tel:+15550100 or sip:agent@example.com.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_uri"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
         "description": "Update fields of an existing event on the operator's Google Calendar (a partial patch \u2014 only the fields you supply are changed). Identify the event by event_id. start/end accept an RFC3339 datetime OR an all-day date, same as create_event. Returns the updated event.",
         "name": "update_event",
         "parameters": {
@@ -11423,7 +11835,7 @@
               "type": "string"
             },
             "location": {
-              "description": "Optional. New free-text location.",
+              "description": "Optional. New location, as FREE TEXT \u2014 a street address, place or business name, room, or meeting URL. Replaces the old value (pass it only when it changed). Same field list_events reads back and the same form navigate_device(destination=...) takes, so keep it a real address rather than coordinates.",
               "type": "string"
             },
             "operator": {
@@ -11466,8 +11878,11 @@
               "type": "string"
             },
             "values": {
-              "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
+              "description": "A 2D array of cell values: an array of rows, each row an array of cell strings. Send every cell as a string \u2014 Sheets USER_ENTERED parsing coerces it (\"42\" becomes a number, \"=B2*1.1\" a formula, \"5/1/2026\" a date). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]].",
               "items": {
+                "items": {
+                  "type": "string"
+                },
                 "type": "array"
               },
               "type": "array"
@@ -11532,6 +11947,39 @@
           },
           "required": [
             "url"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Clone a voice from ONE local audio sample file (max 120 seconds) using xAI Custom Voices. The cloned voice_id becomes selectable as a Grok realtime voice-session voice (and on the xAI phone line) \u2014 it is NOT a TTS-picker voice. Use when the user wants a custom Grok voice from a recording they provide (e.g. an uploaded audio sample). REQUIRES explicit consent: you must first confirm the user owns or has permission to clone the voice, then pass confirm_consent=true.",
+        "name": "xai_clone_voice",
+        "parameters": {
+          "properties": {
+            "audio_path": {
+              "description": "Local file path to ONE audio sample to clone from, at most 120 seconds long (e.g. a session-upload path).",
+              "type": "string"
+            },
+            "confirm_consent": {
+              "description": "Set true ONLY after the user has explicitly confirmed they own or have permission to clone this voice. You MUST ask and get confirmation first \u2014 refuse otherwise.",
+              "type": "boolean"
+            },
+            "description": {
+              "description": "Optional short description of the voice.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Display name for the cloned voice (how it will appear in the Grok voice list).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "audio_path",
+            "confirm_consent"
           ],
           "type": "object"
         }

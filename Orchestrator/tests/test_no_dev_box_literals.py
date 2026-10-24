@@ -76,9 +76,10 @@ ALLOWLIST = {
     "Orchestrator/config.py": (
         {"port"}, "ORCHESTRATOR_PORT's built-in default, the one value every loopback "
                   "URL derives from"),
-    "Orchestrator/toolvault/context.py": (
-        {"port"}, "the lean MCP venv loads this module without Orchestrator.config; its "
-                  "fallback mirrors the app's default port"),
+    "Orchestrator/utils/loopback.py": (
+        {"port"}, "the stdlib-only loopback helper the lean MCP venv loads without "
+                  "Orchestrator.config; config.ORCHESTRATOR_PORT wins whenever config is "
+                  "loaded, and this is the same built-in default"),
     "Orchestrator/security/origin_guard.py": (
         {"port"}, "a constructor default; its one production caller (security/perimeter.py) "
                   "passes config.ORCHESTRATOR_PORT"),

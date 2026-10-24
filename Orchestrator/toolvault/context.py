@@ -47,10 +47,8 @@ def _local_base_url() -> str:
     (ORCHESTRATOR_PORT) once the app has loaded config. This module also loads
     in the lean MCP venv, which never imports config; there the port comes
     from the ORCHESTRATOR_PORT env var, else the app's default."""
-    cfg = sys.modules.get("Orchestrator.config")
-    if cfg is not None and hasattr(cfg, "orchestrator_url"):
-        return cfg.orchestrator_url()
-    return f"http://localhost:{os.getenv('ORCHESTRATOR_PORT') or 9091}"
+    from Orchestrator.utils.loopback import orchestrator_url  # stdlib-only
+    return orchestrator_url()
 
 
 @dataclass

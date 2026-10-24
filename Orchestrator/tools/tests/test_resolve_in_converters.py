@@ -136,11 +136,34 @@ def test_x_source_does_not_leak_into_real_registry():
 # Fallback is registry-sourced: chat_routes CHAT_TOOLS_* == getter output.
 # ---------------------------------------------------------------------------
 def test_chat_fallback_arrays_are_registry_derived():
+    """Modulo the operator enum: the arrays are built once at import with the
+    roster of that moment, while the getters resolve it per call, so a test
+    that ran earlier in the session with a pinned or patched roster made the
+    two differ on nothing but that list (order-dependent failure, M3 merge)."""
+    import json as _json
+    from pathlib import Path as _Path
     from Orchestrator.routes import chat_routes as cr
+    from .test_registry_parity import _names_of, _restrict, _strip_operator_enums as norm
 
-    assert cr.CHAT_TOOLS_ANTHROPIC == tr.get_anthropic_tools("chat")
-    assert cr.CHAT_TOOLS_OPENAI == tr.get_openai_rest_tools("chat")
-    assert cr.CHAT_TOOLS_GEMINI == tr.get_gemini_rest_tools("chat")
-    assert cr.CHAT_TOOLS_ANTHROPIC_CU == tr.get_anthropic_tools("chat_cu")
+    # Key/registry-gated tools (x-availability: per-provider web search and image
+    # tools, local_image) come and go with the box's keys and custom-server
+    # registry, which earlier tests patch; only those may differ between the
+    # import-time arrays and a fresh getter call.
+    tools_dir = _Path(cr.__file__).resolve().parents[2] / "ToolVault" / "tools"
+    gated = {d.name for d in tools_dir.iterdir()
+             if (d / "schema.json").is_file()
+             and "x-availability" in _json.loads((d / "schema.json").read_text(encoding="utf-8"))}
+
+    def same(fmt, frozen, fresh):
+        a, b = norm(frozen), norm(fresh)
+        na, nb = _names_of(fmt, a), _names_of(fmt, b)
+        assert (na ^ nb) <= gated, f"{fmt}: non-gated tools differ: {sorted((na ^ nb) - gated)}"
+        common = (na & nb) - gated
+        assert _restrict(fmt, a, common) == _restrict(fmt, b, common), f"{fmt} drifted"
+
+    same("anthropic_chat", cr.CHAT_TOOLS_ANTHROPIC, tr.get_anthropic_tools("chat"))
+    same("openai_rest_chat", cr.CHAT_TOOLS_OPENAI, tr.get_openai_rest_tools("chat"))
+    same("gemini_rest_chat", cr.CHAT_TOOLS_GEMINI, tr.get_gemini_rest_tools("chat"))
+    same("anthropic_chat", cr.CHAT_TOOLS_ANTHROPIC_CU, tr.get_anthropic_tools("chat_cu"))
     # xAI reuses the OpenAI array object.
     assert cr.CHAT_TOOLS_XAI == cr.CHAT_TOOLS_OPENAI
