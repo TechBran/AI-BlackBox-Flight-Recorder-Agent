@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -32,17 +33,19 @@ DEFAULT_REMOTE_URL = "https://github.com/TechBran/ai-blackbox-flight-recorder-ag
 
 
 def _git(root: Path, *args: str, check: bool = True,
-         timeout: Optional[float] = 60.0) -> subprocess.CompletedProcess:
+         timeout: Optional[float] = 60.0,
+         env: Optional[dict] = None) -> subprocess.CompletedProcess:
     """Run `git <args>` with cwd=root. Captures stdout+stderr as text.
 
     Default timeout is 60s — covers git fetch over typical residential
     connections. Caller passes timeout=None for git clone of the whole
-    repo (which can take longer on first install).
+    repo (which can take longer on first install). `env` replaces the
+    environment (tracked_changes passes GIT_INDEX_FILE this way).
     """
     return subprocess.run(
         ["git", *args],
         cwd=str(root),
-        capture_output=True, text=True, timeout=timeout, check=check,
+        capture_output=True, text=True, timeout=timeout, check=check, env=env,
     )
 
 
@@ -155,10 +158,26 @@ def tracked_changes(root: Path) -> list[str]:
     except where the target commit has a file of its own: see
     paths_in_the_way(). --no-optional-locks keeps this probe from taking
     .git/index.lock, so a status poll can never make the runner's reset fail
-    on a held lock.
+    on a held lock. On a ZIP-installed box whose index was never filled, the
+    files on disk are compared with HEAD instead (see below), so only files
+    that really differ are listed.
     """
-    out = _git(root, "--no-optional-locks", "status", "--porcelain=v1", "-z",
-               "--untracked-files=no").stdout
+    status = ("--no-optional-locks", "status", "--porcelain=v1", "-z",
+              "--untracked-files=no")
+    if _index_unfilled(root):
+        # A ZIP-installed box (install.sh Step 0a / lazy_init): HEAD names a
+        # commit but the index was never filled, so plain status calls every
+        # file a staged deletion. Compare the files on disk with HEAD through
+        # a throwaway index instead; the box's own index is never written. It
+        # lives in the git dir, which the service can always write (/tmp may
+        # not be writable under the unit's sandboxing).
+        git_dir = _git(root, "rev-parse", "--absolute-git-dir").stdout.strip()
+        with tempfile.TemporaryDirectory(prefix="blackbox-status-", dir=git_dir) as tmp:
+            env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
+            _git(root, "read-tree", "HEAD", env=env)
+            out = _git(root, *status, env=env).stdout
+    else:
+        out = _git(root, *status).stdout
     entries = out.split("\0")
     paths: list[str] = []
     i = 0
@@ -174,6 +193,15 @@ def tracked_changes(root: Path) -> list[str]:
             i += 1
         paths.append(entry[3:])
     return paths
+
+
+def _index_unfilled(root: Path) -> bool:
+    """True when HEAD has files but the index has none: what install.sh Step
+    0a and lazy_init leave on a ZIP-installed box until its first reset."""
+    if _git(root, "ls-files", "-z").stdout:
+        return False
+    tree = _git(root, "ls-tree", "--name-only", "HEAD", check=False)
+    return tree.returncode == 0 and bool(tree.stdout.strip())
 
 
 def paths_in_the_way(root: Path, target: str) -> list[str]:

@@ -79,3 +79,20 @@ def stash_entries(root) -> list[str]:
 
 def tags(root) -> list[str]:
     return [t for t in git(root, "tag", "--list").splitlines() if t.strip()]
+
+
+def make_zip_box(box, at):
+    """A ZIP-installed box after install.sh Step 0a / git_ops.lazy_init: .git
+    points HEAD at origin/main, but the index was never filled and the files
+    on disk came from the ZIP (here: commit `at` of box.seed, unpacked).
+    Returns its root, next to box.root."""
+    from Orchestrator.update import git_ops
+    root = box.root.parent / "zipbox"
+    root.mkdir()
+    archive = subprocess.run(["git", "archive", at], cwd=str(box.seed), check=True,
+                             capture_output=True).stdout
+    subprocess.run(["tar", "-x", "-C", str(root)], input=archive, check=True)
+    git_ops.lazy_init(root, str(box.origin))
+    _identity(root)
+    (root / "Manifest").mkdir(exist_ok=True)
+    return root

@@ -33,7 +33,7 @@ from Orchestrator.update import runner as runner_mod
 from Orchestrator.update.manager import UpdateInProgressError, UpdateManager
 from Orchestrator.update.runner import UpdateRunner
 
-from ._gitbox import git, head, make_box, push_upstream, stash_entries, tags
+from ._gitbox import git, head, make_box, make_zip_box, push_upstream, stash_entries, tags
 
 
 @pytest.fixture
@@ -626,3 +626,50 @@ def test_a_rollback_restores_a_freeze_taken_for_its_own_update(tmp_path):
     done = collect(rb.rollback("pre-update-1"))[-1]
     assert done["succeeded"] is True, done
     assert [c for c in rb.calls if "--force-reinstall" in c], rb.calls
+
+
+# ── a ZIP-installed box (install.sh Step 0a) ─────────────────────────────
+#
+# Step 0a and git_ops.lazy_init point HEAD at origin/main over the ZIP's files
+# and never fill the index, so `git status` lists EVERY tracked file as a
+# staged deletion: the panel said thousands of files had local changes and
+# every Install was refused until the operator agreed to stash them all.
+
+def test_a_zip_install_box_lists_only_files_that_differ_from_head(box):
+    root = make_zip_box(box, box.v2)
+    assert git_ops.tracked_changes(root) == []
+    (root / "notes.txt").write_text("customer edit\n")
+    assert git_ops.tracked_changes(root) == ["notes.txt"]
+    # The probe read a throwaway index: the box's own is still unfilled, and
+    # the throwaway one is gone.
+    assert git(root, "ls-files") == ""
+    assert not list((root / ".git").glob("blackbox-status-*"))
+
+
+def _push_v3(box):
+    (box.seed / "app.py").write_text("VERSION = 3\n")
+    git(box.seed, "commit", "-q", "-am", "v3")
+    git(box.seed, "push", "-q", "origin", "main")
+
+
+def test_a_zip_install_box_updates_without_asking_when_nothing_differs(box):
+    root = make_zip_box(box, box.v2)       # the ZIP is the commit HEAD names
+    _push_v3(box)
+    done = collect(FakeRunner(root).run())[-1]
+    assert done["succeeded"] is True, done
+    assert (root / "app.py").read_text() == "VERSION = 3\n"
+    assert stash_entries(root) == []
+
+
+def test_a_zip_install_box_refuses_and_stashes_only_the_real_edit(box):
+    root = make_zip_box(box, box.v2)
+    _push_v3(box)
+    (root / "notes.txt").write_text("customer edit\n")
+
+    done = collect(FakeRunner(root).run())[-1]
+    assert done.get("refused") == "dirty_tree" and done["dirty_files"] == ["notes.txt"]
+
+    done = collect(FakeRunner(root, discard_local_changes=True).run())[-1]
+    assert done["succeeded"] is True, done
+    assert (root / "app.py").read_text() == "VERSION = 3\n"
+    assert "customer edit" in git(root, "show", "stash@{0}:notes.txt")

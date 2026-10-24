@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from ._gitbox import git, head, make_box, push_upstream, stash_entries, tags
+from ._gitbox import git, head, make_box, make_zip_box, push_upstream, stash_entries, tags
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -333,3 +333,40 @@ def test_the_freeze_names_the_run_it_belongs_to(sh):
     freeze = (box.root / "Manifest" / "pre_update_pip_freeze.txt").read_text()
     assert freeze.splitlines()[0] == f"# blackbox-freeze-for: {tag}"
     assert "aiohttp==3.13.2" in freeze.splitlines()
+
+
+def _zip_box_behind(box):
+    """A ZIP-installed box at v2 (see make_zip_box) with v3 upstream."""
+    root = make_zip_box(box, box.v2)
+    (box.seed / "app.py").write_text("VERSION = 3\n")
+    git(box.seed, "commit", "-q", "-am", "v3")
+    git(box.seed, "push", "-q", "origin", "main")
+    return root
+
+
+def run_in(root, box, *args):
+    return subprocess.run(["bash", str(root / "Scripts" / "update.sh"), *args], cwd=str(root),
+                          env=box.env, capture_output=True, text=True, timeout=120)
+
+
+def test_a_zip_install_box_is_not_refused_for_files_it_never_changed(sh):
+    """install.sh Step 0a never fills the index, so `git status` called every
+    file a staged deletion and --yes refused every first update."""
+    box = sh()
+    root = _zip_box_behind(box)
+    r = run_in(root, box, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (root / "app.py").read_text() == "VERSION = 3\n"
+    assert stash_entries(root) == []
+
+
+def test_a_zip_install_box_lists_only_its_real_edits(sh):
+    box = sh()
+    root = _zip_box_behind(box)
+    (root / "notes.txt").write_text("customer edit\n")
+    r = run_in(root, box, "--yes")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "notes.txt" in r.stdout and "app.py" not in r.stdout
+    assert (root / "notes.txt").read_text() == "customer edit\n"
+    assert git(root, "ls-files") == "", "the box's own index stays as install.sh left it"
+    assert not list((root / ".git").glob("blackbox-status-*"))

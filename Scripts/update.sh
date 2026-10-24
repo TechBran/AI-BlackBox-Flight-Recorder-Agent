@@ -119,7 +119,22 @@ echo "[update] ─────────────────────�
 # only. Untracked files (ledger, uploads, Manifest/) survive a reset, so only
 # tracked changes count (keep_local_work moves aside the few untracked files
 # a reset would overwrite). Decided before anything is tagged or reset.
-tracked_edits() { git status --porcelain --untracked-files=no; }
+tracked_edits() {
+    local tmp rc
+    # A ZIP-installed box (install.sh Step 0a): HEAD names a commit but the
+    # index was never filled, so plain status calls every file a staged
+    # deletion. Compare the files on disk with HEAD through a throwaway index
+    # (as git_ops.tracked_changes does); the box's own index is never written.
+    if [[ -z "$(git ls-files -z | head -c 1)" && -n "$(git ls-tree --name-only HEAD 2>/dev/null | head -c 1)" ]]; then
+        tmp="$(mktemp -d "$(git rev-parse --absolute-git-dir)/blackbox-status-XXXXXX")"
+        GIT_INDEX_FILE="$tmp/index" git read-tree HEAD \
+            && GIT_INDEX_FILE="$tmp/index" git --no-optional-locks status --porcelain --untracked-files=no
+        rc=$?
+        rm -rf "$tmp"
+        return "$rc"
+    fi
+    git status --porcelain --untracked-files=no
+}
 
 # --yes refuses local edits without --stash; an interactive run asks.
 refuse_or_ask_to_stash() {
