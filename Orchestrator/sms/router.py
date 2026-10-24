@@ -349,7 +349,9 @@ class SMSRouter:
             sender: Sender phone number (E.164, e.g. +15555550112)
             body: Decoded message text
             span: GSM span that received the message
-            recvtime: Timestamp from TG200 (e.g. "2026-03-25 17:20:48")
+            recvtime: Timestamp from TG200 (e.g. "2026-03-25 17:20:48"), in the
+                gateway's own clock: stored as gateway_recvtime, never as the
+                row's timestamp
             gateway_id: Id of the gateway that received the message (reply goes back out the same one)
         """
         log.info("Incoming SMS from %s (gateway=%s span=%s): %s", sender, gateway_id, span, body[:80])
@@ -380,12 +382,12 @@ class SMSRouter:
             operator, contact_name, classification,
         )
 
-        # 2. Normalize timestamp to ISO 8601
-        try:
-            ts = datetime.strptime(recvtime, "%Y-%m-%d %H:%M:%S")
-            timestamp = ts.replace(tzinfo=timezone.utc).isoformat()
-        except (ValueError, TypeError):
-            timestamp = datetime.now(timezone.utc).isoformat()
+        # 2. Stamp the server's receipt time: the thread is ordered by it, and
+        #    every outbound row carries the same UTC clock. The gateway's Recvtime
+        #    is in its own clock, not UTC (hours off on a stock TG200), so it is
+        #    kept as sent beside it, never used for order (audit O12-messaging-02).
+        timestamp = datetime.now(timezone.utc).isoformat()
+        gateway_recvtime = str(recvtime or "").strip()
 
         # 3. Store inbound message (tagged with the resolved line + gateway)
         self.store.store_message(
@@ -397,6 +399,7 @@ class SMSRouter:
             timestamp=timestamp,
             line_number=line_number,
             gateway_id=gateway_id or "",
+            gateway_recvtime=gateway_recvtime,
         )
 
         # 3b. M3 — notify the operator when a whitelisted PEER (not themselves)
@@ -414,7 +417,9 @@ class SMSRouter:
                     f"SMS from {contact_name}",
                     preview,
                     category="sms",
-                    dedup_key=f"sms-inbound:{operator}:{sender}:{timestamp}",
+                    # One text, one alert: keyed on the gateway's own time when
+                    # it sent one, as before receipt-time stamping.
+                    dedup_key=f"sms-inbound:{operator}:{sender}:{gateway_recvtime or timestamp}",
                 )
             except Exception:
                 # notify() is engineered never to raise; guard anyway so an alert

@@ -28,18 +28,23 @@ CREATE TABLE IF NOT EXISTS messages (
     status TEXT DEFAULT 'delivered',
     read INTEGER DEFAULT 0,
     line_number TEXT DEFAULT '',
-    gateway_id TEXT DEFAULT ''
+    gateway_id TEXT DEFAULT '',
+    gateway_recvtime TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_operator ON messages(operator);
 CREATE INDEX IF NOT EXISTS idx_phone ON messages(phone_number);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
 """
 
-# Additive columns that may be missing on DBs created before per-line scoping.
+# Additive columns that may be missing on DBs created before per-line scoping
+# (line_number, gateway_id) or before inbound rows were stamped with the
+# server's receipt time (gateway_recvtime: the gateway's own Recvtime string,
+# kept as sent; '' on outbound rows and on rows written before it existed).
 # (column_name, column_def) — applied via idempotent ALTER TABLE migration.
 _ADDITIVE_COLUMNS = (
     ("line_number", "TEXT DEFAULT ''"),
     ("gateway_id", "TEXT DEFAULT ''"),
+    ("gateway_recvtime", "TEXT DEFAULT ''"),
 )
 
 
@@ -101,8 +106,13 @@ class MessageStore:
         status: str = "delivered",
         line_number: str = "",
         gateway_id: str = "",
+        gateway_recvtime: str = "",
     ) -> int:
-        """Store a message and return its row ID."""
+        """Store a message and return its row ID.
+
+        ``timestamp`` orders the thread, so it is the server's UTC clock (the
+        default); ``gateway_recvtime`` is the gateway's own receive-time string,
+        informational only (its clock is not UTC, audit O12-messaging-02)."""
         if timestamp is None:
             timestamp = datetime.now(timezone.utc).isoformat()
         normalized = _normalize_phone(phone_number)
@@ -113,11 +123,11 @@ class MessageStore:
                     """INSERT INTO messages
                        (operator, direction, phone_number, contact_name,
                         body, ai_response, timestamp, status, read,
-                        line_number, gateway_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+                        line_number, gateway_id, gateway_recvtime)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
                     (operator, direction, normalized, contact_name,
                      body, ai_response, timestamp, status,
-                     normalized_line, gateway_id),
+                     normalized_line, gateway_id, gateway_recvtime or ""),
                 )
                 self._conn.commit()
                 msg_id = cur.lastrowid
@@ -142,6 +152,7 @@ class MessageStore:
     def get_conversation(
         self, operator: str, phone_number: str, limit: int = 50, offset: int = 0,
         line_number: str | None = None, recent: bool = False,
+        before_id: int | None = None,
     ) -> list:
         """Get messages between operator and a phone number, oldest first (chat order).
 
@@ -159,7 +170,10 @@ class MessageStore:
           - ``True``: return the most RECENT ``limit`` messages, presented
             oldest-first (chronological). The window is the last N — fetch
             DESC + LIMIT then reverse — so a long thread yields the tail, not
-            the head. ``offset`` is ignored in this mode.
+            the head. ``offset`` skips that many of the newest first.
+            ``before_id`` is a cursor: only messages that come before message
+            ``before_id`` in that same ``(timestamp, id)`` order (the page just
+            above it when scrolling back; none when that row does not exist).
         """
         normalized = _normalize_phone(phone_number)
         where = "operator = ? AND phone_number = ?"
@@ -168,15 +182,20 @@ class MessageStore:
             where += " AND line_number = ?"
             params.append(_normalize_phone(line_number) if line_number else "")
         if recent:
+            if before_id is not None:
+                # Row-value comparison: the display order, not the id order (rows
+                # stored before receipt-time stamping carry a skewed clock).
+                where += " AND (timestamp, id) < (SELECT timestamp, id FROM messages WHERE id = ?)"
+                params.append(before_id)
             # Newest-N window: take the last ``limit`` rows (DESC), then reverse
             # in Python so the caller still receives them oldest-first.
-            params.append(limit)
+            params.extend([limit, offset])
             with self._lock:
                 rows = self._conn.execute(
                     f"""SELECT * FROM messages
                         WHERE {where}
                         ORDER BY timestamp DESC, id DESC
-                        LIMIT ?""",
+                        LIMIT ? OFFSET ?""",
                     params,
                 ).fetchall()
             rows = list(reversed(rows))
@@ -240,17 +259,22 @@ class MessageStore:
         Returns list of dicts sorted by last_timestamp descending:
             {phone_number, contact_name, last_message, last_timestamp,
              unread_count, direction, line_number}
+
+        Exactly one row per phone: its newest message by ``(timestamp, id)``,
+        the order the thread is shown in. (Joining on MAX(timestamp) returned a
+        row for EVERY message sharing the newest second, and the Android list
+        is keyed by phone, audit O12-messaging-20 / A14-ui-misc-10.)
         """
         normalized_line = (
             (_normalize_phone(line_number) if line_number else "")
             if line_number is not None
             else None
         )
-        # Optional per-line filter applied to both inner aggregates.
+        # Optional per-line filter applied to both inner queries.
         line_clause = " AND line_number = ?" if normalized_line is not None else ""
-        # Each inner query takes (operator[, line]); the JOIN uses operator again.
+        # Each inner query takes (operator[, line]).
         inner = [operator] + ([normalized_line] if normalized_line is not None else [])
-        params = inner + [operator] + inner
+        params = inner + inner
 
         sql = f"""
             SELECT
@@ -261,23 +285,21 @@ class MessageStore:
                 m.direction,
                 m.line_number,
                 COALESCE(u.unread_count, 0) AS unread_count
-            FROM messages m
-            INNER JOIN (
-                SELECT phone_number, MAX(timestamp) AS max_ts
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY phone_number ORDER BY timestamp DESC, id DESC
+                ) AS rn
                 FROM messages
                 WHERE operator = ?{line_clause}
-                GROUP BY phone_number
-            ) latest
-                ON m.phone_number = latest.phone_number
-               AND m.timestamp   = latest.max_ts
-               AND m.operator    = ?
+            ) m
             LEFT JOIN (
                 SELECT phone_number, COUNT(*) AS unread_count
                 FROM messages
                 WHERE operator = ? AND direction = 'inbound' AND read = 0{line_clause}
                 GROUP BY phone_number
             ) u ON m.phone_number = u.phone_number
-            ORDER BY last_timestamp DESC
+            WHERE m.rn = 1
+            ORDER BY last_timestamp DESC, m.id DESC
         """
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()

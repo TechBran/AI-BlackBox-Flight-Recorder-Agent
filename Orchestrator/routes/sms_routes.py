@@ -49,17 +49,34 @@ async def get_threads(operator: str = Query(...)):
 async def get_messages(
     operator: str = Query(...),
     phone: str = Query(...),
-    limit: int = Query(50),
-    offset: int = Query(0),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    before_id: Optional[int] = Query(None, ge=1),
 ):
-    """Return messages in a conversation thread (oldest first for chat).
+    """Return the NEWEST ``limit`` messages of a thread, oldest first for chat.
+
+    The thread's tail, not its head: serving the oldest page meant a long
+    thread never showed a recent message (audit O12-messaging-03). Scroll back
+    with ``before_id`` = the ``next_before_id`` of the page on screen (the id
+    of its oldest message); ``has_more`` says whether anything is older still.
+    ``offset`` skips that many of the newest messages first.
 
     Read-only: clients POST /sms/mark-read once they show the thread (a GET
     that marked threads read could be fired by any cross-site <img>)."""
     _require_sms()
     store = get_message_store()
-    messages = store.get_conversation(operator, phone, limit, offset)
-    return {"messages": messages, "operator": operator, "phone": phone}
+    # One extra row tells whether an older page exists.
+    rows = store.get_conversation(operator, phone, limit=limit + 1, offset=offset,
+                                  recent=True, before_id=before_id)
+    has_more = len(rows) > limit
+    messages = rows[1:] if has_more else rows
+    return {
+        "messages": messages,
+        "operator": operator,
+        "phone": phone,
+        "has_more": has_more,
+        "next_before_id": messages[0]["id"] if has_more and messages else None,
+    }
 
 
 @router.post("/send")

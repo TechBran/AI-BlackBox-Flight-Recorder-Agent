@@ -166,7 +166,7 @@ class _FakeStore:
     def __init__(self):
         self.marked = []
 
-    def get_conversation(self, operator, phone, limit, offset):
+    def get_conversation(self, operator, phone, limit=50, offset=0, **window):
         return [{"id": 1, "body": "hi"}]
 
     def mark_all_read(self, operator, phone):

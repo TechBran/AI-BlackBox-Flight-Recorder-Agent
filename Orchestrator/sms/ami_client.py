@@ -20,6 +20,21 @@ log = logging.getLogger("sms.ami")
 # non-ASCII digits.
 _SMS_DESTINATION_RE = re.compile(r"\+?[0-9]{3,15}")
 
+# How long the parts of a concatenated SMS may take to arrive before whatever
+# has arrived is delivered as it is (a part the network never delivers must not
+# hold the text back forever).
+MULTIPART_TIMEOUT_S = 30.0
+
+
+def _gateway_int(value, default: int) -> int:
+    """Total/Index exactly as the gateway sent them, or [default] when blank or
+    garbled: a malformed field must never raise out of the read loop (audit
+    O12-messaging-11)."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
 
 def is_valid_sms_destination(destination) -> bool:
     """True for an E.164-style number the gateway's `gsm send sms` can take.
@@ -112,14 +127,21 @@ class AMISMSClient:
         self._read_task: Optional[asyncio.Task] = None
         self._keepalive_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
-        self._multipart_flush_tasks: dict[str, asyncio.Task] = {}
+        self._multipart_flush_tasks: dict[tuple, asyncio.Task] = {}
 
         # Incoming SMS callback
         self._sms_callbacks: list[Callable] = []
 
-        # Multi-part SMS buffer: (sender, recvtime) -> {index: content, ...}
+        # Multi-part SMS buffer, keyed (sender, reference, total) — see
+        # _handle_received_sms: {"parts": {index: content}, "span", "recvtime"}.
         self._multipart_buf: dict[tuple, dict] = {}
-        self._multipart_total: dict[tuple, int] = {}
+
+        # Complete inbound texts being handed to the callbacks. Each runs as its
+        # own task so the read loop keeps reading AMI frames (keepalive Pings
+        # included) while a reply is written; the lock answers them one at a
+        # time, in arrival order, as before (audit O12-messaging-10).
+        self._deliveries: set[asyncio.Task] = set()
+        self._delivery_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -165,7 +187,11 @@ class AMISMSClient:
         self._authenticated = True
         log.info("AMI authenticated to %s:%s", self.host, self.port)
 
-        # Start background loops
+        # Start background loops. Loops left over from the previous connection
+        # must not keep reading from (or pinging) this one's socket.
+        for stale in (self._read_task, self._keepalive_task):
+            if stale and not stale.done() and stale is not asyncio.current_task():
+                stale.cancel()
         self._read_task = asyncio.create_task(self._read_loop(), name="ami-read")
         self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="ami-keepalive")
 
@@ -173,10 +199,14 @@ class AMISMSClient:
         """Gracefully disconnect from AMI."""
         self._shutting_down = True
 
-        # Cancel multipart flush timers
+        # Cancel multipart flush timers (and drop the parts they guarded).
+        # Texts already being answered are left to finish: a gateway re-add or
+        # reconnect must not drop a reply mid-write, and the reply goes out
+        # through whichever client the manager holds for the gateway by then.
         for task in self._multipart_flush_tasks.values():
             task.cancel()
         self._multipart_flush_tasks.clear()
+        self._multipart_buf.clear()
 
         # Send Logoff if still connected
         if self._connected and self._writer and not self._writer.is_closing():
@@ -380,20 +410,25 @@ class AMISMSClient:
                     log.warning("AMI read loop: connection lost: %s", exc)
                     break
 
-                # Dispatch based on message type
-                action_id = msg.get("ActionID")
-                event = msg.get("Event")
+                # Dispatch based on message type. One bad event is logged and
+                # skipped: it must never end the loop and drop the connection
+                # (audit O12-messaging-11).
+                try:
+                    action_id = msg.get("ActionID")
+                    event = msg.get("Event")
 
-                if action_id and action_id in self._pending:
-                    fut = self._pending.pop(action_id)
-                    if not fut.done():
-                        fut.set_result(msg)
-                elif event == "ReceivedSMS":
-                    await self._handle_received_sms(msg)
-                elif event:
-                    log.debug("AMI event: %s", event)
-                elif msg.get("Response"):
-                    log.debug("AMI unsolicited response: %s", msg.get("Response"))
+                    if action_id and action_id in self._pending:
+                        fut = self._pending.pop(action_id)
+                        if not fut.done():
+                            fut.set_result(msg)
+                    elif event == "ReceivedSMS":
+                        await self._handle_received_sms(msg)
+                    elif event:
+                        log.debug("AMI event: %s", event)
+                    elif msg.get("Response"):
+                        log.debug("AMI unsolicited response: %s", msg.get("Response"))
+                except Exception:
+                    log.exception("AMI event handling failed; skipping event %r", msg.get("Event"))
 
         except asyncio.CancelledError:
             return
@@ -440,21 +475,35 @@ class AMISMSClient:
             self._sms_callbacks.append(callback)
 
     async def _handle_received_sms(self, msg: dict):
-        """Process a ReceivedSMS event, buffering multi-part if needed."""
-        sender = msg.get("Sender", "").strip()
+        """Process a ReceivedSMS event, buffering multi-part if needed.
+
+        The parts of one concatenated text are grouped by (sender, reference,
+        total). Not by Recvtime: the TG200 stamps every part with its own
+        Recvtime, so a 2-part text arriving across a second boundary used to
+        land in two buffers and go out as two inbound texts, each with its own
+        AI reply (audit O12-messaging-01). The reference is the event's ID —
+        blank on the TG200 firmware seen so far, so there the key is (sender,
+        total); a firmware that fills it keeps two interleaved texts apart.
+        Parts are assembled in Index order, so the firmware's 1-based
+        multi-part numbering and a 0-based one both work.
+        """
+        sender = (msg.get("Sender") or "").strip()
         raw_content = msg.get("Content", "")
         span = msg.get("GsmSpan", "2")
         recvtime = msg.get("Recvtime", "")
+        reference = (msg.get("ID") or "").strip()
 
         # URL-decode the content (+ = space, %XX = char)
         body = urllib.parse.unquote_plus(raw_content)
 
-        total = int(msg.get("Total", "1"))
-        index = int(msg.get("Index", "0"))
+        raw_total, raw_index = msg.get("Total"), msg.get("Index")
+        total = max(_gateway_int(raw_total, 1), 1)
+        index = _gateway_int(raw_index, 0)
 
+        # Index/Total exactly as sent (the firmware numbers multi-part from 1).
         log.info(
-            "SMS received: sender=%s span=%s part=%d/%d len=%d",
-            sender, span, index + 1, total, len(body),
+            "SMS received: sender=%s span=%s Index=%r Total=%r ref=%r len=%d",
+            sender, span, raw_index, raw_total, reference, len(body),
         )
 
         if total <= 1:
@@ -463,60 +512,80 @@ class AMISMSClient:
             return
 
         # Multi-part: buffer until all parts arrive
-        buf_key = (sender, recvtime)
-        if buf_key not in self._multipart_buf:
-            self._multipart_buf[buf_key] = {}
-            self._multipart_total[buf_key] = total
-            # Start a 30s flush timer
-            task = asyncio.create_task(self._multipart_timeout(buf_key, sender, span, recvtime))
-            self._multipart_flush_tasks[buf_key] = task
+        buf_key = (sender, reference, total)
+        buf = self._multipart_buf.get(buf_key)
+        if buf is not None and index in buf["parts"]:
+            # The same part number again is the NEXT text of the same shape:
+            # deliver what the previous one has instead of overwriting it.
+            log.warning(
+                "Multi-part SMS from %s: Index %r repeated before the text was "
+                "whole; delivering the %d/%d parts received",
+                sender, raw_index, len(buf["parts"]), total,
+            )
+            await self._flush_multipart(buf_key)
+            buf = None
+        if buf is None:
+            # The text's span and gateway time are those of its first part.
+            buf = {"parts": {}, "span": span, "recvtime": recvtime}
+            self._multipart_buf[buf_key] = buf
+            # Fallback: flush whatever has arrived after MULTIPART_TIMEOUT_S
+            self._multipart_flush_tasks[buf_key] = asyncio.create_task(
+                self._multipart_timeout(buf_key))
 
-        self._multipart_buf[buf_key][index] = body
+        buf["parts"][index] = body
 
         # Check if all parts have arrived
-        if len(self._multipart_buf[buf_key]) >= total:
-            # Cancel the timeout timer
-            timer = self._multipart_flush_tasks.pop(buf_key, None)
-            if timer and not timer.done():
-                timer.cancel()
-            await self._flush_multipart(buf_key, sender, span, recvtime)
+        if len(buf["parts"]) >= total:
+            await self._flush_multipart(buf_key)
 
-    async def _multipart_timeout(self, buf_key: tuple, sender: str, span: str, recvtime: str):
-        """After 30s, flush whatever parts we have for a multi-part SMS."""
+    async def _multipart_timeout(self, buf_key: tuple):
+        """After MULTIPART_TIMEOUT_S, flush whatever parts we have for a multi-part SMS."""
         try:
-            await asyncio.sleep(30)
-            self._multipart_flush_tasks.pop(buf_key, None)
-            if buf_key in self._multipart_buf:
-                log.warning(
-                    "Multi-part SMS timeout for %s — flushing %d/%d parts",
-                    sender,
-                    len(self._multipart_buf[buf_key]),
-                    self._multipart_total.get(buf_key, "?"),
-                )
-                await self._flush_multipart(buf_key, sender, span, recvtime)
+            await asyncio.sleep(MULTIPART_TIMEOUT_S)
         except asyncio.CancelledError:
             return
+        buf = self._multipart_buf.get(buf_key)
+        if buf is None:
+            return
+        # This timer is the one finishing: _flush_multipart must not cancel it.
+        self._multipart_flush_tasks.pop(buf_key, None)
+        log.warning(
+            "Multi-part SMS timeout for %s — flushing %d/%d parts",
+            buf_key[0], len(buf["parts"]), buf_key[2],
+        )
+        await self._flush_multipart(buf_key)
 
-    async def _flush_multipart(self, buf_key: tuple, sender: str, span: str, recvtime: str):
+    async def _flush_multipart(self, buf_key: tuple):
         """Assemble buffered parts in order and deliver."""
-        parts = self._multipart_buf.pop(buf_key, {})
-        self._multipart_total.pop(buf_key, None)
+        timer = self._multipart_flush_tasks.pop(buf_key, None)
+        if timer and not timer.done():
+            timer.cancel()
+        buf = self._multipart_buf.pop(buf_key, None)
+        if not buf:
+            return
 
         # Assemble in index order
-        assembled = ""
-        for i in sorted(parts.keys()):
-            assembled += parts[i]
+        parts = buf["parts"]
+        assembled = "".join(parts[i] for i in sorted(parts))
 
-        await self._dispatch_sms(sender, assembled, span, recvtime)
+        await self._dispatch_sms(buf_key[0], assembled, buf["span"], buf["recvtime"])
 
     async def _dispatch_sms(self, sender: str, body: str, span: str, recvtime: str):
-        """Invoke all registered SMS callbacks."""
+        """Hand a complete inbound SMS to the callbacks without blocking the read loop."""
         log.info("SMS dispatch: sender=%s body=%r", sender, body[:100])
-        for cb in self._sms_callbacks:
-            try:
-                await cb(sender, body, span, recvtime, self.gateway_id)
-            except Exception:
-                log.exception("SMS callback error")
+        task = asyncio.create_task(
+            self._deliver_sms(sender, body, span, recvtime), name="ami-sms-deliver")
+        self._deliveries.add(task)
+        task.add_done_callback(self._deliveries.discard)
+
+    async def _deliver_sms(self, sender: str, body: str, span: str, recvtime: str):
+        """Invoke all registered SMS callbacks, one inbound text at a time."""
+        async with self._delivery_lock:
+            for cb in self._sms_callbacks:
+                try:
+                    await cb(sender, body, span, recvtime, self.gateway_id)
+                except Exception:
+                    log.exception("SMS callback error")
 
     # ------------------------------------------------------------------
     # Public API
