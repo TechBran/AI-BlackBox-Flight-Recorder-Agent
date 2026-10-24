@@ -16,7 +16,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -50,7 +50,10 @@ logger = logging.getLogger(__name__)
 # while the first may still send its SMS or place its call.
 #
 # RUN_CANCELLED: the job's /chat task was cancelled (task manager, cancel-all).
-# Cancelling is an operator decision, so it is not retried either.
+# Cancelling is an operator decision, so it is not retried either. The cancel
+# is cooperative and cannot prove that no tool ran, so the run is recorded as
+# cancelled (history delivery_status and last_run_result), not as a failure,
+# and a one-shot is paused like a run that may have delivered.
 # ---------------------------------------------------------------------------
 OUTCOME_UNKNOWN = "outcome_unknown"
 RUN_CANCELLED = "cancelled"
@@ -276,6 +279,10 @@ _HISTORY_ADDED_COLUMNS = {
 # Standard cron numbers the week 0=Sunday .. 6=Saturday (7 is Sunday again).
 _CRON_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
 
+# cron_meta key: the start-up notice of the jobs whose fire days the O15-01
+# fix moved was given (it is for the first start after the fix, not every boot).
+_DOW_NOTICE_KEY = "dow_standard_cron_notice"
+
 
 @dataclass
 class _Attempt:
@@ -289,6 +296,7 @@ class _Attempt:
     retryable: bool
     turn_ran: bool
     outcome_unknown: bool = False
+    cancelled: bool = False
 
 
 class CronJobManager:
@@ -365,8 +373,11 @@ class CronJobManager:
 
         Handles '*', '?', single days, names, lists, ranges and steps, with
         the standard meanings: '*/2' is Sun,Tue,Thu,Sat; 'N/S' runs from N to
-        7; a range must not run backwards. The result lists the days by name,
-        which APScheduler reads the same way standard cron does.
+        7; a range must not run backwards. A range that ends on the NAME sun
+        ('sat-sun', 'mon-sun') ends the week: APScheduler numbers sun last, so
+        it read those as written and stored weekend jobs use them. The result
+        lists the days by name, which APScheduler reads the same way standard
+        cron does.
         """
         if field in ("*", "?"):
             return "*"
@@ -383,6 +394,8 @@ class CronJobManager:
             elif "-" in base:
                 lo_text, _, hi_text = base.partition("-")
                 lo, hi = cls._dow_number(lo_text), cls._dow_number(hi_text)
+                if hi == 0 and lo > 0 and hi_text.strip().lower() == "sun":
+                    hi = 7
                 if lo > hi:
                     raise ValueError(f"day-of-week range '{base}' runs backwards")
             else:
@@ -393,12 +406,75 @@ class CronJobManager:
         return ",".join(_CRON_DOW_NAMES[d] for d in sorted(days, key=lambda d: (d - 1) % 7))
 
     @staticmethod
-    def _has_numeric_dow(schedule: str) -> bool:
-        """True for a 5-field schedule whose day-of-week field has a number in
-        it (a day or a '*/N' step), i.e. one whose fire days the O15-01 fix
-        moves: before it, numeric days fired a day late."""
+    def _week_days(trigger: CronTrigger) -> "set[int]":
+        """The weekdays (0 = Monday) a trigger fires on over one week."""
+        cursor = datetime(2026, 1, 5, tzinfo=LOCAL_TZ)  # a Monday
+        end = cursor + timedelta(days=7)
+        days = set()
+        while True:
+            fire = trigger.get_next_fire_time(None, cursor)
+            if fire is None or fire >= end:
+                return days
+            days.add(fire.astimezone(LOCAL_TZ).weekday())
+            cursor = fire + timedelta(seconds=1)
+
+    @staticmethod
+    def _format_days(days: "set[int]") -> str:
+        """Weekdays (0 = Monday) as 'Mon-Fri' or 'Tue, Thu, Sat, Sun'."""
+        names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        runs: List[List[int]] = []
+        for d in sorted(days):
+            if runs and d == runs[-1][-1] + 1:
+                runs[-1].append(d)
+            else:
+                runs.append([d])
+        parts = []
+        for run in runs:
+            if len(run) >= 3:
+                parts.append(f"{names[run[0]]}-{names[run[-1]]}")
+            else:
+                parts.extend(names[d] for d in run)
+        return ", ".join(parts) or "no day"
+
+    def _dow_change_note(self, schedule: str) -> Optional[str]:
+        """How the O15-01 fix moves a stored schedule's fire days, or None.
+
+        Only a numeric day-of-week field moves (names always meant what they
+        say). Before the fix the field went to APScheduler untranslated, where
+        0 is Monday and 7 is refused; the note compares that reading with the
+        standard one, so a field whose days do not move ('0-6') gets none.
+        """
         fields = (schedule or "").split()
-        return len(fields) == 5 and any(c.isdigit() for c in fields[4])
+        if len(fields) != 5 or not any(c.isdigit() for c in fields[4]):
+            return None
+        probe = f"0 0 * * {fields[4]}"
+        new_days = self._week_days(self._build_trigger(probe))
+        try:
+            old_days = self._week_days(CronTrigger.from_crontab(probe, timezone=LOCAL_TZ))
+        except ValueError:
+            return f"fires {self._format_days(new_days)}; it used to be refused"
+        if old_days == new_days:
+            return None
+        return (f"fires {self._format_days(new_days)}, where it used to fire "
+                f"{self._format_days(old_days)}")
+
+    def _meta_get(self, key: str) -> Optional[str]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute("SELECT value FROM cron_meta WHERE key = ?", (key,)).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _meta_set(self, key: str, value: str) -> None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO cron_meta (key, value) VALUES (?, ?)", (key, value)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Database initialisation
@@ -481,6 +557,13 @@ class CronJobManager:
                 CREATE INDEX IF NOT EXISTS idx_cron_job_history_job_id
                     ON cron_job_history(job_id)
             """)
+            # One-time start-up notices already given (_DOW_NOTICE_KEY).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cron_meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
             conn.commit()
         finally:
             conn.close()
@@ -524,18 +607,30 @@ class CronJobManager:
         jobs = self.list_jobs(status="active")
         loaded = 0
         caught_up = 0
+        # O15-01: on the first start after the fix, name each job whose fire
+        # days the corrected trigger moves (once, not on every boot).
+        try:
+            dow_notice_due = self._meta_get(_DOW_NOTICE_KEY) is None
+        except sqlite3.Error:
+            logger.exception("[CRON] startup: could not read cron_meta")
+            dow_notice_due = False
         for job in jobs:
             # Capture the PRE-restart next_run_at BEFORE re-registering, which
             # overwrites it with the next future fire (M3.2 ordering).
             captured_next_run_at = job.get("next_run_at")
-            if self._has_numeric_dow(job["schedule"]):
-                # O15-01: re-registering builds the corrected trigger; say so,
-                # since this job's fire days move (numeric days by one day).
-                logger.info(
-                    "[CRON] job %s (%s): day-of-week in '%s' is now read as "
-                    "standard cron (0/7 = Sunday); numeric days used to fire one day later",
-                    job["id"], job.get("name"), job["schedule"],
-                )
+            if dow_notice_due:
+                try:
+                    note = self._dow_change_note(job["schedule"])
+                except Exception:
+                    # A notice never keeps a job from loading; a schedule that
+                    # does not build is reported by the registration below.
+                    note = None
+                if note:
+                    logger.info(
+                        "[CRON] job %s (%s): day-of-week in '%s' is now read as "
+                        "standard cron (0/7 = Sunday): it %s",
+                        job["id"], job.get("name"), job["schedule"], note,
+                    )
             try:
                 self._register_job_with_scheduler(job)
                 loaded += 1
@@ -556,6 +651,12 @@ class CronJobManager:
             if self._is_past(captured_next_run_at, now):
                 self._enqueue_catchup(job["id"])
                 caught_up += 1
+
+        if dow_notice_due:
+            try:
+                self._meta_set(_DOW_NOTICE_KEY, now.isoformat())
+            except sqlite3.Error:
+                logger.exception("[CRON] startup: could not write cron_meta")
 
         logger.info(
             "CronJobManager started – %d active job(s) loaded from %d total",
@@ -1445,6 +1546,8 @@ class CronJobManager:
         failed_turn_reply: Optional[str] = None
         # O15-02: the executor could not see how the turn ended.
         outcome_unknown = False
+        # The /chat task was cancelled (RUN_CANCELLED).
+        cancelled = False
 
         for attempt in range(MAX_RETRIES + 1):
             result = await self._attempt_once(job)
@@ -1471,6 +1574,9 @@ class CronJobManager:
                         "Cron job %s: %s; not retrying (a retry could repeat its delivery)",
                         job_id, result.error_text,
                     )
+                elif result.cancelled:
+                    cancelled = True
+                    logger.warning("Cron job %s: %s; not retrying", job_id, result.error_text)
                 elif result.turn_ran:
                     turn_completed = True
                     failed_turn_reply = result.result_text
@@ -1502,14 +1608,16 @@ class CronJobManager:
             last_run_result = "success"
         elif outcome_unknown:
             last_run_result = OUTCOME_UNKNOWN
+        elif cancelled:
+            last_run_result = RUN_CANCELLED
         else:
             last_run_result = "partial" if final_status == "partial" else "error"
         now_iso = datetime.now(timezone.utc).isoformat()
 
         # error_count increments ONCE for a failed run as a whole, not once per
-        # failed attempt, and not for a run whose outcome is unknown. The
-        # in-flight marker is cleared in the same update.
-        counts_as_error = not succeeded and not outcome_unknown
+        # failed attempt, and not for a run whose outcome is unknown or that was
+        # cancelled. The in-flight marker is cleared in the same update.
+        counts_as_error = not succeeded and not outcome_unknown and not cancelled
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
@@ -1555,13 +1663,13 @@ class CronJobManager:
         # is consumed — any side effect that worked already happened, so it
         # must not fire again at the next match of its expression. Pause it:
         # it survives for inspection and can be resumed on purpose. A run whose
-        # outcome is unknown (O15-02) may have delivered too, so it is paused
-        # the same way.
+        # outcome is unknown (O15-02), or that was cancelled mid-turn, may have
+        # delivered too, so it is paused the same way.
         one_shot_paused = False
         if job.get("one_shot") and succeeded:
             logger.info("One-shot job %s completed successfully, deleting", job_id)
             self.delete_job(job_id)
-        elif job.get("one_shot") and (turn_completed or outcome_unknown):
+        elif job.get("one_shot") and (turn_completed or outcome_unknown or cancelled):
             logger.info("One-shot job %s may have run (%s), pausing", job_id, last_run_result)
             one_shot_paused = self.pause_job(job_id) is not None
 
@@ -1577,6 +1685,7 @@ class CronJobManager:
             fire_ts=last_run_at.isoformat(),
             partial=last_run_result == "partial",
             outcome_unknown=outcome_unknown,
+            cancelled=cancelled,
             one_shot_paused=one_shot_paused,
         )
 
@@ -1590,6 +1699,7 @@ class CronJobManager:
         fire_ts: str,
         partial: bool = False,
         outcome_unknown: bool = False,
+        cancelled: bool = False,
         one_shot_paused: bool = False,
     ) -> None:
         """Push the run's outcome to the notification bus (M5.1).
@@ -1633,6 +1743,8 @@ class CronJobManager:
                          "again; resume it once the cause is fixed.")
             if outcome_unknown:
                 title = f"Cron job outcome unknown: {job_name}"
+            elif cancelled:
+                title = f"Cron job cancelled: {job_name}"
             elif partial:
                 title = f"Cron job partially failed: {job_name}"
             else:
@@ -1699,8 +1811,13 @@ class CronJobManager:
         credits do not come back within the backoff, so a retry only repeats
         the refusal (and, for a CU job, the desktop launch). The turn never
         ran, so ``turn_ran`` is False and the run is an ordinary failure (a
-        one-shot survives armed, M2.6, instead of being paused). A cancelled
-        task (``error_kind`` cancelled) is the same: the operator decided.
+        one-shot survives armed, M2.6, instead of being paused). Any other
+        exception with ``retryable`` False (executor.CronJobInvalid) is not
+        retried either. A cancelled task (``error_kind`` cancelled) is not
+        retried and is recorded as 'cancelled' (``cancelled`` True): the
+        operator decided, and the turn may have run before the cancel landed.
+        An executor.CronTurnIncomplete (the turn ran but did not end cleanly)
+        is handled like CronToolFailure.
 
         O15-02: an executor.CronOutcomeUnknown (``error_kind`` outcome_unknown:
         the turn may have run and delivered, but its end was not seen) is
@@ -1716,6 +1833,7 @@ class CronJobManager:
         retryable = True
         turn_ran = False
         outcome_unknown = False
+        cancelled = False
         task_ids: List[str] = []
 
         def _on_task_id(task_id: str) -> None:
@@ -1750,7 +1868,12 @@ class CronJobManager:
                 result_text = getattr(exc, "result_text", None) or None
                 delivery_status = getattr(exc, "delivery_status", "error")
                 logger.warning("Cron job %s: %s", job_id, error_text)
-            elif error_kind in (CREDITS_EXHAUSTED, RUN_CANCELLED):
+            elif error_kind == RUN_CANCELLED:
+                retryable = False
+                cancelled = True
+                delivery_status = RUN_CANCELLED
+                logger.warning("Cron job %s: %s", job_id, error_text)
+            elif error_kind == CREDITS_EXHAUSTED or getattr(exc, "retryable", True) is False:
                 retryable = False
                 logger.warning("Cron job %s: %s", job_id, error_text)
             else:
@@ -1796,6 +1919,7 @@ class CronJobManager:
             retryable=retryable,
             turn_ran=turn_ran,
             outcome_unknown=outcome_unknown,
+            cancelled=cancelled,
         )
 
     def _record_skipped_run(self, job_id: str) -> None:

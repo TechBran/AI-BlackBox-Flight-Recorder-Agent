@@ -465,6 +465,23 @@ async def test_edit_model_only_foreign_model_switches_provider(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("start", [("google", ""), ("anthropic", "claude-opus-4-8")])
+async def test_edit_model_only_cu_model_moves_the_job_to_computer_use(
+    temp_manager, ctx, monkeypatch, start
+):
+    """A model-only edit to a computer-use id makes a computer-use job, as the
+    tool did before the pairing rules moved into the manager: left on google,
+    the CU id would be sent to /chat as a chat model."""
+    _mock_catalog(monkeypatch)
+    job = _seed(temp_manager, *start)
+    cu_id = "gemini-2.5-computer-use-preview-10-2025"
+    res = await _edit(ctx, job["id"], model=cu_id)
+    assert res.success, res.result
+    refreshed = temp_manager.get_job(job["id"])
+    assert (refreshed["provider"], refreshed["model"]) == ("computer-use", cu_id)
+
+
+@pytest.mark.asyncio
 async def test_edit_model_only_switch_on_row_without_stored_provider(
     temp_manager, ctx, monkeypatch
 ):

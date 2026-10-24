@@ -166,3 +166,143 @@ def test_bare_word_resolves_to_the_jobs_provider(model, provider, fired):
     """A row the old default wrote (provider anthropic, model "gemini") sent a
     Gemini id to Anthropic and 404'd every fire."""
     assert sched_exec._resolve_model_name(model, provider) == fired
+
+
+# ---------------------------------------------------------------------------
+# computer-use ids: a model-only edit to one moves the job to computer-use
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("start_provider, start_model, cu_model", [
+    ("google", "", "gemini-2.5-computer-use-preview-10-2025"),
+    ("anthropic", "claude-opus-4-8", "gemini-2.5-computer-use-preview-10-2025"),
+    ("openai", "gpt-5.1", "computer-use-preview"),
+    ("google", "", "computer-use"),
+])
+def test_put_model_only_naming_a_cu_model_moves_the_job_to_computer_use(
+    client, start_provider, start_model, cu_model
+):
+    """Only provider computer-use runs on the desktop: a CU id left on google or
+    openai was sent to /chat as a chat model (the ToolVault edit tool moved such
+    an edit to computer-use before the pairing rules moved into the manager)."""
+    job = _post(client, provider=start_provider, model=start_model).json()["job"]
+    resp = client.put(f"/api/cron/jobs/{job['id']}", json={"model": cu_model})
+    assert resp.status_code == 200, resp.text
+    updated = resp.json()["job"]
+    assert updated["provider"] == "computer-use"
+    assert updated["model"] == cu_model
+
+
+def test_put_model_only_cu_edit_on_a_cu_job_stays_put(client):
+    job = _post(client, provider="computer-use", model="").json()["job"]
+    resp = client.put(f"/api/cron/jobs/{job['id']}", json={"model": "claude-opus-4-6"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["job"]["provider"] == "computer-use"
+
+
+# ---------------------------------------------------------------------------
+# providers outside cron scope are refused at the sink
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("provider", ["agents", "gemini-agents", "realtime", "local", "Bogus"])
+def test_out_of_scope_provider_is_refused_on_create(client, provider):
+    resp = _post(client, provider=provider, model="")
+    assert resp.status_code == 400, resp.text
+    assert "cron" in resp.json()["detail"].lower()
+    assert client.get("/api/cron/jobs").json()["count"] == 0
+
+
+@pytest.mark.parametrize("provider", ["agents", "realtime", "local", "bogus"])
+def test_out_of_scope_provider_is_refused_on_update(client, provider):
+    job = _post(client, provider="google", model="").json()["job"]
+    resp = client.put(f"/api/cron/jobs/{job['id']}", json={"provider": provider})
+    assert resp.status_code == 400, resp.text
+    again = client.get(f"/api/cron/jobs/{job['id']}").json()["job"]
+    assert again["provider"] == "google"
+
+
+def test_out_of_scope_provider_is_refused_by_the_manager(client):
+    mgr = manager_mod.get_scheduler_manager()
+    with pytest.raises(ValueError):
+        mgr.create_job(name="j", prompt="hi", schedule="0 15 * * *", operator="system",
+                       provider="local", model="gemma-e4b")
+
+
+# ---------------------------------------------------------------------------
+# fire time: a stored provider WORD is sent as its catalog key
+# ---------------------------------------------------------------------------
+
+class _ChatResp:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return ""
+
+
+def _capture_chat_payloads(monkeypatch):
+    posts = []
+
+    class _Session:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def post(self, url, json=None, timeout=None):
+            posts.append(json)
+            return _ChatResp({"task_id": "t-1"})
+
+        def get(self, url, timeout=None):
+            return _ChatResp({"status": "completed", "result_data": {"ui_reply": "done"}})
+
+    monkeypatch.setattr(sched_exec.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(sched_exec, "_POLL_INTERVAL_SECS", 0)
+    return posts
+
+
+@pytest.mark.parametrize("word, key, default", [
+    ("claude", "anthropic", ANTHROPIC_MODEL_DEFAULT),
+    ("gpt", "openai", OPENAI_MODEL_DEFAULT),
+    ("gemini", "google", GEMINI_MODEL_DEFAULT),
+    ("Claude", "anthropic", ANTHROPIC_MODEL_DEFAULT),
+])
+def test_stored_provider_word_fires_as_its_catalog_key(monkeypatch, word, key, default):
+    """A raw HTTP client could store provider 'claude' before the manager
+    normalized it; /chat only maps 'gemini', and Auto resolved such a row to the
+    Gemini default."""
+    import asyncio
+
+    posts = _capture_chat_payloads(monkeypatch)
+    job = {"id": "cron_w", "name": "w", "prompt": "hi", "operator": "system",
+           "delivery": "snapshot", "delivery_target": "", "model": "", "provider": word}
+    assert asyncio.run(sched_exec.execute_cron_job(job)) == "done"
+    assert (posts[0]["provider"], posts[0]["model"]) == (key, default)
+
+
+def test_stored_out_of_scope_provider_fails_without_a_submission(monkeypatch):
+    """A row stored before the sink refused it never reaches /chat (whose
+    'unknown provider' failure was retried on every fire)."""
+    import asyncio
+
+    posts = _capture_chat_payloads(monkeypatch)
+    job = {"id": "cron_a", "name": "a", "prompt": "hi", "operator": "system",
+           "delivery": "snapshot", "delivery_target": "", "model": "", "provider": "agents"}
+    with pytest.raises(RuntimeError) as info:
+        asyncio.run(sched_exec.execute_cron_job(job))
+    assert getattr(info.value, "retryable", True) is False
+    assert "agents" in str(info.value)
+    assert posts == []

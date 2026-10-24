@@ -29,9 +29,11 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
         # Provider/model pairing (O15-05): a provider word is stored as its key
         # and a blank one counts as omitted; a model-only edit naming another
-        # vendor's model moves the job to that vendor; a provider switch with
-        # no model resets the model to Auto (and restating the provider repairs
-        # a stored bare word that belongs elsewhere); a foreign pair is refused.
+        # vendor's model moves the job to that vendor (a computer-use model, to
+        # computer-use); a provider switch with no model resets the model to
+        # Auto (and restating the provider repairs a stored bare word that
+        # belongs elsewhere); a foreign pair, and a provider cron cannot run,
+        # are refused.
         # The manager applies the same rules in update_job; they run here first
         # so the catalog check below consults the provider the job will have.
         try:

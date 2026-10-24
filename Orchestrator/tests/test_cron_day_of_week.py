@@ -97,13 +97,24 @@ def test_ranges_lists_and_steps_use_standard_numbering(zoned_manager, dow, expec
     ("SAT,sun", ["Sat", "Sun"]),
     ("Mon,3", ["Mon", "Wed"]),
     ("sun-tue", ["Mon", "Tue", "Sun"]),
+    # APScheduler numbers sun last, so it read these as written; a stored
+    # weekend job must keep firing on the weekend.
+    ("sat-sun", ["Sat", "Sun"]),
+    ("SAT-SUN", ["Sat", "Sun"]),
+    ("fri-sun", ["Fri", "Sat", "Sun"]),
+    ("thu-sun", ["Thu", "Fri", "Sat", "Sun"]),
+    ("mon-sun", DAYS),
+    ("sun-sun", ["Sun"]),
+    ("fri-sun/2", ["Fri", "Sun"]),
+    ("mon,sat-sun", ["Mon", "Sat", "Sun"]),
 ])
 def test_named_days_keep_their_meaning(zoned_manager, dow, expected):
     mgr, tz = zoned_manager
     assert _fire_days(mgr, tz, f"0 9 * * {dow}") == expected * 2
 
 
-@pytest.mark.parametrize("dow", ["8", "5-1", "fri-mon", "xyz", "1-", "*/0", "1,,2", "-1"])
+@pytest.mark.parametrize("dow", ["8", "5-1", "fri-mon", "sun-sat-mon", "5-0", "xyz", "1-",
+                                 "*/0", "1,,2", "-1"])
 def test_bad_day_of_week_is_refused(zoned_manager, dow):
     mgr, _ = zoned_manager
     with pytest.raises(ValueError):
@@ -185,3 +196,77 @@ def test_startup_reregisters_stored_numeric_job_on_the_right_day(tmp_path, monke
     refreshed = asyncio.run(_run())
     nxt = datetime.fromisoformat(refreshed["next_run_at"]).astimezone(tz)
     assert DAYS[nxt.weekday()] == "Mon"
+
+
+def _store_raw_job(db_path, job_id, schedule, *, status="active"):
+    """Insert a row the way the code before this fix stored it (no trigger built)."""
+    now = datetime.now(ZoneInfo("UTC")).isoformat()
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO cron_jobs (id, name, prompt, schedule, model, provider, delivery, "
+        "operator, status, one_shot, created_at, updated_at) "
+        "VALUES (?, ?, 'hi', ?, '', 'google', 'snapshot', 'system', ?, 0, ?, ?)",
+        (job_id, job_id, schedule, status, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _start_and_stop(caplog=None):
+    import asyncio
+
+    async def _run():
+        mgr = CronJobManager()
+        await mgr.start()
+        try:
+            return {j["id"]: (j, mgr.scheduler.get_job(j["id"])) for j in mgr.list_jobs()}
+        finally:
+            await mgr.shutdown()
+
+    return asyncio.run(_run())
+
+
+def test_stored_weekend_range_job_stays_active_after_restart(tmp_path, monkeypatch):
+    """'0 10 * * sat-sun' worked before the fix; the first restart after it
+    must not mark the job 'error'."""
+    tz = ZoneInfo("America/New_York")
+    monkeypatch.setattr(manager_mod, "LOCAL_TZ", tz)
+    monkeypatch.setattr(manager_mod, "DB_PATH", tmp_path / "cron_weekend.db")
+    CronJobManager()  # creates the schema
+    _store_raw_job(manager_mod.DB_PATH, "wk", "0 10 * * sat-sun")
+
+    jobs = _start_and_stop()
+
+    row, scheduled = jobs["wk"]
+    assert row["status"] == "active"
+    assert scheduled is not None
+    nxt = datetime.fromisoformat(row["next_run_at"]).astimezone(tz)
+    assert DAYS[nxt.weekday()] in ("Sat", "Sun")
+
+
+def test_moved_fire_days_are_logged_once_and_name_the_change(tmp_path, monkeypatch, caplog):
+    """The notice says which days a stored numeric job moves from and to, is
+    given on the first start after the fix only, and is not given for a job
+    whose days do not move."""
+    import logging
+
+    tz = ZoneInfo("America/New_York")
+    monkeypatch.setattr(manager_mod, "LOCAL_TZ", tz)
+    monkeypatch.setattr(manager_mod, "DB_PATH", tmp_path / "cron_notice.db")
+    CronJobManager()
+    _store_raw_job(manager_mod.DB_PATH, "weekdays", "0 9 * * 1-5")
+    _store_raw_job(manager_mod.DB_PATH, "daily", "0 9 * * 0-6")
+    _store_raw_job(manager_mod.DB_PATH, "named", "0 9 * * mon-fri")
+
+    with caplog.at_level(logging.INFO, logger=manager_mod.logger.name):
+        _start_and_stop()
+    notices = [r.getMessage() for r in caplog.records if "day-of-week in" in r.getMessage()]
+    assert len(notices) == 1, notices
+    assert "weekdays" in notices[0]
+    assert "Tue-Sat" in notices[0] and "Mon-Fri" in notices[0]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=manager_mod.logger.name):
+        _start_and_stop()
+    assert not [r for r in caplog.records if "day-of-week in" in r.getMessage()], \
+        "the notice is for the first start after the fix, not every boot"

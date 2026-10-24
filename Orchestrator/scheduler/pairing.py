@@ -14,7 +14,9 @@ script) gets the same rules (audit O15-scheduler-admin-05, W18):
     pair 404s on every fire;
   * an edit that switches provider without naming a model resets the model to
     Auto, and an edit naming only another vendor's model moves the job to that
-    vendor.
+    vendor (a computer-use model, to computer-use);
+  * a provider cron cannot run (agents, realtime, local, an unknown word) is
+    refused.
 
 The live-catalog typo check (is this id in GET /models/{provider}?) needs a
 provider round-trip and stays in the ToolVault tool layer.
@@ -63,6 +65,27 @@ def normalize_provider_word(provider: Any) -> Optional[str]:
     if not p:
         return None
     return PROVIDER_WORD_TO_KEY.get(p, p)
+
+
+def scope_error(provider_key: Optional[str]) -> Optional[str]:
+    """An error message when a normalized provider is outside cron scope, else None."""
+    if provider_key is None or provider_key in CRON_PROVIDER_KEYS:
+        return None
+    return (
+        f"Provider '{provider_key}' cannot run cron jobs; use one of "
+        f"{', '.join(sorted(CRON_PROVIDER_KEYS))}."
+    )
+
+
+def is_cu_model(model: Any) -> bool:
+    """True for a computer-use model id (or the bare 'computer-use'/'cu' word):
+    one only provider computer-use runs, on the desktop."""
+    m = (str(model) if model is not None else "").strip().lower()
+    if not m:
+        return False
+    from Orchestrator.scheduler.executor import _model_to_provider
+
+    return _model_to_provider(m) == "computer-use"
 
 
 def is_auto(model: Any) -> bool:
@@ -140,6 +163,9 @@ def pair_for_create(provider: Any, model: Any) -> Tuple[Optional[str], str]:
     stored with its own key, and Auto with no provider runs on the box default.
     """
     provider_key = normalize_provider_word(provider)
+    err = scope_error(provider_key)
+    if err:
+        raise ValueError(err)
     stored_model = "" if model is None else str(model)
     if provider_key is None:
         if is_auto(stored_model):
@@ -163,6 +189,9 @@ def pair_for_update(existing: Dict[str, Any], updates: Dict[str, Any]) -> Dict[s
     out = dict(updates)
     if "provider" in out:
         provider_key = normalize_provider_word(out["provider"])
+        err = scope_error(provider_key)
+        if err:
+            raise ValueError(err)
         if provider_key is None:
             out.pop("provider")
         else:
@@ -177,7 +206,13 @@ def pair_for_update(existing: Dict[str, Any], updates: Dict[str, Any]) -> Dict[s
     # A model-only edit naming another vendor's model moves the job to that
     # vendor. Rows with no stored provider report one derived from the OLD
     # model, so checking against it would refuse the switch that used to work.
-    if not has_provider and has_model and foreign_model_error(out["model"], stored_provider):
+    # A computer-use model moves the job to computer-use: left on google or
+    # openai it would be sent to /chat as a chat model, not run on the desktop.
+    if (not has_provider and has_model and stored_provider != "computer-use"
+            and is_cu_model(out["model"])):
+        out["provider"] = "computer-use"
+        has_provider = True
+    elif not has_provider and has_model and foreign_model_error(out["model"], stored_provider):
         out["provider"] = obvious_owner(out["model"])
         has_provider = True
 

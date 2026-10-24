@@ -166,9 +166,30 @@ def test_task_id_reaches_the_run_sink(monkeypatch):
     assert seen == ["task-1"]
 
 
+def _config_with(text):
+    import configparser
+
+    cfg = configparser.ConfigParser()
+    cfg.read_string(text)
+    return cfg
+
+
 def test_poll_budget_is_minutes_not_three(monkeypatch):
-    """180 s was shorter than an ordinary tool-using turn."""
-    assert executor_mod._POLL_TIMEOUT_SECS >= 15 * 60
+    """180 s was shorter than an ordinary tool-using turn. Checks the code's
+    default, not this box's config.ini (an operator may set the knob)."""
+    import Orchestrator.config as config
+
+    monkeypatch.setattr(config, "CFG", _config_with(""))
+    assert executor_mod._poll_timeout_from_config() == 1800
+
+
+@pytest.mark.parametrize("value, expected", [("600", 600), ("5", 60), ("soon", 1800)])
+def test_poll_budget_knob(monkeypatch, value, expected):
+    """[scheduler] poll_timeout_s is honoured, floored at 60 s; junk falls back."""
+    import Orchestrator.config as config
+
+    monkeypatch.setattr(config, "CFG", _config_with(f"[scheduler]\npoll_timeout_s = {value}\n"))
+    assert executor_mod._poll_timeout_from_config() == expected
 
 
 # ---------------------------------------------------------------------------

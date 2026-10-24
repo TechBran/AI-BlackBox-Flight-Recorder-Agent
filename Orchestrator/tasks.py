@@ -2100,6 +2100,7 @@ def stamp_origin_device(inp) -> Optional[str]:
 
 def process_chat_task(task: Task):
     """Process a chat request asynchronously"""
+    _tool_log = None  # opened below (W15); read by the failure path
     try:
         update_task(task.task_id, progress=5)
 
@@ -2764,6 +2765,12 @@ def process_chat_task(task: Task):
         if billing:
             error_msg = billing.text
             failure.update(error=error_msg, **billing.record_fields())
+        # O15-02: the tool calls the turn made before it failed (a 529 on the
+        # round after a send_sms), so the scheduler does not re-submit a turn
+        # that may already have delivered. Absent when the turn failed before
+        # its tool log was opened.
+        if _tool_log is not None:
+            failure["tool_outcomes"] = list(_tool_log)
 
         update_task(task.task_id,
                    status=TaskStatus.FAILED,

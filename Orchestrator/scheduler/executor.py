@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, Optional
 from Orchestrator.browser.dispatch import resolve_cu_model
 from Orchestrator.provider_billing import CREDITS_EXHAUSTED
 from Orchestrator.scheduler.pairing import (
+    CRON_PROVIDER_KEYS,
     PROVIDER_WORD_TO_KEY,
     SINGLE_VENDOR_KEYS,
     normalize_provider_word,
@@ -199,9 +200,45 @@ class CronOutcomeUnknown(RuntimeError):
 
 class CronRunCancelled(RuntimeError):
     """The job's /chat task was cancelled (task manager, cancel-all). Not
-    retried: cancelling is the operator's decision (manager.RUN_CANCELLED)."""
+    retried: cancelling is the operator's decision (manager.RUN_CANCELLED).
+    The cancel is cooperative, so the turn may have delivered before it landed;
+    the manager records the run as cancelled, not as a failure."""
 
     error_kind = "cancelled"
+    retryable = False
+
+
+class CronTurnIncomplete(RuntimeError):
+    """The job's turn ran but did not end cleanly (O15-02).
+
+    Raised when the /chat task completed with no reply text (a model that ends
+    its turn on a tool result, or call_anthropic's tool-iteration cap), when the
+    task failed after a tool call that may have had effects (a 529 on the
+    provider round after a send_sms), and when a CU run reported an error after
+    it had acted on the desktop. Its tools, an SMS or a call among them, may
+    have taken effect, so it is not retried, like CronToolFailure: a retry
+    submits a second turn with the same DELIVERY instruction. The manager
+    records it as a run that ran (a one-shot is paused); ``partial`` is True
+    when a tool call that did real work succeeded.
+    """
+
+    retryable = False
+
+    def __init__(self, message: str, *, result_text: str = "", partial: bool = False):
+        super().__init__(message)
+        self.result_text = result_text
+        self.partial = partial
+
+    @property
+    def delivery_status(self) -> str:
+        return "partial" if self.partial else "error"
+
+
+class CronJobInvalid(RuntimeError):
+    """The stored job cannot run as written: its provider is outside cron scope
+    (a row stored before the manager refused one). Nothing is submitted, and it
+    is not retried, since every attempt would fail the same way."""
+
     retryable = False
 
 
@@ -226,6 +263,27 @@ def _summarize_tool_failures(failures: list) -> str:
             text += f" (a later {tool} call with other arguments worked)"
         parts.append(text)
     return "; ".join(parts)
+
+
+def _real_work_calls(outcomes: Any) -> list:
+    """The tool calls of a turn that may have had effects: every call in its
+    tool_outcomes log except tool discovery and the clock (``incidental``)."""
+    if not isinstance(outcomes, list):
+        return []
+    return [o for o in outcomes
+            if isinstance(o, dict) and o.get("tool") and not o.get("incidental")]
+
+
+def _summarize_tool_calls(calls: list) -> str:
+    """'send_sms ok; list_events failed (x2)' — grouped by tool and result, in order."""
+    grouped: Dict[tuple, int] = {}
+    for o in calls:
+        key = (o.get("tool", "?"), bool(o.get("success")))
+        grouped[key] = grouped.get(key, 0) + 1
+    return "; ".join(
+        f"{tool} {'ok' if ok else 'failed'}" + (f" (x{count})" if count > 1 else "")
+        for (tool, ok), count in grouped.items()
+    )
 
 
 def _raise_on_tool_failures(result_data: Dict[str, Any], job_name: str, reply: str) -> None:
@@ -273,7 +331,11 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
             (a RuntimeError subclass carrying the reply; not retried).
         CronOutcomeUnknown: If the turn may have run but its end was not seen
             (poll budget exhausted, POST timed out); not retried.
+        CronTurnIncomplete: If the turn ran but did not end cleanly (no reply
+            text, or a failure after a tool call or a CU action); not retried.
         CronRunCancelled: If the task was cancelled; not retried.
+        CronJobInvalid: If the job's provider is outside cron scope; nothing
+            is submitted.
     """
     start_time = time.monotonic()
     prompt = job["prompt"]
@@ -286,7 +348,15 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
     # M4.1a/b: the job carries an explicit provider (backfilled from the model
     # for legacy rows by the manager). Trust it as the dispatch provider, and
     # only fall back to deriving from the model string if it is somehow blank.
-    provider = (job.get("provider") or "").strip() or _model_to_provider(model)
+    # A provider WORD a raw HTTP client stored before the manager normalized it
+    # ('claude', 'grok') is sent as its catalog key: /chat maps only 'gemini',
+    # and Auto would resolve the word to the Gemini default (O15-05).
+    provider = normalize_provider_word(job.get("provider")) or _model_to_provider(model)
+    if provider not in CRON_PROVIDER_KEYS:
+        raise CronJobInvalid(
+            f"cron job '{job_name}' has provider '{provider}', which cron cannot run "
+            f"(one of {', '.join(sorted(CRON_PROVIDER_KEYS))}); edit the job's provider"
+        )
 
     # M4.1b: Auto (empty/whitespace model) resolves to THIS provider's
     # configured default at fire time — using the stored provider rather than
@@ -417,6 +487,10 @@ async def _execute_cu_job(
     # O15-02: once the stream is open the CU run is under way on the desktop;
     # losing the stream after that leaves its outcome unknown, not retryable.
     stream_started = False
+    # O15-02: the agent has acted on the desktop (an action event, or step 2
+    # beginning, which means step 1's actions ran). An error after that is not
+    # retried: a re-run would repeat what the first run already did.
+    acted = False
     budget = _cu_stream_timeout()
 
     cu_lock = _get_cu_lock()
@@ -471,8 +545,14 @@ async def _execute_cu_job(
                                 logger.error("[CU-CRON] Error for '%s': %s", job_name, error_text)
                                 break
 
+                            elif event_type in ("cu_action", "cu_bash_output", "cu_file_edit"):
+                                acted = True
+
                             elif event_type == "cu_step":
                                 if isinstance(data, dict):
+                                    step = data.get("step")
+                                    if isinstance(step, int) and step >= 2:
+                                        acted = True
                                     logger.debug("[CU-CRON] '%s' step %s/%s",
                                         job_name, data.get("step", "?"), data.get("total", "?"))
 
@@ -494,6 +574,11 @@ async def _execute_cu_job(
     if error_text and not result_text:
         if error_kind == CREDITS_EXHAUSTED:
             raise CronCreditsExhausted(f"CU job '{job_name}' failed: {error_text}")
+        if acted:
+            raise CronTurnIncomplete(
+                f"CU job '{job_name}' failed after it had acted on the desktop: "
+                f"{error_text}. Not retried, so the desktop task is not run twice."
+            )
         raise RuntimeError(f"CU job '{job_name}' failed: {error_text}")
 
     return result_text or "(CU job completed with no response text)"
@@ -611,7 +696,7 @@ async def _poll_task_until_done(task_id: str, job_name: str) -> str:
                 result_data = data.get("result_data")
                 if isinstance(result_data, dict):
                     _raise_on_tool_failures(result_data, job_name, _reply_text(result_data))
-                return _extract_reply(data, job_name)
+                return _extract_reply(data, job_name, task_id)
 
             if status == "failed":
                 error_msg = data.get("error_message") or ""
@@ -620,6 +705,17 @@ async def _poll_task_until_done(task_id: str, job_name: str) -> str:
                 if result_data.get("error_kind") == CREDITS_EXHAUSTED:
                     raise CronCreditsExhausted(
                         f"Chat task {task_id} failed for job '{job_name}': {detail}"
+                    )
+                # O15-02: a turn that failed after a tool call (a 529 on the
+                # provider round after its send_sms) may have delivered; a retry
+                # would deliver again. Only a turn with no such call is retried.
+                calls = _real_work_calls(result_data.get("tool_outcomes"))
+                if calls:
+                    raise CronTurnIncomplete(
+                        f"Chat task {task_id} failed for job '{job_name}' after its tool "
+                        f"calls ran ({_summarize_tool_calls(calls)}): {detail}. Not "
+                        f"retried, so those calls are not repeated.",
+                        partial=any(o.get("success") for o in calls),
                     )
                 raise RuntimeError(
                     f"Chat task {task_id} failed for job '{job_name}': {detail}"
@@ -655,20 +751,33 @@ def _reply_text(result_data: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_reply(task_data: Dict[str, Any], job_name: str) -> str:
-    """Extract the LLM reply text from a completed task."""
+def _extract_reply(task_data: Dict[str, Any], job_name: str,
+                   task_id: Optional[str] = None) -> str:
+    """Extract the LLM reply text from a completed task.
+
+    A completed task without reply text still RAN (O15-02): a model can end its
+    turn on a tool result, and call_anthropic stops at its tool-iteration cap
+    with no text, after the send_sms went out. So it raises CronTurnIncomplete
+    (not retried), naming the tool calls the turn made.
+    """
+    task = f"Chat task {task_id}" if task_id else "Chat task"
     result_data = task_data.get("result_data")
     if not result_data or not isinstance(result_data, dict):
-        raise RuntimeError(
-            f"Completed task for job '{job_name}' has no result_data"
+        raise CronTurnIncomplete(
+            f"{task} for job '{job_name}' completed with no result_data; not "
+            f"retried, so whatever the turn did is not repeated."
         )
 
     reply = _reply_text(result_data)
     if reply:
         return reply
 
-    raise RuntimeError(
-        f"Completed task for job '{job_name}' has no reply text in result_data"
+    calls = _real_work_calls(result_data.get("tool_outcomes"))
+    ran = f"its tool calls: {_summarize_tool_calls(calls)}" if calls else "it made no tool calls"
+    raise CronTurnIncomplete(
+        f"{task} for job '{job_name}' completed with no reply text ({ran}); not "
+        f"retried, so its delivery is not repeated.",
+        partial=any(o.get("success") for o in calls),
     )
 
 
