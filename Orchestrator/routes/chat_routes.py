@@ -5489,11 +5489,15 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                             if local_path is not None:
                                 media_bytes = local_path.read_bytes()
                                 suffix = local_path.suffix.lower()
+                                # The documents typed as call_gemini types them (the
+                                # Portal streams .txt/.doc/.docx attachments too).
                                 mime_map = {
                                     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
                                     ".mp4": "video/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav",
                                     ".m4a": "audio/aac", ".ogg": "audio/ogg", ".flac": "audio/flac",
-                                    ".pdf": "application/pdf"
+                                    ".pdf": "application/pdf", ".txt": "text/plain",
+                                    ".doc": "application/msword",
+                                    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                 }
                                 mime_type = mime_map.get(suffix, "application/octet-stream")
                                 content_parts.append({
