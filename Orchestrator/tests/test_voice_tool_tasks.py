@@ -382,3 +382,116 @@ def test_phone_bridge_stop_cancels_tools_of_its_session(gated, monkeypatch):
     session = asyncio.run(run())
     assert gated.cancelled == ["slow_tool"]
     assert not session.tool_tasks
+
+
+# ---------------------------------------------------------------------------
+# A cancelled caller stays cancelled (review of rank 51)
+# ---------------------------------------------------------------------------
+# cancel_task swallowed every CancelledError, its CALLER's included. In the
+# Gemini listener's toolCallCancellation branch that meant: a teardown or a
+# reconnect cancelling the listener while it waited for a tool to unwind left
+# the listener running, and retire_upstream (which closes the socket only after
+# the listener is gone) waited on it until Google closed the idle socket.
+class _IdleGeminiUpstream:
+    """Yields the scripted frames (the second once `gate` is set), then idles."""
+
+    def __init__(self, first, second, gate):
+        self._frames = [first, second]
+        self._gate = gate
+        self.idle = asyncio.Event()
+        self.sent = []
+        self.closed = False
+
+    async def send(self, data):
+        self.sent.append(json.loads(data))
+
+    async def close(self):
+        self.closed = True
+        self.idle.set()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if len(self._frames) == 2:
+            return self._frames.pop(0)
+        if self._frames:
+            await self._gate.wait()
+            return self._frames.pop(0)
+        await self.idle.wait()            # Gemini says nothing while the user is quiet
+        raise StopAsyncIteration
+
+
+def test_retiring_the_listener_while_a_tool_unwinds_does_not_hang(monkeypatch):
+    async def run():
+        started, unwinding = asyncio.Event(), asyncio.Event()
+
+        async def slow_unwinding_tool(session, name, args):
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                unwinding.set()
+                await _REAL_SLEEP(0.3)   # stopping a CU or phone task takes a moment
+                raise
+
+        monkeypatch.setattr(glr, "_execute_gemini_tool", slow_unwinding_tool)
+        session = _session("gemini")
+        session.gemini_ws = _IdleGeminiUpstream(
+            json.dumps(_gemini_call("c1", name="use_computer")),
+            json.dumps({"toolCallCancellation": {"ids": ["c1"]}}),
+            started)
+        listener = asyncio.create_task(glr.gemini_listener(session))
+        session.listener_task = listener
+        await unwinding.wait()
+        await _REAL_SLEEP(0)             # the listener is back reading (or, before: blocked)
+        retire = asyncio.create_task(shared.retire_upstream(session, "gemini_ws"))
+        done, _ = await asyncio.wait({retire}, timeout=3)
+        state = {"retired": bool(done), "listener_done": listener.done()}
+        if session.gemini_ws is not None:
+            session.gemini_ws.idle.set()
+        retire.cancel()
+        await _REAL_SLEEP(0.35)
+        return state
+
+    assert asyncio.run(run()) == {"retired": True, "listener_done": True}
+
+
+def test_cancel_task_lets_the_callers_own_cancellation_through():
+    async def run():
+        async def child():
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                await _REAL_SLEEP(0.05)  # an unwind that takes a moment
+
+        after = []
+
+        async def caller(teardown):
+            task = asyncio.create_task(child())
+            await _REAL_SLEEP(0)
+            await shared.cancel_task(task, teardown=teardown)
+            after.append(teardown)       # reached only when the cancel was absorbed
+
+        plain = asyncio.create_task(caller(False))
+        absorbing = asyncio.create_task(caller(True))
+        await _REAL_SLEEP(0.01)          # both callers are inside cancel_task
+        plain.cancel()
+        absorbing.cancel()
+        await asyncio.wait({plain, absorbing})
+        return plain, absorbing, after
+
+    plain, absorbing, after = asyncio.run(run())
+    assert plain.cancelled(), "a cancelled caller must not run on"
+    assert not absorbing.cancelled() and after == [True], \
+        "a teardown runs to its end (the transcript save comes after)"
+
+
+def test_cancel_task_never_raises_the_tasks_own_cancellation():
+    async def run():
+        task = asyncio.create_task(asyncio.sleep(3600))
+        await _REAL_SLEEP(0)
+        await shared.cancel_task(task)
+        return task
+
+    assert asyncio.run(run()).cancelled()

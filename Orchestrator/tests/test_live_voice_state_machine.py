@@ -485,3 +485,320 @@ def test_reconnect_restores_the_keepalive(monkeypatch, module, cls, ws_attr, rec
     session, alive = asyncio.run(run())
     assert started == [session]
     assert alive
+
+
+# ---------------------------------------------------------------------------
+# Ownership holds THROUGH the old owner's teardown (review of rank 50)
+# ---------------------------------------------------------------------------
+# The Portal re-attaches 1 s after a drop that both ends saw (a Tailscale idle
+# reap, say) while the old handler's teardown is still running: retiring the
+# upstream, then a /chat/save that mints inline (2-4 s on the dev box). Checked
+# only on entry, the old teardown's tail then nulled the new attach's client
+# socket, marked it disconnected and freed its buffers: deaf and reapable while
+# its upstream ran.
+async def _reattach(session, ws_attr, new_portal, *, retire=True):
+    """What a re-attaching handler does: claim, then (connect) retire + reset + dial."""
+    from Orchestrator.routes.voice_ws_shared import claim_session, reset_for_connect, retire_upstream
+
+    session.portal_ws = new_portal
+    claim_session(session)
+    if retire:
+        await retire_upstream(session, ws_attr)
+    reset_for_connect(session)
+    new_upstream = FakeUpstreamWS()
+    setattr(session, ws_attr, new_upstream)
+    session.listener_task = asyncio.create_task(_forever())
+    session.keepalive_task = asyncio.create_task(_forever())
+    session.status = "connected"
+    return new_upstream
+
+
+@pytest.mark.parametrize("module,cls,ws_attr,save_name", TEARDOWNS)
+def test_reattach_while_the_old_owner_saves_keeps_the_new_attach(monkeypatch, module, cls,
+                                                                 ws_attr, save_name):
+    from Orchestrator.live_session_reaper import is_reapable
+    from Orchestrator.routes.voice_ws_shared import claim_session
+
+    saved = []
+
+    async def run():
+        save_started, release_save = asyncio.Event(), asyncio.Event()
+
+        async def slow_save(s):
+            saved.append([m["content"] for m in s.conversation])
+            save_started.set()
+            await release_save.wait()        # /chat/save + inline perform_mint
+            del s.conversation[:1]           # conversation_releaser: exactly the saved turn
+
+        monkeypatch.setattr(module, save_name, slow_save)
+        session = cls(session_id=f"save-race-{ws_attr}", operator="system")
+        old_portal, new_portal = FakePortalWS(), FakePortalWS()
+        session.portal_ws = old_portal
+        old_gen = claim_session(session)
+        setattr(session, ws_attr, FakeUpstreamWS())
+        session.listener_task = asyncio.create_task(_forever())
+        session.conversation = [{"role": "user", "content": "old attach turn",
+                                 "timestamp": "2026-10-23T00:00:00Z"}]
+
+        teardown = asyncio.create_task(module._end_portal_session(session, old_portal, old_gen, None))
+        await save_started.wait()
+        new_upstream = await _reattach(session, ws_attr, new_portal)
+        session.transcript_buffer = "a reply the new attach is speaking"
+        session.conversation.append({"role": "user", "content": "new attach turn",
+                                     "timestamp": "2026-10-23T00:00:05Z"})
+        release_save.set()
+        await teardown
+
+        now = time.time()
+        state = dict(
+            portal_ws_is_new=session.portal_ws is new_portal,
+            status=session.status,
+            upstream_current=getattr(session, ws_attr) is new_upstream,
+            upstream_open=not new_upstream.closed,
+            listener_alive=not session.listener_task.done(),
+            keepalive_alive=not session.keepalive_task.done(),
+            transcript_buffer=session.transcript_buffer,
+            conversation=[m["content"] for m in session.conversation],
+            reapable=is_reapable(session, now + 3600),
+            intentional=session.intentional_disconnect,
+        )
+        session.listener_task.cancel()
+        session.keepalive_task.cancel()
+        return state
+
+    state = asyncio.run(run())
+    assert saved == [["old attach turn"]]
+    assert state == dict(portal_ws_is_new=True, status="connected", upstream_current=True,
+                         upstream_open=True, listener_alive=True, keepalive_alive=True,
+                         transcript_buffer="a reply the new attach is speaking",
+                         conversation=["new attach turn"], reapable=False,
+                         intentional=False), state
+
+
+@pytest.mark.parametrize("module,cls,ws_attr,save_name", TEARDOWNS)
+def test_reattach_while_the_old_owner_retires_keeps_the_new_upstream(monkeypatch, module, cls,
+                                                                     ws_attr, save_name):
+    """retire_upstream awaits each cancellation; a re-attach that connects in
+    between installs its own upstream, listener and keepalive, which the old
+    owner's retire must neither close nor forget."""
+    from Orchestrator.routes.voice_ws_shared import claim_session
+
+    save = AsyncMock()
+    monkeypatch.setattr(module, save_name, save)
+
+    async def run():
+        unwinding, finish_unwind = asyncio.Event(), asyncio.Event()
+
+        async def old_listener():
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                unwinding.set()
+                await finish_unwind.wait()   # e.g. a cancelled tool stopping a CU task
+
+        session = cls(session_id=f"retire-race-{ws_attr}", operator="system")
+        old_portal, new_portal = FakePortalWS(), FakePortalWS()
+        session.portal_ws = old_portal
+        old_gen = claim_session(session)
+        old_upstream = FakeUpstreamWS()
+        setattr(session, ws_attr, old_upstream)
+        session.listener_task = asyncio.create_task(old_listener())
+        await asyncio.sleep(0)
+
+        teardown = asyncio.create_task(module._end_portal_session(session, old_portal, old_gen, None))
+        await unwinding.wait()
+        # The re-attach's connect ran to completion meanwhile (its own retire
+        # found nothing more to stop than the old owner already is).
+        new_upstream = await _reattach(session, ws_attr, new_portal, retire=False)
+        finish_unwind.set()
+        await teardown
+
+        state = dict(
+            old_closed=old_upstream.closed,
+            upstream_current=getattr(session, ws_attr) is new_upstream,
+            upstream_open=not new_upstream.closed,
+            listener_alive=session.listener_task is not None and not session.listener_task.done(),
+            keepalive_alive=session.keepalive_task is not None and not session.keepalive_task.done(),
+            portal_ws_is_new=session.portal_ws is new_portal,
+            status=session.status,
+        )
+        for t in (session.listener_task, session.keepalive_task):
+            if t is not None:
+                t.cancel()
+        return state, save
+
+    state, save = asyncio.run(run())
+    assert state == dict(old_closed=True, upstream_current=True, upstream_open=True,
+                         listener_alive=True, keepalive_alive=True, portal_ws_is_new=True,
+                         status="connected"), state
+    save.assert_not_awaited()   # the newer owner saves the conversation
+
+
+@pytest.mark.parametrize("module,cls,ws_attr,reconnect_name,connect_name", [
+    pytest.param(glr, GeminiLiveSession, "gemini_ws", "gemini_reconnect", "connect_to_gemini",
+                 id="gemini"),
+    pytest.param(gk, GrokLiveSession, "grok_ws", "grok_reconnect", "connect_to_grok",
+                 id="grok"),
+    pytest.param(rt, RealtimeSession, "openai_ws", "openai_reconnect", "connect_to_openai",
+                 id="openai"),
+])
+def test_every_spawned_reconnect_is_cancelled_by_a_reattach(monkeypatch, module, cls, ws_attr,
+                                                            reconnect_name, connect_name):
+    """The listener's close handler and the keepalive can both spawn a reconnect
+    in one tick, before either sets is_reconnecting. Only the LAST spawn used
+    to be tracked, but the FIRST is the one that dials: a re-attach cancelled
+    the no-op one, and the real one's dial then replaced the new upstream."""
+    from Orchestrator.routes.voice_ws_shared import (claim_session, reset_for_connect,
+                                                     retire_upstream, spawn_reconnect)
+
+    dials = []
+    dial_done = None
+
+    async def slow_connect(session, *a, **k):
+        dials.append(session)
+        await dial_done.wait()               # the TLS dial in progress
+        setattr(session, ws_attr, FakeUpstreamWS())
+        return True
+
+    monkeypatch.setattr(module, connect_name, slow_connect)
+
+    async def run():
+        nonlocal dial_done
+        dial_done = asyncio.Event()
+        session = cls(session_id=f"double-spawn-{ws_attr}", operator="system")
+        session.portal_ws = FakePortalWS()
+        claim_session(session)
+        reconnect = getattr(module, reconnect_name)
+        spawned = [spawn_reconnect(session, reconnect(session)),
+                   spawn_reconnect(session, reconnect(session))]
+        while not dials:                     # past the 0.5 s backoff, now dialing
+            await _REAL_SLEEP(0.05)
+
+        # The client re-attaches and connects afresh; then the old dial returns.
+        claim_session(session)
+        await retire_upstream(session, ws_attr)
+        reset_for_connect(session)
+        new_upstream = FakeUpstreamWS()
+        setattr(session, ws_attr, new_upstream)
+        dial_done.set()
+        for _ in range(10):
+            await _REAL_SLEEP(0)
+        return session, new_upstream, spawned
+
+    session, new_upstream, spawned = asyncio.run(run())
+    assert len(dials) == 1, "only one of the two reconnects dials"
+    assert all(t.done() for t in spawned), \
+        "both reconnects, the dialing one included, end with the re-attach"
+    assert getattr(session, ws_attr) is new_upstream and not new_upstream.closed, \
+        "the old reconnect's dial replaced the re-attached session's upstream"
+
+
+class _FakeDialedWS(FakeUpstreamWS):
+    pass
+
+
+@pytest.mark.parametrize("module,cls,ws_attr,connect_name,key", [
+    pytest.param(glr, GeminiLiveSession, "gemini_ws", "connect_to_gemini", "GOOGLE_API_KEY",
+                 id="gemini"),
+    pytest.param(gk, GrokLiveSession, "grok_ws", "connect_to_grok", "XAI_API_KEY", id="grok"),
+    pytest.param(rt, RealtimeSession, "openai_ws", "connect_to_openai", "OPENAI_API_KEY",
+                 id="openai"),
+])
+def test_a_dial_superseded_midway_never_replaces_the_new_upstream(monkeypatch, module, cls,
+                                                                  ws_attr, connect_name, key):
+    """connect_to_<provider> wrote session.<ws> when its dial returned, whoever
+    owned the session by then: a detached reconnect dialing across a re-attach
+    replaced (and orphaned) the newer attach's upstream."""
+    from Orchestrator.routes.voice_ws_shared import claim_session
+
+    monkeypatch.setattr(module, key, "test-key")
+    monkeypatch.setattr(module, "WEBSOCKETS_AVAILABLE", True)
+    session = cls(session_id=f"dial-race-{ws_attr}", operator="system")
+    claim_session(session)
+    new_upstream = FakeUpstreamWS()
+    dialed = _FakeDialedWS()
+
+    async def connect(url, **kwargs):
+        # A re-attach claims the session and connects while this dial is open.
+        claim_session(session)
+        setattr(session, ws_attr, new_upstream)
+        return dialed
+
+    monkeypatch.setattr(module.websockets, "connect", connect)
+    ok = asyncio.run(getattr(module, connect_name)(session))
+
+    assert ok is False
+    assert getattr(session, ws_attr) is new_upstream and not new_upstream.closed
+    assert dialed.closed, "the superseded dial is closed, not leaked"
+
+
+# ---------------------------------------------------------------------------
+# A turn whose turnComplete never comes is still saved (review of rank 50)
+# ---------------------------------------------------------------------------
+# turnComplete waits for PLAYBACK. Moving the flush there (one entry per turn)
+# opened a window: an End tap or a hang-up during the reply (the goodbye) left
+# both sides of the last exchange in the buffers, and release_payload() threw
+# them away. The base code flushed on generationComplete and saved them.
+async def _speak_without_turn_complete(session):
+    await glr.handle_gemini_message(
+        session, {"serverContent": {"inputTranscription": {"text": "say goodbye"}}})
+    await glr.handle_gemini_message(
+        session, {"serverContent": {"outputTranscription": {"text": "Goodbye, have a great day."}}})
+    await glr.handle_gemini_message(session, {"serverContent": {"generationComplete": True}})
+
+
+def _capture_saves(monkeypatch):
+    summaries = []
+
+    async def fake_save(**kwargs):
+        summaries.append(kwargs["session_summary"])
+        if kwargs.get("on_safe"):
+            kwargs["on_safe"]()
+        return True
+
+    monkeypatch.setattr(glr, "save_voice_transcript", fake_save)
+    return summaries
+
+
+def test_portal_end_during_the_reply_saves_the_last_exchange(monkeypatch):
+    from Orchestrator.routes.voice_ws_shared import claim_session
+
+    summaries = _capture_saves(monkeypatch)
+
+    async def run():
+        session = make_session()
+        generation = claim_session(session)
+        session.gemini_ws = FakeUpstreamWS()
+        await _speak_without_turn_complete(session)
+        await glr._end_portal_session(session, session.portal_ws, generation, None)
+        return session
+
+    session = asyncio.run(run())
+    assert len(summaries) == 1
+    assert "[User]: say goodbye" in summaries[0]
+    assert "[AI]: Goodbye, have a great day." in summaries[0]
+    assert summaries[0].index("[User]: say goodbye") < summaries[0].index("[AI]: Goodbye")
+    assert session.conversation == [] and session.transcript_buffer == ""
+
+
+def test_phone_hangup_during_the_reply_saves_the_last_exchange(monkeypatch):
+    """The phone bridge's stop() saves through save_session_to_blackbox."""
+    summaries = _capture_saves(monkeypatch)
+
+    async def run():
+        session = make_session()
+        await _speak_without_turn_complete(session)
+        await glr.save_session_to_blackbox(session)
+
+    asyncio.run(run())
+    assert len(summaries) == 1 and "Goodbye, have a great day." in summaries[0]
+    assert "say goodbye" in summaries[0]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turn_is_not_saved_twice():
+    session = make_session()
+    await _speak_without_turn_complete(session)
+    await glr.handle_gemini_message(session, {"serverContent": {"turnComplete": True}})
+    glr._flush_open_turn(session)
+    assert [m["role"] for m in session.conversation] == ["user", "assistant"]

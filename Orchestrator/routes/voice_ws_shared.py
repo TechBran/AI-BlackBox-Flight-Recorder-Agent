@@ -59,13 +59,24 @@ def superseded(session, generation: int) -> bool:
     return getattr(session, "generation", 0) != generation
 
 
-async def cancel_task(task) -> None:
-    """Cancel `task` if it is still running and wait for it to finish. Never raises.
+def _caller_cancelled() -> bool:
+    """True when the running task itself has a cancellation pending (3.11+)."""
+    task = asyncio.current_task()
+    cancelling = getattr(task, "cancelling", None)
+    return bool(task is not None and cancelling is not None and cancelling())
 
-    Teardown paths call this and must run to the end (the transcript save
-    comes after), so a cancellation of the CALLER is swallowed too, as the
-    routes' finally blocks always did. A task cannot await itself: called from
-    inside `task` this only requests the cancellation.
+
+async def cancel_task(task, *, teardown: bool = False) -> None:
+    """Cancel `task` if it is still running and wait for it to finish.
+
+    The task's own error or cancellation never reaches the caller. A
+    cancellation of the CALLER while it waits does, so a listener or a handler
+    that is itself being cancelled stops; swallowed, a listener cancelled while
+    it waited on a tool kept reading frames and held its own retirement up
+    forever. ``teardown=True`` is for the teardown paths, which must run to the
+    end (the transcript save comes after): they absorb a cancellation of the
+    caller, as the routes' finally blocks always did. A task cannot await
+    itself: called from inside `task` this only requests the cancellation.
     """
     if task is None:
         return
@@ -75,45 +86,103 @@ async def cancel_task(task) -> None:
         return
     try:
         await task
-    except BaseException:  # noqa: BLE001 — CancelledError or the task's own error
+    except asyncio.CancelledError:
+        if _caller_cancelled():
+            if not teardown:
+                raise
+            current = asyncio.current_task()
+            if hasattr(current, "uncancel"):
+                current.uncancel()
+    except Exception:  # noqa: BLE001 — the task's own error ends with the task
         pass
 
 
 def spawn_reconnect(session, coro) -> "asyncio.Task":
-    """Run a reconnect coroutine detached, remembered as the session's CURRENT
-    reconnect so a re-attach or a teardown cancels it outright instead of
-    trusting it to notice, after its backoff sleep, that the session moved on."""
+    """Run a reconnect coroutine detached and tracked on the session, so a
+    re-attach or a teardown cancels it outright instead of trusting it to
+    notice, after its backoff sleep, that the session moved on.
+
+    EVERY spawned reconnect is tracked (``session.reconnect_tasks``), not just
+    the latest: the listener's close handler and the keepalive can both spawn
+    one in the same tick, before either has set is_reconnecting, and the one
+    that ends up dialing is then the first, not the last.
+    """
     task = asyncio.create_task(coro)
-    session.reconnect_task = task
+    tasks = getattr(session, "reconnect_tasks", None)
+    if tasks is None:
+        tasks = session.reconnect_tasks = set()
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
     return task
 
 
-async def retire_upstream(session, ws_attr: str) -> None:
+async def retire_upstream(session, ws_attr: str, *, teardown: bool = False) -> None:
     """Stop everything a previous connect left live on `session`.
 
-    Cancels the pending reconnect, the keepalive loop, the upstream listener
+    Cancels the pending reconnects, the keepalive loop, the upstream listener
     and the in-flight tool calls (their call ids belong to this upstream; no
     later socket can be answered for them), then closes the upstream socket
     named by `ws_attr` (``gemini_ws`` / ``grok_ws`` / ``openai_ws``).
     Listener before socket: left running it would observe the close and start
     a reconnect. A no-op on a fresh session.
+
+    What gets retired is what is live on ENTRY: the cancellations below await,
+    and a re-attach that connects meanwhile installs its own upstream,
+    listener and keepalive, which are not this call's to stop. A field is
+    cleared only while it still holds what was retired. ``teardown`` as for
+    cancel_task.
     """
-    reconnect = getattr(session, "reconnect_task", None)
-    if reconnect is not asyncio.current_task():
-        await cancel_task(reconnect)
-    session.reconnect_task = None
-    await cancel_task(getattr(session, "keepalive_task", None))
-    session.keepalive_task = None
-    await cancel_task(getattr(session, "listener_task", None))
-    session.listener_task = None
-    await cancel_voice_tools(session)
+    current = asyncio.current_task()
+    reconnects = [t for t in getattr(session, "reconnect_tasks", ()) if t is not current]
+    keepalive = getattr(session, "keepalive_task", None)
+    listener = getattr(session, "listener_task", None)
+    tools = list((getattr(session, "tool_tasks", None) or {}).keys())
     ws = getattr(session, ws_attr, None)
+
+    for task in reconnects:
+        await cancel_task(task, teardown=teardown)
+    await cancel_task(keepalive, teardown=teardown)
+    if getattr(session, "keepalive_task", None) is keepalive:
+        session.keepalive_task = None
+    await cancel_task(listener, teardown=teardown)
+    if getattr(session, "listener_task", None) is listener:
+        session.listener_task = None
+    for task in tools:
+        await cancel_task(task, teardown=teardown)
     if ws is not None:
+        await close_upstream(session, ws_attr, ws)
+
+
+async def close_upstream(session, ws_attr: str, ws) -> None:
+    """Close `ws`, and clear ``session.<ws_attr>`` only while it still holds `ws`.
+
+    A reconnect or teardown closes the socket IT knows about: the field may
+    already be a newer attach's upstream by the time the close returns.
+    """
+    try:
+        await ws.close()
+    except Exception:
+        pass
+    if getattr(session, ws_attr, None) is ws:
+        setattr(session, ws_attr, None)
+
+
+async def adopt_upstream(session, ws_attr: str, ws, generation: int, log_prefix: str) -> bool:
+    """Install a freshly dialed upstream as ``session.<ws_attr>``, unless the
+    attach `generation` that dialed it was superseded during the dial: then
+    the socket is closed unused and False returned, and the newer attach's
+    upstream stays in place (a detached reconnect's dial used to overwrite it).
+    """
+    if superseded(session, generation):
+        print(f"{log_prefix} Session {getattr(session, 'session_id', '')} was re-attached "
+              f"during the dial; closing the superseded upstream")
         try:
             await ws.close()
         except Exception:
             pass
-        setattr(session, ws_attr, None)
+        return False
+    setattr(session, ws_attr, ws)
+    return True
 
 
 def reset_for_connect(session) -> None:
@@ -122,6 +191,69 @@ def reset_for_connect(session) -> None:
     session.is_reconnecting = False
     session.reconnect_count = 0
     session.status = "connecting"
+
+
+async def end_portal_session(session, generation: int, keepalive_task, *, ws_attr: str,
+                             save, log_prefix: str, flush=None) -> None:
+    """Teardown when a /ws/<provider> handler's client WS ends.
+
+    Only the CURRENT owner tears the session down, and only while it stays
+    the owner. Teardown awaits (retiring the upstream, then a transcript save
+    that mints inline and takes seconds) and the clients re-attach a second
+    after a drop, so ownership is checked again after every await. Once a
+    re-attach has claimed the session, its new client socket, upstream,
+    buffers and status are the newer handler's, and so is the conversation,
+    which it saves at its own teardown. The tail used to run unchecked after
+    the save, leaving the re-attached session deaf (portal_ws None), marked
+    disconnected and reapable while its upstream ran (O09-live-voice-providers-01).
+
+    ``save(session)`` persists the transcript; ``flush(session)``, when given,
+    moves a turn still in its buffers into the conversation first.
+    """
+    from Orchestrator.live_session_reaper import release_payload
+    from Orchestrator.volume import now_utc_iso
+
+    sid = getattr(session, "session_id", "")
+
+    def _handed_over(stage: str) -> bool:
+        if not superseded(session, generation):
+            return False
+        print(f"{log_prefix} Session {sid} was re-attached {stage}; "
+              f"it stays with the newer attach")
+        return True
+
+    if superseded(session, generation):
+        await cancel_task(keepalive_task, teardown=True)
+        print(f"{log_prefix} Superseded handler for {sid} closed; "
+              f"the session stays with the newer attach")
+        return
+
+    # Mark the session terminal FIRST so anything still running for it bails
+    # instead of re-dialing and flipping status back to "connected", which
+    # would resurrect a clientless session the reaper can never evict (it only
+    # reaps status=="disconnected"). A re-attach resets it at its connect.
+    session.intentional_disconnect = True
+
+    # Cleanup: the pending reconnects, the keepalive, the CURRENT listener
+    # (after a reconnect a different task than the one this handler spawned)
+    # and the upstream. Stopped before the save, so no turn lands after it.
+    await retire_upstream(session, ws_attr, teardown=True)
+    await cancel_task(keepalive_task, teardown=True)
+    if _handed_over("while its upstream was retired"):
+        return
+
+    if flush is not None:
+        flush(session)
+    if session.conversation:
+        await save(session)
+    if _handed_over("while its transcript was saved"):
+        return
+
+    session.portal_ws = None
+    session.status = "disconnected"
+    session.last_activity = now_utc_iso()  # start reaper grace clock (live_session_reaper)
+    release_payload(session)               # free audio/transcript buffers; conversation already saved
+    print(f"{log_prefix} Session {sid} cleaned up")
 
 
 # =============================================================================
@@ -197,12 +329,21 @@ async def _quietly(fn, arg) -> None:
         print(f"[VOICE-TOOLS] could not deliver a tool answer: {type(e).__name__}: {e}")
 
 
-async def cancel_voice_tools(session, call_ids=None) -> None:
+async def cancel_voice_tools(session, call_ids=None, *, wait: bool = True,
+                             teardown: bool = False) -> None:
     """Cancel the in-flight tool calls of `session` (only those whose provider
-    call id is in `call_ids`, when given) and wait for them."""
+    call id is in `call_ids`, when given) and, with `wait`, wait for them.
+
+    The upstream listener passes ``wait=False``: it must go on reading, and a
+    tool's unwind (stopping a CU or phone task) is not something to block
+    the provider's socket on. ``teardown`` as for cancel_task.
+    """
     for task, call_id in list((getattr(session, "tool_tasks", None) or {}).items()):
         if call_ids is None or call_id in call_ids:
-            await cancel_task(task)
+            if wait:
+                await cancel_task(task, teardown=teardown)
+            elif not task.done():
+                task.cancel()
 
 
 def voice_debug_enabled() -> bool:

@@ -129,8 +129,8 @@ async def _finalize_call(session, listener_task, keepalive_task, save_fn) -> Non
         # call: the reconnect that close handler spawned, the keepalive (a
         # reconnect may have respawned it), any respawned listener, the socket.
         session.intentional_disconnect = True
-        await cancel_task(keepalive_task)
-        await retire_upstream(session, "grok_ws")
+        await cancel_task(keepalive_task, teardown=True)
+        await retire_upstream(session, "grok_ws", teardown=True)
         try:
             await save_fn(session)
         except Exception as e:

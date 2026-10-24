@@ -11,7 +11,7 @@ Original SHA-256: f5b863cc422c23f88fd7cfa3527f711bfdc37f3ef3a58a318c3cde2ab718a6
 
 # Standard library imports
 from dataclasses import dataclass, field
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Set
 from enum import Enum
 import sqlite3
 import json
@@ -108,14 +108,14 @@ class RealtimeSession:
     # stamped by voice_ws_shared.claim_session on every client attach: a handler
     # (or a detached reconnect) whose generation is no longer current has been
     # superseded by a re-attach of the same session id and must leave the
-    # session to the newer owner. keepalive_task / reconnect_task are the
-    # CURRENT keepalive loop and detached reconnect (a re-attach or a teardown
-    # cancels them); tool_tasks maps each in-flight voice tool call (a task run
-    # off the listener by voice_ws_shared.dispatch_voice_tool) to its provider
-    # call id, and teardown cancels them.
+    # session to the newer owner. keepalive_task is the CURRENT keepalive loop
+    # and reconnect_tasks every detached reconnect still running (a re-attach
+    # or a teardown cancels them); tool_tasks maps each in-flight voice tool
+    # call (a task run off the listener by voice_ws_shared.dispatch_voice_tool)
+    # to its provider call id, and teardown cancels them.
     generation: int = 0
     keepalive_task: Optional[Any] = None
-    reconnect_task: Optional[Any] = None
+    reconnect_tasks: Set[Any] = field(default_factory=set)
     tool_tasks: Dict[Any, str] = field(default_factory=dict)
     tool_lock: Optional[Any] = None
 
@@ -180,14 +180,14 @@ class GeminiLiveSession:
     # stamped by voice_ws_shared.claim_session on every client attach: a handler
     # (or a detached reconnect) whose generation is no longer current has been
     # superseded by a re-attach of the same session id and must leave the
-    # session to the newer owner. keepalive_task / reconnect_task are the
-    # CURRENT keepalive loop and detached reconnect (a re-attach or a teardown
-    # cancels them); tool_tasks maps each in-flight voice tool call (a task run
-    # off the listener by voice_ws_shared.dispatch_voice_tool) to its provider
-    # call id, and teardown cancels them.
+    # session to the newer owner. keepalive_task is the CURRENT keepalive loop
+    # and reconnect_tasks every detached reconnect still running (a re-attach
+    # or a teardown cancels them); tool_tasks maps each in-flight voice tool
+    # call (a task run off the listener by voice_ws_shared.dispatch_voice_tool)
+    # to its provider call id, and teardown cancels them.
     generation: int = 0
     keepalive_task: Optional[Any] = None
-    reconnect_task: Optional[Any] = None
+    reconnect_tasks: Set[Any] = field(default_factory=set)
     tool_tasks: Dict[Any, str] = field(default_factory=dict)
     tool_lock: Optional[Any] = None
     # True when the session's owner runs its own reconnect loop around
@@ -234,14 +234,14 @@ class GrokLiveSession:
     # stamped by voice_ws_shared.claim_session on every client attach: a handler
     # (or a detached reconnect) whose generation is no longer current has been
     # superseded by a re-attach of the same session id and must leave the
-    # session to the newer owner. keepalive_task / reconnect_task are the
-    # CURRENT keepalive loop and detached reconnect (a re-attach or a teardown
-    # cancels them); tool_tasks maps each in-flight voice tool call (a task run
-    # off the listener by voice_ws_shared.dispatch_voice_tool) to its provider
-    # call id, and teardown cancels them.
+    # session to the newer owner. keepalive_task is the CURRENT keepalive loop
+    # and reconnect_tasks every detached reconnect still running (a re-attach
+    # or a teardown cancels them); tool_tasks maps each in-flight voice tool
+    # call (a task run off the listener by voice_ws_shared.dispatch_voice_tool)
+    # to its provider call id, and teardown cancels them.
     generation: int = 0
     keepalive_task: Optional[Any] = None
-    reconnect_task: Optional[Any] = None
+    reconnect_tasks: Set[Any] = field(default_factory=set)
     tool_tasks: Dict[Any, str] = field(default_factory=dict)
     tool_lock: Optional[Any] = None
 
