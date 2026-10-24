@@ -20,7 +20,9 @@
  * stt_error is TERMINAL: capture stops and nothing reconnects. With
  * switchable:true (quota_exceeded first) another provider can take the
  * dictation, so a prompt offers the ones /stt/catalog says can stream; picking
- * one restarts the dictation on it. stt_status provider_override renders as a
+ * one restarts THAT dictation on it (the next one goes back to the box's own
+ * choice). When the catalog offers none after all, the error is handled like a
+ * non-switchable one, legacy fallback included. stt_status provider_override renders as a
  * chip and loading_models as a warming state on the mic button (audit rank 52:
  * W24, O08-stt-realtime-04). The frames are pinned by
  * tests/fixtures/stt_ws_frames.json, which the server and Android suites read
@@ -99,7 +101,6 @@ const OPEN_TIMEOUT_MS = 4000;
 
 // Status + provider-switch state (audit rank 52).
 let lastStart = null;              // {targetId, buttonId, opts} of the latest start(), for a switch
-let switchedProvider = '';         // picked in the switch prompt; kept for this page's life only
 let overrideNote = '';             // provider_override chip text for the current session
 let warming = false;               // on-box models loading (stt_status loading_models)
 let catalogCache = null;           // the last /stt/catalog response
@@ -108,6 +109,10 @@ function fireUnavailable(reason) {
     const cb = onUnavailable;
     onUnavailable = null;
     if (openTimer) { clearTimeout(openTimer); openTimer = null; }
+    return invokeUnavailable(cb, reason);
+}
+
+function invokeUnavailable(cb, reason) {
     console.warn('[STT-STREAM] streaming unavailable:', reason);
     if (typeof cb === 'function') {
         try { cb(reason); } catch (e) { console.error('[STT-STREAM] onUnavailable cb error:', e); }
@@ -232,9 +237,9 @@ function sendAudio(base64) {
 // Button visual state (mirrors tts-stt.js aria-pressed convention)
 // =============================================================================
 
-function setButtonRecording(on) {
-    if (!buttonId) return;
-    const btn = $(buttonId);
+function setButtonRecording(on, id = buttonId) {
+    if (!id) return;
+    const btn = $(id);
     if (!btn) return;
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.classList.toggle('stt-streaming', on);
@@ -385,13 +390,15 @@ function closeSwitchPrompt() {
 
 /**
  * Offer the providers that can take over after a switchable stt_error. Picking
- * one restarts the SAME dictation (target, button, options) on it. Nothing is
- * shown when no other provider can stream: the toast already said why.
+ * one restarts the SAME dictation (target, button, options) on it; the pick is
+ * not remembered, so the next dictation is the box's own choice again (kept,
+ * it silently overrode the wizard's STT setting until a reload). Resolves
+ * whether a prompt is shown: nothing is when no other provider can stream.
  */
 async function offerProviderSwitch(err) {
     const session = lastStart;
     const choices = switchAlternatives(await loadCatalog(), err.provider);
-    if (!session || !choices.length || streaming) return;
+    if (!session || !choices.length || streaming) return false;
     closeSwitchPrompt();
     const box = document.createElement('div');
     box.id = 'sttSwitchPrompt';
@@ -410,7 +417,6 @@ async function offerProviderSwitch(err) {
         b.textContent = choice.label;
         b.addEventListener('click', () => {
             closeSwitchPrompt();
-            switchedProvider = choice.id;
             start(session.targetId, session.buttonId, { ...session.opts, provider: choice.id });
         });
         actions.appendChild(b);
@@ -423,6 +429,7 @@ async function offerProviderSwitch(err) {
     actions.appendChild(dismiss);
     box.appendChild(actions);
     document.body.appendChild(box);
+    return true;
 }
 
 // =============================================================================
@@ -449,10 +456,22 @@ function handleMessage(msg) {
             if (msg.switchable === true) {
                 // Another provider can take this dictation (quota_exceeded first).
                 // Say so and offer it, rather than the silent legacy fallback,
-                // which would go to the same exhausted provider (W24).
-                toast('STT error: ' + message);
-                cleanup();
-                offerProviderSwitch(msg);
+                // which would go to the same exhausted provider (W24). If the
+                // catalog has nothing to offer after all, the fallback still
+                // gets its chance, as for a non-switchable error.
+                const fallback = !gotTranscript ? onUnavailable : null;
+                const btn = buttonId;
+                onUnavailable = null;
+                cleanup({ silent: Boolean(fallback) });
+                offerProviderSwitch(msg).then((shown) => {
+                    if (streaming) return;   // a new dictation started meanwhile: it owns the mic
+                    if (!shown && fallback) {
+                        invokeUnavailable(fallback, 'stt_error: ' + message);
+                        return;
+                    }
+                    toast('STT error: ' + message);
+                    if (fallback) setButtonRecording(false, btn);
+                });
             } else if (!gotTranscript && onUnavailable) {
                 // If the error arrived before any transcript landed, this invocation
                 // never really started — offer the caller a fallback (e.g. legacy
@@ -706,7 +725,7 @@ function cleanup(opts = {}) {
  * @param {Object} [opts] - { lang, onUnavailable, provider } — onUnavailable(reason)
  *   fires once if streaming can't get going, so the caller can fall back to a
  *   legacy record->/stt path for this invocation. provider pins the STT provider
- *   (default: the one picked in the switch prompt, else the box's own choice).
+ *   for this dictation (default: the box's own choice).
  */
 async function start(targetIdArg, buttonIdArg, opts = {}) {
     if (streaming) {
@@ -745,7 +764,7 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
     const native = isNativeAndroid();
     const sampleRate = 24000;  // uniform 24kHz (OpenAI requires >=24k; native already 24k)
     const lang = opts.lang || 'en';
-    const provider = opts.provider || switchedProvider || '';
+    const provider = opts.provider || '';
 
     // Open the WebSocket.
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

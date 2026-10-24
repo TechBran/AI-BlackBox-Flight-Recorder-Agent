@@ -77,14 +77,24 @@ class _WsModule:
         return self._upstream
 
 
+# The providers that could stream on the simulated box: several by default, so
+# a provider failure has somewhere to switch to.
+MULTI_PROVIDER_BOX = ["openai", "google", "elevenlabs"]
+
+
 @pytest.fixture
 def resolved(monkeypatch):
     monkeypatch.setattr(stt_ws_routes, "local_streaming_stt_available", lambda: False)
     monkeypatch.setattr(stt_ws_routes, "onbox_stt_available", lambda: False)
+    streaming = {"providers": list(MULTI_PROVIDER_BOX)}
+    monkeypatch.setattr(stt_ws_routes, "streaming_stt_providers",
+                        lambda **k: list(streaming["providers"]))
 
-    def pick(provider):
+    def pick(provider, box=None):
         monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider",
                             lambda *a, **k: provider)
+        if box is not None:
+            streaming["providers"] = list(box)
     return pick
 
 
@@ -170,3 +180,52 @@ def test_fixture_status_states_are_ones_the_server_sends():
     for entry in _fixture()["frames"]:
         if entry["frame"]["type"] == "stt_status":
             assert f'"{entry["frame"]["state"]}"' in source, entry["name"]
+
+
+# ---------------------------------------------------------------------------
+# switchable means "another provider can stream now" (review of rank 52)
+# ---------------------------------------------------------------------------
+# stamp() set switchable for every code but no_provider/bad_request, without
+# looking at what else the box has. On a single-provider box (the fresh-box
+# case) the Portal then skipped its record-then-/stt fallback for an offer that
+# had nothing in it, and the user got a toast and a dead mic.
+def test_a_single_provider_box_never_offers_a_switch(resolved, monkeypatch):
+    resolved("elevenlabs", box=["elevenlabs"])
+    monkeypatch.setattr(stt_ws_routes, "resolve_api_key", lambda: "test-key")
+    monkeypatch.setattr(stt_ws_routes, "websockets", _WsModule(_Upstream([
+        {"message_type": "quota_exceeded", "error": "This request exceeds your quota."},
+    ])))
+
+    sent = _run(_Client({"type": "stt_start", "provider": "", "sample_rate": 24000}))
+
+    errors_sent = [m for m in sent if m["type"] == "stt_error"]
+    assert errors_sent == [_frame("single_provider_quota_exceeded")]
+
+
+def test_a_bridge_exception_on_a_single_provider_box_is_not_switchable(resolved, monkeypatch):
+    resolved("openai", box=["openai"])
+
+    async def explode(websocket, provider, start):
+        raise RuntimeError("server_error")
+
+    monkeypatch.setattr(stt_ws_routes, "run_stt_bridge", explode)
+    sent = _run(_Client({"type": "stt_start", "provider": ""}))
+    assert sent[0]["code"] == errors.PROVIDER_ERROR
+    assert sent[0]["switchable"] is False
+
+
+def test_switchable_needs_a_provider_other_than_the_failing_one():
+    frame = {"type": "stt_error", "message": "m", "code": errors.QUOTA_EXCEEDED}
+    assert errors.stamp(frame, "openai", alternatives=[])["switchable"] is False
+    assert errors.stamp(frame, "openai", alternatives=["google"])["switchable"] is True
+    no_provider = {"type": "stt_error", "message": "m", "code": errors.NO_PROVIDER}
+    assert errors.stamp(no_provider, None, alternatives=["google"])["switchable"] is False
+
+
+def test_streaming_providers_are_the_ones_that_can_stream(monkeypatch):
+    from Orchestrator.stt import resolve
+
+    monkeypatch.setattr(resolve, "stt_availability", lambda: (True, False, True))
+    assert resolve.streaming_stt_providers(local_ok=False, onbox_ok=False) == ["openai", "elevenlabs"]
+    assert resolve.streaming_stt_providers(local_ok=True, onbox_ok=True) == \
+        ["openai", "elevenlabs", "onbox", "local"]

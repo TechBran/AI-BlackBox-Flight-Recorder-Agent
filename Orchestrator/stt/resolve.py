@@ -89,6 +89,21 @@ def onbox_stt_degraded() -> "str | None":
     return f"running on CPU: {gpu.get('reason')}"
 
 
+def streaming_stt_providers(*, local_ok=None, onbox_ok=None) -> list:
+    """Every provider that could serve live (/ws/stt) dictation right now, in
+    the resolver's tie-break order. Cloud credentials are read live
+    (stt_availability); `local_ok` / `onbox_ok` default to the same probes
+    /ws/stt resolves with (a local server counts only when it streams), so a
+    caller that has just made those probes passes their answers instead of
+    probing again. What an stt_error's `switchable` is computed from."""
+    openai_ok, google_ok, elevenlabs_ok = stt_availability()
+    local_ok = local_streaming_stt_available() if local_ok is None else local_ok
+    onbox_ok = onbox_stt_available() if onbox_ok is None else onbox_ok
+    avail = {"openai": openai_ok, "google": google_ok, "elevenlabs": bool(elevenlabs_ok),
+             "onbox": bool(onbox_ok), "local": bool(local_ok)}
+    return [p for p, ok in avail.items() if ok]
+
+
 def _fresh_stt_provider():
     """Fresh-read the saved STT_PROVIDER (wizard selection) from .env so it takes
     effect WITHOUT a service restart. The web/Android client sends provider:""

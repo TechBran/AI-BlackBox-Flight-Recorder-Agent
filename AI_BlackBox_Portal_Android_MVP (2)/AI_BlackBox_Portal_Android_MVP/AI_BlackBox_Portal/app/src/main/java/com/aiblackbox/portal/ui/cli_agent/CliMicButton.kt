@@ -175,10 +175,8 @@ fun CliMicButton(
     var committed by remember { mutableStateOf("") }
     // Set true by the stop tap so the trailing final finishes + pastes.
     var stopping by remember { mutableStateOf(false) }
-    // A switchable stt_error waiting for the operator to pick another provider,
-    // and the provider picked (kept for this button's life; "" = the box's choice).
+    // A switchable stt_error waiting for the operator to pick another provider.
     var switchOffer by remember { mutableStateOf<SttEvent.Error?>(null) }
-    var providerPick by remember { mutableStateOf("") }
     // The session's stt_status, and catalog labels to name providers by.
     val sttStatus by sttClient.status.collectAsState()
     var providerLabels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -192,13 +190,16 @@ fun CliMicButton(
     // Keep the latest callback without restarting the events collector.
     val currentOnTranscript by rememberUpdatedState(onTranscript)
 
-    fun beginStreaming() {
+    // `provider` pins THIS dictation's provider (a pick in the switch prompt);
+    // "" is the box's own choice. A pick is not remembered: kept, it silently
+    // overrode the wizard's STT setting for the button's life.
+    fun beginStreaming(provider: String = "") {
         cancelRequested = false
         interimText = ""
         committed = ""
         stopping = false
         state = MicState.Recording
-        sttClient.start(provider = providerPick)
+        sttClient.start(provider = provider)
     }
 
     // Single reset path for every terminal exit (trailing final, error,
@@ -438,8 +439,7 @@ fun CliMicButton(
                     // Same dictation, another provider: the mic permission was
                     // granted for the session that just failed.
                     switchOffer = null
-                    providerPick = choice.id
-                    beginStreaming()
+                    beginStreaming(provider = choice.id)
                 },
                 onDismiss = { switchOffer = null },
             )

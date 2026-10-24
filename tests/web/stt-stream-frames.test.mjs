@@ -54,10 +54,11 @@ globalThis.AndroidMic = mic;
 window.AndroidMic = mic;
 
 const catalogFetches = [];
+let catalog = FIXTURE.catalog;      // what /stt/catalog answers; a test may swap it
 globalThis.fetch = window.fetch = async (url) => {
     catalogFetches.push(String(url));
     if (String(url).endsWith("/stt/catalog")) {
-        return { ok: true, status: 200, json: async () => FIXTURE.catalog };
+        return { ok: true, status: 200, json: async () => catalog };
     }
     throw new Error("unexpected fetch " + url);
 };
@@ -164,6 +165,55 @@ test("picking a provider in the prompt restarts dictation on it", async () => {
     sttStream.stop();
     next.deliver(byName("done").frame);
     await settle();
+});
+
+test("a switchable error with nothing to switch to keeps the legacy fallback", async () => {
+    // The catalog can disagree with the server (another surface just removed
+    // a key): with no provider to offer, the prompt shows nothing, so the
+    // record-then-/stt fallback must still get its chance before a transcript.
+    dismissPrompt();
+    const entry = byName("elevenlabs_quota_exceeded");
+    catalog = { providers: FIXTURE.catalog.providers.map((p) =>
+        (p.id === entry.expect.provider ? p : { ...p, available: false })) };
+    try {
+        let fellBack = null;
+        const ws = await startSession({ onUnavailable: (reason) => { fellBack = reason; } });
+        ws.deliver(entry.frame);
+        await settle();
+        assert.equal(prompt(), null, "nothing to offer: no prompt");
+        assert.match(String(fellBack), /stt_error/, "the legacy fallback must run");
+        assert.equal(sttStream.isStreaming(), false);
+    } finally {
+        catalog = FIXTURE.catalog;
+    }
+});
+
+test("a provider picked in the prompt serves that dictation only", async () => {
+    // Kept for the page's life it silently overrode the wizard's STT setting
+    // (and a recovered provider) until a reload, with no chip saying so.
+    dismissPrompt();
+    const ws = await startSession();
+    ws.deliver(byName("delta").frame);
+    ws.deliver(byName("elevenlabs_quota_exceeded").frame);
+    await settle();
+    prompt().querySelector('button[data-provider="openai"]').click();
+    await settle();
+    const switched = FakeWS.instances.at(-1);
+    await switched.open();
+    assert.equal(switched.sent.find((m) => m.type === "stt_start").provider, "openai");
+    sttStream.stop();
+    switched.deliver(byName("done").frame);
+    await settle();
+
+    const next = await startSession();
+    try {
+        assert.equal(next.sent.find((m) => m.type === "stt_start").provider, "",
+            "the next dictation goes back to the box's own choice");
+    } finally {
+        sttStream.stop();
+        next.deliver(byName("done").frame);
+        await settle();
+    }
 });
 
 test("switchAlternatives follows the fixture", () => {

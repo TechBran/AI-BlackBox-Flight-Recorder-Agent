@@ -11,9 +11,11 @@ Every stt_error now carries, additively (old clients ignore unknown keys):
   * ``code``       — one of the CODES below, the reason a program can act on;
   * ``provider``   — the provider the session was using (None before one
                      resolved);
-  * ``switchable`` — True when another STT provider could serve the dictation,
-                     so the client offers a switch-provider prompt fed by
-                     /stt/catalog.
+  * ``switchable`` — True when another STT provider could serve the dictation
+                     right now (the endpoint passes the box's other streaming
+                     providers), so the client offers a switch-provider prompt
+                     fed by /stt/catalog. False on a box with only the failing
+                     provider: the client then keeps its own fallback.
 
 An stt_error is TERMINAL for the client: it stops capture and does not
 reconnect. The shared frame fixture tests/fixtures/stt_ws_frames.json pins the
@@ -21,7 +23,7 @@ shapes for the server, Portal and Android suites.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 QUOTA_EXCEEDED = "quota_exceeded"              # the provider account is out of quota or credit
 AUTH_FAILED = "auth_failed"                    # the provider key is missing or was rejected
@@ -58,12 +60,16 @@ def elevenlabs_code(taxonomy_code: Optional[str]) -> str:
     return _ELEVENLABS.get(taxonomy_code or "", PROVIDER_ERROR)
 
 
-def stamp(data: dict, provider: Optional[str]) -> dict:
+def stamp(data: dict, provider: Optional[str],
+          alternatives: Optional[Sequence[str]] = None) -> dict:
     """Return the stt_error `data` completed with code, provider and switchable.
 
     Explicit values win. Without a code, a billing refusal (provider_billing's
     ``error_kind: credits_exhausted``) reads as quota_exceeded and anything
-    else as provider_error.
+    else as provider_error. `alternatives` are the OTHER providers that could
+    stream now: switchable needs one (a switch prompt with nothing in it only
+    took the client's own fallback away). Without them (None) the code alone
+    decides.
     """
     out = dict(data)
     code = out.get("code")
@@ -71,5 +77,8 @@ def stamp(data: dict, provider: Optional[str]) -> dict:
         code = QUOTA_EXCEEDED if out.get("error_kind") == "credits_exhausted" else PROVIDER_ERROR
     out["code"] = code
     out.setdefault("provider", provider or None)
-    out.setdefault("switchable", code not in _NOT_SWITCHABLE)
+    switchable = code not in _NOT_SWITCHABLE
+    if alternatives is not None:
+        switchable = switchable and any(p and p != provider for p in alternatives)
+    out.setdefault("switchable", switchable)
     return out

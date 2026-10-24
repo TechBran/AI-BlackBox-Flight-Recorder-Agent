@@ -1,5 +1,5 @@
 {
-  "description": "The /ws/stt server->client frames and what every client must do with them (audit rank 52: W24, A08-cli-agent-ui-07, O08-stt-realtime-04). ONE file read by three suites: Orchestrator/tests/test_stt_error_contract.py (the server emits these shapes), tests/web/stt-stream-frames.test.mjs (Portal and the Android WebView, Portal/modules/stt-stream.js) and the Android JVM test SttStreamFramesTest (data/voice/SttStreamClient.kt). An stt_error is TERMINAL: the client stops capture and never reconnects. switchable=true means another provider can serve the dictation; the client then offers the providers from /stt/catalog that are available, stream, and are not the one that failed. A new state or code lands here first, so no surface can miss it.",
+  "description": "The /ws/stt server->client frames and what every client must do with them (audit rank 52: W24, A08-cli-agent-ui-07, O08-stt-realtime-04). ONE file read by three suites: Orchestrator/tests/test_stt_error_contract.py (the server emits these shapes), tests/web/stt-stream-frames.test.mjs (Portal and the Android WebView, Portal/modules/stt-stream.js) and the Android JVM test SttStreamFramesTest (data/voice/SttStreamClient.kt). An stt_error is TERMINAL: the client stops capture and never reconnects. switchable=true means another provider can stream right now (false on a box with only the failing one); the client then offers the providers from /stt/catalog that are available, stream, and are not the one that failed. A new state or code lands here first, so no surface can miss it.",
   "catalog": {
     "providers": [
       {"id": "openai", "label": "OpenAI", "available": true, "models": {"streaming": "stream-model-a", "file": "file-model-a"}},
@@ -28,6 +28,11 @@
       "name": "elevenlabs_auth_failed",
       "frame": {"type": "stt_error", "message": "ElevenLabs auth failed - check ELEVENLABS_API_KEY", "code": "auth_failed", "provider": "elevenlabs", "switchable": true},
       "expect": {"kind": "error", "terminal": true, "code": "auth_failed", "provider": "elevenlabs", "switchable": true}
+    },
+    {
+      "name": "single_provider_quota_exceeded",
+      "frame": {"type": "stt_error", "message": "ElevenLabs quota exceeded - add credits or upgrade plan", "code": "quota_exceeded", "provider": "elevenlabs", "switchable": false},
+      "expect": {"kind": "error", "terminal": true, "code": "quota_exceeded", "provider": "elevenlabs", "switchable": false}
     },
     {
       "name": "no_provider",

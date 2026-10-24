@@ -77,7 +77,9 @@ from Orchestrator.elevenlabs.client import (
     resolve_api_key, WS_BASE_URL, auth_headers, map_error, classify_realtime_frame,
 )
 from Orchestrator.stt import errors as stt_errors
-from Orchestrator.stt.resolve import resolve_stt_provider, local_streaming_stt_available, onbox_stt_available
+from Orchestrator.stt.resolve import (
+    resolve_stt_provider, local_streaming_stt_available, onbox_stt_available, streaming_stt_providers,
+)
 from Orchestrator.stt.streaming import (
     map_openai_event, map_google_result, InterimAccumulator, join_transcript_segments,
 )
@@ -130,18 +132,32 @@ class _StampedClientSocket:
     carries a machine-readable code, the provider of this session and whether
     another provider could serve it (stt_errors.stamp; audit rank 52, W24).
     Stamping here, not per call site, covers every bridge's sends, including
-    ones added later. Everything else is the underlying WebSocket's."""
+    ones added later. Everything else is the underlying WebSocket's.
+
+    `alternatives` (set once the provider resolved) lists the box's other
+    streaming providers, read when an error is sent: switchable is true only
+    when one exists, so a single-provider box keeps the client's fallback."""
 
     def __init__(self, websocket: WebSocket):
         self._websocket = websocket
         self.provider = None
+        self.alternatives = None   # () -> list of provider ids, or None before resolution
 
     def __getattr__(self, name):
         return getattr(self._websocket, name)
 
+    def _switch_to(self):
+        if self.alternatives is None:
+            return None
+        try:
+            return [p for p in self.alternatives() if p != self.provider]
+        except Exception as e:  # noqa: BLE001 — an error frame must still go out
+            print(f"[STT/WS] could not list the other STT providers: {e}")
+            return []
+
     async def send_json(self, data, *args, **kwargs):
         if isinstance(data, dict) and data.get("type") == "stt_error":
-            data = stt_errors.stamp(data, self.provider)
+            data = stt_errors.stamp(data, self.provider, self._switch_to())
         return await self._websocket.send_json(data, *args, **kwargs)
 
 
@@ -158,9 +174,11 @@ async def ws_stt(websocket: WebSocket):
         # realtime (/v1/realtime) capability; otherwise local stays file-only and
         # must not win STREAMING resolution.
         override = {}
+        local_ok = local_streaming_stt_available()
+        onbox_ok = onbox_stt_available()
         provider = resolve_stt_provider(start.get("provider"),
-                                        local_ok=local_streaming_stt_available(),
-                                        onbox_ok=onbox_stt_available(),
+                                        local_ok=local_ok,
+                                        onbox_ok=onbox_ok,
                                         override_out=override)
         overridden_from = override.get("overridden_from")
         if not provider:
@@ -168,6 +186,7 @@ async def ws_stt(websocket: WebSocket):
                                                        stt_errors.NO_PROVIDER))
             return
         websocket.provider = provider
+        websocket.alternatives = lambda: streaming_stt_providers(local_ok=local_ok, onbox_ok=onbox_ok)
         print(f"[STT/WS] start provider={provider} sample_rate={start.get('sample_rate')} "
               f"lang={start.get('lang')} target={start.get('target')}")
         if overridden_from:

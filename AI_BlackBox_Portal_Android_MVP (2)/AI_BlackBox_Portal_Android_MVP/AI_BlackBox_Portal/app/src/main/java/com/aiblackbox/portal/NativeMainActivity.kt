@@ -358,12 +358,11 @@ class NativeMainActivity : ComponentActivity() {
                 }
                 val sttStatusText = SttFrames.statusText(sttStatus, sttProviderLabels)
                 var sttSwitchOffer by remember { mutableStateOf<SttEvent.Error?>(null) }
-                // The provider picked in the switch prompt, for this activity's life ("" = the box's choice).
-                var sttProviderPick by remember { mutableStateOf("") }
 
-                // Start dictation at the caret: the mic tap, and a provider picked in the
-                // switch prompt.
-                fun startDictation() {
+                // Start dictation at the caret: the mic tap ("" = the box's choice), and a
+                // provider picked in the switch prompt, for that dictation only (kept, it
+                // silently overrode the wizard's STT setting for the activity's life).
+                fun startDictation(provider: String = "") {
                     withMicPermission {
                         // Fresh dictation: don't drop the first final.
                         sttDiscardTrailingFinal = false
@@ -373,7 +372,7 @@ class NativeMainActivity : ComponentActivity() {
                         val insert = cur.selection.start.coerceIn(0, cur.text.length)
                         sttBaseBefore = cur.text.substring(0, insert)
                         sttBaseAfter = cur.text.substring(insert)
-                        sttClient.start(provider = sttProviderPick)
+                        sttClient.start(provider = provider)
                     }
                 }
 
@@ -1465,8 +1464,7 @@ class NativeMainActivity : ComponentActivity() {
                         error = offer,
                         onPick = { choice ->
                             sttSwitchOffer = null
-                            sttProviderPick = choice.id
-                            startDictation()
+                            startDictation(provider = choice.id)
                         },
                         onDismiss = { sttSwitchOffer = null },
                     )
