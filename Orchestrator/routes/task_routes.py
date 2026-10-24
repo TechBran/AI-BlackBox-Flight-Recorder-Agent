@@ -29,8 +29,27 @@ from Orchestrator.retrieval import retrieve
 from Orchestrator.tasks import create_task, update_task
 from Orchestrator.utils.paths import AUDIO_EXTS, UploadPathError, resolve_upload_path
 
+# The most rows one /tasks/list call returns when the caller sets ?limit=.
+TASKS_LIST_MAX_LIMIT = 1000
+
+
+def _parse_status_filter(status: Optional[str]) -> Optional[List[str]]:
+    """?status=pending,processing -> ['pending', 'processing']; an unknown status
+    is a 400 (a typo must not silently match nothing)."""
+    if status is None or not status.strip():
+        return None
+    valid = {s.value for s in TaskStatus}
+    wanted = [s.strip().lower() for s in status.split(",") if s.strip()]
+    unknown = sorted(set(wanted) - valid)
+    if unknown:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown task status: {', '.join(unknown)} (valid: {', '.join(sorted(valid))})")
+    return wanted
+
+
 @app.get("/tasks/list")
-def list_tasks(operator: Optional[str] = None, all: bool = False):
+def list_tasks(operator: Optional[str] = None, all: bool = False,
+               status: Optional[str] = None, limit: Optional[int] = None):
     """List tasks with smart filtering.
     By default, returns only:
     - Active tasks (pending/processing)
@@ -38,35 +57,36 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
     This dramatically reduces response size for mobile/Tailscale while still
     allowing placeholder polling to detect completions.
     Use ?all=true to get full task history.
+    ?status=a,b returns exactly those statuses (no time window); ?limit=N caps
+    the rows, newest first (1..TASKS_LIST_MAX_LIMIT).
     """
+    statuses = _parse_status_filter(status)
+    if limit is not None and not (1 <= limit <= TASKS_LIST_MAX_LIMIT):
+        raise HTTPException(status_code=400, detail=f"limit must be 1..{TASKS_LIST_MAX_LIMIT}")
+
     # F2 (Part 2): projection — pulls ONLY the scalar columns the pill renders, NOT
     # result_data (the base64 blob that was 97% of tasks.db). Previously this ran
     # `SELECT * ... ORDER BY created_at DESC` + json.loads on every row (~1s, GIL-held,
     # polled every 2s). Ordering now uses idx_tasks_created_at (no TEMP B-TREE sort).
     # Rows are plain dicts of the projected fields (see TaskDatabase.get_task_list).
-    all_tasks = task_db.get_task_list(operator)
-
-    # If all=true, return everything (for debugging/admin)
-    if all:
-        filtered_tasks = all_tasks
+    # The filters run in the query (audit rank 67): the poll no longer reads the
+    # box's whole task history into Python to keep a handful of rows.
+    if statuses or all:
+        filtered_tasks = task_db.get_task_list(operator, statuses=statuses, limit=limit)
     else:
-        # Smart filter: active + recently completed
+        # Smart filter: active + recently ended. 'cancelled' is terminal like
+        # completed/failed (G2-T8) — without it a just-cancelled task would
+        # appear in NEITHER branch and the pill would vanish instantly, which is
+        # exactly the "UI lies" bug T8 kills.
         from datetime import datetime, timezone, timedelta
         cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=10)
-
-        filtered_tasks = [
-            t for t in all_tasks
-            if t["status"] in ['pending', 'processing']  # Always show active
-            or (
-                # Show recently-ended tasks. 'cancelled' is terminal like
-                # completed/failed (G2-T8) — without it a just-cancelled task
-                # would appear in NEITHER branch and the pill would vanish
-                # instantly, which is exactly the "UI lies" bug T8 kills.
-                t["status"] in ['completed', 'failed', 'cancelled']
-                and t["updated_at"]  # Has update timestamp
-                and datetime.fromisoformat(t["updated_at"].replace('Z', '+00:00')) > cutoff_time
-            )
-        ]
+        filtered_tasks = task_db.get_task_list(
+            operator,
+            active_statuses=['pending', 'processing'],  # Always show active
+            ended_statuses=['completed', 'failed', 'cancelled'],
+            ended_since=cutoff_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            limit=limit,
+        )
 
     return {
         "tasks": [{
@@ -95,7 +115,7 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
             # (/cu/view/{session_id}) instead of the first streamable session.
             "session_id": t["session_id"],
         } for t in filtered_tasks],
-        "total_tasks": len(all_tasks),
+        "total_tasks": task_db.count_tasks(operator),
         "filtered_count": len(filtered_tasks)
     }
 

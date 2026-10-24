@@ -562,7 +562,12 @@ class TaskDatabase:
 
         return self._task_from_row(row)
 
-    def get_task_list(self, operator: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_task_list(self, operator: Optional[str] = None, *,
+                      statuses: Optional[List[str]] = None,
+                      active_statuses: Optional[List[str]] = None,
+                      ended_statuses: Optional[List[str]] = None,
+                      ended_since: Optional[str] = None,
+                      limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """F2 (Part 2): LIGHTWEIGHT projection for the polled /tasks/list.
 
         Selects ONLY the columns the task pill / monitor renders — deliberately NOT
@@ -570,6 +575,15 @@ class TaskDatabase:
         from its own real column (populated by save_task, backfilled by the F2
         migration), so this query never reads or parses a result_data blob. Ordered
         by created_at DESC, which uses idx_tasks_created_at (no TEMP B-TREE sort).
+
+        Filters run IN the query (audit rank 67: the polled route used to read every
+        row of the box's history into Python each poll and drop almost all of them):
+          - statuses: exactly these statuses;
+          - active_statuses / ended_statuses + ended_since: the default view, rows in
+            an active status OR an ended status updated after ended_since (an ISO
+            UTC timestamp, compared with julianday so 'Z' and '+00:00' rows agree);
+          - limit: at most this many rows (newest first).
+        With no filter it returns every row, as before.
 
         Returns a list of plain dicts (not Task objects) — the route needs only these
         scalar fields. For the full record incl. result_data, use get_task (single-row
@@ -579,17 +593,51 @@ class TaskDatabase:
                  "updated_at", "result_url", "operator", "prompt",
                  "progress_text", "device_id", "reasoning_text", "session_id")
         select = ", ".join(_cols)
+        where: List[str] = []
+        params: List[Any] = []
+        if operator:
+            where.append("operator = ?")
+            params.append(operator)
+        if statuses:
+            where.append(f"status IN ({', '.join('?' for _ in statuses)})")
+            params.extend(statuses)
+        if active_statuses or ended_statuses:
+            parts = []
+            if active_statuses:
+                parts.append(f"status IN ({', '.join('?' for _ in active_statuses)})")
+                params.extend(active_statuses)
+            if ended_statuses and ended_since:
+                parts.append(f"(status IN ({', '.join('?' for _ in ended_statuses)})"
+                             " AND julianday(updated_at) > julianday(?))")
+                params.extend(ended_statuses)
+                params.append(ended_since)
+            where.append("(" + " OR ".join(parts) + ")")
+        sql = f"SELECT {select} FROM tasks"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         conn = self._connect()
         cursor = conn.cursor()
-        if operator:
-            cursor.execute(
-                f"SELECT {select} FROM tasks WHERE operator = ? ORDER BY created_at DESC",
-                (operator,))
-        else:
-            cursor.execute(f"SELECT {select} FROM tasks ORDER BY created_at DESC")
+        cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
         return [dict(zip(_cols, row)) for row in rows]
+
+    def count_tasks(self, operator: Optional[str] = None) -> int:
+        """How many tasks the box holds (optionally one operator's): /tasks/list's
+        total_tasks, without reading the rows."""
+        conn = self._connect()
+        cursor = conn.cursor()
+        if operator:
+            cursor.execute("SELECT COUNT(*) FROM tasks WHERE operator = ?", (operator,))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM tasks")
+        (count,) = cursor.fetchone()
+        conn.close()
+        return int(count)
 
     def get_all_tasks(self, operator: Optional[str] = None) -> List[Task]:
         conn = self._connect()
