@@ -127,6 +127,19 @@ def generate_csv(content: str, output_path: Path):
     # CSV is just text - write directly
     output_path.write_text(content, encoding='utf-8')
 
+# Terminal escape sequences (CSI "\x1b[31m", OSC "\x1b]0;title\x07", and the
+# two-character escapes), then every character XML 1.0 cannot carry.
+_ANSI_ESCAPE = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])')
+_XML_INVALID = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]')
+
+
+def _xml_safe(text: str) -> str:
+    """``text`` without what python-docx refuses ("All strings must be XML
+    compatible"): model text quoting terminal or CLI-agent output carries ANSI
+    escapes and NUL bytes, which used to fail the whole .docx artifact."""
+    return _XML_INVALID.sub('', _ANSI_ESCAPE.sub('', text))
+
+
 def generate_docx(content: str, output_path: Path):
     """Generate DOCX from markdown-like content using python-docx."""
     from docx import Document
@@ -134,6 +147,7 @@ def generate_docx(content: str, output_path: Path):
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     doc = Document()
+    content = _xml_safe(content)
 
     lines = content.split('\n')
     for line in lines:
