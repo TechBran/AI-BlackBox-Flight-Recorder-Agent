@@ -2,15 +2,23 @@ package com.aiblackbox.portal.ui.cu
 
 import android.annotation.SuppressLint
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import com.aiblackbox.portal.ui.webview.BbxWebChromeClient
+import com.aiblackbox.portal.ui.webview.BbxWebViewClient
 
 /** CU live view (D9: WebView reuse): loads ${baseUrl}/cu/view/{sessionId} — the
  *  Orchestrator-served noVNC viewer page. Every gesture/cursor/extra-keys
@@ -38,72 +46,90 @@ fun CuLiveViewScreen(baseUrl: String, sessionId: String, modifier: Modifier = Mo
     val bottomInsetDp = with(density) {
         WindowInsets.navigationBars.getBottom(this).toDp().value.toInt()
     } + 118
-    AndroidView(
-        modifier = modifier.fillMaxSize(),
-        factory = { ctx ->
-            WebView(ctx).apply {
-                // ROOT CAUSE of the v1.5.0–1.5.4 black screen (paint-probe
-                // verdict 2026-07-23: viewport 599x0 CSS px = full inner-screen
-                // WIDTH x ZERO height, stream healthy, desktop rendered into a
-                // 2x1px sliver): a WebView constructed WITHOUT LayoutParams
-                // inside Compose's AndroidView can get measured at zero height
-                // on the first pass and the renderer stays locked there. The
-                // canonical fix — explicit MATCH_PARENT params so every
-                // measure pass resolves full-size. (The wizard WebView dodges
-                // this via Column+weight; this one sits in a nav-destination
-                // Box and does not.)
-                layoutParams = android.view.ViewGroup.LayoutParams(
-                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                )
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mediaPlaybackRequiresUserGesture = false
-                // Multi-touch pass-through: the served page's gesture layer
-                // (touch-action:none overlay) owns pinch-zoom/pan/touchpad
-                // gestures. Disable the WebView's OWN zoom so it never
-                // consumes a pinch before the page sees the raw touches.
-                settings.setSupportZoom(false)
-                settings.builtInZoomControls = false
-                // Respect the page's viewport meta (the viewer sizes itself).
-                settings.useWideViewPort = true
-                // Defense-in-depth (mirrors WizardWebViewScreen): this loads only an
-                // http(s) server origin (the noVNC viewer) with no JS bridge/file
-                // upload, so deny local file:// and content:// access outright.
-                settings.allowFileAccess = false
-                settings.allowContentAccess = false
-                // BLACK-SCREEN HUNT (Brandon field find 2026-07-23): the served
-                // page rendered PURE BLACK in this WebView while identical in
-                // Chrome. The /cu/view/diag beacons PROVED the page loads, the
-                // whole ES-module chain boots, and the RFB stream CONNECTS in
-                // this WebView — so the loss is in view-surface rendering, not
-                // networking or JS. v1.5.4 therefore aligns this settings block
-                // with the field-proven WizardWebViewScreen config:
-                //  - NO setLayerType(LAYER_TYPE_HARDWARE): forcing an explicit
-                //    hardware layer on a WebView is a documented trigger for
-                //    exactly this black-surface symptom (the WebView manages
-                //    its own compositor surface; an outer HW layer can swallow
-                //    it). The wizard WebView works without it.
-                //  - MIXED_CONTENT_COMPATIBILITY_MODE: wizard parity.
-                settings.mixedContentMode =
-                    android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                // Darkening opt-outs stay (harmless, defensive): never let the
-                // WebView re-shade the already-dark page or its canvas.
-                if (android.os.Build.VERSION.SDK_INT >= 33) {
-                    settings.isAlgorithmicDarkeningAllowed = false
+    // Bumped when the renderer dies (a heavy noVNC canvas on a low-memory device), which
+    // remounts a fresh viewer instead of the app being killed (A13-ui-ops-11).
+    var rendererGeneration by remember { mutableIntStateOf(0) }
+    var webView by remember { mutableStateOf<WebView?>(null) }
+    // Pause the viewer's stream and timers while the app is in the background.
+    LifecycleResumeEffect(webView) {
+        webView?.onResume()
+        onPauseOrDispose { webView?.onPause() }
+    }
+    key(rendererGeneration) {
+        AndroidView(
+            modifier = modifier.fillMaxSize(),
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    // ROOT CAUSE of the v1.5.0–1.5.4 black screen (paint-probe
+                    // verdict 2026-07-23: viewport 599x0 CSS px = full inner-screen
+                    // WIDTH x ZERO height, stream healthy, desktop rendered into a
+                    // 2x1px sliver): a WebView constructed WITHOUT LayoutParams
+                    // inside Compose's AndroidView can get measured at zero height
+                    // on the first pass and the renderer stays locked there. The
+                    // canonical fix — explicit MATCH_PARENT params so every
+                    // measure pass resolves full-size. (The wizard WebView dodges
+                    // this via Column+weight; this one sits in a nav-destination
+                    // Box and does not.)
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    // Multi-touch pass-through: the served page's gesture layer
+                    // (touch-action:none overlay) owns pinch-zoom/pan/touchpad
+                    // gestures. Disable the WebView's OWN zoom so it never
+                    // consumes a pinch before the page sees the raw touches.
+                    settings.setSupportZoom(false)
+                    settings.builtInZoomControls = false
+                    // Respect the page's viewport meta (the viewer sizes itself).
+                    settings.useWideViewPort = true
+                    // Defense-in-depth (mirrors WizardWebViewScreen): this loads only an
+                    // http(s) server origin (the noVNC viewer) with no JS bridge/file
+                    // upload, so deny local file:// and content:// access outright.
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    // BLACK-SCREEN HUNT (Brandon field find 2026-07-23): the served
+                    // page rendered PURE BLACK in this WebView while identical in
+                    // Chrome. The /cu/view/diag beacons PROVED the page loads, the
+                    // whole ES-module chain boots, and the RFB stream CONNECTS in
+                    // this WebView — so the loss is in view-surface rendering, not
+                    // networking or JS. v1.5.4 therefore aligns this settings block
+                    // with the field-proven WizardWebViewScreen config:
+                    //  - NO setLayerType(LAYER_TYPE_HARDWARE): forcing an explicit
+                    //    hardware layer on a WebView is a documented trigger for
+                    //    exactly this black-surface symptom (the WebView manages
+                    //    its own compositor surface; an outer HW layer can swallow
+                    //    it). The wizard WebView works without it.
+                    //  - MIXED_CONTENT_COMPATIBILITY_MODE: wizard parity.
+                    settings.mixedContentMode =
+                        android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    // Darkening opt-outs stay (harmless, defensive): never let the
+                    // WebView re-shade the already-dark page or its canvas.
+                    if (android.os.Build.VERSION.SDK_INT >= 33) {
+                        settings.isAlgorithmicDarkeningAllowed = false
+                    }
+                    @Suppress("DEPRECATION")
+                    if (android.os.Build.VERSION.SDK_INT in 29..32) {
+                        settings.forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
+                    }
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    // Shared clients (audit rank 62): a renderer crash remounts the viewer,
+                    // and the page's dialogs answer instead of silently failing.
+                    webViewClient = BbxWebViewClient(onRendererGone = { rendererGeneration++ })
+                    webChromeClient = BbxWebChromeClient()
+                    loadUrl("${baseUrl.trimEnd('/')}/cu/view/$sessionId" +
+                            "?ti=$topInsetDp&bi=$bottomInsetDp")
+                    webView = this
                 }
-                @Suppress("DEPRECATION")
-                if (android.os.Build.VERSION.SDK_INT in 29..32) {
-                    settings.forceDark = android.webkit.WebSettings.FORCE_DARK_OFF
-                }
-                setBackgroundColor(android.graphics.Color.BLACK)
-                webViewClient = WebViewClient()
-                loadUrl("${baseUrl.trimEnd('/')}/cu/view/$sessionId" +
-                        "?ti=$topInsetDp&bi=$bottomInsetDp")
-            }
-        },
-        // Release the WebView (JS/DOM-storage engine) on teardown to avoid a leak
-        // every time the composable leaves composition (mirrors WizardWebViewScreen).
-        onRelease = { it.destroy() },
-    )
+            },
+            // Release the WebView (JS/DOM-storage engine) on teardown to avoid a leak
+            // every time the composable leaves composition (mirrors WizardWebViewScreen).
+            onRelease = {
+                if (webView === it) webView = null
+                it.destroy()
+            },
+        )
+    }
 }

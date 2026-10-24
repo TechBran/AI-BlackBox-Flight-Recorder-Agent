@@ -1,9 +1,7 @@
 package com.aiblackbox.portal.ui.webview
 
-import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,8 +17,12 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,9 +52,9 @@ import com.aiblackbox.portal.ui.theme.BbxWhite
  * `?mode=manage`.
  *
  * Only PortalActivity's WebSettings block is mirrored (javaScriptEnabled,
- * domStorageEnabled, MIXED_CONTENT_COMPATIBILITY_MODE) plus a plain
- * [WebViewClient] so navigation stays inside this WebView, and a default
- * [WebChromeClient] so the wizard's confirm()/alert() dialogs show.
+ * domStorageEnabled, MIXED_CONTENT_COMPATIBILITY_MODE), with the shared
+ * [BbxWebViewClient] (navigation stays inside this WebView; a renderer crash remounts
+ * it) and [BbxWebChromeClient] (JS dialogs and <input type=file> pickers work).
  *
  * KNOWN LIMITATION (m1): the onboarding SPA intercepts `target="_blank"`
  * links — the API-key "get your key" links and the Google-OAuth console /
@@ -73,6 +75,10 @@ fun WizardWebViewScreen(
     // before popping the destination (mirrors PortalActivity's
     // OnBackPressedCallback: goBack() while canGoBack(), else exit).
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
+    // The page's <input type=file> opens the platform picker.
+    val fileChooser = rememberWebFileChooser()
+    // Bumped when the renderer dies, which remounts a fresh WebView.
+    var rendererGeneration by remember { mutableIntStateOf(0) }
 
     BackHandler {
         val web = webViewRef.value
@@ -113,35 +119,43 @@ fun WizardWebViewScreen(
             }
         }
 
-        AndroidView(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    // Reuse ONLY PortalActivity's WebSettings block — not its
-                    // origin/`/ui/` URL logic.
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                    // G3-T13 M-2 defense-in-depth: loads only an http(s) server origin
-                    // (the onboarding SPA) with no JS bridge/file upload, so deny local
-                    // file:// and content:// access outright.
-                    settings.allowFileAccess = false
-                    settings.allowContentAccess = false
-                    // Plain WebViewClient keeps same-origin SPA navigation inside
-                    // the WebView (no external-browser bounce on internal links).
-                    webViewClient = WebViewClient()
-                    // Without a WebChromeClient a WebView cancels every JS
-                    // dialog: confirm() returns false, so the hub's Install Now
-                    // and the wizard's remove/delete confirms silently did
-                    // nothing. The default one shows the stock dialogs.
-                    webChromeClient = WebChromeClient()
-                    loadUrl("$origin/onboarding/$suffix")
-                    webViewRef.value = this
-                }
-            },
-            onRelease = { it.destroy() },
-        )
+        // A renderer crash replaces the WebView with a fresh one instead of killing the app.
+        key(rendererGeneration) {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        // Reuse ONLY PortalActivity's WebSettings block — not its
+                        // origin/`/ui/` URL logic.
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        // G3-T13 M-2 defense-in-depth: loads only an http(s) server origin
+                        // (the onboarding SPA) with no JS bridge, so deny the PAGE local
+                        // file:// and content:// URLs. A file the user picks for an
+                        // <input type=file> is handed over by the chooser, not loaded.
+                        settings.allowFileAccess = false
+                        settings.allowContentAccess = false
+                        // Keeps same-origin SPA navigation inside the WebView (no
+                        // external-browser bounce on internal links) and survives a
+                        // renderer crash (audit rank 62).
+                        webViewClient = BbxWebViewClient(onRendererGone = { rendererGeneration++ })
+                        // confirm()/alert() dialogs and <input type=file> pickers: the
+                        // hub's Install Now, the wizard's "Remove operator", credential-file
+                        // upload and update alerts silently did nothing without a chrome
+                        // client (a WebView with none cancels every JS dialog).
+                        webChromeClient = BbxWebChromeClient(fileChooser)
+                        loadUrl("$origin/onboarding/$suffix")
+                        webViewRef.value = this
+                    }
+                },
+                onRelease = {
+                    if (webViewRef.value === it) webViewRef.value = null
+                    it.destroy()
+                },
+            )
+        }
     }
 }
