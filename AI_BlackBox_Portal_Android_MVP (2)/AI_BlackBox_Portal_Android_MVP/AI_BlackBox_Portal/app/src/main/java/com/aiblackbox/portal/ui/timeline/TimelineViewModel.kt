@@ -21,6 +21,33 @@ import kotlinx.serialization.json.jsonPrimitive
 private const val TAG = "TimelineVM"
 private const val POLL_INTERVAL_MS = 10_000L  // Refresh every 10 seconds
 
+/**
+ * The peek sheet's body, TAGGED with the snapshot it was fetched for
+ * (A07-components-rest-01): the sheet renders it only under that id, so snapshot A's
+ * text can never sit under snapshot B's title while B loads or after B's fetch fails.
+ */
+data class SnapshotPeek(
+    val snapId: String,
+    val content: String? = null,
+    val loading: Boolean = true,
+    val error: String? = null,
+)
+
+/** What the peek sheet shows for the id on its title. */
+sealed class PeekView {
+    data object Loading : PeekView()
+    data class Error(val message: String) : PeekView()
+    data class Body(val text: String) : PeekView()
+}
+
+/** Pure: a body tagged with another id is never shown, a failed fetch shows its error. */
+fun peekViewFor(peek: SnapshotPeek?, currentSnapId: String): PeekView = when {
+    peek == null || peek.snapId != currentSnapId -> PeekView.Loading
+    peek.content != null -> PeekView.Body(peek.content)
+    peek.error != null -> PeekView.Error(peek.error)
+    else -> PeekView.Loading
+}
+
 class TimelineViewModel(application: Application) : AndroidViewModel(application) {
     private var api: BlackBoxApi? = null
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -45,6 +72,14 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
 
     private val _isLoadingContent = MutableStateFlow(false)
     val isLoadingContent: StateFlow<Boolean> = _isLoadingContent.asStateFlow()
+
+    // The peek sheet's body, tagged with its snapshot id (see [SnapshotPeek]).
+    private val _peek = MutableStateFlow<SnapshotPeek?>(null)
+    val peek: StateFlow<SnapshotPeek?> = _peek.asStateFlow()
+
+    // The one in-flight snapshot fetch; a newer request cancels it so a slow reply for
+    // an earlier id can never land after the newer one.
+    private var peekJob: Job? = null
 
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
@@ -145,8 +180,11 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
      */
     fun navigateToSnapshot(snapId: String) {
         val api = api ?: return
+        peekJob?.cancel()
+        _peek.value = SnapshotPeek(snapId)
+        _fullContent.value = null
         _isLoadingContent.value = true
-        viewModelScope.launch {
+        peekJob = viewModelScope.launch {
             try {
                 val response = api.get("/fossil/snapshot/$snapId")
                 val obj = json.parseToJsonElement(response).jsonObject
@@ -165,28 +203,39 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
                 )
                 _selectedSnapshot.value = snap
                 _fullContent.value = content
+                _peek.value = SnapshotPeek(snapId, content, loading = false)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Superseded by a newer peek: leave its state alone.
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "navigateToSnapshot failed for $snapId: ${e.message}")
+                _peek.value = SnapshotPeek(snapId, loading = false, error = "Could not load $snapId. Check the connection and try again.")
             } finally {
-                _isLoadingContent.value = false
+                if (_peek.value?.snapId == snapId) _isLoadingContent.value = false
             }
         }
     }
 
     private fun fetchFullContent(snapId: String) {
         val api = api ?: return
+        peekJob?.cancel()
         _isLoadingContent.value = true
-        viewModelScope.launch {
+        peekJob = viewModelScope.launch {
             try {
                 val response = api.get("/fossil/snapshot/$snapId")
                 val obj = json.parseToJsonElement(response).jsonObject
-                _fullContent.value = obj["content"]?.jsonPrimitive?.content ?: ""
+                if (_selectedSnapshot.value?.snapId == snapId) {
+                    _fullContent.value = obj["content"]?.jsonPrimitive?.content ?: ""
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "fetchFullContent failed for $snapId: ${e.message}")
-                // Fallback to snippet
-                _fullContent.value = _selectedSnapshot.value?.snippet
+                // Fallback to the snippet of THIS snapshot, never another one's.
+                val selected = _selectedSnapshot.value
+                if (selected?.snapId == snapId) _fullContent.value = selected.snippet
             } finally {
-                _isLoadingContent.value = false
+                if (_selectedSnapshot.value?.snapId == snapId) _isLoadingContent.value = false
             }
         }
     }

@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.local
 
 import android.content.Context
+import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.model.SaveRequest
 import com.aiblackbox.portal.data.repository.ChatRepository
 import kotlinx.coroutines.sync.Mutex
@@ -16,9 +17,10 @@ import java.io.IOException
  * wires it to [ChatRepository.saveConversation] (see [LocalSnapshotQueue.fromContext]),
  * tests substitute a fake.
  *
- * A non-success surfaces as a throw. An [IOException] specifically is the OFFLINE
- * boundary (BlackBoxApi throws IOException for unreachable hub AND non-2xx); the
- * queue treats that as "try again later" and KEEPS the item.
+ * A non-success surfaces as a throw. A plain [IOException] is the OFFLINE boundary
+ * (unreachable hub): the queue KEEPS the item and tries again later. A non-2xx arrives
+ * as [ApiHttpException] (also an IOException) carrying the status, which
+ * [LocalSnapshotQueue.failureKind] reads to tell "later" from "never".
  */
 interface SnapshotSender {
     suspend fun send(request: SaveRequest)
@@ -39,7 +41,18 @@ interface QueueStore {
 
     /** Replace the persisted queue with [items] (the new full FIFO list). */
     fun save(items: List<SaveRequest>)
+
+    /**
+     * Park [item] OUTSIDE the live queue because the box refused it for good ([reason]
+     * names the status). Kept, not dropped, so a refused turn can still be recovered by
+     * hand; the default (test stores) only forgets it.
+     */
+    fun deadLetter(item: SaveRequest, reason: String) {}
 }
+
+/** A turn the box refused for good, parked by [QueueStore.deadLetter]. */
+@kotlinx.serialization.Serializable
+data class DeadLetter(val reason: String, val request: SaveRequest)
 
 /**
  * Offline-resilient, ordered write-back of on-device chat turns to the BlackBox
@@ -55,6 +68,10 @@ interface QueueStore {
  *    [IOException] (offline / unreachable) STOPS the drain, leaving that item and
  *    everything after it queued, in order, for the next flush. Nothing is dropped
  *    or reordered.
+ *  - A turn the box REFUSES for good (a 4xx other than 408/429, e.g. 413 or 422, or a
+ *    refusal repeated [MAX_REFUSED_ATTEMPTS] times) is moved to the dead-letter file
+ *    and the drain goes on (A09-data-local-model-04). Before, every non-2xx was read as
+ *    "offline", so one rejected head blocked every later on-device turn forever.
  *
  * Concurrency: a [Mutex] serializes flushes so a fire-and-forget app-open flush
  * can't interleave with an enqueue-triggered flush and double-send / reorder.
@@ -76,6 +93,12 @@ class LocalSnapshotQueue(
     // Serializes mutations of the persisted queue across concurrent flushes.
     private val mutex = Mutex()
 
+    // How many times the box has REFUSED the current head (an HTTP status, not a dead
+    // socket). In memory only: a restart just grants the head a fresh set of attempts,
+    // and an offline phone never counts, however long the outage.
+    private var refusedHead: SaveRequest? = null
+    private var refusedCount = 0
+
     /**
      * Append [request] to the on-disk queue (persisted before we attempt any send,
      * so an offline turn survives even an immediate process kill), then try to
@@ -92,7 +115,9 @@ class LocalSnapshotQueue(
     /**
      * Drain the persisted queue in FIFO order. Removes each item from disk only on
      * a successful send; stops at the first [IOException] (offline), leaving the
-     * remainder queued in order. A non-IO error propagates WITHOUT dropping the
+     * remainder queued in order. A refusal ([failureKind] PERMANENT, or a RETRYABLE
+     * one repeated [MAX_REFUSED_ATTEMPTS] times) parks the head in the dead-letter
+     * store and drains on. A non-IO error propagates WITHOUT dropping the
      * item — the queue is left exactly as far as it got, so no turn is silently
      * lost. Concurrent flushes are serialized by [the mutex] (kotlinx [Mutex] is
      * non-reentrant — this guarantees non-overlapping acquisition, not reentry).
@@ -105,20 +130,61 @@ class LocalSnapshotQueue(
                 try {
                     sender.send(head)
                 } catch (e: IOException) {
-                    // Offline / unreachable / non-2xx: stop, keep head + the rest
-                    // (already persisted) for the next flush. No drop, no reorder.
-                    return
+                    val kind = failureKind(e)
+                    if (kind == FailureKind.OFFLINE) {
+                        // Offline / unreachable: stop, keep head + the rest (already
+                        // persisted) for the next flush. No drop, no reorder.
+                        return
+                    }
+                    if (refusedHead != head) {
+                        refusedHead = head
+                        refusedCount = 0
+                    }
+                    refusedCount++
+                    if (kind == FailureKind.RETRYABLE && refusedCount < MAX_REFUSED_ATTEMPTS) return
+                    // The box will not take this turn: park it so the turns behind it
+                    // still reach the ledger.
+                    store.deadLetter(head, "HTTP ${(e as ApiHttpException).code} after $refusedCount attempt(s): ${e.message}")
+                    refusedHead = null
+                    refusedCount = 0
                 }
-                // Sent: drop the head and persist the shorter queue immediately so
-                // a crash mid-drain can't re-send it.
+                // Sent (or parked): drop the head and persist the shorter queue
+                // immediately so a crash mid-drain can't re-send it.
                 pending = pending.drop(1)
                 store.save(pending)
             }
         }
     }
 
+    /** How a failed send is treated (see [failureKind]). */
+    enum class FailureKind {
+        /** No HTTP answer (dead socket, timeout, DNS): keep the head, never counted. */
+        OFFLINE,
+        /** The box answered but may accept later (5xx, 408, 429): counted toward the cap. */
+        RETRYABLE,
+        /** The box refused this request for good (any other 4xx): dead-lettered at once. */
+        PERMANENT,
+    }
+
     companion object {
         private const val QUEUE_FILE_NAME = "local_snapshot_queue.json"
+
+        /** Refusals of one head before it is dead-lettered (an unreachable box never counts). */
+        const val MAX_REFUSED_ATTEMPTS = 5
+
+        /**
+         * Classify a send failure. BlackBoxApi maps every non-2xx to [ApiHttpException]
+         * (an [IOException]); a code of 0 means no status was seen, so it is transport.
+         */
+        fun failureKind(e: IOException): FailureKind {
+            val code = (e as? ApiHttpException)?.code ?: 0
+            return when {
+                code == 0 -> FailureKind.OFFLINE
+                code == 408 || code == 429 -> FailureKind.RETRYABLE
+                code in 400..499 -> FailureKind.PERMANENT
+                else -> FailureKind.RETRYABLE
+            }
+        }
 
         /**
          * Build a [LocalSnapshotQueue] wired to a file in the app's private files
@@ -130,8 +196,9 @@ class LocalSnapshotQueue(
             val file = File(context.applicationContext.filesDir, QUEUE_FILE_NAME)
             val sender = object : SnapshotSender {
                 override suspend fun send(request: SaveRequest) {
-                    // saveConversation throws IOException for offline/non-2xx —
-                    // exactly the boundary flush() keys on.
+                    // saveConversation throws IOException when offline and
+                    // ApiHttpException (with the status) for a non-2xx — exactly
+                    // what flush() classifies.
                     repository.saveConversation(request)
                 }
             }
@@ -191,8 +258,45 @@ class JsonFileQueueStore(private val file: File) : QueueStore {
         }
     }
 
-    private companion object {
-        val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-        val REQUEST_LIST = ListSerializer(SaveRequest.serializer())
+    /**
+     * Append [item] to the dead-letter sibling (`<queue>.dead.json`), keeping only the
+     * newest [MAX_DEAD_LETTERS] so a box that refuses everything cannot fill the disk.
+     * Written atomically like the queue; a damaged dead-letter file starts over.
+     */
+    override fun deadLetter(item: SaveRequest, reason: String) {
+        val kept = (deadLetters() + DeadLetter(reason, item)).takeLast(MAX_DEAD_LETTERS)
+        writeAtomically(deadFile, JSON.encodeToString(DEAD_LIST, kept))
+    }
+
+    /** The parked turns, oldest first (empty when none or unreadable). */
+    fun deadLetters(): List<DeadLetter> {
+        if (!deadFile.exists()) return emptyList()
+        return try {
+            val text = deadFile.readText()
+            if (text.isBlank()) emptyList() else JSON.decodeFromString(DEAD_LIST, text)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private val deadFile: File get() = File(file.parentFile, file.nameWithoutExtension + ".dead.json")
+
+    private fun writeAtomically(target: File, json: String) {
+        target.parentFile?.mkdirs()
+        val tmp = File(target.parentFile, target.name + ".tmp")
+        tmp.writeText(json)
+        if (!tmp.renameTo(target)) {
+            target.delete()
+            if (!tmp.renameTo(target)) target.writeText(json)
+        }
+    }
+
+    companion object {
+        /** Parked turns kept on disk; older ones are discarded first. */
+        const val MAX_DEAD_LETTERS = 50
+
+        private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        private val REQUEST_LIST = ListSerializer(SaveRequest.serializer())
+        private val DEAD_LIST = ListSerializer(DeadLetter.serializer())
     }
 }

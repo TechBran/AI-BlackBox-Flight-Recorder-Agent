@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -45,13 +46,15 @@ import com.aiblackbox.portal.ui.theme.Neutral200
 import com.aiblackbox.portal.ui.theme.Neutral300
 import com.aiblackbox.portal.ui.theme.Neutral500
 import com.aiblackbox.portal.ui.theme.RadiusMd
+import com.aiblackbox.portal.ui.timeline.PeekView
 import com.aiblackbox.portal.ui.timeline.TimelineViewModel
+import com.aiblackbox.portal.ui.timeline.peekViewFor
 
 /**
  * Inline bottom sheet for peeking at a snapshot's content from the chat surface.
  *
  * Reuses [TimelineViewModel.navigateToSnapshot] which fetches /fossil/snapshot/{id}
- * and exposes selectedSnapshot + fullContent + isLoadingContent StateFlows.
+ * and exposes selectedSnapshot plus the id-tagged peek body ([TimelineViewModel.peek]).
  *
  * Nested SNAP-XXXX references inside the body are clickable via
  * [ClickableSnapshotContent]; tapping them swaps the sheet's content in place
@@ -66,8 +69,9 @@ fun SnapshotPeekSheet(
 ) {
     val vm: TimelineViewModel = viewModel()
     val selected by vm.selectedSnapshot.collectAsState()
-    val fullContent by vm.fullContent.collectAsState()
-    val isLoading by vm.isLoadingContent.collectAsState()
+    // The body is tagged with the id it was fetched for and rendered only under that
+    // id (A07-components-rest-01): never the previous snapshot's text under a new title.
+    val peek by vm.peek.collectAsState()
 
     var currentSnapId by remember { mutableStateOf(snapId) }
 
@@ -119,19 +123,31 @@ fun SnapshotPeekSheet(
                     .background(Color(0xFF0A0A0A))
                     .border(1.dp, Neutral300, RoundedCornerShape(RadiusMd)),
             ) {
-                if (isLoading && fullContent == null) {
-                    Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = HighlightSnapshot, strokeWidth = 2.dp)
+                when (val view = peekViewFor(peek, currentSnapId)) {
+                    PeekView.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(
+                            color = HighlightSnapshot,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(32.dp),
+                        )
                     }
-                } else {
-                    val body = fullContent ?: snap?.snippet ?: ""
-                    Column(
+                    is PeekView.Error -> Box(
+                        Modifier.fillMaxSize().padding(16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = view.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Neutral500,
+                        )
+                    }
+                    is PeekView.Body -> Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .verticalScroll(rememberScrollState())
                             .padding(16.dp),
                     ) {
-                        if (body.isBlank()) {
+                        if (view.text.isBlank()) {
                             Text(
                                 text = "No content available for this snapshot.",
                                 style = MaterialTheme.typography.bodySmall.copy(
@@ -142,7 +158,7 @@ fun SnapshotPeekSheet(
                             )
                         } else {
                             ClickableSnapshotContent(
-                                text = body,
+                                text = view.text,
                                 onSnapIdClick = { nestedId ->
                                     if (nestedId != currentSnapId) currentSnapId = nestedId
                                 },

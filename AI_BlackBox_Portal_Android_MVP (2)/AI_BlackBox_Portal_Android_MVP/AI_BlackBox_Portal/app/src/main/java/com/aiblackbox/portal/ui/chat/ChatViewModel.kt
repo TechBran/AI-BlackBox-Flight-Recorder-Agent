@@ -55,6 +55,7 @@ import com.aiblackbox.portal.data.store.OperatorResolution
 import com.aiblackbox.portal.data.store.OperatorResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -176,6 +177,28 @@ private const val MAX_CHAT_MESSAGES = 100
  * owns its own context budget).
  */
 private const val LOCAL_HISTORY_BUDGET_CHARS = 4000
+
+/**
+ * One cloud turn's identity, read ONCE at send time (A04-chat-viewmodel-16): the
+ * operator, provider and model it was sent with and the ids of its two bubbles. The
+ * finalize, the /chat/save body and the history write all use these, never the live
+ * fields an operator or provider switch rewrites while the stream is still running.
+ */
+private class SseTurn(
+    val operator: String,
+    val provider: String,
+    val model: String,
+    val userMessageId: String,
+    val assistantMessageId: String,
+) {
+    // cu_queued: the box queued this prompt behind a running computer-use task, whose
+    // stream carries the reply (cu_queue_next), so this turn has no reply of its own.
+    var queued = false
+
+    // cu_queue_next: this stream now also carries the next queued prompt's reply,
+    // appended after a separator, so "done" must not replace the accumulated content.
+    var queueAppend = false
+}
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -520,6 +543,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     if (op.isNotBlank()) _operatorPrompt.value = OperatorPrompt.NONE
                     // Load history when operator changes (or on first launch)
                     if (!historyLoaded || op != oldOp) {
+                        // A turn still streaming belongs to the operator it was sent as:
+                        // settle it in THAT conversation before the new one replaces the
+                        // list (A04-chat-viewmodel-01), or its late updates land in the
+                        // new operator's conversation and file.
+                        if (historyLoaded) finalizeInFlightTurn(oldOp)
                         loadHistory(op)
                     }
                 }
@@ -578,20 +606,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadHistory(operator: String) {
         viewModelScope.launch {
             val saved = historyStore.load(operator)
-            if (saved.isNotEmpty()) {
-                // Cap at MAX to keep UI responsive on load
-                // Clear ALL stale transient flags from persisted state:
-                // - ttsGenerating: no TTS generation active after restart
-                // - isStreaming: no stream active after restart (stuck true = buttons won't render)
-                // - isThinking: no thinking active after restart
-                val cleaned = saved.takeLast(MAX_CHAT_MESSAGES).map { msg ->
-                    if (msg.ttsGenerating || msg.isStreaming || msg.isThinking) {
-                        msg.copy(ttsGenerating = false, ttsStatus = null, isStreaming = false, isThinking = false)
-                    } else msg
-                }
-                _messages.value = cleaned
-                Log.d(TAG, "Restored ${saved.size} messages for $operator (capped at $MAX_CHAT_MESSAGES)")
-            }
+            // A slower load for an operator the user already switched away from.
+            if (operator != currentOperator) return@launch
+            // ALWAYS assign (A04-chat-viewmodel-01): an operator with no saved history
+            // gets an empty conversation, never the previous operator's left on screen
+            // (and then persisted under the new operator's name).
+            _messages.value = restoredHistory(saved)
+            Log.d(TAG, "Restored ${saved.size} messages for $operator (capped at $MAX_CHAT_MESSAGES)")
             historyLoaded = true
             // Resolve any unresolved media placeholders from prior sessions
             resolveUnresolvedMediaTasks()
@@ -691,10 +712,48 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun persistHistory() {
+    /**
+     * Save the conversation on screen under [operator]. Both are read NOW, not when the
+     * launched save runs, so an operator switch in between can never write one
+     * operator's conversation into the other's file.
+     */
+    private fun persistHistory(operator: String = currentOperator) {
+        val snapshot = _messages.value
         viewModelScope.launch {
-            historyStore.save(currentOperator, _messages.value)
+            historyStore.save(operator, snapshot)
         }
+    }
+
+    /**
+     * Persist a finished cloud turn into ITS operator's file. Skipped once an operator
+     * switch has replaced the conversation on screen: [finalizeInFlightTurn] already
+     * saved the turn's conversation under its operator.
+     */
+    private fun persistTurnHistory(turn: SseTurn) {
+        if (turn.operator == currentOperator) persistHistory(turn.operator)
+    }
+
+    /**
+     * Settle the in-flight turn before an operator switch replaces the conversation:
+     * cancel it, wait for its own cancellation handling to finish (so nothing of it
+     * runs after the swap), clear the streaming flags and save the conversation under
+     * [operator], the one it was sent as. A partial reply is not minted, exactly like
+     * a STOP.
+     */
+    private suspend fun finalizeInFlightTurn(operator: String) {
+        val job = streamJob ?: return
+        if (!job.isActive) return
+        _streamCancelled.value = true
+        job.cancelAndJoin()
+        processPendingLocalReWarm()
+        _chatState.value = ChatState.IDLE
+        _signalLabel.value = null
+        stopBackgroundService()
+        val settled = _messages.value.map {
+            if (it.isStreaming || it.isThinking) it.copy(isStreaming = false, isThinking = false) else it
+        }
+        _messages.value = settled
+        historyStore.save(operator, settled)
     }
 
     fun initialize(origin: String) {
@@ -2005,7 +2064,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         repo: ChatRepository,
         clearInput: Boolean = true,
     ) {
-        // Append user message
         val userMsg = UiMessage(
             role = "user",
             content = text,
@@ -2013,15 +2071,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             provider = currentProvider,
             model = currentModel
         )
-        // Captured for the failure path: when the stream dies with NOTHING usable
-        // arrived, THIS user turn gets sendFailed=true so the UI offers a retry chip.
-        val userMsgId = userMsg.id
-        _messages.value = _messages.value + userMsg
-        // clearInput=false on the retry path (retryMessage) — a retried turn must
-        // not wipe whatever draft the user has typed since the failure.
-        if (clearInput) _inputText.value = TextFieldValue()
-
-        // Create placeholder assistant message
+        // Placeholder assistant message
         val assistantMsg = UiMessage(
             role = "assistant",
             content = "",
@@ -2029,6 +2079,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             provider = currentProvider,
             model = currentModel
         )
+        // Everything below uses THIS, never the live fields (A04-chat-viewmodel-16).
+        val turn = SseTurn(
+            operator = currentOperator,
+            provider = currentProvider,
+            model = currentModel,
+            userMessageId = userMsg.id,
+            assistantMessageId = assistantMsg.id,
+        )
+        // Captured for the failure path: when the stream dies with NOTHING usable
+        // arrived, THIS user turn gets sendFailed=true so the UI offers a retry chip.
+        val userMsgId = turn.userMessageId
+        _messages.value = _messages.value + userMsg
+        // clearInput=false on the retry path (retryMessage) — a retried turn must
+        // not wipe whatever draft the user has typed since the failure.
+        if (clearInput) _inputText.value = TextFieldValue()
         _messages.value = _messages.value + assistantMsg
 
         // Trim oldest messages to keep UI responsive (matches Portal MAX_HISTORY_ITEMS=100)
@@ -2055,14 +2120,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _signalLabel.value = null
         signalLastTool = ""
         signalGenerating = false
-        signalModelLabel = currentModel.ifBlank { currentProvider }.ifBlank { "model" }
+        signalModelLabel = turn.model.ifBlank { turn.provider }.ifBlank { "model" }
         // Computer-use turns keep The Signal dark for the whole turn (match web).
-        signalSuppressed = signalSuppressedForProvider(currentProvider)
+        signalSuppressed = signalSuppressedForProvider(turn.provider)
 
         val history = buildApiHistory()
 
         // CU: set status to running when sending a computer-use request
-        val isCuProvider = currentProvider == "computer-use"
+        val isCuProvider = turn.provider == CU_PROVIDER
         if (isCuProvider) {
             _cuStatus.value = "running"
             _cuStep.value = 0
@@ -2086,7 +2151,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val cuDeviceId = if (isCuProvider) _cuDeviceId.value else null
 
             // Robotics ER camera (only when provider is robotics)
-            val erCamera = if (currentProvider == "robotics") _erCamera.value else null
+            val erCamera = if (turn.provider == "robotics") _erCamera.value else null
 
             try {
                 // M3 (task 3.6): stamp this phone's OWN tailnet identity on the request so a
@@ -2111,18 +2176,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     runCatching { locationProvider.capture(locationAttachEnabled) }.getOrNull()
                 }
                 val flow = if (imageUrls.isEmpty()) {
-                    repo.sendStream(text, history, currentOperator, currentProvider, currentModel.ifBlank { null },
+                    repo.sendStream(text, history, turn.operator, turn.provider, turn.model.ifBlank { null },
                         sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera,
                         originDeviceId = originDeviceId, location = location)
                 } else {
-                    repo.sendStreamMultimodal(text, imageUrls, history, currentOperator, currentProvider, currentModel.ifBlank { null },
+                    repo.sendStreamMultimodal(text, imageUrls, history, turn.operator, turn.provider, turn.model.ifBlank { null },
                         sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera,
                         originDeviceId = originDeviceId, location = location)
                 }
 
                 flow.collect { event ->
                     processSSEEvent(
-                        event, content, reasoning, mediaTasks, errors
+                        event, turn, content, reasoning, mediaTasks, errors
                     ) { model, tokens, prov ->
                         if (model != null) streamModel = model
                         if (tokens != null) tokenCount = tokens
@@ -2131,7 +2196,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     // Update the streaming assistant message — the user still sees
                     // error-event text as it arrives (rendered after real content).
+                    // Addressed by id: a late event can never rewrite another message.
                     updateLastMessage(
+                        messageId = turn.assistantMessageId,
                         content = combineContentAndErrors(content.toString(), errors.toString()),
                         reasoning = reasoning.toString().ifBlank { null },
                         isStreaming = true,
@@ -2152,6 +2219,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val display = combineContentAndErrors(realContent, errorText)
                 val failedOutcome = streamOutcomeIsFailure(realContent, errorText)
 
+                if (turn.queued) {
+                    // cu_queued (A04-chat-viewmodel-15): the reply streams into the
+                    // running task's turn, so drop this empty bubble and save nothing.
+                    // The task is still running; its CU status is left as it is.
+                    _chatState.value = ChatState.IDLE
+                    _signalLabel.value = null
+                    stopBackgroundService()
+                    _messages.value = dropQueuedPlaceholder(_messages.value, turn.assistantMessageId)
+                    persistTurnHistory(turn)
+                    return@launch
+                }
+
                 if (!failedOutcome) {
                     _chatState.value = ChatState.IDLE
                     if (isCuProvider && _cuStatus.value == "running") {
@@ -2162,6 +2241,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _signalLabel.value = null
                 stopBackgroundService()
                 updateLastMessage(
+                    messageId = turn.assistantMessageId,
                     content = display,
                     reasoning = reasoning.toString().ifBlank { null },
                     isStreaming = false,
@@ -2186,17 +2266,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         userMsgId,
                         usableContentArrived = false,
                     )
-                    persistHistory()
+                    persistTurnHistory(turn)
                 } else {
-                    // Save conversation for snapshot (matches Portal /chat/save).
+                    // Save conversation for snapshot (matches Portal /chat/save) — the
+                    // REAL reply only, never the error-event text the bubble also shows
+                    // (A04-chat-viewmodel-14); nothing for a computer-use turn, which the
+                    // backend CU loop already saved and minted (A04-chat-viewmodel-02);
+                    // nothing for an empty completion (A04-chat-viewmodel-15).
                     // provenance is forwarded so backend auto-mint records context lineage.
-                    // assistantMessageId pins the artifacts[] from the /chat/save response
-                    // (Phase 6a) onto THIS streamed assistant turn (the last message).
-                    saveConversation(text, display, reasoning.toString(), streamModel, tokenCount, provenance,
-                        assistantMessageId = _messages.value.lastOrNull()?.id)
+                    ledgerResponseFor(turn.provider, realContent)?.let { response ->
+                        saveConversation(turn, text, response, reasoning.toString(), streamModel, tokenCount, provenance)
+                    }
 
                     // Persist to local storage
-                    persistHistory()
+                    persistTurnHistory(turn)
 
                     // Auto-TTS: speak the response if enabled
                     // Matches Portal window.triggerAutoTTS() called after full response
@@ -2212,6 +2295,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _signalLabel.value = null
                 stopBackgroundService()
                 updateLastMessage(
+                    messageId = turn.assistantMessageId,
                     content = combineContentAndErrors(content.toString(), errors.toString())
                         .ifBlank { "Error: ${e.message}" },
                     isStreaming = false,
@@ -2229,7 +2313,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         usableContentArrived = content.isNotBlank(),
                     )
                     // Persist so the error bubble + retry affordance survive a reload.
-                    persistHistory()
+                    persistTurnHistory(turn)
                 }
             }
         }
@@ -2240,6 +2324,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
     private fun processSSEEvent(
         event: SSEEvent,
+        turn: SseTurn,
         content: StringBuilder,
         reasoning: StringBuilder,
         mediaTasks: MutableList<String>,
@@ -2297,8 +2382,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     val doneContent = obj["content"]?.jsonPrimitive?.content
                     val doneThinking = obj["thinking"]?.jsonPrimitive?.content
                         ?: obj["reasoning"]?.jsonPrimitive?.content
-                    // Use done content if our streaming buffer is empty or shorter
-                    if (!doneContent.isNullOrBlank() && doneContent.length > content.length) {
+                    // Use done content if our streaming buffer is empty or shorter —
+                    // except after cu_queue_next, when the buffer holds two replies.
+                    if (!turn.queueAppend && !doneContent.isNullOrBlank() && doneContent.length > content.length) {
                         content.clear()
                         content.append(doneContent)
                     }
@@ -2312,7 +2398,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _chatState.value = ChatState.IDLE
                 _signalLabel.value = null // dissolve The Signal (ephemeral)
                 // Clear ER mission state when stream completes
-                if (currentProvider == "robotics") {
+                if (turn.provider == "robotics") {
                     _erMissionActive.value = false
                 }
             }
@@ -2441,6 +2527,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             "cu_stopped", "cu_task_stopped" -> {
                 _cuStatus.value = "stopped"
+            }
+            // ── CU prompt queue — matches Portal chat-send.js ──
+            "cu_queued" -> {
+                // The box queued this prompt behind the running task; that task's
+                // stream carries the reply (cu_queue_next), so this turn ends empty
+                // and the finalize drops its placeholder instead of saving it.
+                turn.queued = true
+                val position = runCatching {
+                    json.parseToJsonElement(event.data).jsonObject["position"]?.jsonPrimitive?.content
+                }.getOrNull()
+                _cuActionLabel.value = if (position.isNullOrBlank()) "Prompt queued" else "Prompt queued (#$position)"
+            }
+            "cu_queue_next" -> {
+                // The running task picked up the next queued prompt: its reply
+                // streams into THIS bubble after a separator.
+                turn.queueAppend = true
+                val prompt = runCatching {
+                    json.parseToJsonElement(event.data).jsonObject["prompt"]?.jsonPrimitive?.content
+                }.getOrNull().orEmpty()
+                content.append(cuQueueSeparator(prompt))
+                _chatState.value = ChatState.STREAMING
+                _cuStatus.value = "running"
             }
 
             // ── Robotics ER events — matches Portal chat-send.js ──
@@ -2626,6 +2734,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
     // Update streaming message
     // =========================================================================
+    /**
+     * Update the streaming bubble: [messageId] when given (the cloud path), else the
+     * last message (the on-device paths). An id no longer in the list (an operator
+     * switch replaced the conversation) changes nothing.
+     */
     private fun updateLastMessage(
         content: String,
         reasoning: String? = null,
@@ -2634,12 +2747,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         model: String? = null,
         tokens: TokenCount? = null,
         provenance: Provenance? = null,
-        mediaTasks: List<String> = emptyList()
+        mediaTasks: List<String> = emptyList(),
+        messageId: String? = null,
     ) {
-        val current = _messages.value.toMutableList()
-        if (current.isNotEmpty()) {
-            val last = current.last()
-            current[current.lastIndex] = last.copy(
+        _messages.value = updateMessageById(_messages.value, messageId) { last ->
+            last.copy(
                 content = content,
                 reasoning = reasoning ?: last.reasoning,
                 isStreaming = isStreaming,
@@ -2649,7 +2761,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 provenance = provenance ?: last.provenance,
                 mediaTasks = mediaTasks.ifEmpty { last.mediaTasks }
             )
-            _messages.value = current
         }
     }
 
@@ -2667,21 +2778,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Save conversation for snapshot
     // =========================================================================
     private fun saveConversation(
+        turn: SseTurn,
         userMessage: String,
         assistantResponse: String,
         reasoning: String,
         model: String?,
         tokens: TokenCount?,
         provenance: Provenance? = null,
-        assistantMessageId: String? = null
     ) {
         val repo = repository ?: return
+        // The operator and model the turn was SENT with (A04-chat-viewmodel-16).
         val request = buildSaveRequest(
-            operator = currentOperator,
+            operator = turn.operator,
             userMessage = userMessage,
             assistantResponse = assistantResponse,
             reasoning = reasoning,
-            model = model ?: currentModel,
+            model = model ?: turn.model,
             tokens = tokens,
             provenance = provenance,
         )
@@ -2695,10 +2807,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // missing/[]/malformed -> no-op (parseArtifacts never throws).
                 val body = repo.saveConversation(request)
                 val artifacts = parseArtifacts(body)
-                if (artifacts.isNotEmpty()) {
-                    attachArtifactsToMessage(assistantMessageId, artifacts)
+                if (artifacts.isNotEmpty() && attachArtifactsToMessage(turn.assistantMessageId, artifacts)) {
                     // Persist so the chips survive a history reload.
-                    persistHistory()
+                    persistTurnHistory(turn)
                 }
                 // Task 2.3 — mint line (MATCHES WEB, keep it): narrate the mint on
                 // the turn's HUD as a brief final flourish AFTER /chat/save returns,
@@ -2725,19 +2836,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * Targets [assistantMessageId] when known; otherwise falls back to the last
      * assistant message (the turn that just streamed). Replaces the message's
      * artifacts list, mirroring how resolveMediaTaskInMessage updates a message.
+     * Returns false when the message is no longer on screen (nothing changed).
      */
-    private fun attachArtifactsToMessage(assistantMessageId: String?, artifacts: List<ArtifactRef>) {
+    private fun attachArtifactsToMessage(assistantMessageId: String?, artifacts: List<ArtifactRef>): Boolean {
         val current = _messages.value.toMutableList()
-        if (current.isEmpty()) return
+        if (current.isEmpty()) return false
         val idx = if (assistantMessageId != null) {
             current.indexOfLast { it.id == assistantMessageId }
         } else {
             current.indexOfLast { it.role == "assistant" }
         }
-        if (idx < 0) return
+        if (idx < 0) return false
         current[idx] = current[idx].copy(artifacts = artifacts)
         _messages.value = current
         Log.d(TAG, "Attached ${artifacts.size} artifact(s) to message ${current[idx].id}")
+        return true
     }
 
     // =========================================================================
@@ -3698,6 +3811,61 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 errorText.isBlank() -> realContent
                 realContent.isBlank() -> errorText
                 else -> "$realContent\n\n$errorText"
+            }
+
+        /** The computer-use provider id (its turns are saved by the backend CU loop). */
+        internal const val CU_PROVIDER = "computer-use"
+
+        /**
+         * What a finished cloud turn sends to /chat/save as assistant_response, or null
+         * when nothing may be minted. Pure for unit tests.
+         *  - computer-use: null. The backend CU loops save the turn and auto-mint it
+         *    (_cu_save_to_blackbox), so a phone save duplicated every CU turn in the
+         *    ledger (A04-chat-viewmodel-02); the Portal skips it for the same reason.
+         *  - no real content (error-only, empty, or a queued CU prompt): null.
+         *  - otherwise the REAL content only: error-event text is shown in the bubble
+         *    but never minted (A04-chat-viewmodel-14).
+         */
+        fun ledgerResponseFor(provider: String, realContent: String): String? =
+            when {
+                provider == CU_PROVIDER -> null
+                realContent.isBlank() -> null
+                else -> realContent
+            }
+
+        /** The separator a cu_queue_next reply streams in after (Portal parity). */
+        fun cuQueueSeparator(prompt: String): String = "\n\n---\n\n**➡ Next:** $prompt\n\n"
+
+        /** Drop a queued turn's empty placeholder bubble (and nothing else). */
+        fun dropQueuedPlaceholder(messages: List<UiMessage>, assistantMessageId: String): List<UiMessage> =
+            messages.filterNot { it.id == assistantMessageId && it.role == "assistant" }
+
+        /**
+         * Apply [update] to the message [id] (or the last message when [id] is null).
+         * Returns [messages] itself when the id is not there, so an update for a turn
+         * that is no longer on screen cannot rewrite someone else's message.
+         */
+        fun updateMessageById(
+            messages: List<UiMessage>,
+            id: String?,
+            update: (UiMessage) -> UiMessage,
+        ): List<UiMessage> {
+            val idx = if (id == null) messages.lastIndex else messages.indexOfLast { it.id == id }
+            if (idx < 0) return messages
+            return messages.toMutableList().also { it[idx] = update(it[idx]) }
+        }
+
+        /**
+         * A saved conversation made ready for the screen: the newest [cap] messages, with
+         * every transient flag cleared (no stream, thinking phase or TTS generation is
+         * alive after a load — a stuck isStreaming hides the bubble's buttons). Empty in,
+         * empty out: the caller always assigns it.
+         */
+        fun restoredHistory(saved: List<UiMessage>, cap: Int = MAX_CHAT_MESSAGES): List<UiMessage> =
+            saved.takeLast(cap).map { msg ->
+                if (msg.ttsGenerating || msg.isStreaming || msg.isThinking) {
+                    msg.copy(ttsGenerating = false, ttsStatus = null, isStreaming = false, isThinking = false)
+                } else msg
             }
 
         /**

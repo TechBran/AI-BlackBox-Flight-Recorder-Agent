@@ -194,4 +194,97 @@ class LocalSnapshotQueueTest {
         assertTrue("queue file present", leftovers.contains(file.name))
         assertFalse("no leftover .tmp from the atomic write", leftovers.contains(file.name + ".tmp"))
     }
+
+    // ── A09-data-local-model-04: a permanent rejection must not wedge the ledger ──
+
+    /** A [SnapshotSender] that fails each request with the exception [failWith] picks. */
+    private class ScriptedSender(var failWith: (SaveRequest) -> IOException? = { null }) : SnapshotSender {
+        val sent = mutableListOf<SaveRequest>()
+        val attempted = mutableListOf<SaveRequest>()
+        override suspend fun send(request: SaveRequest) {
+            attempted += request
+            failWith(request)?.let { throw it }
+            sent += request
+        }
+    }
+
+    private fun http(code: Int) = com.aiblackbox.portal.data.api.ApiHttpException("rejected", code)
+
+    @Test
+    fun `a permanent 4xx is dead-lettered and the turns behind it still reach the ledger`() = runTest {
+        val file = File(tmp.root, "local_snapshot_queue.json")
+        val store = JsonFileQueueStore(file)
+        val poison = req("too big")
+        val next = req("ordinary turn")
+        store.save(listOf(poison, next))
+        val sender = ScriptedSender(failWith = { if (it == poison) http(422) else null })
+
+        LocalSnapshotQueue(sender, store).flush()
+
+        assertEquals("the turn behind the poison pill was sent", listOf(next), sender.sent)
+        assertTrue("the live queue drained", store.load().isEmpty())
+        val dead = store.deadLetters()
+        assertEquals("the rejected turn is parked, not dropped", listOf(poison), dead.map { it.request })
+        assertTrue("the reason names the status", dead.single().reason.contains("422"))
+    }
+
+    @Test
+    fun `408 and 429 are retryable and keep the head in place`() = runTest {
+        for (code in listOf(408, 429)) {
+            val store = JsonFileQueueStore(File(tmp.root, "q$code.json"))
+            val head = req("retry-$code")
+            store.save(listOf(head, req("behind-$code")))
+            val sender = ScriptedSender(failWith = { http(code) })
+
+            LocalSnapshotQueue(sender, store).flush()
+
+            assertEquals("$code stops the drain at the head", 1, sender.attempted.size)
+            assertEquals("$code keeps both turns queued", 2, store.load().size)
+            assertTrue("$code is never dead-lettered on the first try", store.deadLetters().isEmpty())
+        }
+    }
+
+    @Test
+    fun `a head the box keeps refusing is dead-lettered after the attempt cap`() = runTest {
+        val store = JsonFileQueueStore(File(tmp.root, "q.json"))
+        val head = req("server keeps failing")
+        val next = req("fine")
+        store.save(listOf(head, next))
+        val sender = ScriptedSender(failWith = { if (it == head) http(500) else null })
+        val queue = LocalSnapshotQueue(sender, store)
+
+        repeat(LocalSnapshotQueue.MAX_REFUSED_ATTEMPTS - 1) { queue.flush() }
+        assertEquals("below the cap the head stays queued", listOf(head, next), store.load())
+        assertTrue(store.deadLetters().isEmpty())
+
+        queue.flush()
+        assertEquals("at the cap the head is parked and the drain continues", listOf(next), sender.sent)
+        assertTrue(store.load().isEmpty())
+        assertEquals(listOf(head), store.deadLetters().map { it.request })
+    }
+
+    @Test
+    fun `an unreachable box never counts toward the cap`() = runTest {
+        val store = JsonFileQueueStore(File(tmp.root, "q.json"))
+        val head = req("offline for a week")
+        store.save(listOf(head))
+        val sender = ScriptedSender(failWith = { IOException("unreachable") })
+        val queue = LocalSnapshotQueue(sender, store)
+
+        repeat(LocalSnapshotQueue.MAX_REFUSED_ATTEMPTS * 3) { queue.flush() }
+
+        assertEquals("an offline turn is kept however long the outage", listOf(head), store.load())
+        assertTrue(store.deadLetters().isEmpty())
+    }
+
+    @Test
+    fun `the dead-letter file survives a restart and stays bounded`() = runTest {
+        val file = File(tmp.root, "local_snapshot_queue.json")
+        repeat(JsonFileQueueStore.MAX_DEAD_LETTERS + 5) { i ->
+            JsonFileQueueStore(file).deadLetter(req("dead-$i"), "HTTP 422")
+        }
+        val reread = JsonFileQueueStore(file).deadLetters()
+        assertEquals(JsonFileQueueStore.MAX_DEAD_LETTERS, reread.size)
+        assertEquals("the newest are kept", "dead-${JsonFileQueueStore.MAX_DEAD_LETTERS + 4}", reread.last().request.userMessage)
+    }
 }
