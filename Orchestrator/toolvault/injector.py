@@ -176,6 +176,7 @@ def _select_names(
     group: str,
     max_semantic_tools: int,
     similarity_threshold: float,
+    catalog: Optional[List[Dict]] = None,
 ) -> List[Tuple[str, str]]:
     """Select tool names for a prompt, with a reason for each.
 
@@ -190,16 +191,22 @@ def _select_names(
         ``prompt.strip()``. Discovery is global by design — out-of-group and
         tier-3 tools surface here when semantically relevant.
 
+    ``catalog`` is the caller's ``registry.load_canonical()`` snapshot, so
+    one injection reads the registry once; omitted, it is loaded here.
+
     Returns an ordered list of ``(name, reason)`` with no duplicates.
     """
     selected: List[Tuple[str, str]] = [("toolvault", "meta")]
     seen = {"toolvault"}
+    if catalog is None:
+        catalog = registry.load_canonical()
 
     # --- Tier 1: always-on baseline, filtered by the requesting group ---
     #     ...and by availability (an x-availability gate drops a tool when its
     #     provider key is absent or the provider isn't enabled; no-op for the
     #     ungated catalog of today).
-    for entry in availability.filter_available(registry.load_canonical(group)):
+    in_group = [e for e in catalog if group in (e.get("groups") or [])]
+    for entry in availability.filter_available(in_group):
         if entry.get("tier") == TIER_1:
             name = entry.get("name")
             if name and name not in seen:
@@ -211,7 +218,7 @@ def _select_names(
         # ALL tools (all groups, all tiers), excluding what's already selected.
         searchable = {
             e.get("name"): e.get("description", "")
-            for e in availability.filter_available(registry.load_canonical())
+            for e in availability.filter_available(catalog)
             if e.get("name") and e.get("name") not in seen
         }
         if searchable:
@@ -243,22 +250,45 @@ def _canonical_for(name: str, ctx: ToolContext) -> Optional[Dict]:
     ``x-source`` markers are filled and stripped (provider-clean).
     """
     if name == "toolvault":
-        return {
-            "name": META_TOOL_SCHEMA["name"],
-            "description": META_TOOL_SCHEMA["description"],
-            "parameters": META_TOOL_SCHEMA["parameters"],
-        }
+        return _meta_canonical()
 
     entry = registry.get_tool(name)
     if not entry:
         return None
 
-    resolved = resolve_schema(entry, ctx)
+    return _canonical_from(name, resolve_schema(entry, ctx))
+
+
+def _meta_canonical() -> Dict:
+    return {
+        "name": META_TOOL_SCHEMA["name"],
+        "description": META_TOOL_SCHEMA["description"],
+        "parameters": META_TOOL_SCHEMA["parameters"],
+    }
+
+
+def _canonical_from(name: str, resolved: Dict) -> Dict:
     return {
         "name": resolved.get("name", name),
         "description": resolved.get("description", ""),
         "parameters": resolved.get("parameters", {"type": "object", "properties": {}}),
     }
+
+
+def _resolve_selected(names: List[str], catalog: List[Dict], ctx: ToolContext) -> Dict[str, Dict]:
+    """Resolve each selected tool's schema once: ``{name: resolved schema}``.
+
+    The tools array and the system-prompt instructions are both rendered from
+    these, instead of each fetching and resolving every schema again (audit
+    O17-toolvault-runtime-05). The meta-tool and unknown names are left out.
+    """
+    by_name = {e.get("name"): e for e in catalog}
+    resolved = {}
+    for name in names:
+        entry = by_name.get(name)
+        if name != "toolvault" and entry:
+            resolved[name] = resolve_schema(entry, ctx)
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -330,18 +360,27 @@ def build_tool_instructions(
         return ""
 
     ctx = ctx or ToolContext()
-    sections = []
-
+    resolved_by_name = {}
     for name in tool_names:
         # Skip meta-tool — it has its own fixed description.
         if name == "toolvault":
             continue
-
         entry = registry.get_tool(name)
-        if not entry:
+        if entry:
+            resolved_by_name[name] = resolve_schema(entry, ctx)
+    return _render_instructions(tool_names, resolved_by_name)
+
+
+def _render_instructions(tool_names: List[str], resolved_by_name: Dict[str, Dict]) -> str:
+    """The AVAILABLE TOOLS text for ``tool_names`` from already-resolved schemas
+    (names without one, such as the meta-tool, are skipped)."""
+    sections = []
+
+    for name in tool_names:
+        resolved = resolved_by_name.get(name)
+        if not resolved:
             continue
 
-        resolved = resolve_schema(entry, ctx)
         desc = resolved.get("description", "")
         example = resolved.get("example", "")
         notes = resolved.get("notes", "")
@@ -445,20 +484,27 @@ def inject_for_prompt(
     if group is None:
         group = PROVIDER_DEFAULT_GROUP.get(provider, "chat")
 
-    names = _select_names(prompt, group, max_semantic_tools, similarity_threshold)
+    # One registry snapshot and one resolve per selected schema feed both
+    # outputs. (A turn's second injection of the same prompt also reuses the
+    # query vector: embeddings.embed_query.)
+    catalog = registry.load_canonical()
+    names = _select_names(prompt, group, max_semantic_tools, similarity_threshold,
+                          catalog=catalog)
     selected_names = [n for n, _ in names]
+    resolved_by_name = _resolve_selected(selected_names, catalog, ctx)
 
     # Build resolved canonical schemas for the API payload.
     canonical_list = []
-    for name, _reason in names:
-        canonical = _canonical_for(name, ctx)
-        if canonical:
-            canonical_list.append(canonical)
+    for name in selected_names:
+        if name == "toolvault":
+            canonical_list.append(_meta_canonical())
+        elif name in resolved_by_name:
+            canonical_list.append(_canonical_from(name, resolved_by_name[name]))
 
     formatted_tools = _format_tools(canonical_list, provider_format)
 
     # Human-readable instructions for the system prompt.
-    tool_instructions = build_tool_instructions(selected_names, ctx)
+    tool_instructions = _render_instructions(selected_names, resolved_by_name)
 
     # Injection summary.
     Y = "\033[33m"

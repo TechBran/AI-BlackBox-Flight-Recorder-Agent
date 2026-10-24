@@ -33,7 +33,11 @@ without the model needing to see all 41+ tool schemas.
 import hashlib
 import json
 import math
+import operator
 import os
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -87,14 +91,48 @@ def embed_tool_description(
     return generate_embedding_sync(description, purpose="document", slug=slug)
 
 
+# A query vector is a pure function of (embedding model, text), and one chat
+# turn injects twice with the same prompt (the system-prompt tool instructions,
+# then the provider's tools array), so the second pass reuses the first one's
+# vector instead of another provider round trip (audit O17-toolvault-runtime-02).
+# A failed embed (None) is reused only briefly: long enough that a down provider
+# is not paid for twice in one turn (its retries take ~7 s), short enough that a
+# recovery is seen on the next turn. The key also carries the identity of the
+# embed function and of the slug's provider instance, so swapping either (a
+# re-registered provider, a test double) never serves a vector made by another.
+QUERY_VEC_TTL_S = 300.0
+QUERY_VEC_FAIL_TTL_S = 10.0
+_QUERY_VEC_MAX = 16
+_query_vecs: "OrderedDict[tuple, Tuple[float, Optional[List[float]]]]" = OrderedDict()
+_query_vecs_lock = threading.Lock()
+_monotonic = time.monotonic  # module global so tests can drive the clock
+
+
 def embed_query(query: str) -> Optional[List[float]]:
     """Embed a search query via the shared active provider.
 
     purpose="query": optimized for finding relevant docs. None on failure.
+    Reused for the same text under the same model (see QUERY_VEC_TTL_S).
     """
+    from Orchestrator.embeddings import providers
     from Orchestrator.embeddings.search import generate_embedding_sync
 
-    return generate_embedding_sync(query, purpose="query")
+    slug = _active_slug()
+    key = (slug, query, id(generate_embedding_sync), id(providers._instances.get(slug)))
+    now = _monotonic()
+    with _query_vecs_lock:
+        hit = _query_vecs.get(key)
+        if hit is not None and hit[0] > now:
+            _query_vecs.move_to_end(key)
+            return hit[1]
+    vec = generate_embedding_sync(query, purpose="query")
+    ttl = QUERY_VEC_TTL_S if vec else QUERY_VEC_FAIL_TTL_S
+    with _query_vecs_lock:
+        _query_vecs[key] = (now + ttl, vec)
+        _query_vecs.move_to_end(key)
+        while len(_query_vecs) > _QUERY_VEC_MAX:
+            _query_vecs.popitem(last=False)
+    return vec
 
 
 # ---------------------------------------------------------------------------
@@ -106,23 +144,49 @@ def _emb_hash(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+# The parsed store, keyed on (path, mtime_ns, size). Every chat prompt reads
+# it, and re-parsing the whole file (5.8 MB, ~48 ms measured) each time was pure
+# overhead (audit O17-toolvault-runtime-03). An edit or a save (which also
+# drops the entry) is a cache miss.
+_store_cache: Dict[str, Any] = {"key": None, "store": None}
+_store_cache_lock = threading.Lock()
+
+
 def load_embeddings_store(path: Optional[Path] = None) -> Dict[str, Any]:
     """Read the embeddings cache store.
 
     Missing file → ``{}``. Corrupt JSON → ``{}`` (logged, never raised).
+    Parsed once per file version; each call gets its own top-level dict, but
+    the entries are shared with the cache, so treat them as read-only.
     """
     p = Path(path) if path is not None else EMBEDDINGS_PATH
-    if not p.exists():
+    try:
+        st = p.stat()
+    except OSError:
         return {}
+    key = (str(p), st.st_mtime_ns, st.st_size)
+    with _store_cache_lock:
+        if _store_cache["key"] == key:
+            return dict(_store_cache["store"])
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             print(f"[TOOLVAULT-EMB] Store at {p} is not an object; treating as empty")
             return {}
-        return data
     except Exception as e:
         print(f"[TOOLVAULT-EMB] Failed to read store at {p}: {e}; treating as empty")
         return {}
+    with _store_cache_lock:
+        _store_cache["key"] = key
+        _store_cache["store"] = data
+        _vector_norms.clear()  # the previous store's vectors are gone
+    return dict(data)
+
+
+def _forget_cached_store() -> None:
+    with _store_cache_lock:
+        _store_cache["key"] = None
+        _store_cache["store"] = None
 
 
 def save_embeddings_store(store: Dict[str, Any], path: Optional[Path] = None) -> None:
@@ -137,6 +201,7 @@ def save_embeddings_store(store: Dict[str, Any], path: Optional[Path] = None) ->
         data = json.dumps(store, indent=2, ensure_ascii=False).encode("utf-8")
         tmp.write_bytes(data)
         os.replace(tmp, p)
+        _forget_cached_store()
     except Exception as e:
         print(f"[TOOLVAULT-EMB] Failed to save store: {e}")
         if tmp.exists():
@@ -293,6 +358,32 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     return dot_product / (magnitude1 * magnitude2)
 
 
+def _dot_fallback(a: List[float], b: List[float]) -> float:
+    return sum(map(operator.mul, a, b))
+
+
+# math.sumprod is a C loop (Python 3.12+); the fallback keeps an older
+# interpreter working at the old speed.
+_dot = getattr(math, "sumprod", None) or _dot_fallback
+
+# Stored vectors' norms, keyed by the vector object's id (the entry keeps the
+# vector, so its id cannot be reused while it is here). Cleared whenever the
+# cached store is replaced; bounded so ad-hoc stores cannot grow it forever.
+_vector_norms: Dict[int, Tuple[List[float], float]] = {}
+_VECTOR_NORMS_MAX = 4096
+
+
+def _norm(vec: List[float]) -> float:
+    hit = _vector_norms.get(id(vec))
+    if hit is not None and hit[0] is vec:
+        return hit[1]
+    n = math.sqrt(_dot(vec, vec))
+    if len(_vector_norms) >= _VECTOR_NORMS_MAX:
+        _vector_norms.clear()
+    _vector_norms[id(vec)] = (vec, n)
+    return n
+
+
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------
@@ -390,12 +481,19 @@ def semantic_search_store(
     if not query_vec:
         return []
 
+    # Same scores as cosine_similarity, with the query's norm computed once and
+    # each stored vector's norm cached (it was recomputed per vector per prompt).
+    q_norm = math.sqrt(_dot(query_vec, query_vec))
     scores = []
     for name, entry in store.items():
         vector = entry.get("vector")
         if not vector:
             continue
-        sim = cosine_similarity(query_vec, vector)
+        if len(vector) != len(query_vec) or q_norm == 0:
+            sim = 0.0
+        else:
+            v_norm = _norm(vector)
+            sim = _dot(query_vec, vector) / (q_norm * v_norm) if v_norm else 0.0
         scores.append((name, sim))
 
     scores.sort(key=lambda x: x[1], reverse=True)
