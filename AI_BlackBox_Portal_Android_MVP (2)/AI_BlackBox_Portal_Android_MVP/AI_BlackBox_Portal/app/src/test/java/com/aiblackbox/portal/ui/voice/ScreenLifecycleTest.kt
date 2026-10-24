@@ -35,6 +35,23 @@ class ScreenLifecycleTest {
         assertFalse(endVoiceSessionOnStop(changingConfigurations = false, state = VoiceState.DISCONNECTED))
     }
 
+    // Review follow-up: the screen timing out is an ON_STOP too, so without the display
+    // held on a hands-free session ended after ~30 s of talking without touching it.
+    @Test fun `a live session keeps the display on, an ended one lets it sleep`() {
+        for (state in VoiceState.values()) {
+            val live = state != VoiceState.DISCONNECTED && state != VoiceState.ERROR
+            assertTrue(state.name, voiceKeepsScreenOn(state) == live)
+        }
+    }
+
+    @Test fun `the voice screen holds the display while a session is live`() {
+        val src = source("src/main/java/com/aiblackbox/portal/ui/voice/VoiceScreen.kt")
+        val effect = src.substring(src.indexOf("val keepOn = voiceKeepsScreenOn(voiceState)"))
+        val block = effect.substring(0, effect.indexOf("\n    }\n"))
+        assertTrue("view.keepScreenOn = keepOn" in block)
+        assertTrue("released when the screen leaves", "onDispose { view.keepScreenOn = false }" in block)
+    }
+
     private fun source(rel: String): String {
         var dir: File? = File(".").absoluteFile
         while (dir != null) {

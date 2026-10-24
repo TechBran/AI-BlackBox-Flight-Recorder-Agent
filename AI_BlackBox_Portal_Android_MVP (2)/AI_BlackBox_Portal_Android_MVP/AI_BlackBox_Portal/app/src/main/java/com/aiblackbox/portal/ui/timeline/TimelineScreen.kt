@@ -98,11 +98,12 @@ fun TimelineScreen(
     var selectedOperator by remember { mutableStateOf("") } // "" = all
     var showOperatorFilter by remember { mutableStateOf(false) }
 
-    // Initialize and load the live feed
+    // Initialize and load the live feed (opening the screen, or a new operator, starts
+    // outside search mode; a resume below does not)
     LaunchedEffect(origin, operator) {
         if (origin.isNotBlank()) {
             viewModel.initialize(origin)
-            viewModel.loadRecent(operator)
+            viewModel.clearSearch(operator)
         }
     }
     // Auto-poll for live updates only while the screen is RESUMED (A14-ui-misc-09): it

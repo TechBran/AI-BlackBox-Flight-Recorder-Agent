@@ -50,6 +50,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -1318,6 +1319,14 @@ private fun VoiceRibbon(
 internal fun endVoiceSessionOnStop(changingConfigurations: Boolean, state: VoiceState): Boolean =
     !changingConfigurations && state != VoiceState.DISCONNECTED
 
+/**
+ * Whether the Voice screen holds the display on: while a session is connecting or live.
+ * Without it the screen timeout would end a hands-free conversation after ~30 s
+ * ([endVoiceSessionOnStop] ends the session when the display turns off). Pure for tests.
+ */
+internal fun voiceKeepsScreenOn(state: VoiceState): Boolean =
+    state != VoiceState.DISCONNECTED && state != VoiceState.ERROR
+
 private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
     is android.app.Activity -> this
     is android.content.ContextWrapper -> baseContext.findActivity()
@@ -1402,6 +1411,15 @@ fun VoiceScreen(
         if (transcript.isNotEmpty()) listState.animateScrollToItem(transcript.size - 1)
     }
     val isConnected = voiceState != VoiceState.DISCONNECTED && voiceState != VoiceState.ERROR
+
+    // A live session keeps the display on, as a call screen does: the screen timing out
+    // stops the activity, which ends the session (see the stop handler above), and a
+    // hands-free conversation never touches the screen to hold it on.
+    val keepOn = voiceKeepsScreenOn(voiceState)
+    DisposableEffect(view, keepOn) {
+        view.keepScreenOn = keepOn
+        onDispose { view.keepScreenOn = false }
+    }
 
     // Task 8: collapsible settings pane — auto-collapses once a session connects.
     var settingsExpanded by remember { mutableStateOf(true) }

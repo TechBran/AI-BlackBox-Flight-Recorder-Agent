@@ -63,6 +63,10 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
     // Tracks whether user is actively searching (disables auto-poll to avoid overwriting results)
     private var isUserSearching = false
 
+    /** True while search results are on screen, so the live feed must not replace them. */
+    @androidx.annotation.VisibleForTesting
+    internal val inSearchMode: Boolean get() = isUserSearching
+
     private val _selectedSnapshot = MutableStateFlow<SnapshotResult?>(null)
     val selectedSnapshot: StateFlow<SnapshotResult?> = _selectedSnapshot.asStateFlow()
 
@@ -134,10 +138,13 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** Start auto-polling for live updates. Call when timeline screen becomes visible. */
+    /**
+     * Start auto-polling for live updates. Call when timeline screen becomes visible. It
+     * runs again on every resume, so it leaves search mode alone: search results stay
+     * on screen across a lock or an app switch (only [clearSearch] ends search mode).
+     */
     fun startPolling(operator: String) {
         currentOperator = operator
-        isUserSearching = false
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (isActive) {
