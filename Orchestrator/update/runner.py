@@ -10,7 +10,7 @@ EVENT SHAPES (each yielded as a dict; route serializes to SSE 'data: {json}'):
   {type: "log", text: "...", phase: "apt_install"}
   {type: "heartbeat", phase: "...", elapsed_s: 42}  # every 2s if no other events
   {type: "complete", succeeded: true|false, sha_before, sha_after, error?,
-   restart_scheduled: bool, stash_ref?,
+   restart_scheduled: bool, stash_ref?, stash_refs?: [...],
    refused?: "dirty_tree", dirty_files?: [...]}  # refused = nothing changed
 
 DIRTY TREE (audit O16-01): the update and the rollback refuse to run while a

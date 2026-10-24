@@ -466,7 +466,7 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
             val outcome = RestartWait.await(
                 priorBootId = priorBootId,
                 probe = { r.bootId() },
-                onTick = { _restartPollLabel.value = RestartWait.stageLabel(it) },
+                onTick = { elapsed, verdict -> _restartPollLabel.value = RestartWait.stageLabel(elapsed, verdict) },
                 taskState = taskState,
             )
             _restartPollLabel.value = null

@@ -375,6 +375,7 @@ export async function readTaskState(taskId, fetchImpl = (...a) => fetch(...a)) {
  * `timeoutMs` after the task was last seen running (a pip phase alone can
  * take 10 minutes), at most `maxMs`; a wait that reaches maxMs while the
  * update still runs resolves { restarted: false, stillRunning: true }.
+ * `onTick(elapsedMs, verdict)` hears the last verdict (null without a probe).
  */
 export async function waitForRestart({
     priorBootId, seenDown = false, readBoot = readBootId,
@@ -395,7 +396,7 @@ export async function waitForRestart({
                 ? { restarted: false, stillRunning: true, elapsedMs, lastUp }
                 : { restarted: false, elapsedMs, lastUp };
         }
-        if (onTick) onTick(elapsedMs);
+        if (onTick) onTick(elapsedMs, verdict);
         const bootId = await readBoot();
         lastUp = bootId !== null;
         if (bootId === null) {
@@ -921,13 +922,16 @@ export function openHealthPollModal(initialMsg, { priorBootId, taskState = null 
         }
         const result = await waitForRestart({
             priorBootId: prior, seenDown, timeoutMs, taskState,
-            onTick: (elapsed) => {
-                // Progressive 3-stage copy (audit C5)
-                header.textContent = elapsed < 30000
-                    ? "Restarting service…"
-                    : elapsed < 90000
-                        ? "Rebuilding snapshot index (60–90s typical)…"
-                        : "Still warming. If this hangs, run `journalctl -u blackbox.service`.";
+            onTick: (elapsed, verdict) => {
+                // Progressive 3-stage copy (audit C5), unless the update
+                // behind a dropped stream is still running.
+                header.textContent = verdict === "running"
+                    ? "Update still running on the box…"
+                    : elapsed < 30000
+                        ? "Restarting service…"
+                        : elapsed < 90000
+                            ? "Rebuilding snapshot index (60–90s typical)…"
+                            : "Still warming. If this hangs, run `journalctl -u blackbox.service`.";
             },
         });
         if (result.restarted) {

@@ -139,6 +139,17 @@ test("a long pip phase keeps the wait going past the timeout", async () => {
     assert.equal(res.elapsedMs, 650_000);
 });
 
+test("onTick hears the task's verdict, so the modal can say the update still runs", async () => {
+    const s = timeline({
+        boot: (t) => (t < 8_000 ? "A" : "B"),
+        task: (t) => (t < 4_000 ? "running" : "restarting"),
+    });
+    const ticks = [];
+    await waitForRestart({ priorBootId: "A", ...s, intervalMs: 2000,
+                           onTick: (elapsed, verdict) => ticks.push([elapsed, verdict]) });
+    assert.deepEqual(ticks, [[0, null], [2000, "running"], [4000, "running"], [6000, "restarting"], [8000, "restarting"]]);
+});
+
 test("an update that never finishes is reported as still running, at the cap", async () => {
     const s = timeline({ boot: () => "A", task: () => "running" });
     const res = await waitForRestart({ priorBootId: "A", ...s, timeoutMs: 20_000, maxMs: 60_000, intervalMs: 2000 });

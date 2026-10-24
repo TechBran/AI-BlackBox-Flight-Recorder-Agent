@@ -88,7 +88,8 @@ object RestartWait {
      * [Outcome.GaveUp]. [TaskVerdict.Running] keeps it going until [timeoutMs]
      * after the task was last seen running (a pip phase alone can take 10
      * minutes), at most [maxMs]; reaching that cap while the update still runs
-     * is [Outcome.StillRunning]. null (no answer) changes nothing.
+     * is [Outcome.StillRunning]. null (no answer) changes nothing. [onTick] hears
+     * the elapsed time and the last verdict (null without a probe).
      */
     suspend fun await(
         priorBootId: String?,
@@ -100,7 +101,7 @@ object RestartWait {
         maxMs: Long = MAX_MS,
         intervalMs: Long = INTERVAL_MS,
         graceMs: Long = GRACE_MS,
-        onTick: (Long) -> Unit = {},
+        onTick: (Long, TaskVerdict?) -> Unit = { _, _ -> },
         taskState: (suspend () -> TaskVerdict?)? = null,
     ): Outcome {
         val start = now()
@@ -118,7 +119,7 @@ object RestartWait {
                     else -> Outcome.StillDown(elapsed)
                 }
             }
-            onTick(elapsed)
+            onTick(elapsed, verdict)
             val bootId = probe()
             lastUp = bootId != null
             if (bootId == null) {
@@ -134,8 +135,10 @@ object RestartWait {
         }
     }
 
-    /** Progressive copy while waiting (parity with the Portal's audit C5 stages). */
-    fun stageLabel(elapsedMs: Long): String = when {
+    /** Progressive copy while waiting (parity with the Portal's audit C5 stages),
+     *  unless the update behind a dropped stream is still running. */
+    fun stageLabel(elapsedMs: Long, verdict: TaskVerdict? = null): String = when {
+        verdict == TaskVerdict.Running -> "Update still running on the box…"
         elapsedMs < 30_000 -> "Restarting service…"
         elapsedMs < 90_000 -> "Rebuilding snapshot index (60–90s typical)…"
         else -> "Still warming. Check logs via journalctl if this hangs."

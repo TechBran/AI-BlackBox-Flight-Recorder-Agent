@@ -183,6 +183,29 @@ class RestartWaitTest {
     }
 
     @Test
+    fun `the label says the update still runs while it does`() {
+        assertEquals("Update still running on the box…", RestartWait.stageLabel(200_000, TaskVerdict.Running))
+        assertEquals("Restarting service…", RestartWait.stageLabel(5_000, TaskVerdict.Restarting))
+        assertEquals("Restarting service…", RestartWait.stageLabel(5_000))
+    }
+
+    @Test
+    fun `onTick hears the task's verdict`() = runTest {
+        val box = Timeline(
+            boot = { t -> if (t < 8_000) "A" else "B" },
+            task = { t -> if (t < 4_000) TaskVerdict.Running else TaskVerdict.Restarting },
+        )
+        val ticks = mutableListOf<Pair<Long, TaskVerdict?>>()
+        RestartWait.await(
+            priorBootId = "A", probe = { box.boot(box.t) }, now = { box.t }, sleep = { box.t += it },
+            onTick = { elapsed, verdict -> ticks += elapsed to verdict },
+            taskState = { box.task(box.t) },
+        )
+        assertEquals(listOf(0L to null, 2_000L to TaskVerdict.Running, 4_000L to TaskVerdict.Running,
+            6_000L to TaskVerdict.Restarting, 8_000L to TaskVerdict.Restarting), ticks)
+    }
+
+    @Test
     fun `without a task probe the timeout is not extended`() = runTest {
         val box = Timeline(boot = { "A" }, task = { TaskVerdict.Running })
         assertTrue(box.await(prior = "A", timeoutMs = 20_000, probeTask = false) is RestartWait.Outcome.NotRestarted)
