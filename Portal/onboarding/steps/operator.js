@@ -15,6 +15,7 @@
 // both present.
 
 import { escapeHtml } from "../util.js";
+import { confirmInline } from "../inline-confirm.js";
 
 const NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
@@ -219,7 +220,7 @@ function wireRows(container, state) {
             const existingName = target.dataset.name;
             if (existingName) {
                 // Existing operator → confirm + DELETE
-                removeExistingOperator(existingName, container, state);
+                removeExistingOperator(existingName, container, state, target);
             } else {
                 // Pending row → just splice
                 const id = Number(target.dataset.rowId);
@@ -231,9 +232,10 @@ function wireRows(container, state) {
     });
 }
 
-async function removeExistingOperator(name, container, state) {
+async function removeExistingOperator(name, container, state, button) {
     const message = `Remove operator "${name}"? Their conversation history stays in BlackBox memory but they won't appear in the operator dropdown.`;
-    if (!confirm(message)) return;
+    // Inline two-tap confirm: confirm() is a silent "no" in the Android WebView.
+    if (!confirmInline(button, { prompt: "Remove?", detail: message })) return;
 
     try {
         const r = await fetch(`/operator/${encodeURIComponent(name)}`, { method: "DELETE" });

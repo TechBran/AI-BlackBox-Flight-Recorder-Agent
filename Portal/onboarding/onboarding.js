@@ -3,6 +3,7 @@
 // a step-grid landing page (Phase 2.10 — not yet implemented).
 
 import { escapeHtml } from "./util.js";
+import { openExternalUrl } from "./open-url.js";
 
 const STEPS = [
     "welcome", "tailscale", "api_keys", "embeddings", "local_models",
@@ -79,21 +80,16 @@ let busy = false;
 document.addEventListener("click", function (e) {
     const a = e.target.closest && e.target.closest("a[target=\"_blank\"]");
     if (!a || !a.href) return;
+    // An anchor that opens itself synchronously (tailscale.js banners) keeps
+    // its own user-gesture window.open; intercepting it too opened the page twice.
+    if (a.dataset.openWired === "1") return;
     // Only intercept external links — localhost target=_blank passes through.
     try {
         const u = new URL(a.href);
         if (u.host === "localhost" || u.host === "127.0.0.1") return;
     } catch (_) { return; }
     e.preventDefault();
-    fetch("/onboarding/open-url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: a.href }),
-    }).catch(() => {
-        // Last-resort fallback: navigate current tab so URL is at least visible
-        // in the wizard's webview address handling.
-        window.location.assign(a.href);
-    });
+    openExternalUrl(a.href);
 }, true);  // capture phase — fires before any per-anchor handlers
 
 function ensureToastStyles() {

@@ -105,16 +105,12 @@ export async function render(container, { next, back, skip, sigil }) {
     // If customer pairs via QR + polling fires → auto-advances (existing
     // flow). If customer pairs out-of-band OR has stored credentials from
     // a prior session → click this button to mark complete.
-    document.getElementById("ob-pair-mark-done").addEventListener("click", async () => {
+    document.getElementById("ob-pair-mark-done").addEventListener("click", () => {
         stopPolling(rs);
-        // Best-effort: tell backend the step is complete so state reflects it
-        try {
-            await fetch("/onboarding/step/complete", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ step: "pair_phone" }),
-            });
-        } catch (_) { /* non-fatal */ }
+        // next() alone: it completes the step in linear mode and returns to the
+        // hub in revisit mode. Posting /onboarding/step/complete here as well
+        // completed the step twice and, on a revisit from the hub, rewound the
+        // customer's current step (audit P08-onboarding-installer-03).
         next();
     });
 

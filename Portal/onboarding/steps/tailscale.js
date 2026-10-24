@@ -22,6 +22,7 @@
 // with the disclosure expanded).
 
 import { escapeHtml } from "../util.js";
+import { openOnThisDevice } from "../open-url.js";
 
 // Per-render state — module globals leaked across non-linear hub mounts.
 // _active points at the latest render so a new render can abort the old
@@ -333,11 +334,12 @@ function wireBannerOpenBtn(scope) {
     scope.querySelectorAll(".ob-banner-link-primary[href]").forEach(a => {
         // Avoid double-binding if banner re-renders
         if (a.dataset.openWired === "1") return;
+        // The shell's open-url handler (onboarding.js) skips wired anchors, so
+        // this click is the only opener: no default target=_blank on top.
         a.dataset.openWired = "1";
         a.addEventListener("click", (e) => {
-            try {
-                window.open(a.href, "_blank", "noopener,noreferrer");
-            } catch (_) { /* fall through — anchor's default may still work */ }
+            e.preventDefault();
+            openOnThisDevice(a.href);
         });
     });
 }
@@ -575,12 +577,22 @@ async function startAuth(statusEl, { back, skip, recheck }, rs) {
     let backendDownShown = false;
     const pollOnce = async () => {
         if (myAbort.aborted) return;  // C1: superseded — stop polling
+        // The step is gone (Skip / Back / another step rendered): stop. The
+        // loop used to keep polling for 5 minutes into a detached box and then
+        // POST /tailscale/cancel, killing a `tailscale up` the customer had
+        // left running (audit P08-onboarding-installer-05).
+        if (!statusBox.isConnected) {
+            myAbort.aborted = true;
+            return;
+        }
         const elapsed = Date.now() - startedAt;
         if (elapsed > TIMEOUT_MS) {
             statusBox.insertAdjacentHTML("beforeend", `
                 <p class="ob-auth-err">Timed out waiting for authentication.</p>
             `);
-            await fetch("/onboarding/tailscale/cancel", { method: "POST" });
+            try {
+                await fetch("/onboarding/tailscale/cancel", { method: "POST" });
+            } catch (_) { /* best effort: the step still resets below */ }
             btn.disabled = false;
             btn.textContent = "Try again";
             return;
@@ -687,10 +699,15 @@ function renderStepNav({ showSkip }) {
 }
 
 function wireStepNav(scope, { back, skip }) {
+    // Leaving the step ends its sign-in poll first (see pollOnce).
+    const leave = (go) => () => {
+        if (_active && _active.authAbort) _active.authAbort.aborted = true;
+        go();
+    };
     const backBtn = scope.querySelector("#ob-tailscale-back");
-    if (backBtn && back) backBtn.addEventListener("click", back);
+    if (backBtn && back) backBtn.addEventListener("click", leave(back));
     const skipBtn = scope.querySelector("#ob-tailscale-skip");
-    if (skipBtn && skip) skipBtn.addEventListener("click", skip);
+    if (skipBtn && skip) skipBtn.addEventListener("click", leave(skip));
 }
 
 // ── Copy button: clipboard + transient "Copied" feedback ─────────

@@ -339,12 +339,26 @@ export async function mountUpdatesBadge(hostEl, {
         `;
 
     if (!isMajor) {
+        // Failures show inline in the banner: window.alert() is swallowed by
+        // the Android wizard WebView (audit P08-onboarding-installer-06).
+        const showUpdateError = (msg) => {
+            const banner = hostEl.querySelector(".ob-update-banner");
+            if (!banner) return;
+            let line = banner.querySelector(".ob-update-banner-error");
+            if (!line) {
+                line = document.createElement("p");
+                line.className = "ob-update-banner-error";
+                line.setAttribute("role", "alert");
+                banner.appendChild(line);
+            }
+            line.textContent = msg;   // textContent: server text never becomes markup
+        };
         hostEl.querySelector("[data-ob-update-install]").addEventListener("click", async () => {
             try {
                 const mod = await loadUpdates();
                 await mod.startInstall(status);
             } catch (e) {
-                window.alert("Network error: " + e.message);
+                showUpdateError("Network error: " + e.message);
             }
         });
         hostEl.querySelector("[data-ob-update-skip]").addEventListener("click", () => {

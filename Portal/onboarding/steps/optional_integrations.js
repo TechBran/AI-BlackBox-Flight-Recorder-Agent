@@ -12,6 +12,7 @@
 // we render the ElevenLabs card in its configured state with a Replace button.
 
 import { escapeHtml } from "../util.js";
+import { confirmInline } from "../inline-confirm.js";
 
 const GMAIL_PROVIDER = {
     id: "gmail",
@@ -708,7 +709,7 @@ function wireCredCardBody(container, state, p) {
     if (removeBtn) {
         removeBtn.addEventListener("click", () => {
             const filename = removeBtn.dataset.filename;
-            removeCredentialFile(filename, container, state, p);
+            removeCredentialFile(filename, container, state, p, removeBtn);
         });
     }
 }
@@ -746,11 +747,13 @@ async function uploadCredentialFile(file, container, state, p) {
     }
 }
 
-async function removeCredentialFile(filename, container, state, p) {
+async function removeCredentialFile(filename, container, state, p, button) {
     if (!filename) return;
-    const ok = window.confirm(
-        `Remove ${filename}? This will also clear GOOGLE_APPLICATION_CREDENTIALS if it points to this file.`
-    );
+    // Inline two-tap confirm: confirm() is a silent "no" in the Android WebView.
+    const ok = confirmInline(button, {
+        prompt: "Remove?",
+        detail: `Remove ${filename}? This will also clear GOOGLE_APPLICATION_CREDENTIALS if it points to this file.`,
+    });
     if (!ok) return;
     try {
         const r = await fetch(`/onboarding/credentials/${encodeURIComponent(filename)}`, {

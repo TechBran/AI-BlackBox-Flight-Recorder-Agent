@@ -2661,6 +2661,15 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 .ob-update-banner-major strong {
     color: rgba(255, 220, 150, 0.95);
 }
+.ob-update-banner .ob-update-banner-error {
+    margin: 0.5rem 0 0;
+    color: #ff6b6b;
+}
+/* Armed two-tap confirm (inline-confirm.js) */
+.ob-confirm-armed {
+    color: var(--ob-accent);
+    border-color: var(--ob-accent);
+}
 
 /* ── Task 13 (pluggable embeddings): Memory & Search wizard step ────
  * Model picker grid + migration/pull progress. Cards reuse the
