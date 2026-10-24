@@ -388,6 +388,18 @@ def record_download_state(model_id: str, state: str = "downloaded", **extra) -> 
 # its on-disk filename here so an installed reranker reads as downloaded.
 _SELFCONVERT_GGUF = {"rerank-qwen3-8b": "Qwen3-Reranker-8B-Q8_0.gguf"}
 
+# How each self-converted member gets built (audit O19-local-stack-10): no
+# install path produced the reranker GGUF, so a fresh box shipped a member
+# that could never start. The script automates the runbook at pinned
+# llama.cpp + HF revisions; GET /local-models/status and the /rerank/select
+# refusal both point at it.
+SELFCONVERT_BUILD = {
+    "rerank-qwen3-8b": {
+        "command": "bash installer/templates/blackbox-build-reranker-gguf.sh",
+        "runbook": "LocalModels/reranker/CONVERT-QWEN3-RERANKER-GGUF.md",
+    },
+}
+
 
 def _member_gguf_present(model_id: str) -> bool:
     """True iff `model_id`'s single on-disk GGUF exists and is non-empty — the
@@ -407,6 +419,40 @@ def _member_gguf_present(model_id: str) -> bool:
         return p.is_file() and p.stat().st_size > 0
     except OSError:
         return False
+
+
+def member_built(model_id: str) -> dict:
+    """{"built": bool, "reason": str|None} — can llama-swap start member
+    `model_id` on this box: the stack is installed, the member's weights are
+    on disk, and the live llama-swap config defines it. The gate POST
+    /rerank/select applies before persisting an on-box reranker selection
+    (audit rank 69): selecting a member that can never start used to make
+    every search fall through un-reranked. Never raises."""
+    if not is_installed():
+        return {"built": False, "reason": (
+            "the on-box model stack is not installed — install it from the setup "
+            "wizard (sudo bash installer/templates/blackbox-install-localstack.sh)")}
+    if not _member_gguf_present(model_id):
+        name = _SELFCONVERT_GGUF.get(model_id) or f"the {model_id} weights"
+        how = SELFCONVERT_BUILD.get(model_id)
+        if how:
+            reason = (f"{name} is not built on this box — build it with "
+                      f"`{how['command']}` (runbook: {how['runbook']}), then run "
+                      "the G2 gate (eval/rerank_g2.py) before selecting it")
+        else:
+            reason = f"{name} is not downloaded — use the Download button in the wizard"
+        return {"built": False, "reason": reason}
+    path = llama_swap_config_path()
+    try:
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) if path else None
+        members = (cfg or {}).get("models") or {}
+    except (OSError, yaml.YAMLError, AttributeError):
+        members = {}
+    if model_id not in members:
+        return {"built": False, "reason": (
+            f"the live llama-swap config has no member {model_id!r} — re-render it "
+            "(restart blackbox.service, or re-run the local-stack installer)")}
+    return {"built": True, "reason": None}
 
 
 def model_downloaded(model_id: str) -> bool:

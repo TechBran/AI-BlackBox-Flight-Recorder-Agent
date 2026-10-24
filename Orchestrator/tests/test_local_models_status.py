@@ -93,9 +93,11 @@ def test_models_rollup(client, monkeypatch):
         ["embed-qwen3-8b", "rerank-qwen3-8b", "speaches", "qwen-tts"]
     for m in models:
         # audio members (qwen-tts, speaches) carry an ADDITIVE per-artifact
-        # `artifacts` list (M-A/A4: the 3 Qwen variants + whisper); every other
-        # member keeps exactly MODEL_KEYS.
+        # `artifacts` list (M-A/A4: the 3 Qwen variants + whisper); the
+        # self-converted reranker an ADDITIVE `acquire` block (how it gets
+        # built, O19-local-stack-10); every other member keeps exactly MODEL_KEYS.
         expected = MODEL_KEYS | ({"artifacts"} if m["model"] in {"speaches", "qwen-tts"} else set())
+        expected |= {"acquire"} if m["model"] == "rerank-qwen3-8b" else set()
         assert set(m) == expected
     by_id = {m["model"]: m for m in models}
     assert by_id["speaches"]["running"] is True
@@ -200,6 +202,22 @@ def test_open_breaker_reports_degraded_with_the_last_error(client, monkeypatch):
     assert "HTTP 500: CUDA error" in tts["reason"]
     assert tts["breaker"]["state"] == "open"
     assert tts["breaker"]["consecutive_failures"] == local_stack.BREAKER_THRESHOLD
+
+
+def test_self_converted_reranker_row_says_how_it_gets_built(client, monkeypatch):
+    """O19-local-stack-10: a silent `downloadable: false` row left the operator
+    nowhere; the row now names the build command and the runbook, and whether
+    llama-swap can start the member."""
+    _wire(monkeypatch)
+    monkeypatch.setattr(local_stack, "member_built", lambda m: {
+        "built": False, "reason": "Qwen3-Reranker-8B-Q8_0.gguf is not built on this box"})
+    row = {m["model"]: m for m in client.get("/local-models/status").json()["models"]}["rerank-qwen3-8b"]
+    assert row["downloadable"] is False
+    acq = row["acquire"]
+    assert acq["kind"] == "self-convert" and acq["built"] is False
+    assert acq["command"] == "bash installer/templates/blackbox-build-reranker-gguf.sh"
+    assert acq["runbook"] == "LocalModels/reranker/CONVERT-QWEN3-RERANKER-GGUF.md"
+    assert "not built" in acq["reason"]
 
 
 def test_unhealthy_reason_points_at_the_service(client, monkeypatch):

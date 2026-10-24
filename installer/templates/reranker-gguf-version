@@ -1,0 +1,20 @@
+# Pins for blackbox-build-reranker-gguf.sh — the GGUF behind the on-box reranker
+# (llama-swap member rerank-qwen3-8b, ${models-dir}/Qwen3-Reranker-8B-Q8_0.gguf).
+#
+# llama.cpp is NOT pinned here: the convert + quantize run at the llamacpp-version
+# tag the installer builds llama-server from, so the converter and the server
+# that loads its output are the same release (that tag post-dates the
+# Qwen3-Reranker convert fix, llama.cpp #16407; the script checks).
+#
+# Three non-comment lines: <hf-repo>, <hf-revision>, <reference-sha256>.
+#   hf-revision       the 40-hex commit of the HF checkpoint (main as of the
+#                     2026-07-22 MS02 conversion; the repo's last change is
+#                     2026-04-16).
+#   reference-sha256  the Q8_0 GGUF that passed the G2 gate on MS02 (8,047,134,272
+#                     bytes). It was converted at an unrecorded llama.cpp tag, so a
+#                     fresh build may differ byte-wise: a match proves the artifact,
+#                     a mismatch means "run the G2 gate before selecting it". It is
+#                     also the checksum to pin when that artifact is published.
+Qwen/Qwen3-Reranker-8B
+77d193c791ed757ca307ee72715aa132723da912
+8d81cca758aaf1503526081a35ebea21985990aff206e50d6f92e22eaa4ea627

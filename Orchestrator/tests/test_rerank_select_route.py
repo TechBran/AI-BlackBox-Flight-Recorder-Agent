@@ -188,3 +188,71 @@ def test_select_no_key_does_not_write_env(client, monkeypatch):
         "provider": "voyage", "model": "voyage-rerank-2.5", "enabled": True})
     assert r.status_code == 200
     assert calls == []
+
+
+# ── the on-box reranker must be BUILT before it can be selected ──────────────
+# (audit rank 69 / O19-local-stack-10): its GGUF is self-converted and no
+# install path produced it, so a fresh box could select a llama-swap member
+# that can never start and every search silently fell through un-reranked.
+
+LOCAL = {"provider": "localstack", "model": "qwen3-reranker-8b-local"}
+
+
+@pytest.fixture
+def onbox(tmp_path, monkeypatch):
+    """An installed stack whose models dir / live llama-swap config the test
+    controls: returns (models_dir, config_path)."""
+    from Orchestrator import local_stack, localstack_downloads
+    from Orchestrator import localstack_render as lr
+    _pin_tier(monkeypatch, "HIGH")
+    home = tmp_path / "localstack"
+    models = home / "models"
+    models.mkdir(parents=True)
+    lr.reconcile(str(home), str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+    monkeypatch.setattr(localstack_downloads, "MODELS_DIR", models)
+    monkeypatch.setattr(local_stack, "is_installed", lambda: True)
+    monkeypatch.setattr(local_stack, "llama_swap_config_path",
+                        lambda: home / "llama-swap-config.yaml")
+    return models, home / "llama-swap-config.yaml"
+
+
+def test_select_refuses_an_unbuilt_onbox_reranker(client, onbox):
+    r = client.post("/rerank/select", json={**LOCAL, "enabled": True})
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "Qwen3-Reranker-8B-Q8_0.gguf" in detail
+    assert "blackbox-build-reranker-gguf.sh" in detail      # how to build it
+    assert store.get_rerank_selection() is None              # nothing persisted
+
+
+def test_select_accepts_a_built_onbox_reranker(client, onbox):
+    models, _cfg = onbox
+    (models / "Qwen3-Reranker-8B-Q8_0.gguf").write_bytes(b"GGUF")
+    r = client.post("/rerank/select", json={**LOCAL, "enabled": True})
+    assert r.status_code == 200
+    assert store.get_rerank_selection() == {"enabled": True, **LOCAL}
+
+
+def test_select_refuses_when_the_live_config_lacks_the_member(client, onbox):
+    models, cfg = onbox
+    (models / "Qwen3-Reranker-8B-Q8_0.gguf").write_bytes(b"GGUF")
+    cfg.write_text("models:\n  \"embed-qwen3-8b\":\n    ttl: 600\n", encoding="utf-8")
+    r = client.post("/rerank/select", json={**LOCAL, "enabled": True})
+    assert r.status_code == 409
+    assert "rerank-qwen3-8b" in r.json()["detail"]
+
+
+def test_select_refuses_when_the_stack_is_not_installed(client, onbox, monkeypatch):
+    from Orchestrator import local_stack
+    models, _cfg = onbox
+    (models / "Qwen3-Reranker-8B-Q8_0.gguf").write_bytes(b"GGUF")
+    monkeypatch.setattr(local_stack, "is_installed", lambda: False)
+    r = client.post("/rerank/select", json={**LOCAL, "enabled": True})
+    assert r.status_code == 409
+    assert "not installed" in r.json()["detail"]
+
+
+def test_turning_the_onbox_reranker_off_is_never_gated(client, onbox):
+    r = client.post("/rerank/select", json={**LOCAL, "enabled": False})
+    assert r.status_code == 200
+    assert store.get_rerank_selection() == {"enabled": False, **LOCAL}

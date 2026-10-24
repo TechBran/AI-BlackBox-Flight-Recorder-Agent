@@ -92,6 +92,8 @@ def _artifact_dest_root(dest_dir: "str | None") -> Path:
 #   • rerank-qwen3-8b — Qwen3-Reranker-8B @ Q8_0, SELF-CONVERTED from a pinned
 #     llama.cpp build (Task 4.4), not a direct download (~8.1GB on disk once
 #     converted; the sequential retrieval group per D13 makes the 8B affordable).
+#     installer/templates/blackbox-build-reranker-gguf.sh builds it at the pins
+#     in reranker-gguf-version; GET /local-models/status says so on its row.
 #   • embed-qwen3-0.6b — CPU-tier fallback only (not fetched on a GPU box).
 #
 # "repo_pending_g3": True marks an hf_snapshot whose repo ids are placeholders

@@ -14,6 +14,31 @@ resolved: detects Qwen3-Reranker, extracts `cls.output.weight`, sets
 the G2 gate (`eval/rerank_g2.py`) before the wizard is allowed to select the
 `qwen3-reranker-8b-local` model.
 
+## Automated (use this)
+
+```bash
+bash installer/templates/blackbox-build-reranker-gguf.sh     # as the box's user, not root
+```
+
+It runs steps 1-5 below at pinned revisions and installs
+`~/.blackbox/localstack/models/Qwen3-Reranker-8B-Q8_0.gguf` with a
+`.provenance.json` beside it (audit O19-local-stack-10):
+
+- **llama.cpp** — the tag in `installer/templates/llamacpp-version`, the same
+  release the installer builds `llama-server` from (it refuses a convert script
+  without the #16407 reranker-head handling);
+- **HF checkpoint** — `Qwen/Qwen3-Reranker-8B` at the revision in
+  `installer/templates/reranker-gguf-version`;
+- **reference sha256** — also in that file: the Q8_0 GGUF that passed G2 on MS02
+  (converted 2026-07-22 at an unrecorded llama.cpp tag). A build that matches it
+  is that artifact; one that differs is a different conversion, so run the G2
+  gate (step 6) before selecting it. `POST /rerank/select` refuses the on-box
+  reranker until the GGUF is on disk and the live llama-swap config has the member.
+
+The manual steps stay below as the reference for what the script does.
+
+## Manual procedure
+
 Run this on the GPU box (MS02). `${LOCALSTACK_MODELS}` is the llama-swap
 models-dir the installer substitutes into
 `installer/templates/llama-swap-config.yaml.template` (the reranker member reads
@@ -24,10 +49,10 @@ models-dir the installer substitutes into
 ```bash
 git clone https://github.com/ggml-org/llama.cpp
 cd llama.cpp
-# Pin to a tagged release that INCLUDES PR #16407. Resolve the exact tag once,
-# then hard-pin it here (record it in the commit message). As of 2026-07 use the
-# latest b-tag and VERIFY the fix is present before trusting the build:
-git checkout <PINNED_LLAMACPP_TAG>   # e.g. b6600+ — must post-date #16407
+# The pinned tag is the first non-comment line of
+# installer/templates/llamacpp-version (it post-dates PR #16407). VERIFY the
+# fix is present before trusting the build:
+git checkout "$(grep -vE '^[[:space:]]*(#|$)' "$BLACKBOX_ROOT/installer/templates/llamacpp-version" | head -n1)"
 ```
 
 Verify the convert script actually handles Qwen3-Reranker (abort if these do not
@@ -51,7 +76,9 @@ pip install -U "huggingface_hub[cli]"
 ## 3. Download the HF weights (CausalLM checkpoint)
 
 ```bash
+# --revision: the pinned commit, line 2 of installer/templates/reranker-gguf-version
 huggingface-cli download Qwen/Qwen3-Reranker-8B \
+  --revision 77d193c791ed757ca307ee72715aa132723da912 \
   --local-dir ./Qwen3-Reranker-8B
 ```
 

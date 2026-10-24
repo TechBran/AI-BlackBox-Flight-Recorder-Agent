@@ -54,6 +54,9 @@ def rerank_select(req: RerankSelectRequest, response: Response):
       • model ∈ RERANK_MODELS .............. else 404 (mirrors /embeddings/placement)
       • the model's provider == request.provider ... else 400 (no cross-provider pick)
       • the model's tiers include THIS box's hardware tier ... else 400
+      • enabling an on-box (localstack) model: its llama-swap member is
+        built (stack installed, GGUF on disk, member in the live config)
+        ... else 409 with how to build it (local_stack.member_built)
 
     When api_key is given AND the model declares a key_env, the key is written to
     .env (secrets_writer.update_env) AND mirrored into os.environ (live, no
@@ -94,6 +97,18 @@ def rerank_select(req: RerankSelectRequest, response: Response):
             detail=(f"model {model!r} requires tier ∈ {tiers}; this box is "
                     f"{tier}"),
         )
+
+    # An on-box reranker can only be turned ON once llama-swap can start its
+    # member (audit rank 69 / O19-local-stack-10): the GGUF is self-converted,
+    # so a fresh box could select a member that never starts, and every search
+    # then fell through un-reranked. Turning it OFF is never gated.
+    if provider == "localstack" and req.enabled:
+        from Orchestrator import local_stack
+        built = local_stack.member_built(entry.get("model_id", ""))
+        if not built["built"]:
+            raise HTTPException(status_code=409, detail=(
+                f"The on-box reranker {model!r} cannot be selected yet: "
+                f"{built['reason']}."))
 
     # Live key write — only when a key was actually pasted AND the model declares
     # a key_env (cloud bearer providers). update_env validates the value; a

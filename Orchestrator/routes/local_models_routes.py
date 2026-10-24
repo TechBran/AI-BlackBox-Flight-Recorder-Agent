@@ -126,6 +126,14 @@ def local_models_status(response: Response):
             row["artifacts"] = (
                 [_artifact_row(k) for k in child_keys] if installed else []
             )
+        # Self-converted members (the reranker) are not downloadable; say how
+        # they DO get built instead of a silent disabled row (additive, audit
+        # O19-local-stack-10). `built` is what POST /rerank/select gates on.
+        build = local_stack.SELFCONVERT_BUILD.get(m["model"])
+        if build is not None:
+            built = local_stack.member_built(m["model"])
+            row["acquire"] = {"kind": "self-convert", "built": built["built"],
+                              "reason": built["reason"], **build}
         models.append(row)
 
     # The capability signal beside liveness (plan Task 10): read from the same
