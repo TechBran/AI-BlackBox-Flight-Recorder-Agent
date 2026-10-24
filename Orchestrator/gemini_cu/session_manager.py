@@ -228,6 +228,10 @@ class GeminiCUSession:
 
 
 # Session Store
+# Lookups and teardowns run in worker threads (a teardown waits seconds on
+# Chrome and the display; audit O13-computer-use-17), so a session is taken
+# out of the store with one atomic pop BEFORE it is destroyed: whichever
+# caller pops it destroys it, and a concurrent sweep finds it gone.
 _sessions: Dict[str, GeminiCUSession] = {}
 _operator_sessions: Dict[str, str] = {}
 
@@ -239,22 +243,21 @@ def get_or_create_session(operator: str, device_id: str, environment: str,
     2026-07-23) — the busy agent keeps its desktop; _operator_sessions is the
     MRU pointer only."""
     if not force_new:
-        if session_id and session_id in _sessions:
-            session = _sessions[session_id]
+        session = _sessions.get(session_id) if session_id else None
+        if session is not None:
             if session.operator == operator and not session.is_expired():
                 session.touch()
                 return session
 
-        if operator in _operator_sessions:
-            sid = _operator_sessions[operator]
-            if sid in _sessions:
-                session = _sessions[sid]
+        sid = _operator_sessions.get(operator)
+        if sid:
+            session = _sessions.get(sid)
+            if session is not None:
                 if not session.is_expired():
                     session.touch()
                     return session
-                else:
+                elif _sessions.pop(sid, None) is not None:
                     session.destroy()
-                    del _sessions[sid]
 
     session = GeminiCUSession(operator, device_id, environment, session_id)
     _sessions[session.session_id] = session
@@ -278,9 +281,9 @@ def get_session(operator: str) -> Optional[GeminiCUSession]:
 
 def destroy_session(operator: str):
     sid = _operator_sessions.pop(operator, None)
-    if sid and sid in _sessions:
-        _sessions[sid].destroy()
-        del _sessions[sid]
+    session = _sessions.pop(sid, None) if sid else None
+    if session is not None:
+        session.destroy()
 
 
 def create_task_session(operator: str, device_id: str,
@@ -321,11 +324,12 @@ def cleanup_expired_sessions() -> int:
     for sid, s in list(_sessions.items()):
         running = s.agent_task is not None and not s.agent_task.done()
         if s.is_expired() and not running and s.status != "running":
-            print(f"[GEMINI CU] sweeping expired session {sid[:8]} ({s.operator})")
-            s.destroy()
-            _sessions.pop(sid, None)
+            if _sessions.pop(sid, None) is None:
+                continue  # another thread took it first
             if _operator_sessions.get(s.operator) == sid:
                 _operator_sessions.pop(s.operator, None)
+            print(f"[GEMINI CU] sweeping expired session {sid[:8]} ({s.operator})")
+            s.destroy()
             removed += 1
     return removed
 
@@ -334,5 +338,5 @@ def destroy_task_session(session: GeminiCUSession):
     """Tear down a create_task_session() session: stop its agent task and drop it
     from _sessions. Never touches _operator_sessions, so the operator's chat
     session is left intact. Idempotent."""
-    session.destroy()
     _sessions.pop(session.session_id, None)
+    session.destroy()

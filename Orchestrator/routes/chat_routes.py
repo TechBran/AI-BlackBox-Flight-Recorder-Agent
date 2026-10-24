@@ -4541,8 +4541,10 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
         return
 
     # ── Get/create persistent session (lifecycle only — no display arbitration
-    #    here; that is per-launch, at the driver launch below) ──
-    session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
+    #    here; that is per-launch, at the driver launch below). A lookup tears
+    #    down an expired session (Chrome + display quartet): in a thread. ──
+    session = await asyncio.to_thread(
+        get_or_create_session, operator, session_id=session_id, device_id=device_id)
     session.touch()
 
     # ── On-the-fly device switching ──
@@ -4573,7 +4575,8 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
             and incoming_user_text
             and incoming_user_text != "[reconnect]"
             and incoming_user_text != session.user_message):
-        session = get_or_create_session(operator, device_id=device_id, force_new=True)
+        session = await asyncio.to_thread(
+            get_or_create_session, operator, device_id=device_id, force_new=True)
         print(f"[CU-STREAM] Busy agent -> new desktop {session.session_id[:8]} for {operator}")
         # Re-emit so the frontend repoints its stored session id at the NEW desktop.
         yield {"type": "cu_session", "data": {"session_id": session.session_id,
@@ -4861,8 +4864,10 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
     # queue turns never claim and can never self-block, and there is no guard-level
     # claim to leak on an early return (review C3).
 
-    # ── Get/create persistent session ──
-    session = gemini_get_or_create(operator, device_id, environment, session_id)
+    # ── Get/create persistent session (a lookup tears down an expired one:
+    #    in a worker thread) ──
+    session = await asyncio.to_thread(
+        gemini_get_or_create, operator, device_id, environment, session_id)
     session.touch()
 
     # ── Emit session ID ──
@@ -4885,8 +4890,9 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             and incoming_user_text
             and incoming_user_text != "[reconnect]"
             and incoming_user_text != session.user_message):
-        session = gemini_get_or_create(operator, session.device_id,
-                                       session.environment, force_new=True)
+        session = await asyncio.to_thread(
+            gemini_get_or_create, operator, session.device_id,
+            session.environment, force_new=True)
         print(f"[GEMINI-CU-STREAM] Busy agent -> new desktop {session.session_id[:8]} for {operator}")
         yield {"type": "cu_session", "data": {"session_id": session.session_id,
                                               "new_desktop": True}}
@@ -4927,7 +4933,7 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
         if detected_device and detected_device != session.device_id:
             print(f"[GEMINI-CU-STREAM] Device switch: {session.device_id} → {detected_device}")
             from Orchestrator.gemini_cu import destroy_session as gemini_destroy
-            gemini_destroy(operator)
+            await asyncio.to_thread(gemini_destroy, operator)
             new_device = registry.get_device(detected_device)
             new_env = "android" if new_device and new_device.protocol == DeviceProtocol.ADB else "desktop"
             if new_env == "android":
@@ -4940,7 +4946,8 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
                 except Exception as e:
                     yield {"type": "error", "data": f"ADB error: {str(e)}"}
                     return
-            session = gemini_get_or_create(operator, detected_device, new_env)
+            session = await asyncio.to_thread(
+                gemini_get_or_create, operator, detected_device, new_env)
             session.touch()
             yield {"type": "cu_session", "data": {"session_id": session.session_id, "device_switch": detected_device}}
 
@@ -5166,8 +5173,10 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
         pass
 
     # ── Get/create persistent session (shared with the Anthropic path; lifecycle
-    #    only — display arbitration is per-launch, at the driver launch below) ──
-    session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
+    #    only — display arbitration is per-launch, at the driver launch below).
+    #    A lookup tears down an expired session: in a worker thread. ──
+    session = await asyncio.to_thread(
+        get_or_create_session, operator, session_id=session_id, device_id=device_id)
     session.touch()
 
     # ── Emit session ID ──
@@ -5190,7 +5199,8 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
             and incoming_user_text
             and incoming_user_text != "[reconnect]"
             and incoming_user_text != session.user_message):
-        session = get_or_create_session(operator, device_id=device_id, force_new=True)
+        session = await asyncio.to_thread(
+            get_or_create_session, operator, device_id=device_id, force_new=True)
         print(f"[OPENAI-CU-STREAM] Busy agent -> new desktop {session.session_id[:8]} for {operator}")
         yield {"type": "cu_session", "data": {"session_id": session.session_id,
                                               "device_id": session.device_id,
@@ -8301,7 +8311,8 @@ async def cu_new_session(request: Request):
             if old_session.status == "running":
                 old_session.request_stop()
                 await asyncio.sleep(0.5)
-            destroy_session(operator)
+            # Chrome + display quartet teardown waits for seconds: in a thread.
+            await asyncio.to_thread(destroy_session, operator)
             print(f"[CU-NEW] Destroyed Anthropic CU session for {operator}")
     except Exception:
         pass
@@ -8313,7 +8324,7 @@ async def cu_new_session(request: Request):
             if gemini_session.status == "running":
                 gemini_session.request_stop()
                 await asyncio.sleep(0.5)
-            gemini_destroy(operator)
+            await asyncio.to_thread(gemini_destroy, operator)
             print(f"[CU-NEW] Destroyed Gemini CU session for {operator}")
     except Exception:
         pass

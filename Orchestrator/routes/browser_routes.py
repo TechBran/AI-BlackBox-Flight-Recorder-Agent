@@ -230,9 +230,10 @@ def _save_live_jpeg(png_bytes: bytes) -> dict:
     save_path.write_bytes(jpg_bytes)
     url = f"/ui/uploads/{filename}"
 
-    # Clean up old live screenshots (keep last 5)
+    # Clean up old live screenshots (keep last 5). Concurrent pollers sweep
+    # in parallel threads, so a file can vanish between the glob and its stat.
     for pattern in ["browser_live_*.jpg", "browser_live_*.png"]:
-        live_files = sorted(UPLOADS_DIR.glob(pattern), key=lambda p: p.stat().st_mtime)
+        live_files = sorted(UPLOADS_DIR.glob(pattern), key=_mtime_or_zero)
         for old_file in live_files[:-5]:
             try:
                 old_file.unlink()
@@ -240,6 +241,13 @@ def _save_live_jpeg(png_bytes: bytes) -> dict:
                 pass
 
     return {"url": url, "timestamp": ts}
+
+
+def _mtime_or_zero(path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 @app.get("/cu/preflight")
@@ -284,7 +292,9 @@ async def cu_session_open(req: Optional[CuSessionOpenIn] = Body(default=None)):
                   and not existing.is_expired())
 
     try:
-        session = get_or_create_session(operator)
+        # A lookup tears down an expired session (Chrome + display quartet,
+        # seconds of waits): in a worker thread, like every CU teardown.
+        session = await asyncio.to_thread(get_or_create_session, operator)
     except RuntimeError as e:
         return JSONResponse({"error": str(e)}, status_code=503)
 
@@ -297,7 +307,7 @@ async def cu_session_open(req: Optional[CuSessionOpenIn] = Body(default=None)):
     if not ok:
         # Don't pin a half-created session on the operator; a reused session
         # that failed to (re)start its browser is equally unusable.
-        destroy_session_by_id(session.session_id)
+        await asyncio.to_thread(destroy_session_by_id, session.session_id)
         return JSONResponse(
             {"error": "Failed to start the desktop session (virtual display cap "
                       "reached, or Xvfb/Chrome could not start)"},
@@ -654,22 +664,47 @@ async def _cu_view_ws_main(websocket: WebSocket) -> None:
     from Orchestrator.browser import native_stream
     await websocket.accept()
     mgr = native_stream.get_native_stream()
+    # The first viewer spawns x11vnc + websockify and waits up to 5 s for each
+    # port, all under the stream's lock: attach and detach run in a worker
+    # thread (audit O13-computer-use-19).
+    attaching = asyncio.ensure_future(asyncio.to_thread(_attach_main_stream, mgr))
     try:
-        ws_port = mgr.acquire()
+        ws_port, viewers = await asyncio.shield(attaching)
     except RuntimeError as e:
         print(f"[CU-MAIN] main-desktop stream refused: {e}")
         await websocket.close(code=1008, reason=str(e)[:120])
         return
+    except asyncio.CancelledError:
+        # The thread finishes the attach anyway: give that viewer back.
+        attaching.add_done_callback(_detach_if_attached(mgr))
+        raise
     client = getattr(websocket, "client", None)
     peer = f"{client.host}:{client.port}" if client else "unknown"
     print(f"[CU-MAIN] main-desktop stream WS CONNECT from {peer} "
-          f"(viewers={mgr.viewers})")
+          f"(viewers={viewers})")
     try:
         await _proxy_ws_to_loopback(websocket, f"ws://127.0.0.1:{ws_port}/")
     finally:
-        mgr.release()
+        viewers = await asyncio.to_thread(_detach_main_stream, mgr)
         print(f"[CU-MAIN] main-desktop stream WS DISCONNECT from {peer} "
-              f"(viewers={mgr.viewers})")
+              f"(viewers={viewers})")
+
+
+def _attach_main_stream(mgr):
+    port = mgr.acquire()
+    return port, mgr.viewers
+
+
+def _detach_main_stream(mgr) -> int:
+    mgr.release()
+    return mgr.viewers
+
+
+def _detach_if_attached(mgr):
+    def done(fut):
+        if not fut.cancelled() and fut.exception() is None:
+            asyncio.get_running_loop().run_in_executor(None, mgr.release)
+    return done
 
 
 @app.websocket("/cu/view/{session_id}/ws")

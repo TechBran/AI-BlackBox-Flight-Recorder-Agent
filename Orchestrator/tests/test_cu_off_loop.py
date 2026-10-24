@@ -151,15 +151,15 @@ def test_a_launched_app_that_writes_later_is_not_killed_by_sigpipe(pidfile):
 
     async def go():
         result = await chat_routes.execute_bash_command(
-            f"(sleep 0.3; echo late; echo late >&2; exec sleep 30) & echo $! > {pidfile}",
+            f"(sleep 1; echo late; echo late >&2; exec sleep 30) & echo $! > {pidfile}",
             timeout=5)
-        await asyncio.sleep(1.0)  # the loop keeps running, as the server's does
+        await asyncio.sleep(2.0)  # the loop keeps running, as the server's does
         return result
 
     t0 = time.monotonic()
     result = asyncio.run(go())
     assert result == {"output": "", "exit_code": 0}
-    assert time.monotonic() - t0 < 3
+    assert time.monotonic() - t0 < 4
     assert _pid_alive(_read_pid(pidfile)), "the launched app died after writing"
 
 
@@ -340,6 +340,72 @@ def test_cu_driver_runs_actions_and_captures_off_the_loop(monkeypatch):
     assert gap < 0.2, f"a CU step blocked the event loop for {gap:.2f}s"
 
 
+ZOOM_TURN = _sse([
+    {"type": "content_block_start",
+     "content_block": {"type": "tool_use", "id": "tu_z", "name": "computer"}},
+    {"type": "content_block_delta",
+     "delta": {"type": "input_json_delta",
+               "partial_json": "{\"action\": \"zoom\", \"region\": [0, 0, 4, 4]}"}},
+    {"type": "content_block_stop"},
+    {"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+     "usage": {"input_tokens": 1, "output_tokens": 1}},
+])
+
+
+def test_cu_driver_zoom_crop_runs_off_the_loop(monkeypatch):
+    """The zoom action decodes, crops and re-encodes a full frame (audit
+    O13-computer-use-01's correction: 0.1-0.2 s of PIL work per zoom)."""
+    import io
+    import PIL.Image
+    from Orchestrator.routes import chat_routes
+
+    buf = io.BytesIO()
+    PIL.Image.new("RGB", (16, 16), (1, 2, 3)).save(buf, format="PNG")
+    frame = buf.getvalue()
+    monkeypatch.setattr(ComputerUseSession, "capture_screenshot_bytes", lambda self: frame)
+    monkeypatch.setattr("Orchestrator.browser.screenshot.save_screenshot_to_uploads",
+                        lambda png, ident, step: "/ui/uploads/x.png")
+    real_open = PIL.Image.open
+    sizes = []
+
+    def slow_open(fp, *a, **k):
+        time.sleep(BLOCK)
+        img = real_open(fp, *a, **k)
+        return img
+
+    monkeypatch.setattr(PIL.Image, "open", slow_open)
+
+    async def _no_save(*a, **k):
+        return None
+
+    monkeypatch.setattr(chat_routes, "_cu_save_to_blackbox", _no_save)
+    httpx_stub, calls = _scripted_httpx([ZOOM_TURN, END_TURN])
+    monkeypatch.setitem(sys.modules, "httpx", httpx_stub)
+
+    class _Actions:
+        def execute(self, action, **params):
+            return {"success": True, "message": "ok"}
+
+    session = ComputerUseSession("cu-zoom-op")
+    session.actions = _Actions()
+    import Orchestrator.browser.screenshot as shot
+    real_b64 = shot.screenshot_to_base64
+
+    def record_b64(png):
+        sizes.append(real_open(io.BytesIO(png)).size)
+        return real_b64(png)
+
+    monkeypatch.setattr(shot, "screenshot_to_base64", record_b64)
+
+    from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop
+    history = [{"role": "user", "content": [{"type": "text", "text": "zoom"}]}]
+    _, gap = asyncio.run(_max_gap_during(run_anthropic_cu_loop(
+        session, history, "sys", [], {}, "claude-sonnet-5", "cu-zoom-op", "zoom")))
+    assert len(calls) == 2
+    assert sizes == [(4, 4)], "the zoom result is the cropped region"
+    assert gap < 0.2, f"the zoom crop blocked the event loop for {gap:.2f}s"
+
+
 # ---------------------------------------------------------------------------
 # Desktop allocation and Chrome start
 # ---------------------------------------------------------------------------
@@ -461,6 +527,38 @@ def test_viewer_live_screenshot_runs_off_the_loop(monkeypatch, tmp_path):
     assert result["url"].startswith("/ui/uploads/browser_live_")
     assert (tmp_path / result["url"].rsplit("/", 1)[1]).exists()
     assert gap < 0.2, f"the live screenshot blocked the event loop for {gap:.2f}s"
+
+
+def test_concurrent_live_screenshots_tolerate_the_cleanup_sweep(monkeypatch, tmp_path):
+    """Live saves run in threads now, so one call's keep-last-5 sweep can delete
+    a file another call is about to stat. A file that vanishes mid-sweep (a
+    dangling link here, deterministically) must not fail a call whose own JPEG
+    was saved."""
+    import io
+    from PIL import Image
+    from Orchestrator import config
+    import Orchestrator.browser.screenshot as screenshot
+    from Orchestrator.routes import browser_routes
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(buf, format="PNG")
+    png = buf.getvalue()
+    monkeypatch.setattr(screenshot, "capture_screenshot", lambda *a, **k: png)
+    monkeypatch.setattr(config, "UPLOADS_DIR", tmp_path)
+    (tmp_path / "browser_live_1.jpg").symlink_to(tmp_path / "gone.jpg")
+
+    result = asyncio.run(browser_routes.browser_screenshot_live(None))
+    assert "error" not in result, result
+    assert (tmp_path / result["url"].rsplit("/", 1)[1]).exists()
+
+    async def burst():
+        return await asyncio.gather(*[browser_routes.browser_screenshot_live(None)
+                                      for _ in range(8)])
+
+    for _ in range(10):
+        errors = [r for r in asyncio.run(burst()) if "error" in r]
+        assert not errors, errors[:2]
+    assert len(list(tmp_path.glob("browser_live_*.jpg"))) <= 5 + 8
 
 
 def test_gemini_cu_display_setup_runs_off_the_loop(monkeypatch):

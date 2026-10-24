@@ -85,6 +85,18 @@ def _computer_result(tool_id, content, is_member, is_error=False):
     return result
 
 
+def _crop_png(png_bytes, region):
+    """The zoom action's crop: ``region`` is [x0, y0, x1, y1] in screen pixels."""
+    import io
+    from PIL import Image
+    img = Image.open(io.BytesIO(png_bytes))
+    x0, y0, x1, y1 = [int(v) for v in region]
+    cropped = img.crop((x0, y0, x1, y1))
+    buf = io.BytesIO()
+    cropped.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers, model, operator, user_text):
     """Background agent loop for Computer Use.  Pushes events to
     session.event_queue instead of yielding, so the loop survives
@@ -453,14 +465,8 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                         if action == "zoom":
                             region = tool_input.get("region")
                             if region and len(region) == 4:
-                                import io
-                                from PIL import Image
-                                img = Image.open(io.BytesIO(png_bytes))
-                                x0, y0, x1, y1 = [int(v) for v in region]
-                                cropped = img.crop((x0, y0, x1, y1))
-                                buf = io.BytesIO()
-                                cropped.save(buf, format="PNG")
-                                png_bytes = buf.getvalue()
+                                # PNG decode + crop + encode: 0.1-0.2 s a frame.
+                                png_bytes = await asyncio.to_thread(_crop_png, png_bytes, region)
 
                         png_b64 = screenshot_to_base64(png_bytes)
                         consecutive_screenshot_failures = 0

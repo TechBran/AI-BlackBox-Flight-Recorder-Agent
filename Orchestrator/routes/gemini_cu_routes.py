@@ -222,7 +222,7 @@ async def _run_task(task_id, operator, device_id, environment,
         return
 
     try:
-        session = create_task_session(operator, device_id, environment)
+        session = await asyncio.to_thread(create_task_session, operator, device_id, environment)
     except Exception as e:
         task.status = TaskStatus.FAILED
         task.result_data["error"] = f"Cannot start Gemini CU: {e}"
@@ -392,7 +392,7 @@ async def stream_gemini_cu(body: GeminiCURequest):
     _claim_id = f"gemini-route-stream:{uuid.uuid4()}"
 
     async def event_stream():
-        session = create_task_session(body.operator, body.device_id, environment)
+        session = await asyncio.to_thread(create_task_session, body.operator, body.device_id, environment)
         try:
             # The stream's own session is reachable only by id (live-view stop,
             # /chat/cu-stop?session_id=), so the client is told it first.
@@ -436,7 +436,7 @@ async def get_session_info(operator: str):
 async def end_session(operator: str):
     """End the operator's chat session and stop their running /run and /stream tasks
     (each drives its own task session, registered by id only; it tears itself down)."""
-    destroy_session(operator)
+    await asyncio.to_thread(destroy_session, operator)
     from Orchestrator.gemini_cu.session_manager import list_task_sessions
     stopped = 0
     for task_session in list_task_sessions(operator):

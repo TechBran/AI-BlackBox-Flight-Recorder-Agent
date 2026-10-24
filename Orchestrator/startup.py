@@ -246,6 +246,38 @@ def startup_check_index():
 
 
 
+async def _cu_sweep_once():
+    """One pass of the CU TTL reaper. Each teardown stops Chrome and a display
+    quartet with multi-second waits, so every step runs in a worker thread,
+    never on the server's loop (audit O13-computer-use-17)."""
+    import asyncio
+    from Orchestrator.browser.display import get_allocator
+    try:
+        await asyncio.to_thread(get_allocator().reap_idle)
+    except Exception as e:
+        print(f"[CU-DISPLAY] TTL reap skipped: {e}")
+    # Session-level sweep (desktop-first CU 2026-07-23): manual
+    # /cu/session/open sessions have no agent turn to lazily observe
+    # their expiry, so sweep ComputerUseSession objects here too —
+    # same SESSION_TIMEOUT the reuse path already enforces, running
+    # tasks skipped. Reaps Chrome + the session dict entry; the
+    # display quartet falls to reap_idle above / release() here.
+    try:
+        from Orchestrator.browser.session_manager import cleanup_inactive_sessions
+        from Orchestrator.browser.config import SESSION_TIMEOUT
+        await asyncio.to_thread(cleanup_inactive_sessions, timeout=SESSION_TIMEOUT)
+    except Exception as e:
+        print(f"[CU-SESSION] idle sweep skipped: {e}")
+    # Gemini sessions hold per-session displays too (2026-07-23) —
+    # sweep their expired sessions or a stale chat session pins one of
+    # the few display slots for the full display TTL.
+    try:
+        from Orchestrator.gemini_cu.session_manager import cleanup_expired_sessions
+        await asyncio.to_thread(cleanup_expired_sessions)
+    except Exception as e:
+        print(f"[GEMINI CU] idle sweep skipped: {e}")
+
+
 @boot_hook(app, "startup")
 async def _cu_display_reaper():
     """CU virtual-display reaper (M9 §9). Sweeps restart-survivor children on our
@@ -273,30 +305,7 @@ async def _cu_display_reaper():
         interval = max(60.0, VIRTUAL_DISPLAY_TTL / 3.0)
         while True:
             await asyncio.sleep(interval)
-            try:
-                get_allocator().reap_idle()
-            except Exception as e:
-                print(f"[CU-DISPLAY] TTL reap skipped: {e}")
-            # Session-level sweep (desktop-first CU 2026-07-23): manual
-            # /cu/session/open sessions have no agent turn to lazily observe
-            # their expiry, so sweep ComputerUseSession objects here too —
-            # same SESSION_TIMEOUT the reuse path already enforces, running
-            # tasks skipped. Reaps Chrome + the session dict entry; the
-            # display quartet falls to reap_idle above / release() here.
-            try:
-                from Orchestrator.browser.session_manager import cleanup_inactive_sessions
-                from Orchestrator.browser.config import SESSION_TIMEOUT
-                cleanup_inactive_sessions(timeout=SESSION_TIMEOUT)
-            except Exception as e:
-                print(f"[CU-SESSION] idle sweep skipped: {e}")
-            # Gemini sessions hold per-session displays too (2026-07-23) —
-            # sweep their expired sessions or a stale chat session pins one of
-            # the few display slots for the full display TTL.
-            try:
-                from Orchestrator.gemini_cu.session_manager import cleanup_expired_sessions
-                cleanup_expired_sessions()
-            except Exception as e:
-                print(f"[GEMINI CU] idle sweep skipped: {e}")
+            await _cu_sweep_once()
 
     asyncio.create_task(_loop())
 

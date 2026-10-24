@@ -308,6 +308,12 @@ class ComputerUseSession:
 # Dual-dict: _sessions keys by session_id, _operator_sessions maps operator → session_id
 _sessions: Dict[str, ComputerUseSession] = {}
 _operator_sessions: Dict[str, str] = {}  # operator → session_id
+# The store is used from the event loop and from worker threads: lookups and
+# teardowns run in threads because a teardown waits seconds on Chrome and the
+# display quartet (audit O13-computer-use-17). The lock covers the bookkeeping
+# only, never a teardown: a session is taken out of the store under the lock
+# and destroyed after it, so exactly one caller destroys it.
+_store_lock = threading.RLock()
 
 
 def get_or_create_session(operator: str, session_id: Optional[str] = None,
@@ -333,8 +339,19 @@ def get_or_create_session(operator: str, session_id: Optional[str] = None,
     per-LAUNCH and lives at the launch sites (see the display_arbiter). This is
     session lifecycle only.
     """
-    global _sessions, _operator_sessions
+    doomed: List[ComputerUseSession] = []
+    try:
+        with _store_lock:
+            return _get_or_create_locked(operator, session_id, device_id, force_new, doomed)
+    finally:
+        for s in doomed:
+            s.destroy()
 
+
+def _get_or_create_locked(operator, session_id, device_id, force_new, doomed):
+    """get_or_create_session's bookkeeping, under _store_lock. A dead or expired
+    session found on the way is taken out of the store and left in ``doomed``
+    for the caller to destroy outside the lock."""
     if not force_new:
         # ── Lookup by session_id if provided ──
         if session_id and session_id in _sessions:
@@ -345,7 +362,7 @@ def get_or_create_session(operator: str, session_id: Optional[str] = None,
                     return session
                 else:
                     # Expired or dead — clean up and recreate
-                    _cleanup_session(session_id)
+                    doomed.append(_detach_session_locked(session_id))
             else:
                 # Operator mismatch — ignore the session_id, fall through
                 print(f"[CU-SESSION] session_id {session_id[:8]} belongs to {session.operator}, not {operator}")
@@ -359,7 +376,7 @@ def get_or_create_session(operator: str, session_id: Optional[str] = None,
                     session.touch()
                     return session
                 else:
-                    _cleanup_session(existing_sid)
+                    doomed.append(_detach_session_locked(existing_sid))
 
     # ── Create fresh session (force_new never reuses the caller's session_id —
     #    that id names the BUSY session the prompt is escaping from) ──
@@ -406,38 +423,47 @@ def _cleanup_session(session_id: str):
     removed session was the operator's MRU pointer, repair the pointer to
     their most-recent surviving session (multi-desktop 2026-07-23) — a dead
     key would orphan every older desktop from no-id lookups."""
-    global _sessions, _operator_sessions
-    if session_id in _sessions:
-        session = _sessions[session_id]
+    with _store_lock:
+        session = _detach_session_locked(session_id)
+    if session is not None:
         session.destroy()
-        del _sessions[session_id]
-        if _operator_sessions.get(session.operator) == session_id:
-            survivors = [s for s in _sessions.values()
-                         if s.operator == session.operator]
-            if survivors:
-                newest = max(survivors, key=lambda s: s.last_activity)
-                _operator_sessions[session.operator] = newest.session_id
-            else:
-                del _operator_sessions[session.operator]
+
+
+def _detach_session_locked(session_id: str) -> Optional[ComputerUseSession]:
+    """Take a session out of both dicts (caller holds _store_lock); the caller
+    destroys what this returns, outside the lock."""
+    session = _sessions.pop(session_id, None)
+    if session is None:
+        return None
+    if _operator_sessions.get(session.operator) == session_id:
+        survivors = [s for s in _sessions.values()
+                     if s.operator == session.operator]
+        if survivors:
+            newest = max(survivors, key=lambda s: s.last_activity)
+            _operator_sessions[session.operator] = newest.session_id
+        else:
+            del _operator_sessions[session.operator]
+    return session
 
 
 def destroy_session(operator: str):
     """Explicitly destroy an operator's session."""
-    global _sessions, _operator_sessions
-    sid = _operator_sessions.get(operator)
-    if sid:
-        _cleanup_session(sid)
+    with _store_lock:
+        session = _detach_session_locked(_operator_sessions.get(operator, ""))
+    if session is not None:
+        session.destroy()
         print(f"[CU-SESSION] Destroyed session for {operator}")
 
 
 def destroy_session_by_id(session_id: str) -> bool:
     """Explicitly destroy a session by id (the manual /cu/session/{sid}/close
     path). Returns False when the id is unknown — the caller 404s."""
-    if session_id not in _sessions:
+    with _store_lock:
+        session = _detach_session_locked(session_id)
+    if session is None:
         return False
-    op = _sessions[session_id].operator
-    _cleanup_session(session_id)
-    print(f"[CU-SESSION] Closed session {session_id[:8]} for {op} (explicit)")
+    session.destroy()
+    print(f"[CU-SESSION] Closed session {session_id[:8]} for {session.operator} (explicit)")
     return True
 
 
@@ -445,16 +471,15 @@ def cleanup_inactive_sessions(timeout: int = 600):
     """Remove sessions that have been inactive for too long.
     Skips sessions whose background agent task is still running.
     """
-    global _sessions
     now = time.time()
-    expired = [
-        sid for sid, s in _sessions.items()
-        if (now - s.last_activity) > timeout and s.status != "running"
-    ]
-    for sid in expired:
-        op = _sessions[sid].operator if sid in _sessions else "unknown"
-        print(f"[CU-SESSION] Cleaning up expired session {sid[:8]} for {op}")
-        _cleanup_session(sid)
+    with _store_lock:
+        expired = [
+            _detach_session_locked(sid) for sid, s in list(_sessions.items())
+            if (now - s.last_activity) > timeout and s.status != "running"
+        ]
+    for session in expired:
+        print(f"[CU-SESSION] Cleaning up expired session {session.session_id[:8]} for {session.operator}")
+        session.destroy()
     # Also clean up old screenshot files
     cleanup_old_screenshots()
 
