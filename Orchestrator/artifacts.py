@@ -28,7 +28,15 @@ from Orchestrator.utils.paths import safe_filename
 
 
 def generate_pdf(content: str, output_path: Path):
-    """Generate PDF from markdown content with rich formatting using reportlab."""
+    """Generate PDF from markdown content with rich formatting using reportlab.
+
+    The inline formatting is the model's text, so its markup can be malformed:
+    overlapping emphasis ("**bold *italic** tail*") becomes interleaved tags
+    like '<b><i></b>', which reportlab refuses ("Parse error: saw </b> instead
+    of expected </i>", MS02 2026-10-17..23) and which used to fail the WHOLE
+    artifact. A paragraph whose markup does not parse is set as plain text,
+    and a document that still fails to build is rebuilt from plain lines.
+    """
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -59,40 +67,58 @@ def generate_pdf(content: str, output_path: Path):
         text = escape_xml(text)
         # Bold: **text** or __text__ -> <b>text</b>
         text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-        text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
-        # Italic: *text* or _text_ -> <i>text</i>
+        text = re.sub(r'(?<!\w)__(.+?)__(?!\w)', r'<b>\1</b>', text)
+        # Italic: *text* or _text_ -> <i>text</i>. Underscores inside a word
+        # (snake_case identifiers) are not emphasis.
         text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'<i>\1</i>', text)
-        text = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'<i>\1</i>', text)
+        text = re.sub(r'(?<![\w_])_([^_]+)_(?![\w_])', r'<i>\1</i>', text)
         # Code: `text` -> <font face="Courier">text</font>
         text = re.sub(r'`(.+?)`', r'<font face="Courier">\1</font>', text)
         return text
+
+    def paragraph(text, style, prefix=''):
+        """``prefix`` + ``text`` with its inline formatting; plain when the
+        resulting markup does not parse."""
+        try:
+            return Paragraph(prefix + process_inline_formatting(text), style)
+        except ValueError as e:
+            print(f"[ARTIFACT] PDF line set as plain text (markup did not parse): {e}")
+            return Paragraph(prefix + escape_xml(text), style)
 
     lines = content.split('\n')
     for line in lines:
         # Headers
         if line.startswith('# '):
-            story.append(Paragraph(process_inline_formatting(line[2:]), styles['Heading1']))
+            story.append(paragraph(line[2:], styles['Heading1']))
         elif line.startswith('## '):
-            story.append(Paragraph(process_inline_formatting(line[3:]), styles['Heading2']))
+            story.append(paragraph(line[3:], styles['Heading2']))
         elif line.startswith('### '):
-            story.append(Paragraph(process_inline_formatting(line[4:]), styles['Heading3']))
+            story.append(paragraph(line[4:], styles['Heading3']))
         # Bullet points
         elif line.strip().startswith('- ') or line.strip().startswith('* '):
-            bullet_text = process_inline_formatting(line.strip()[2:])
-            story.append(Paragraph(f'• {bullet_text}', styles['BulletText']))
+            story.append(paragraph(line.strip()[2:], styles['BulletText'], prefix='• '))
         # Numbered lists
         elif re.match(r'^\d+\.\s', line.strip()):
-            list_text = process_inline_formatting(re.sub(r'^\d+\.\s', '', line.strip()))
+            list_text = re.sub(r'^\d+\.\s', '', line.strip())
             num = re.match(r'^(\d+)\.', line.strip()).group(1)
-            story.append(Paragraph(f'{num}. {list_text}', styles['BulletText']))
+            story.append(paragraph(list_text, styles['BulletText'], prefix=f'{num}. '))
         # Empty lines
         elif not line.strip():
             story.append(Spacer(1, 0.15*inch))
         # Regular paragraphs
         else:
-            story.append(Paragraph(process_inline_formatting(line), styles['Normal']))
+            story.append(paragraph(line, styles['Normal']))
 
-    doc.build(story)
+    try:
+        doc.build(story)
+    except Exception as e:
+        # Never lose the document over its formatting: every line, plain.
+        print(f"[ARTIFACT] PDF build failed ({e}); rebuilding as plain text")
+        plain = [Paragraph(escape_xml(line), styles['Normal']) if line.strip() else Spacer(1, 0.15*inch)
+                 for line in lines]
+        SimpleDocTemplate(str(output_path), pagesize=letter,
+                          leftMargin=inch, rightMargin=inch,
+                          topMargin=inch, bottomMargin=inch).build(plain)
 
 def generate_csv(content: str, output_path: Path):
     """Generate CSV file from content.
