@@ -688,6 +688,14 @@ def _apply_anthropic_caps(payload: Dict, model: str, temperature: float) -> None
         payload["temperature"] = temperature
 
 
+class DeclinedReply(str):
+    """A non-stream reply that is a provider's refusal or safety block, as a
+    parenthesized notice. It is still the notice str, so the chat worker shows
+    it unchanged; a caller that needs an answer (the Flight Recorder's provider
+    chain, oversight._synthesize) checks for this type and tries its next
+    provider instead of minting the notice as the report."""
+
+
 def _anthropic_refusal(stop_details) -> Dict:
     """A stop_reason "refusal" as ``{"message", "category"}``. The 5.x safety
     classifiers decline with HTTP 200 and empty (or partial) content, so the
@@ -1316,7 +1324,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
     if stop_reason == "refusal":
         refusal = _anthropic_refusal(data.get("stop_details"))
         print(f"[ANTHROPIC] Refusal ({refusal['category'] or 'no category'})")
-        return f"({refusal['message']})", total_usage, "", media_tasks
+        return DeclinedReply(f"({refusal['message']})"), total_usage, "", media_tasks
 
     # Extract final text response (answer) and native reasoning (thinking blocks).
     # Anthropic returns reasoning in `thinking` / `redacted_thinking` blocks and the
@@ -1490,8 +1498,8 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
             # Check for safety ratings
             prompt_feedback = data.get("promptFeedback", {})
             if prompt_feedback.get("blockReason"):
-                return f"(The model blocked the prompt. Reason: {prompt_feedback.get('blockReason')})", {}, [], "", media_tasks
-            return "(The model did not provide a response. This may be due to the safety policy.)", {}, [], "", media_tasks
+                return DeclinedReply(f"(The model blocked the prompt. Reason: {prompt_feedback.get('blockReason')})"), {}, [], "", media_tasks
+            return DeclinedReply("(The model did not provide a response. This may be due to the safety policy.)"), {}, [], "", media_tasks
 
         # Extract ALL parts from response (text + inline media)
         parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
@@ -3136,9 +3144,12 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
 
     Yields SSE events: {"type": "thinking"|"content"|"done"|"error", "data": "..."}
     Every turn ends in exactly one ``done`` or ``error``: a refusal, a mid-stream
-    error event or a stream cut off before message_delta is an error (never a
-    done that would save a fragment as the answer); a max_tokens stop and the
-    tool-round cap end in done with a note in the content.
+    error event or a stream cut off before message_delta is an error, never a
+    done; a max_tokens stop and the tool-round cap end in done with a note in
+    the content. The clients build the reply from the content events, so text
+    that streamed BEFORE such an error is still saved by them, with the error
+    (Portal chat-send.js, Android ChatViewModel); only an error with no content
+    before it keeps the turn out of the ledger.
     """
     if not ANTHROPIC_API_KEY:
         yield {"type": "error", "data": "ANTHROPIC_API_KEY not set"}
@@ -3422,12 +3433,12 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                         return
                     if stop_reason is None:
                         # The connection ended before message_delta: whatever
-                        # streamed is a fragment, not an answer to save.
+                        # streamed is a fragment, so this is no done.
                         yield {"type": "error", "data": "Anthropic stream ended before the response finished."}
                         return
                     if stop_reason == "refusal":
-                        # HTTP 200 with a declined request: report it, and never
-                        # let done save the partial text as the answer.
+                        # HTTP 200 with a declined request: report it as an
+                        # error, never a done for the partial text.
                         refusal = _anthropic_refusal(stop_details)
                         print(f"[ANTHROPIC-STREAM] Refusal ({refusal['category'] or 'no category'})")
                         yield {"type": "error", "data": refusal["message"],

@@ -414,6 +414,9 @@ def _synthesize(prompt: str) -> Optional[str]:
             return None
         out = fn(messages, model=model, operator=FLIGHT_RECORDER_OPERATOR)
         reply = out[0] if isinstance(out, tuple) else out
+        if isinstance(reply, cr.DeclinedReply):
+            # A refusal / safety block is no report: recorded, next provider.
+            raise RuntimeError(f"declined {reply}")
         return reply or None
 
     candidates: List[tuple] = []

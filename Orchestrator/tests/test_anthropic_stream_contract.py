@@ -19,7 +19,8 @@ with each way a Claude turn can end:
   * the 30-iteration tool cap (O02-chat-routes-A-11): the stream still ends
     with content + done; it used to end with neither.
   * a mid-stream error event or a stream that stops before message_delta: an
-    error, never a done that would save a partial reply as complete.
+    error, never a done that marks the partial reply as complete (a client
+    still saves content that streamed before the error, with the error).
   * the streaming history merges adjacent same-role turns (O02-chat-routes-A-14).
   * the non-stream call has a (connect, read) timeout that a long xhigh turn
     fits in, and MCP chat_with_context waits at least that long (W21).
@@ -299,7 +300,7 @@ def test_stream_refusal_is_an_error_with_its_category(cr, monkeypatch):
                                  "explanation": "This request was declined by a safety classifier."}))
     events, _ = _stream(cr, monkeypatch, script)
 
-    assert "done" not in _types(events), "a refusal must not save the partial reply as an answer"
+    assert "done" not in _types(events), "a refusal must not end in a done for the partial reply"
     err = events[-1]
     assert err["type"] == "error"
     assert "declined" in err["data"] and "cyber" in err["data"]
