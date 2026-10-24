@@ -6,8 +6,9 @@ every mint). A /chat/stream turn read it whole five times - once decoded to a
 str for a parameter every index-backed helper ignores, then once more per
 section - and every search_snapshots tool call read and decoded it again only
 to hand hybrid_retrieve an argument it never used. The snapshot index already
-carries each snapshot's byte range, so everything but the keyword scan (which
-scores the operator's whole corpus) now reads just the snapshots it returns.
+carries each snapshot's byte range, so every section now reads just the
+snapshots it returns, and the keyword scan just the snapshots it scores: the
+asking operator's, or every operator's for "system".
 
 These tests run against a real ledger and index written under tmp_path and
 count the bytes actually read from the volume file, so they hold whatever the
@@ -93,22 +94,78 @@ def _size(index, ids):
     return sum(index[s]["byte_end"] - index[s]["byte_start"] for s in ids)
 
 
+def _owned(index, op):
+    return [s for s, m in index.items() if m["operator"] == op]
+
+
+@pytest.fixture
+def whole_reads(monkeypatch):
+    """Calls that read the whole volume file, through either helper, from any
+    module that imported them by name."""
+    import importlib
+    calls = []
+    for mod_name in ("Orchestrator.fossils", "Orchestrator.volume", "Orchestrator.context_builder",
+                     "Orchestrator.retrieval", "Orchestrator.tasks"):
+        mod = importlib.import_module(mod_name)
+        for fn_name in ("read_volume_bytes", "read_text_safe"):
+            real = getattr(mod, fn_name, None)
+            if real is None:
+                continue
+
+            def spy(p, *a, _real=real, _name=fn_name, **k):
+                if str(p).endswith("SNAPSHOT_VOLUME.txt"):
+                    calls.append(_name)
+                return _real(p, *a, **k)
+            monkeypatch.setattr(mod, fn_name, spy)
+    return calls
+
+
 # -- the per-turn context build ------------------------------------------------
 
-def test_stream_turn_reads_the_ledger_whole_at_most_once(ledger, volume_reads, monkeypatch):
-    """Only the keyword channel scans the whole volume; every other section
-    reads just its own snapshots (plus the semantic over-fetch). Before: the
-    volume was read whole 5 times per turn."""
+def test_stream_turn_reads_only_the_operators_snapshots(ledger, volume_reads, whole_reads, monkeypatch):
+    """Every section reads just its own snapshots, and the keyword channel just
+    the ones it scores - this operator's, by their byte ranges. Before: the
+    volume was read whole 5 times per turn, then (first pass of this fix) once
+    for the keyword scan."""
     from Orchestrator import context_builder, retrieval
     monkeypatch.setattr(retrieval, "retrieve", _fake_retrieve(ledger))
     vol_size = VOL_PATH.stat().st_size
+    ana = _size(ledger, _owned(ledger, "Ana"))
 
     _ctx, prov = context_builder.build_fossil_context(
         "reranker latency", "Ana", provider="anthropic", include_media=False)
 
     assert prov["recent"] and prov["semantic"] and prov["checkpoint"] and prov["keyword"]
-    assert vol_size <= volume_reads["bytes"] < 1.5 * vol_size, (
-        f"read {volume_reads['bytes']:,} bytes of a {vol_size:,}-byte volume")
+    assert whole_reads == []
+    assert ana <= volume_reads["bytes"] < 2 * ana < vol_size, (
+        f"read {volume_reads['bytes']:,} bytes of a {vol_size:,}-byte volume "
+        f"(the operator owns {ana:,})")
+
+
+def test_keyword_scan_reads_exactly_the_snapshots_it_scores(ledger, volume_reads, whole_reads):
+    got = fossils.keyword_retrieve_for_operator("", "reranker latency déjà", 6, "Ben")
+    assert got and whole_reads == []
+    assert volume_reads["bytes"] == _size(ledger, _owned(ledger, "Ben"))
+
+    volume_reads["bytes"] = 0
+    # "system" scores every operator's snapshots: one range read each.
+    assert fossils.keyword_retrieve_for_operator("", "reranker latency", 6, "system")
+    assert volume_reads["bytes"] == _size(ledger, ledger)
+
+    volume_reads["bytes"] = 0
+    # A query with nothing to match reads nothing.
+    assert fossils.keyword_retrieve_for_operator("", "", 6, "Ana") == []
+    assert volume_reads["bytes"] == 0
+    assert whole_reads == []
+
+
+def test_retrieve_keyword_channel_reads_no_whole_volume(ledger, volume_reads, whole_reads):
+    """search_snapshots and every turn reach the keyword scan through
+    retrieve()'s keyword channel."""
+    ids = fossils.keyword_retrieve_ids_for_operator("", "reranker latency", 20, "Cy")
+    assert ids and all(ledger[s]["operator"] == "Cy" for s in ids)
+    assert whole_reads == []
+    assert volume_reads["bytes"] == _size(ledger, _owned(ledger, "Cy"))
 
 
 def test_context_without_the_keyword_channel_never_reads_the_whole_volume(

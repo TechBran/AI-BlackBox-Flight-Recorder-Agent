@@ -11,7 +11,6 @@ for an empty result, and on a box they scanned its whole volume.
 """
 import pytest
 
-import Orchestrator.fossils as fossils
 from Orchestrator.fossils import (
     keyword_retrieve_ids,
     keyword_retrieve_ids_for_operator,
@@ -22,18 +21,18 @@ from Orchestrator.fossils import (
 from Orchestrator.tests.test_keyword_scorer_parity import (
     SYNTH_QUERY,
     _build_synthetic_corpus,
+    serve_corpus_to_operator_scorer,
 )
 
 OFF_TOPIC_QUERY = "control phone on-device gemma"
 
 
 @pytest.fixture
-def corpus(monkeypatch):
+def corpus(monkeypatch, tmp_path):
     """The synthetic volume text, with the operator scorer's index and volume
     reads pointed at the same corpus."""
     vol_txt, vol_bytes, index = _build_synthetic_corpus()
-    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: index)
-    monkeypatch.setattr(fossils, "read_volume_bytes", lambda _path: vol_bytes)
+    serve_corpus_to_operator_scorer(monkeypatch, tmp_path, vol_bytes, index)
     return vol_txt, index
 
 

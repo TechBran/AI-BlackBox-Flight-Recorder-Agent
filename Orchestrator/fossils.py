@@ -1463,10 +1463,6 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
         matching.sort(key=lambda x: x[0])
         recent = matching[:]  # Get all snapshots (no limit)
 
-        # FIX 1: Read as BYTES to use byte offsets correctly (not string slicing)
-        vol_bytes = read_volume_bytes(VOL_PATH)
-        vol_len = len(vol_bytes)
-
         # snap_ids are known from the index entries; keep just the id list.
         sids = [snap_id for snap_id, _meta in recent]
 
@@ -1478,8 +1474,22 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
         if not terms and not bigrams and not trigrams:
             return []
 
+        # Read only the snapshots being scored - this operator's, or every one
+        # for "system" - by their index byte ranges, once each and in file
+        # order. This used to read the whole volume on every chat turn and
+        # every search, whoever asked (audit X05-architecture-14). A range the
+        # index puts past the end of the file scores as empty, as before.
+        raw = [b""] * len(recent)
+        with VolumeRanges() as vol:
+            vol_len = vol.size
+            for i in sorted(range(len(recent)), key=lambda j: recent[j][1]["byte_start"]):
+                start = recent[i][1]["byte_start"]
+                end = recent[i][1]["byte_end"]
+                if start < vol_len and end <= vol_len:
+                    raw[i] = vol.read(start, end)
+
         # PHASE 2b PEAK FIX: do NOT materialize the full decoded `texts` list.
-        # Holding `vol_bytes` (~37 MB) alongside a decoded-string copy of the WHOLE
+        # Holding the raw bytes (~37 MB of volume then) alongside a decoded copy of the WHOLE
         # corpus (~89 MB of str objects) was the per-call high-water mark (~127 MB).
         # Instead we decode each snapshot on demand (twice -- once for the corpus
         # document-frequency pass, once for scoring) and keep only the lowered text
@@ -1492,12 +1502,7 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
         num_texts = len(recent)
 
         def _decode_lc(i):
-            meta = recent[i][1]
-            start = meta["byte_start"]
-            end = meta["byte_end"]
-            if start < vol_len and end <= vol_len:
-                return vol_bytes[start:end].decode('utf-8', errors='replace').lower()
-            return ""
+            return raw[i].decode('utf-8', errors='replace').lower()
 
         # Shared streaming base TF-IDF (df pass + per-doc tf*idf); boosts added below.
         base = _streaming_tfidf_scores(_decode_lc, num_texts, terms)
@@ -1536,17 +1541,10 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
                 scored.append((score, i))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        # Decode text for the top-k only (from vol_bytes byte offsets).
+        # Decode text for the top-k only.
         base = []
         for _, i in scored[:k]:
-            meta = recent[i][1]
-            start = meta["byte_start"]
-            end = meta["byte_end"]
-            if start < vol_len and end <= vol_len:
-                t = vol_bytes[start:end].decode('utf-8', errors='replace')
-            else:
-                t = ""
-            base.append((sids[i], t))
+            base.append((sids[i], raw[i].decode('utf-8', errors='replace')))
     else:
         # Fallback to old method if index not available
         base_texts = keyword_retrieve(_fallback_volume_text(vol_txt), query, k=999999) if query else []  # Get all results (no limit)

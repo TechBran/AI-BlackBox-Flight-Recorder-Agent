@@ -144,9 +144,9 @@ def _build_synthetic_corpus():
 
     `index` mirrors the production snapshot_index shape ({snap_id: {byte_start,
     byte_end, operator, timestamp}}) with byte offsets that slice `vol_bytes` back to
-    each block -- this is what the operator scorer reads internally, so monkeypatching
-    load_snapshot_index/read_volume_bytes to return these makes the operator path score
-    the SAME fixed docs the non-operator path sees.
+    each block -- this is what the operator scorer reads internally, so serving
+    these to it (serve_corpus_to_operator_scorer) makes the operator path score the
+    SAME fixed docs the non-operator path sees.
     """
     vol_bytes = b""
     index = {}
@@ -162,6 +162,16 @@ def _build_synthetic_corpus():
             "timestamp": utc,
         }
     return vol_bytes.decode("utf-8"), vol_bytes, index
+
+
+def serve_corpus_to_operator_scorer(monkeypatch, tmp_path, vol_bytes, index):
+    """Point the operator scorer at the synthetic corpus: its index, and a volume
+    file holding `vol_bytes` (it reads each scored snapshot's byte range from
+    fossils.VOL_PATH, never the box's ledger)."""
+    vol_file = tmp_path / "SNAPSHOT_VOLUME.txt"
+    vol_file.write_bytes(vol_bytes)
+    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: index)
+    monkeypatch.setattr(fossils, "VOL_PATH", vol_file)
 
 
 def _ids_nonop(vol, q, k=20):
@@ -203,13 +213,13 @@ def test_nonoperator_scorer_ranking_parity():
     assert got == EXPECTED_NONOP, f"non-op ranking drift: {got} != {EXPECTED_NONOP}"
 
 
-def test_operator_scorer_ranking_parity_system(monkeypatch):
+def test_operator_scorer_ranking_parity_system(monkeypatch, tmp_path):
     """Operator scorer (op="system", sees all) over the FIXED synthetic corpus.
 
-    The operator scorer reads load_snapshot_index() + read_volume_bytes(VOL_PATH)
-    internally; we monkeypatch BOTH (on the Orchestrator.fossils module, where the
-    scorer looks them up) to return the synthetic index + bytes, so it scores the same
-    fixed docs deterministically.
+    The operator scorer reads load_snapshot_index() and byte ranges of VOL_PATH
+    internally; both are pointed (on the Orchestrator.fossils module, where the
+    scorer looks them up) at the synthetic index + a file of its bytes, so it scores
+    the same fixed docs deterministically.
 
     Guards the operator-path RECENCY bonus + re-score stage: the keyword-identical
     201/205 pair is ordered NEWEST-first here (205 before 201) -- the opposite of the
@@ -217,8 +227,7 @@ def test_operator_scorer_ranking_parity_system(monkeypatch):
     203 still leads on the exact-phrase boost. Immune to live-volume growth (the live
     volume is never read for this assertion)."""
     _vol_txt, vol_bytes, index = _build_synthetic_corpus()
-    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: index)
-    monkeypatch.setattr(fossils, "read_volume_bytes", lambda _path: vol_bytes)
+    serve_corpus_to_operator_scorer(monkeypatch, tmp_path, vol_bytes, index)
 
     # vol_txt arg is unused by the index path of the operator scorer; pass empty to
     # prove the assertion does NOT depend on the live volume text.
@@ -228,15 +237,14 @@ def test_operator_scorer_ranking_parity_system(monkeypatch):
     )
 
 
-def test_operator_scorer_ranking_parity_brandon(monkeypatch):
+def test_operator_scorer_ranking_parity_brandon(monkeypatch, tmp_path):
     """Operator scorer (op="Brandon") over the FIXED synthetic corpus.
 
     Guards operator FILTERING + the re-score refinement stage: only Brandon's relevant
     doc (204) survives -- the system-only docs (201/203/205) and Brandon's off-topic doc
     (202, which scores 0) are dropped. Deterministic + immune to live-volume growth."""
     _vol_txt, vol_bytes, index = _build_synthetic_corpus()
-    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: index)
-    monkeypatch.setattr(fossils, "read_volume_bytes", lambda _path: vol_bytes)
+    serve_corpus_to_operator_scorer(monkeypatch, tmp_path, vol_bytes, index)
 
     got = _ids_op("", SYNTH_QUERY, "Brandon")
     assert got == EXPECTED_OP_BRANDON, (
@@ -244,15 +252,14 @@ def test_operator_scorer_ranking_parity_brandon(monkeypatch):
     )
 
 
-def test_scorer_returns_text_for_topk(monkeypatch):
+def test_scorer_returns_text_for_topk(monkeypatch, tmp_path):
     """The (sid, text) tuples must still carry real decoded text for the top-k
     results (the win decodes only top-k, but it MUST still decode them).
 
     Runs over the FIXED synthetic corpus so the contract is checked deterministically
     against known docs (not the live volume)."""
     _vol_txt, vol_bytes, index = _build_synthetic_corpus()
-    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: index)
-    monkeypatch.setattr(fossils, "read_volume_bytes", lambda _path: vol_bytes)
+    serve_corpus_to_operator_scorer(monkeypatch, tmp_path, vol_bytes, index)
 
     results = _keyword_retrieve_for_operator_scored("", SYNTH_QUERY, 5, "system")
     assert len(results) <= 5
