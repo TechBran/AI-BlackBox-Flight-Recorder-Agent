@@ -1032,12 +1032,23 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=-/usr/bin/pkill -9 -f audio_subprocess.py
 ExecStart=$BLACKBOX_ROOT/Orchestrator/venv/bin/python -m uvicorn Orchestrator.app:app \\
     --host 0.0.0.0 --port 9091 \\
-    --timeout-keep-alive 120 --limit-max-requests 100000 --timeout-graceful-shutdown 30 --loop uvloop
+    --timeout-keep-alive 120 --timeout-graceful-shutdown 30 --loop uvloop
 Restart=always
 RestartSec=10
 
-# Memory pressure (audit Q4) — soft cap at 70 % of system RAM
+# Memory bounds (audit Q4, X06-ops-deploy-01). MemoryHigh= is the soft cap at
+# 70 % of system RAM: past it the kernel throttles the unit and reclaims.
+# MemoryMax= is the hard cap: past it the kernel OOM-kills the largest process
+# in the unit, and when that is uvicorn, Restart=always brings it back. This is
+# the leak backstop that replaced uvicorn's --limit-max-requests, which made
+# the service exit (an outage: dropped sessions, then the index rebuild) every
+# 100000 requests whether anything leaked or not. The orchestrator logs a
+# [MEM-WATCHDOG] warning as its RSS nears these (Orchestrator/memory_watchdog.py).
+# OOMPolicy=continue: a CLI agent the OOM killer picks (KillMode=process keeps
+# them in this unit) dies alone instead of stopping the orchestrator with it.
 MemoryHigh=70%
+MemoryMax=85%
+OOMPolicy=continue
 
 # Security hardening (audit M2 — preserved from existing unit)
 # NOTE: ProtectHome=read-only (NOT true) because BLACKBOX_ROOT lives in /home
@@ -1134,8 +1145,9 @@ render_override_dropin() {
 # ExecStart=
 # ExecStart=$BLACKBOX_ROOT/Orchestrator/venv/bin/python -m uvicorn Orchestrator.app:app --host 0.0.0.0 --port 8000
 
-# Override memory pressure (default 70 %):
+# Override memory pressure (default 70 %) and the hard cap (default 85 %):
 # MemoryHigh=50%
+# MemoryMax=65%
 
 # Override CPU priority:
 # Nice=-5

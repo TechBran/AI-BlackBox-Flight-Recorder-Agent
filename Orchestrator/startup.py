@@ -16,8 +16,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import sys
-import signal
 import threading
 from typing import Dict, Any, Optional, List
 
@@ -51,17 +49,11 @@ from Orchestrator.monitoring import cleanup_stuck_tasks, get_disk_usage
 from Orchestrator.scheduler import get_scheduler_manager
 
 
-def shutdown_handler(signum, frame):
-    """Handle SIGTERM/SIGINT for graceful shutdown"""
-    logger.info("Received signal %s, shutting down gracefully...", signum)
-    logger.info("Stopping background worker...")
-    # The worker thread is daemon=True, so it will stop when main thread exits
-    logger.info("Shutdown complete")
-    sys.exit(0)
-
-# Register signal handlers
-signal.signal(signal.SIGTERM, shutdown_handler)  # systemd stop
-signal.signal(signal.SIGINT, shutdown_handler)   # Ctrl+C
+# No signal handlers here: uvicorn owns SIGTERM/SIGINT. It installs its own
+# before it imports the app, and the import-time handler this module used to
+# register replaced them and ended in sys.exit(0), so every systemctl
+# stop/restart skipped the graceful drain and every shutdown hook (audit
+# O01-core-runtime-01). Shutdown work belongs in a shutdown hook.
 
 def _incremental_index_update(index, vol_bytes, scan_from_byte):
     """Process only new snapshots from a byte offset instead of full rebuild.
@@ -336,6 +328,24 @@ async def startup_storage_maintenance():
 
     global _storage_maintenance_task
     _storage_maintenance_task = asyncio.create_task(_loop())
+
+
+# The memory watchdog's task, held like the storage maintenance one.
+_memory_watchdog_task = None
+
+
+@boot_hook(app, "startup")
+async def startup_memory_watchdog():
+    """Warn in the journal when the process's RSS climbs toward the unit's
+    MemoryHigh=/MemoryMax= (Orchestrator/memory_watchdog.py), the bound that
+    replaced the --limit-max-requests recycle (audit X06-ops-deploy-01). Warn
+    only. Never raises."""
+    global _memory_watchdog_task
+    try:
+        from Orchestrator.memory_watchdog import start_memory_watchdog
+        _memory_watchdog_task = start_memory_watchdog()
+    except Exception as e:  # noqa: BLE001 — maintenance, not boot criteria.
+        logger.error("[MEM-WATCHDOG] failed to start (non-fatal): %s", e)
 
 
 @boot_hook(app, "startup")
