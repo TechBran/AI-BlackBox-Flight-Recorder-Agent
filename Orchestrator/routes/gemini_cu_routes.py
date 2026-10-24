@@ -131,36 +131,71 @@ async def run_gemini_cu(body: GeminiCURequest):
 
 
 def start_gemini_cu_task(task_id, operator, device_id, environment, prompt,
-                         model=DEFAULT_CU_MODEL, system_prompt=None, url=None) -> asyncio.Task:
+                         model=DEFAULT_CU_MODEL, system_prompt=None, url=None):
     """Launch _run_task in the background for an already-created GEMINI_CU task row.
 
     The public entry point for every caller (this router's /run and the
-    control_android_device tool). The task is kept in _BACKGROUND_TASKS until it
+    control_android_device tool). The driver is kept in _BACKGROUND_TASKS until it
     finishes, and an exception that escapes the runner is logged and written to
-    the task row instead of leaving it on "running" forever."""
-    bg = asyncio.create_task(_run_task(
-        task_id, operator, device_id, environment, prompt, model, system_prompt, url),
-        name=f"gemini-cu:{task_id}")
+    the task row instead of leaving it on "running" forever.
+
+    The driver always runs on the server's long-lived loop. The non-stream chat
+    path (tasks.process_chat_task -> call_anthropic / call_gemini) runs a tool
+    inside asyncio.run on a worker thread, and a task created on THAT loop was
+    cancelled the moment the tool returned, so the row stayed PENDING or
+    PROCESSING forever (audit O18-toolvault-modules-10). From another loop or
+    thread this returns a concurrent.futures.Future; on the server loop itself,
+    an asyncio.Task."""
+    coro = _run_task(task_id, operator, device_id, environment, prompt, model,
+                     system_prompt, url)
+    from Orchestrator.notifications.bridge import get_main_loop
+    server_loop = get_main_loop()
+    try:
+        here = asyncio.get_running_loop()
+    except RuntimeError:
+        here = None
+    if server_loop is not None and server_loop is not here:
+        bg = asyncio.run_coroutine_threadsafe(coro, server_loop)
+    elif here is not None:
+        bg = here.create_task(coro, name=f"gemini-cu:{task_id}")
+    else:
+        coro.close()
+        _record_task_failure(task_id, "No event loop is available to run the Gemini CU task")
+        raise RuntimeError("no event loop to run the Gemini CU task on")
     _BACKGROUND_TASKS.add(bg)
 
-    def _done(t: asyncio.Task):
+    def _done(t):
         _BACKGROUND_TASKS.discard(t)
         if t.cancelled():
+            # Cancelled with its loop (shutdown, or a throwaway loop with no
+            # server loop captured). A cancel by the operator already marked the
+            # row CANCELLED, which is sticky; anything else must not stay running.
+            _record_task_failure(
+                task_id, "Gemini CU task was interrupted before it finished "
+                         "(its event loop shut down)", only_if_running=True)
             return
         exc = t.exception()
         if exc is None:
             return
         print(f"[GEMINI CU] Task {task_id} crashed: {type(exc).__name__}: {exc}")
-        try:
-            from Orchestrator.tasks import update_task
-            from Orchestrator.models import TaskStatus
-            update_task(task_id, status=TaskStatus.FAILED,
-                        error_message=str(exc) or type(exc).__name__)
-        except Exception as e:  # pragma: no cover - best effort bookkeeping
-            print(f"[GEMINI CU] could not record the crash of task {task_id}: {e}")
+        _record_task_failure(task_id, str(exc) or type(exc).__name__)
 
     bg.add_done_callback(_done)
     return bg
+
+
+def _record_task_failure(task_id: str, message: str, only_if_running: bool = False) -> None:
+    """Best-effort FAILED write for a driver that cannot report its own end."""
+    try:
+        from Orchestrator.tasks import task_db, update_task
+        from Orchestrator.models import TaskStatus
+        if only_if_running:
+            row = task_db.get_task(task_id)
+            if row is None or row.status not in (TaskStatus.PENDING, TaskStatus.PROCESSING):
+                return
+        update_task(task_id, status=TaskStatus.FAILED, error_message=message)
+    except Exception as e:  # pragma: no cover - best effort bookkeeping
+        print(f"[GEMINI CU] could not record the end of task {task_id}: {e}")
 
 
 async def _run_task(task_id, operator, device_id, environment,
@@ -175,10 +210,15 @@ async def _run_task(task_id, operator, device_id, environment,
     the chat's history and a previous task's stop flag."""
     from Orchestrator.tasks import (
         task_db, is_cancel_requested, register_cancel_handle, unregister_cancel_handle,
+        clear_cancel_request,
     )
     from Orchestrator.models import TaskStatus
     task = task_db.get_task(task_id)
     if not task:
+        return
+    if task.status == TaskStatus.CANCELLED or is_cancel_requested(task_id):
+        # Cancelled before the driver started: there is no session to stop.
+        clear_cancel_request(task_id)
         return
 
     try:
@@ -266,10 +306,10 @@ async def _run_task(task_id, operator, device_id, environment,
         # request_stop() sets it on the exact session this task drives, and the
         # gemini loop exits cleanly via `break` (not an exception), so we reach
         # this point. It reflects only THIS task's cancel because the session is
-        # this task's own (created un-stopped above). The worker thread's
-        # process_task `finally` clears the per-task_id is_cancel_requested flag
-        # (GEMINI_CU returns from process_task early) but never touches
-        # stop_requested. is_cancel_requested is OR'd in for symmetry with the
+        # this task's own (created un-stopped above). The background worker never
+        # sees a GEMINI_CU row (tasks._ROUTE_OWNED_TASK_TYPES), so the cancel
+        # handle and the is_cancel_requested flag live until this task's own
+        # `finally`. is_cancel_requested is OR'd in for symmetry with the
         # USE_COMPUTER guard + a flag-only cancel.
         if getattr(session, "stop_requested", False) or is_cancel_requested(task_id):
             task.status = TaskStatus.CANCELLED
@@ -315,6 +355,7 @@ async def _run_task(task_id, operator, device_id, environment,
         # so is this task's own session.
         release_claim(_claim_id)
         unregister_cancel_handle(task_id)
+        clear_cancel_request(task_id)
         destroy_task_session(session)
 
 
@@ -353,6 +394,9 @@ async def stream_gemini_cu(body: GeminiCURequest):
     async def event_stream():
         session = create_task_session(body.operator, body.device_id, environment)
         try:
+            # The stream's own session is reachable only by id (live-view stop,
+            # /chat/cu-stop?session_id=), so the client is told it first.
+            yield f"data: {json.dumps({'type': 'session', 'data': {'session_id': session.session_id}})}\n\n"
             if _claims_display:
                 owner = try_claim("gemini-task", body.operator, _claim_id,
                                   session_id=session.session_id)
@@ -390,5 +434,12 @@ async def get_session_info(operator: str):
 
 @router.delete("/session/{operator}")
 async def end_session(operator: str):
+    """End the operator's chat session and stop their running /run and /stream tasks
+    (each drives its own task session, registered by id only; it tears itself down)."""
     destroy_session(operator)
-    return {"status": "destroyed"}
+    from Orchestrator.gemini_cu.session_manager import list_task_sessions
+    stopped = 0
+    for task_session in list_task_sessions(operator):
+        task_session.request_stop()
+        stopped += 1
+    return {"status": "destroyed", "stopped_tasks": stopped}

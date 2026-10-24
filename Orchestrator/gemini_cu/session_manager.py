@@ -302,6 +302,14 @@ def create_task_session(operator: str, device_id: str,
     return session
 
 
+def list_task_sessions(operator: str) -> list:
+    """The operator's live task sessions (create_task_session): every session of
+    theirs in _sessions that is not their chat session behind _operator_sessions."""
+    chat_sid = _operator_sessions.get(operator)
+    return [s for sid, s in list(_sessions.items())
+            if s.operator == operator and sid != chat_sid]
+
+
 def cleanup_expired_sessions() -> int:
     """Sweep expired, non-running Gemini sessions so their per-session displays
     free promptly. Without this, an expired chat session pinned one of

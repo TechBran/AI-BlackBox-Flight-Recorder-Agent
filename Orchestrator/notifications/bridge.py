@@ -62,6 +62,18 @@ def set_main_loop(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
     logger.info("[NOTIFY-BRIDGE] main event loop captured for sync→async notify")
 
 
+def get_main_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """The captured main loop while it is live (running, not closed), else None.
+
+    For sync or throwaway-loop callers that must hand long-lived work to the
+    server's loop (a coroutine left on an ``asyncio.run`` loop is cancelled the
+    moment that loop's main coroutine returns)."""
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed() or not loop.is_running():
+        return None
+    return loop
+
+
 def _swallow_future_exception(future) -> None:
     """Done-callback: retrieve the scheduled notify's exception so it never leaks.
 

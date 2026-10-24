@@ -241,7 +241,36 @@ def _signal_cu_cancel(operator: str, session_id: str = "", model: str = "") -> b
         return False
 
 
+def _signal_gemini_task_session(operator: str, session_id: str) -> bool:
+    """request_stop() on the task-scoped Gemini session ``session_id`` only."""
+    try:
+        from Orchestrator.gemini_cu.session_manager import get_session_by_id
+    except Exception as e:  # pragma: no cover — import wiring
+        print(f"[CANCEL] could not import the Gemini session store: {e}")
+        return False
+    session = get_session_by_id(session_id)
+    if session is None or getattr(session, "operator", None) != operator:
+        return False
+    try:
+        session.request_stop()
+        print(f"[CANCEL] Gemini task session stop requested for operator={operator!r} "
+              f"session={session_id[:8]}")
+        return True
+    except Exception as e:  # pragma: no cover — defensive
+        print(f"[CANCEL] request_stop failed for {operator!r}: {e}")
+        return False
+
+
 _CU_TASK_TYPES = (TaskType.BROWSER_USE, TaskType.USE_COMPUTER, TaskType.GEMINI_CU)
+
+# Task types an async route runs and owns end to end: its row, its cancel handle
+# and its cancel flag (gemini_cu_routes._run_task drives a GEMINI_CU task on the
+# server loop). The background worker never queues or touches them. It used to
+# "skip" a GEMINI_CU row and then, in process_task's finally (or the queue
+# reaper, once the row was PROCESSING), drop the cancel handle the route had just
+# registered; cancel_task then routed by operator and stopped the operator's
+# OTHER CU agent.
+_ROUTE_OWNED_TASK_TYPES = (TaskType.GEMINI_CU,)
 
 # CLI-agent task types get their OWN concurrency budget (see background_worker).
 _CLI_AGENT_TASK_TYPES = (TaskType.CLI_AGENT,)
@@ -337,9 +366,19 @@ def cancel_task(task_id: str) -> Dict[str, Any]:
         handle = _cancel_handles.get(task_id)
 
     detail = "cooperative"
+    task_session = ((handle or {}).get("session_id")
+                    or getattr(task, "session_id", "") or "")
     if handle and handle.get("kind") == "process":
         _kill_process_group(handle.get("pid"), task_id)
         detail = "process-group-kill"
+    elif task.task_type in _ROUTE_OWNED_TASK_TYPES:
+        # A Gemini task drives its OWN session: stop exactly that one, never via
+        # the cu-stop resolver's operator fallback (that stops a different
+        # agent). With no session yet, or one already gone, the cooperative flag
+        # set above stops the driver (it checks it at start and at every step).
+        if task_session:
+            _signal_gemini_task_session(task.operator or "", task_session)
+        detail = "cu-stop"
     elif handle and handle.get("kind") == "cu":
         # The handle is registered before the session exists on the headless
         # path; the row learns its session id at launch, so fall back to it.
@@ -395,8 +434,9 @@ def create_task(task_type: TaskType, operator: Optional[str] = None, **kwargs) -
     )
     task_db.save_task(task)
 
-    with task_lock:
-        task_queue.append(task_id)
+    if task_type not in _ROUTE_OWNED_TASK_TYPES:
+        with task_lock:
+            task_queue.append(task_id)
 
     return task
 
@@ -775,6 +815,11 @@ def background_worker():
 
 def process_task(task: Task):
     """Process a single task based on its type"""
+    if task.task_type in _ROUTE_OWNED_TASK_TYPES:
+        # Never queued (create_task), but if one ever arrives here it is not this
+        # worker's: no status write, and its cancel bookkeeping stays with the route.
+        print(f"[WORKER] Skipping {task.task_type} task {task.task_id} (handled by async route)")
+        return
     try:
         update_task(task.task_id, status=TaskStatus.PROCESSING, progress=10)
         # A task cancelled while queued (PENDING) never runs; one cancelled at
@@ -803,10 +848,6 @@ def process_task(task: Task):
             process_browser_use(task)
         elif task.task_type == TaskType.CLI_AGENT:
             process_cli_agent(task)
-        elif task.task_type == TaskType.GEMINI_CU:
-            # Handled by asyncio.create_task in gemini_cu_routes — skip worker processing
-            print(f"[WORKER] Skipping GEMINI_CU task {task.task_id} (handled by async route)")
-            return
 
     except TaskCancelled:
         # Cooperative cancel fired at a check point. cancel_task already marked

@@ -46,9 +46,11 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             }
         )
 
-        # Background driver: start_gemini_cu_task keeps a strong reference and
-        # records a crash on the task row, so get_task_status never sticks on
-        # "running" (audit O18-toolvault-modules-10).
+        # Background driver: start_gemini_cu_task keeps a strong reference,
+        # records a crash or an interruption on the task row, and runs the driver
+        # on the server loop even when this tool runs inside a worker thread's
+        # asyncio.run (the non-stream chat path), so get_task_status never sticks
+        # on "running" (audit O18-toolvault-modules-10).
         start_gemini_cu_task(task.task_id, ctx.operator, device_id, "android",
                              prompt, DEFAULT_CU_MODEL)
 
