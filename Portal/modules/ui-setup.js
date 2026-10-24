@@ -8,7 +8,7 @@
 
 import { $, toast, toastError } from './core-utils.js';
 import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
-import { loadTimelineData, showTimelineDetail } from './timeline-browser.js';
+import { openSnapshotById } from './timeline-browser.js';
 import { taskTypeMeta, isAgentTaskType, canShowLiveView, truncateText } from './task-ui.js';
 
 // =============================================================================
@@ -17,9 +17,6 @@ import { taskTypeMeta, isAgentTaskType, canShowLiveView, truncateText } from './
 
 /** Current lightbox zoom level */
 let currentLightboxZoom = 1;
-
-/** Timeline data reference for snapshot click handling */
-let timelineData = [];
 
 // =============================================================================
 // Health Check
@@ -289,42 +286,10 @@ export function setupImageLightbox() {
         snapId = snapId.toUpperCase();
         toast('Loading snapshot ' + snapId + '...');
 
-        try {
-            // Load timeline data if needed
-            const data = await loadTimelineData();
-            timelineData = data;
-
-            // Find the snapshot
-            let snapshot = timelineData.find(s => s.snapId === snapId);
-
-            // Try partial match for short format
-            if (!snapshot && snapId.match(/^SNAP-\d+$/)) {
-                const shortNum = snapId.replace('SNAP-', '');
-                console.log('[SNAPSHOT-CLICK] Short format detected, searching for:', shortNum);
-
-                const matches = timelineData.filter(s => s.snapId.endsWith('-' + shortNum));
-
-                if (matches.length === 1) {
-                    snapshot = matches[0];
-                    console.log('[SNAPSHOT-CLICK] Found unique match:', snapshot.snapId);
-                } else if (matches.length > 1) {
-                    console.warn('[SNAPSHOT-CLICK] Multiple matches found:', matches.map(s => s.snapId));
-                    snapshot = matches[0];
-                    toast('Multiple matches found, showing most recent: ' + snapshot.snapId);
-                }
-            }
-
-            if (snapshot) {
-                console.log('[SNAPSHOT-CLICK] Snapshot found, displaying...');
-                showTimelineDetail(snapshot);
-            } else {
-                console.error('[SNAPSHOT-CLICK] Snapshot not found:', snapId);
-                toastError('Snapshot ' + snapId + ' not found in volume');
-            }
-        } catch (error) {
-            console.error('[SNAPSHOT-CLICK] Error loading snapshot:', error);
-            toastError('Failed to load snapshot: ' + error.message);
-        }
+        // One snapshot from the per-id route (a short SNAP-<n> resolves
+        // server-side to the newest match), not the whole ledger from
+        // /assert per click (audit P04-media-tasks-fx-web-06).
+        await openSnapshotById(snapId);
     }
 }
 

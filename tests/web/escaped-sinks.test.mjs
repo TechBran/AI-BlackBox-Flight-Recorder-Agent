@@ -38,11 +38,15 @@ test("escapeHtml / escapeAttr escape all five characters and tolerate null", asy
 test("Timeline list and detail render ledger operator/preview as text", async () => {
     document.body.insertAdjacentHTML("beforeend",
         `<div id="timelineList"></div><div id="snapshotPopup" class="hide"><div id="snapshotPopupBody"></div></div>`);
-    const snap = (id, op, user) => `=== START SNAPSHOT — UTC 2026-10-17T00:00:00Z — ${id} (v1) ===\n`
-        + `OPERATOR: ${op}\nRaw Session Log\n[t] operator=${op.split(" ")[0]} user: ${user}\n`
-        + `=== END SNAPSHOT — ${id} — UTC 2026-10-17T00:00:00Z ===\n`;
-    const volume = snap("SNAP-20261017-1", XSS, XSS) + snap("SNAP-20261017-2", `Ops ${ATTR_BREAK}`, "hello <b>there</b>");
-    globalThis.fetch = () => jsonResponse({ volume });
+    // The list comes from the snapshot index; a body from the per-id route.
+    const rows = [
+        { snap_id: "SNAP-20261017-2", operator: `Ops ${ATTR_BREAK}`, timestamp: "2026-10-17T00:00:00Z", type: "normal", snippet: "hello <b>there</b>" },
+        { snap_id: "SNAP-20261017-1", operator: XSS, timestamp: "2026-10-17T00:00:00Z", type: "normal", snippet: XSS },
+    ];
+    globalThis.fetch = (url) => String(url).startsWith("/fossil/snapshot/")
+        ? jsonResponse({ snap_id: "SNAP-20261017-1", content: `OPERATOR: ${XSS}\nuser: ${XSS}`,
+                         metadata: { operator: XSS, timestamp: "2026-10-17T00:00:00Z", type: "normal" } })
+        : jsonResponse({ results: rows, count: rows.length, has_more: false, operators: [XSS] });
     try {
         const tl = await import("../../Portal/modules/timeline-browser.js");
         await tl.loadTimelineData();
