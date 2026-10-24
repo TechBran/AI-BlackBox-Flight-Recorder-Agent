@@ -58,6 +58,56 @@ def test_wrong_shape_counts_as_corrupt(tmp_path):
     assert moved.read_text() == "[1, 2]"
 
 
+def test_a_reader_never_quarantines_a_file_a_writer_just_replaced(tmp_path, monkeypatch):
+    """A reader holds the corrupt bytes it read; a writer then moves them
+    aside and writes good data; the reader's quarantine must not take the
+    writer's good file with it (review of rank 47: the live store vanished)."""
+    path = tmp_path / "store.json"
+    path.write_bytes(b'{"truncated": ')
+    real_parse = atomic_json._parse
+    state = {"interleaved": False}
+
+    def parse(raw):
+        if raw == b'{"truncated": ' and not state["interleaved"]:
+            state["interleaved"] = True
+            # The writer lands between the reader's read and its quarantine.
+            atomic_json.write_json(path, {"good": "written after the corrupt file was moved"})
+        return real_parse(raw)
+
+    monkeypatch.setattr(atomic_json, "_parse", parse)
+    got = atomic_json.read_json(path, {})
+    assert state["interleaved"]
+    assert got == {"good": "written after the corrupt file was moved"}
+    assert json.loads(path.read_text()) == {"good": "written after the corrupt file was moved"}
+    (moved,) = _quarantined(path)                    # only the corrupt bytes
+    assert moved.read_bytes() == b'{"truncated": '
+
+
+def test_a_reader_quarantines_under_the_store_lock(tmp_path):
+    path = tmp_path / "store.json"
+    path.write_bytes(b"{not json")
+    done = threading.Event()
+    with atomic_json.locked(path):
+        reader = threading.Thread(target=lambda: (atomic_json.read_json(path, {}), done.set()))
+        reader.start()
+        assert not done.wait(0.3), "the reader moved the store aside without its lock"
+        assert path.exists()
+    reader.join(5)
+    assert done.is_set() and not path.exists() and len(_quarantined(path)) == 1
+
+
+def test_a_reader_can_leave_a_corrupt_file_to_the_locked_writer(tmp_path):
+    path = tmp_path / "store.json"
+    path.write_bytes(b"{not json")
+    assert atomic_json.read_json(path, {"d": 1}, quarantine=False) == {"d": 1}
+    assert path.read_bytes() == b"{not json" and _quarantined(path) == []
+    with atomic_json.update_json(path, {}) as data:   # the writer still moves it aside
+        data["x"] = 1
+    assert json.loads(path.read_text()) == {"x": 1}
+    (moved,) = _quarantined(path)
+    assert moved.read_bytes() == b"{not json"
+
+
 def test_write_over_a_corrupt_file_quarantines_it_first(tmp_path):
     path = tmp_path / "store.json"
     path.write_bytes(b"\x00\x01 truncated")

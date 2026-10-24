@@ -285,7 +285,9 @@ Orchestrator/local_provider/local_devices.json
 Contacts/contacts.json.corrupt-*
 Orchestrator/local_provider/local_devices.json.corrupt-*
 Orchestrator/local_provider/.local_devices.json.*.tmp
-/.env.*.tmp
+# The temp sibling is '.' + the file's name, so the root .env's (and its
+# backups') are '..env.<rand>.tmp' / '..env.backup.<ts>.<rand>.tmp'.
+/..env.*.tmp
 /.config.ini.*.tmp
 
 # Zellij CLI Agent state: (operator, provider, app) -> session_name +

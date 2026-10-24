@@ -99,6 +99,23 @@ def test_service_account_upload_still_works(client, creds_dir):
     assert f"GOOGLE_APPLICATION_CREDENTIALS={target}" in secrets_writer.ENV_FILE.read_text()
 
 
+
+def test_service_account_upload_never_writes_through_a_fixed_temp_name(client, creds_dir, tmp_path):
+    """The key goes to a private, uniquely named temp sibling (audit
+    O15-scheduler-admin-10): a link planted at the old fixed '<name>.tmp'
+    must not receive it, and nothing is left behind."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched")
+    (creds_dir / "sa.tmp").symlink_to(outside)
+    r = _upload(client, "sa.json", json.dumps(SA).encode())
+    assert r.status_code == 200, r.text
+    assert outside.read_text() == "untouched"
+    assert json.loads((creds_dir / "sa.json").read_text()) == SA
+    assert (creds_dir / "sa.json").stat().st_mode & 0o077 == 0
+    (creds_dir / "sa.tmp").unlink()
+    assert sorted(p.name for p in creds_dir.iterdir()) == ["sa.json"]
+
+
 @pytest.mark.parametrize("name", sorted(cr.RESERVED_FILENAMES))
 def test_registry_files_cannot_be_overwritten_by_upload(client, creds_dir, name):
     registry = creds_dir / name

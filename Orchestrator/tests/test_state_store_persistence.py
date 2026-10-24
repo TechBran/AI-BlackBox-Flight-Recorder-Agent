@@ -85,6 +85,28 @@ def test_corrupt_preferences_are_quarantined_not_overwritten(prefs):
     assert json.loads(prefs.read_text()) == {"Bob": {"tts_voice": "openai:nova"}}
 
 
+def test_one_malformed_operator_entry_never_drops_every_operator(prefs):
+    """A null or non-object entry for one operator is skipped; it must not
+    quarantine the whole file and wipe every other operator's persona."""
+    prefs.write_text(json.dumps({"Ann": {"persona": "a long persona", "tts_voice": "onyx"},
+                                 "ghost": None, "odd": ["not", "a", "dict"]}))
+    state.load_operator_preferences()
+    assert state.get_operator_preference("Ann", "persona") == "a long persona"
+    assert _quarantined(prefs) == []
+    assert "ghost" not in state.OPERATOR_PREFERENCES
+    state.set_operator_preference("ghost", "tts_voice", "openai:nova")   # no AttributeError
+    assert json.loads(prefs.read_text())["ghost"] == {"tts_voice": "openai:nova"}
+    assert json.loads(prefs.read_text())["Ann"]["persona"] == "a long persona"
+
+
+def test_a_preferences_file_that_is_not_an_object_is_quarantined(prefs):
+    prefs.write_text('["Ann"]')
+    state.load_operator_preferences()
+    assert state.OPERATOR_PREFERENCES == {}
+    (moved,) = _quarantined(prefs)
+    assert moved.read_text() == '["Ann"]'
+
+
 def test_corrupt_operator_state_is_quarantined_not_overwritten(op_state):
     op_state.write_text('{"Ann": {"total_turns": 41, "last_chec')
     state.load_operator_state()

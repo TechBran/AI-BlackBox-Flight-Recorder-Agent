@@ -66,7 +66,7 @@ def _load_tokens() -> dict:
     quarantined (mcp_tokens.json.corrupt-<ts>) and reads as empty, so the next
     mint can never write one token over every operator's (audit
     O15-scheduler-admin-07)."""
-    data = atomic_json.read_json(MCP_TOKENS_FILE, {}, valid=_valid_tokens)
+    data = atomic_json.read_json(MCP_TOKENS_FILE, {}, valid=_valid_tokens, cross_process=True)
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
 

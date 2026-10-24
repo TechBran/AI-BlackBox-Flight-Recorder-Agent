@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from Orchestrator.onboarding.secrets_writer import remove_env_keys, update_env
 from Orchestrator.onboarding.service_account import service_account_problem
+from Orchestrator.utils import atomic_json
 from Orchestrator.utils.paths import resolve
 
 logger = logging.getLogger(__name__)
@@ -122,8 +123,9 @@ async def upload_credential(
     that the JSON is a service-account key (service_account_problem), then
     optionally points GOOGLE_APPLICATION_CREDENTIALS at it.
 
-    File is written atomically: .tmp + chmod 0600 + os.replace. credentials/
-    dir is auto-created with chmod 0700 if absent.
+    File is written atomically (Orchestrator/utils/atomic_json.py: 0600 temp
+    file, fsync, os.replace). credentials/ dir is auto-created with chmod 0700
+    if absent.
     """
     filename = (file.filename or "").strip()
     if not _FILENAME_RE.match(filename):
@@ -150,13 +152,11 @@ async def upload_credential(
     CREDS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CREDS_DIR, 0o700)
     target = CREDS_DIR / filename
-    # Atomic write via .tmp + os.replace. chmod 0600 on the tmp file BEFORE
-    # the rename so the final file lands with the right mode regardless of
-    # umask.
-    tmp = target.with_suffix(".tmp")
-    tmp.write_bytes(contents)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, target)
+    # Atomic write through a private, uniquely named temp sibling that is
+    # 0600 from creation, fsync'ed, then os.replace()d (audit
+    # O15-scheduler-admin-10): the old fixed '<name>.tmp' was briefly
+    # umask-readable and followed whatever link sat at that name.
+    atomic_json.write_bytes(target, contents, mode=0o600)
 
     is_sa = _is_google_service_account(target)
     result: dict = {

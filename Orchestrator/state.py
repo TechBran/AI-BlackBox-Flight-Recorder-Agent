@@ -183,7 +183,9 @@ OPERATOR_PREFERENCES: Dict[str, dict] = {}
 
 
 def _valid_preferences(data) -> bool:
-    return isinstance(data, dict) and all(isinstance(v, dict) for v in data.values())
+    # The file's shape only: one malformed operator entry is skipped by the
+    # loader, never a reason to quarantine every operator's preferences.
+    return isinstance(data, dict)
 
 
 def load_operator_preferences():
@@ -195,9 +197,13 @@ def load_operator_preferences():
         # A corrupt file is quarantined (*.corrupt-<ts>) instead of being
         # overwritten by the next save with a near-empty dict.
         data = atomic_json.read_json(OPERATOR_PREFS_FILE, {}, valid=_valid_preferences)
+        skipped = [op for op, prefs in data.items() if not isinstance(prefs, dict)]
+        for op in skipped:
+            print(f"[PREFS] Skipped {op!r}: its preferences are not an object")
         with _store_lock:
             OPERATOR_PREFERENCES.clear()
-            OPERATOR_PREFERENCES.update(data)
+            OPERATOR_PREFERENCES.update({op: prefs for op, prefs in data.items()
+                                         if isinstance(prefs, dict)})
         print(f"[PREFS] Loaded preferences for {len(OPERATOR_PREFERENCES)} operators")
     except Exception as e:
         print(f"[ERROR] Failed to load operator preferences: {e}")

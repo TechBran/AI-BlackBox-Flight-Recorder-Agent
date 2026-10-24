@@ -2031,7 +2031,8 @@ def _load_oauth_clients() -> Dict[str, dict]:
     left for the next registration to overwrite.
     """
     return atomic_json.read_json(BLACKBOX_MCP_OAUTH_CLIENTS_FILE, {},
-                                 valid=lambda d: isinstance(d, dict))
+                                 valid=lambda d: isinstance(d, dict),
+                                 cross_process=True)
 
 
 def _persist_oauth_client(client_id: str, record: dict) -> None:

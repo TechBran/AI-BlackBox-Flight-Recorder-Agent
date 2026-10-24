@@ -17,7 +17,9 @@ through here, so each gets the same guarantees custom_servers.py pioneered:
     fcntl.flock on a hidden '.<name>.lock' sibling.
   * corrupt-safe: a file that does not parse, or fails the caller's shape
     check, is renamed to '<name>.corrupt-<UTC>' and the caller gets its
-    default, so the next save cannot destroy what was there.
+    default, so the next save cannot destroy what was there. A reader does
+    the rename under the store's lock, and only while the file still holds
+    the bytes that failed, so it never moves aside a writer's fresh file.
   * never overwrites a corrupt file: write_json() checks the file it is about
     to replace and quarantines it first; when even that rename fails, it
     raises CorruptStoreError and writes nothing.
@@ -179,57 +181,92 @@ def _parse(raw: bytes) -> Any:
     return json.loads(raw.decode("utf-8"))
 
 
-def _read(target: str, default: Any, valid: Optional[Callable[[Any], bool]],
-          strict: bool) -> Any:
+def _read_raw(target: str, default: Any, strict: bool):
+    """(raw bytes, None), or (None, the value to return) when there is no
+    readable file."""
     try:
         with open(target, "rb") as f:
-            raw = f.read()
+            return f.read(), None
     except FileNotFoundError:
-        return copy.deepcopy(default)
+        return None, copy.deepcopy(default)
     except OSError as exc:
         if strict:
             raise UnreadableStoreError(target, f"cannot read {target}: {exc}") from exc
         logger.warning("atomic_json: unreadable store %s (%s), using the default", target, exc)
-        return copy.deepcopy(default)
-    problem = None
+        return None, copy.deepcopy(default)
+
+
+def _check(raw: bytes, valid: Optional[Callable[[Any], bool]]):
+    """(data, None) for a good store, or (None, what is wrong with it)."""
     try:
         data = _parse(raw)
     except (ValueError, UnicodeDecodeError) as exc:  # JSONDecodeError is a ValueError
-        problem = f"does not parse ({exc})"
-    else:
-        if valid is not None and not valid(data):
-            problem = "has the wrong shape"
+        return None, f"does not parse ({exc})"
+    if valid is not None and not valid(data):
+        return None, "has the wrong shape"
+    return data, None
+
+
+def _read(target: str, default: Any, valid: Optional[Callable[[Any], bool]],
+          strict: bool, quarantine_corrupt: bool = True, cross_process: bool = False) -> Any:
+    raw, missing = _read_raw(target, default, strict)
+    if raw is None:
+        return missing
+    data, problem = _check(raw, valid)
     if problem is None:
         return data
-    moved = quarantine(target)
-    if moved is None and os.path.lexists(target):
-        if strict:
-            raise CorruptStoreError(
-                target, f"{target} {problem} and could not be moved aside; "
-                        "refusing to write over it")
-        logger.error("atomic_json: %s %s and could not be quarantined", target, problem)
+    if not quarantine_corrupt:
+        logger.warning("atomic_json: %s %s; left in place for the next write, "
+                       "using the default", target, problem)
         return copy.deepcopy(default)
+    # Move it aside under the store's lock, and only if it still holds the
+    # bytes that failed: a writer may have quarantined them and written good
+    # data since this read, and renaming THAT aside would make the live store
+    # vanish (writers replace the file while holding this lock).
+    with locked(target, cross_process=cross_process):
+        fresh, missing = _read_raw(target, default, strict)
+        if fresh is None:
+            return missing
+        if fresh != raw:
+            data, problem = _check(fresh, valid)
+            if problem is None:
+                return data
+        moved = quarantine(target)
+        if moved is None and os.path.lexists(target):
+            if strict:
+                raise CorruptStoreError(
+                    target, f"{target} {problem} and could not be moved aside; "
+                            "refusing to write over it")
+            logger.error("atomic_json: %s %s and could not be quarantined", target, problem)
+            return copy.deepcopy(default)
     logger.warning("atomic_json: %s %s; quarantined to %s, starting from the default",
                    target, problem, moved)
     return copy.deepcopy(default)
 
 
-def read_json(path, default: Any = None, *, valid: Optional[Callable[[Any], bool]] = None) -> Any:
+def read_json(path, default: Any = None, *, valid: Optional[Callable[[Any], bool]] = None,
+              quarantine: bool = True, cross_process: bool = False) -> Any:
     """The store's content, for a reader. Never raises.
 
     A missing file yields a copy of `default`; a corrupt one (bad JSON, bad
-    UTF-8, or `valid(data)` false) is quarantined first, then yields the
-    default; an unreadable one is logged and yields the default.
+    UTF-8, or `valid(data)` false) is quarantined first (under the store's
+    lock, pass the writers' `cross_process`), then yields the default; an
+    unreadable one is logged and yields the default. `quarantine=False`
+    leaves a corrupt file where it is for the next locked write to move
+    aside, for a store whose writer recovers its content when it does (the
+    media index rebuilds from Portal/uploads).
     """
-    return _read(_target(path), default, valid, strict=False)
+    return _read(_target(path), default, valid, strict=False,
+                 quarantine_corrupt=quarantine, cross_process=cross_process)
 
 
-def load_json(path, default: Any = None, *, valid: Optional[Callable[[Any], bool]] = None) -> Any:
+def load_json(path, default: Any = None, *, valid: Optional[Callable[[Any], bool]] = None,
+              cross_process: bool = False) -> Any:
     """As read_json, for a caller about to write the store back: raises
     UnreadableStoreError when the file cannot be read and CorruptStoreError
     when a corrupt file could not be moved aside, so it never writes over
     data it could not see."""
-    return _read(_target(path), default, valid, strict=True)
+    return _read(_target(path), default, valid, strict=True, cross_process=cross_process)
 
 
 # ------------------------------------------------------------------ writing
@@ -350,7 +387,7 @@ def update_json(path, default: Any = _MISSING, *, valid: Optional[Callable[[Any]
         default = {}
     target = _target(path)
     with locked(target, cross_process=cross_process):
-        data = load_json(target, default, valid=valid)
+        data = load_json(target, default, valid=valid, cross_process=cross_process)
         before = json.dumps(data, sort_keys=True)
         yield data
         if json.dumps(data, sort_keys=True) != before:

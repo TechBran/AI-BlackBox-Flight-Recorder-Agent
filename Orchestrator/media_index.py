@@ -26,8 +26,11 @@ def _valid_index(data) -> bool:
 
 def load_media_index() -> Dict[str, Any]:
     """Load the media index from disk. Never raises: a file that does not
-    parse is quarantined (media_index.json.corrupt-<ts>) and reads as empty."""
-    return atomic_json.read_json(MEDIA_INDEX_FILE, {}, valid=_valid_index)
+    parse reads as empty and is left where it is. Only the locked writer
+    (_editing_index) moves it aside, because only the writer rebuilds the
+    catalog from Portal/uploads when it does; a reader that moved it first
+    left the next add nothing to rebuild from, resetting the catalog."""
+    return atomic_json.read_json(MEDIA_INDEX_FILE, {}, valid=_valid_index, quarantine=False)
 
 
 def save_media_index(index: Dict[str, Any]):

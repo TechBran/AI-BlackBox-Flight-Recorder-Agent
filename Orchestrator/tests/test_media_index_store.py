@@ -62,8 +62,30 @@ def test_failed_save_leaves_the_previous_index(index_file):
 
 
 def test_readers_never_rewrite_and_survive_a_corrupt_index(index_file):
+    """A reader reads a corrupt index as empty and leaves the file where it
+    is: only the locked writer moves it aside, because only the writer
+    rebuilds the catalog from Portal/uploads when it does."""
     path, _ = index_file
     path.write_text("{oops")
     assert media_index.list_media() == []
     assert media_index.get_index_stats()["total_files"] == 0
-    assert list(path.parent.glob("media_index.json.corrupt-*"))
+    assert path.read_text() == "{oops"
+    assert not list(path.parent.glob("media_index.json.corrupt-*"))
+
+
+def test_corrupt_index_seen_first_by_a_reader_is_still_rebuilt(index_file):
+    """The Portal's media list reaches a torn index before any add: the next
+    add must still rebuild the catalog, not reset it to its one entry."""
+    path, uploads = index_file
+    for i in range(5):
+        (uploads / f"keep{i}_abcdef1{i}.png").write_bytes(b"png")
+        media_index.add_media_entry(f"/ui/uploads/keep{i}_abcdef1{i}.png", "image", prompt=f"p{i}")
+    path.write_text(path.read_text()[:60])          # torn on disk
+    media_index.list_media()
+    media_index.get_index_stats()
+    media_index.add_media_entry("/ui/uploads/new.mp3", "audio", prompt="new")
+    index = json.loads(path.read_text())
+    assert "/ui/uploads/new.mp3" in index
+    assert all(f"/ui/uploads/keep{i}_abcdef1{i}.png" in index for i in range(5))
+    (moved,) = sorted(path.parent.glob("media_index.json.corrupt-*"))
+    assert len(moved.read_text()) == 60

@@ -199,3 +199,40 @@ def test_env_writes_are_owner_only_and_leave_no_fixed_temp_file(env_file):
     assert not (env_file.parent / ".env.tmp").exists()
     leftovers = [p.name for p in env_file.parent.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
+
+
+def _git_ignores(name: str) -> bool:
+    proc = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--no-index", name],
+                          capture_output=True)
+    if proc.returncode not in (0, 1):
+        pytest.skip(f"git check-ignore unavailable: {proc.stderr.decode(errors='replace')}")
+    return proc.returncode == 0
+
+
+def test_temp_files_of_the_root_env_and_config_ini_are_gitignored(env_file, tmp_path, monkeypatch):
+    """A kill mid-write leaves the private temp sibling behind. At the
+    serving tree's root it holds every API key, so git must ignore it (the
+    updater refuses a dirty tree, and the repo is public). The names are the
+    ones atomic_json really creates, not a copy of its naming rule."""
+    import shutil
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    from Orchestrator.onboarding import secrets_writer
+    from Orchestrator.utils import atomic_json, config_ini
+    names = []
+    real_mkstemp = atomic_json.tempfile.mkstemp
+
+    def spy(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        names.append(os.path.basename(path))
+        return fd, path
+
+    monkeypatch.setattr(atomic_json.tempfile, "mkstemp", spy)
+    secrets_writer.update_env({"A_KEY": "1"})
+    secrets_writer.update_env({"B_KEY": "2"})            # backs the first file up
+    ini = tmp_path / "config.ini"
+    ini.write_text("[users]\nlist = Ann\n")
+    config_ini.update_config_ini(lambda p: p.set("users", "list", "Ann, Bob"), path=ini)
+    assert any(n.endswith(".tmp") and "backup" in n for n in names)
+    assert any(".config.ini." in n for n in names)
+    assert names and all(_git_ignores(n) for n in names), names
