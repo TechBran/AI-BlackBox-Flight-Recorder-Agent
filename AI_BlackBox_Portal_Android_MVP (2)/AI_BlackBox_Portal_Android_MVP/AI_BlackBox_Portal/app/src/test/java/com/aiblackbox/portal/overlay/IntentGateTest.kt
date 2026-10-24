@@ -259,6 +259,23 @@ class IntentGateTest {
     }
 
     @Test
+    fun `the platform launch exemptions follow the Android release`() {
+        // API 26-28: no background-activity-launch restrictions at all.
+        for (sdk in 26..28) {
+            assertTrue("sdk $sdk", platformLaunchExempt(sdk, canDrawOverlays = false))
+        }
+        // API 29-34: a user-granted SYSTEM_ALERT_WINDOW exempts the app without a window.
+        for (sdk in 29..34) {
+            assertTrue("sdk $sdk with SAW", platformLaunchExempt(sdk, canDrawOverlays = true))
+            assertFalse("sdk $sdk without SAW", platformLaunchExempt(sdk, canDrawOverlays = false))
+        }
+        // API 35+: SAW alone no longer counts (it needs a visible overlay window).
+        for (sdk in 35..36) {
+            assertFalse("sdk $sdk", platformLaunchExempt(sdk, canDrawOverlays = true))
+        }
+    }
+
+    @Test
     fun `the no-handler detail names the action and is a dispatch failure`() {
         val detail = noHandlerDetail("set_timer")
         assertTrue(detail, detail.startsWith("set_timer failed"))

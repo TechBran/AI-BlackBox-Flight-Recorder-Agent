@@ -353,6 +353,75 @@ class ActuatorsTest {
         }
     }
 
+    // ---- review fixes: same-looking controls in another row, and the card's own window ----
+
+    @Test
+    fun `an identical control in a different list row is not the approved one`() {
+        // Every row of a list has its own "Delete": a scroll under the card moves row B's
+        // button into row A's slot with the same label and class. Only the row tells them apart.
+        val rowA = ApprovedTarget("Delete", false, "android.widget.ImageButton",
+            row = rowDigest(listOf("Invoice 1042", "Delete")))
+        val rowB = rowA.copy(row = rowDigest(listOf("Invoice 2077", "Delete")))
+        assertNotNull("a recycled row's identical button must abort", approvedTargetChanged(rowA, rowB))
+        assertNull(approvedTargetChanged(rowA, rowA.copy()))
+    }
+
+    @Test
+    fun `rowDigest tells rows apart by their visible text`() {
+        assertNull("no row text, no row identity", rowDigest(emptyList()))
+        assertEquals(rowDigest(listOf("Bob", "Delete")), rowDigest(listOf("Bob", "Delete")))
+        assertTrue(rowDigest(listOf("Bob", "Delete")) != rowDigest(listOf("Alice", "Delete")))
+        assertTrue("order matters", rowDigest(listOf("a", "b")) != rowDigest(listOf("b", "a")))
+        assertTrue("no join ambiguity", rowDigest(listOf("ab", "c")) != rowDigest(listOf("a", "bc")))
+    }
+
+    @Test
+    fun `a coordinate that now hits the same label in another row aborts`() = runBlocking {
+        val labeler = ScriptedLabeler(CoordinateHit.Node("Delete", row = 1),
+            CoordinateHit.Node("Delete", row = 2))
+        val r = Actuators(service = { null }, mode = { AutonomyMode.PERMISSION },
+            confirm = RecordingConfirm(answer = true), coordinateLabeler = labeler).tap(10, 20)
+        assertEquals(SCREEN_CHANGED_SINCE_APPROVAL, r.detail)
+    }
+
+    @Test
+    fun `after an Allow the target is re-read only once the confirm card has left`() = runBlocking {
+        // The card is a focusable overlay, so right after Allow it can still be the ACTIVE
+        // window: a re-read then sees the card, not the app, and every approved tap aborts.
+        val events = mutableListOf<String>()
+        val confirm = object : ConfirmUi {
+            override suspend fun confirm(description: String): Boolean {
+                events += "confirm"; return true
+            }
+        }
+        val labeler: (Int, Int) -> CoordinateHit = { _, _ -> events += "read"; CoordinateHit.Node("Send") }
+        val r = Actuators(service = { null }, mode = { AutonomyMode.PERMISSION }, confirm = confirm,
+            coordinateLabeler = labeler, awaitConfirmCardGone = { events += "await-card-gone" }).tap(10, 20)
+        assertEquals(listOf("read", "confirm", "await-card-gone", "read"), events)
+        assertEquals("accessibility service not enabled", r.detail)   // passed the re-check
+    }
+
+    @Test
+    fun `nothing waits for the card when nothing was asked`() = runBlocking {
+        var waited = 0
+        Actuators(service = { null }, mode = { AutonomyMode.YOLO },
+            coordinateLabeler = { _, _ -> CoordinateHit.Node("Send") },
+            awaitConfirmCardGone = { waited++ }).tap(1, 1)
+        assertEquals(0, waited)
+    }
+
+    @Test
+    fun `awaitWhile returns as soon as the condition clears and gives up at the timeout`() =
+        kotlinx.coroutines.test.runTest {
+            var polls = 0
+            assertTrue(awaitWhile(timeoutMs = 1_000, stepMs = 25) { ++polls < 4 })
+            assertEquals(4, polls)
+            var forever = 0
+            assertFalse(awaitWhile(timeoutMs = 100, stepMs = 25) { forever++; true })
+            assertEquals("bounded: polled once per step plus the first check", 5, forever)
+            assertTrue("a condition already clear never waits", awaitWhile(1_000, 25) { false })
+        }
+
     @Test
     fun `the screen-changed abort is a dispatch failure, never a user decision`() {
         // classifyActuatorError treats "declined" as a user decision (no error) and "not found"

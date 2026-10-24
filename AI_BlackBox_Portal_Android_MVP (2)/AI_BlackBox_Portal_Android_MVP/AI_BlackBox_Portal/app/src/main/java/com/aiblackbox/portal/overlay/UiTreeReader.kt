@@ -254,6 +254,10 @@ class UiTreeReader(
          */
         const val MAX_NODES = 80
 
+        /** [rowSignature]: how far up a row container is looked for, and how much of it is read. */
+        private const val ROW_MAX_HOPS = 6
+        private const val ROW_MAX_NODES = 64
+
         /**
          * Production factory: reads the live root from the connected
          * [BlackBoxA11yService] via the singleton seam. The constructor takes a
@@ -375,6 +379,7 @@ class UiTreeReader(
             var found = false
             var bestArea = Long.MAX_VALUE
             var bestLabel: String? = null
+            var bestRow: Int? = null
             val counter = intArrayOf(0)
             try {
                 walkActionable(root, counter) { node, _ ->
@@ -388,6 +393,7 @@ class UiTreeReader(
                             // Redaction: never read a password node's text into the label.
                             val pw = isPasswordField(node.isPassword, node.inputType)
                             bestLabel = if (pw) null else (node.text ?: node.contentDescription)?.toString()
+                            bestRow = rowSignature(node)
                         }
                     }
                     false // scan every actionable node; do not short-circuit
@@ -395,7 +401,65 @@ class UiTreeReader(
             } catch (e: Exception) {
                 Log.w(TAG, "labelAtPoint: hit-test aborted (${e.javaClass.simpleName})")
             }
-            return if (found) CoordinateHit.Node(bestLabel) else CoordinateHit.None
+            return if (found) CoordinateHit.Node(bestLabel, bestRow) else CoordinateHit.None
+        }
+
+        /**
+         * (rank 64, review) The list-row identity of [node]: [rowDigest] of the visible,
+         * non-password text in the list row that holds it, or null when it is not in a list.
+         *
+         * A list's rows usually repeat one control ("Delete", "Send", "Reply"), so a scroll
+         * under the confirm card can put another row's identical button into the approved
+         * slot with the same label and class. The row's text (the item's title, sender,
+         * amount…) is what tells them apart. The row is the nearest ancestor-or-self (at most
+         * [ROW_MAX_HOPS] up) that is a collection item or a direct child of a scrollable or
+         * collection container. Bounds are deliberately NOT part of the identity: the card
+         * can hide the keyboard, which moves a composer's Send button without changing it.
+         * Never throws; the digest is a hash, so no screen text is kept.
+         */
+        internal fun rowSignature(node: AccessibilityNodeInfo): Int? = try {
+            var row: AccessibilityNodeInfo? = null
+            var cur: AccessibilityNodeInfo? = node
+            var hops = 0
+            while (cur != null && hops <= ROW_MAX_HOPS) {
+                val parent = cur.parent
+                if (cur.collectionItemInfo != null ||
+                    (parent != null && (parent.isScrollable || parent.collectionInfo != null))
+                ) {
+                    row = cur
+                    break
+                }
+                cur = parent
+                hops++
+            }
+            row?.let { r ->
+                val texts = ArrayList<String>()
+                collectRowTexts(r, texts, intArrayOf(0))
+                rowDigest(texts)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "rowSignature: aborted (${e.javaClass.simpleName})")
+            null
+        }
+
+        /** Pre-order visible text of [node]'s subtree (password fields skipped), capped. */
+        private fun collectRowTexts(node: AccessibilityNodeInfo, out: MutableList<String>, count: IntArray) {
+            if (count[0]++ >= ROW_MAX_NODES) return
+            if (!isPasswordField(node.isPassword, node.inputType)) {
+                (node.text ?: node.contentDescription)?.toString()?.takeIf { it.isNotBlank() }
+                    ?.let { out += it }
+            }
+            for (i in 0 until node.childCount) {
+                if (count[0] >= ROW_MAX_NODES) break
+                val child = node.getChild(i) ?: continue
+                collectRowTexts(child, out, count)
+                @Suppress("DEPRECATION")
+                try {
+                    child.recycle()
+                } catch (_: Exception) {
+                    // see walkActionable: cleanup must never crash the read
+                }
+            }
         }
 
         /**
@@ -539,6 +603,14 @@ private val readScreenJson = Json {
     encodeDefaults = true
     // Keep output compact (no pretty-print) — this goes straight into a prompt.
 }
+
+/**
+ * PURE: the digest of a list row's visible text ([UiTreeReader.rowSignature]), or null for
+ * a row with no text. Order-sensitive, and a separator that cannot occur in screen text
+ * keeps `["ab","c"]` and `["a","bc"]` apart.
+ */
+fun rowDigest(texts: List<String>): Int? =
+    if (texts.isEmpty()) null else texts.joinToString("\u0000").hashCode()
 
 /**
  * THE REDACTION GATE. For a password node returns the fixed

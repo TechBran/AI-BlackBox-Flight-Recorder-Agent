@@ -12,6 +12,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -157,6 +158,16 @@ class OverlayConfirmUi(context: Context) : ConfirmUi {
                 cornerRadius = dp(16).toFloat()
                 setColor(Color.parseColor("#1E1E1E"))
             }
+            // Mark the card's root node so the actuator can tell when the card (a focusable
+            // window) has stopped being the active window after an Allow, and only then
+            // re-read the app it approved an action on (see Actuators awaitConfirmCardGone).
+            // An extra, not a description: TalkBack reads the card exactly as before.
+            accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.extras.putBoolean(CONFIRM_CARD_EXTRA, true)
+                }
+            }
         }
 
         card.addView(TextView(appContext).apply {
@@ -196,3 +207,6 @@ class OverlayConfirmUi(context: Context) : ConfirmUi {
         private const val TAG = "OverlayConfirmUi"
     }
 }
+
+/** The accessibility-node extra that marks the root of the [OverlayConfirmUi] card. */
+const val CONFIRM_CARD_EXTRA: String = "com.aiblackbox.portal.overlay.CONFIRM_CARD"

@@ -234,8 +234,12 @@ sealed interface CoordinateHit {
      * (the same text-or-contentDescription label an element tap gates on; `null`/blank
      * when the resolved node is a password field or has no readable label). A password
      * node's text is NEVER placed here — the recovery mirrors the actuator's redaction.
+     *
+     * [row] is the hit control's list-row identity ([rowDigest] of the row's visible
+     * text, null outside a list): an approved coordinate whose re-hit lands on the same
+     * label in ANOTHER row (a recycled list row) is a different control.
      */
-    data class Node(val label: String?) : CoordinateHit
+    data class Node(val label: String?, val row: Int? = null) : CoordinateHit
 
     /**
      * `(x,y)` resolved to NO actionable node — the coordinate is tree-blind / lands on

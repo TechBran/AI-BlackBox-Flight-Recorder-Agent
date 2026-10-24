@@ -831,11 +831,18 @@ class IntentActuator(
                 com.aiblackbox.portal.BlackBoxNotificationManager(appContext.applicationContext)
                     .postNavigation(push)
             },
-            // (W27) The launch exemptions besides a visible activity: the floating overlay
-            // (a visible TYPE_APPLICATION_OVERLAY window) and the connected accessibility
-            // service (a system-bound service). Either lets a launch through, as before.
+            // (W27) The launch exemptions besides a visible activity: the release's own
+            // (none before Android 10; the overlay grant on Android 10-14), the floating
+            // overlay (a visible TYPE_APPLICATION_OVERLAY window) and the connected
+            // accessibility service (a system-bound service). Any one lets a launch through.
             launchExempt: () -> Boolean = {
-                OverlayService.isRunning() || BlackBoxA11yService.instance != null
+                val sdk = android.os.Build.VERSION.SDK_INT
+                // The overlay grant only matters on Android 10-14; read it only there.
+                val saw = sdk in android.os.Build.VERSION_CODES.Q until
+                    android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM &&
+                    Settings.canDrawOverlays(appContext.applicationContext)
+                platformLaunchExempt(sdk, saw) ||
+                    OverlayService.isRunning() || BlackBoxA11yService.instance != null
             },
         ): IntentActuator =
             IntentActuator({ appContext.applicationContext }, mode, confirm, foreground, navNotifier,

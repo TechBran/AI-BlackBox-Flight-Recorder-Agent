@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.delay
 
 /**
  * Gesture ACTUATORS for the on-device phone-control agent (Phase 4, Task 4.3).
@@ -82,6 +83,11 @@ import android.view.accessibility.AccessibilityNodeInfo
  *   centered swipe is correct on a tablet / unfolded Fold / split-screen window rather than a
  *   phone-narrow display metric. Null when no bounds can be read (service off / probe throws).
  *   Injected as a fake in unit tests.
+ * @param awaitConfirmCardGone suspends after an Allow until the confirm card is no longer
+ *   the ACTIVE window (prod: a bounded poll of [BlackBoxA11yService.rootInActiveWindow] for
+ *   the card's [CONFIRM_CARD_EXTRA] marker). The card is a focusable overlay, so right after
+ *   the tap on Allow the active window can still be the card: a re-read then sees the card
+ *   instead of the app and every approved action would abort. Injected in unit tests.
  */
 class Actuators(
     private val service: () -> BlackBoxA11yService?,
@@ -90,6 +96,7 @@ class Actuators(
     private val credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
     private val coordinateLabeler: (Int, Int) -> CoordinateHit = defaultCoordinateLabeler(service),
     private val viewportSize: () -> IntArray? = defaultViewportSize(service),
+    private val awaitConfirmCardGone: suspend () -> Unit = defaultAwaitConfirmCardGone(service),
 ) {
 
     /**
@@ -116,7 +123,8 @@ class Actuators(
      * 30 s while the screen keeps changing. After an Allow the node is RE-RESOLVED and
      * compared with what the user saw ([approvedTargetChanged]); if a different control
      * now answers to [ref] (a recycled list row, a new screen) the tap is aborted with
-     * [SCREEN_CHANGED_SINCE_APPROVAL] instead of landing on it.
+     * [SCREEN_CHANGED_SINCE_APPROVAL] instead of landing on it. The identity includes the
+     * control's list row ([UiTreeReader.rowSignature]), read only when the card is shown.
      */
     suspend fun tap(ref: NodeRef): ActuatorResult {
         val svc = service() ?: return notEnabled()
@@ -125,8 +133,11 @@ class Actuators(
         // Autonomy gate: never read a password node's text into the label. Use the
         // same text-or-contentDescription label read_screen uses, so an icon-only
         // high-consequence button (label lives in contentDescription) still gates.
-        val approved = approvedTargetOf(node)
-        when (gate("tap", approved.label, approved.isPassword)) {
+        var approved = approvedTargetOf(node, withRow = false)
+        val asked = node
+        when (gate("tap", approved.label, approved.isPassword) {
+            approved = approvedTargetOf(asked, withRow = true)
+        }) {
             GateDecision.DECLINED -> return ActuatorResult(false, "user declined")
             GateDecision.APPROVED -> node = recheckApproved(ref, approved) { return it }
             GateDecision.NOT_ASKED -> Unit
@@ -206,9 +217,12 @@ class Actuators(
         val hit = coordinateLabeler(x, y)
         when (coordinateGate(hit)) {
             GateDecision.DECLINED -> return ActuatorResult(false, "user declined")
-            GateDecision.APPROVED -> if (coordinateLabeler(x, y) != hit) {
-                Log.i(TAG, "autonomy: coordinate target changed after approval — aborted")
-                return ActuatorResult(false, SCREEN_CHANGED_SINCE_APPROVAL)
+            GateDecision.APPROVED -> {
+                awaitConfirmCardGone()   // re-hit the app, never the card itself
+                if (coordinateLabeler(x, y) != hit) {
+                    Log.i(TAG, "autonomy: coordinate target changed after approval — aborted")
+                    return ActuatorResult(false, SCREEN_CHANGED_SINCE_APPROVAL)
+                }
             }
             GateDecision.NOT_ASKED -> Unit
         }
@@ -300,8 +314,11 @@ class Actuators(
             // Autonomy gate for a non-password type. Label is the field's text
             // (the FIELD name/placeholder), never the value being typed. An approved
             // type re-resolves its field first, like an approved tap.
-            val approved = approvedTargetOf(node)
-            when (gate("type", node.text?.toString(), isPasswordTarget = false)) {
+            var approved = approvedTargetOf(node, withRow = false)
+            val asked = node
+            when (gate("type", node.text?.toString(), isPasswordTarget = false) {
+                approved = approvedTargetOf(asked, withRow = true)
+            }) {
                 GateDecision.DECLINED -> return ActuatorResult(false, "user declined")
                 GateDecision.APPROVED -> node = recheckApproved(ref, approved) { return it }
                 GateDecision.NOT_ASKED -> Unit
@@ -497,10 +514,19 @@ class Actuators(
      * SECURITY: [describeAction] is fed only the action + [label]; for a password
      * target [label] is null by construction, so the confirm message is the fixed
      * generic "Type into password field" — the typed text can never reach it.
+     *
+     * [beforeAsk] runs only when the card is about to be shown (the caller snapshots the
+     * full identity of what the user is approving there, not on every benign action).
      */
-    private suspend fun gate(action: String, label: String?, isPasswordTarget: Boolean): GateDecision {
+    private suspend fun gate(
+        action: String,
+        label: String?,
+        isPasswordTarget: Boolean,
+        beforeAsk: () -> Unit = {},
+    ): GateDecision {
         val hc = isHighConsequence(action, label, isPasswordTarget)
         if (!shouldConfirm(mode(), hc)) return GateDecision.NOT_ASKED
+        beforeAsk()
         val allowed = confirm.confirm(describeAction(action, label))
         if (allowed) {
             // Log the DECISION only — never the label/text (leak discipline).
@@ -539,29 +565,32 @@ class Actuators(
      * fresh node — or [abort] with [SCREEN_CHANGED_SINCE_APPROVAL] when the control that
      * now answers to [ref] is not the one the user approved (or is gone). Acting on the
      * pre-confirm node would click whatever now owns its accessibility id, or tap its
-     * stale bounds.
+     * stale bounds. The re-read waits for the card to leave first ([awaitConfirmCardGone]).
      */
-    private inline fun recheckApproved(
+    private suspend inline fun recheckApproved(
         ref: NodeRef,
         approved: ApprovedTarget,
         abort: (ActuatorResult) -> Nothing,
     ): AccessibilityNodeInfo {
+        awaitConfirmCardGone()
         val svc = service() ?: abort(notEnabled())
         val fresh = resolve(svc, ref)
-        approvedTargetChanged(approved, fresh?.let { approvedTargetOf(it) })?.let {
+        approvedTargetChanged(approved, fresh?.let { approvedTargetOf(it, withRow = true) })?.let {
             Log.i(TAG, "autonomy: ${ref.describe()} changed after approval — aborted")
             abort(it)
         }
         return fresh ?: abort(ActuatorResult(false, SCREEN_CHANGED_SINCE_APPROVAL))
     }
 
-    /** The redaction-safe identity of [node] the user approves: never a password's text. */
-    private fun approvedTargetOf(node: AccessibilityNodeInfo): ApprovedTarget {
+    /** The redaction-safe identity of [node] the user approves: never a password's text.
+     *  [withRow] adds its list-row identity (a subtree read, so only when it is compared). */
+    private fun approvedTargetOf(node: AccessibilityNodeInfo, withRow: Boolean): ApprovedTarget {
         val isPassword = isPasswordField(node.isPassword, node.inputType)
         return ApprovedTarget(
             label = if (isPassword) null else (node.text ?: node.contentDescription)?.toString(),
             isPassword = isPassword,
             className = node.className?.toString(),
+            row = if (withRow) UiTreeReader.rowSignature(node) else null,
         )
     }
 
@@ -693,10 +722,17 @@ internal enum class GateDecision {
 
 /**
  * (rank 64) The identity of the control a confirm card asked about: its redaction-safe
- * label (null for a password field), whether it is a password field, and its class. An
- * approved action re-resolves its node and acts only if this still matches.
+ * label (null for a password field), whether it is a password field, its class, and its
+ * list row ([rowDigest] of the row's text, null outside a list — same-looking buttons in
+ * different rows are different controls). An approved action re-resolves its node and
+ * acts only if this still matches.
  */
-data class ApprovedTarget(val label: String?, val isPassword: Boolean, val className: String?)
+data class ApprovedTarget(
+    val label: String?,
+    val isPassword: Boolean,
+    val className: String?,
+    val row: Int? = null,
+)
 
 /**
  * The detail an approved action returns when the screen changed under the confirm card.
@@ -727,6 +763,47 @@ private fun defaultCoordinateLabeler(
 ): (Int, Int) -> CoordinateHit = { x, y ->
     val svc = service()
     if (svc == null) CoordinateHit.None else UiTreeReader.labelAtPoint(svc.rootInActiveWindow, x, y)
+}
+
+/** How long an approved action waits for the confirm card to stop being the active window. */
+internal const val CONFIRM_CARD_GONE_TIMEOUT_MS = 1_000L
+private const val CONFIRM_CARD_POLL_MS = 25L
+
+/**
+ * The production [Actuators] `awaitConfirmCardGone` seam: polls (bounded by
+ * [CONFIRM_CARD_GONE_TIMEOUT_MS]) while the active window is still the confirm card
+ * ([OverlayConfirmUi] marks its root with [CONFIRM_CARD_EXTRA]) or has no root yet. On a
+ * timeout it returns anyway: the re-check that follows then fails safe. A disabled service
+ * has nothing to wait for.
+ */
+private fun defaultAwaitConfirmCardGone(
+    service: () -> BlackBoxA11yService?,
+): suspend () -> Unit = {
+    awaitWhile(CONFIRM_CARD_GONE_TIMEOUT_MS, CONFIRM_CARD_POLL_MS) {
+        val svc = service()
+        svc != null && svc.rootInActiveWindow.let { it == null || isConfirmCardNode(it) }
+    }
+}
+
+/** True for the root node of the [OverlayConfirmUi] card (its [CONFIRM_CARD_EXTRA] marker). */
+internal fun isConfirmCardNode(node: AccessibilityNodeInfo): Boolean = try {
+    node.extras?.getBoolean(CONFIRM_CARD_EXTRA, false) == true
+} catch (e: Exception) {
+    false
+}
+
+/**
+ * PURE (timing): suspend while [condition] holds, checking it every [stepMs], for at most
+ * [timeoutMs]. True when it cleared, false when the wait gave up.
+ */
+internal suspend fun awaitWhile(timeoutMs: Long, stepMs: Long, condition: () -> Boolean): Boolean {
+    var waited = 0L
+    while (condition()) {
+        if (waited >= timeoutMs) return false
+        delay(stepMs)
+        waited += stepMs
+    }
+    return true
 }
 
 /**

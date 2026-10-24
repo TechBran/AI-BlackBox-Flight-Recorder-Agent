@@ -598,6 +598,17 @@ const val LAUNCH_BLOCKED_DETAIL: String =
 fun launchRefusal(appForeground: Boolean, launchExempt: Boolean): String? =
     if (appForeground || launchExempt) null else LAUNCH_BLOCKED_DETAIL
 
+/**
+ * PURE: the launch exemptions that come from the Android release itself. Background
+ * activity launches are unrestricted before Android 10 ([sdkInt] < 29, and minSdk is 26),
+ * and on Android 10-14 an app the user granted SYSTEM_ALERT_WINDOW ([canDrawOverlays]) is
+ * exempt without any window. From Android 15 the overlay grant alone no longer counts:
+ * the app needs a VISIBLE overlay window (the running floating overlay, checked apart).
+ */
+fun platformLaunchExempt(sdkInt: Int, canDrawOverlays: Boolean): Boolean =
+    sdkInt < android.os.Build.VERSION_CODES.Q ||
+        (sdkInt < android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM && canDrawOverlays)
+
 /** The detail for an intent no installed app can handle (ActivityNotFoundException). */
 fun noHandlerDetail(name: String): String =
     "$name failed: no app on this phone handles it (ActivityNotFoundException)"
