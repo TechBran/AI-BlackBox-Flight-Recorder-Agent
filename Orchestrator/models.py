@@ -560,26 +560,7 @@ class TaskDatabase:
         if not row:
             return None
 
-        return Task(
-            task_id=row[0],
-            task_type=TaskType(row[1]),
-            status=TaskStatus(row[2]),
-            created_at=row[3],
-            updated_at=row[4],
-            prompt=row[5],
-            input_file=row[6],
-            result_url=row[7],
-            result_data=json.loads(row[8]) if row[8] else None,
-            error_message=row[9],
-            progress=row[10],
-            operator=row[11],
-            image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
-            google_video_uri=row[13] if len(row) > 13 else None,
-            progress_text=row[14] if len(row) > 14 else None,
-            device_id=row[15] if len(row) > 15 else None,
-            reasoning_text=row[16] if len(row) > 16 else None,
-            session_id=row[17] if len(row) > 17 else None
-        )
+        return self._task_from_row(row)
 
     def get_task_list(self, operator: Optional[str] = None) -> List[Dict[str, Any]]:
         """F2 (Part 2): LIGHTWEIGHT projection for the polled /tasks/list.
@@ -620,29 +601,58 @@ class TaskDatabase:
         rows = cursor.fetchall()
         conn.close()
         
-        tasks = []
-        for row in rows:
-            tasks.append(Task(
-                task_id=row[0],
-                task_type=TaskType(row[1]),
-                status=TaskStatus(row[2]),
-                created_at=row[3],
-                updated_at=row[4],
-                prompt=row[5],
-                input_file=row[6],
-                result_url=row[7],
-                result_data=json.loads(row[8]) if row[8] else None,
-                error_message=row[9],
-                progress=row[10],
-                operator=row[11],
-                image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
-                google_video_uri=row[13] if len(row) > 13 else None,
-                progress_text=row[14] if len(row) > 14 else None,
-                device_id=row[15] if len(row) > 15 else None,
-                reasoning_text=row[16] if len(row) > 16 else None,
-                session_id=row[17] if len(row) > 17 else None
-            ))
-        return tasks
+        return [self._task_from_row(row) for row in rows]
+
+    def get_recent_media_tasks(self, operators: List[str], task_types, limit: int) -> List[Task]:
+        """The newest ``limit`` COMPLETED tasks of ``task_types`` that produced a
+        result_url and belong to any of ``operators``, newest first.
+
+        One query, filtered in SQL (audit rank 49): the old reader loaded the
+        operator's whole task history plus the system's and cut to 50 BEFORE
+        filtering, so an operator with 50+ chat tasks never saw a media row.
+        """
+        operators = [o for o in dict.fromkeys(operators) if o]
+        types = [getattr(t, "value", t) for t in task_types]
+        if not operators or not types or limit <= 0:
+            return []
+        query = (
+            "SELECT * FROM tasks"
+            f" WHERE operator IN ({', '.join('?' * len(operators))})"
+            f" AND task_type IN ({', '.join('?' * len(types))})"
+            " AND status = ? AND result_url IS NOT NULL AND result_url != ''"
+            " ORDER BY created_at DESC LIMIT ?"
+        )
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                query, (*operators, *types, TaskStatus.COMPLETED.value, int(limit))).fetchall()
+        finally:
+            conn.close()
+        return [self._task_from_row(row) for row in rows]
+
+    @staticmethod
+    def _task_from_row(row) -> Task:
+        """A Task from one ``SELECT *`` row (older DBs may lack trailing columns)."""
+        return Task(
+            task_id=row[0],
+            task_type=TaskType(row[1]),
+            status=TaskStatus(row[2]),
+            created_at=row[3],
+            updated_at=row[4],
+            prompt=row[5],
+            input_file=row[6],
+            result_url=row[7],
+            result_data=json.loads(row[8]) if row[8] else None,
+            error_message=row[9],
+            progress=row[10],
+            operator=row[11],
+            image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
+            google_video_uri=row[13] if len(row) > 13 else None,
+            progress_text=row[14] if len(row) > 14 else None,
+            device_id=row[15] if len(row) > 15 else None,
+            reasoning_text=row[16] if len(row) > 16 else None,
+            session_id=row[17] if len(row) > 17 else None
+        )
 
 # Global task management
 # Move a legacy Portal/tasks.db (served at /ui!) into data/ BEFORE this first

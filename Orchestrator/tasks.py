@@ -43,6 +43,7 @@ from Orchestrator.state import get_state, save_operator_state, task_lock, state_
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.models import Task, TaskStatus, TaskType, task_db, task_queue, worker_running
 import Orchestrator.models as models_module  # For modifying worker_running global
+from Orchestrator.media import get_recent_media_artifacts  # the one copy (rank 49)
 from Orchestrator.media_index import add_media_entry
 from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
@@ -441,50 +442,6 @@ def create_task(task_type: TaskType, operator: Optional[str] = None, **kwargs) -
     return task
 
 
-def get_recent_media_artifacts(operator: str, limit: int = 10) -> List[Dict]:
-    """Get recent media artifacts (images, videos, music) for an operator.
-
-    Returns list of artifacts with URLs that the model can reference for
-    subsequent operations like image-to-video conversion.
-    """
-    artifacts = []
-    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC, TaskType.ELEVENLABS_MUSIC}
-
-    # Get all tasks for this operator (or system operator for tool-generated media)
-    all_tasks = task_db.get_all_tasks(operator=operator)
-    system_tasks = task_db.get_all_tasks(operator="system")
-
-    for task in (all_tasks + system_tasks)[:50]:  # Check last 50 tasks
-        if task.task_type not in media_task_types:
-            continue
-        if task.status != TaskStatus.COMPLETED:
-            continue
-        if not task.result_url:
-            continue
-
-        # Build artifact info
-        artifact = {
-            "type": task.task_type.value.replace("_generation", "").replace("lyria_", ""),
-            "url": task.result_url,
-            "prompt": task.prompt[:100] if task.prompt else "",
-            "task_id": task.task_id,
-            "created_at": task.created_at
-        }
-
-        # Include artifact metadata if available
-        if task.result_data and "artifact" in task.result_data:
-            artifact.update(task.result_data["artifact"])
-
-        artifacts.append(artifact)
-
-        if len(artifacts) >= limit:
-            break
-
-    # Sort by created_at descending (most recent first)
-    artifacts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return artifacts[:limit]
-
-
 def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str] = None) -> List[Dict]:
     """Collect media artifacts from completed tasks for an operator.
 
@@ -562,8 +519,9 @@ def _emit_task_notification(task, new_status) -> None:
 
     ONE choke-point (update_task) covers every async worker. Only COMPLETED /
     FAILED fire — progress and PROCESSING are noise. System-scope / unattributed
-    tasks (operator in None/""/"system") are SUPPRESSED: those are tool-generated
-    media that nobody subscribed to as themselves, so notifying would spam. The
+    tasks (operator in None/""/"system") are SUPPRESSED: box-scope work nobody
+    subscribed to as themselves, so notifying would spam. Media a chat tool loop
+    creates carries the requesting operator (audit rank 49), so it notifies. The
     whole body is wrapped so a notify failure NEVER breaks update_task's DB write.
     """
     try:

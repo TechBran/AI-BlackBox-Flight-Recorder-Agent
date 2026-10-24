@@ -899,7 +899,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
 
                     task = create_task(
                         TaskType.IMAGE_GENERATION,
-                        operator="system",  # Placeholder, actual operator set by UI
+                        operator=operator,
                         prompt=prompt,
                         result_data={"options": image_options}
                     )
@@ -951,7 +951,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                         }
                         task = create_task(
                             TaskType.VIDEO_GENERATION,
-                            operator="system",
+                            operator=operator,
                             prompt=prompt,
                             result_data=video_data
                         )
@@ -984,7 +984,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
 
                         task = create_task(
                             TaskType.VIDEO_GENERATION,
-                            operator="system",
+                            operator=operator,
                             prompt=prompt,
                             image_data=image_data,
                             result_data={"options": video_options}
@@ -1049,7 +1049,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     # Create music generation task
                     music_options = {
                         "prompt": prompt,
-                        "operator": "system",
+                        "operator": operator,
                     }
                     if negative_prompt:
                         music_options["negative_prompt"] = negative_prompt
@@ -1058,7 +1058,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
 
                     task = create_task(
                         TaskType.LYRIA_MUSIC,
-                        operator="system",
+                        operator=operator,
                         prompt=prompt,
                         result_data=music_options
                     )
@@ -1554,7 +1554,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
 
                     task = create_task(
                         TaskType.IMAGE_GENERATION,
-                        operator="system",
+                        operator=operator,
                         prompt=prompt,
                         result_data={"options": image_options}
                     )
@@ -1600,7 +1600,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                         }
                         task = create_task(
                             TaskType.VIDEO_GENERATION,
-                            operator="system",
+                            operator=operator,
                             prompt=prompt,
                             result_data=video_data
                         )
@@ -1633,7 +1633,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
 
                         task = create_task(
                             TaskType.VIDEO_GENERATION,
-                            operator="system",
+                            operator=operator,
                             prompt=prompt,
                             image_data=image_data,
                             result_data={"options": video_options}
@@ -1670,7 +1670,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
 
                     music_options = {
                         "prompt": prompt,
-                        "operator": "system",
+                        "operator": operator,
                     }
                     if negative_prompt:
                         music_options["negative_prompt"] = negative_prompt
@@ -1679,7 +1679,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
 
                     task = create_task(
                         TaskType.LYRIA_MUSIC,
-                        operator="system",
+                        operator=operator,
                         prompt=prompt,
                         result_data=music_options
                     )
@@ -2654,7 +2654,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
 
                                 task = create_task(
                                     TaskType.IMAGE_GENERATION,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data={"options": image_options}
                                 )
@@ -2706,7 +2706,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                     }
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt or "Extend video",
                                         result_data=video_data
                                     )
@@ -2727,7 +2727,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
 
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt,
                                         result_data={"options": video_options}
                                     )
@@ -2781,7 +2781,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 # Create music generation task
                                 music_options = {
                                     "prompt": prompt,
-                                    "operator": "system",
+                                    "operator": operator,
                                 }
                                 if negative_prompt:
                                     music_options["negative_prompt"] = negative_prompt
@@ -2790,7 +2790,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
 
                                 task = create_task(
                                     TaskType.LYRIA_MUSIC,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data=music_options
                                 )
@@ -3499,7 +3499,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
 
                                 task = create_task(
                                     TaskType.IMAGE_GENERATION,
-                                    operator="system",  # Placeholder, actual operator set by UI
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data={"options": image_options}
                                 )
@@ -3554,7 +3554,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     }
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt or "Extend video",
                                         result_data=video_data
                                     )
@@ -3574,7 +3574,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
 
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt,
                                         result_data={"options": video_options}
                                     )
@@ -3646,7 +3646,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 # Create music generation task
                                 music_options = {
                                     "prompt": prompt,
-                                    "operator": "system",
+                                    "operator": operator,
                                 }
                                 if negative_prompt:
                                     music_options["negative_prompt"] = negative_prompt
@@ -3655,7 +3655,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
 
                                 task = create_task(
                                     TaskType.LYRIA_MUSIC,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data=music_options
                                 )
@@ -5546,7 +5546,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
 
                                 task = create_task(
                                     TaskType.IMAGE_GENERATION,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data={"options": image_options}
                                 )
@@ -5603,7 +5603,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                     }
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt or "Extend video",
                                         result_data=video_data
                                     )
@@ -5623,7 +5623,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
 
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt,
                                         result_data={"options": video_options}
                                     )
@@ -5703,7 +5703,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 # Create music generation task
                                 music_options = {
                                     "prompt": prompt,
-                                    "operator": "system",
+                                    "operator": operator,
                                 }
                                 if negative_prompt:
                                     music_options["negative_prompt"] = negative_prompt
@@ -5712,7 +5712,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
 
                                 task = create_task(
                                     TaskType.LYRIA_MUSIC,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data=music_options
                                 )
@@ -6255,7 +6255,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
 
                                 task = create_task(
                                     TaskType.IMAGE_GENERATION,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data={"options": image_options}
                                 )
@@ -6306,7 +6306,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                     }
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt or "Extend video",
                                         result_data=video_data
                                     )
@@ -6326,7 +6326,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
 
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt,
                                         result_data={"options": video_options}
                                     )
@@ -6379,7 +6379,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 # Create music generation task
                                 music_options = {
                                     "prompt": prompt,
-                                    "operator": "system",
+                                    "operator": operator,
                                 }
                                 if negative_prompt:
                                     music_options["negative_prompt"] = negative_prompt
@@ -6388,7 +6388,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
 
                                 task = create_task(
                                     TaskType.LYRIA_MUSIC,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data=music_options
                                 )
@@ -6835,7 +6835,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
 
                                 task = create_task(
                                     TaskType.IMAGE_GENERATION,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data={"options": image_options}
                                 )
@@ -6886,7 +6886,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                     }
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt or "Extend video",
                                         result_data=video_data
                                     )
@@ -6906,7 +6906,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
 
                                     task = create_task(
                                         TaskType.VIDEO_GENERATION,
-                                        operator="system",
+                                        operator=operator,
                                         prompt=prompt,
                                         result_data={"options": video_options}
                                     )
@@ -6959,7 +6959,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 # Create music generation task
                                 music_options = {
                                     "prompt": prompt,
-                                    "operator": "system",
+                                    "operator": operator,
                                 }
                                 if negative_prompt:
                                     music_options["negative_prompt"] = negative_prompt
@@ -6968,7 +6968,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
 
                                 task = create_task(
                                     TaskType.LYRIA_MUSIC,
-                                    operator="system",
+                                    operator=operator,
                                     prompt=prompt,
                                     result_data=music_options
                                 )

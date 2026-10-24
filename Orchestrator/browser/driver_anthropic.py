@@ -540,7 +540,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     provider = IMAGE_TOOL_PROVIDERS[tool_name]
                     prompt = tool_input.get("prompt", "")
                     num_images = tool_input.get("numberOfImages", 1)
-                    task = create_task(TaskType.IMAGE_GENERATION, operator="system", prompt=prompt,
+                    task = create_task(TaskType.IMAGE_GENERATION, operator=operator, prompt=prompt,
                                        result_data={"options": {
                                            "aspectRatio": tool_input.get("aspectRatio", "16:9"),
                                            "resolution": tool_input.get("resolution", "1K"),
@@ -556,7 +556,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                 elif tool_name == "generate_video":
                     prompt = tool_input.get("prompt", "")
                     duration = tool_input.get("duration", 8)
-                    task = create_task(TaskType.VIDEO_GENERATION, operator="system", prompt=prompt,
+                    task = create_task(TaskType.VIDEO_GENERATION, operator=operator, prompt=prompt,
                                        result_data={"options": {
                                            "aspectRatio": tool_input.get("aspectRatio", "16:9"),
                                            "duration": duration,
@@ -571,8 +571,8 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                 elif tool_name == "lyria_music":
                     prompt = tool_input.get("prompt", "")
                     sample_count = tool_input.get("sampleCount", 1)
-                    task = create_task(TaskType.LYRIA_MUSIC, operator="system", prompt=prompt,
-                                       result_data={"prompt": prompt, "operator": "system"})
+                    task = create_task(TaskType.LYRIA_MUSIC, operator=operator, prompt=prompt,
+                                       result_data={"prompt": prompt, "operator": operator})
                     result_msg = f"Music generation started for: {prompt[:100]}. 30-second track."
                     tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": result_msg})
                     await emit({"type": "music_task", "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}})
