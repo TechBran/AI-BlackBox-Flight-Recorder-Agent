@@ -13,8 +13,18 @@
  *   Server -> client:
  *     {type:"stt_delta", text:"<CUMULATIVE interim so far>", target:...}
  *     {type:"stt_final", text:"<full final>", target:...}
- *     {type:"stt_error", message:...}
+ *     {type:"stt_error", message:..., code:..., provider:..., switchable:...}
+ *     {type:"stt_status", state:"provider_override"|"loading_models"|"listening"|...}
  *     {type:"stt_done"}                    (terminal — always the last frame)
+ *
+ * stt_error is TERMINAL: capture stops and nothing reconnects. With
+ * switchable:true (quota_exceeded first) another provider can take the
+ * dictation, so a prompt offers the ones /stt/catalog says can stream; picking
+ * one restarts the dictation on it. stt_status provider_override renders as a
+ * chip and loading_models as a warming state on the mic button (audit rank 52:
+ * W24, O08-stt-realtime-04). The frames are pinned by
+ * tests/fixtures/stt_ws_frames.json, which the server and Android suites read
+ * too; this module also runs inside the Android WebView.
  *
  * KEY: stt_delta.text is CUMULATIVE and already normalized backend-side, so the
  * client simply REPLACES the interim region with `text` on each delta and
@@ -86,6 +96,13 @@ let onUnavailable = null;          // one-shot callback, cleared after firing
 let gotTranscript = false;         // true once a delta/final landed
 let openTimer = null;              // ws-open watchdog
 const OPEN_TIMEOUT_MS = 4000;
+
+// Status + provider-switch state (audit rank 52).
+let lastStart = null;              // {targetId, buttonId, opts} of the latest start(), for a switch
+let switchedProvider = '';         // picked in the switch prompt; kept for this page's life only
+let overrideNote = '';             // provider_override chip text for the current session
+let warming = false;               // on-box models loading (stt_status loading_models)
+let catalogCache = null;           // the last /stt/catalog response
 
 function fireUnavailable(reason) {
     const cb = onUnavailable;
@@ -269,6 +286,146 @@ function applyFinal(text) {
 }
 
 // =============================================================================
+// Status chip, warming state and the switch-provider prompt (audit rank 52)
+// =============================================================================
+
+async function loadCatalog() {
+    try {
+        const resp = await fetch('/stt/catalog', { cache: 'no-store' });
+        if (resp && resp.ok) catalogCache = await resp.json();
+    } catch (e) {
+        console.warn('[STT-STREAM] /stt/catalog unavailable:', e);
+    }
+    return catalogCache;
+}
+
+/** The catalog's label for a provider id (the id itself until the catalog is in). */
+function providerLabel(id) {
+    const providers = catalogCache && Array.isArray(catalogCache.providers) ? catalogCache.providers : [];
+    const p = providers.find((x) => x && x.id === id);
+    return (p && p.label) || id || 'the selected provider';
+}
+
+/**
+ * Providers that can take over a dictation `failedProvider` could not serve:
+ * available, able to STREAM (a file-only local server cannot), and not the one
+ * that failed, in catalog order.
+ * @returns {{id: string, label: string}[]}
+ */
+export function switchAlternatives(catalog, failedProvider) {
+    const providers = catalog && Array.isArray(catalog.providers) ? catalog.providers : [];
+    return providers
+        .filter((p) => p && p.available && p.models && p.models.streaming && p.id !== failedProvider)
+        .map((p) => ({ id: p.id, label: p.label || p.id }));
+}
+
+function statusChip(create) {
+    let el = $('sttStatusChip');
+    if (!el && create) {
+        el = document.createElement('div');
+        el.id = 'sttStatusChip';
+        el.className = 'stt-status-chip';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        el.hidden = true;
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+function renderStatusChip() {
+    const text = warming ? 'Warming on-box speech-to-text\u2026' : overrideNote;
+    const el = statusChip(Boolean(text));
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
+    el.classList.toggle('stt-status-warming', warming);
+}
+
+function setWarming(on) {
+    warming = on;
+    const btn = buttonId ? $(buttonId) : null;
+    if (btn) btn.classList.toggle('stt-warming', on);
+    renderStatusChip();
+}
+
+function overrideText(msg) {
+    return `Mic is using ${providerLabel(msg.provider)}: `
+        + `${providerLabel(msg.overridden_from)} can't stream on this box`;
+}
+
+/** stt_status: provider_override -> chip; loading_models -> warming until the next state. */
+function applyStatus(msg) {
+    if (msg.state === 'provider_override') {
+        overrideNote = overrideText(msg);
+        renderStatusChip();
+        if (!catalogCache) {
+            // The chip names providers by their catalog labels once those are in.
+            loadCatalog().then(() => {
+                if (overrideNote) { overrideNote = overrideText(msg); renderStatusChip(); }
+            });
+        }
+    } else if (msg.state === 'loading_models') {
+        setWarming(true);
+    } else if (warming) {
+        setWarming(false);   // listening / speech / processing: the models are up
+    }
+}
+
+/** The session is over: its status goes with it. */
+function clearStatus() {
+    overrideNote = '';
+    setWarming(false);
+}
+
+function closeSwitchPrompt() {
+    const el = $('sttSwitchPrompt');
+    if (el) el.remove();
+}
+
+/**
+ * Offer the providers that can take over after a switchable stt_error. Picking
+ * one restarts the SAME dictation (target, button, options) on it. Nothing is
+ * shown when no other provider can stream: the toast already said why.
+ */
+async function offerProviderSwitch(err) {
+    const session = lastStart;
+    const choices = switchAlternatives(await loadCatalog(), err.provider);
+    if (!session || !choices.length || streaming) return;
+    closeSwitchPrompt();
+    const box = document.createElement('div');
+    box.id = 'sttSwitchPrompt';
+    box.className = 'stt-switch-prompt';
+    box.setAttribute('role', 'alertdialog');
+    box.setAttribute('aria-label', 'Switch speech-to-text provider');
+    const text = document.createElement('p');
+    text.textContent = `${providerLabel(err.provider)} can't take dictation right now. Dictate with:`;
+    box.appendChild(text);
+    const actions = document.createElement('div');
+    actions.className = 'stt-switch-actions';
+    for (const choice of choices) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.provider = choice.id;
+        b.textContent = choice.label;
+        b.addEventListener('click', () => {
+            closeSwitchPrompt();
+            switchedProvider = choice.id;
+            start(session.targetId, session.buttonId, { ...session.opts, provider: choice.id });
+        });
+        actions.appendChild(b);
+    }
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'stt-switch-dismiss';
+    dismiss.textContent = 'Not now';
+    dismiss.addEventListener('click', closeSwitchPrompt);
+    actions.appendChild(dismiss);
+    box.appendChild(actions);
+    document.body.appendChild(box);
+}
+
+// =============================================================================
 // WebSocket message handling
 // =============================================================================
 
@@ -280,20 +437,35 @@ function handleMessage(msg) {
         case 'stt_final':
             applyFinal(msg.text);
             break;
-        case 'stt_error':
-            console.error('[STT-STREAM] stt_error:', msg.message);
-            // If the error arrived before any transcript landed, this invocation
-            // never really started — offer the caller a fallback (e.g. legacy
-            // record->/stt) instead of surfacing a hard error. Tear down quietly.
-            if (!gotTranscript && onUnavailable) {
+        case 'stt_status':
+            applyStatus(msg);
+            break;
+        case 'stt_error': {
+            // TERMINAL: every branch stops capture and closes the socket; nothing
+            // reconnects. code/provider/switchable are additive (older servers
+            // send a bare message, read as a non-switchable provider_error).
+            const message = msg.message || 'unknown';
+            console.error('[STT-STREAM] stt_error:', msg.code || 'provider_error', message);
+            if (msg.switchable === true) {
+                // Another provider can take this dictation (quota_exceeded first).
+                // Say so and offer it, rather than the silent legacy fallback,
+                // which would go to the same exhausted provider (W24).
+                toast('STT error: ' + message);
+                cleanup();
+                offerProviderSwitch(msg);
+            } else if (!gotTranscript && onUnavailable) {
+                // If the error arrived before any transcript landed, this invocation
+                // never really started — offer the caller a fallback (e.g. legacy
+                // record->/stt) instead of surfacing a hard error. Tear down quietly.
                 cleanup({ silent: true });
-                fireUnavailable('stt_error: ' + (msg.message || 'unknown'));
+                fireUnavailable('stt_error: ' + message);
             } else {
-                toast('STT error: ' + (msg.message || 'unknown'));
+                toast('STT error: ' + message);
                 // Stop capture and tear down; do not leave the mic open.
                 cleanup();
             }
             break;
+        }
         case 'stt_done':
             // Terminal marker (2026-07-09): ALWAYS the server's last frame —
             // finalize the stop the moment the session is truly over instead of
@@ -471,6 +643,7 @@ function stopNativeCapture() {
 function finalizeStop() {
     if (!stopping) return;   // idempotence: stt_done + backstop + onclose race
     stopping = false;
+    clearStatus();
     if (closeTimer) {
         clearTimeout(closeTimer);
         closeTimer = null;
@@ -495,6 +668,7 @@ function finalizeStop() {
 function cleanup(opts = {}) {
     stopping = false;
     lastInterim = '';
+    clearStatus();
     if (closeTimer) {
         clearTimeout(closeTimer);
         closeTimer = null;
@@ -529,15 +703,18 @@ function cleanup(opts = {}) {
  * Begin streaming dictation into the element #targetId.
  * @param {string} targetIdArg - id of the target input/textarea
  * @param {string} [buttonIdArg] - id of the trigger button (visual state)
- * @param {Object} [opts] - { lang, onUnavailable } — onUnavailable(reason) fires
- *   once if streaming can't get going, so the caller can fall back to a legacy
- *   record->/stt path for this invocation.
+ * @param {Object} [opts] - { lang, onUnavailable, provider } — onUnavailable(reason)
+ *   fires once if streaming can't get going, so the caller can fall back to a
+ *   legacy record->/stt path for this invocation. provider pins the STT provider
+ *   (default: the one picked in the switch prompt, else the box's own choice).
  */
 async function start(targetIdArg, buttonIdArg, opts = {}) {
     if (streaming) {
         // Already streaming — ignore (caller should stop() first to retarget).
         return;
     }
+    lastStart = { targetId: targetIdArg, buttonId: buttonIdArg, opts };
+    closeSwitchPrompt();
     // Reset fast-failure + stop-handshake state for this invocation.
     onUnavailable = typeof opts.onUnavailable === 'function' ? opts.onUnavailable : null;
     gotTranscript = false;
@@ -557,6 +734,7 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
     }
 
     // Capture insertion point + surrounding text for the delta applier.
+    clearStatus();
     targetId = targetIdArg;
     buttonId = buttonIdArg || null;
     const insertPos = (typeof el.selectionStart === 'number') ? el.selectionStart : el.value.length;
@@ -567,6 +745,7 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
     const native = isNativeAndroid();
     const sampleRate = 24000;  // uniform 24kHz (OpenAI requires >=24k; native already 24k)
     const lang = opts.lang || 'en';
+    const provider = opts.provider || switchedProvider || '';
 
     // Open the WebSocket.
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -602,7 +781,7 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
         ws.send(JSON.stringify({
             type: 'stt_start',
             target: targetId,
-            provider: '',
+            provider: provider,
             lang: lang,
             sample_rate: sampleRate
         }));

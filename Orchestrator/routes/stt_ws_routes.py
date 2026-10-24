@@ -11,7 +11,9 @@ clients. The client contract is provider-agnostic:
           then {"type":"stt_stop"}
     DOWN: {"type":"stt_delta","text":...,"target":...}
           {"type":"stt_final","text":...,"target":...}
-          {"type":"stt_error","message":...}
+          {"type":"stt_error","message":...,"code":...,"provider":...,"switchable":...}
+              (code/provider/switchable additive, Orchestrator/stt/errors.py;
+               TERMINAL for the client: stop capture, never reconnect)
           {"type":"stt_done"}                  (terminal — ALWAYS the last frame)
           {"type":"stt_status","state":"loading_models"}   (onbox warm affordance, additive)
           {"type":"stt_status","state":"listening"|"speech"|"processing"}
@@ -74,6 +76,7 @@ from Orchestrator import provider_billing
 from Orchestrator.elevenlabs.client import (
     resolve_api_key, WS_BASE_URL, auth_headers, map_error, classify_realtime_frame,
 )
+from Orchestrator.stt import errors as stt_errors
 from Orchestrator.stt.resolve import resolve_stt_provider, local_streaming_stt_available, onbox_stt_available
 from Orchestrator.stt.streaming import (
     map_openai_event, map_google_result, InterimAccumulator, join_transcript_segments,
@@ -122,13 +125,34 @@ async def _send_final(websocket: WebSocket, provider: str, m: dict, stop_ts: dic
         raise
 
 
+class _StampedClientSocket:
+    """The client socket as the bridges see it: every stt_error that leaves it
+    carries a machine-readable code, the provider of this session and whether
+    another provider could serve it (stt_errors.stamp; audit rank 52, W24).
+    Stamping here, not per call site, covers every bridge's sends, including
+    ones added later. Everything else is the underlying WebSocket's."""
+
+    def __init__(self, websocket: WebSocket):
+        self._websocket = websocket
+        self.provider = None
+
+    def __getattr__(self, name):
+        return getattr(self._websocket, name)
+
+    async def send_json(self, data, *args, **kwargs):
+        if isinstance(data, dict) and data.get("type") == "stt_error":
+            data = stt_errors.stamp(data, self.provider)
+        return await self._websocket.send_json(data, *args, **kwargs)
+
+
 @app.websocket("/ws/stt")
 async def ws_stt(websocket: WebSocket):
     await websocket.accept()
+    websocket = _StampedClientSocket(websocket)
     try:
         start = await websocket.receive_json()
         if start.get("type") != "stt_start":
-            await websocket.send_json({"type": "stt_error", "message": "expected stt_start"})
+            await websocket.send_json(stt_errors.frame("expected stt_start", stt_errors.BAD_REQUEST))
             return
         # Local streaming resolves ONLY when a registered server advertises the
         # realtime (/v1/realtime) capability; otherwise local stays file-only and
@@ -140,8 +164,10 @@ async def ws_stt(websocket: WebSocket):
                                         override_out=override)
         overridden_from = override.get("overridden_from")
         if not provider:
-            await websocket.send_json({"type": "stt_error", "message": "no STT provider configured"})
+            await websocket.send_json(stt_errors.frame("no STT provider configured",
+                                                       stt_errors.NO_PROVIDER))
             return
+        websocket.provider = provider
         print(f"[STT/WS] start provider={provider} sample_rate={start.get('sample_rate')} "
               f"lang={start.get('lang')} target={start.get('target')}")
         if overridden_from:
@@ -230,7 +256,8 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     """Bridge client PCM -> OpenAI realtime transcription -> client deltas/finals."""
     api_key = (config.OPENAI_API_KEY or "").strip()
     if not api_key:
-        await websocket.send_json({"type": "stt_error", "message": "OPENAI_API_KEY not configured"})
+        await websocket.send_json(stt_errors.frame("OPENAI_API_KEY not configured",
+                                                   stt_errors.AUTH_FAILED))
         return
 
     url = f"{config.OPENAI_REALTIME_URL}?intent=transcription"
@@ -447,7 +474,8 @@ async def _local_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     from Orchestrator.onboarding.custom_servers import resolve_audio
     resolved = resolve_audio("streaming")
     if not resolved:
-        await websocket.send_json({"type": "stt_error", "message": "no local streaming STT server available"})
+        await websocket.send_json(stt_errors.frame("no local streaming STT server available",
+                                                   stt_errors.PROVIDER_UNAVAILABLE))
         return
     srv, model = resolved
     from urllib.parse import quote
@@ -722,8 +750,8 @@ async def _onbox_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     from Orchestrator import local_stack
     async with local_stack.voice_session():
         if not await _warm_audio_group(websocket):
-            await websocket.send_json({"type": "stt_error",
-                                       "message": "on-box STT models still loading — please retry"})
+            await websocket.send_json(stt_errors.frame(
+                "on-box STT models still loading — please retry", stt_errors.PROVIDER_UNAVAILABLE))
             return
         model = local_stack.stt_stream_model()
         ws_url = local_stack.speaches_realtime_ws_url(model)
@@ -949,15 +977,13 @@ async def _onbox_vad_loop(websocket: WebSocket, *, target, lang, sample_rate):
             missing = f"silero VAD model fetch failed: {e}"
     if missing:
         print(f"[STT/WS] onbox VAD loop unavailable: {missing}")
-        await websocket.send_json({
-            "type": "stt_error",
-            "message": f"on-box STT unavailable: {missing}"})
+        await websocket.send_json(stt_errors.frame(
+            f"on-box STT unavailable: {missing}", stt_errors.PROVIDER_UNAVAILABLE))
         return
     async with local_stack.voice_session():
         if not await _warm_and_prime(websocket):
-            await websocket.send_json({
-                "type": "stt_error",
-                "message": "on-box STT models still loading — please retry"})
+            await websocket.send_json(stt_errors.frame(
+                "on-box STT models still loading — please retry", stt_errors.PROVIDER_UNAVAILABLE))
             return
         await websocket.send_json({"type": "stt_status", "state": "listening"})
         gate = _make_utterance_gate()
@@ -1125,7 +1151,8 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
     """
     key = resolve_api_key()
     if not key:
-        await websocket.send_json({"type": "stt_error", "message": "ELEVENLABS_API_KEY not configured"})
+        await websocket.send_json(stt_errors.frame("ELEVENLABS_API_KEY not configured",
+                                                   stt_errors.AUTH_FAILED))
         return
 
     url = (
@@ -1214,7 +1241,8 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                     if err_code == "session_time_limit_exceeded":
                         rotate["v"] = True
                         return
-                    await websocket.send_json({"type": "stt_error", "message": map_error(0, event)})
+                    await websocket.send_json(stt_errors.frame(
+                        map_error(0, event), stt_errors.elevenlabs_code(err_code)))
                     return
                 m = acc.elevenlabs(event)
                 if not m:
@@ -1329,7 +1357,8 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
             except Exception as e:
                 print(f"[STT/WS] elevenlabs connect failed: {e}")
                 try:
-                    await websocket.send_json({"type": "stt_error", "message": f"STT connection failed: {e}"})
+                    await websocket.send_json(stt_errors.frame(f"STT connection failed: {e}",
+                                                               stt_errors.PROVIDER_UNAVAILABLE))
                 except Exception:
                     pass
                 break
@@ -1347,7 +1376,8 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                 if rotations > _EL_MAX_ROTATIONS:
                     print(f"[STT/WS] elevenlabs rotation cap ({_EL_MAX_ROTATIONS}) exceeded — ending session")
                     try:
-                        await websocket.send_json({"type": "stt_error", "message": "STT session could not be sustained"})
+                        await websocket.send_json(stt_errors.frame("STT session could not be sustained",
+                                                                   stt_errors.SESSION_LIMIT))
                     except Exception:
                         pass
                     break
@@ -1400,16 +1430,19 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     """
     creds_path = config.GOOGLE_APPLICATION_CREDENTIALS
     if not creds_path:
-        await websocket.send_json({"type": "stt_error", "message": "GOOGLE_APPLICATION_CREDENTIALS not configured"})
+        await websocket.send_json(stt_errors.frame("GOOGLE_APPLICATION_CREDENTIALS not configured",
+                                                   stt_errors.AUTH_FAILED))
         return
     try:
         with open(creds_path, "r") as f:
             project_id = json.load(f).get("project_id")
     except (OSError, ValueError) as e:
-        await websocket.send_json({"type": "stt_error", "message": f"invalid Google credentials file: {e}"})
+        await websocket.send_json(stt_errors.frame(f"invalid Google credentials file: {e}",
+                                                   stt_errors.AUTH_FAILED))
         return
     if not project_id:
-        await websocket.send_json({"type": "stt_error", "message": "project_id missing from Google credentials file"})
+        await websocket.send_json(stt_errors.frame("project_id missing from Google credentials file",
+                                                   stt_errors.AUTH_FAILED))
         return
 
     # Lazy SDK import (kept lazy for symmetry with file_transcribe + optionality).

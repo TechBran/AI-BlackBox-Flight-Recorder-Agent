@@ -2911,6 +2911,7 @@ export async function startSTTFor(targetInputId, buttonId) {
  * @param {string} buttonId - Button ID
  */
 export function toggleSTTFor(targetInputId, buttonId) {
+    resyncStreamingFlag();
     const wasStreaming = sttStreamingActive;
     const active = sttStreamingActive || micOn;
     if (active && currentSTTTarget === targetInputId) {
@@ -2960,6 +2961,7 @@ export async function startSTT() {
         return;
     }
     // Already dictating? No-op (button handlers gate on isMicOn, but be safe).
+    resyncStreamingFlag();
     if (sttStreamingActive || micOn) return;
 
     // A just-stopped streaming session keeps its socket open briefly (grace
@@ -3208,7 +3210,17 @@ export function setLastAssistantText(text) {
  * @returns {boolean} Mic state
  */
 export function isMicOn() {
+    resyncStreamingFlag();
     return sttStreamingActive || micOn;
+}
+
+/**
+ * An stt_error is terminal: the streaming client ends the session itself
+ * (audit rank 52), and this flag stayed set, so the next tap "stopped" a dead
+ * session instead of starting a new one.
+ */
+function resyncStreamingFlag() {
+    if (sttStreamingActive && !sttStream.isStreaming()) sttStreamingActive = false;
 }
 
 // =============================================================================

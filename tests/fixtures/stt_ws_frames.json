@@ -1,0 +1,83 @@
+{
+  "description": "The /ws/stt server->client frames and what every client must do with them (audit rank 52: W24, A08-cli-agent-ui-07, O08-stt-realtime-04). ONE file read by three suites: Orchestrator/tests/test_stt_error_contract.py (the server emits these shapes), tests/web/stt-stream-frames.test.mjs (Portal and the Android WebView, Portal/modules/stt-stream.js) and the Android JVM test SttStreamFramesTest (data/voice/SttStreamClient.kt). An stt_error is TERMINAL: the client stops capture and never reconnects. switchable=true means another provider can serve the dictation; the client then offers the providers from /stt/catalog that are available, stream, and are not the one that failed. A new state or code lands here first, so no surface can miss it.",
+  "catalog": {
+    "providers": [
+      {"id": "openai", "label": "OpenAI", "available": true, "models": {"streaming": "stream-model-a", "file": "file-model-a"}},
+      {"id": "google", "label": "Google", "available": false, "models": {"streaming": "stream-model-b", "file": "file-model-b"}},
+      {"id": "elevenlabs", "label": "ElevenLabs", "available": true, "models": {"streaming": "stream-model-c", "file": "file-model-c"}},
+      {"id": "local", "label": "Local (free)", "available": true, "models": {"streaming": null, "file": "local"}},
+      {"id": "onbox", "label": "On-box (local)", "available": true, "models": {"streaming": "stream-model-d", "file": "file-model-d"}}
+    ]
+  },
+  "switch_alternatives": {
+    "elevenlabs": ["openai", "onbox"],
+    "openai": ["elevenlabs", "onbox"]
+  },
+  "frames": [
+    {
+      "name": "elevenlabs_quota_exceeded",
+      "frame": {"type": "stt_error", "message": "ElevenLabs quota exceeded - add credits or upgrade plan", "code": "quota_exceeded", "provider": "elevenlabs", "switchable": true},
+      "expect": {"kind": "error", "terminal": true, "code": "quota_exceeded", "provider": "elevenlabs", "switchable": true}
+    },
+    {
+      "name": "openai_credits_exhausted",
+      "frame": {"type": "stt_error", "message": "OpenAI account is out of credits - add credits or turn on auto-reload in the OpenAI console", "error_kind": "credits_exhausted", "code": "quota_exceeded", "provider": "openai", "switchable": true},
+      "expect": {"kind": "error", "terminal": true, "code": "quota_exceeded", "provider": "openai", "switchable": true}
+    },
+    {
+      "name": "elevenlabs_auth_failed",
+      "frame": {"type": "stt_error", "message": "ElevenLabs auth failed - check ELEVENLABS_API_KEY", "code": "auth_failed", "provider": "elevenlabs", "switchable": true},
+      "expect": {"kind": "error", "terminal": true, "code": "auth_failed", "provider": "elevenlabs", "switchable": true}
+    },
+    {
+      "name": "no_provider",
+      "frame": {"type": "stt_error", "message": "no STT provider configured", "code": "no_provider", "provider": null, "switchable": false},
+      "expect": {"kind": "error", "terminal": true, "code": "no_provider", "provider": null, "switchable": false}
+    },
+    {
+      "name": "legacy_error_without_code",
+      "frame": {"type": "stt_error", "message": "something went wrong"},
+      "expect": {"kind": "error", "terminal": true, "code": "provider_error", "provider": null, "switchable": false}
+    },
+    {
+      "name": "provider_override",
+      "frame": {"type": "stt_status", "state": "provider_override", "provider": "openai", "overridden_from": "elevenlabs"},
+      "expect": {"kind": "status", "state": "provider_override", "provider": "openai", "overridden_from": "elevenlabs", "warming": false}
+    },
+    {
+      "name": "loading_models",
+      "frame": {"type": "stt_status", "state": "loading_models"},
+      "expect": {"kind": "status", "state": "loading_models", "warming": true}
+    },
+    {
+      "name": "listening",
+      "frame": {"type": "stt_status", "state": "listening"},
+      "expect": {"kind": "status", "state": "listening", "warming": false}
+    },
+    {
+      "name": "speech",
+      "frame": {"type": "stt_status", "state": "speech"},
+      "expect": {"kind": "status", "state": "speech", "warming": false}
+    },
+    {
+      "name": "processing",
+      "frame": {"type": "stt_status", "state": "processing"},
+      "expect": {"kind": "status", "state": "processing", "warming": false}
+    },
+    {
+      "name": "delta",
+      "frame": {"type": "stt_delta", "text": "hello wor", "target": "prompt"},
+      "expect": {"kind": "delta", "text": "hello wor"}
+    },
+    {
+      "name": "final",
+      "frame": {"type": "stt_final", "text": "hello world", "target": "prompt"},
+      "expect": {"kind": "final", "text": "hello world"}
+    },
+    {
+      "name": "done",
+      "frame": {"type": "stt_done"},
+      "expect": {"kind": "done"}
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+/* _stt-status.css
+ * Live-dictation status (audit rank 52): the provider_override chip, the
+ * on-box "warming" state of the mic button and the switch-provider prompt
+ * after a switchable stt_error. Rendered by Portal/modules/stt-stream.js,
+ * which also runs inside the Android WebView.
+ */
+
+.stt-status-chip,
+.stt-switch-prompt {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(92vw, 420px);
+  z-index: var(--z-sticky);
+  background: var(--neutral-150);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.stt-status-chip {
+  bottom: 96px;
+  padding: 6px 12px;
+  pointer-events: none;
+}
+
+.stt-status-chip[hidden] {
+  display: none;
+}
+
+.stt-status-chip.stt-status-warming {
+  border-color: var(--highlight-header);
+}
+
+.stt-switch-prompt {
+  bottom: 140px;
+  padding: 12px 14px;
+}
+
+.stt-switch-prompt p {
+  margin: 0 0 10px;
+  line-height: 1.4;
+}
+
+.stt-switch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stt-switch-actions button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--neutral-250);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.stt-switch-actions button:hover {
+  background: var(--neutral-300);
+}
+
+.stt-switch-actions .stt-switch-dismiss {
+  background: transparent;
+  color: var(--muted);
+}
+
+/* On-box models still loading: the mic is open but not transcribing yet. An
+ * outline, because the recording state already owns the button's background
+ * and animation. */
+.stt-warming {
+  outline: 2px dashed var(--highlight-header);
+  outline-offset: 2px;
+}
