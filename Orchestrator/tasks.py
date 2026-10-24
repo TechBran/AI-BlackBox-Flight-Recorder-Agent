@@ -978,6 +978,29 @@ def _vet_veo_download_uri(video_uri, api_base: str) -> str:
     return video_uri
 
 
+_VEO_DEFAULT_DURATION_S = 8
+_LEADING_NUMBER_RX = re.compile(r"\s*(\d+(?:\.\d+)?)")
+
+
+def _veo_duration_seconds(value) -> int:
+    """``duration`` as the whole number of seconds Veo's durationSeconds needs.
+
+    Model tool calls often send it as a string ("8", "8s", "8 seconds") and the
+    chat loops copy it into the task unchanged; Veo answers 400 "The value type
+    for durationSeconds needs to be a number" (MS02, 2026-10-17..23). Anything
+    without a leading number is the default.
+    """
+    if isinstance(value, bool):
+        return _VEO_DEFAULT_DURATION_S
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        match = _LEADING_NUMBER_RX.match(value)
+        if match:
+            return int(float(match.group(1)))
+    return _VEO_DEFAULT_DURATION_S
+
+
 def process_video_generation(task: Task):
     """Generate video using Veo 3.1 (text-to-video, image-to-video, or video extension)"""
     update_task(task.task_id, progress=20)
@@ -1124,7 +1147,7 @@ def process_video_generation(task: Task):
     # Get aspect ratio and resolution from options
     aspect_ratio = video_options.get("aspectRatio", "16:9")
     resolution = video_options.get("resolution", "720p")
-    duration = video_options.get("duration", 8)
+    duration = _veo_duration_seconds(video_options.get("duration"))
     negative_prompt = video_options.get("negativePrompt")
 
     # Validate 1080p + 8s constraint
