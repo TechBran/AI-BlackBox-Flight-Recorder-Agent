@@ -547,6 +547,11 @@ if systemctl is-enabled --quiet vllm-reranker.service 2>/dev/null; then
     exit 0
 fi
 sudo systemctl enable blackbox-models.service >/dev/null 2>&1
+# The unit's StartLimitBurst=3 / StartLimitIntervalSec=300 counts manual starts
+# too: after three failed boot-time starts (a dead driver, fixed since) a bare
+# restart is refused "repeated too quickly" and set -e ends this run. Running
+# the installer is an explicit intent to start, so clear the counter first.
+sudo systemctl reset-failed blackbox-models.service 2>/dev/null || true
 sudo systemctl restart blackbox-models.service
 echo "[install-localstack] blackbox-models.service written + enabled + (re)started"
 

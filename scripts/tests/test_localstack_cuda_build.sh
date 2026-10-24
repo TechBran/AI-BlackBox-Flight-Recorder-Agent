@@ -123,6 +123,18 @@ STUB_VENV_PYTHON_RC=1 STUB_COMPUTE_CAP=8.6 STUB_VRAM_MB=16380 \
 grep -q 'torch.cuda.is_available() is False' "$WORK/nocuda.log" \
     || fail "2c: a qwen-tts torch that cannot use the GPU was not reported: $(grep -i qwen "$WORK/nocuda.log")"
 
+# ── 2d. a re-run after three failed starts still restarts the stack ───────────
+# blackbox-models.service carries StartLimitBurst=3 within 300 s, and manual
+# starts count against it: re-running the installer right after a driver fix
+# (what the exit-7 message asks for) hit "start request repeated too quickly"
+# and `set -e` aborted the run with an undocumented exit 1.
+: > "$STUB_LOG"
+STUB_START_LIMITED=blackbox-models.service STUB_COMPUTE_CAP=8.6 STUB_VRAM_MB=16380 \
+    bash "$LOCALSTACK_SH" "$USER_NAME" "$HOME_DIR" "$ROOT" > "$WORK/limited.log" 2>&1; rc=$?
+[[ "$rc" == 0 ]] || fail "2d: a start-limited unit aborted the re-run (rc=$rc): $(tail -5 "$WORK/limited.log")"
+grep -nE '^systemctl (reset-failed|restart) blackbox-models.service$' "$STUB_LOG" | head -n 1 \
+    | grep -q 'reset-failed' || fail "2d: blackbox-models.service was restarted without a reset-failed first"
+
 # ── 3. GPU swap: rebuild ──────────────────────────────────────────────────────
 rc="$(run_stack 8.9)"
 [[ "$rc" == 0 ]] || fail "3: run exited $rc"

@@ -206,6 +206,9 @@ render_vllm_reranker_unit() {
 render_vllm_reranker_unit | sudo tee "$UNIT_DEST" > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable vllm-reranker.service > /dev/null 2>&1
+# StartLimitBurst=3 / 300 s counts manual starts too; a re-run is an explicit
+# intent to start, so clear the counter or set -e ends it "repeated too quickly".
+sudo systemctl reset-failed vllm-reranker.service 2>/dev/null || true
 sudo systemctl restart vllm-reranker.service
 echo "[install-reranker] vllm-reranker.service written + enabled + (re)started"
 

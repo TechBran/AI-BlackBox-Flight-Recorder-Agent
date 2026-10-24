@@ -23,6 +23,10 @@
 #                        driver-dead message (unset: the driver answers)
 #   STUB_LSPCI           lspci output (default: one NVIDIA VGA line; "" = no card)
 #   STUB_VENV_PYTHON_RC  exit code of a stub venv's bin/python (default 0)
+#   STUB_START_LIMITED   space-separated units whose start limit is hit: `systemctl
+#                        start|restart <unit>` fails as systemd does ("start request
+#                        repeated too quickly") unless this run already logged a
+#                        `systemctl reset-failed <unit>`
 #   STUB_NVCC_ARCHS      `nvcc --list-gpu-arch` output, space-separated (default:
 #                        Ubuntu 24.04's apt CUDA 12.0, compute_50 .. compute_90);
 #                        "none" makes it fail like an nvcc without the option
@@ -115,6 +119,13 @@ case "${args[0]:-}" in
             mv "$STUB_UNITS.tmp" "$STUB_UNITS"
         done ;;
     is-failed) exit 1 ;;
+    start|restart)
+        for u in ${STUB_START_LIMITED:-}; do
+            if [[ "$u" == "${args[1]:-}" ]] && ! grep -qxF -- "systemctl reset-failed $u" "$STUB_LOG"; then
+                echo "Job for $u failed: start request repeated too quickly." >&2
+                exit 1
+            fi
+        done ;;
 esac
 exit 0
 STUB

@@ -100,6 +100,15 @@ rc="$(RERANK_PROVIDER='' STUB_ENABLED_UNITS="" run_gpu flag --vllm)"
 [[ "$rc" == 0 ]] || fail "3: --vllm run exited $rc: $(cat "$WORK/flag/run.log")"
 check_provisioned flag
 
+# ── 3b. a re-run after three failed starts still restarts the unit ───────────
+# vllm-reranker.service has StartLimitBurst=3 within 300 s, and a manual
+# restart counts against it: without a reset-failed, `set -e` ended the re-run.
+rc="$(RERANK_PROVIDER=vllm STUB_ENABLED_UNITS="" STUB_START_LIMITED=vllm-reranker.service run_gpu limited)"
+[[ "$rc" == 0 ]] || fail "3b: a start-limited unit aborted the re-run (rc=$rc): $(tail -5 "$WORK/limited/run.log")"
+grep -nE '^systemctl (reset-failed|restart) vllm-reranker.service$' "$STUB_LOG" | head -n 1 \
+    | grep -q 'reset-failed' || fail "3b: vllm-reranker.service was restarted without a reset-failed first"
+rm -f "$STUB_ROOT/etc/systemd/system/vllm-reranker.service"
+
 # ── 4. a home the unit cannot carry is refused up front ──────────────────────
 : > "$STUB_LOG"
 RERANK_PROVIDER=vllm bash "$RERANKER_SH" "$USER_NAME" "$WORK/bad home" "$ROOT" > "$WORK/bad.log" 2>&1; rc=$?
