@@ -1428,14 +1428,14 @@ async def _execute_gemini_tool(session: GeminiLiveSession, name: str, args: Dict
         url = args.get("url")
         task_id_param = args.get("task_id")
         print(f"[GEMINI-LIVE] Executing get_media: url={url}, task_id={task_id_param}")
-        media_result = execute_get_media(url=url, task_id=task_id_param)
+        media_result = await run_blocking(execute_get_media, url=url, task_id=task_id_param)
         result = json.dumps(media_result, indent=2)
     elif name == "list_media":
         from Orchestrator.routes.chat_routes import execute_list_media
         media_type = args.get("media_type")
         limit = args.get("limit", 20)
         print(f"[GEMINI-LIVE] Executing list_media: type={media_type}, limit={limit}")
-        list_result = execute_list_media(media_type=media_type, limit=limit)
+        list_result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
         result = json.dumps(list_result, indent=2)
     elif name == "search_media":
         from Orchestrator.routes.chat_routes import execute_search_media
@@ -1443,7 +1443,7 @@ async def _execute_gemini_tool(session: GeminiLiveSession, name: str, args: Dict
         media_type = args.get("media_type")
         limit = args.get("limit", 10)
         print(f"[GEMINI-LIVE] Executing search_media: query='{query}', type={media_type}")
-        search_result = execute_search_media(query=query, media_type=media_type, limit=limit)
+        search_result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
         result = json.dumps(search_result, indent=2)
     elif name == "send_sms":
         # Send SMS using unified tool executor

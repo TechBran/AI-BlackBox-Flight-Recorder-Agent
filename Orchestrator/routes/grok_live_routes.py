@@ -1078,14 +1078,14 @@ async def _execute_grok_tool(session: 'GrokLiveSession', name: str, arguments: D
         url = arguments.get("url")
         task_id_param = arguments.get("task_id")
         print(f"[GROK-LIVE] Executing get_media: url={url}, task_id={task_id_param}")
-        media_result = execute_get_media(url=url, task_id=task_id_param)
+        media_result = await run_blocking(execute_get_media, url=url, task_id=task_id_param)
         result = json.dumps(media_result, indent=2)
     elif name == "list_media":
         from Orchestrator.routes.chat_routes import execute_list_media
         media_type = arguments.get("media_type")
         limit = arguments.get("limit", 20)
         print(f"[GROK-LIVE] Executing list_media: type={media_type}, limit={limit}")
-        list_result = execute_list_media(media_type=media_type, limit=limit)
+        list_result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
         result = json.dumps(list_result, indent=2)
     elif name == "search_media":
         from Orchestrator.routes.chat_routes import execute_search_media
@@ -1093,7 +1093,7 @@ async def _execute_grok_tool(session: 'GrokLiveSession', name: str, arguments: D
         media_type = arguments.get("media_type")
         limit = arguments.get("limit", 10)
         print(f"[GROK-LIVE] Executing search_media: query='{query}', type={media_type}")
-        search_result = execute_search_media(query=query, media_type=media_type, limit=limit)
+        search_result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
         result = json.dumps(search_result, indent=2)
     elif name == "send_sms":
         # Send SMS using unified tool executor
