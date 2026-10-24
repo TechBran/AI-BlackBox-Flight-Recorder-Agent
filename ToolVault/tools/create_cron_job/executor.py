@@ -1,58 +1,24 @@
 """Executor for create_cron_job (migrated from blackbox_tools._execute_create_cron_job).
 
-Also hosts the small cron model/provider helpers shared with edit_cron_job
-(imported there) so there is one source of truth for: normalizing a provider
-word to its canonical stored key, validating a chosen specific model id
-against the live /models/{provider} catalog (M4.2b), and refusing a model that
-obviously belongs to a different provider than the job's.
+Also hosts the live-catalog model check shared with edit_cron_job (imported
+there): a chosen specific model id must resolve in its provider's GET
+/models/{provider} catalog (M4.2b). The provider/model PAIRING rules
+(normalizing a provider word to its stored key, refusing a model that
+obviously belongs to another provider, Auto for an omitted model) live in
+Orchestrator/scheduler/pairing.py and are applied by CronJobManager itself,
+so the HTTP API gets them too (audit O15-scheduler-admin-05); the catalog
+check below reuses them.
 """
 import logging
 
+from Orchestrator.scheduler.pairing import (
+    BARE_PROVIDER_WORDS as _BARE_PROVIDER_WORDS,
+    foreign_model_error as _foreign_model_error,
+    normalize_provider_word as _normalize_provider_word,
+)
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
-
-
-# Provider WORD (what the AI/schema uses) -> the canonical stored provider key
-# (what the cron executor sends to /chat and what /models/{key} is keyed on).
-# gemini->google, claude->anthropic, grok->xai; openai/computer-use/custom
-# unchanged. The catalog keys are also accepted verbatim (idempotent
-# normalization).
-_PROVIDER_WORD_TO_KEY = {
-    "gemini": "google",
-    "google": "google",
-    "claude": "anthropic",
-    "anthropic": "anthropic",
-    "openai": "openai",
-    "gpt": "openai",
-    "grok": "xai",
-    "xai": "xai",
-    "computer-use": "computer-use",
-    "cu": "computer-use",
-    "custom": "custom",
-}
-
-# Bare provider words that are a DEFAULT selector (not a specific id) -- these
-# are never validated against the catalog (they resolve to a provider default).
-_BARE_PROVIDER_WORDS = set(_PROVIDER_WORD_TO_KEY.keys())
-
-# Providers whose specific ids are single-vendor, so _model_to_provider can
-# tell a foreign id apart. computer-use runs claude/gpt/gemini CU ids and custom
-# servers host arbitrary ids, so neither is checked for specific ids.
-_SINGLE_VENDOR_KEYS = ("google", "anthropic", "openai", "xai")
-
-
-def _normalize_provider_word(provider):
-    """Map a provider word to its canonical stored key, or None when blank.
-
-    Unknown words pass through lowercased (defense-in-depth: never silently
-    drop a value the caller meant)."""
-    if not provider:
-        return None
-    p = provider.strip().lower()
-    if not p:
-        return None
-    return _PROVIDER_WORD_TO_KEY.get(p, p)
 
 
 def _fetch_catalog_models(provider_key, operator=None):
@@ -66,51 +32,6 @@ def _fetch_catalog_models(provider_key, operator=None):
     """
     from Orchestrator.routes.admin_routes import get_available_models
     return get_available_models(provider_key, operator)
-
-
-def _obvious_owner(model):
-    """The provider key ``model`` unmistakably belongs to, or None.
-
-    A bare provider word maps to its key; a specific id goes through the
-    scheduler's _model_to_provider, except its google catch-all (an id it can
-    only place there by default is not a positive match)."""
-    m = (model or "").strip().lower()
-    if not m:
-        return None
-    if m in _BARE_PROVIDER_WORDS:
-        return _PROVIDER_WORD_TO_KEY[m]
-    from Orchestrator.scheduler.executor import _model_to_provider
-    owner = _model_to_provider(m)
-    if owner == "google" and "gemini" not in m:
-        return None
-    return owner
-
-
-def _foreign_model_error(model, provider_word):
-    """Return an error message when ``model`` OBVIOUSLY belongs to a provider
-    other than ``provider_word``, else None.
-
-    Such a pairing 404s on every fire: a bare provider word ("gemini") resolves
-    to ITS provider's default regardless of the stored provider
-    (scheduler.executor._resolve_model_name), and a specific id is sent
-    verbatim to the stored provider's API. computer-use is never checked (it
-    legitimately runs other vendors' models), and an id _model_to_provider can
-    only place via its google catch-all is not 'obvious'.
-    """
-    provider_key = _normalize_provider_word(provider_word)
-    m = (model or "").strip().lower()
-    if not m or provider_key not in _SINGLE_VENDOR_KEYS + ("custom",):
-        return None
-    if provider_key == "custom" and m not in _BARE_PROVIDER_WORDS:
-        return None  # custom: any specific id may be a registry model
-    owner = _obvious_owner(m)
-    if owner is None or owner == provider_key:
-        return None
-    return (
-        f"Model '{model.strip()}' belongs to provider {owner}, not {provider_key}. "
-        f"Set provider to {owner} as well, or leave model empty for the "
-        f"{provider_key} default."
-    )
 
 
 def _validate_model(model, provider_word, operator=None):
@@ -178,13 +99,10 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     try:
         provider = _normalize_provider_word(params.get("provider"))
 
-        # An omitted model follows the provider: '' is Auto, which the scheduler
-        # resolves to THIS provider's default at fire time. A call with neither
-        # keeps the legacy "gemini" default (the manager backfills provider
-        # google from it).
+        # An omitted model is Auto: the manager pairs it with the provider
+        # (THIS provider's default at fire time, or the box's default provider
+        # when neither is given -- never "gemini" whatever the provider, W18).
         model = params.get("model")
-        if model is None:
-            model = "" if provider else "gemini"
 
         # M4.2b: validate a chosen specific model id against the live catalog so
         # a typo fails LOUDLY here, not silently at fire time. Graceful on any

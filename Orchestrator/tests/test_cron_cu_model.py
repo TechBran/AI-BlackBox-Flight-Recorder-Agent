@@ -181,13 +181,16 @@ def test_model_to_provider_plain_aliases_still_work():
 
 
 # ---------------------------------------------------------------------------
-# The sync-wrapper CU timeout keys off the provider (not just the model string)
+# A CU job's only budget is the CU stream's, sized from the CU session config
 # ---------------------------------------------------------------------------
 
-def test_cu_timeout_keys_off_provider(tmp_path, monkeypatch):
-    """A CU job carrying a SPECIFIC CU model id (so the old model-string check
-    would miss it) still gets the long 660s timeout because the wrapper keys off
-    the authoritative provider."""
+def test_cu_job_has_no_wrapper_timeout(tmp_path, monkeypatch):
+    """The sync wrapper used to cap a CU run at 660 s (300 s for chat) while
+    the run itself continued, so a long run was logged as an exception. The
+    scheduler now awaits _execute_job directly (O15-scheduler-admin-04), and a
+    CU job carrying a SPECIFIC CU model id is bounded only by the CU stream
+    budget, which covers the configured CU session."""
+    import Orchestrator.config as config
     from Orchestrator.scheduler import manager as manager_mod
     from Orchestrator.scheduler.manager import CronJobManager
 
@@ -202,25 +205,6 @@ def test_cu_timeout_keys_off_provider(tmp_path, monkeypatch):
         provider="computer-use",
         model=CU_GEMINI_MODEL_DEFAULT,  # a specific CU id, NOT "computer-use"
     )
-
-    # Capture the timeout the wrapper would request without running anything.
-    captured = {}
-
-    class _FakeFuture:
-        def result(self, timeout=None):
-            captured["timeout"] = timeout
-
-    monkeypatch.setattr(
-        manager_mod.asyncio,
-        "run_coroutine_threadsafe",
-        lambda coro, loop: (coro.close(), _FakeFuture())[1],
-    )
-
-    import asyncio as _aio
-    mgr._loop = _aio.new_event_loop()
-    try:
-        mgr._execute_job_sync_wrapper(job["id"])
-    finally:
-        mgr._loop.close()
-
-    assert captured["timeout"] == 660
+    assert job["provider"] == "computer-use"
+    assert not hasattr(mgr, "_execute_job_sync_wrapper")
+    assert executor_mod._cu_stream_timeout() > config.CU_SESSION_TIMEOUT + 30

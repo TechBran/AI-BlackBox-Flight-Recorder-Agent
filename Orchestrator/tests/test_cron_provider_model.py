@@ -10,7 +10,8 @@ every fire 404'd ("model: gemini-3.1-pro-preview").
 
 Now:
   * create: an omitted model with a provider is Auto ('' -> that provider's
-    default at fire time); with no provider the legacy "gemini" default stays.
+    default at fire time); with no provider either it is Auto on the box's
+    default provider (W18; it used to be "gemini" on every box).
   * create/edit: a model that obviously belongs to a different provider (a
     foreign bare word, or a foreign specific id the catalog can't vouch for)
     is rejected LOUDLY at create/edit time.
@@ -20,6 +21,8 @@ Now:
 The catalog fetch and the scheduler DB are isolated, so these tests are
 deterministic and offline.
 """
+
+import sqlite3
 
 import pytest
 
@@ -138,16 +141,25 @@ async def test_create_model_none_treated_as_omitted(temp_manager, ctx, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_create_no_provider_no_model_keeps_legacy_gemini(
-    temp_manager, ctx, monkeypatch
+@pytest.mark.parametrize("box_default, key, fired", [
+    ("anthropic", "anthropic", ANTHROPIC_MODEL_DEFAULT),
+    ("google", "google", GEMINI_MODEL_DEFAULT),
+])
+async def test_create_no_provider_no_model_is_auto_on_the_box_default(
+    temp_manager, ctx, monkeypatch, box_default, key, fired
 ):
+    """W18: neither given used to store "gemini" (Gemini even on a box with
+    only an Anthropic key). It is Auto on the box's default provider now."""
+    import Orchestrator.config as config
+
+    monkeypatch.setattr(config, "DEFAULT_PROVIDER", box_default)
     _mock_catalog(monkeypatch)
     res = await _create(ctx)
     assert res.success, res.result
     job = temp_manager.get_job(res.data["job"]["id"])
-    assert job["model"] == "gemini"
-    assert job["provider"] == "google"
-    assert _fired_model(job) == GEMINI_MODEL_DEFAULT
+    assert job["model"] == ""
+    assert job["provider"] == key
+    assert _fired_model(job) == fired
 
 
 @pytest.mark.asyncio
@@ -413,8 +425,15 @@ async def test_edit_restating_provider_repairs_foreign_stored_model(
     """A row the old create default produced (anthropic + "gemini") is repaired
     by restating the provider, even though the provider doesn't change."""
     _mock_catalog(monkeypatch)
-    job = _seed(temp_manager, "anthropic", "gemini")
-    assert _fired_model(job) == GEMINI_MODEL_DEFAULT  # the broken pairing
+    # The manager refuses this pair now, so write the old row directly.
+    job = _seed(temp_manager, "anthropic", "")
+    conn = sqlite3.connect(temp_manager.db_path)
+    conn.execute("UPDATE cron_jobs SET model = 'gemini' WHERE id = ?", (job["id"],))
+    conn.commit()
+    conn.close()
+    job = temp_manager.get_job(job["id"])
+    # The executor already heals it at fire time: the job's provider wins.
+    assert _fired_model(job) == ANTHROPIC_MODEL_DEFAULT
     res = await _edit(ctx, job["id"], provider="claude")
     assert res.success, res.result
     refreshed = temp_manager.get_job(job["id"])

@@ -1,15 +1,11 @@
 """Executor for edit_cron_job (migrated from blackbox_tools._execute_edit_cron_job)."""
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
-# Shared cron model/provider helpers live in create_cron_job's executor (one
-# source of truth); import them so edit validates identically.
-from ToolVault.tools.create_cron_job.executor import (
-    _BARE_PROVIDER_WORDS,
-    _foreign_model_error,
-    _normalize_provider_word,
-    _obvious_owner,
-    _validate_model,
-)
+# The provider/model pairing rules are the scheduler's (one source of truth,
+# also applied by CronJobManager.update_job); the live-catalog model check is
+# shared with create_cron_job, so edit validates identically.
+from Orchestrator.scheduler.pairing import pair_for_update
+from ToolVault.tools.create_cron_job.executor import _validate_model
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -31,21 +27,17 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         ):
             return ToolResult(False, "Job not found")
 
-        # Normalize a provided provider word to its canonical stored key
-        # (gemini->google, claude->anthropic, grok->xai) so the stored provider
-        # matches what the cron executor + /chat expect. Done FIRST so a blank
-        # provider ('  ') counts as omitted in every check below.
-        if params.get("provider") is not None:
-            params["provider"] = _normalize_provider_word(params.get("provider"))
-
-        # Schema: provider is "derived from the model" when omitted. A model-only
-        # edit naming another vendor's model switches the job to that vendor --
-        # rows with no stored provider report one derived from the OLD model, so
-        # validating against it would refuse the switch that used to work.
-        if params.get("provider") is None and params.get("model") is not None and (
-            _foreign_model_error(params.get("model"), existing.get("provider"))
-        ):
-            params["provider"] = _obvious_owner(params.get("model"))
+        # Provider/model pairing (O15-05): a provider word is stored as its key
+        # and a blank one counts as omitted; a model-only edit naming another
+        # vendor's model moves the job to that vendor; a provider switch with
+        # no model resets the model to Auto (and restating the provider repairs
+        # a stored bare word that belongs elsewhere); a foreign pair is refused.
+        # The manager applies the same rules in update_job; they run here first
+        # so the catalog check below consults the provider the job will have.
+        try:
+            params = pair_for_update(existing, params)
+        except ValueError as e:
+            return ToolResult(False, str(e))
 
         # M4.2b: when the edit sets a model, validate the chosen specific id
         # against the live catalog so a typo fails LOUDLY here, not at fire time.
@@ -59,21 +51,6 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             )
             if not ok:
                 return ToolResult(False, err)
-
-        # A provider switch with no model in the call resets the model to Auto
-        # ('' -> the new provider's default at fire time) so the old provider's
-        # model can't ride along (e.g. "gemini" under anthropic 404s every
-        # fire). Restating the same provider also repairs a stored BARE provider
-        # word that belongs elsewhere (the shape the old "gemini" default wrote);
-        # specific ids are left alone -- the substring heuristic can misplace them.
-        new_provider = params.get("provider")
-        stored_model = (existing.get("model") or "").strip().lower()
-        if new_provider and params.get("model") is None and (
-            new_provider != existing.get("provider")
-            or (stored_model in _BARE_PROVIDER_WORDS
-                and _foreign_model_error(stored_model, new_provider))
-        ):
-            params["model"] = ""
 
         # Translate pause/resume into a status update and fall through to the
         # SINGLE update_job path (M2.4). update_job whitelists `status` and

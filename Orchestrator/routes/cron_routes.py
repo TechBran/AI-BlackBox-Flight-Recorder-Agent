@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Strong references to in-flight fire-and-forget run-now tasks. The event loop
 # only holds a WEAK reference to a bare asyncio.Task, so without this the GC can
-# collect a long-running job (it awaits a 180-600s /chat call) mid-flight and it
+# collect a long-running job (it awaits a minutes-long /chat call) mid-flight and it
 # would silently never complete. Each task self-removes on done.
 _RUN_NOW_TASKS: "set[asyncio.Task]" = set()
 
@@ -33,7 +33,9 @@ class CronJobCreate(BaseModel):
     prompt: str
     schedule: str                          # cron expression
     frequency_hint: Optional[str] = None   # human-readable
-    model: Optional[str] = "gemini"
+    # Omitted/null = Auto: the manager pairs it with the provider (W18), so an
+    # omitted model is never "gemini" under another provider.
+    model: Optional[str] = None
     provider: Optional[str] = None         # canonical catalog key (M4); '' model = Auto
     delivery: Optional[str] = "snapshot"
     delivery_target: Optional[str] = None
@@ -57,6 +59,18 @@ class CronJobUpdate(BaseModel):
 class CronPreview(BaseModel):
     schedule: str                          # candidate cron expression
     count: int = 3                         # how many upcoming fires to preview
+
+
+def _box_zone() -> dict:
+    """The box's scheduling time zone, for labelling times as box time.
+
+    Every schedule is read against the box-local clock (M1.1), which the
+    Android app and the Portal may not share; they label the Simple editor's
+    time fields with it (A12-voice-cron-14). Additive response fields:
+    ``timezone`` (IANA name when known) and ``tz_abbrev`` (e.g. "EDT", now).
+    """
+    name = getattr(LOCAL_TZ, "key", None) or str(LOCAL_TZ)
+    return {"timezone": name, "tz_abbrev": datetime.now(LOCAL_TZ).tzname() or name}
 
 
 @app.get("/api/cron/contacts")
@@ -163,7 +177,7 @@ async def preview_cron(body: CronPreview):
         next_runs.append(fire.isoformat())
         cursor = fire + timedelta(microseconds=1)
 
-    return {"next_runs": next_runs}
+    return {"next_runs": next_runs, **_box_zone()}
 
 
 @app.get("/api/cron/jobs")
@@ -171,7 +185,7 @@ async def list_cron_jobs(operator: Optional[str] = None, status: Optional[str] =
     """List all cron jobs, optionally filtered by operator and/or status."""
     manager = get_scheduler_manager()
     jobs = manager.list_jobs(operator=operator, status=status)
-    return {"jobs": jobs, "count": len(jobs)}
+    return {"jobs": jobs, "count": len(jobs), **_box_zone()}
 
 
 @app.post("/api/cron/jobs")
@@ -264,7 +278,7 @@ async def run_cron_job_now(job_id: str):
 
     Returns 202 right away with a small ack and runs the job in the
     background instead of blocking the request for the full job duration
-    (which could be 180-600s). The Portal's 5s history poll observes
+    (which can take many minutes). The Portal's 5s history poll observes
     completion. The background run goes through _execute_job, so the M2.6
     per-job lock prevents a manual run from colliding with a scheduled fire
     (a manual run that lands while one is already in flight simply records a

@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,8 +33,27 @@ from Orchestrator.notifications.bus import notify
 # W09: a run the provider refused for billing (executor.CronCreditsExhausted)
 # carries this error_kind and is not retried.
 from Orchestrator.provider_billing import CREDITS_EXHAUSTED
+# O15-05/W18: the provider/model pairing rules, applied at this sink.
+from Orchestrator.scheduler.pairing import pair_for_create, pair_for_update
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Run outcomes the executor cannot classify as success or failure (O15-02/-03)
+#
+# OUTCOME_UNKNOWN: the run's turn may have run, and delivered, but the
+# scheduler could not see how it ended: the /chat task was still running when
+# the poll budget ran out, the POST or the CU stream timed out after reaching
+# the box, or the box restarted mid-run. It is the history delivery_status, the
+# job's last_run_result and executor.CronOutcomeUnknown's error_kind. It is
+# never retried: a retry submits a NEW turn with the same DELIVERY instruction
+# while the first may still send its SMS or place its call.
+#
+# RUN_CANCELLED: the job's /chat task was cancelled (task manager, cancel-all).
+# Cancelling is an operator decision, so it is not retried either.
+# ---------------------------------------------------------------------------
+OUTCOME_UNKNOWN = "outcome_unknown"
+RUN_CANCELLED = "cancelled"
 
 # Operators we never push a notification to (pushing "to nobody"). 'system' is
 # the shared, ownerless operator used by infrastructure jobs; a blank/None
@@ -224,6 +244,10 @@ _CRON_JOBS_COLUMNS = [
     "next_run_at",
     "run_count",
     "error_count",
+    # O15-03: the in-flight marker. Set when a run starts, cleared when it
+    # ends; a row that still has it on start() was interrupted by a restart.
+    "run_started_at",
+    "run_task_id",
 ]
 
 _HISTORY_COLUMNS = [
@@ -236,7 +260,35 @@ _HISTORY_COLUMNS = [
     "delivery_status",
     "duration_ms",
     "error",
+    "task_id",
 ]
+
+# Columns added after the first release, ALTERed in when absent (migration-safe).
+_CRON_JOBS_ADDED_COLUMNS = {
+    "provider": "TEXT",
+    "run_started_at": "TEXT",
+    "run_task_id": "TEXT",
+}
+_HISTORY_ADDED_COLUMNS = {
+    "task_id": "TEXT",
+}
+
+# Standard cron numbers the week 0=Sunday .. 6=Saturday (7 is Sunday again).
+_CRON_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+
+
+@dataclass
+class _Attempt:
+    """One executor attempt, as _attempt_once recorded it in history."""
+
+    result_text: Optional[str]
+    error_text: Optional[str]
+    duration_ms: int
+    run_at: datetime
+    delivery_status: str
+    retryable: bool
+    turn_ran: bool
+    outcome_unknown: bool = False
 
 
 class CronJobManager:
@@ -260,9 +312,10 @@ class CronJobManager:
         # execute. A run that finds the lock already held SKIPS (it does not
         # queue/block). Created lazily per job_id on first execution.
         self._job_locks: Dict[str, asyncio.Lock] = {}
-        # Strong refs to in-flight cold-restart catch-up tasks (M3.2). The event
-        # loop only weakly references a bare asyncio.Task, so without retaining
-        # it the GC could collect a catch-up run mid-flight and it would silently
+        # Strong refs to in-flight cold-restart tasks: catch-up runs (M3.2) and
+        # the alerts for runs a restart interrupted (O15-03). The event loop
+        # only weakly references a bare asyncio.Task, so without retaining it
+        # the GC could collect a catch-up run mid-flight and it would silently
         # never complete (the same footgun as the run-now route). Each task
         # self-removes via a done-callback.
         self._catchup_tasks: "set[asyncio.Task]" = set()
@@ -283,8 +336,69 @@ class CronJobManager:
         Single chokepoint for cron-expression parsing so that every trigger
         the manager constructs interprets the schedule against the same
         authoritative box-local wall clock (M1.1).
+
+        The day-of-week field is read as standard cron (O15-01): 0 and 7 are
+        Sunday, 1 is Monday. CronTrigger.from_crontab passes it to APScheduler
+        untranslated, where 0 is MONDAY and 7 is refused, so every numeric day
+        fired one day late ('1-5' ran Tuesday to Saturday). The field is
+        rewritten as APScheduler day names before the trigger is built.
         """
+        fields = schedule.split() if isinstance(schedule, str) else []
+        if len(fields) == 5:
+            fields[4] = self._cron_dow_to_aps(fields[4])
+            schedule = " ".join(fields)
         return CronTrigger.from_crontab(schedule, timezone=LOCAL_TZ)
+
+    @staticmethod
+    def _dow_number(token: str) -> int:
+        """A standard-cron day token (0-7 or a three-letter name) as 0-7."""
+        t = token.strip().lower()
+        if t.isdigit() and 0 <= int(t) <= 7:
+            return int(t)
+        if t in _CRON_DOW_NAMES:
+            return _CRON_DOW_NAMES.index(t)
+        raise ValueError(f"'{token}' is not a day of the week (0-7, 0 and 7 = Sunday, or sun..sat)")
+
+    @classmethod
+    def _cron_dow_to_aps(cls, field: str) -> str:
+        """Rewrite a standard-cron day-of-week field in APScheduler's terms.
+
+        Handles '*', '?', single days, names, lists, ranges and steps, with
+        the standard meanings: '*/2' is Sun,Tue,Thu,Sat; 'N/S' runs from N to
+        7; a range must not run backwards. The result lists the days by name,
+        which APScheduler reads the same way standard cron does.
+        """
+        if field in ("*", "?"):
+            return "*"
+        days = set()
+        for item in field.split(","):
+            base, has_step, step_text = item.partition("/")
+            step = 1
+            if has_step:
+                if not step_text.isdigit() or int(step_text) == 0:
+                    raise ValueError(f"invalid day-of-week step in '{item}'")
+                step = int(step_text)
+            if base == "*":
+                lo, hi = 0, 6
+            elif "-" in base:
+                lo_text, _, hi_text = base.partition("-")
+                lo, hi = cls._dow_number(lo_text), cls._dow_number(hi_text)
+                if lo > hi:
+                    raise ValueError(f"day-of-week range '{base}' runs backwards")
+            else:
+                lo = cls._dow_number(base)
+                hi = 7 if has_step else lo
+            days.update(day % 7 for day in range(lo, hi + 1, step))
+        # APScheduler's week runs mon..sun; list the days in that order.
+        return ",".join(_CRON_DOW_NAMES[d] for d in sorted(days, key=lambda d: (d - 1) % 7))
+
+    @staticmethod
+    def _has_numeric_dow(schedule: str) -> bool:
+        """True for a 5-field schedule whose day-of-week field has a number in
+        it (a day or a '*/N' step), i.e. one whose fire days the O15-01 fix
+        moves: before it, numeric days fired a day late."""
+        fields = (schedule or "").split()
+        return len(fields) == 5 and any(c.isdigit() for c in fields[4])
 
     # ------------------------------------------------------------------
     # Database initialisation
@@ -333,11 +447,13 @@ class CronJobManager:
             # an existing DB created before this column upgrades cleanly and a
             # second construction is a no-op. Newly stored rows still derive
             # nothing here — defaults stay NULL and _job_to_dict backfills.
+            # The same pattern adds the O15-03 in-flight marker columns.
             existing_cols = {
                 row[1] for row in cursor.execute("PRAGMA table_info(cron_jobs)")
             }
-            if "provider" not in existing_cols:
-                cursor.execute("ALTER TABLE cron_jobs ADD COLUMN provider TEXT")
+            for col, col_type in _CRON_JOBS_ADDED_COLUMNS.items():
+                if col not in existing_cols:
+                    cursor.execute(f"ALTER TABLE cron_jobs ADD COLUMN {col} {col_type}")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS cron_job_history (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +469,14 @@ class CronJobManager:
                         ON DELETE CASCADE
                 )
             """)
+            # history.task_id (O15-02/-03): the /chat task an attempt submitted,
+            # so an outcome_unknown row says which turn to look at.
+            history_cols = {
+                row[1] for row in cursor.execute("PRAGMA table_info(cron_job_history)")
+            }
+            for col, col_type in _HISTORY_ADDED_COLUMNS.items():
+                if col not in history_cols:
+                    cursor.execute(f"ALTER TABLE cron_job_history ADD COLUMN {col} {col_type}")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_cron_job_history_job_id
                     ON cron_job_history(job_id)
@@ -376,10 +500,15 @@ class CronJobManager:
         catch-up run (never N, even if several fires were missed). The catch-up
         goes through _execute_job, so the per-job lock prevents it from
         colliding with the job's normal next fire.
+
+        Interrupted runs (O15-03): a job that still carries the in-flight
+        marker was mid-run when the previous process stopped. Its outcome is
+        unknown, so it is recorded as such and NOT re-run (a re-run would repeat
+        an SMS or call the first run may already have made). Its next_run_at
+        was moved to the next future fire when the run started, so the
+        catch-up below only fires for a fire genuinely missed while down.
         """
-        # Capture the main event loop so _execute_job_sync_wrapper can
-        # schedule coroutines from APScheduler's thread-pool threads.
-        self._loop = asyncio.get_running_loop()
+        await self._reconcile_interrupted_runs()
 
         # Start the scheduler BEFORE registering jobs so that each add_job
         # computes a live next_run_time, which _register_job_with_scheduler
@@ -395,6 +524,14 @@ class CronJobManager:
             # Capture the PRE-restart next_run_at BEFORE re-registering, which
             # overwrites it with the next future fire (M3.2 ordering).
             captured_next_run_at = job.get("next_run_at")
+            if self._has_numeric_dow(job["schedule"]):
+                # O15-01: re-registering builds the corrected trigger; say so,
+                # since this job's fire days move (numeric days by one day).
+                logger.info(
+                    "[CRON] job %s (%s): day-of-week in '%s' is now read as "
+                    "standard cron (0/7 = Sunday); numeric days used to fire one day later",
+                    job["id"], job.get("name"), job["schedule"],
+                )
             try:
                 self._register_job_with_scheduler(job)
                 loaded += 1
@@ -489,6 +626,155 @@ class CronJobManager:
             conn.commit()
         finally:
             conn.close()
+
+    async def _reconcile_interrupted_runs(self) -> None:
+        """Record every run a restart interrupted as outcome_unknown (O15-03).
+
+        A row whose run_started_at is still set was mid-run when the previous
+        process stopped (the completion update clears it). The turn may have
+        delivered before the process died, so the run is not repeated: it gets
+        an 'outcome_unknown' history row naming its /chat task, the marker is
+        cleared, a one-shot is paused (consumed, as W15 does for a turn whose
+        tools failed) and the owner is alerted. Runs before the scheduler
+        starts, so nothing can fire the job meanwhile.
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM cron_jobs WHERE run_started_at IS NOT NULL"
+            ).fetchall()
+            interrupted = [self._job_to_dict(row) for row in rows]
+        finally:
+            conn.close()
+
+        for job in interrupted:
+            try:
+                await self._reconcile_interrupted_run(job)
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile interrupted run of cron job %s", job["id"]
+                )
+        if interrupted:
+            logger.warning(
+                "[CRON] startup: %d run(s) were interrupted by the restart; "
+                "recorded as outcome unknown, not re-run",
+                len(interrupted),
+            )
+
+    async def _reconcile_interrupted_run(self, job: Dict[str, Any]) -> None:
+        job_id = job["id"]
+        started = job["run_started_at"]
+        task_id = job.get("run_task_id")
+        one_shot = bool(job.get("one_shot"))
+        error_text = (
+            f"outcome unknown: the BlackBox restarted while this run was in "
+            f"progress (started {started}"
+            + (f", chat task {task_id}" if task_id else "")
+            + "). It was not re-run, so its delivery is not repeated; check the "
+            "conversation log before running it again."
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO cron_job_history
+                    (job_id, run_at, prompt, model, result, delivery_status,
+                     duration_ms, error, task_id)
+                VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?)
+                """,
+                (job_id, started, job["prompt"], job["model"], OUTCOME_UNKNOWN,
+                 error_text, task_id),
+            )
+            # A one-shot is consumed: paused with no next fire, never re-armed.
+            consumed = ", status = 'paused', next_run_at = NULL" if one_shot else ""
+            cursor.execute(
+                f"""
+                UPDATE cron_jobs
+                SET last_run_at     = ?,
+                    last_run_result = ?,
+                    run_count       = run_count + 1,
+                    run_started_at  = NULL,
+                    run_task_id     = NULL,
+                    updated_at      = ?{consumed}
+                WHERE id = ?
+                """,
+                (started, OUTCOME_UNKNOWN, now_iso, job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        logger.warning("Cron job %s (%s): %s", job_id, job.get("name"), error_text)
+        # The alert goes out in the background: it resolves the owner's online
+        # devices over the tailnet, which must not hold up the app's startup.
+        task = asyncio.ensure_future(self._notify_run_outcome(
+            job,
+            succeeded=False,
+            error_text=error_text,
+            result_text=None,
+            fire_ts=started,
+            outcome_unknown=True,
+            one_shot_paused=one_shot,
+        ))
+        self._catchup_tasks.add(task)
+        task.add_done_callback(self._catchup_tasks.discard)
+
+    def _mark_run_started(self, job_id: str, started_at: str, next_run_at: Optional[str]) -> None:
+        """Persist the in-flight marker and the NEXT fire in one update (O15-03).
+
+        Written before the executor runs, so a crash from here on leaves a
+        marker that start() reconciles, and a next_run_at that is already in
+        the future (the old code kept the fire that had just passed there until
+        the run ended, so a restart mid-run re-fired the job). Best-effort: a
+        failed write is logged and the run goes ahead.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.execute(
+                    "UPDATE cron_jobs SET run_started_at = ?, run_task_id = NULL, "
+                    "next_run_at = ? WHERE id = ?",
+                    (started_at, next_run_at, job_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("Failed to record the start of cron job %s's run", job_id)
+
+    def _mark_run_task(self, job_id: str, task_id: str) -> None:
+        """Persist the /chat task id of the in-flight run as soon as it is known."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.execute(
+                    "UPDATE cron_jobs SET run_task_id = ? WHERE id = ?",
+                    (task_id, job_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("Failed to record the task id of cron job %s's run", job_id)
+
+    def _next_fire_iso(self, job: Dict[str, Any]) -> Optional[str]:
+        """The job's next future fire as an ISO string, or None.
+
+        None for a job that is not active (paused, error: nothing will fire it,
+        so a value would lie about a fire that never happens) and for a
+        schedule that no longer builds."""
+        if job.get("status") != "active":
+            return None
+        try:
+            trigger = self._build_trigger(job["schedule"])
+            next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
+            return next_fire.isoformat() if next_fire else None
+        except Exception:
+            return None
 
     async def shutdown(self) -> None:
         """Gracefully shut down the scheduler."""
@@ -605,11 +891,14 @@ class CronJobManager:
         next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
         next_run_at = next_fire.isoformat() if next_fire else None
 
-        model = kwargs.get("model", "gemini")
-        # M4.1a: explicit provider. Stored verbatim when given; left None
-        # otherwise so _job_to_dict backfills it from the model on read (legacy
-        # rows and callers that only know a model still report a provider).
-        provider = kwargs.get("provider")
+        # M4.1a + O15-05/W18: explicit provider, paired with the model at this
+        # sink. An omitted (or null) model is Auto, never "gemini" whatever the
+        # provider; a provider word is stored as its catalog key; a model that
+        # obviously belongs to another provider raises ValueError (a 400 on the
+        # HTTP path). With a specific model and no provider, provider stays None
+        # and _job_to_dict derives it from the model on read (legacy rows and
+        # callers that only know a model still report a provider).
+        provider, model = pair_for_create(kwargs.get("provider"), kwargs.get("model"))
         delivery = kwargs.get("delivery") or "snapshot"
         delivery_target = kwargs.get("delivery_target")
 
@@ -755,20 +1044,27 @@ class CronJobManager:
         if not updates:
             return self.get_job(job_id)
 
+        existing = self.get_job(job_id)
+        if existing is None:
+            return None
+
+        # O15-05/W18: pair provider and model against the stored row (provider
+        # word -> key, a provider switch without a model -> Auto, a model-only
+        # edit naming another vendor -> that vendor, a foreign pair ->
+        # ValueError).
+        if "provider" in updates or "model" in updates:
+            updates = pair_for_update(existing, updates)
+
         # Central field validation (M2.1). Only validate the fields actually
         # being updated (partial=True) — but resolve the *effective* delivery
         # and delivery_target by merging the update over the existing job, so a
         # transition INTO sms/voice_call is caught even when the update only
         # flips `delivery` and the target already lives on the row (or vice
-        # versa). The existing row is only fetched when a delivery-related
-        # field is in play, keeping the common no-delivery update cheap.
+        # versa).
         validation_fields: Dict[str, Any] = {
             k: updates[k] for k in ("operator", "status") if k in updates
         }
         if "delivery" in updates or "delivery_target" in updates:
-            existing = self.get_job(job_id)
-            if existing is None:
-                return None
             effective_delivery = (
                 updates["delivery"] if "delivery" in updates else existing.get("delivery")
             )
@@ -796,6 +1092,15 @@ class CronJobManager:
             # so any client-supplied frequency_hint is overridden (M1.3).
             updates["frequency_hint"] = self._hint_from_cron(updates["schedule"])
             schedule_changed = True
+
+        # O15-13: a job that is not active has no next fire, exactly as
+        # pause_job leaves it; a job made active again gets its next fire now
+        # (re-registration below overwrites it with the live scheduler's value).
+        effective_status = updates.get("status", existing.get("status"))
+        if effective_status != "active":
+            updates["next_run_at"] = None
+        elif "status" in updates and "next_run_at" not in updates:
+            updates["next_run_at"] = self._next_fire_iso({**existing, **updates})
 
         # Normalise one_shot to integer
         if "one_shot" in updates:
@@ -1010,8 +1315,12 @@ class CronJobManager:
         except Exception:
             pass
 
+        # O15-04: register the coroutine itself. AsyncIOScheduler awaits it on
+        # the event loop, so no thread is parked on the run, there is no
+        # wrapper timeout shorter than the retry budget to log a still-running
+        # run as an exception, and max_instances holds until the run really ends.
         self.scheduler.add_job(
-            func=self._execute_job_sync_wrapper,
+            func=self._execute_job,
             trigger=trigger,
             id=job["id"],
             name=job["name"],
@@ -1055,40 +1364,6 @@ class CronJobManager:
             )
 
         logger.debug("Registered job %s with scheduler (schedule=%s)", job["id"], job["schedule"])
-
-    def _execute_job_sync_wrapper(self, job_id: str) -> None:
-        """
-        Synchronous wrapper invoked by APScheduler from its thread-pool.
-
-        Uses the main event loop reference captured during start() to
-        safely schedule the async coroutine from a worker thread.
-        """
-        loop = getattr(self, "_loop", None)
-        if loop is None or loop.is_closed():
-            logger.error("Main event loop not available; cannot execute job %s", job_id)
-            return
-
-        # CU jobs need a longer timeout (10 min + buffer vs 5 min default).
-        # Key off the authoritative provider (M4.1a) — a CU job now carries a
-        # SPECIFIC CU model id (e.g. a "gemini-...computer-use" id), so the old
-        # model-string check ("computer-use"/"cu") would miss it and wrongly
-        # apply the short 300s budget to a CU run. _job_to_dict backfills the
-        # provider for legacy rows, so this stays correct for old CU jobs too.
-        job = self.get_job(job_id)
-        is_cu = bool(
-            job
-            and (
-                (job.get("provider") or "").lower() == "computer-use"
-                or job.get("model", "").lower() in ("computer-use", "cu")
-            )
-        )
-        timeout = 660 if is_cu else 300
-
-        future = asyncio.run_coroutine_threadsafe(self._execute_job(job_id), loop)
-        try:
-            future.result(timeout=timeout)
-        except Exception:
-            logger.exception("Job %s execution raised an exception", job_id)
 
     async def _execute_job(self, job_id: str) -> None:
         """
@@ -1144,6 +1419,13 @@ class CronJobManager:
             logger.warning("_execute_job called for non-existent job %s", job_id)
             return
 
+        # --- O15-03: record the run's start before anything runs. ---
+        # One update: the in-flight marker and the NEXT future fire, so a
+        # restart from here on is reconciled as outcome_unknown by start()
+        # instead of re-firing through the cold-restart catch-up.
+        next_run_at = self._next_fire_iso(job)
+        self._mark_run_started(job_id, datetime.now(timezone.utc).isoformat(), next_run_at)
+
         # --- Bounded retry loop: each attempt writes its own history row. ---
         final_error: Optional[str] = None
         final_status = "error"
@@ -1157,17 +1439,18 @@ class CronJobManager:
         # (CronToolFailure) — its reply, for the same push.
         turn_completed = False
         failed_turn_reply: Optional[str] = None
+        # O15-02: the executor could not see how the turn ended.
+        outcome_unknown = False
 
         for attempt in range(MAX_RETRIES + 1):
-            (result_text, error_text, duration_ms, attempt_run_at,
-             delivery_status, retryable, turn_ran) = await self._attempt_once(job)
-            last_duration_ms = duration_ms
-            last_run_at = attempt_run_at
+            result = await self._attempt_once(job)
+            last_duration_ms = result.duration_ms
+            last_run_at = result.run_at
 
-            if error_text is None:
+            if result.error_text is None:
                 final_error = None
                 succeeded = True
-                success_result_text = result_text
+                success_result_text = result.result_text
                 if attempt > 0:
                     logger.info(
                         "Cron job %s succeeded on retry %d/%d",
@@ -1175,91 +1458,80 @@ class CronJobManager:
                     )
                 break
 
-            final_error = error_text
-            final_status = delivery_status
-            if not retryable:
-                if turn_ran:
+            final_error = result.error_text
+            final_status = result.delivery_status
+            if not result.retryable:
+                if result.outcome_unknown:
+                    outcome_unknown = True
+                    logger.warning(
+                        "Cron job %s: %s; not retrying (a retry could repeat its delivery)",
+                        job_id, result.error_text,
+                    )
+                elif result.turn_ran:
                     turn_completed = True
-                    failed_turn_reply = result_text
+                    failed_turn_reply = result.result_text
                     logger.warning(
                         "Cron job %s finished with failed tool calls (%s); not retrying",
-                        job_id, error_text,
+                        job_id, result.error_text,
                     )
                 else:
-                    logger.warning("Cron job %s: %s; not retrying", job_id, error_text)
+                    logger.warning("Cron job %s: %s; not retrying", job_id, result.error_text)
                 break
             # More attempts remain → back off, then retry within the lock.
             if attempt < MAX_RETRIES:
                 backoff = self._retry_backoff_for(attempt)
                 logger.warning(
                     "Cron job %s attempt %d/%d failed (%s); retrying in %ss",
-                    job_id, attempt + 1, MAX_RETRIES + 1, error_text, backoff,
+                    job_id, attempt + 1, MAX_RETRIES + 1, result.error_text, backoff,
                 )
                 if backoff:
                     await asyncio.sleep(backoff)
 
         # --- Update job stats ONCE for the whole run (not per attempt). ---
-        try:
-            trigger = self._build_trigger(job["schedule"])
-            next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
-            next_run_at = next_fire.isoformat() if next_fire else None
-        except Exception:
-            next_run_at = None
+        # next_run_at was settled at the start of the run; the row's status may
+        # have changed during it (paused from the Portal), so re-read it.
+        current = self.get_job(job_id)
+        if current is not None:
+            next_run_at = self._next_fire_iso(current)
 
         if succeeded:
             last_run_result = "success"
+        elif outcome_unknown:
+            last_run_result = OUTCOME_UNKNOWN
         else:
             last_run_result = "partial" if final_status == "partial" else "error"
         now_iso = datetime.now(timezone.utc).isoformat()
 
+        # error_count increments ONCE for a failed run as a whole, not once per
+        # failed attempt, and not for a run whose outcome is unknown. The
+        # in-flight marker is cleared in the same update.
+        counts_as_error = not succeeded and not outcome_unknown
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
-            if succeeded:
-                cursor.execute(
-                    """
-                    UPDATE cron_jobs
-                    SET last_run_at         = ?,
-                        last_run_result     = ?,
-                        last_run_duration_ms = ?,
-                        next_run_at         = ?,
-                        run_count           = run_count + 1,
-                        updated_at          = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        last_run_at.isoformat(),
-                        last_run_result,
-                        last_duration_ms,
-                        next_run_at,
-                        now_iso,
-                        job_id,
-                    ),
-                )
-            else:
-                # error_count increments ONCE for the failed run as a whole,
-                # not once per failed attempt.
-                cursor.execute(
-                    """
-                    UPDATE cron_jobs
-                    SET last_run_at         = ?,
-                        last_run_result     = ?,
-                        last_run_duration_ms = ?,
-                        next_run_at         = ?,
-                        run_count           = run_count + 1,
-                        error_count         = error_count + 1,
-                        updated_at          = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        last_run_at.isoformat(),
-                        last_run_result,
-                        last_duration_ms,
-                        next_run_at,
-                        now_iso,
-                        job_id,
-                    ),
-                )
+            cursor.execute(
+                f"""
+                UPDATE cron_jobs
+                SET last_run_at          = ?,
+                    last_run_result      = ?,
+                    last_run_duration_ms = ?,
+                    next_run_at          = ?,
+                    run_count            = run_count + 1,
+                    {"error_count = error_count + 1," if counts_as_error else ""}
+                    run_started_at       = NULL,
+                    run_task_id          = NULL,
+                    updated_at           = ?
+                WHERE id = ?
+                """,
+                (
+                    last_run_at.isoformat(),
+                    last_run_result,
+                    last_duration_ms,
+                    next_run_at,
+                    now_iso,
+                    job_id,
+                ),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -1278,13 +1550,15 @@ class CronJobManager:
         # W15: when the turn itself ran (its tool calls failed), the one-shot
         # is consumed — any side effect that worked already happened, so it
         # must not fire again at the next match of its expression. Pause it:
-        # it survives for inspection and can be resumed on purpose.
+        # it survives for inspection and can be resumed on purpose. A run whose
+        # outcome is unknown (O15-02) may have delivered too, so it is paused
+        # the same way.
         one_shot_paused = False
         if job.get("one_shot") and succeeded:
             logger.info("One-shot job %s completed successfully, deleting", job_id)
             self.delete_job(job_id)
-        elif job.get("one_shot") and turn_completed:
-            logger.info("One-shot job %s ran with failed tool calls, pausing", job_id)
+        elif job.get("one_shot") and (turn_completed or outcome_unknown):
+            logger.info("One-shot job %s may have run (%s), pausing", job_id, last_run_result)
             one_shot_paused = self.pause_job(job_id) is not None
 
         # ----- Notification bus hooks (M5.1) -----
@@ -1298,6 +1572,7 @@ class CronJobManager:
             result_text=success_result_text if succeeded else failed_turn_reply,
             fire_ts=last_run_at.isoformat(),
             partial=last_run_result == "partial",
+            outcome_unknown=outcome_unknown,
             one_shot_paused=one_shot_paused,
         )
 
@@ -1310,6 +1585,7 @@ class CronJobManager:
         result_text: Optional[str],
         fire_ts: str,
         partial: bool = False,
+        outcome_unknown: bool = False,
         one_shot_paused: bool = False,
     ) -> None:
         """Push the run's outcome to the notification bus (M5.1).
@@ -1322,7 +1598,9 @@ class CronJobManager:
             calls failed — ``partial`` when some of them worked) ->
             notify(category='alert') EXACTLY once. The dedup_key
             (cronfail:<job_id>:<fire_ts>) is stable for this run, so the bus
-            collapses any duplicate into one logical alert.
+            collapses any duplicate into one logical alert. A run whose
+            outcome is unknown (O15-02/-03) alerts the same way, titled as
+            such: it may well have delivered, so "failed" would be untrue.
           * A reply with delivery='notification' -> notify(category='cron')
             with the reply text: on SUCCESS, and (W15) on a turn that ran but
             whose tool calls failed, where ``result_text`` is that turn's reply
@@ -1349,12 +1627,17 @@ class CronJobManager:
             if one_shot_paused:
                 body += (" — this one-shot job was paused so it does not run "
                          "again; resume it once the cause is fixed.")
+            if outcome_unknown:
+                title = f"Cron job outcome unknown: {job_name}"
+            elif partial:
+                title = f"Cron job partially failed: {job_name}"
+            else:
+                title = f"Cron job failed: {job_name}"
             try:
                 await notify(
                     operator=operator,
                     category="alert",
-                    title=(f"Cron job partially failed: {job_name}" if partial
-                           else f"Cron job failed: {job_name}"),
+                    title=title,
                     body=body,
                     dedup_key=f"cronfail:{job_id}:{fire_ts}",
                 )
@@ -1392,13 +1675,14 @@ class CronJobManager:
         idx = min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)
         return RETRY_BACKOFF_SECONDS[idx]
 
-    async def _attempt_once(self, job: Dict[str, Any]):
+    async def _attempt_once(self, job: Dict[str, Any]) -> _Attempt:
         """Run the executor once and write THIS attempt's history row.
 
-        Returns ``(result_text, error_text, duration_ms, run_at,
-        delivery_status, retryable, turn_ran)``. A non-None error_text means
-        the attempt failed; delivery_status is 'delivered', 'error' or
-        'partial'.
+        Returns an _Attempt. A non-None error_text means the attempt failed;
+        delivery_status is 'delivered', 'error', 'partial' or 'outcome_unknown'.
+        The history row carries the /chat task id the attempt submitted, which
+        the executor reports through RUN_TASK_ID_SINK (also persisted on the
+        job row as the in-flight run's task, for start()'s reconciliation).
 
         W15: an executor.CronToolFailure (the turn completed but its tool calls
         failed) is recorded with the reply AND the tool error, as 'error' or
@@ -1411,7 +1695,13 @@ class CronJobManager:
         credits do not come back within the backoff, so a retry only repeats
         the refusal (and, for a CU job, the desktop launch). The turn never
         ran, so ``turn_ran`` is False and the run is an ordinary failure (a
-        one-shot survives armed, M2.6, instead of being paused).
+        one-shot survives armed, M2.6, instead of being paused). A cancelled
+        task (``error_kind`` cancelled) is the same: the operator decided.
+
+        O15-02: an executor.CronOutcomeUnknown (``error_kind`` outcome_unknown:
+        the turn may have run and delivered, but its end was not seen) is
+        recorded as 'outcome_unknown' and is never retried, whatever the
+        delivery: a retry submits a second turn with the same instructions.
         """
         job_id = job["id"]
         run_at = datetime.now(timezone.utc)
@@ -1421,27 +1711,48 @@ class CronJobManager:
         delivery_status: str = "pending"
         retryable = True
         turn_ran = False
+        outcome_unknown = False
+        task_ids: List[str] = []
 
+        def _on_task_id(task_id: str) -> None:
+            task_ids.append(task_id)
+            self._mark_run_task(job_id, task_id)
+
+        # Lazy import to avoid circular dependencies. executor.py always
+        # exists and is importable, so any failure surfaces as an error.
+        from Orchestrator.scheduler import executor
+
+        sink_token = executor.RUN_TASK_ID_SINK.set(_on_task_id)
         try:
-            # Lazy import to avoid circular dependencies. executor.py always
-            # exists and is importable, so any failure surfaces as an error.
-            from Orchestrator.scheduler.executor import execute_cron_job
-            result_text = await execute_cron_job(job)
+            result_text = await executor.execute_cron_job(job)
             delivery_status = "delivered"
         except Exception as exc:
-            error_text = str(exc)
+            # A bare exception (TimeoutError()) has no text; never record
+            # 'failed ()' (O15-17).
+            error_text = str(exc) or exc.__class__.__name__
             delivery_status = "error"
-            if hasattr(exc, "delivery_status") and getattr(exc, "retryable", True) is False:
+            error_kind = getattr(exc, "error_kind", None)
+            if error_kind == OUTCOME_UNKNOWN:
+                retryable = False
+                outcome_unknown = True
+                delivery_status = OUTCOME_UNKNOWN
+                exc_task_id = getattr(exc, "task_id", None)
+                if exc_task_id and exc_task_id not in task_ids:
+                    task_ids.append(exc_task_id)
+                logger.warning("Cron job %s: %s", job_id, error_text)
+            elif hasattr(exc, "delivery_status") and getattr(exc, "retryable", True) is False:
                 retryable = False
                 turn_ran = True
                 result_text = getattr(exc, "result_text", None) or None
                 delivery_status = getattr(exc, "delivery_status", "error")
                 logger.warning("Cron job %s: %s", job_id, error_text)
-            elif getattr(exc, "error_kind", None) == CREDITS_EXHAUSTED:
+            elif error_kind in (CREDITS_EXHAUSTED, RUN_CANCELLED):
                 retryable = False
                 logger.warning("Cron job %s: %s", job_id, error_text)
             else:
                 logger.exception("Error executing cron job %s", job_id)
+        finally:
+            executor.RUN_TASK_ID_SINK.reset(sink_token)
 
         end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         duration_ms = end_ms - start_ms
@@ -1452,8 +1763,9 @@ class CronJobManager:
             cursor.execute(
                 """
                 INSERT INTO cron_job_history
-                    (job_id, run_at, prompt, model, result, delivery_status, duration_ms, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (job_id, run_at, prompt, model, result, delivery_status, duration_ms,
+                     error, task_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -1464,13 +1776,23 @@ class CronJobManager:
                     delivery_status,
                     duration_ms,
                     error_text,
+                    task_ids[-1] if task_ids else None,
                 ),
             )
             conn.commit()
         finally:
             conn.close()
 
-        return result_text, error_text, duration_ms, run_at, delivery_status, retryable, turn_ran
+        return _Attempt(
+            result_text=result_text,
+            error_text=error_text,
+            duration_ms=duration_ms,
+            run_at=run_at,
+            delivery_status=delivery_status,
+            retryable=retryable,
+            turn_ran=turn_ran,
+            outcome_unknown=outcome_unknown,
+        )
 
     def _record_skipped_run(self, job_id: str) -> None:
         """Write a history row noting a run was skipped because the job was

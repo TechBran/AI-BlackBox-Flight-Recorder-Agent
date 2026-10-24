@@ -17,13 +17,19 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from contextvars import ContextVar
+from typing import Any, Callable, Dict, Optional
 
 # resolve_cu_model was hoisted to browser/dispatch.py (M1-T1) — it is a pure
 # function of the model string + CU_MODEL_FILTERS, shared with the CU dispatch
 # path. Imported into this namespace so _execute_cu_job's call site stays local.
 from Orchestrator.browser.dispatch import resolve_cu_model
 from Orchestrator.provider_billing import CREDITS_EXHAUSTED
+from Orchestrator.scheduler.pairing import (
+    PROVIDER_WORD_TO_KEY,
+    SINGLE_VENDOR_KEYS,
+    normalize_provider_word,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +55,76 @@ BASE_URL = _base_url()
 # ---------------------------------------------------------------------------
 # Polling configuration
 # ---------------------------------------------------------------------------
+
+
+def _poll_timeout_from_config() -> int:
+    """config.ini [scheduler] poll_timeout_s, default 1800 (30 minutes).
+
+    The budget for one /chat turn, tool calls included. It used to be 180 s,
+    shorter than an ordinary web-search or media turn, so the poll gave up on
+    turns that then finished (and delivered) anyway (O15-02). Running out of
+    it is now 'outcome unknown', never a retry, so a long budget only delays
+    the record of a slow turn."""
+    from Orchestrator.config import CFG
+
+    try:
+        return max(60, CFG.getint("scheduler", "poll_timeout_s", fallback=1800))
+    except ValueError:
+        logger.warning("config.ini [scheduler] poll_timeout_s is not a number; using 1800")
+        return 1800
+
+
 _POLL_INTERVAL_SECS = 2          # seconds between status checks
-_POLL_TIMEOUT_SECS = 180         # total wall-clock budget for a single job
+_POLL_TIMEOUT_SECS = _poll_timeout_from_config()  # total budget for one turn
 _CHAT_REQUEST_TIMEOUT = 30       # timeout for the initial POST to /chat
 _TASK_STATUS_TIMEOUT = 10        # timeout for each GET /tasks/status/{id}
 
 # Computer-use streaming configuration
-_CU_STREAM_TIMEOUT = 600         # 10-minute budget for CU SSE stream
+_CU_STREAM_FLOOR = 600           # never wait less than the old 10-minute budget
 _CU_CONNECT_TIMEOUT = 30         # Initial connection timeout
+
+
+def _cu_stream_timeout() -> int:
+    """The budget for one CU SSE stream: the configured CU session budget plus
+    the worker's 30 s backstop and a margin, never below the old 600 s.
+
+    A fixed 600 s gave up on CU sessions the box allows to run 1800 s; the
+    timed-out run was then retried, launching a second desktop session."""
+    from Orchestrator import config
+
+    return max(_CU_STREAM_FLOOR, int(config.CU_SESSION_TIMEOUT) + 30 + 90)
+
+
+# ---------------------------------------------------------------------------
+# The in-flight run's /chat task id (O15-03)
+#
+# The manager persists the task id of a run as soon as /chat returns it, so a
+# restart mid-run can name the turn it interrupted. The manager sets this sink
+# around each attempt; execute_cron_job reports through note_run_task_id. A
+# context variable keeps execute_cron_job's signature (tests and callers stub
+# it as fn(job)) and confines the sink to the attempt that set it.
+# ---------------------------------------------------------------------------
+RUN_TASK_ID_SINK: ContextVar[Optional[Callable[[str], None]]] = ContextVar(
+    "cron_run_task_id_sink", default=None
+)
+
+
+def note_run_task_id(task_id: str) -> None:
+    """Report the current run's /chat task id to the manager, if it listens."""
+    sink = RUN_TASK_ID_SINK.get()
+    if sink is None:
+        return
+    try:
+        sink(task_id)
+    except Exception:
+        logger.exception("Could not record cron task id %s", task_id)
+
+
+# A connect timeout means nothing reached the server, unlike every other
+# timeout (aiohttp >= 3.10; older versions raise the plain timeout).
+_CONNECT_TIMEOUT_ERRORS = tuple(
+    cls for cls in (getattr(aiohttp, "ConnectionTimeoutError", None),) if cls is not None
+)
 
 # CU serialization lock — only one CU job at a time (shared Xvfb display)
 _CU_LOCK = None
@@ -106,6 +174,35 @@ class CronCreditsExhausted(RuntimeError):
 
     def __init__(self, message: str):
         super().__init__(f"{CREDITS_EXHAUSTED}: {message}")
+
+
+class CronOutcomeUnknown(RuntimeError):
+    """The job's turn may have run, and delivered, but its end was not seen (O15-02).
+
+    Raised when the /chat task is still running after the poll budget, when the
+    POST to /chat times out after reaching the box (the executor calls its own
+    event loop, so a timeout there means a busy loop, not a refused request),
+    and when a CU stream that had begun times out. The turn goes on running, so
+    its SMS or call may still happen: the manager records 'outcome_unknown'
+    (manager.OUTCOME_UNKNOWN) with ``task_id`` and never retries, since a retry
+    submits a second turn with the same DELIVERY instruction.
+    """
+
+    error_kind = "outcome_unknown"
+    delivery_status = "outcome_unknown"
+    retryable = False
+
+    def __init__(self, message: str, *, task_id: Optional[str] = None):
+        super().__init__(f"outcome unknown: {message}")
+        self.task_id = task_id
+
+
+class CronRunCancelled(RuntimeError):
+    """The job's /chat task was cancelled (task manager, cancel-all). Not
+    retried: cancelling is the operator's decision (manager.RUN_CANCELLED)."""
+
+    error_kind = "cancelled"
+    retryable = False
 
 
 def _summarize_tool_failures(failures: list) -> str:
@@ -171,10 +268,12 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
         The LLM reply text.
 
     Raises:
-        RuntimeError: If the chat API is unreachable, the task fails, or
-            the polling timeout is exceeded.
+        RuntimeError: If the chat API is unreachable or the task fails.
         CronToolFailure: If the turn completed but tool calls it made failed
             (a RuntimeError subclass carrying the reply; not retried).
+        CronOutcomeUnknown: If the turn may have run but its end was not seen
+            (poll budget exhausted, POST timed out); not retried.
+        CronRunCancelled: If the task was cancelled; not retried.
     """
     start_time = time.monotonic()
     prompt = job["prompt"]
@@ -241,10 +340,25 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
                     raise RuntimeError(
                         f"Chat API did not return a task_id: {data}"
                     )
+    except _CONNECT_TIMEOUT_ERRORS as exc:
+        # Nothing was sent: an ordinary, retryable failure.
+        raise RuntimeError(
+            f"Timed out connecting to chat API: {exc or exc.__class__.__name__}"
+        ) from exc
+    except asyncio.TimeoutError as exc:
+        # Checked before ClientError: aiohttp's ServerTimeoutError is both. The
+        # request reached this box's own loop, which may still create and run
+        # the task once it is free, so this is not a retryable failure.
+        raise CronOutcomeUnknown(
+            f"the POST to /chat timed out after {_CHAT_REQUEST_TIMEOUT}s; the "
+            f"turn may still run. Not retried, so its delivery ({delivery}) is "
+            f"not repeated."
+        ) from exc
     except aiohttp.ClientError as exc:
         raise RuntimeError(f"Failed to connect to chat API: {exc}") from exc
 
     logger.debug("Job '%s' queued as task %s", job_name, task_id)
+    note_run_task_id(task_id)
 
     # ------------------------------------------------------------------
     # Poll for completion
@@ -300,12 +414,16 @@ async def _execute_cu_job(
     error_text = ""
     error_kind = None
     event_type = None
+    # O15-02: once the stream is open the CU run is under way on the desktop;
+    # losing the stream after that leaves its outcome unknown, not retryable.
+    stream_started = False
+    budget = _cu_stream_timeout()
 
     cu_lock = _get_cu_lock()
     async with cu_lock:
         try:
             timeout = aiohttp.ClientTimeout(
-                total=_CU_STREAM_TIMEOUT,
+                total=budget,
                 connect=_CU_CONNECT_TIMEOUT,
             )
             async with aiohttp.ClientSession() as session:
@@ -317,6 +435,7 @@ async def _execute_cu_job(
                     if resp.status != 200:
                         error = await resp.text()
                         raise RuntimeError(f"CU stream returned HTTP {resp.status}: {error[:300]}")
+                    stream_started = True
 
                     async for raw_line in resp.content:
                         line = raw_line.decode("utf-8", errors="replace").rstrip("\n\r")
@@ -359,10 +478,18 @@ async def _execute_cu_job(
 
                             event_type = None
 
-        except aiohttp.ClientError as exc:
-            raise RuntimeError(f"Failed to connect to CU stream: {exc}") from exc
-        except asyncio.TimeoutError:
-            raise RuntimeError(f"CU job '{job_name}' timed out after {_CU_STREAM_TIMEOUT}s")
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            # aiohttp's ServerTimeoutError is both; isinstance names it a timeout.
+            reason = (f"timed out after {budget}s" if isinstance(exc, asyncio.TimeoutError)
+                      else f"lost its stream ({exc or exc.__class__.__name__})")
+            if stream_started:
+                raise CronOutcomeUnknown(
+                    f"CU job '{job_name}' {reason} while the run was in progress; "
+                    f"not retried, so the desktop task is not run twice."
+                ) from exc
+            raise RuntimeError(
+                f"Failed to connect to CU stream for '{job_name}': {reason}"
+            ) from exc
 
     if error_text and not result_text:
         if error_kind == CREDITS_EXHAUSTED:
@@ -442,8 +569,13 @@ def _build_prompt(
 async def _poll_task_until_done(task_id: str, job_name: str) -> str:
     """
     Poll /tasks/status/{task_id} until the task reaches a terminal state.
+
+    A task still running when the budget runs out raises CronOutcomeUnknown,
+    not a retryable error: the turn keeps running and may still deliver, so a
+    retry would submit a second turn with the same instructions (O15-02).
     """
     deadline = time.monotonic() + _POLL_TIMEOUT_SECS
+    last_status = ""
 
     async with aiohttp.ClientSession() as session:
         while time.monotonic() < deadline:
@@ -471,6 +603,7 @@ async def _poll_task_until_done(task_id: str, job_name: str) -> str:
                 continue
 
             status = data.get("status", "")
+            last_status = status or last_status
 
             if status == "completed":
                 # Tool failures first: a turn whose tools all failed may still
@@ -492,15 +625,24 @@ async def _poll_task_until_done(task_id: str, job_name: str) -> str:
                     f"Chat task {task_id} failed for job '{job_name}': {detail}"
                 )
 
+            if status == "cancelled":
+                # Terminal (task_routes cancel / cancel-all). Polling on would
+                # only run the budget out and report an unknown outcome.
+                raise CronRunCancelled(
+                    f"Chat task {task_id} for job '{job_name}' was cancelled"
+                )
+
             progress = data.get("progress", 0)
             logger.debug(
                 "Task %s for job '%s': status=%s progress=%d%%",
                 task_id, job_name, status, progress,
             )
 
-    raise RuntimeError(
-        f"Timed out after {_POLL_TIMEOUT_SECS}s waiting for task {task_id} "
-        f"(job '{job_name}')"
+    raise CronOutcomeUnknown(
+        f"chat task {task_id} for job '{job_name}' was still "
+        f"{last_status or 'unconfirmed'} after {_POLL_TIMEOUT_SECS}s. Not retried, "
+        f"so its delivery is not repeated; the turn may still finish and deliver.",
+        task_id=task_id,
     )
 
 
@@ -634,7 +776,8 @@ def _resolve_model_name(model: str, provider: Optional[str] = None) -> str:
         longer guess a provider from an empty model string. With no provider
         given it falls back to the Gemini default (legacy behaviour).
       * A bare provider alias ("anthropic"/"gpt"/"grok"/…) resolves to that
-        provider's default.
+        provider's default — unless the job's own provider is a different
+        chat provider (W18): then the provider wins and the word means Auto.
       * A specific id ("claude-opus-4-8", "gpt-5.1", …) passes through verbatim.
     """
     m = (model or "").lower().strip()
@@ -643,17 +786,20 @@ def _resolve_model_name(model: str, provider: Optional[str] = None) -> str:
     if not m:
         return _provider_default_model((provider or "google").strip().lower())
 
-    if m in ("computer-use", "cu"):
-        return _provider_default_model("computer-use")
-    if m in ("gemini", "google"):
-        return _provider_default_model("google")
-    if m in ("anthropic", "claude"):
-        return _provider_default_model("anthropic")
-    if m in ("openai", "gpt"):
-        return _provider_default_model("openai")
-    if m in ("xai", "grok"):
-        return _provider_default_model("xai")
-    if m == "custom":
-        return _provider_default_model("custom")
+    word_key = PROVIDER_WORD_TO_KEY.get(m)
+    if word_key is None:
+        return model
 
-    return model
+    # W18: the old create default stored "gemini" whatever the provider, and a
+    # bare word used to resolve to ITS provider's default regardless, so a
+    # provider-anthropic job sent a Gemini id to Anthropic and 404'd every fire.
+    # The manager now refuses that pair; rows written before it are healed
+    # here. computer-use is left alone (it runs other vendors' models).
+    provider_key = normalize_provider_word(provider)
+    if provider_key in SINGLE_VENDOR_KEYS + ("custom",) and provider_key != word_key:
+        logger.warning(
+            "Cron model '%s' belongs to provider %s, not the job's provider %s; "
+            "using the %s default", model, word_key, provider_key, provider_key,
+        )
+        word_key = provider_key
+    return _provider_default_model(word_key)

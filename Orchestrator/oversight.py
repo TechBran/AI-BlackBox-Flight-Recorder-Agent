@@ -243,11 +243,14 @@ def collect_oversight_signals() -> Dict[str, Any]:
                 # cron_job_history has NO 'status' column — outcome lives in
                 # delivery_status: 'delivered'/'error'/'partial'/'skipped'
                 # (review 2026-07-23 caught the dead 'status' read; 'partial'
-                # = some of the run's tool calls failed, W15).
+                # = some of the run's tool calls failed, W15; 'outcome_unknown'
+                # = the run may have delivered but its end was not seen, O15-02).
                 for run in manager.get_job_history(job["id"], limit=5):
-                    if (run.get("delivery_status") or "").lower() in ("error", "partial"):
+                    outcome = (run.get("delivery_status") or "").lower()
+                    if outcome in ("error", "partial", "outcome_unknown"):
                         failures.append({"job_id": job["id"], "name": job.get("name"),
                                          "run_at": run.get("run_at"),
+                                         "outcome": outcome,
                                          "error": str(run.get("error") or "")[:300]})
             except Exception:
                 pass
