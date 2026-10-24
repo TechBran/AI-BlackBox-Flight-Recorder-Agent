@@ -2,8 +2,10 @@ package com.aiblackbox.portal.ui.sms
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.IOException
@@ -21,6 +23,10 @@ import java.util.Locale
  *    failed SMS was silently lost. A draft is cleared only after its send succeeded.
  *  - A14-ui-misc-11: bubble times showed "22+00" (the tail of an ISO string) and thread
  *    times raw UTC. Both are local wall-clock times now.
+ *  - the conversation follows a new newest message only when the reader could see the
+ *    end of the previous one. It used to decide from scroll-in-progress events, which
+ *    its own animateScrollToItem raised too, so after the first automatic scroll it
+ *    stopped following a reader resting at the bottom.
  */
 class SmsInboxModelTest {
 
@@ -123,5 +129,54 @@ class SmsInboxModelTest {
         assertEquals("10:03 AM", plain(SmsTime.threadStamp("2026-10-08T14:03:22+00:00", newYork, now, us)))
         assertEquals("Oct 7, 10:03 AM", plain(SmsTime.threadStamp("2026-10-07T14:03:22+00:00", newYork, now, us)))
         assertEquals("", SmsTime.threadStamp("garbage", newYork, now, us))
+    }
+
+    // ── following the newest message ─────────────────────────────────────────
+
+    /** A 1000 px viewport; the list as the reader last saw it, [key] to bottom edge. */
+    private fun follows(
+        previousNewestId: Int?,
+        messageIds: List<Int>,
+        vararg seen: Pair<Int, Int>,
+        justSent: Boolean = false,
+    ) = SmsFollow.shouldScroll(
+        previousNewestId = previousNewestId,
+        messageIds = messageIds,
+        justSent = justSent,
+        seen = seen.map { (key, bottom) -> SmsFollow.Seen(key, bottom) },
+        viewportEnd = 1000,
+    )
+
+    @Test fun `a thread that just opened goes to its newest message`() {
+        assertTrue(follows(null, listOf(1, 2, 3)))
+        assertFalse("nothing to show yet", follows(null, emptyList()))
+    }
+
+    @Test fun `a reader at the bottom follows every new message, not only the first`() {
+        // The newest was 3, at the bottom of the view; 4 arrives below it.
+        assertTrue(follows(3, listOf(1, 2, 3, 4), 2 to 700, 3 to 960))
+        // After the view scrolled to 4, 5 arrives: still followed. (The old rule had
+        // stopped following after its own scroll.)
+        assertTrue(follows(4, listOf(1, 2, 3, 4, 5), 3 to 700, 4 to 960))
+        // The newest page keeps a fixed size: the oldest drops out as 101 arrives.
+        assertTrue(follows(100, (2..101).toList(), 99 to 800, 100 to 990))
+    }
+
+    @Test fun `a tall newest message whose end is on screen counts as at the bottom`() {
+        assertTrue(follows(3, listOf(1, 2, 3, 4), 3 to 990))
+    }
+
+    @Test fun `a reader reading history is not pulled down`() {
+        assertFalse("the newest is off screen", follows(3, listOf(1, 2, 3, 4), 1 to 400, 2 to 900))
+        assertFalse("only its top is on screen", follows(3, listOf(1, 2, 3, 4), 2 to 900, 3 to 1300))
+    }
+
+    @Test fun `the reader's own send comes into view wherever they were`() {
+        assertTrue(follows(3, listOf(1, 2, 3, 4), 1 to 400, justSent = true))
+    }
+
+    @Test fun `a page that replaced the list goes to its newest message`() {
+        // Another thread's page, or a reload in which the previous newest is gone.
+        assertTrue(follows(42, listOf(7, 8, 9), 41 to 500, 42 to 990))
     }
 }

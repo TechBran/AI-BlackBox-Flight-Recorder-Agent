@@ -41,7 +41,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -323,8 +322,9 @@ private fun SmsThreadCard(thread: SmsThread, onClick: () -> Unit) {
     }
 }
 
+// internal, not private: SmsConversationFollowTest (androidTest) drives it directly.
 @Composable
-private fun SmsConversationView(
+internal fun SmsConversationView(
     phone: String,
     contactName: String,
     messages: List<SmsMsg>,
@@ -340,19 +340,29 @@ private fun SmsConversationView(
     val listState = rememberLazyListState()
     val feedback = rememberPressFeedback()
 
-    // Follow new messages while the reader is at the newest one; once they scroll up to
-    // read history a poll must not pull them back down. Only the reader's own scrolling
-    // moves this (content growing below them does not).
-    var followNewest by remember(phone) { mutableStateOf(true) }
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
-            .collect { (scrolling, canScrollForward) -> if (scrolling) followNewest = !canScrollForward }
-    }
+    // Follow a new message while the reader is at the newest one; once they scroll up
+    // to read history a poll must not pull them back down. Decided from the list as
+    // they last saw it (SmsFollow), never from scroll events: this view's own
+    // animateScrollToItem is a scroll in progress too, so a flag kept from them
+    // stopped the following after the first automatic scroll.
+    var shownNewestId by remember(phone) { mutableStateOf<Int?>(null) }
+    var justSent by remember(phone) { mutableStateOf(false) }
     // Keyed on the newest message, not the count: the box serves a fixed-size newest
     // page, so a new message leaves the count unchanged.
     val newestId = messages.lastOrNull()?.id
     LaunchedEffect(phone, newestId) {
-        if (messages.isNotEmpty() && followNewest) listState.animateScrollToItem(messages.size - 1)
+        if (newestId == null) return@LaunchedEffect
+        val layout = listState.layoutInfo
+        val follow = SmsFollow.shouldScroll(
+            previousNewestId = shownNewestId,
+            messageIds = messages.map { it.id },
+            justSent = justSent,
+            seen = layout.visibleItemsInfo.map { SmsFollow.Seen(it.key, it.offset + it.size) },
+            viewportEnd = layout.viewportEndOffset,
+        )
+        shownNewestId = newestId
+        justSent = false
+        if (follow) listState.animateScrollToItem(messages.size - 1)
     }
 
     Column(
@@ -444,7 +454,7 @@ private fun SmsConversationView(
                     // The view model clears the draft once the box accepted the SMS;
                     // a failed send leaves it here to retry. Our own message is shown.
                     if (draft.isNotBlank()) {
-                        followNewest = true
+                        justSent = true
                         onSend()
                     }
                 },

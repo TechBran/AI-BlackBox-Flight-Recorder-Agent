@@ -98,6 +98,43 @@ class SmsDrafts {
 }
 
 /**
+ * When the open conversation scrolls to its newest message. It follows a new message
+ * while the reader is at the newest one and leaves a reader who scrolled up to history
+ * where they are. The view used to keep a flag from scroll-in-progress events, but its
+ * own animateScrollToItem is a scroll in progress too and never reports its end state,
+ * so after the first automatic scroll it stopped following a reader at the bottom. The
+ * list as the reader last saw it is what decides now.
+ */
+object SmsFollow {
+    /** A list item as last laid out: its key and its bottom edge (offset + size). */
+    data class Seen(val key: Any, val bottom: Int)
+
+    /**
+     * @param previousNewestId the thread's newest message id before this change; null
+     *   when the thread has just opened
+     * @param messageIds the ids now shown, oldest first
+     * @param justSent the reader just sent: their own message comes into view
+     * @param seen the visible items of the last layout
+     * @param viewportEnd that layout's viewport end offset
+     */
+    fun shouldScroll(
+        previousNewestId: Int?,
+        messageIds: List<Int>,
+        justSent: Boolean,
+        seen: List<Seen>,
+        viewportEnd: Int,
+    ): Boolean {
+        if (messageIds.isEmpty()) return false
+        if (previousNewestId == null || justSent) return true
+        // A page with the previous newest gone replaced the list (another thread, a reload).
+        if (previousNewestId !in messageIds) return true
+        // At the bottom = the end of the previous newest message was on screen. The new
+        // message is below it, laid out or not yet, so this holds either way.
+        return seen.any { it.key == previousNewestId && it.bottom <= viewportEnd }
+    }
+}
+
+/**
  * SMS times as the reader's wall clock (A14-ui-misc-11). The box stamps ISO-8601 with an
  * offset ("2026-10-08T14:03:22+00:00", with microseconds on some rows); the bubble used
  * to show the string's tail ("22+00") and the thread row raw UTC.

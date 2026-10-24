@@ -18,7 +18,10 @@ import java.io.File
  *    cleared only by a successful send;
  *  - A14-ui-misc-10: the thread list is deduped and keyed by the box's thread key;
  *  - the box now serves a thread's newest page, whose size stays the same as messages
- *    arrive, so the conversation follows its newest message id, not its size;
+ *    arrive, so the conversation follows its newest message id, not its size, and
+ *    decides from the list the reader last saw (SmsFollow), not from scroll events: its
+ *    own animateScrollToItem counts as a scroll in progress, so a flag set from them
+ *    stopped the following after the first automatic scroll;
  *  - A14-ui-misc-11: bubble and thread times go through SmsTime.
  */
 class SmsInboxWiringTest {
@@ -78,6 +81,16 @@ class SmsInboxWiringTest {
         val conv = functionBody(screen, "SmsConversationView")
         assertFalse("LaunchedEffect(messages.size)" in conv)
         assertTrue(conv, Regex("""LaunchedEffect\(phone, newestId\)""").containsMatchIn(conv))
+    }
+
+    @Test fun `following is decided from the list the reader saw, not from scroll events`() {
+        val conv = functionBody(screen, "SmsConversationView")
+        assertFalse("no scroll-in-progress flag", "isScrollInProgress" in conv)
+        assertFalse("snapshotFlow" in conv)
+        assertTrue(conv, "SmsFollow.shouldScroll(" in conv)
+        assertTrue(conv, "listState.layoutInfo" in conv)
+        assertTrue(conv, ".visibleItemsInfo" in conv)
+        assertTrue(conv, ".viewportEndOffset" in conv)
     }
 
     @Test fun `times are shown in local wall-clock time`() {
