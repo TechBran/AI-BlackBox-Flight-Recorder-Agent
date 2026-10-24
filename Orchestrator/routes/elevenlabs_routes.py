@@ -6,7 +6,12 @@ These are thin consumers of ``Orchestrator.elevenlabs.voices`` (the DONE provide
 module) -- the routes own ONLY transport concerns (multipart parsing, temp-file
 lifecycle, error->HTTP mapping) and the CONSENT GATE on cloning. Cloning is
 refused with HTTP 422 unless the caller passes ``consent="true"``.
+
+The provider helpers are synchronous ``requests`` calls (15-120 s timeouts), so
+every one runs in ``asyncio.to_thread``: on the event loop, one clone upload
+froze every chat stream and voice call on the box (audit O07-tts-voice-03).
 """
+import asyncio
 import os
 import tempfile
 
@@ -24,7 +29,7 @@ async def elevenlabs_status():
     from Orchestrator.elevenlabs import catalog
     if not resolve_api_key():
         return {"configured": False}
-    user = catalog.get_user() or {}
+    user = await asyncio.to_thread(catalog.get_user) or {}
     return {
         "configured": True,
         "tier": user.get("tier", "unknown"),
@@ -54,7 +59,8 @@ async def elevenlabs_library(
     from the Portal WITHOUT exposing the key client-side. No key -> empty result
     (the browse UI is gated on /elevenlabs/status, but this stays graceful)."""
     from Orchestrator.elevenlabs import catalog
-    result = catalog.get_shared_voices(
+    result = await asyncio.to_thread(
+        catalog.get_shared_voices,
         search=search, page_size=page_size, gender=gender, category=category
     )
     if result is None:
@@ -78,7 +84,7 @@ async def elevenlabs_library_add(payload: dict = Body(...)):
             detail="public_owner_id, voice_id and name are all required",
         )
     try:
-        result = catalog.add_shared_voice(public_owner_id, voice_id, name)
+        result = await asyncio.to_thread(catalog.add_shared_voice, public_owner_id, voice_id, name)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if result is None:
@@ -127,7 +133,8 @@ async def elevenlabs_voices_clone(
             temp_paths.append(temp_path)
 
         try:
-            result = voices.clone_instant(
+            result = await asyncio.to_thread(
+                voices.clone_instant,
                 name,
                 temp_paths,
                 description=description,
@@ -167,7 +174,7 @@ async def elevenlabs_voices_design(payload: dict = Body(...)):
     if model_id:
         kwargs["model_id"] = model_id
     try:
-        result = voices.design_previews(voice_description, **kwargs)
+        result = await asyncio.to_thread(voices.design_previews, voice_description, **kwargs)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"text": result.get("text"), "previews": result.get("previews")}
@@ -190,7 +197,7 @@ async def elevenlabs_voices_design_save(payload: dict = Body(...)):
     from Orchestrator.elevenlabs import voices
     description = (payload or {}).get("description") or ""
     try:
-        result = voices.design_save(generated_voice_id, name, description)
+        result = await asyncio.to_thread(voices.design_save, generated_voice_id, name, description)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"voice_id": result.get("voice_id")}
@@ -202,7 +209,7 @@ async def elevenlabs_voices_list():
     Voice Lab UI. No key -> a graceful empty grouping (matches the browse UI's
     no-key contract)."""
     from Orchestrator.elevenlabs import catalog
-    result = catalog.get_voices()
+    result = await asyncio.to_thread(catalog.get_voices)
     if result is None:
         return {"my_voices": [], "premade": []}
     return result
@@ -217,7 +224,7 @@ async def elevenlabs_voices_delete(voice_id: str):
     from Orchestrator.elevenlabs import voices
     in_use = voices.voice_in_use(voice_id)
     try:
-        voices.delete_voice(voice_id)
+        await asyncio.to_thread(voices.delete_voice, voice_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "in_use": in_use}

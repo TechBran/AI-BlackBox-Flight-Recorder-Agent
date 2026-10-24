@@ -9,7 +9,12 @@ server-side (surfaced as a 400 with the provider message).
 
 GET /xai/voices doubles as the frontends' gating probe: no XAI_API_KEY ->
 {"configured": false, "voices": []} and the Portal/Android xAI zones hide.
+
+The provider helpers are synchronous httpx calls (a clone upload waits up to
+120 s), so each runs in ``asyncio.to_thread`` rather than on the event loop
+every chat stream and voice call shares (audit O07-tts-voice-03).
 """
+import asyncio
 import os
 import tempfile
 
@@ -23,7 +28,7 @@ async def xai_voices_list():
     """List cloned voices. No key -> graceful unconfigured payload (zone hides)."""
     from Orchestrator import xai_voices
     try:
-        voices = xai_voices.list_custom_voices()
+        voices = await asyncio.to_thread(xai_voices.list_custom_voices)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if voices is None:
@@ -60,7 +65,8 @@ async def xai_voices_clone(
         with os.fdopen(fd, "wb") as out:
             out.write(await file.read())
         try:
-            result = xai_voices.clone_voice(name, temp_path, description=description)
+            result = await asyncio.to_thread(
+                xai_voices.clone_voice, name, temp_path, description=description)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     finally:
@@ -80,7 +86,7 @@ async def xai_voices_delete(voice_id: str):
     """Delete a cloned voice. Provider RuntimeError -> 400."""
     from Orchestrator import xai_voices
     try:
-        xai_voices.delete_voice(voice_id)
+        await asyncio.to_thread(xai_voices.delete_voice, voice_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}

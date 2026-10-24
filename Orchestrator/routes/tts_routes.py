@@ -458,7 +458,12 @@ def tts_openai(body: dict = Body(...)):
     }
 
 
-# Thread pool for parallel TTS generation (shared across requests)
+# Thread pool for parallel TTS generation (shared across requests). It is for
+# TTS chunk fan-out only: /tts/batch submits one future per chunk, so anything
+# else queued here (an STT upload, a Voice Lab clone, a 120 s provider call)
+# would wait behind a long synthesis or hold a chunk worker. The other blocking
+# provider calls in these async routes run in asyncio.to_thread instead
+# (audit O07-tts-voice-02/-03).
 _tts_executor = ThreadPoolExecutor(max_workers=8)
 # Single-flight EVERY on-box (qwen) synth path: the qwen-tts member is one GPU
 # (concurrencyLimit 2, but effectively serial), so two overlapping submissions
@@ -504,7 +509,8 @@ async def tts_queue_submit(body: dict = Body(...)):
         raise HTTPException(
             400, "The TTS queue serves on-box (qwen) voices only — cloud "
                  "providers stay synchronous (use /tts or /tts/batch)")
-    if not qwen_tts._tts_available():
+    # The availability check probes the local stack over HTTP: off the loop.
+    if not await asyncio.to_thread(qwen_tts._tts_available):
         raise HTTPException(
             503, "On-box TTS stack is unavailable (local stack off/unhealthy)")
     bare = voice.split(":", 1)[1] if voice.startswith("qwen:") else voice
@@ -706,8 +712,9 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
 
         # Re-chunk by the model's LIVE per-request cap (not the generic
         # max_chunk_chars used above) so we make the fewest synthesize calls.
+        # A cold catalog cache fetches /v1/models, so the lookup is threaded.
         el_model = model or ELEVENLABS_TTS_MODEL_DEFAULT
-        cap = el_tts.max_chars_for(el_model)
+        cap = await asyncio.to_thread(el_tts.max_chars_for, el_model)
         chunks = chunk_text_for_tts(text, max_chars=cap)
         num_chunks = len(chunks)
         voice_settings = body.get("voice_settings")
@@ -897,11 +904,14 @@ async def stt(
     # Diarized rich payload only when ElevenLabs is the resolved provider AND the
     # caller explicitly asked for diarization. Back-compat: flat `text` stays at
     # the top level so existing single-field consumers keep working unchanged.
-    resolved = (provider or "").strip().lower() or resolve_stt_provider()
+    # Resolution may probe the local stack and a transcription can take up to
+    # 120 s, so both run in a worker thread (see _tts_executor for why not there).
+    resolved = (provider or "").strip().lower() or await asyncio.to_thread(resolve_stt_provider)
     if resolved == "elevenlabs" and diarize:
         from Orchestrator.elevenlabs import stt as el_stt
         try:
-            rich = el_stt.transcribe_bytes(audio_bytes, filename, diarize=True)
+            rich = await asyncio.to_thread(
+                el_stt.transcribe_bytes, audio_bytes, filename, diarize=True)
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         except Exception as e:
@@ -917,7 +927,8 @@ async def stt(
         }
 
     try:
-        text = transcribe_bytes(
+        text = await asyncio.to_thread(
+            transcribe_bytes,
             audio_bytes,
             content_type,
             provider=provider,
@@ -975,7 +986,8 @@ async def stt_json(body: dict = Body(...)):
     # only — this path serves Gemini Live quick transcription; diarization (YAGNI
     # here) lives on /stt. An explicit provider in the body is honored.
     try:
-        text = transcribe_bytes(
+        text = await asyncio.to_thread(
+            transcribe_bytes,
             wav_bytes, "audio/wav", provider=body.get("provider"), filename="audio.wav"
         )
     except RuntimeError as e:
@@ -1001,13 +1013,15 @@ async def stt_translate(body: dict = Body(...)):
         from Orchestrator.stt.file_transcribe import transcribe_bytes
         try:
             audio_bytes = _b64.b64decode(body["audio"])
-            text = transcribe_bytes(audio_bytes, body.get("content_type") or "audio/wav", filename="audio.wav")
+            text = await asyncio.to_thread(
+                transcribe_bytes, audio_bytes, body.get("content_type") or "audio/wav",
+                filename="audio.wav")
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         except Exception as e:
             raise HTTPException(502, f"STT upstream error: {e}")
     try:
-        translated = translate_text(text or "", target_lang)
+        translated = await asyncio.to_thread(translate_text, text or "", target_lang)
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -1397,7 +1411,7 @@ async def get_google_voices(operator: Optional[str] = None):
     # We can log this request or check operator permissions if needed
     # op = (operator or CURRENT_OPERATOR or USERS_DEFAULT).strip()
     try:
-        return call_google_tts_voices()
+        return await asyncio.to_thread(call_google_tts_voices)
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -1483,7 +1497,7 @@ async def tts_catalog():
 async def qwen_voices_list():
     """Saved clone/design profiles for the manage zone. No GPU wake (disk read)."""
     from Orchestrator import qwen_tts
-    return {"voices": qwen_tts.list_profiles()}
+    return {"voices": await asyncio.to_thread(qwen_tts.list_profiles)}
 
 
 @app.post("/qwen/voices/clone")
@@ -1508,15 +1522,14 @@ async def qwen_voices_clone(
         raise HTTPException(422, "consent required to clone a voice")
     from Orchestrator import qwen_tts
     from Orchestrator.audio_transcode import TranscodeError, to_wav_pcm16
-    loop = asyncio.get_running_loop()
     # Forward under the SINGULAR field name 'file' — the M6 server declares
     # `file: UploadFile = File(...)` (Task 6.6). Every part is normalized to
-    # 16-bit mono 24k WAV (executor-offloaded; ffmpeg is CPU-bound).
+    # 16-bit mono 24k WAV (threaded; ffmpeg is CPU-bound).
     fwd_files = []
     for f in files:
         raw = await f.read()
         try:
-            wav = await loop.run_in_executor(_tts_executor, lambda b=raw: to_wav_pcm16(b))
+            wav = await asyncio.to_thread(to_wav_pcm16, raw)
         except TranscodeError as e:
             raise HTTPException(422, f"reference audio unusable ({f.filename or 'clip'}): {e}")
         base = (f.filename or "clip").rsplit(".", 1)[0]
@@ -1526,11 +1539,12 @@ async def qwen_voices_clone(
         data["description"] = description
     # Blocking HTTP in an ASYNC route freezes the whole event loop for up to
     # QWEN_TTS_TIMEOUT (300s of GPU synth) — every chat/WS/STT surface stalls
-    # (audit CRITICAL 2026-07-22). Offload to the TTS executor.
+    # (audit CRITICAL 2026-07-22). Offload to a worker thread (not the TTS
+    # chunk executor, which a 300 s clone would hold).
     try:
-        r = await loop.run_in_executor(_tts_executor, lambda: requests.post(
-            qwen_tts.upstream_url("/v1/voices/clone"),
-            data=data, files=fwd_files, timeout=qwen_tts.QWEN_TTS_TIMEOUT))
+        r = await asyncio.to_thread(
+            requests.post, qwen_tts.upstream_url("/v1/voices/clone"),
+            data=data, files=fwd_files, timeout=qwen_tts.QWEN_TTS_TIMEOUT)
     except Exception as e:
         raise HTTPException(502, f"qwen-tts clone unreachable: {e}")
     if r.status_code != 200:
@@ -1541,15 +1555,16 @@ async def qwen_voices_clone(
     slug = (out.get("voice_id") or "").strip()
     if slug:
         try:
-            pr = await loop.run_in_executor(_tts_executor, lambda: qwen_tts.synthesize(
-                slug, "Hi — this is your cloned voice speaking from the BlackBox."))
+            pr = await asyncio.to_thread(
+                qwen_tts.synthesize,
+                slug, "Hi — this is your cloned voice speaking from the BlackBox.")
             if pr.status_code != 200:
                 raise RuntimeError(f"HTTP {pr.status_code}: {pr.text[:200]}")
             out["preview_b64"] = base64.b64encode(pr.content).decode()
             out["preview_mime"] = "audio/wav"
         except Exception as e:  # noqa: BLE001 — broken clone must not survive
             try:
-                qwen_tts.delete_profile(slug)
+                await asyncio.to_thread(qwen_tts.delete_profile, slug)
             except Exception:
                 pass
             raise HTTPException(
@@ -1564,13 +1579,12 @@ async def qwen_voices_design(body: dict = Body(...)):
     audio_b64, sample_rate}]} (passed through verbatim; the Voice Lab builds the
     data: URL from audio_b64). Proxied through /upstream/qwen-tts/v1/voices/design."""
     from Orchestrator import qwen_tts
-    # Executor-offloaded: a design preview is a real GPU synth (audit CRITICAL —
-    # blocking here froze the entire event loop for its duration).
-    loop = asyncio.get_running_loop()
+    # Threaded: a design preview is a real GPU synth (audit CRITICAL — blocking
+    # here froze the entire event loop for its duration).
     try:
-        r = await loop.run_in_executor(_tts_executor, lambda: requests.post(
-            qwen_tts.upstream_url("/v1/voices/design"),
-            json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT))
+        r = await asyncio.to_thread(
+            requests.post, qwen_tts.upstream_url("/v1/voices/design"),
+            json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT)
     except Exception as e:
         raise HTTPException(502, f"qwen-tts design unreachable: {e}")
     if r.status_code != 200:
@@ -1583,12 +1597,11 @@ async def qwen_voices_design_save(body: dict = Body(...)):
     """Save a chosen design preview: {generated_voice_id, name, description?}
     -> {voice_id}. Persists Manifest/voices/qwen/{slug}/ server-side."""
     from Orchestrator import qwen_tts
-    # Executor-offloaded (audit CRITICAL — see the clone/design routes above).
-    loop = asyncio.get_running_loop()
+    # Threaded (audit CRITICAL — see the clone/design routes above).
     try:
-        r = await loop.run_in_executor(_tts_executor, lambda: requests.post(
-            qwen_tts.upstream_url("/v1/voices/design/save"),
-            json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT))
+        r = await asyncio.to_thread(
+            requests.post, qwen_tts.upstream_url("/v1/voices/design/save"),
+            json=body, timeout=qwen_tts.QWEN_TTS_TIMEOUT)
     except Exception as e:
         raise HTTPException(502, f"qwen-tts design/save unreachable: {e}")
     if r.status_code != 200:
@@ -1601,7 +1614,7 @@ async def qwen_voices_delete(slug: str):
     """Delete a saved profile (filesystem op; voices are lazy-loaded from disk,
     so no server round-trip is needed)."""
     from Orchestrator import qwen_tts
-    if qwen_tts.delete_profile(slug):
+    if await asyncio.to_thread(qwen_tts.delete_profile, slug):
         return {"ok": True, "slug": slug}
     raise HTTPException(404, f"no such qwen voice profile: {slug}")
 
@@ -1621,9 +1634,13 @@ async def stt_catalog():
     from Orchestrator import config as _cfg
     from Orchestrator.stt.catalog import build_stt_catalog, build_stt_resolution
     from Orchestrator.stt.resolve import resolve_stt_provider
-    resolved = resolve_stt_provider()
-    resolution = build_stt_resolution()
-    return {"providers": build_stt_catalog(), "resolved": resolved,
+
+    def _assemble():
+        # Resolution probes the local stack's health over HTTP: off the loop.
+        return resolve_stt_provider(), build_stt_resolution(), build_stt_catalog()
+
+    resolved, resolution, providers = await asyncio.to_thread(_assemble)
+    return {"providers": providers, "resolved": resolved,
             "default": _cfg.STT_PROVIDER or resolved,
             # Copied in by name, not spread: a later key added to the resolution
             # must never be able to overwrite the two legacy fields above.
@@ -1638,6 +1655,11 @@ async def get_last_response(operator: str):
     Get the most recent assistant response for the given operator from the latest snapshot.
     Used for recovering incomplete conversations after page reload/rotation.
     """
+    # Parsing the snapshot index and reading the volume block: off the loop.
+    return await asyncio.to_thread(_last_response_for, operator)
+
+
+def _last_response_for(operator: str):
     try:
         # Load the snapshot index
         index = load_snapshot_index()
@@ -2338,7 +2360,8 @@ async def generate_elevenlabs_sound_effect(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail="`text` is required.")
 
     try:
-        mp3_bytes = el_sfx.generate(
+        mp3_bytes = await asyncio.to_thread(
+            el_sfx.generate,
             text,
             duration_seconds=body.get("duration_seconds"),
             prompt_influence=body.get("prompt_influence"),
@@ -2353,11 +2376,12 @@ async def generate_elevenlabs_sound_effect(body: dict = Body(...)):
     slug = generate_prompt_slug(text)
     filename = f"{slug}_{uuid.uuid4().hex}_sfx.mp3"
     save_path = UPLOADS_DIR / filename
-    save_path.write_bytes(mp3_bytes)
+    await asyncio.to_thread(save_path.write_bytes, mp3_bytes)
     audio_url = f"/ui/uploads/{filename}"
     print(f"[SFX] Saved ElevenLabs sound effect: {filename} ({len(mp3_bytes)} bytes)")
 
-    add_media_entry(
+    await asyncio.to_thread(
+        add_media_entry,
         url=audio_url,
         media_type="audio",
         prompt=text,
@@ -2408,7 +2432,8 @@ async def elevenlabs_voice_changer(body: dict = Body(...)):
     audio_path = _contained_audio_path(audio_path)
 
     try:
-        audio_bytes = el_transform.change_voice(
+        audio_bytes = await asyncio.to_thread(
+            el_transform.change_voice,
             audio_path,
             target_voice,
             output_format=body.get("output_format"),
@@ -2421,11 +2446,12 @@ async def elevenlabs_voice_changer(body: dict = Body(...)):
 
     filename = f"voice_changed_{uuid.uuid4().hex}.mp3"
     save_path = UPLOADS_DIR / filename
-    save_path.write_bytes(audio_bytes)
+    await asyncio.to_thread(save_path.write_bytes, audio_bytes)
     audio_url = f"/ui/uploads/{filename}"
     print(f"[VOICE-CHANGER] Saved: {filename} ({len(audio_bytes)} bytes)")
 
-    add_media_entry(
+    await asyncio.to_thread(
+        add_media_entry,
         url=audio_url,
         media_type="audio",
         prompt=f"voice-changed -> {target_voice}",
@@ -2458,7 +2484,7 @@ async def elevenlabs_isolate(body: dict = Body(...)):
     audio_path = _contained_audio_path(audio_path)
 
     try:
-        audio_bytes = el_transform.isolate(audio_path)
+        audio_bytes = await asyncio.to_thread(el_transform.isolate, audio_path)
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -2467,11 +2493,12 @@ async def elevenlabs_isolate(body: dict = Body(...)):
 
     filename = f"voice_isolated_{uuid.uuid4().hex}.mp3"
     save_path = UPLOADS_DIR / filename
-    save_path.write_bytes(audio_bytes)
+    await asyncio.to_thread(save_path.write_bytes, audio_bytes)
     audio_url = f"/ui/uploads/{filename}"
     print(f"[ISOLATE] Saved: {filename} ({len(audio_bytes)} bytes)")
 
-    add_media_entry(
+    await asyncio.to_thread(
+        add_media_entry,
         url=audio_url,
         media_type="audio",
         prompt="voice-isolated (background noise removed)",
