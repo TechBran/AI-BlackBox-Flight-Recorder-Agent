@@ -190,10 +190,13 @@ def startup_check_index():
     logger.info("Running artifact cleanup...")
     cleanup_old_artifacts()
 
-    # Run archive cleanup on startup
+    # Run archive cleanup on startup (the same retention and free-space floor
+    # the storage maintenance timer applies, startup_storage_maintenance)
     logger.info("Running archive cleanup...")
     try:
-        cleanup_stats = cleanup_old_archives(days_to_keep=30, max_size_gb=5.0, max_files=200)
+        from Orchestrator.maintenance import ARCHIVE_RETENTION
+        from Orchestrator.volume import archive_min_free_gb
+        cleanup_stats = cleanup_old_archives(**ARCHIVE_RETENTION, min_free_gb=archive_min_free_gb())
         if cleanup_stats["deleted_files"] > 0:
             logger.info("Cleaned up %d archives (%.1f MB freed)",
                         cleanup_stats["deleted_files"], cleanup_stats["deleted_size_mb"])
@@ -296,6 +299,34 @@ async def _cu_display_reaper():
                 print(f"[GEMINI CU] idle sweep skipped: {e}")
 
     asyncio.create_task(_loop())
+
+
+# The storage maintenance loop's task, held so it is not garbage-collected
+# mid-run (a bare create_task result can be).
+_storage_maintenance_task = None
+
+
+@boot_hook(app, "startup")
+async def startup_storage_maintenance():
+    """Bound Archive/ and the agent upload folders between restarts (audit
+    X06-ops-deploy-04): every mint copies the whole ledger into Archive/, and
+    the boot-time cleanup was the only thing that ever pruned it, so a box up
+    for weeks grew past its own 5 GB cap; nothing ever ran the upload session
+    sweep at all. Runs run_storage_maintenance() every MAINTENANCE_INTERVAL_S
+    in a worker thread (it stats and deletes files). Never raises."""
+    import asyncio
+    from Orchestrator.maintenance import MAINTENANCE_INTERVAL_S, run_storage_maintenance
+
+    async def _loop():
+        while True:
+            await asyncio.sleep(MAINTENANCE_INTERVAL_S)
+            try:
+                await asyncio.to_thread(run_storage_maintenance)
+            except Exception as e:  # noqa: BLE001 — maintenance must never die
+                logger.error("Storage maintenance pass failed: %s", e)
+
+    global _storage_maintenance_task
+    _storage_maintenance_task = asyncio.create_task(_loop())
 
 
 @boot_hook(app, "startup")

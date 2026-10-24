@@ -17,6 +17,17 @@ debounce_ms = 3000
 turns_to_compress = 26
 auto_create_interval = 24
 min_snapshots_required = 5
+# Optional: the chat provider/model that writes checkpoint summaries. Empty =
+# the box's default provider and its configured default model; a failed
+# attempt is retried one interval later.
+# provider = anthropic
+# model =
+
+[archive]
+# Free space (GB) the disk holding Archive/ must keep: a full-ledger archive
+# copy that would cross it is skipped, and the hourly cleanup removes the
+# oldest copies (never the newest) until it is met.
+min_free_gb = 2
 
 [budget]
 context_tokens_max = 120000

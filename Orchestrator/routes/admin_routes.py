@@ -41,7 +41,8 @@ import Orchestrator.models as models_module  # Import module for dynamic access 
 from Orchestrator.models import task_queue
 from Orchestrator.monitoring import drift_state_global, get_disk_usage
 from Orchestrator.state import get_state, state_by_op
-from Orchestrator.volume import cleanup_old_archives, parse_tail, read_text_safe, sha256_bytes, verify_gm_or_halt
+from Orchestrator.volume import LedgerError, cleanup_old_archives, parse_tail, read_text_safe, sha256_bytes, verify_gm_or_halt
+from Orchestrator.maintenance import cleanup_old_session_files
 
 
 def _require_operator(name) -> str:
@@ -233,39 +234,11 @@ async def cleanup_session_files(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def cleanup_old_session_files(max_age_days: int = 3):
-    """Clean up session folders older than max_age_days.
-
-    Called periodically to prevent unbounded file growth.
-    """
-    import time
-    import shutil
-
-    if not SESSION_UPLOADS_DIR.exists():
-        return 0
-
-    cutoff_time = time.time() - (max_age_days * 24 * 60 * 60)
-    cleaned = 0
-
-    for session_folder in SESSION_UPLOADS_DIR.iterdir():
-        if session_folder.is_dir():
-            # Check folder modification time
-            try:
-                mtime = session_folder.stat().st_mtime
-                if mtime < cutoff_time:
-                    shutil.rmtree(session_folder)
-                    print(f"[Session Cleanup] Removed old session folder: {session_folder.name}")
-                    cleaned += 1
-            except Exception as e:
-                print(f"[Session Cleanup] Error cleaning {session_folder}: {e}")
-
-    return cleaned
-
-
 @app.post("/upload/cleanup")
 async def trigger_session_cleanup(max_age_days: int = 3):
-    """Manually trigger cleanup of old session files."""
-    cleaned = cleanup_old_session_files(max_age_days)
+    """Manually trigger cleanup of old session files (the same sweep the
+    storage maintenance timer runs, Orchestrator/maintenance.py)."""
+    cleaned = cleanup_old_session_files(max_age_days, SESSION_UPLOADS_DIR)
     return {"cleaned_sessions": cleaned, "max_age_days": max_age_days}
 
 # ─── Tailnet origin resolution ─────────────────────────────────────────────
@@ -344,7 +317,7 @@ def health():
         gm_digest, gm_bytes = verify_gm_or_halt()
         status = "ok"
         detail = ""
-    except HTTPException as e:
+    except (HTTPException, LedgerError) as e:
         gm_digest, gm_bytes = "", 0
         status = "GM FAIL"
         detail = str(e)
@@ -547,9 +520,8 @@ def cleanup_archives_manual(
 ):
     """Manually trigger archive cleanup with custom parameters."""
     if dry_run:
-        # Just check what would be deleted
-        stats = cleanup_old_archives(days_to_keep, max_size_gb, max_files)
-        # Restore files since this was a dry run (hacky but works)
+        # Only report what would be deleted: nothing is removed.
+        stats = cleanup_old_archives(days_to_keep, max_size_gb, max_files, dry_run=True)
         return {"dry_run": True, "would_delete": stats}
 
     stats = cleanup_old_archives(days_to_keep, max_size_gb, max_files)

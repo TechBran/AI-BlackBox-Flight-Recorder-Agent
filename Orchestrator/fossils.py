@@ -16,6 +16,7 @@ import json
 import math
 import re
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -590,6 +591,11 @@ def filter_by_operator(fossils: List[str], op: str) -> List[str]:
 # In-memory index cache — avoids re-parsing 254MB JSON on every call
 _index_cache: Optional[Dict[str, Dict[str, Any]]] = None
 _index_cache_mtime: float = 0.0
+# Serializes update_snapshot_index's load-modify-save. The cached dict a
+# reader got from load_snapshot_index() is never mutated: an update builds a
+# new dict and swaps it in (copy-on-write, audit O05-ledger-persistence-16),
+# so a search iterating the old one never sees it change size mid-loop.
+_index_write_lock = threading.RLock()
 
 # Schema version sentinel (T1 / audit M9). Bump when the per-snapshot dict
 # shape in snapshot_index.json changes in a way readers can't tolerate.
@@ -694,8 +700,9 @@ def get_snapshot_by_id(snap_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def save_snapshot_index(index: Dict[str, Dict[str, Any]]):
-    """Save the snapshot index to disk atomically and update the in-memory cache."""
+def save_snapshot_index(index: Dict[str, Dict[str, Any]]) -> bool:
+    """Save the snapshot index to disk atomically and update the in-memory cache.
+    Returns False (logged) when the write failed."""
     global _index_cache, _index_cache_mtime
     try:
         SNAPSHOT_INDEX.parent.mkdir(parents=True, exist_ok=True)
@@ -706,8 +713,10 @@ def save_snapshot_index(index: Dict[str, Dict[str, Any]]):
         # Update cache directly — avoid re-reading the file we just wrote
         _index_cache = index
         _index_cache_mtime = SNAPSHOT_INDEX.stat().st_mtime
+        return True
     except Exception as e:
         print(f"[ERROR] Failed to save snapshot index: {e}")
+        return False
 
 def rebuild_snapshot_index() -> Dict[str, Dict[str, Any]]:
     """Rebuild the entire snapshot index by scanning the volume file.
@@ -815,8 +824,8 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
             stay slim)
         chunk_vectors: Optional chunk-group vectors (M6c) — appended to the
             ACTIVE VectorStore as ONE contiguous group in document order when
-            it is schema 2. Mutually shaped with `embedding`: the vector-block
-            schema guard below validates whichever arrived against the
+            it is schema 2. Mutually shaped with `embedding`: the schema guard
+            in append_snapshot_vectors validates whichever arrived against the
             store's CURRENT schema at append time (audit A4) and drops a
             mismatch for the catch-up loop to re-embed.
         media_artifacts: Optional list of media artifact metadata dicts containing:
@@ -829,30 +838,71 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
             - resolution: For images/videos
             - created_at: ISO timestamp
     """
+    ok = False
     try:
         print(f"[INDEX] Updating index with {snap_id} (operator: {operator}, type: {snap_type})")
-        index = load_snapshot_index()
-        print(f"[INDEX] Loaded existing index with {len(index)} entries")
-        index[snap_id] = {
-            "byte_start": byte_start,
-            "byte_end": byte_end,
-            "operator": operator,
-            "timestamp": timestamp,
-            "type": snap_type
-        }
+        with _index_write_lock:
+            # Copy-on-write: never mutate the cached dict readers may be iterating.
+            index = dict(load_snapshot_index())
+            print(f"[INDEX] Loaded existing index with {len(index)} entries")
+            index[snap_id] = {
+                "byte_start": byte_start,
+                "byte_end": byte_end,
+                "operator": operator,
+                "timestamp": timestamp,
+                "type": snap_type
+            }
 
-        # Vector write seam (pluggable embeddings): vectors go to the ACTIVE
-        # binary store, never into the JSON entry. A mint must NEVER fail
-        # because of the vector layer — every store-side error below is
-        # logged and the vector dropped (the migration job's catch-up loop
-        # re-embeds missing ids later, keyed on store.missing()).
-        #
-        # M6c schema guard (audit A4): the payload shape is validated against
-        # the store's CURRENT schema at APPEND time — covering the race where
-        # the active store changed between embed and append, in BOTH
-        # directions. A whole-snapshot vector must never masquerade as a
-        # 1-chunk group in a schema-2 store, and chunk vectors must never
-        # land as a bogus single row in a v1 store.
+            # Vector write seam: vectors go to the ACTIVE binary store, never
+            # into the JSON entry (append_snapshot_vectors below).
+            append_snapshot_vectors(snap_id, embedding=embedding, chunk_vectors=chunk_vectors)
+
+            # Add media artifacts if provided
+            if media_artifacts:
+                index[snap_id]["media_artifacts"] = media_artifacts
+                print(f"[INDEX] Stored {len(media_artifacts)} media artifact(s) for {snap_id}")
+
+            ok = save_snapshot_index(index)
+        if ok:
+            print(f"[INDEX] Successfully updated index with {snap_id}, now {len(index)} entries")
+    except Exception as e:
+        print(f"[ERROR] Failed to update snapshot index: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Flight Recorder natural trigger (Brandon 2026-07-23): every mint path
+    # passes through here — the ONE choke point. Counts across all operators;
+    # fires a background flight report every N snapshots. Guarded inside
+    # on_snapshot_minted (never raises, never recurses on flight_report).
+    try:
+        from Orchestrator.oversight import on_snapshot_minted
+        on_snapshot_minted(snap_id, snap_type, operator)
+    except Exception as _fr_e:
+        print(f"[FLIGHT-RECORDER] mint hook failed (non-fatal): {_fr_e}")
+    return ok
+
+
+def append_snapshot_vectors(snap_id: str, embedding: Optional[List[float]] = None,
+                            chunk_vectors: Optional[List[List[float]]] = None) -> None:
+    """Append a minted snapshot's vectors to the ACTIVE VectorStore.
+
+    The mint path calls it after releasing mint_lock (the embed it follows
+    can take minutes on a slow provider); update_snapshot_index calls it for
+    a caller that passes the vectors along with the entry. Idempotent on
+    snap_id (the store's first write wins). Never raises.
+
+    A mint must NEVER fail because of the vector layer — every store-side
+    error below is logged and the vector dropped (the migration job's
+    catch-up loop re-embeds missing ids later, keyed on store.missing()).
+
+    M6c schema guard (audit A4): the payload shape is validated against the
+    store's CURRENT schema at APPEND time — covering the race where the
+    active store changed between embed and append, in BOTH directions. A
+    whole-snapshot vector must never masquerade as a 1-chunk group in a
+    schema-2 store, and chunk vectors must never land as a bogus single row
+    in a v1 store.
+    """
+    try:
         if embedding is not None or chunk_vectors:
             store = None
             schema = 1
@@ -902,28 +952,9 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
                         print(f"[INDEX] Stored embedding for {snap_id} in {store.slug} store ({len(embedding)} dimensions)")
                     except Exception as e:
                         print(f"[INDEX] store append failed; snapshot {snap_id} minted without vector: {e}")
+    except Exception as e:  # noqa: BLE001 — the vector layer never fails a mint
+        print(f"[INDEX] vector append failed; snapshot {snap_id} minted without vector: {e}")
 
-        # Add media artifacts if provided
-        if media_artifacts:
-            index[snap_id]["media_artifacts"] = media_artifacts
-            print(f"[INDEX] Stored {len(media_artifacts)} media artifact(s) for {snap_id}")
-
-        save_snapshot_index(index)
-        print(f"[INDEX] Successfully updated index with {snap_id}, now {len(index)} entries")
-    except Exception as e:
-        print(f"[ERROR] Failed to update snapshot index: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # Flight Recorder natural trigger (Brandon 2026-07-23): every mint path
-    # passes through here — the ONE choke point. Counts across all operators;
-    # fires a background flight report every N snapshots. Guarded inside
-    # on_snapshot_minted (never raises, never recurses on flight_report).
-    try:
-        from Orchestrator.oversight import on_snapshot_minted
-        on_snapshot_minted(snap_id, snap_type, operator)
-    except Exception as _fr_e:
-        print(f"[FLIGHT-RECORDER] mint hook failed (non-fatal): {_fr_e}")
 
 def split_snapshots(vol_txt: str) -> List[Tuple[str, int, int]]:
     snaps = []

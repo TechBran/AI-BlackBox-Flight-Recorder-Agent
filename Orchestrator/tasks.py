@@ -1653,15 +1653,18 @@ def process_checkpoint_task(task: Task):
 
         update_task(task.task_id, progress=40)
 
-        # Run checkpoint function (synchronous — uses requests.post internally)
-        create_checkpoint_async(operator, manual=manual)
+        # Run checkpoint function (synchronous — uses requests.post internally).
+        # It never raises; a failed compression is reported, not COMPLETED.
+        outcome = create_checkpoint_async(operator, manual=manual) or {}
+        if outcome.get("status") == "failed":
+            raise RuntimeError(outcome.get("error") or "checkpoint creation failed")
 
         update_task(task.task_id,
                    status=TaskStatus.COMPLETED,
-                   result_data={"operator": operator, "manual": manual},
+                   result_data={"operator": operator, "manual": manual, **outcome},
                    progress=100)
 
-        print(f"[WORKER] Checkpoint created successfully for {operator}")
+        print(f"[WORKER] Checkpoint {outcome.get('status', 'done')} for {operator}")
 
     except Exception as e:
         import traceback

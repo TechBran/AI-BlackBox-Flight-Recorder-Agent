@@ -20,11 +20,14 @@ an empty store simply means nothing is embedded yet and yields [].
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 
 from Orchestrator import config
 from Orchestrator.embeddings.chunker import chunk_snapshot, chunks_for_snapshot
-from Orchestrator.embeddings.providers import get_provider
+from Orchestrator.embeddings.providers import (
+    GEMINI_EMBED_TIMEOUT_S, LOCALSTACK_READ_TIMEOUT_S, OLLAMA_READ_TIMEOUT_S, get_provider,
+)
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import VectorStore, get_active_slug, get_store
 
@@ -95,10 +98,36 @@ def swap_active(slug: str) -> VectorStore:
 # deadlock (no caller does this — all production callers are external).
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="emb")
 
+# The longest one embed call may hold its caller (audit
+# O05-ledger-persistence-05): one full local-model read window (Ollama /
+# llama-swap hold a request through a cold load) plus a minute, which also
+# covers Gemini's whole retry envelope. A provider that is still silent then
+# is treated as hung: the coroutine is cancelled (freeing its pool thread)
+# and the caller gets the usual failure (None / {}), so a mint degrades to a
+# vector-less snapshot the catch-up loop re-embeds instead of waiting forever.
+EMBED_CEILING_S = max(OLLAMA_READ_TIMEOUT_S, LOCALSTACK_READ_TIMEOUT_S,
+                      GEMINI_EMBED_TIMEOUT_S * 2) + 60.0
+
 
 def _run_async(coro):
-    """Run a coroutine to completion from sync code, loop or no loop."""
-    return _EXECUTOR.submit(asyncio.run, coro).result()
+    """Run a coroutine to completion from sync code, loop or no loop, for at
+    most EMBED_CEILING_S. Raises TimeoutError past the ceiling."""
+    ceiling = EMBED_CEILING_S
+
+    async def bounded():
+        return await asyncio.wait_for(coro, ceiling)
+
+    wrapped = bounded()
+    future = _EXECUTOR.submit(asyncio.run, wrapped)
+    try:
+        # A small grace over the in-loop deadline; it also bounds the wait
+        # for a pool thread when hung calls occupy all four.
+        return future.result(timeout=ceiling + 5.0)
+    except FutureTimeoutError:
+        if future.cancel():  # never started: close both, no "never awaited" noise
+            wrapped.close()
+            coro.close()
+        raise TimeoutError(f"embedding call exceeded the {ceiling:.0f}s ceiling") from None
 
 
 # ── fast provider-down health signal (F8) ────────────────────────────────────

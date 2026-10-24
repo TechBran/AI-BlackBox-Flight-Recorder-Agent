@@ -451,8 +451,8 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
     so the per-operator checkpoint pin is untouched (additive invariant #3).
     """
     from Orchestrator.fossils import (
-        get_recent_fossils_for_operator, load_snapshot_index,
-        update_snapshot_index,
+        append_snapshot_vectors, get_recent_fossils_for_operator,
+        load_snapshot_index, update_snapshot_index,
     )
     from Orchestrator.volume import (
         append_snapshot_text, next_snap_id_from_tail, now_utc_iso,
@@ -539,11 +539,15 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
             byte_start = VOL_PATH.stat().st_size if VOL_PATH.exists() else 0
             append_snapshot_text(body)
             byte_end = VOL_PATH.stat().st_size
-            embed_payload = _embed_for_index(snap_id, body)
             update_snapshot_index(
                 snap_id=snap_id, byte_start=byte_start, byte_end=byte_end,
                 operator=FLIGHT_RECORDER_OPERATOR, timestamp=utc,
-                snap_type="flight_report", **embed_payload)
+                snap_type="flight_report")
+
+        # The embed runs after mint_lock is released, as on every mint path
+        # (checkpoint._embed_and_store): a slow provider must not hold every
+        # other mint (audit O05-ledger-persistence-05).
+        append_snapshot_vectors(snap_id, **_embed_for_index(snap_id, body))
 
         with _state_lock:
             _state["last_report_id"] = snap_id

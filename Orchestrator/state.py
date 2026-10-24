@@ -70,6 +70,10 @@ class OpState:
     total_turns: int = 0  # Total conversation turns for this operator
     last_checkpoint_turn: int = 0  # Turn number of last checkpoint
     last_checkpoint_id: str = ""  # SNAP-ID of most recent checkpoint
+    # Turn at which the last checkpoint was ATTEMPTED (claimed): a failed or
+    # still-running attempt holds off the next one for a full interval, so a
+    # box whose compression call keeps failing does not re-fire every turn.
+    last_checkpoint_attempt_turn: int = 0
     total_tokens: int = 0  # Cumulative token usage for this operator
 
     def add_conversation_turn(self, turn: dict, max_turns: int = 100):
@@ -96,6 +100,7 @@ def save_operator_state():
                 "total_turns": state.total_turns,
                 "last_checkpoint_turn": state.last_checkpoint_turn,
                 "last_checkpoint_id": state.last_checkpoint_id,
+                "last_checkpoint_attempt_turn": state.last_checkpoint_attempt_turn,
                 # Note: last_mint_index is not persisted since conversation_log is in-memory only
                 "last_mint_ms": state.last_mint_ms,
                 "total_tokens": state.total_tokens
@@ -145,6 +150,7 @@ def load_operator_state():
             s.total_turns = data.get("total_turns", 0)
             s.last_checkpoint_turn = data.get("last_checkpoint_turn", 0)
             s.last_checkpoint_id = data.get("last_checkpoint_id", "")
+            s.last_checkpoint_attempt_turn = data.get("last_checkpoint_attempt_turn", s.last_checkpoint_turn)
             # Reset last_mint_index to 0 since conversation_log is empty after restart
             s.last_mint_index = 0
             s.last_mint_ms = data.get("last_mint_ms", 0)
