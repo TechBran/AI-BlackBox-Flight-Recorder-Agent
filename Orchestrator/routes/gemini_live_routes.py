@@ -95,6 +95,7 @@ from Orchestrator.routes.voice_ws_shared import (
     dispatch_voice_tool,
     reset_for_connect,
     retire_upstream,
+    conversation_releaser,
     save_voice_transcript,
     send_gemini_tool_error,
     spawn_reconnect,
@@ -789,6 +790,9 @@ Messages: {len(session.conversation)}
 
     print(f"[GEMINI-LIVE] Saving session {session.session_id} with {len(session.conversation)} messages to BlackBox")
 
+    # Drops exactly the turns in this transcript, once they are safe (spooled
+    # or saved): a turn that lands while the save runs stays for the next one.
+    release = conversation_releaser(session)
     saved = await save_voice_transcript(
         operator=session.operator,
         user_message=f"[Voice Session Transcript] Gemini Live voice session {session.session_id}",
@@ -796,12 +800,13 @@ Messages: {len(session.conversation)}
         model_label="gemini-live-voice",
         log_prefix="[GEMINI-LIVE]",
         session_id=session.session_id,
+        on_safe=release,
     )
 
     # Clear ONLY once the transcript is safe: saved, or in the retry spool
     # (P1b cross-route contract; rank 51 write-ahead spool).
     if saved:
-        session.conversation = []
+        release()
     else:
         print(f"[GEMINI-LIVE] Save FAILED and the retry spool is unavailable — keeping "
               f"{len(session.conversation)} turns in memory for the next save attempt")

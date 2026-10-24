@@ -24,7 +24,7 @@ import os
 import time
 
 import aiohttp
-from typing import Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set
 
 from starlette.websockets import WebSocketState
 
@@ -357,9 +357,29 @@ async def _post_chat_save(body: dict, log_prefix: str) -> Optional[int]:
         return None
 
 
+def conversation_releaser(session) -> Callable[[], None]:
+    """A one-shot that drops exactly the turns a save is persisting.
+
+    Built when the transcript is (the turns in ``session.conversation`` right
+    now); calling it deletes those and keeps any turn appended while the save
+    ran. Idempotent. Pass it to save_voice_transcript as ``on_safe`` and call
+    it again on a True result.
+    """
+    included = len(session.conversation)
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            del session.conversation[:included]
+    return release
+
+
 async def save_voice_transcript(operator: str, user_message: str,
                                 session_summary: str, model_label: str,
-                                log_prefix: str, session_id: str = "") -> bool:
+                                log_prefix: str, session_id: str = "",
+                                on_safe: Optional[Callable[[], None]] = None) -> bool:
     """Persist a voice-session transcript via POST /chat/save.
 
     Direct persistence: the backend's turns_threshold=1 auto-mint fires
@@ -377,19 +397,32 @@ async def save_voice_transcript(operator: str, user_message: str,
     Returns True when the transcript is safe — in the ledger, or durably queued
     for it — and False only when the save failed AND the spool could not be
     written. Callers clear their conversation buffer only on True: a False
-    keeps it in memory for the next teardown path or the reaper.
+    keeps it in memory for the next teardown path or the reaper. ``on_safe``
+    runs the moment the transcript is safe, which is before the POST once the
+    spool is written: a save cancelled mid-POST (the phone bridge's 10 s
+    timeout) has still handed the turns to the spool, and a caller that kept
+    them would post them again on its next save.
     """
     from Orchestrator import voice_transcript_spool as spool
 
     record = spool.new_record(session_id=session_id, operator=operator,
                               user_message=user_message, session_summary=session_summary,
                               model_label=model_label, log_prefix=log_prefix)
+    def _safe() -> None:
+        if on_safe is not None:
+            try:
+                on_safe()
+            except Exception as e:
+                print(f"{log_prefix} on_safe callback failed: {e}")
+
     spooled = False
     try:
         await asyncio.to_thread(spool.write, record)
         spooled = True
     except Exception as e:
         print(f"{log_prefix} could not spool the transcript for retry: {e}")
+    if spooled:
+        _safe()
 
     _SAVES_IN_FLIGHT.add(record["transcript_id"])
     try:
@@ -404,6 +437,8 @@ async def save_voice_transcript(operator: str, user_message: str,
             except Exception as e:
                 # The retry finds the marker in the ledger and drops it then.
                 print(f"{log_prefix} saved, but the retry copy could not be removed: {e}")
+        else:
+            _safe()
         return True
     if spooled:
         print(f"{log_prefix} transcript kept in the retry spool "

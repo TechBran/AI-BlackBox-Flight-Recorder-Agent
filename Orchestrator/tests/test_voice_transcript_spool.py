@@ -125,6 +125,36 @@ def test_cancelled_save_is_still_spooled(box, monkeypatch):
     assert [r["session_id"] for r in spool.pending()] == ["phone-call-7"]
 
 
+@pytest.mark.parametrize("save,cls,label", ROUTES)
+def test_a_cancelled_save_releases_the_turns_it_spooled(box, monkeypatch, save, cls, label):
+    """Once spooled the turns are safe, so memory drops them even if the POST is
+    then cancelled: kept, the next save (reaper, teardown) posted them twice."""
+    _ChatSave(monkeypatch, hang=True)
+    session = _session(cls, "phone-call-8")
+
+    async def run():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(save(session), timeout=0.2)
+
+    asyncio.run(run())
+    assert session.conversation == []
+    assert len(list(spool.pending())) == 1
+
+
+@pytest.mark.parametrize("save,cls,label", ROUTES)
+def test_a_turn_added_while_the_save_runs_is_kept(box, monkeypatch, save, cls, label):
+    session = _session(cls)
+
+    async def post(body, log_prefix):
+        session.conversation.append({"role": "user", "content": "one more thing",
+                                     "timestamp": "2026-10-23T11:00:09Z"})
+        return 200
+
+    monkeypatch.setattr(shared, "_post_chat_save", post)
+    asyncio.run(save(session))
+    assert [m["content"] for m in session.conversation] == ["one more thing"]
+
+
 def test_retry_posts_the_spooled_transcript_and_clears_it(box, monkeypatch):
     _ChatSave(monkeypatch, status=503)
     asyncio.run(rt.save_session_to_blackbox(_session(RealtimeSession)))

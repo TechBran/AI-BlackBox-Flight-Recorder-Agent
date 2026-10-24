@@ -87,6 +87,7 @@ from Orchestrator.routes.voice_ws_shared import (
     dispatch_voice_tool,
     reset_for_connect,
     retire_upstream,
+    conversation_releaser,
     save_voice_transcript,
     send_openai_style_tool_error,
     spawn_reconnect,
@@ -158,6 +159,9 @@ Messages: {len(session.conversation)}
 
     print(f"[REALTIME] Saving session {session.session_id} with {len(session.conversation)} messages to BlackBox")
 
+    # Drops exactly the turns in this transcript, once they are safe (spooled
+    # or saved): a turn that lands while the save runs stays for the next one.
+    release = conversation_releaser(session)
     saved = await save_voice_transcript(
         operator=session.operator,
         user_message=f"[Voice Session Transcript] OpenAI Realtime voice session {session.session_id}",
@@ -165,13 +169,14 @@ Messages: {len(session.conversation)}
         model_label="openai-realtime-voice",
         log_prefix="[REALTIME]",
         session_id=session.session_id,
+        on_safe=release,
     )
 
     # Clear ONLY once the transcript is safe: saved, or in the retry spool
     # (previously cleared unconditionally, permanently losing the transcript
     # after a failed save; rank 51 write-ahead spool).
     if saved:
-        session.conversation = []
+        release()
     else:
         print(f"[REALTIME] Save FAILED and the retry spool is unavailable — keeping "
               f"{len(session.conversation)} turns in memory for the next save attempt")
