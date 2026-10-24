@@ -521,6 +521,14 @@ def _box_stores_off_the_checkout(tmp_path_factory):
     test writes there and never reads the box's copy."""
     _checkout_guard.allow(tmp_path_factory.getbasetemp())
     _host_command_guard.allow(tmp_path_factory.getbasetemp())
+    # The MCP server's /internal/reload secret (Orchestrator/utils/internal_secret.py,
+    # stdlib-only) is created under <checkout>/credentials/ on first use, and the
+    # lean MCP venv below never reaches the Orchestrator store table, so point it
+    # at the sandbox through its own env override BEFORE anything can write it
+    # (a fresh CI checkout has no credentials/ dir; the write guard refused the
+    # mkdir at teardown of three remote-scoping tests).
+    os.environ.setdefault("BLACKBOX_MCP_RELOAD_SECRET_FILE",
+                          str(tmp_path_factory.getbasetemp() / "credentials" / "mcp_reload.secret"))
     try:
         import Orchestrator.config  # noqa: F401
     except (ImportError, SystemExit):
