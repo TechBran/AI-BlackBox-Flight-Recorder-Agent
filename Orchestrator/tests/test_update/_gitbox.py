@@ -1,0 +1,81 @@
+"""A real git box for the updater tests: a bare origin (GitHub) and a clone
+(the box) one commit behind it, all under a test's tmp_path. Shared by
+test_updater_safety.py (the in-app runner and routes) and test_update_sh.py
+(the Scripts/update.sh twin)."""
+from __future__ import annotations
+
+import subprocess
+from types import SimpleNamespace
+
+
+def git(cwd, *args) -> str:
+    return subprocess.run(["git", *args], cwd=str(cwd), check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _identity(repo):
+    git(repo, "config", "user.email", "updater-test@example.invalid")
+    git(repo, "config", "user.name", "updater test")
+    git(repo, "config", "commit.gpgsign", "false")
+
+
+def make_box(tmp_path, extra_files=None):
+    """origin.git (GitHub) and blackbox/ (the box) at commit v1.
+
+    extra_files ({relpath: body}) are committed in v1; *.sh files are made
+    executable first, so git records them 100755.
+    """
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "-q", "--bare", str(origin))
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    seed = tmp_path / "seed"
+    git(tmp_path, "init", "-q", str(seed))
+    git(seed, "symbolic-ref", "HEAD", "refs/heads/main")
+    _identity(seed)
+    (seed / "app.py").write_text("VERSION = 1\n")
+    (seed / "notes.txt").write_text("operator notes\n")
+    for rel, body in (extra_files or {}).items():
+        p = seed / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+        if rel.endswith(".sh"):
+            p.chmod(0o755)
+    git(seed, "add", "-A")
+    git(seed, "commit", "-q", "-m", "v1")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "-q", "origin", "main")
+
+    root = tmp_path / "blackbox"
+    git(tmp_path, "clone", "-q", str(origin), str(root))
+    _identity(root)
+    (root / "Manifest").mkdir()
+    # Runtime files a real box always has. Untracked: they must never block.
+    (root / "Volumes").mkdir()
+    (root / "Volumes" / "SNAPSHOT_VOLUME.txt").write_text("ledger\n")
+    return SimpleNamespace(origin=origin, seed=seed, root=root,
+                           v1=git(root, "rev-parse", "HEAD"))
+
+
+def push_upstream(box, *, requirements=False):
+    """Publish v2 on origin: app.py changes and, when asked, requirements.txt.
+    Returns v2's SHA."""
+    (box.seed / "app.py").write_text("VERSION = 2\n")
+    if requirements:
+        (box.seed / "requirements.txt").write_text("aiohttp==3.14.5\n")
+    git(box.seed, "add", "-A")
+    git(box.seed, "commit", "-q", "-m", "v2")
+    git(box.seed, "push", "-q", "origin", "main")
+    return git(box.seed, "rev-parse", "HEAD")
+
+
+def head(root) -> str:
+    return git(root, "rev-parse", "HEAD")
+
+
+def stash_entries(root) -> list[str]:
+    out = git(root, "stash", "list", "--format=%gs")
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def tags(root) -> list[str]:
+    return [t for t in git(root, "tag", "--list").splitlines() if t.strip()]

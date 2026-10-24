@@ -27,6 +27,10 @@ PHASE state machine:
   restart_pending → SSE complete event flushed; detached restart scheduled
   complete     → terminal success state (kept in state.json for /update/status)
   failed       → terminal failure state with error + rollback info
+
+The in-app Rollback (POST /update/rollback) runs under the same lock:
+  rollback     → venvs restored from the pre-update freeze, code reset to the tag
+  rolled_back  → terminal: the rollback finished and the restart is scheduled
 """
 from __future__ import annotations
 
@@ -52,8 +56,12 @@ PHASE_RESET_HARD = "reset_hard"
 PHASE_RESTART_PENDING = "restart_pending"
 PHASE_COMPLETE = "complete"
 PHASE_FAILED = "failed"
+PHASE_ROLLBACK = "rollback"
+PHASE_ROLLED_BACK = "rolled_back"
 
-TERMINAL_PHASES = (PHASE_COMPLETE, PHASE_FAILED)
+# rolled_back is terminal (O16-08): before, a finished rollback read as an
+# interrupted update until the next one ran.
+TERMINAL_PHASES = (PHASE_COMPLETE, PHASE_FAILED, PHASE_ROLLED_BACK)
 
 
 class UpdateInProgressError(Exception):
@@ -89,14 +97,17 @@ class UpdateManager:
         self.manifest_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self.lock_file), os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                os.close(fd)
-                raise UpdateInProgressError(
-                    "Another update is already in progress. "
-                    "Check /update/state for status."
-                )
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Raised BEFORE the try/finally below: an attempt that lost the
+            # race must not release the holder's lock. The routes share one
+            # instance, so the holder's fd is this object's _lock_fd.
+            os.close(fd)
+            raise UpdateInProgressError(
+                "Another update is already in progress. "
+                "Check /update/state for status."
+            )
+        try:
             # Write our PID + start time so an SSH operator inspecting
             # the lock file can identify which process holds it.
             os.lseek(fd, 0, 0)
@@ -105,15 +116,16 @@ class UpdateManager:
             self._lock_fd = fd
             yield
         finally:
-            if self._lock_fd is not None:
-                try:
-                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
-                try:
-                    os.close(self._lock_fd)
-                except OSError:
-                    pass
+            # Release the fd THIS call locked, never whatever _lock_fd holds.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            if self._lock_fd == fd:
                 self._lock_fd = None
 
     def is_locked(self) -> bool:

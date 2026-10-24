@@ -145,6 +145,40 @@ def status_porcelain(root: Path) -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
+def tracked_changes(root: Path) -> list[str]:
+    """Paths of TRACKED files with local changes, staged or not; [] when a
+    `git reset --hard` would destroy nothing (audit O16-01).
+
+    Untracked files are left out on purpose: a box's runtime files (ledger,
+    uploads, Manifest/) are untracked or ignored, and a reset keeps them.
+    --no-optional-locks keeps this probe from taking .git/index.lock, so a
+    status poll can never make the runner's reset fail on a held lock.
+    """
+    out = _git(root, "--no-optional-locks", "status", "--porcelain=v1", "-z",
+               "--untracked-files=no").stdout
+    entries = out.split("\0")
+    paths: list[str] = []
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        if entry[0] in "RC":
+            i += 1  # -z puts a rename's or copy's source path in the next entry
+        paths.append(entry[3:])
+    return paths
+
+
+def tag_commit(root: Path, name: str) -> str:
+    """Full SHA of the commit tag `name` points at, or "" when there is no such
+    tag. Resolved through refs/tags/ so a name can never be read as an option
+    or as some other ref."""
+    out = _git(root, "rev-parse", "-q", "--verify", f"refs/tags/{name}^{{commit}}",
+               check=False)
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def tag(root: Path, name: str, ref: str = "HEAD") -> None:
     """Create a lightweight git tag pointing at `ref`. Used for rollback anchors."""
     _git(root, "tag", name, ref)
@@ -157,13 +191,13 @@ def delete_tag(root: Path, name: str) -> None:
 
 
 def reset_hard(root: Path, ref: str) -> None:
-    """git reset --hard <ref>. Atomic file swap.
+    """git reset --hard <ref>.
 
-    Caller MUST hold the update mutex AND have already validated that any
-    side-effect-causing tasks succeeded against a worktree-staging copy
-    (audit C2). uvicorn workers re-importing modules mid-reset will crash
-    on partially-written .py files — so this call must be followed
-    immediately by the detached restart with no intervening async/await.
+    Destroys every local change to a tracked file. Caller MUST hold the update
+    mutex and must have checked tracked_changes() first: refuse a dirty tree,
+    or stash it when the operator agreed to discard the changes (audit O16-01).
+    The runner resets, then installs the new dependencies, then restarts; the
+    old process keeps running the code it already imported until the restart.
     """
     _git(root, "reset", "--hard", ref)
 
@@ -188,6 +222,14 @@ def worktree_remove(root: Path, path: Path, force: bool = True) -> None:
 
 def stash_push(root: Path, message: str) -> bool:
     """git stash push with the given message. Returns True if anything
-    was actually stashed (False = clean tree, no stash entry created)."""
+    was actually stashed (False = clean tree, no stash entry created).
+    Tracked changes only: untracked files stay where they are."""
     out = _git(root, "stash", "push", "-m", message).stdout
     return "No local changes" not in out
+
+
+def latest_stash(root: Path) -> str:
+    """Full SHA of the newest stash entry, or "" when there is none. Reported
+    to the operator so a stashed change can be found again."""
+    out = _git(root, "rev-parse", "-q", "--verify", "refs/stash", check=False)
+    return out.stdout.strip() if out.returncode == 0 else ""
