@@ -256,6 +256,10 @@ test("classifyAttachment routes every type the picker offers", () => {
     assert.equal(classifyAttachment(f("a.docx",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document")), "document_url");
     assert.equal(classifyAttachment(f("a.bin", "application/octet-stream")), null);
+    // A browser with no MIME entry for an extension the picker accepts.
+    assert.equal(classifyAttachment(f("Report.DOCX", "")), "document_url");
+    assert.equal(classifyAttachment(f("notes.txt", "application/octet-stream")), "document_url");
+    assert.equal(classifyAttachment(f("a.exe", "")), null);
 });
 
 test("normalizeReplyFromAny keeps interior code fences and unwraps only a whole-fenced envelope", () => {

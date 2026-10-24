@@ -2305,6 +2305,12 @@ export async function send() {
     if (attachedFiles.length > 0) {
         let imageUrls = [];  // Track image URLs for tool usage
         for (const file of attachedFiles) {
+            const type = classifyAttachment(file);
+            if (!type) {
+                // Never dropped silently: the operator would think the model saw it.
+                toast(`Not sent to the model (unsupported type): ${file.name}`);
+                continue;
+            }
             let uploadResult;
             try {
                 uploadResult = await handleFileUpload(file);
@@ -2315,12 +2321,6 @@ export async function send() {
                 return;
             }
             if (!uploadResult || !uploadResult.url) continue;
-            const type = classifyAttachment(file);
-            if (!type) {
-                // Never dropped silently: the operator would think the model saw it.
-                toast(`Not sent to the model (unsupported type): ${file.name}`);
-                continue;
-            }
             userContent.push({ type, [type]: { url: uploadResult.url } });
             bubbleContent += `\n[Attached: ${file.name}]`;
 
@@ -2622,6 +2622,12 @@ export function classifyAttachment(file) {
     if (mime.startsWith("video/")) return "video_url";
     if (mime.startsWith("audio/")) return "audio_url";
     if (DOCUMENT_MIME_TYPES.has(mime)) return "document_url";
+    // The picker accepts .pdf/.txt/.doc/.docx by EXTENSION; a browser without
+    // a MIME entry for one reports "" or application/octet-stream.
+    if (!mime || mime === "application/octet-stream") {
+        const ext = String((file && file.name) || '').toLowerCase().split('.').pop();
+        if (DOCUMENT_EXTENSIONS.has(ext)) return "document_url";
+    }
     return null;
 }
 
@@ -2631,6 +2637,8 @@ const DOCUMENT_MIME_TYPES = new Set([
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ]);
+
+const DOCUMENT_EXTENSIONS = new Set(["pdf", "txt", "doc", "docx"]);
 
 /**
  * Persist a completed streamed turn: local history, then /chat/save (which
