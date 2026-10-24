@@ -89,8 +89,14 @@ from Orchestrator.routes.voice_translate import (
     build_translate_instructions,
 )
 from Orchestrator.routes.voice_ws_shared import (
+    cancel_task,
+    claim_session,
+    reset_for_connect,
+    retire_upstream,
     save_voice_transcript,
     send_gemini_tool_error,
+    spawn_reconnect,
+    superseded,
 )
 
 
@@ -1062,8 +1068,19 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
                         "data": text
                     })
 
-        # Handle turn/generation complete
-        if turn_complete or generation_complete:
+        # generationComplete and turnComplete are SEPARATE frames: the model
+        # finishes generating first, and turnComplete follows once playback of
+        # the reply is done (or after `interrupted`). Handling both as "turn
+        # over" flushed the transcript and sent response_complete on the early
+        # frame, so the outputTranscription that arrives in between became a
+        # second assistant entry and the client got a second response_complete
+        # (audit O09-live-voice-providers-07). generationComplete only means
+        # the model stopped producing audio.
+        if generation_complete:
+            session.is_speaking = False
+
+        # One assistant entry and one response_complete per turn.
+        if turn_complete:
             session.is_speaking = False
 
             # P1.8 — flush the native user transcript FIRST so the ledger
@@ -1512,13 +1529,30 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
         goaway = event.get("goAway") or {}
         delay = _goaway_delay_seconds(goaway)
         print(f"[GEMINI-LIVE] Server sending goAway (timeLeft={goaway.get('timeLeft')!r}) - graceful reconnect in {delay:.1f}s")
-        if not session.intentional_disconnect and not session.is_reconnecting:
+        generation = session.generation
+        if session.external_reconnect:
+            # The owner's own loop re-dials when the listener ends (phone
+            # bridge): close this socket before Google's deadline instead of
+            # dialing a second upstream for the same session.
+            upstream = session.gemini_ws
+
+            async def _goaway_close():
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if upstream is not None and session.gemini_ws is upstream:
+                    try:
+                        await upstream.close()
+                    except Exception:
+                        pass
+            spawn_reconnect(session, _goaway_close())
+        elif not session.intentional_disconnect and not session.is_reconnecting:
             async def _goaway_reconnect():
                 if delay > 0:
                     await asyncio.sleep(delay)
-                if not session.intentional_disconnect and not session.is_reconnecting:
+                if (not session.intentional_disconnect and not session.is_reconnecting
+                        and not superseded(session, generation)):
                     await gemini_reconnect(session)
-            asyncio.create_task(_goaway_reconnect())
+            spawn_reconnect(session, _goaway_reconnect())
         return
 
     # Check for error in response
@@ -1569,6 +1603,11 @@ async def gemini_reconnect(session: GeminiLiveSession):
         print(f"[GEMINI-LIVE] Already reconnecting, skipping")
         return
 
+    # The attach this reconnect works for. A client re-attach resets
+    # intentional_disconnect, so after every await the generation is what says
+    # whether the session is still ours to re-dial (O09-live-voice-providers-01).
+    generation = session.generation
+
     if session.reconnect_count >= session.max_reconnects:
         print(f"[GEMINI-LIVE] Max reconnects ({session.max_reconnects}) reached, giving up")
         session.status = "disconnected"
@@ -1609,8 +1648,12 @@ async def gemini_reconnect(session: GeminiLiveSession):
     await asyncio.sleep(delay)
 
     # P1.5-fix: the session may have been torn down during the backoff sleep.
-    # This coroutine runs DETACHED (bare create_task at every trigger site), so
-    # the caller-side intentional_disconnect guards don't cover it — re-check here.
+    # This coroutine runs DETACHED, so the caller-side intentional_disconnect
+    # guards don't cover it — re-check here, and bail as well when a newer
+    # attach took the session over (its reconnect state is not ours to reset).
+    if superseded(session, generation):
+        print(f"[GEMINI-LIVE] Session re-attached during backoff — abandoning reconnect")
+        return
     if session.intentional_disconnect:
         print(f"[GEMINI-LIVE] Session closed during backoff — abandoning reconnect")
         session.is_reconnecting = False
@@ -1630,14 +1673,15 @@ async def gemini_reconnect(session: GeminiLiveSession):
             # P1.5-fix: teardown may have run during the dial. If so, close the
             # socket we just opened and bail — do NOT respawn a listener onto a
             # session that's being torn down.
-            if session.intentional_disconnect:
+            if session.intentional_disconnect or superseded(session, generation):
                 if session.gemini_ws:
                     try:
                         await session.gemini_ws.close()
                     except Exception:
                         pass
                     session.gemini_ws = None
-                session.is_reconnecting = False
+                if not superseded(session, generation):
+                    session.is_reconnecting = False
                 return
 
             # Reconfigure — configure_gemini_session falls back to the session-
@@ -1665,14 +1709,15 @@ async def gemini_reconnect(session: GeminiLiveSession):
             # to "connected". This is the last guard; past it the session is live
             # again, so leaving a hole here would still resurrect a torn-down,
             # reaper-immune session (just via a narrower window).
-            if session.intentional_disconnect:
+            if session.intentional_disconnect or superseded(session, generation):
                 if session.gemini_ws:
                     try:
                         await session.gemini_ws.close()
                     except Exception:
                         pass
                     session.gemini_ws = None
-                session.is_reconnecting = False
+                if not superseded(session, generation):
+                    session.is_reconnecting = False
                 return
 
             # CRITICAL (recon finding #1): respawn the listener. The previous
@@ -1684,6 +1729,12 @@ async def gemini_reconnect(session: GeminiLiveSession):
             if session.listener_task and not session.listener_task.done():
                 session.listener_task.cancel()
             session.listener_task = asyncio.create_task(gemini_listener(session))
+            # The keepalive loop ends when the socket it fed closes (and a
+            # failed keepalive send is what started some reconnects): a
+            # reconnected session needs a live one again. ConnectionClosed from
+            # the listener and the keepalive is the only liveness signal now.
+            if session.keepalive_task is None or session.keepalive_task.done():
+                session.keepalive_task = asyncio.create_task(gemini_keepalive_loop(session))
 
             # NOTE: reconnect_count is NOT reset here — see setupComplete in
             # handle_gemini_message (consecutive-failure semantics).
@@ -1702,24 +1753,29 @@ async def gemini_reconnect(session: GeminiLiveSession):
             print(f"[GEMINI-LIVE] Reconnect attempt {attempt} failed")
             session.is_reconnecting = False
             # Try again
-            asyncio.create_task(gemini_reconnect(session))
+            spawn_reconnect(session, gemini_reconnect(session))
 
     except Exception as e:
         print(f"[GEMINI-LIVE] Reconnect error: {e}")
         session.is_reconnecting = False
-        asyncio.create_task(gemini_reconnect(session))
+        spawn_reconnect(session, gemini_reconnect(session))
 
 
 async def gemini_keepalive_loop(session: GeminiLiveSession):
     """
     Send periodic keepalive silence to prevent Gemini idle timeout.
-    Also monitors for stale connections (no AI message for 60s).
+
+    Liveness is the transport's job, not this loop's: connect_to_gemini runs
+    websockets' ping/pong (ping_interval=20, ping_timeout=30), so a dead socket
+    surfaces as ConnectionClosed in gemini_listener within ~50 s, and a failed
+    send here reconnects too. A silent upstream is not a dead one: Gemini sends
+    nothing while the user is quiet, and the old 60 s no-message timer forced a
+    full reconnect (context rebuild, dropped audio) on ordinary pauses, two in
+    one 3-minute session (audit O09-live-voice-providers-02).
     """
     keepalive_interval = 15  # seconds
-    stale_timeout = 60  # seconds without AI message = stale (standardized across all backends)
 
-    session.last_ai_message_time = time.time()
-    print(f"[GEMINI-LIVE] Keepalive loop started (interval={keepalive_interval}s, stale={stale_timeout}s)")
+    print(f"[GEMINI-LIVE] Keepalive loop started (interval={keepalive_interval}s)")
 
     try:
         while True:
@@ -1728,15 +1784,6 @@ async def gemini_keepalive_loop(session: GeminiLiveSession):
             # Check if session is still active
             if not session.gemini_ws or session.intentional_disconnect:
                 break
-
-            # Check for stale connection
-            time_since_message = time.time() - session.last_ai_message_time
-            if time_since_message > stale_timeout:
-                print(f"[GEMINI-LIVE] STALE CONNECTION: No AI message for {time_since_message:.0f}s")
-                if not session.is_reconnecting and not session.intentional_disconnect:
-                    session.last_ai_message_time = time.time()  # Reset to prevent rapid retrigger
-                    asyncio.create_task(gemini_reconnect(session))
-                continue
 
             # Send keepalive: 20ms of silence as PCM16@16kHz
             try:
@@ -1754,8 +1801,9 @@ async def gemini_keepalive_loop(session: GeminiLiveSession):
                     }))
             except websockets.exceptions.ConnectionClosed:
                 print(f"[GEMINI-LIVE] Keepalive failed - connection closed")
-                if not session.is_reconnecting and not session.intentional_disconnect:
-                    asyncio.create_task(gemini_reconnect(session))
+                if (not session.is_reconnecting and not session.intentional_disconnect
+                        and not session.external_reconnect):
+                    spawn_reconnect(session, gemini_reconnect(session))
                 break
             except Exception as e:
                 print(f"[GEMINI-LIVE] Keepalive error: {e}")
@@ -1804,8 +1852,13 @@ async def gemini_listener(session: GeminiLiveSession):
                 "code": close_code,
                 "reason": close_reason,
             })
-            print(f"[GEMINI-LIVE] Unexpected disconnect - triggering reconnect")
-            asyncio.create_task(gemini_reconnect(session))
+            if session.external_reconnect:
+                # The owner's loop (phone bridge) re-dials when this listener
+                # returns; a second dialer here raced it for session.gemini_ws.
+                print(f"[GEMINI-LIVE] Unexpected disconnect - reconnect left to the session owner")
+            else:
+                print(f"[GEMINI-LIVE] Unexpected disconnect - triggering reconnect")
+                spawn_reconnect(session, gemini_reconnect(session))
         elif session.intentional_disconnect:
             session.status = "disconnected"
             await _safe_ws_send(session.portal_ws, {
@@ -1902,6 +1955,9 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
 
     session.portal_ws = websocket
     session.last_activity = now_utc_iso()
+    # This handler's attach: a later re-attach of the same session id bumps it,
+    # and from then on the session is that handler's (see _end_portal_session).
+    generation = claim_session(session)
 
     keepalive_task = None
 
@@ -1989,6 +2045,15 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                     "data": "Connecting to Gemini Live..."
                 })
 
+                # A re-attach (or a second connect on this socket) starts clean:
+                # retire whatever the previous connect left live, then drop the
+                # previous handler's teardown flags. Without the reset the
+                # keepalive died on its first tick, every upstream close read as
+                # deliberate, goAway was ignored and the reconnect budget carried
+                # over (O09-live-voice-providers-01).
+                await retire_upstream(session, "gemini_ws")
+                reset_for_connect(session)
+
                 # Connect to Gemini
                 if await connect_to_gemini(session):
                     # Configure session with tools, context, voice + model/VAD/thinking
@@ -2038,6 +2103,7 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                     # live task at teardown.
                     session.listener_task = asyncio.create_task(gemini_listener(session))
                     keepalive_task = asyncio.create_task(gemini_keepalive_loop(session))
+                    session.keepalive_task = keepalive_task
 
                     await _safe_ws_send(websocket, {
                         "type": "connected",
@@ -2058,7 +2124,8 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
 
             elif msg_type == "disconnect":
                 # Graceful disconnect
-                session.intentional_disconnect = True
+                if not superseded(session, generation):
+                    session.intentional_disconnect = True
                 break
 
             elif msg_type == "ping":
@@ -2074,7 +2141,8 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         print(f"[GEMINI-LIVE] Portal WebSocket disconnected: {session_id}")
-        session.portal_ws = None  # Clear portal ws but keep model connection for grace period
+        if session.portal_ws is websocket:
+            session.portal_ws = None  # Clear portal ws but keep model connection for grace period
 
     except Exception as e:
         print(f"[GEMINI-LIVE] WebSocket error: {e}")
@@ -2084,46 +2152,45 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
         })
 
     finally:
-        # P1.5-fix: mark the session terminal FIRST so any in-flight, detached
-        # gemini_reconnect task (spawned via bare create_task, not tracked here)
-        # bails after its backoff sleep instead of re-dialing and flipping
-        # status back to "connected" — which would resurrect a clientless
-        # session the reaper can never evict (it only reaps status=="disconnected").
-        session.intentional_disconnect = True
+        await _end_portal_session(session, websocket, generation, keepalive_task)
 
-        # Cleanup — cancel whichever listener task is CURRENT (reconnects
-        # respawn it; see session.listener_task).
-        if session.listener_task:
-            session.listener_task.cancel()
-            try:
-                await session.listener_task
-            except asyncio.CancelledError:
-                pass
-            session.listener_task = None
 
-        if keepalive_task:
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except asyncio.CancelledError:
-                pass
+async def _end_portal_session(session: GeminiLiveSession, websocket, generation: int,
+                              keepalive_task) -> None:
+    """Teardown when this handler's client WS ends.
 
-        if session.gemini_ws:
-            try:
-                await session.gemini_ws.close()
-            except:
-                pass
-            session.gemini_ws = None
+    Only the CURRENT owner tears the session down. A handler superseded by a
+    re-attach of the same session id stops its own keepalive and leaves the
+    upstream, listener and conversation to the newer attach, which saves at its
+    own teardown; before the generation stamp, an old handler whose finally
+    ran after the re-attach closed the new upstream (O09-live-voice-providers-01).
+    """
+    if superseded(session, generation):
+        await cancel_task(keepalive_task)
+        print(f"[GEMINI-LIVE] Superseded handler for {session.session_id} closed; "
+              f"the session stays with the newer attach")
+        return
 
-        # Save session to BlackBox before clearing (backend handles this now)
-        if session.conversation:
-            await save_session_to_blackbox(session)
+    # P1.5-fix: mark the session terminal FIRST so anything still running for
+    # it bails instead of re-dialing and flipping status back to "connected",
+    # which would resurrect a clientless session the reaper can never evict
+    # (it only reaps status=="disconnected").
+    session.intentional_disconnect = True
 
-        session.portal_ws = None
-        session.status = "disconnected"
-        session.last_activity = now_utc_iso()  # start reaper grace clock (live_session_reaper)
-        release_payload(session)               # free audio/transcript buffers; conversation already saved
-        print(f"[GEMINI-LIVE] Session {session_id} cleaned up")
+    # Cleanup: the pending reconnect, the keepalive, whichever listener task is
+    # CURRENT (reconnects respawn it; see session.listener_task), the upstream.
+    await retire_upstream(session, "gemini_ws")
+    await cancel_task(keepalive_task)
+
+    # Save session to BlackBox before clearing (backend handles this now)
+    if session.conversation:
+        await save_session_to_blackbox(session)
+
+    session.portal_ws = None
+    session.status = "disconnected"
+    session.last_activity = now_utc_iso()  # start reaper grace clock (live_session_reaper)
+    release_payload(session)               # free audio/transcript buffers; conversation already saved
+    print(f"[GEMINI-LIVE] Session {session.session_id} cleaned up")
 
 # =============================================================================
 # HTTP Endpoints

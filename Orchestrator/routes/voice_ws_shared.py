@@ -16,6 +16,7 @@ Keep this module LIGHT (json/aiohttp/starlette only): it is imported by all
 three voice routes and, through them, the phone bridge chain.
 """
 
+import asyncio
 import json
 import os
 
@@ -23,6 +24,99 @@ import aiohttp
 from typing import Dict, Optional, Set
 
 from starlette.websockets import WebSocketState
+
+
+# =============================================================================
+# Session ownership across client re-attaches (audit rank 50)
+# =============================================================================
+# All three clients re-attach to the SAME session id after a network blip
+# (Portal reconnectToExistingSession, Android VoiceClient's resume loop), within
+# the reaper's grace window, and the route reuses the session object. Before
+# this, the connect branch inherited the previous handler's teardown flags
+# (intentional_disconnect=True: keepalive dead on tick one, every upstream close
+# treated as deliberate, goAway ignored; a used-up reconnect budget), and an
+# older handler whose finally ran AFTER the re-attach closed the newer handler's
+# upstream and listener (O09-live-voice-providers-01).
+
+def claim_session(session) -> int:
+    """Stamp a new attach generation on `session` and return it.
+
+    Called by each /ws/<provider> handler right after it takes the session.
+    A handler, or a detached reconnect it spawned, whose generation is no
+    longer current has been superseded by a newer attach of the same session
+    id and must leave the upstream, listener, keepalive and conversation to
+    the newer owner.
+    """
+    session.generation = getattr(session, "generation", 0) + 1
+    return session.generation
+
+
+def superseded(session, generation: int) -> bool:
+    """True when a newer attach owns `session` than the one stamped `generation`."""
+    return getattr(session, "generation", 0) != generation
+
+
+async def cancel_task(task) -> None:
+    """Cancel `task` if it is still running and wait for it to finish. Never raises.
+
+    Teardown paths call this and must run to the end (the transcript save
+    comes after), so a cancellation of the CALLER is swallowed too, as the
+    routes' finally blocks always did. A task cannot await itself: called from
+    inside `task` this only requests the cancellation.
+    """
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    if task is asyncio.current_task():
+        return
+    try:
+        await task
+    except BaseException:  # noqa: BLE001 — CancelledError or the task's own error
+        pass
+
+
+def spawn_reconnect(session, coro) -> "asyncio.Task":
+    """Run a reconnect coroutine detached, remembered as the session's CURRENT
+    reconnect so a re-attach or a teardown cancels it outright instead of
+    trusting it to notice, after its backoff sleep, that the session moved on."""
+    task = asyncio.create_task(coro)
+    session.reconnect_task = task
+    return task
+
+
+async def retire_upstream(session, ws_attr: str) -> None:
+    """Stop everything a previous connect left live on `session`.
+
+    Cancels the pending reconnect, the keepalive loop and the upstream
+    listener, then closes the upstream socket named by `ws_attr`
+    (``gemini_ws`` / ``grok_ws`` / ``openai_ws``). Listener before socket:
+    left running it would observe the close and start a reconnect. A no-op on
+    a fresh session.
+    """
+    reconnect = getattr(session, "reconnect_task", None)
+    if reconnect is not asyncio.current_task():
+        await cancel_task(reconnect)
+    session.reconnect_task = None
+    await cancel_task(getattr(session, "keepalive_task", None))
+    session.keepalive_task = None
+    await cancel_task(getattr(session, "listener_task", None))
+    session.listener_task = None
+    ws = getattr(session, ws_attr, None)
+    if ws is not None:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        setattr(session, ws_attr, None)
+
+
+def reset_for_connect(session) -> None:
+    """Fresh connection state for a session object that may be a re-attach."""
+    session.intentional_disconnect = False
+    session.is_reconnecting = False
+    session.reconnect_count = 0
+    session.status = "connecting"
 
 
 def voice_debug_enabled() -> bool:

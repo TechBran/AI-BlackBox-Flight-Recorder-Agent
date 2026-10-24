@@ -379,22 +379,22 @@ class PhoneAIBridge:
         This loop:
         1. Sends silent audio to prevent AI backend timeout
         2. Tracks consecutive send failures
-        3. Monitors last message received time (stale connection detection)
-        4. Triggers reconnection if connection appears dead
-        """
-        import time
+        3. Triggers reconnection if the sends keep failing
 
+        A caller who listens, thinks or is on hold is NOT a dead connection:
+        OpenAI and Grok send nothing while the line is quiet, and the old 60 s
+        no-message timer reconnected them, rebuilding the session WITHOUT the
+        call's conversation (audit O10-telephony-twilio-08). Liveness is the
+        socket's own ping/pong (ping_interval=20, ping_timeout=30 in the route
+        connect functions): a dead upstream surfaces as ConnectionClosed in
+        the listener, which reconnects.
+        """
         keepalive_interval = 10  # seconds
         backend = self.phone_session.ai_backend
         consecutive_failures = 0
         max_consecutive_failures = 3
-        stale_timeout = 60  # seconds without receiving a message = stale
 
-        # Initialize last message time tracking
-        if not hasattr(self, '_last_ai_message_time'):
-            self._last_ai_message_time = time.time()
-
-        print(f"[PHONE-BRIDGE] Health monitor started (keepalive={keepalive_interval}s, stale={stale_timeout}s)")
+        print(f"[PHONE-BRIDGE] Health monitor started (keepalive={keepalive_interval}s)")
 
         try:
             while self._running:
@@ -402,28 +402,6 @@ class PhoneAIBridge:
 
                 if not self._running:
                     break
-
-                # Check for stale connection (no messages received recently)
-                time_since_message = time.time() - self._last_ai_message_time
-                if time_since_message > stale_timeout:
-                    print(f"[PHONE-BRIDGE] ⚠️ STALE CONNECTION: No AI message for {time_since_message:.0f}s")
-                    print(f"[PHONE-BRIDGE] Triggering reconnection due to stale connection...")
-
-                    # Trigger reconnection based on backend
-                    if backend == AIBackend.OPENAI_REALTIME:
-                        if not getattr(self, '_openai_reconnecting', False):
-                            asyncio.create_task(self._reconnect_openai())
-                    elif backend == AIBackend.GEMINI_LIVE:
-                        # Gemini uses the listener_with_reconnect which handles this
-                        pass
-                    elif backend == AIBackend.GROK_LIVE:
-                        if not getattr(self, '_grok_reconnecting', False):
-                            asyncio.create_task(self._reconnect_grok())
-
-                    # Reset timer after triggering reconnect
-                    self._last_ai_message_time = time.time()
-                    consecutive_failures = 0
-                    continue
 
                 # Send keepalive
                 try:
@@ -1270,6 +1248,10 @@ class PhoneAIBridge:
             status="connecting",
         )
         GEMINI_LIVE_SESSIONS[session_id] = self._ai_session
+        # _gemini_listener_with_reconnect re-dials this session itself: the
+        # route's listener and goAway handler must not dial a second upstream
+        # for it (two dialers raced for session.gemini_ws on every drop).
+        self._ai_session.external_reconnect = True
 
         # Track reconnection state
         self._gemini_reconnecting = False

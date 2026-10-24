@@ -77,8 +77,14 @@ from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_par
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 from Orchestrator.routes.voice_ws_shared import (
+    cancel_task,
+    claim_session,
+    reset_for_connect,
+    retire_upstream,
     save_voice_transcript,
     send_openai_style_tool_error,
+    spawn_reconnect,
+    superseded,
     voice_debug_enabled,
 )
 
@@ -1272,6 +1278,11 @@ async def grok_reconnect(session: 'GrokLiveSession'):
         print(f"[GROK-LIVE] Already reconnecting, skipping")
         return
 
+    # The attach this reconnect works for. A client re-attach resets
+    # intentional_disconnect, so after every await the generation is what says
+    # whether the session is still ours to re-dial (O09-live-voice-providers-01).
+    generation = session.generation
+
     if session.reconnect_count >= session.max_reconnects:
         print(f"[GROK-LIVE] Max reconnects ({session.max_reconnects}) reached, giving up")
         session.status = "disconnected"
@@ -1308,11 +1319,15 @@ async def grok_reconnect(session: 'GrokLiveSession'):
 
     await asyncio.sleep(delay)
 
-    # P1b (terminal guard): this coroutine runs DETACHED (bare create_task at
-    # every trigger site) and just slept, so the WS endpoint may have torn the
-    # session down during the backoff. Re-check here — otherwise a Portal drop
-    # mid-reconnect would re-dial + respawn a listener + flip status back to
-    # "connected", resurrecting a clientless session the reaper can never evict.
+    # P1b (terminal guard): this coroutine runs DETACHED and just slept, so the
+    # WS endpoint may have torn the session down during the backoff. Re-check
+    # here — otherwise a Portal drop mid-reconnect would re-dial + respawn a
+    # listener + flip status back to "connected", resurrecting a clientless
+    # session the reaper can never evict. A newer attach that took the session
+    # over during the backoff owns its reconnect state: leave it alone.
+    if superseded(session, generation):
+        print(f"[GROK-LIVE] Session re-attached during backoff — abandoning reconnect")
+        return
     if session.intentional_disconnect:
         print(f"[GROK-LIVE] Session closed during backoff — abandoning reconnect")
         session.is_reconnecting = False
@@ -1341,14 +1356,15 @@ async def grok_reconnect(session: 'GrokLiveSession'):
             # P1b (terminal guard): teardown may have run during the dial. If so,
             # close the socket we just opened and bail — do NOT respawn a
             # listener onto a session that is being torn down.
-            if session.intentional_disconnect:
+            if session.intentional_disconnect or superseded(session, generation):
                 if session.grok_ws:
                     try:
                         await session.grok_ws.close()
                     except Exception:
                         pass
                     session.grok_ws = None
-                session.is_reconnecting = False
+                if not superseded(session, generation):
+                    session.is_reconnecting = False
                 return
 
             if resume_id:
@@ -1370,14 +1386,15 @@ async def grok_reconnect(session: 'GrokLiveSession'):
             # during them — re-check before we respawn a listener and flip status
             # to "connected". This is the last guard; past it the session is live
             # again, so a hole here would still resurrect a reaper-immune session.
-            if session.intentional_disconnect:
+            if session.intentional_disconnect or superseded(session, generation):
                 if session.grok_ws:
                     try:
                         await session.grok_ws.close()
                     except Exception:
                         pass
                     session.grok_ws = None
-                session.is_reconnecting = False
+                if not superseded(session, generation):
+                    session.is_reconnecting = False
                 return
 
             # P1b: respawn the listener on the NEW upstream ws. Without this the
@@ -1387,6 +1404,12 @@ async def grok_reconnect(session: 'GrokLiveSession'):
             # "reconnected" (parity with the OpenAI/Gemini fixes; the phone
             # bridge always had its own respawn loop).
             session.listener_task = asyncio.create_task(grok_listener(session))
+            # The keepalive loop ends when the socket it fed closes (and a
+            # failed keepalive send is what started some reconnects): a
+            # reconnected session needs a live one again. ConnectionClosed from
+            # the listener and the keepalive is the only liveness signal now.
+            if session.keepalive_task is None or session.keepalive_task.done():
+                session.keepalive_task = asyncio.create_task(grok_keepalive_loop(session))
 
             # Reset state. NOTE: reconnect_count is reset in grok_listener on the
             # first real server frame (proven-healthy), NOT here on dial —
@@ -1407,24 +1430,28 @@ async def grok_reconnect(session: 'GrokLiveSession'):
         else:
             print(f"[GROK-LIVE] Reconnect attempt {attempt} failed")
             session.is_reconnecting = False
-            asyncio.create_task(grok_reconnect(session))
+            spawn_reconnect(session, grok_reconnect(session))
 
     except Exception as e:
         print(f"[GROK-LIVE] Reconnect error: {e}")
         session.is_reconnecting = False
-        asyncio.create_task(grok_reconnect(session))
+        spawn_reconnect(session, grok_reconnect(session))
 
 
 async def grok_keepalive_loop(session: 'GrokLiveSession'):
     """
     Send periodic keepalive silence to prevent Grok idle timeout.
-    Also monitors for stale connections (no AI message for 60s).
+
+    Liveness is the transport's job, not this loop's: connect_to_grok runs
+    websockets' ping/pong (ping_interval=20, ping_timeout=30), so a dead socket
+    surfaces as ConnectionClosed in grok_listener within ~50 s, and a failed
+    send here reconnects too. Grok sends nothing while the user is quiet, so
+    the old 60 s no-message timer reconnected on ordinary pauses (audit
+    O09-live-voice-providers-02).
     """
     keepalive_interval = 15  # seconds
-    stale_timeout = 60  # seconds without AI message = stale (standardized across all backends)
 
-    session.last_ai_message_time = time.time()
-    print(f"[GROK-LIVE] Keepalive loop started (interval={keepalive_interval}s, stale={stale_timeout}s)")
+    print(f"[GROK-LIVE] Keepalive loop started (interval={keepalive_interval}s)")
 
     try:
         while True:
@@ -1433,21 +1460,12 @@ async def grok_keepalive_loop(session: 'GrokLiveSession'):
             if not session.grok_ws or session.intentional_disconnect:
                 break
 
-            # Check for stale connection
-            time_since_message = time.time() - session.last_ai_message_time
-            if time_since_message > stale_timeout:
-                print(f"[GROK-LIVE] STALE CONNECTION: No AI message for {time_since_message:.0f}s")
-                if not session.is_reconnecting and not session.intentional_disconnect:
-                    session.last_ai_message_time = time.time()
-                    asyncio.create_task(grok_reconnect(session))
-                continue
-
             # Send keepalive: 20ms of PCM16 silence at the declared input
             # rate (16kHz post-P2.15 — byte count below matches).
             # SKIPPED for SIP-attached calls (session.call_id set): the call's
             # audio flows xAI-side and injected buffer silence could corrupt it
-            # (uncertain per xAI docs — live-validated in P5.8). Stale detection
-            # above still applies.
+            # (uncertain per xAI docs — live-validated in P5.8). The socket's
+            # ping/pong still detects a dead connection.
             try:
                 if session.grok_ws and not session.call_id:
                     # 20ms at 16kHz (input rate) = 320 samples, PCM16 = 640 bytes of zeros
@@ -1460,7 +1478,7 @@ async def grok_keepalive_loop(session: 'GrokLiveSession'):
             except websockets.exceptions.ConnectionClosed:
                 print(f"[GROK-LIVE] Keepalive failed - connection closed")
                 if not session.is_reconnecting and not session.intentional_disconnect:
-                    asyncio.create_task(grok_reconnect(session))
+                    spawn_reconnect(session, grok_reconnect(session))
                 break
             except Exception as e:
                 print(f"[GROK-LIVE] Keepalive error: {e}")
@@ -1495,7 +1513,7 @@ async def grok_listener(session: 'GrokLiveSession'):
         print(f"[GROK-LIVE] Grok connection closed: {e}")
         if not session.intentional_disconnect and not session.is_reconnecting:
             print(f"[GROK-LIVE] Unexpected disconnect - triggering reconnect")
-            asyncio.create_task(grok_reconnect(session))
+            spawn_reconnect(session, grok_reconnect(session))
         else:
             session.status = "disconnected"
             await _safe_ws_send(session.portal_ws, {
@@ -1560,6 +1578,9 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
 
     session.portal_ws = websocket
     session.last_activity = now_utc_iso()
+    # This handler's attach: a later re-attach of the same session id bumps it,
+    # and from then on the session is that handler's (see _end_portal_session).
+    generation = claim_session(session)
 
     grok_task = None
     keepalive_task = None
@@ -1625,6 +1646,12 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                     "data": "Connecting to Grok..."
                 })
 
+                # A re-attach (or a second connect on this socket) starts clean:
+                # retire whatever the previous connect left live, then drop the
+                # previous handler's teardown flags (O09-live-voice-providers-01).
+                await retire_upstream(session, "grok_ws")
+                reset_for_connect(session)
+
                 # Connect to Grok
                 if await connect_to_grok(session, model=model):
                     # Configure session with tools, context, and voice
@@ -1650,6 +1677,7 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                     grok_task = asyncio.create_task(grok_listener(session))
                     session.listener_task = grok_task
                     keepalive_task = asyncio.create_task(grok_keepalive_loop(session))
+                    session.keepalive_task = keepalive_task
 
                     # If greeting provided (outbound call), inject it so the AI speaks first
                     if greeting:
@@ -1685,7 +1713,8 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
 
             elif msg_type == "disconnect":
                 # Graceful disconnect
-                session.intentional_disconnect = True
+                if not superseded(session, generation):
+                    session.intentional_disconnect = True
                 break
 
             elif msg_type == "ping":
@@ -1701,7 +1730,8 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         print(f"[GROK-LIVE] Portal WebSocket disconnected: {session_id}")
-        session.portal_ws = None
+        if session.portal_ws is websocket:
+            session.portal_ws = None
 
     except Exception as e:
         print(f"[GROK-LIVE] WebSocket error: {e}")
@@ -1711,49 +1741,45 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
         })
 
     finally:
-        # P1b (terminal guard): mark the session terminal FIRST — before the
-        # save await and before cancelling tasks — so any in-flight, detached
-        # grok_reconnect (bare create_task, not tracked here) bails after its
-        # backoff sleep instead of re-dialing and flipping status back to
-        # "connected", which would resurrect a clientless session the reaper can
-        # never evict (it only reaps status=="disconnected").
-        session.intentional_disconnect = True
+        await _end_portal_session(session, websocket, generation, keepalive_task)
 
-        # Save session to BlackBox before cleanup
-        if session.conversation:
-            await save_grok_session_to_blackbox(session)
 
-        # Cleanup — cancel the CURRENT listener; after a reconnect this is a
-        # different task than the locally-captured grok_task, so cancelling only
-        # the local would leak the live listener.
-        listener = session.listener_task or grok_task
-        if listener:
-            listener.cancel()
-            try:
-                await listener
-            except asyncio.CancelledError:
-                pass
-        session.listener_task = None
+async def _end_portal_session(session: 'GrokLiveSession', websocket, generation: int,
+                              keepalive_task) -> None:
+    """Teardown when this handler's client WS ends.
 
-        if keepalive_task:
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except asyncio.CancelledError:
-                pass
+    Only the CURRENT owner tears the session down. A handler superseded by a
+    re-attach of the same session id stops its own keepalive and leaves the
+    upstream, listener and conversation to the newer attach, which saves at its
+    own teardown (O09-live-voice-providers-01).
+    """
+    if superseded(session, generation):
+        await cancel_task(keepalive_task)
+        print(f"[GROK-LIVE] Superseded handler for {session.session_id} closed; "
+              f"the session stays with the newer attach")
+        return
 
-        if session.grok_ws:
-            try:
-                await session.grok_ws.close()
-            except:
-                pass
-            session.grok_ws = None
+    # P1b (terminal guard): mark the session terminal FIRST so anything still
+    # running for it bails instead of re-dialing and flipping status back to
+    # "connected", which would resurrect a clientless session the reaper can
+    # never evict (it only reaps status=="disconnected").
+    session.intentional_disconnect = True
 
-        session.portal_ws = None
-        session.status = "disconnected"
-        session.last_activity = now_utc_iso()  # start reaper grace clock (live_session_reaper)
-        release_payload(session)               # free audio/transcript buffers; conversation already saved
-        print(f"[GROK-LIVE] Session {session_id} cleaned up")
+    # Cleanup: the pending reconnect, the keepalive, the CURRENT listener
+    # (after a reconnect a different task than the one this handler spawned)
+    # and the upstream. Stopped before the save, so no turn lands after it.
+    await retire_upstream(session, "grok_ws")
+    await cancel_task(keepalive_task)
+
+    # Save session to BlackBox
+    if session.conversation:
+        await save_grok_session_to_blackbox(session)
+
+    session.portal_ws = None
+    session.status = "disconnected"
+    session.last_activity = now_utc_iso()  # start reaper grace clock (live_session_reaper)
+    release_payload(session)               # free audio/transcript buffers; conversation already saved
+    print(f"[GROK-LIVE] Session {session.session_id} cleaned up")
 
 # =============================================================================
 # HTTP Endpoints

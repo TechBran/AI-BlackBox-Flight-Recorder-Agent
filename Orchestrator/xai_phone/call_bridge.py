@@ -23,6 +23,7 @@ from typing import Optional
 
 from Orchestrator.live_session_reaper import release_payload
 from Orchestrator.models import GROK_LIVE_SESSIONS, GrokLiveSession
+from Orchestrator.routes.voice_ws_shared import cancel_task, retire_upstream
 from Orchestrator.volume import now_utc_iso
 from Orchestrator.xai_phone import provisioning
 
@@ -102,6 +103,8 @@ async def attach_call(call_id: str, payload: Optional[dict] = None) -> Optional[
 
     listener_task = asyncio.create_task(grok_listener(session))
     keepalive_task = asyncio.create_task(grok_keepalive_loop(session))
+    session.listener_task = listener_task
+    session.keepalive_task = keepalive_task
     asyncio.create_task(
         _finalize_call(session, listener_task, keepalive_task, save_grok_session_to_blackbox)
     )
@@ -122,23 +125,16 @@ async def _finalize_call(session, listener_task, keepalive_task, save_fn) -> Non
         pass
     finally:
         # A hung-up call_id is dead — suppress reconnect churn from the
-        # listener's close handler / keepalive stale detection.
+        # listener's close handler, and stop what is still running for the
+        # call: the reconnect that close handler spawned, the keepalive (a
+        # reconnect may have respawned it), any respawned listener, the socket.
         session.intentional_disconnect = True
-        keepalive_task.cancel()
-        try:
-            await keepalive_task
-        except asyncio.CancelledError:
-            pass
+        await cancel_task(keepalive_task)
+        await retire_upstream(session, "grok_ws")
         try:
             await save_fn(session)
         except Exception as e:
             logger.error("[XAI-PHONE] transcript save failed for %s: %s", session.session_id, e)
-        if session.grok_ws:
-            try:
-                await session.grok_ws.close()
-            except Exception:
-                pass
-            session.grok_ws = None
         session.status = "disconnected"
         session.last_activity = now_utc_iso()  # start reaper grace clock
         release_payload(session)

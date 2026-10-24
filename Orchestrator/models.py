@@ -93,7 +93,7 @@ class RealtimeSession:
     transcript_buffer: str = ""          # Buffer for current response transcript
     conversation: List[Dict] = field(default_factory=list)  # Full conversation log for BlackBox snapshot
     # Reconnection state
-    last_ai_message_time: float = 0.0          # For stale connection detection
+    last_ai_message_time: float = 0.0          # Last upstream frame seen (diagnostic; liveness is ping/pong)
     reconnect_count: int = 0                   # Track reconnection attempts
     max_reconnects: int = 5                    # Max before giving up
     is_reconnecting: bool = False              # Guard against concurrent reconnects
@@ -104,6 +104,19 @@ class RealtimeSession:
     # type instead of degrading into a full persona/tool session.
     mode: str = ""                       # "" = normal, "translate" = translation mode
     target_language: str = ""            # BCP-47 target when mode == "translate"
+    # Live-session ownership + background work (audit rank 50/51). generation is
+    # stamped by voice_ws_shared.claim_session on every client attach: a handler
+    # (or a detached reconnect) whose generation is no longer current has been
+    # superseded by a re-attach of the same session id and must leave the
+    # session to the newer owner. keepalive_task / reconnect_task are the
+    # CURRENT keepalive loop and detached reconnect (a re-attach or a teardown
+    # cancels them); tool_tasks are the in-flight voice tool calls, run off the
+    # listener (voice_ws_shared.dispatch_voice_tool) and cancelled at teardown.
+    generation: int = 0
+    keepalive_task: Optional[Any] = None
+    reconnect_task: Optional[Any] = None
+    tool_tasks: set = field(default_factory=set)
+    tool_lock: Optional[Any] = None
 
 # Global storage for Realtime sessions
 REALTIME_SESSIONS: Dict[str, RealtimeSession] = {}
@@ -136,7 +149,7 @@ class GeminiLiveSession:
     conversation: List[Dict] = field(default_factory=list)  # Full conversation log for BlackBox snapshot
     # Reconnection state
     resumption_handle: Optional[str] = None    # Gemini session resumption token
-    last_ai_message_time: float = 0.0          # For stale connection detection
+    last_ai_message_time: float = 0.0          # Last upstream frame seen (diagnostic; liveness is ping/pong)
     reconnect_count: int = 0                   # Track reconnection attempts
     max_reconnects: int = 5                    # Max before giving up
     is_reconnecting: bool = False              # Guard against concurrent reconnects
@@ -162,6 +175,23 @@ class GeminiLiveSession:
     # type instead of degrading into a full persona/tool session.
     mode: str = ""                       # "" = normal, "translate" = translation mode
     target_language: str = ""            # BCP-47 target when mode == "translate"
+    # Live-session ownership + background work (audit rank 50/51). generation is
+    # stamped by voice_ws_shared.claim_session on every client attach: a handler
+    # (or a detached reconnect) whose generation is no longer current has been
+    # superseded by a re-attach of the same session id and must leave the
+    # session to the newer owner. keepalive_task / reconnect_task are the
+    # CURRENT keepalive loop and detached reconnect (a re-attach or a teardown
+    # cancels them); tool_tasks are the in-flight voice tool calls, run off the
+    # listener (voice_ws_shared.dispatch_voice_tool) and cancelled at teardown.
+    generation: int = 0
+    keepalive_task: Optional[Any] = None
+    reconnect_task: Optional[Any] = None
+    tool_tasks: set = field(default_factory=set)
+    tool_lock: Optional[Any] = None
+    # True when the session's owner runs its own reconnect loop around
+    # gemini_listener (phone/bridge.py): the route then never dials a second
+    # upstream for it on a close or a goAway.
+    external_reconnect: bool = False
 
 # Global storage for Gemini Live sessions
 GEMINI_LIVE_SESSIONS: Dict[str, GeminiLiveSession] = {}
@@ -190,7 +220,7 @@ class GrokLiveSession:
     conversation_id: Optional[str] = None  # xAI conversation.id (session resumption; set by conversation.created)
     conversation: List[Dict] = field(default_factory=list)  # Full conversation log for BlackBox snapshot
     # Reconnection state
-    last_ai_message_time: float = 0.0          # For stale connection detection
+    last_ai_message_time: float = 0.0          # Last upstream frame seen (diagnostic; liveness is ping/pong)
     reconnect_count: int = 0                   # Track reconnection attempts
     max_reconnects: int = 5                    # Max before giving up
     is_reconnecting: bool = False              # Guard against concurrent reconnects
@@ -198,6 +228,19 @@ class GrokLiveSession:
     listener_task: Optional[Any] = None        # asyncio.Task reading the upstream ws — cancelled+respawned on reconnect (P1b)
     provenance: Dict[str, List[str]] = field(default_factory=dict)  # Snapshot retrieval provenance from build_fossil_context
     call_id: str = ""                    # xAI SIP call id (phone-xai-* sessions); reconnects reuse it
+    # Live-session ownership + background work (audit rank 50/51). generation is
+    # stamped by voice_ws_shared.claim_session on every client attach: a handler
+    # (or a detached reconnect) whose generation is no longer current has been
+    # superseded by a re-attach of the same session id and must leave the
+    # session to the newer owner. keepalive_task / reconnect_task are the
+    # CURRENT keepalive loop and detached reconnect (a re-attach or a teardown
+    # cancels them); tool_tasks are the in-flight voice tool calls, run off the
+    # listener (voice_ws_shared.dispatch_voice_tool) and cancelled at teardown.
+    generation: int = 0
+    keepalive_task: Optional[Any] = None
+    reconnect_task: Optional[Any] = None
+    tool_tasks: set = field(default_factory=set)
+    tool_lock: Optional[Any] = None
 
 # Global storage for Grok Live sessions
 GROK_LIVE_SESSIONS: Dict[str, GrokLiveSession] = {}
