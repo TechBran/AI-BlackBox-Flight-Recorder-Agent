@@ -9,8 +9,16 @@
     rows of one phone sharing the newest timestamp produced two thread rows for
     that phone (and Android keys its list by phone, so it crashed on the
     duplicate key). One row per phone now: the newest by (timestamp, id).
+    The store was also never closed (stop_sms_system only dropped it) and ran
+    in rollback-journal mode; it opens in WAL mode and the SMS system closes
+    it on stop.
 """
 from __future__ import annotations
+
+import asyncio
+import sqlite3
+
+import pytest
 
 from Orchestrator.sms import message_store as msm
 
@@ -111,3 +119,36 @@ def test_thread_rows_stay_scoped_to_the_operator_and_line(tmp_path, monkeypatch)
 
 def _bodies_of_threads(threads):
     return [t["last_message"] for t in threads]
+
+
+def test_the_store_opens_in_wal_mode(tmp_path, monkeypatch):
+    s = _store(tmp_path, monkeypatch)
+    assert s._conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    s.close()
+
+
+def test_close_closes_the_connection_and_is_idempotent(tmp_path, monkeypatch):
+    s = _store(tmp_path, monkeypatch)
+    _fill(s, 3)
+    s.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        s._conn.execute("SELECT 1")
+    s.close()  # a second close is a no-op
+    # Everything written is in the main file once the last connection closed.
+    con = sqlite3.connect(tmp_path / "sms.db")
+    assert con.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 3
+    con.close()
+    assert not (tmp_path / "sms.db-wal").exists()
+
+
+def test_stopping_the_sms_system_closes_its_store(tmp_path, monkeypatch):
+    import Orchestrator.sms as sms_pkg
+
+    s = _store(tmp_path, monkeypatch)
+    monkeypatch.setattr(sms_pkg, "_manager", None)
+    monkeypatch.setattr(sms_pkg, "_sms_router", None)
+    monkeypatch.setattr(sms_pkg, "_message_store", s)
+    asyncio.run(sms_pkg.stop_sms_system())
+    assert sms_pkg.get_message_store() is None
+    with pytest.raises(sqlite3.ProgrammingError):
+        s._conn.execute("SELECT 1")

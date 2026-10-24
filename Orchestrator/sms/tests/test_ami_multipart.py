@@ -13,6 +13,10 @@
   * -10: the read loop awaited the whole reply (chat turn + send) inline, so no
     AMI frame was read meanwhile: a keepalive Ping answered in that window timed
     out and tore the connection down mid-reply.
+  * -02 (with -10): replies are still written one at a time, so a text that
+    arrives while the previous reply is being written waits its turn. Its
+    receipt time is taken when its event is read, not when its turn comes, so
+    it is not ordered after a reply that went out after it arrived.
 
 Every test feeds the client hermetically: events go straight into the handler
 or through an in-memory StreamReader. No socket, no gateway, no SMS is sent.
@@ -40,9 +44,10 @@ def _client():
     c.gateway_id = "g1"
     got = []
 
-    async def cb(sender, body, span, recvtime, gateway_id):
+    async def cb(sender, body, span, recvtime, gateway_id, received_at=None):
         got.append({"sender": sender, "body": body, "span": span,
-                    "recvtime": recvtime, "gateway_id": gateway_id})
+                    "recvtime": recvtime, "gateway_id": gateway_id,
+                    "received_at": received_at})
 
     c.on_sms(cb)
     return c, got
@@ -142,6 +147,27 @@ def test_a_reference_keeps_two_interleaved_texts_apart():
             _event(content="y2", index="2", total="2", ref="18"),
         )
         assert sorted(g["body"] for g in got) == ["x1x2", "y1y2"]
+        await c.disconnect()
+
+    asyncio.run(run())
+
+
+def test_one_sender_texting_two_lines_at_once_keeps_the_texts_apart():
+    """Every part of one text arrives on the same span (SIM). One sender sending a
+    long text of the same length to two of the box's lines at once (a broadcast,
+    or the owner texting both lines) interleaves the parts: keyed without the
+    span they spliced across the lines, and a fragment went out as its own text."""
+    async def run():
+        c, got = _client()
+        await _feed(
+            c,
+            _event(content="A1", index="1", total="2", span="2"),
+            _event(content="B1", index="1", total="2", span="3"),
+            _event(content="A2", index="2", total="2", span="2"),
+            _event(content="B2", index="2", total="2", span="3"),
+        )
+        assert sorted((g["span"], g["body"]) for g in got) == [("2", "A1A2"), ("3", "B1B2")]
+        assert c._multipart_buf == {} and c._multipart_flush_tasks == {}
         await c.disconnect()
 
     asyncio.run(run())
@@ -305,6 +331,57 @@ def test_inbound_texts_are_still_answered_one_at_a_time_in_arrival_order():
         await _feed(c, _event(content="first"), _event(content="second"), _event(content="third"))
         assert log == [("start", "first"), ("end", "first"), ("start", "second"),
                        ("end", "second"), ("start", "third"), ("end", "third")]
+        await c.disconnect()
+
+    asyncio.run(run())
+
+
+def test_a_text_queued_behind_a_reply_keeps_the_time_its_event_arrived(monkeypatch):
+    """The receipt time is read with the event. A text that arrives while the
+    previous reply is still being written is handed over only when that reply
+    is done; stamped then, it sorted after the reply it came before."""
+    now = ["2026-10-23T10:00:00+00:00"]
+    monkeypatch.setattr(ami_mod, "_receipt_time", lambda: now[0])
+
+    async def run():
+        c = AMISMSClient(host="h", username="u", secret="s")
+        release, got = asyncio.Event(), []
+
+        async def reply(sender, body, span, recvtime, gateway_id, received_at=None):
+            got.append((body, received_at))
+            if body == "first":
+                await release.wait()   # the chat turn + send
+
+        c.on_sms(reply)
+        await c._handle_received_sms(_event(content="first"))
+        await asyncio.sleep(0)
+        now[0] = "2026-10-23T10:00:05+00:00"
+        await c._handle_received_sms(_event(content="second"))
+        now[0] = "2026-10-23T10:01:00+00:00"   # the reply to "first" ends a minute on
+        release.set()
+        await _settle(c)
+        assert got == [("first", "2026-10-23T10:00:00+00:00"),
+                       ("second", "2026-10-23T10:00:05+00:00")]
+        await c.disconnect()
+
+    asyncio.run(run())
+
+
+def test_a_multipart_text_carries_the_receipt_time_of_its_first_part(monkeypatch):
+    times = iter(["2026-10-23T10:00:00+00:00", "2026-10-23T10:00:01+00:00",
+                  "2026-10-23T10:00:02+00:00"])
+    monkeypatch.setattr(ami_mod, "_receipt_time", lambda: next(times))
+
+    async def run():
+        c, got = _client()
+        await _feed(
+            c,
+            _event(content="long-", index="1", total="2"),
+            _event(sender="+14105550002", content="short"),
+            _event(content="text", index="2", total="2"),
+        )
+        assert sorted((g["body"], g["received_at"]) for g in got) == [
+            ("long-text", "2026-10-23T10:00:00+00:00"), ("short", "2026-10-23T10:00:01+00:00")]
         await c.disconnect()
 
     asyncio.run(run())

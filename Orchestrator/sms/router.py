@@ -2,7 +2,8 @@
 SMS Router — matches incoming SMS to operators via contact book.
 
 Flow:
-1. AMI client fires on_sms callback with sender, body, span, recvtime
+1. AMI client fires on_sms callback with sender, body, span, recvtime,
+   gateway_id, received_at
 2. Normalize sender phone number
 3. Search all operator contact books for matching phone
 4. If found: store inbound, process through AI, send reply, store outbound
@@ -342,7 +343,8 @@ class SMSRouter:
         ranked = sorted(matches, key=lambda m: _recency_key(m[1]), reverse=True)
         return ranked[0]
 
-    async def handle_incoming(self, sender: str, body: str, span: str, recvtime: str, gateway_id: str = None):
+    async def handle_incoming(self, sender: str, body: str, span: str, recvtime: str, gateway_id: str = None,
+                              received_at: str = None):
         """Process an incoming SMS from one of the gateway AMI clients.
 
         Args:
@@ -353,6 +355,8 @@ class SMSRouter:
                 gateway's own clock: stored as gateway_recvtime, never as the
                 row's timestamp
             gateway_id: Id of the gateway that received the message (reply goes back out the same one)
+            received_at: The server's ISO-8601 UTC time the AMI client read the
+                text's event, stored as the row's timestamp; now when absent
         """
         log.info("Incoming SMS from %s (gateway=%s span=%s): %s", sender, gateway_id, span, body[:80])
 
@@ -386,7 +390,10 @@ class SMSRouter:
         #    every outbound row carries the same UTC clock. The gateway's Recvtime
         #    is in its own clock, not UTC (hours off on a stock TG200), so it is
         #    kept as sent beside it, never used for order (audit O12-messaging-02).
-        timestamp = datetime.now(timezone.utc).isoformat()
+        #    The AMI client reads the time with the event: replies are written one
+        #    at a time, and a text that waited for the previous one must not be
+        #    stamped after it.
+        timestamp = received_at or datetime.now(timezone.utc).isoformat()
         gateway_recvtime = str(recvtime or "").strip()
 
         # 3. Store inbound message (tagged with the resolved line + gateway)

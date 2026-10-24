@@ -10,7 +10,7 @@ import logging
 import re
 import urllib.parse
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 log = logging.getLogger("sms.ami")
@@ -34,6 +34,15 @@ def _gateway_int(value, default: int) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _receipt_time() -> str:
+    """The server's UTC clock, read when an inbound SMS event arrives: the row's
+    timestamp, which orders the thread (audit O12-messaging-02). Read with the
+    event, not when the router gets to it: a text that arrives while the previous
+    reply is being written waits for it, and stamped then it sorted after a
+    reply that went out after it arrived."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def is_valid_sms_destination(destination) -> bool:
@@ -132,8 +141,8 @@ class AMISMSClient:
         # Incoming SMS callback
         self._sms_callbacks: list[Callable] = []
 
-        # Multi-part SMS buffer, keyed (sender, reference, total) — see
-        # _handle_received_sms: {"parts": {index: content}, "span", "recvtime"}.
+        # Multi-part SMS buffer, keyed (sender, span, reference, total) — see
+        # _handle_received_sms: {"parts": {index: content}, "recvtime", "received_at"}.
         self._multipart_buf: dict[tuple, dict] = {}
 
         # Complete inbound texts being handed to the callbacks. Each runs as its
@@ -466,7 +475,12 @@ class AMISMSClient:
     # ------------------------------------------------------------------
 
     def on_sms(self, callback: Callable):
-        """Register an async callback: callback(sender, body, span, recvtime, gateway_id).
+        """Register an async callback:
+        callback(sender, body, span, recvtime, gateway_id, received_at).
+
+        ``recvtime`` is the gateway's own Recvtime string (its clock, not UTC);
+        ``received_at`` is the server's ISO-8601 UTC time the text's (first)
+        event was read, which the router stores as the row's timestamp.
 
         Idempotent: registering the same callback twice is a no-op, so a
         re-registration (e.g. manager.set_sms_callback + add_gateway, or a
@@ -478,16 +492,19 @@ class AMISMSClient:
     async def _handle_received_sms(self, msg: dict):
         """Process a ReceivedSMS event, buffering multi-part if needed.
 
-        The parts of one concatenated text are grouped by (sender, reference,
-        total). Not by Recvtime: the TG200 stamps every part with its own
-        Recvtime, so a 2-part text arriving across a second boundary used to
+        The parts of one concatenated text are grouped by (sender, span,
+        reference, total). Not by Recvtime: the TG200 stamps every part with its
+        own Recvtime, so a 2-part text arriving across a second boundary used to
         land in two buffers and go out as two inbound texts, each with its own
-        AI reply (audit O12-messaging-01). The reference is the event's ID —
-        blank on the TG200 firmware seen so far, so there the key is (sender,
-        total); a firmware that fills it keeps two interleaved texts apart.
-        Parts are assembled in Index order, so the firmware's 1-based
-        multi-part numbering and a 0-based one both work.
+        AI reply (audit O12-messaging-01). Every part arrives on the same span
+        (SIM), so the span keeps apart the texts one sender sends to two of the
+        box's lines at once. The reference is the event's ID — blank on the
+        TG200 firmware seen so far, so there the key is (sender, span, total); a
+        firmware that fills it keeps two interleaved texts apart. Parts are
+        assembled in Index order, so the firmware's 1-based multi-part
+        numbering and a 0-based one both work.
         """
+        received_at = _receipt_time()
         sender = (msg.get("Sender") or "").strip()
         raw_content = msg.get("Content", "")
         span = msg.get("GsmSpan", "2")
@@ -509,11 +526,11 @@ class AMISMSClient:
 
         if total <= 1:
             # Single-part SMS — deliver immediately
-            await self._dispatch_sms(sender, body, span, recvtime)
+            await self._dispatch_sms(sender, body, span, recvtime, received_at)
             return
 
         # Multi-part: buffer until all parts arrive
-        buf_key = (sender, reference, total)
+        buf_key = (sender, span, reference, total)
         buf = self._multipart_buf.get(buf_key)
         if buf is not None and index in buf["parts"]:
             # The same part number again is the NEXT text of the same shape:
@@ -526,8 +543,8 @@ class AMISMSClient:
             await self._flush_multipart(buf_key)
             buf = None
         if buf is None:
-            # The text's span and gateway time are those of its first part.
-            buf = {"parts": {}, "span": span, "recvtime": recvtime}
+            # The text's gateway and receipt times are those of its first part.
+            buf = {"parts": {}, "recvtime": recvtime, "received_at": received_at}
             self._multipart_buf[buf_key] = buf
             # Fallback: flush whatever has arrived after MULTIPART_TIMEOUT_S
             self._multipart_flush_tasks[buf_key] = asyncio.create_task(
@@ -550,9 +567,10 @@ class AMISMSClient:
             return
         # This timer is the one finishing: _flush_multipart must not cancel it.
         self._multipart_flush_tasks.pop(buf_key, None)
+        sender, _span, _reference, total = buf_key
         log.warning(
             "Multi-part SMS timeout for %s — flushing %d/%d parts",
-            buf_key[0], len(buf["parts"]), buf_key[2],
+            sender, len(buf["parts"]), total,
         )
         await self._flush_multipart(buf_key)
 
@@ -569,22 +587,26 @@ class AMISMSClient:
         parts = buf["parts"]
         assembled = "".join(parts[i] for i in sorted(parts))
 
-        await self._dispatch_sms(buf_key[0], assembled, buf["span"], buf["recvtime"])
+        sender, span = buf_key[0], buf_key[1]
+        await self._dispatch_sms(sender, assembled, span, buf["recvtime"], buf["received_at"])
 
-    async def _dispatch_sms(self, sender: str, body: str, span: str, recvtime: str):
+    async def _dispatch_sms(self, sender: str, body: str, span: str, recvtime: str,
+                            received_at: str):
         """Hand a complete inbound SMS to the callbacks without blocking the read loop."""
         log.info("SMS dispatch: sender=%s body=%r", sender, body[:100])
         task = asyncio.create_task(
-            self._deliver_sms(sender, body, span, recvtime), name="ami-sms-deliver")
+            self._deliver_sms(sender, body, span, recvtime, received_at),
+            name="ami-sms-deliver")
         self._deliveries.add(task)
         task.add_done_callback(self._deliveries.discard)
 
-    async def _deliver_sms(self, sender: str, body: str, span: str, recvtime: str):
+    async def _deliver_sms(self, sender: str, body: str, span: str, recvtime: str,
+                           received_at: str):
         """Invoke all registered SMS callbacks, one inbound text at a time."""
         async with self._delivery_lock:
             for cb in self._sms_callbacks:
                 try:
-                    await cb(sender, body, span, recvtime, self.gateway_id)
+                    await cb(sender, body, span, recvtime, self.gateway_id, received_at)
                 except Exception:
                     log.exception("SMS callback error")
 

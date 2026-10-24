@@ -150,3 +150,47 @@ def test_gateway_recvtime_is_added_to_an_existing_store(tmp_path, monkeypatch):
                     contact_name="Pat", body="new", gateway_recvtime="2026-10-23 07:00:00")
     assert s.get_conversation("Ana", "4105550001")[-1]["gateway_recvtime"] == "2026-10-23 07:00:00"
     msm.MessageStore()  # opening again is a no-op
+
+
+def test_the_receipt_time_the_ami_client_read_is_the_row_timestamp(router):
+    """The AMI client reads the receipt time with the event and hands it over; a
+    text that waited for the previous reply keeps it (O12-messaging-02)."""
+    asyncio.run(router.handle_incoming(sender="+14105550001", body="hi", span="2",
+                                       recvtime="2020-01-01 00:00:00", gateway_id="g1",
+                                       received_at="2026-10-23T10:00:05+00:00"))
+    row = router.store.get_conversation("Ana", "+14105550001")[0]
+    assert row["timestamp"] == "2026-10-23T10:00:05+00:00"
+    assert row["gateway_recvtime"] == "2020-01-01 00:00:00"
+
+
+def test_a_text_that_arrived_during_a_reply_is_ordered_before_that_reply(router, monkeypatch):
+    """Real AMI client, router and store: B arrives 50 ms after A, while the reply
+    to A is still being written. It used to be stamped when its turn came, after
+    that reply, and so was shown after a reply that went out after it arrived."""
+    from Orchestrator.sms.ami_client import AMISMSClient
+
+    async def slow_reply(self, sender, body, *a, **k):
+        await asyncio.sleep(0.3)   # the chat turn
+        return f"reply to {body}"
+
+    monkeypatch.setattr(SMSRouter, "_route_through_chat", slow_reply)
+
+    def event(body):
+        return {"Event": "ReceivedSMS", "ID": "", "GsmSpan": "2", "Sender": "+14105550001",
+                "Recvtime": "2026-10-23 03:00:00", "Index": "0", "Total": "1", "Content": body}
+
+    async def run():
+        c = AMISMSClient(host="h", username="u", secret="s")
+        c.gateway_id = "g1"
+        c.on_sms(router.handle_incoming)
+        await c._handle_received_sms(event("A"))
+        await asyncio.sleep(0.05)
+        await c._handle_received_sms(event("B"))
+        while c._deliveries:
+            await asyncio.wait(list(c._deliveries), timeout=5)
+        await c.disconnect()
+
+    asyncio.run(run())
+    rows = router.store.get_conversation("Ana", "+14105550001", limit=10, recent=True)
+    assert [(r["direction"], r["body"]) for r in rows] == [
+        ("inbound", "A"), ("inbound", "B"), ("outbound", "reply to A"), ("outbound", "reply to B")]

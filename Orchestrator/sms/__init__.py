@@ -30,6 +30,9 @@ async def stop_sms_system():
     global _manager, _sms_router, _message_store
     if _manager is not None:
         await _manager.stop()
+    if _message_store is not None:
+        # After the manager: no AMI client is left to write an inbound row.
+        _message_store.close()
     _manager = None
     _sms_router = None
     _message_store = None

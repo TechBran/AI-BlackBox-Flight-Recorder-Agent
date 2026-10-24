@@ -62,8 +62,20 @@ class MessageStore:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # WAL, as the task and scheduler stores run: a commit is one append to
+        # the log, and another reader of the file (the sqlite3 CLI, a script)
+        # never blocks a write. close() folds the log back into the file
+        # (audit O12-messaging-20).
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
         log.info("MessageStore initialized at %s", DB_PATH)
+
+    def close(self):
+        """Close the connection (stop_sms_system); the store is unusable after.
+        Idempotent. Closing the last connection checkpoints the WAL into the
+        database file."""
+        with self._lock:
+            self._conn.close()
 
     def _init_schema(self):
         with self._lock:
