@@ -122,6 +122,13 @@ def whole_reads(monkeypatch):
 
 # -- the per-turn context build ------------------------------------------------
 
+
+def _run(call):
+    """The snapshot executors are plain defs since M4 U23 (the dispatcher runs
+    them in a worker thread); an async executor is awaited the same way."""
+    import inspect
+    return asyncio.run(call) if inspect.iscoroutine(call) else call
+
 def test_stream_turn_reads_only_the_operators_snapshots(ledger, volume_reads, whole_reads, monkeypatch):
     """Every section reads just its own snapshots, and the keyword channel just
     the ones it scores - this operator's, by their byte ranges. Before: the
@@ -198,7 +205,7 @@ def test_search_snapshots_tool_reads_no_volume_text(ledger, volume_reads, monkey
         return []
     monkeypatch.setattr(fossils, "hybrid_retrieve", fake_hybrid)
 
-    out = asyncio.run(executor.execute({"query": "reranker"}, ToolContext(operator="Ana")))
+    out = _run(executor.execute({"query": "reranker"}, ToolContext(operator="Ana")))
 
     assert out.success and seen == [""]
     assert volume_reads["bytes"] == 0
@@ -208,7 +215,7 @@ def test_list_recent_snapshots_tool_reads_only_what_it_returns(ledger, volume_re
     from Orchestrator.toolvault.context import ToolContext
     from ToolVault.tools.list_recent_snapshots import executor
 
-    out = asyncio.run(executor.execute({"count": 3}, ToolContext(operator="Ben")))
+    out = _run(executor.execute({"count": 3}, ToolContext(operator="Ben")))
 
     assert out.success and out.data["count"] == 3
     newest_ben = sorted((s for s, m in ledger.items() if m["operator"] == "Ben"),

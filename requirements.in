@@ -61,7 +61,7 @@ requests>=2.33.0,<3             # CVE-2024-47081 (2.32.4), CVE-2026-25645 (2.33.
 httpx>=0.28.1,<0.29             # 0.28 removed `proxies=`/`app=`; a minor can break us
 aiohttp>=3.14.3,<4              # client path of the provider calls; CVE-2026-34518, -47265 (credentials kept across redirects), -54275 (SNI bypass), decompression bombs
 urllib3>=2.8.0,<3               # imported by utils/safe_fetch.py; CVE-2025-66418, -66471, CVE-2026-21441, -97689
-filelock>=4.2.1,<5              # transitive (huggingface-hub, virtualenv); CVE-2026-112907, -112913, -112940 (lock-file symlink/permission races, fixed 4.2.1)
+filelock>=4.2.1,<5              # [transitive] huggingface-hub's download lock, floored for CVE-2026-112907, -112913, -112940 (lock-file symlink/permission races, fixed 4.2.1)
 certifi>=2026.10.19             # safe_fetch.py's CA bundle; calendar-versioned CA data, so no cap; PYSEC-2026-4320 (emSign ECC Root CA - G3 pulled from the bundle)
 
 # === WebSockets ===

@@ -29,6 +29,13 @@ from Orchestrator.tests.voice_ws_fakes import FakeUpstreamWS
 BLOCK = 0.4
 
 
+
+async def _settled(coro, session):
+    """Run a voice handler, then wait for the tool tasks it dispatched (M4 U26
+    runs each voice tool as a session task; the reply lands when it finishes)."""
+    await coro
+    await asyncio.gather(*session.tool_tasks)
+
 async def _max_gap_during(coro):
     gaps = []
     stop = asyncio.Event()
@@ -107,7 +114,7 @@ def test_realtime_recent_snapshots_run_off_the_loop(monkeypatch):
     session.openai_ws = FakeUpstreamWS()
     event = {"type": "response.function_call_arguments.done", "call_id": "c1",
              "name": "list_recent_snapshots", "arguments": json.dumps({"count": 1})}
-    _, gap = asyncio.run(_max_gap_during(rt.handle_openai_message(session, event)))
+    _, gap = asyncio.run(_max_gap_during(_settled(rt.handle_openai_message(session, event), session)))
     assert "hello from the ledger" in session.openai_ws.sent[0]["item"]["output"]
     assert gap < 0.2, f"recent snapshots blocked the event loop for {gap:.2f}s"
 
@@ -118,7 +125,7 @@ def test_grok_recent_snapshots_run_off_the_loop(monkeypatch):
     session.grok_ws = FakeUpstreamWS()
     event = {"type": "response.function_call_arguments.done", "call_id": "c2",
              "name": "list_recent_snapshots", "arguments": json.dumps({"count": 1})}
-    _, gap = asyncio.run(_max_gap_during(gk.handle_grok_message(session, event)))
+    _, gap = asyncio.run(_max_gap_during(_settled(gk.handle_grok_message(session, event), session)))
     assert "hello from the ledger" in session.grok_ws.sent[0]["item"]["output"]
     assert gap < 0.2, f"recent snapshots blocked the event loop for {gap:.2f}s"
 
@@ -129,7 +136,7 @@ def test_gemini_recent_snapshots_run_off_the_loop(monkeypatch):
     session.gemini_ws = FakeUpstreamWS()
     event = {"toolCall": {"functionCalls": [
         {"id": "fc-r", "name": "list_recent_snapshots", "args": {"count": 1}}]}}
-    _, gap = asyncio.run(_max_gap_during(gm.handle_gemini_message(session, event)))
+    _, gap = asyncio.run(_max_gap_during(_settled(gm.handle_gemini_message(session, event), session)))
     responses = session.gemini_ws.sent[0]["toolResponse"]["functionResponses"]
     assert "hello from the ledger" in responses[0]["response"]["result"]
     assert gap < 0.2, f"recent snapshots blocked the event loop for {gap:.2f}s"

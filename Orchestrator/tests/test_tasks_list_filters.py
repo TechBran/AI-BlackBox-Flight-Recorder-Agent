@@ -21,13 +21,16 @@ def _iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-NOW = datetime.now(timezone.utc)
 
 
 def _task(task_id, status, *, minutes_ago=0, created_minutes_ago=None, operator="alice",
-          updated_format=_iso):
-    updated = NOW - timedelta(minutes=minutes_ago)
-    created = NOW - timedelta(minutes=minutes_ago if created_minutes_ago is None else created_minutes_ago)
+          updated_format=_iso, now=None):
+    # The clock is read when the row is BUILT, never at import: in a full run
+    # collection precedes this file's tests by minutes, and a row "ended 3
+    # minutes ago" at import had aged out of the 10-minute window by then.
+    now = now or datetime.now(timezone.utc)
+    updated = now - timedelta(minutes=minutes_ago)
+    created = now - timedelta(minutes=minutes_ago if created_minutes_ago is None else created_minutes_ago)
     return Task(task_id=task_id, task_type=TaskType.IMAGE_GENERATION, status=status,
                 created_at=_iso(created), updated_at=updated_format(updated),
                 prompt=f"prompt {task_id}", operator=operator)

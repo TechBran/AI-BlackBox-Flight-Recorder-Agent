@@ -1,7 +1,7 @@
 {
   "anthropic_chat": [
     {
-      "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Returns task_id (async).",
+      "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Waits for the analysis and returns it.",
       "input_schema": {
         "properties": {
           "file_path": {
@@ -25,7 +25,7 @@
       "input_schema": {
         "properties": {
           "image_url": {
-            "description": "URL or local path to the image (e.g. /ui/uploads/sunset.png or https://example.com/photo.jpg)",
+            "description": "A BlackBox upload (e.g. /ui/uploads/sunset.png) or a public image URL (e.g. https://example.com/photo.jpg)",
             "type": "string"
           },
           "prompt": {
@@ -49,7 +49,7 @@
             "type": "string"
           },
           "video_url": {
-            "description": "URL or local path to the video",
+            "description": "A BlackBox upload (e.g. /ui/uploads/clip.mp4) or a public video URL",
             "type": "string"
           }
         },
@@ -1429,27 +1429,15 @@
       "name": "make_phone_call"
     },
     {
-      "description": "Call a phone number and deliver a pre-recorded voice message using TTS. The system generates the speech audio first (via OpenAI TTS), then calls the number and plays it. For interactive two-way calls, use make_phone_call instead.",
+      "description": "Call a phone number and deliver a spoken message: when they answer, the BlackBox voice agent says the message first and can then talk with them. For a call where the agent works through a task on your behalf, use make_phone_call instead.",
       "input_schema": {
         "properties": {
           "message": {
-            "description": "The message to speak. Will be converted to speech via TTS before calling.",
+            "description": "The message to speak. The voice agent says it as soon as the call connects.",
             "type": "string"
           },
           "phone_number": {
             "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-            "type": "string"
-          },
-          "voice": {
-            "description": "TTS voice to use for the message",
-            "enum": [
-              "alloy",
-              "echo",
-              "fable",
-              "onyx",
-              "nova",
-              "shimmer"
-            ],
             "type": "string"
           }
         },
@@ -3148,28 +3136,16 @@
           }
         },
         {
-          "description": "Call a phone number and deliver a pre-recorded voice message using TTS. The system generates the speech audio first (via OpenAI TTS), then calls the number and plays it. For interactive two-way calls, use make_phone_call instead.",
+          "description": "Call a phone number and deliver a spoken message: when they answer, the BlackBox voice agent says the message first and can then talk with them. For a call where the agent works through a task on your behalf, use make_phone_call instead.",
           "name": "make_voice_call",
           "parameters": {
             "properties": {
               "message": {
-                "description": "The message to speak. Will be converted to speech via TTS before calling.",
+                "description": "The message to speak. The voice agent says it as soon as the call connects.",
                 "type": "string"
               },
               "phone_number": {
                 "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-                "type": "string"
-              },
-              "voice": {
-                "description": "TTS voice to use for the message",
-                "enum": [
-                  "alloy",
-                  "echo",
-                  "fable",
-                  "onyx",
-                  "nova",
-                  "shimmer"
-                ],
                 "type": "string"
               }
             },
@@ -3766,7 +3742,7 @@
     {
       "function_declarations": [
         {
-          "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Returns task_id (async).",
+          "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Waits for the analysis and returns it.",
           "name": "analyze_audio",
           "parameters": {
             "properties": {
@@ -3791,7 +3767,7 @@
           "parameters": {
             "properties": {
               "image_url": {
-                "description": "URL or local path to the image (e.g. /ui/uploads/sunset.png or https://example.com/photo.jpg)",
+                "description": "A BlackBox upload (e.g. /ui/uploads/sunset.png) or a public image URL (e.g. https://example.com/photo.jpg)",
                 "type": "string"
               },
               "prompt": {
@@ -3815,7 +3791,7 @@
                 "type": "string"
               },
               "video_url": {
-                "description": "URL or local path to the video",
+                "description": "A BlackBox upload (e.g. /ui/uploads/clip.mp4) or a public video URL",
                 "type": "string"
               }
             },
@@ -5174,28 +5150,16 @@
           }
         },
         {
-          "description": "Call a phone number and deliver a pre-recorded voice message using TTS. The system generates the speech audio first (via OpenAI TTS), then calls the number and plays it. For interactive two-way calls, use make_phone_call instead.",
+          "description": "Call a phone number and deliver a spoken message: when they answer, the BlackBox voice agent says the message first and can then talk with them. For a call where the agent works through a task on your behalf, use make_phone_call instead.",
           "name": "make_voice_call",
           "parameters": {
             "properties": {
               "message": {
-                "description": "The message to speak. Will be converted to speech via TTS before calling.",
+                "description": "The message to speak. The voice agent says it as soon as the call connects.",
                 "type": "string"
               },
               "phone_number": {
                 "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-                "type": "string"
-              },
-              "voice": {
-                "description": "TTS voice to use for the message",
-                "enum": [
-                  "alloy",
-                  "echo",
-                  "fable",
-                  "onyx",
-                  "nova",
-                  "shimmer"
-                ],
                 "type": "string"
               }
             },
@@ -5964,7 +5928,7 @@
   ],
   "mcp": [
     {
-      "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Returns task_id (async).",
+      "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Waits for the analysis and returns it.",
       "inputSchema": {
         "properties": {
           "file_path": {
@@ -5988,7 +5952,7 @@
       "inputSchema": {
         "properties": {
           "image_url": {
-            "description": "URL or local path to the image (e.g. /ui/uploads/sunset.png or https://example.com/photo.jpg)",
+            "description": "A BlackBox upload (e.g. /ui/uploads/sunset.png) or a public image URL (e.g. https://example.com/photo.jpg)",
             "type": "string"
           },
           "prompt": {
@@ -6012,7 +5976,7 @@
             "type": "string"
           },
           "video_url": {
-            "description": "URL or local path to the video",
+            "description": "A BlackBox upload (e.g. /ui/uploads/clip.mp4) or a public video URL",
             "type": "string"
           }
         },
@@ -8861,28 +8825,16 @@
       "type": "function"
     },
     {
-      "description": "Call a phone number and deliver a pre-recorded voice message using TTS. The system generates the speech audio first (via OpenAI TTS), then calls the number and plays it. For interactive two-way calls, use make_phone_call instead.",
+      "description": "Call a phone number and deliver a spoken message: when they answer, the BlackBox voice agent says the message first and can then talk with them. For a call where the agent works through a task on your behalf, use make_phone_call instead.",
       "name": "make_voice_call",
       "parameters": {
         "properties": {
           "message": {
-            "description": "The message to speak. Will be converted to speech via TTS before calling.",
+            "description": "The message to speak. The voice agent says it as soon as the call connects.",
             "type": "string"
           },
           "phone_number": {
             "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-            "type": "string"
-          },
-          "voice": {
-            "description": "TTS voice to use for the message",
-            "enum": [
-              "alloy",
-              "echo",
-              "fable",
-              "onyx",
-              "nova",
-              "shimmer"
-            ],
             "type": "string"
           }
         },
@@ -9510,7 +9462,7 @@
   "openai_rest_chat": [
     {
       "function": {
-        "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Returns task_id (async).",
+        "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Waits for the analysis and returns it.",
         "name": "analyze_audio",
         "parameters": {
           "properties": {
@@ -9538,7 +9490,7 @@
         "parameters": {
           "properties": {
             "image_url": {
-              "description": "URL or local path to the image (e.g. /ui/uploads/sunset.png or https://example.com/photo.jpg)",
+              "description": "A BlackBox upload (e.g. /ui/uploads/sunset.png) or a public image URL (e.g. https://example.com/photo.jpg)",
               "type": "string"
             },
             "prompt": {
@@ -9565,7 +9517,7 @@
               "type": "string"
             },
             "video_url": {
-              "description": "URL or local path to the video",
+              "description": "A BlackBox upload (e.g. /ui/uploads/clip.mp4) or a public video URL",
               "type": "string"
             }
           },
@@ -11106,28 +11058,16 @@
     },
     {
       "function": {
-        "description": "Call a phone number and deliver a pre-recorded voice message using TTS. The system generates the speech audio first (via OpenAI TTS), then calls the number and plays it. For interactive two-way calls, use make_phone_call instead.",
+        "description": "Call a phone number and deliver a spoken message: when they answer, the BlackBox voice agent says the message first and can then talk with them. For a call where the agent works through a task on your behalf, use make_phone_call instead.",
         "name": "make_voice_call",
         "parameters": {
           "properties": {
             "message": {
-              "description": "The message to speak. Will be converted to speech via TTS before calling.",
+              "description": "The message to speak. The voice agent says it as soon as the call connects.",
               "type": "string"
             },
             "phone_number": {
               "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-              "type": "string"
-            },
-            "voice": {
-              "description": "TTS voice to use for the message",
-              "enum": [
-                "alloy",
-                "echo",
-                "fable",
-                "onyx",
-                "nova",
-                "shimmer"
-              ],
               "type": "string"
             }
           },

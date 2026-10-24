@@ -255,7 +255,7 @@ async def _run_task(task_id, operator, device_id, environment,
             task.result_data["error"] = f"Cannot start Gemini CU — {owner.describe()}. Stop it first."
             task_db.save_task(task)
             unregister_cancel_handle(task_id)
-            destroy_task_session(session)
+            await asyncio.to_thread(destroy_task_session, session)  # teardown (Chrome + display) off the loop
             return
 
     try:
@@ -356,9 +356,7 @@ async def _run_task(task_id, operator, device_id, environment,
         release_claim(_claim_id)
         unregister_cancel_handle(task_id)
         clear_cancel_request(task_id)
-        destroy_task_session(session)
-
-
+        await asyncio.to_thread(destroy_task_session, session)  # teardown (Chrome + display) off the loop
 @router.post("/stream")
 async def stream_gemini_cu(body: GeminiCURequest):
     """Stream Gemini CU events via SSE."""
@@ -410,8 +408,7 @@ async def stream_gemini_cu(body: GeminiCURequest):
             yield "data: [DONE]\n\n"
         finally:
             release_claim(_claim_id)
-            destroy_task_session(session)
-
+            await asyncio.to_thread(destroy_task_session, session)  # teardown (Chrome + display) off the loop
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 

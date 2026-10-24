@@ -35,14 +35,14 @@
 @import url('./features/_tools.css');
 @import url('./features/_cli_agents_modal.css');
 @import url('./features/_voice_agents_modal.css');
-@import url('./features/_gmail_modal.css?v=genui339');
+@import url('./features/_gmail_modal.css?v=genui340');
 @import url('./features/_voice-library.css');
 @import url('./features/_voice-lab.css');
 @import url('./features/_stt-status.css');
 @import url('./features/_updates.css');
 @import url('./features/_collapsibles.css');
 @import url('./features/_system_controls.css');
-@import url('./features/_ember-fx.css?v=genui339');
+@import url('./features/_ember-fx.css?v=genui340');
 @import url('./features/_devices-section.css?v=genui299');
 
 /* === GENERATION === */

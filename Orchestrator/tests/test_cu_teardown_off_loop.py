@@ -276,6 +276,11 @@ def test_openai_cu_stream_replaces_an_expired_session_off_the_loop(stores, slow_
     from Orchestrator import config
     from Orchestrator.routes import chat_routes
     monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    # The stream imports these lazily before its first event; a cold import of
+    # the OpenAI CU package (the SDK behind it) costs ~0.3 s and is not the
+    # lookup this test measures, so warm them first.
+    import Orchestrator.openai_cu.config  # noqa: F401
+    import Orchestrator.gemini_cu.session_manager  # noqa: F401
     old = _expired_browser_session("cu-stream-op")
     evt, gap = asyncio.run(_max_gap_during(_first_event(
         chat_routes.stream_openai_computer_use(MESSAGES, "", "cu-stream-op"))))
@@ -304,7 +309,7 @@ def test_gemini_cu_end_session_tears_down_off_the_loop(stores, slow_teardown):
     from Orchestrator.routes import gemini_cu_routes
     g = gsm.get_or_create_session("cu-end-op", "blackbox", "desktop")
     result, gap = asyncio.run(_max_gap_during(gemini_cu_routes.end_session("cu-end-op")))
-    assert result == {"status": "destroyed"} and slow_teardown == [g.session_id]
+    assert result.get("status") == "destroyed" and slow_teardown == [g.session_id]  # U29 adds stopped_tasks
     assert gap < 0.2, f"DELETE /gemini-cu/session blocked the event loop for {gap:.2f}s"
 
 

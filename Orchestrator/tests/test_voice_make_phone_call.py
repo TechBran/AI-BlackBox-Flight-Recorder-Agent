@@ -62,6 +62,7 @@ def test_openai_realtime_calls_through_the_executor(executor):
         await rt.handle_openai_message(session, {
             "type": "response.function_call_arguments.done", "call_id": "c1",
             "name": "make_phone_call", "arguments": json.dumps(ARGS)})
+        await asyncio.gather(*session.tool_tasks)  # the tool runs as a session task (M4 U26)
         return session.openai_ws.sent[0]["item"]["output"]
 
     output = asyncio.run(run())
@@ -76,6 +77,7 @@ def test_grok_live_calls_through_the_executor(executor):
         await gk.handle_grok_message(session, {
             "type": "response.function_call_arguments.done", "call_id": "c2",
             "name": "make_phone_call", "arguments": json.dumps(ARGS)})
+        await asyncio.gather(*session.tool_tasks)  # the tool runs as a session task (M4 U26)
         return session.grok_ws.sent[0]["item"]["output"]
 
     output = asyncio.run(run())
@@ -89,6 +91,7 @@ def test_gemini_live_calls_through_the_executor(executor):
         session.gemini_ws = FakeUpstreamWS()
         await gm.handle_gemini_message(session, {"toolCall": {"functionCalls": [
             {"id": "fc-call", "name": "make_phone_call", "args": dict(ARGS)}]}})
+        await asyncio.gather(*session.tool_tasks)  # the tool runs as a session task (M4 U26)
         return session.gemini_ws.sent[0]["toolResponse"]["functionResponses"][0]["response"]["result"]
 
     output = asyncio.run(run())
