@@ -10,7 +10,7 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 from Orchestrator.utils.paths import AUDIO_EXTS, UploadNotFoundError, UploadPathError, resolve_upload_path
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     name = (params.get("name") or "").strip()
     audio_paths = params.get("audio_paths") or []
     confirm_consent = bool(params.get("confirm_consent"))

@@ -11,7 +11,7 @@ LOCAL_RESULT_BUDGET_CHARS = 8000
 LOCAL_MIN_WINDOW_CHARS = 1000
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Search BlackBox snapshots for relevant information using hybrid retrieval.
 
     Results are RERANKED (hybrid_retrieve -> retrieve() incl. the cross-encoder

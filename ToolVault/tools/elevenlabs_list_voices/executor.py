@@ -6,7 +6,7 @@ HTTP). No key -> get_voices returns None -> we report nothing is available.
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     from Orchestrator.elevenlabs import catalog
 
     try:

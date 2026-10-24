@@ -2,7 +2,7 @@
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Search media by description, prompt, or filename."""
     query = params.get("query", "")
     media_type = params.get("media_type")

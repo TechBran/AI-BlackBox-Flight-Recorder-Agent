@@ -9,6 +9,7 @@ Orchestrator/scheduler/pairing.py and are applied by CronJobManager itself,
 so the HTTP API gets them too (audit O15-scheduler-admin-05); the catalog
 check below reuses them.
 """
+import asyncio
 import logging
 
 from Orchestrator.scheduler.pairing import (
@@ -106,8 +107,10 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
         # M4.2b: validate a chosen specific model id against the live catalog so
         # a typo fails LOUDLY here, not silently at fire time. Graceful on any
-        # catalog-fetch failure (see _validate_model).
-        ok, err = _validate_model(model, params.get("provider"), ctx.operator)
+        # catalog-fetch failure (see _validate_model). A cold catalog cache
+        # fetches from the provider, so the check runs off the event loop.
+        ok, err = await asyncio.to_thread(
+            _validate_model, model, params.get("provider"), ctx.operator)
         if not ok:
             return ToolResult(False, err)
 

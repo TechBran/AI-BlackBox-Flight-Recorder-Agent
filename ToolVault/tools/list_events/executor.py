@@ -28,7 +28,7 @@ def _slim(event):
     return {k: v for k, v in event.items() if k not in _NOISE_KEYS}
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     from Orchestrator.gmail.service import workspace_connected
     from Orchestrator.google_workspace import calendar
 

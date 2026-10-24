@@ -1,4 +1,6 @@
 """Executor for edit_cron_job (migrated from blackbox_tools._execute_edit_cron_job)."""
+import asyncio
+
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 # The provider/model pairing rules are the scheduler's (one source of truth,
@@ -46,10 +48,11 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         # Provider for the check: the (normalized) provider in THIS call if given,
         # else the job's STORED provider -- so a model-only edit consults the
         # right catalog. Graceful on any catalog-fetch failure (_validate_model).
+        # A cold catalog cache fetches from the provider: off the event loop.
         if params.get("model") is not None:
             provider_for_check = params.get("provider") or existing.get("provider")
-            ok, err = _validate_model(
-                params.get("model"), provider_for_check, ctx.operator
+            ok, err = await asyncio.to_thread(
+                _validate_model, params.get("model"), provider_for_check, ctx.operator
             )
             if not ok:
                 return ToolResult(False, err)

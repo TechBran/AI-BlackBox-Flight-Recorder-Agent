@@ -2,7 +2,7 @@
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Retrieve media by URL or task_id."""
     url = params.get("url", "")
     task_id = params.get("task_id", "")

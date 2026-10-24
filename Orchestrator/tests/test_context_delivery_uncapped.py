@@ -268,7 +268,7 @@ class TestSearchSnapshotsExecutorUncapped:
         # caller-less ctx = a cloud/box surface -> WHOLE delivery (the M8
         # on-device bound keys on ctx.caller == "local" only).
         ctx = types.SimpleNamespace(operator="TestOp")
-        res = asyncio.run(mod.execute({"query": "anything"}, ctx))
+        res = mod.execute({"query": "anything"}, ctx)  # sync: the dispatcher threads it
         assert res.success
         assert big in res.result                      # whole snapshot in the tool result
         assert "[truncated]" not in res.result

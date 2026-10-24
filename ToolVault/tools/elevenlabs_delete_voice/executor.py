@@ -8,7 +8,7 @@ TTS preference.
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     voice_id = (params.get("voice_id") or "").strip()
     confirm = bool(params.get("confirm"))
 

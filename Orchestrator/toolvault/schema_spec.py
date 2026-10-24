@@ -11,6 +11,9 @@ to avoid an import cycle with the resolvers module (built in a later task).
 
 KNOWN_GROUPS = {"chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"}
 VALID_TIERS = {1, 2, 3}
+# Upper bound for an executor's ``timeout_s`` (seconds). A longer job belongs
+# in a background task the model polls (get_task_status), not one tool call.
+MAX_TIMEOUT_S = 3600
 REQUIRED_KEYS = ("name", "description", "category", "groups", "tier", "parameters")
 
 
@@ -93,6 +96,16 @@ def validate_module_dict(d: dict, folder_name: str, known_sources: set) -> list[
         ex = d.get("executor")
         if not isinstance(ex, str) or not ex.strip():
             errors.append("'executor' (optional) must be a non-empty string when present")
+
+    # Optional timeout_s: how long the dispatcher waits for this tool's
+    # executor (a positive number of seconds; bool is not a number here).
+    if "timeout_s" in d:
+        t = d.get("timeout_s")
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 < t <= MAX_TIMEOUT_S:
+            errors.append(
+                f"'timeout_s' (optional) must be a number of seconds in "
+                f"(0, {MAX_TIMEOUT_S}], got {t!r}"
+            )
 
     # Optional x-availability: presence-gate metadata consumed by
     # availability.is_available (provider key + enabled-pref). When present it

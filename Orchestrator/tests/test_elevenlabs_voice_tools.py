@@ -17,6 +17,7 @@ Critical coverage (both consent/confirm gates):
 """
 import asyncio
 import importlib.util
+import inspect
 from pathlib import Path
 
 import pytest
@@ -42,8 +43,10 @@ list_exec = _load_executor("elevenlabs_list_voices")
 delete_exec = _load_executor("elevenlabs_delete_voice")
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _run(result):
+    # These executors are plain defs (the dispatcher runs them in a worker
+    # thread), so execute() already returned the ToolResult.
+    return asyncio.run(result) if inspect.isawaitable(result) else result
 
 
 @pytest.fixture

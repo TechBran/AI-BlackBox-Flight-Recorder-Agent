@@ -3,7 +3,7 @@ from Orchestrator.toolvault.context import ToolContext, ToolResult
 from Orchestrator.toolvault.meta_tool import execute as _meta_execute
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Run a toolvault meta-tool action (search/read/list).
 
     Replicates the param extraction + MetaToolResult→ToolResult conversion that

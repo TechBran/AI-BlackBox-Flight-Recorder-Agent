@@ -643,11 +643,12 @@ def test_elevenlabs_clone_refuses_outside_samples(box, monkeypatch):
     monkeypatch.setattr(voices, "clone_instant", lambda *a, **k: calls.append(a) or {"voice_id": "v"})
     ex = _load_executor("elevenlabs_clone_voice")
     good = str(box / "Portal" / "uploads" / "sessions" / "session-1" / "clip.wav")
-    res = asyncio.run(ex.execute({"name": "V", "confirm_consent": True,
-                                  "audio_paths": [good, str(box / "credentials" / ".env")]}, _ctx()))
+    # A plain def (the dispatcher runs it in a worker thread): called directly.
+    res = ex.execute({"name": "V", "confirm_consent": True,
+                      "audio_paths": [good, str(box / "credentials" / ".env")]}, _ctx())
     assert res.success is False and calls == []
-    res = asyncio.run(ex.execute({"name": "V", "confirm_consent": True,
-                                  "audio_paths": ["/ui/uploads/sessions/session-1/clip.wav"]}, _ctx()))
+    res = ex.execute({"name": "V", "confirm_consent": True,
+                      "audio_paths": ["/ui/uploads/sessions/session-1/clip.wav"]}, _ctx())
     assert res.success is True
     assert calls and list(calls[0][1]) == [str(_uploads(box) / "sessions" / "session-1" / "clip.wav")]
 

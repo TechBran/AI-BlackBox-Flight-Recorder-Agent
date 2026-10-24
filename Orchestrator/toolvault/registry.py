@@ -20,11 +20,15 @@ automatically when the max mtime across ``TOOLS_DIR/**/schema.json`` changes
 from the *current* global on every call, never captured at import time.
 """
 
+import asyncio
+import contextvars
 import copy
+import functools
 import importlib.util
 import inspect
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -65,12 +69,40 @@ _cache_key: Optional[tuple] = None
 # by :func:`get_executor` (one importlib exec per .py), keyed on the file's
 # (path, mtime). ``_executor_cache`` maps folder name -> (mtime, callable);
 # ``_executor_errors`` maps folder name -> [error strings] for executors that
-# FAILED to load (missing ``execute``, not async, wrong arity, or import error).
+# FAILED to load (missing ``execute``, a generator, wrong arity, or import error).
 # A legitimately-absent executor.py is NOT an error and is not recorded here.
 # Both are reset by :func:`invalidate_cache` and surface via :func:`load_errors`.
 # ---------------------------------------------------------------------------
 _executor_cache: dict = {}
 _executor_errors: dict = {}
+
+# A sync ``def execute`` does blocking I/O (provider HTTP, the ledger, Google
+# APIs), and every caller awaits executors on the server's one event loop, so
+# get_executor hands it back wrapped to run on this pool (audit O18-03). It
+# works like asyncio.to_thread -- the caller's contextvars go with the call --
+# but on its own threads: a hung tool the dispatcher stops waiting for keeps
+# its thread until its own I/O timeout, and must not hold the loop's default
+# executor (DNS lookups, every other to_thread) or keep a worker's asyncio.run
+# from returning while it shuts that executor down.
+_SYNC_EXECUTOR_WORKERS = 16
+_sync_pool = ThreadPoolExecutor(max_workers=_SYNC_EXECUTOR_WORKERS,
+                                thread_name_prefix="toolvault-exec")
+
+
+def _run_in_thread(fn: Callable) -> Callable:
+    """Wrap a sync executor as an awaitable that runs it on the tool pool.
+
+    The wrapper keeps ``fn``'s signature (``__wrapped__``) and is marked
+    ``runs_in_thread`` so the dispatcher can apply the threaded default timeout.
+    """
+    @functools.wraps(fn)
+    async def run_in_thread(params, ctx):
+        loop = asyncio.get_running_loop()
+        call = functools.partial(contextvars.copy_context().run, fn, params, ctx)
+        return await loop.run_in_executor(_sync_pool, call)
+
+    run_in_thread.runs_in_thread = True
+    return run_in_thread
 
 
 def _mtime_key() -> tuple:
@@ -222,13 +254,17 @@ def get_executor(name: str) -> Optional[Callable]:
     ``TOOLS_DIR/<canonical>/executor.py``.
 
     Returns:
-        The module's ``execute`` coroutine function, or ``None`` if:
+        An awaitable ``execute(params, ctx)``: the module's own ``async def``,
+        or, for a plain ``def execute`` (blocking work), that function wrapped
+        to run in a worker thread (:func:`_run_in_thread`), so every caller can
+        ``await`` it without stalling the event loop. ``None`` if:
 
         * the ``executor.py`` does not exist (a schema-only tool is valid — this
           is NOT an error and is not recorded), or
-        * the module fails to load / lacks a valid ``execute`` (must be an
-          ``async def`` taking exactly 2 positional params). Real failures ARE
-          recorded under the folder name in :func:`load_errors` and never raised.
+        * the module fails to load / lacks a valid ``execute`` (a ``def`` or
+          ``async def`` taking exactly 2 positional params, not a generator).
+          Real failures ARE recorded under the folder name in
+          :func:`load_errors` and never raised.
 
     The loaded module + callable are cached keyed on the file's mtime, so an
     on-disk edit (mtime bump) is picked up automatically; :func:`invalidate_cache`
@@ -289,6 +325,8 @@ def get_executor(name: str) -> Optional[Callable]:
         print(f"[toolvault.registry] WARNING: {canonical} executor: {err}")
         return None
 
+    if not inspect.iscoroutinefunction(execute):
+        execute = _run_in_thread(execute)
     _executor_cache[canonical] = (mtime, execute)
     return execute
 
@@ -296,15 +334,19 @@ def get_executor(name: str) -> Optional[Callable]:
 def _validate_execute(execute) -> Optional[str]:
     """Return an error string if ``execute`` is not a valid executor, else None.
 
-    Valid == an ``async def`` (``inspect.iscoroutinefunction``) taking exactly
-    two positional parameters (``params``, ``ctx``).
+    Valid == a function taking exactly two positional parameters (``params``,
+    ``ctx``): an ``async def`` that only awaits, or a plain ``def`` for blocking
+    work (run in a worker thread, see :func:`get_executor`). A generator of
+    either kind returns no ToolResult, so it is refused.
     """
     if execute is None:
         return "executor.py defines no 'execute' attribute"
     if not callable(execute):
         return "'execute' is not callable"
-    if not inspect.iscoroutinefunction(execute):
-        return "'execute' must be an async function (async def)"
+    if inspect.isgeneratorfunction(execute) or inspect.isasyncgenfunction(execute):
+        return "'execute' must return a ToolResult, not be a generator"
+    if not (inspect.iscoroutinefunction(execute) or inspect.isfunction(execute)):
+        return "'execute' must be a function (def or async def)"
     try:
         params = list(inspect.signature(execute).parameters.values())
     except (TypeError, ValueError) as e:

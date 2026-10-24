@@ -20,6 +20,7 @@ And that the tool executors return the "not connected" message when
 """
 
 import asyncio
+import inspect
 import json
 
 import pytest
@@ -339,8 +340,10 @@ def test_create_event_403_message_says_reconnect_and_calendar(monkeypatch):
 
 # --- tool executors --------------------------------------------------------
 
-def _run(coro):
-    return asyncio.run(coro)
+def _run(result):
+    # The Workspace executors are plain defs (the dispatcher runs them in a
+    # worker thread), so execute() already returned the ToolResult.
+    return asyncio.run(result) if inspect.isawaitable(result) else result
 
 
 def _load_executor(tool_name):

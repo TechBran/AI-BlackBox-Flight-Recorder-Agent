@@ -2,7 +2,7 @@
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """List media files in uploads folder."""
     media_type = params.get("media_type")
     limit = params.get("limit", 20)

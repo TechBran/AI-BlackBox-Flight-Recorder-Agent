@@ -9,7 +9,7 @@ Calls ``Orchestrator.elevenlabs.voices`` DIRECTLY (in-process, no HTTP).
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     voice_description = (params.get("voice_description") or "").strip()
     text = params.get("text")
     generated_voice_id = (params.get("generated_voice_id") or "").strip()

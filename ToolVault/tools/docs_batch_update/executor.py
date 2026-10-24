@@ -4,7 +4,7 @@ import json
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     from Orchestrator.gmail.service import workspace_connected
     from Orchestrator.google_workspace import docs
 

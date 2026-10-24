@@ -19,7 +19,7 @@ ToolVault/
   tools/
     send_sms/
       schema.json        # canonical tool definition (pure JSON) — REQUIRED
-      executor.py        # async def execute(params, ctx) -> ToolResult — optional*
+      executor.py        # [async] def execute(params, ctx) -> ToolResult — optional*
       dynamic.py         # OPTIONAL escape hatch (see "Dynamic fields")
     search_snapshots/
       schema.json
@@ -66,6 +66,7 @@ that used to live in the v1 manifest. Validated by
 | `returns` | string | Human-readable description of what the tool returns. |
 | `example` | string | A one-line usage example, surfaced in the system-prompt instructions. |
 | `notes` | string | Extra guidance, surfaced in the system-prompt instructions. |
+| `timeout_s` | number | How long the dispatcher waits for the executor, in seconds (`0 < timeout_s <= 3600`). Unset: 180 s for a plain `def execute`, no limit for an `async def`. See [Blocking work](#blocking-work-def-vs-async-def). |
 
 Within `parameters.properties`, any property may carry an `"x-source"` marker
 for [dynamic fields](#dynamic-fields-x-source). That marker is validated against
@@ -128,21 +129,48 @@ resolves it via `resolve_alias()`, and loads the `execute` function from the
 
 ## The `executor.py` contract
 
-`executor.py` defines exactly one entry point:
+`executor.py` defines exactly one entry point, either
 
 ```python
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:        # blocking work
+    ...
+```
+
+or
+
+```python
+async def execute(params: dict, ctx: ToolContext) -> ToolResult:  # awaits only
     ...
 ```
 
 The registry's loader (`registry._validate_execute`) enforces:
 
 - `execute` exists and is callable,
-- it is an **`async def`** (coroutine function), and
+- it is a **`def` or an `async def`** function, not a generator, and
 - it accepts **exactly two positional parameters** (`params`, `ctx`).
 
 A module that violates any of these is *excluded* and its error is surfaced via
 `registry.load_errors()` / the validate CLI — it is never raised at runtime.
+
+### Blocking work: `def` vs `async def`
+
+Every surface awaits executors on the server's one event loop: the chat
+streams, the realtime and live voice bridges, the phone bridge. Anything that
+blocks there (a `requests` call, a Google API call, a ledger read, `time.sleep`,
+`subprocess.run`, `open()`) freezes every other user, stream and voice call on
+the box until it returns. So pick by what the body does:
+
+- **`def execute`** when the work is blocking I/O, which is most tools. The
+  dispatcher (`registry.get_executor`) runs it in a worker thread with the
+  caller's contextvars, and stops waiting after `timeout_s` (default 180 s).
+  The thread cannot be killed, so a timed-out call may still finish; the model
+  is told so.
+- **`async def execute`** only when every slow step is awaited (aiohttp, an
+  async client, or `await asyncio.to_thread(blocking_fn, ...)` for a blocking
+  step). It runs on the loop and is bounded only by a `timeout_s` you declare.
+
+`Orchestrator/toolvault/tests/test_executors_off_loop.py` fails CI when an
+`async def` executor calls a known blocking library or box helper directly.
 
 ### `params`
 
@@ -214,8 +242,9 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 1. **Create the folder + schema.** `ToolVault/tools/<name>/schema.json` with the
    required fields. The folder name and `"name"` must match.
 2. **Add the executor** (unless it's a [schema-only tool](#schema-only-modules)):
-   `ToolVault/tools/<name>/executor.py` with the `async def execute(params, ctx)`
-   contract above.
+   `ToolVault/tools/<name>/executor.py` with the `def execute(params, ctx)` (or
+   `async def`, see [Blocking work](#blocking-work-def-vs-async-def)) contract
+   above.
 3. **Validate.**
    ```bash
    python -m Orchestrator.toolvault.validate

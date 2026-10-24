@@ -2,7 +2,7 @@
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Get the most recent snapshots for quick context catch-up."""
     count = min(params.get("count", 5), 10)  # Cap at 10
 

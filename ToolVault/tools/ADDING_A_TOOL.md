@@ -93,7 +93,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
 ```
 
 Rules:
-- `async def execute(params: dict, ctx: ToolContext) -> ToolResult` — **exactly 2 positional args**, must be `async`. The loader rejects anything else.
+- `execute(params: dict, ctx: ToolContext) -> ToolResult` — **exactly 2 positional args**, a `def` or an `async def` (not a generator). The loader rejects anything else.
+- **Blocking work means a plain `def`.** Executors are awaited on the server's one event loop, so a `requests`/Google API call, a ledger read, `time.sleep` or `subprocess.run` inside an `async def` freezes every chat stream and voice call on the box. Write `def execute` for that (the dispatcher runs it in a worker thread and stops waiting after the schema's `timeout_s`, default 180 s); keep `async def` for bodies that only `await` (aiohttp, or `await asyncio.to_thread(...)` around the one blocking step). `test_executors_off_loop.py` fails CI on an `async def` that blocks. roll_dice above is pure CPU, so either form works.
 - Import `ToolContext, ToolResult` from `Orchestrator.toolvault.context` (NOT from `blackbox_tools`).
 - `ctx.operator` and `ctx.base_url` are the only context fields. Use `ctx.operator` for operator-scoped work.
 - Pull everything else via normal imports inside the file (e.g. `from Orchestrator.fossils import hybrid_retrieve`). Add the imports your body uses at the top of the file.
@@ -113,7 +114,7 @@ Orchestrator/venv/bin/python -m Orchestrator.toolvault.validate
 curl -X POST http://localhost:9091/toolvault/reload
 ```
 
-`validate` checks: valid JSON; `name == folder`; required fields; `parameters` is an object schema; `groups` ⊆ known; `tier` ∈ {1,2,3}; every `x-source` references a registered resolver; and that `executor.py` (if present) exposes a valid `async execute(params, ctx)`.
+`validate` checks: valid JSON; `name == folder`; required fields; `parameters` is an object schema; `groups` ⊆ known; `tier` ∈ {1,2,3}; every `x-source` references a registered resolver; and that `executor.py` (if present) exposes a valid `execute(params, ctx)` (`def` or `async def`).
 
 > **Production note:** the BlackBox runs live from this working tree. ALWAYS `validate` (and, for executors, `import Orchestrator.app`) before relying on a change — a broken module is excluded at runtime and surfaced in `/toolvault/health`, but a Python syntax error in an `executor.py` only bites when that tool is called.
 

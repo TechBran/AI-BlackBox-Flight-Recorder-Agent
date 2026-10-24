@@ -45,7 +45,7 @@ def test_executor_result_is_body_only_with_attribution(monkeypatch):
     monkeypatch.setattr("Orchestrator.volume.read_text_safe", lambda p: "")
 
     ctx = types.SimpleNamespace(operator="Anna")  # caller-less -> cloud/box
-    res = asyncio.run(mod.execute({"query": "reranker seam"}, ctx))
+    res = mod.execute({"query": "reranker seam"}, ctx)  # sync: the dispatcher threads it
     assert res.success
     # attribution + session log delivered
     assert "[SNAP-20260704-7980" in res.result
@@ -77,7 +77,7 @@ def test_executor_on_device_is_body_only_and_within_budget(monkeypatch):
     monkeypatch.setattr("Orchestrator.volume.read_text_safe", lambda p: "")
 
     ctx = types.SimpleNamespace(operator="Anna", caller=ON_DEVICE_CALLER)
-    res = asyncio.run(mod.execute({"query": "q", "limit": 5}, ctx))
+    res = mod.execute({"query": "q", "limit": 5}, ctx)
     assert res.success
     assert "CROSS-FILE BEACON" not in res.result           # body-only
     budget = mod.LOCAL_RESULT_BUDGET_CHARS // 5

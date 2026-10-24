@@ -2,7 +2,7 @@
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
-async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Retrieve a specific snapshot by ID."""
     snap_id = params.get("snap_id", "")
 

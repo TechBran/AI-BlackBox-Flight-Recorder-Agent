@@ -10,6 +10,7 @@ This file provides:
   - execute_tool() convenience function
 """
 
+import asyncio
 import base64
 import json
 from typing import Dict, Any, List, Optional, Callable
@@ -53,7 +54,7 @@ _BOOL_TRUE_STRINGS = {"true", "1", "yes", "on"}
 _BOOL_FALSE_STRINGS = {"false", "0", "no", "off", ""}
 
 
-def _coerce_stringified_json_args(tool_name, tool_input):
+def _coerce_stringified_json_args(tool_name, tool_input, spec=None):
     """Tolerate models that emit array/object/boolean params as STRINGS.
 
     Two model quirks, fixed at one schema-driven chokepoint so every tool
@@ -75,11 +76,15 @@ def _coerce_stringified_json_args(tool_name, tool_input):
     Conservative: only str values whose declared type is array/object/boolean
     and which match the expected shape are touched; everything else is left
     as-is so normal validation still applies.
+
+    ``spec`` is the tool's schema when the caller already has it (the
+    dispatcher does); otherwise it is read from the registry.
     """
     if not isinstance(tool_input, dict):
         return tool_input
-    from Orchestrator.toolvault import registry
-    spec = registry.get_tool(tool_name)
+    if spec is None:
+        from Orchestrator.toolvault import registry
+        spec = registry.get_tool(tool_name)
     if not spec:
         return tool_input
     props = (spec.get("parameters") or {}).get("properties") or {}
@@ -165,6 +170,44 @@ def _stamp_session_operator(tool_name, tool_input, operator):
     return stamped, None
 
 
+# How long the dispatcher waits for a threaded (sync ``def execute``) tool whose
+# schema sets no ``timeout_s``. Above every provider timeout those executors use
+# (ElevenLabs cloning 120 s, web search 90 s, Google APIs 60 s), so it only
+# fires on a call that is truly hung.
+DEFAULT_SYNC_TIMEOUT_S = 180.0
+
+
+def _timeout_for(spec, ex):
+    """The ceiling for one call: the schema's ``timeout_s`` when it declares one
+    (sync or async), else DEFAULT_SYNC_TIMEOUT_S for a threaded executor, else
+    None (an async executor paces itself, e.g. control_phone polls for minutes)."""
+    declared = (spec or {}).get("timeout_s")
+    if isinstance(declared, (int, float)) and not isinstance(declared, bool) and declared > 0:
+        return float(declared)
+    return DEFAULT_SYNC_TIMEOUT_S if getattr(ex, "runs_in_thread", False) else None
+
+
+async def _run_with_timeout(call, timeout_s):
+    """Await ``call`` for at most ``timeout_s``; ``(True, result)`` when it
+    finished (its own exception re-raises), ``(False, None)`` when it did not.
+
+    The call runs as its own task so the dispatcher's ceiling is told apart from
+    a TimeoutError the tool itself raises. An unfinished call is cancelled: an
+    async executor stops at its next await; a threaded one cannot be stopped,
+    so its thread runs on until its own I/O returns (the result is dropped).
+    """
+    task = asyncio.ensure_future(call)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout_s)
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    if not done:
+        task.cancel()
+        return False, None
+    return True, task.result()
+
+
 class BlackBoxToolExecutor:
     """
     Executes BlackBox tools with unified interface for all AI backends.
@@ -201,6 +244,13 @@ class BlackBoxToolExecutor:
         now ships an ``executor.py`` module, so there is no legacy fallback: an
         unknown tool (no module executor) is a hard error.
 
+        Every surface awaits this on the server's one event loop (chat streams,
+        realtime/live voice, the phone bridge), so a blocking executor -- a sync
+        ``def execute`` -- runs in a worker thread with the caller's contextvars
+        (registry.get_executor wraps it) under a timeout: the schema's
+        ``timeout_s``, or DEFAULT_SYNC_TIMEOUT_S. An ``async def execute`` is
+        awaited as it is, bounded only by a ``timeout_s`` its schema declares.
+
         Every outcome (success, failure, unknown tool, crash) is also appended
         to the turn's tool-outcome log when one is open (tool_outcomes), so the
         owner of a whole turn — the /chat worker, and through it the scheduler —
@@ -224,9 +274,10 @@ class BlackBoxToolExecutor:
                 success=False,
                 result=f"Unknown tool: {tool_name}"
             )
+        spec = registry.get_tool(tool_name)
 
         # Models sometimes emit array/object params as JSON strings; parse back.
-        tool_input = _coerce_stringified_json_args(tool_name, tool_input)
+        tool_input = _coerce_stringified_json_args(tool_name, tool_input, spec=spec)
         # A model-supplied operator never overrides the session operator.
         tool_input, refused = _stamp_session_operator(tool_name, tool_input, self.operator)
         if refused is not None:
@@ -237,12 +288,26 @@ class BlackBoxToolExecutor:
                         f"again without the operator argument to run it as {self.operator!r}.")
             )
 
+        timeout_s = _timeout_for(spec, ex)
         try:
-            return await ex(
+            call = ex(
                 tool_input,
                 ToolContext(operator=self.operator, base_url=self.base_url,
                             origin_device_id=self.origin_device_id,
                             caller=self.caller),
+            )
+            if timeout_s is None:
+                return await call
+            finished, result = await _run_with_timeout(call, timeout_s)
+            if finished:
+                return result
+            print(f"[TOOL-TIMEOUT] {tool_name}: no result after {timeout_s:g}s; "
+                  f"stopped waiting (operator={self.operator})")
+            return ToolResult(
+                success=False,
+                result=(f"{tool_name} did not finish within {timeout_s:g} seconds, so "
+                        f"this turn stopped waiting for it. It may still complete in "
+                        f"the background: check its effect before running it again.")
             )
         except Exception as e:
             import traceback

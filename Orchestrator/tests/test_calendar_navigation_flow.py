@@ -50,8 +50,10 @@ def _schema(tool_name):
     return json.loads((_TOOLS / tool_name / "schema.json").read_text())
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _run(result):
+    # list_events is a plain def (the dispatcher runs it in a worker thread),
+    # so its execute() already returned the ToolResult; navigate_device is async.
+    return asyncio.run(result) if inspect.isawaitable(result) else result
 
 
 LIST_EVENTS = _load("list_events")

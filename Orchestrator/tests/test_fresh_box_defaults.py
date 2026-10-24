@@ -201,8 +201,9 @@ def test_gmail_executors_fall_back_to_the_session_then_the_roster(monkeypatch, t
     mod = importlib.import_module(f"ToolVault.tools.{tool}.executor")
     params = {"to": "a@example.invalid", "subject": "s", "body": "b",
               "message_id": "m1", "thread_id": "t1", "query": ""}
-    asyncio.run(mod.execute(dict(params), ToolContext(operator="Alice")))
-    asyncio.run(mod.execute(dict(params, operator=""), ToolContext(operator="")))
+    # Plain defs (the dispatcher runs them in a worker thread): called directly.
+    mod.execute(dict(params), ToolContext(operator="Alice"))
+    mod.execute(dict(params, operator=""), ToolContext(operator=""))
     assert seen == ["Alice", "Default"]
 
 

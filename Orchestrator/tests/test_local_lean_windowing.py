@@ -409,7 +409,7 @@ def _run_search_executor(caller, limit=5, snaps=None):
     with mock.patch.object(fossils, "hybrid_retrieve", _fake_hybrid), \
          mock.patch("Orchestrator.volume.read_text_safe", return_value=""):
         ctx = ToolContext(operator="alice", caller=caller)
-        result = asyncio.run(mod.execute({"query": "q", "limit": limit}, ctx))
+        result = mod.execute({"query": "q", "limit": limit}, ctx)  # sync executor
     return result, captured
 
 
