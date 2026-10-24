@@ -6,7 +6,10 @@ readline(): a stream-json event bigger than one pipe write came back in two
 halves, both failed json.loads and were dropped, so a long answer was spoken as
 silence. Every turn after the first also ran `claude --continue`, which resumes
 the most recent conversation in the shared working directory (possibly another
-operator's). Hermetic: the CLI is a Python stand-in under tmp_path.
+operator's). A call that resumes a conversation the CLI no longer has (an id
+saved for a call that hung up before any turn ran) is answered from a new
+conversation instead of staying silent for every turn. Hermetic: the CLI is a
+Python stand-in under tmp_path.
 """
 from __future__ import annotations
 
@@ -34,6 +37,18 @@ with open(os.path.join(d, "argv.jsonl"), "a") as fh:
     fh.write(json.dumps(argv) + "\n")
 answer = open(os.path.join(d, "answer.txt")).read()
 sid = next(argv[i + 1] for i, a in enumerate(argv) if a in ("--session-id", "--resume"))
+if os.path.exists(os.path.join(d, "strict")):
+    # claude 2.1.296 for `--resume <id>` it has no conversation for.
+    known_path = os.path.join(d, "known.txt")
+    known = open(known_path).read().split() if os.path.exists(known_path) else []
+    if "--resume" in argv and sid not in known:
+        sys.stderr.write("No conversation found with session ID: %s\n" % sid)
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                          "session_id": sid, "errors": ["No conversation found with session ID: " + sid]}),
+              flush=True)
+        sys.exit(1)
+    if "--session-id" in argv:
+        open(known_path, "a").write(sid + "\n")
 def emit_split(obj):
     line = json.dumps(obj) + "\n"
     half = len(line) // 2
@@ -91,3 +106,21 @@ def test_every_phone_turn_resumes_this_conversation_by_id(bridge):
     assert first[first.index("--session-id") + 1] == conversation
     assert "--continue" not in second
     assert second[second.index("--resume") + 1] == conversation
+
+
+def test_a_call_that_resumes_a_conversation_the_cli_lost_is_still_answered(bridge, monkeypatch):
+    (bridge.fake_dir / "strict").write_text("")
+    (bridge.fake_dir / "answer.txt").write_text("Here you go.")
+    persisted = {"Alice": {"claude_session_id": "never-used", "message_count": 0, "last_activity": ""}}
+    monkeypatch.setattr(state, "PERSISTED_AGENT_SESSIONS", persisted)
+    bridge._resume_from_disk = True
+    bridge._claude_session_id = "never-used"
+    answers = [asyncio.run(bridge._claude_respond(t)) for t in ("hello", "are you there")]
+    assert answers == ["Here you go.", "Here you go."]
+    failed, fresh, follow_up = _argvs(bridge.fake_dir)
+    assert failed[failed.index("--resume") + 1] == "never-used"
+    new_id = fresh[fresh.index("--session-id") + 1]
+    assert new_id != "never-used" and "(phone context)" in fresh[-1]
+    assert follow_up[follow_up.index("--resume") + 1] == new_id
+    assert bridge._claude_session_id == new_id
+    assert persisted["Alice"]["claude_session_id"] == new_id

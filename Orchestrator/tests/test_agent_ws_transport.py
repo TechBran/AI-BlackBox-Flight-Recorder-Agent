@@ -16,7 +16,16 @@ Pinned:
   * every attached socket gets the whole stream (one shared cursor used to
     split the lines between them);
   * a CLI that writes a lot to stderr still finishes, and a failed run says why;
-  * ending a running session kills the tools the CLI started, not just the CLI.
+  * ending a running session kills the tools the CLI started, not just the CLI;
+  * a resume whose conversation the CLI no longer has (an id saved before any
+    turn ran, a transcript Claude Code cleaned up) starts a new conversation in
+    the same turn instead of failing every turn after it;
+  * a client that reconnects without a position gets what was written while it
+    was away; a position from an earlier turn reaches the running one;
+  * after the reaper evicts a session, the same socket session resumes its
+    conversation and a new session of that operator starts fresh;
+  * input frames get the same operator check as prompts; a missing working
+    directory is reported as that, not as a missing CLI.
 """
 from __future__ import annotations
 
@@ -24,6 +33,7 @@ import json
 import os
 import sys
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import pytest
@@ -42,6 +52,8 @@ d = os.environ["FAKE_CLI_DIR"]
 argv = sys.argv[1:]
 with open(os.path.join(d, "argv.jsonl"), "a") as fh:
     fh.write(json.dumps(argv) + "\n")
+with open(os.path.join(d, "cwd.jsonl"), "a") as fh:
+    fh.write(json.dumps(os.getcwd()) + "\n")
 mode_path = os.path.join(d, "mode.json")
 mode = json.load(open(mode_path)) if os.path.exists(mode_path) else {}
 sid = None
@@ -53,6 +65,19 @@ if sid is None:
 def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+if mode.get("strict"):
+    # claude 2.1.296 for `--resume <id>` it has no conversation for (probed on
+    # the box): stderr line, a result error event carrying the id, exit 1.
+    known_path = os.path.join(d, "known.txt")
+    known = open(known_path).read().split() if os.path.exists(known_path) else []
+    if "--resume" in argv and sid not in known:
+        sys.stderr.write("No conversation found with session ID: %s\n" % sid)
+        emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "num_turns": 0,
+              "session_id": sid, "errors": ["No conversation found with session ID: " + sid]})
+        sys.exit(1)
+    if "--session-id" in argv:
+        with open(known_path, "a") as fh:
+            fh.write(sid + "\n")
 if mode.get("tool_child"):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     open(os.path.join(d, "child.pid"), "w").write(str(child.pid))
@@ -157,6 +182,7 @@ def claude_ws(cli_dir, monkeypatch):
     monkeypatch.setattr(ar, "save_operator_state", lambda: None)
     monkeypatch.setattr(ar, "notify_in_background", lambda *a, **k: None)
     monkeypatch.setattr(ar, "PERSISTED_AGENT_SESSIONS", {})
+    monkeypatch.setattr(ar, "_CLAUDE_REAPED", OrderedDict())
     before = set(ar.AGENT_SESSIONS)
     app = FastAPI()
     app.add_api_websocket_route("/ws/agent/{session_id}", ar.agent_websocket)
@@ -349,6 +375,205 @@ def test_end_session_kills_the_tools_a_running_cli_started(claude_ws, cli_dir):
                 pass
 
 
+# ── a conversation the CLI no longer has does not wedge the session ─────────────
+
+def _cwds(cli_dir: Path) -> list:
+    path = cli_dir / "cwd.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _flag(argv, flag):
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+def test_a_persisted_conversation_that_is_gone_starts_a_new_one_in_the_same_turn(
+        claude_ws, cli_dir, monkeypatch, tmp_path):
+    """The phone bridge saves an id before any turn runs, and Claude Code deletes
+    transcripts after cleanupPeriodDays: resuming such an id fails. That used to
+    fail every later turn too (each resumed the same id)."""
+    _mode(cli_dir, strict=True)
+    persisted = {"Alice": {"claude_session_id": "pruned-transcript-id", "message_count": 7,
+                           "working_directory": str(tmp_path / "deleted-since")},
+                 "Bob": {"claude_session_id": "bobs-own"}}
+    monkeypatch.setattr(ar, "PERSISTED_AGENT_SESSIONS", persisted)
+    with claude_ws.websocket_connect("/ws/agent/sess-gone") as ws:
+        _prompt(ws, "one")
+        first = _collect(ws)
+        ws.send_json({"type": "input", "text": "two"})
+        second = _collect(ws)
+        _prompt(ws, "three")
+        third = _collect(ws)
+    assert [f["type"] for f in first if f["type"] in ("error", "info")] == ["info"]
+    assert "no longer on this box" in next(f["data"] for f in first if f["type"] == "info")
+    for frames in (first, second, third):
+        assert _texts(frames) == ["line 0"], frames
+        assert not [f for f in frames if f["type"] == "error"]
+    resumed, fresh, follow_up, again = _argvs(cli_dir)
+    assert _flag(resumed, "--resume") == "pruned-transcript-id"
+    new_id = _flag(fresh, "--session-id")
+    assert new_id and new_id != "pruned-transcript-id"
+    assert fresh[-1] == "one"
+    assert _flag(follow_up, "--resume") == new_id and _flag(again, "--resume") == new_id
+    assert "--continue" not in sum(_argvs(cli_dir), [])
+    # The gone id is resumed by nobody any more; nobody else's entry is touched.
+    assert "Alice" not in persisted and persisted["Bob"] == {"claude_session_id": "bobs-own"}
+    # The deleted working directory fell back to the default one.
+    assert all(os.path.isdir(c) for c in _cwds(cli_dir))
+
+
+def test_a_follow_up_whose_conversation_vanished_also_recovers(claude_ws, cli_dir):
+    _mode(cli_dir, strict=True)
+    with claude_ws.websocket_connect("/ws/agent/sess-vanish") as ws:
+        _prompt(ws, "one")
+        _collect(ws)
+        (cli_dir / "known.txt").write_text("")       # the transcript was cleaned up
+        ws.send_json({"type": "input", "text": "two"})
+        frames = _collect(ws)
+    assert _texts(frames) == ["line 0"]
+    assert [f["type"] for f in frames if f["type"] in ("error", "info")] == ["info"]
+    first, failed, fresh = _argvs(cli_dir)
+    assert _flag(failed, "--resume") == _flag(first, "--session-id")
+    assert _flag(fresh, "--session-id") not in (None, _flag(first, "--session-id"))
+    assert fresh[-1] == "two"
+
+
+def test_a_resume_that_fails_for_another_reason_is_not_retried(claude_ws, cli_dir):
+    with claude_ws.websocket_connect("/ws/agent/sess-otherfail") as ws:
+        _prompt(ws, "one")
+        _collect(ws)
+        _mode(cli_dir, fail="Invalid API key - please run /login", lines=0)
+        ws.send_json({"type": "input", "text": "two"})
+        frames = _collect(ws)
+    errors = [f["data"] for f in frames if f["type"] == "error"]
+    assert errors and "please run /login" in errors[-1]
+    assert len(_argvs(cli_dir)) == 2
+
+
+# ── a reconnecting client gets what it missed ────────────────────────────────────
+
+def _wait_detached(session_id: str, timeout: float = 10.0) -> None:
+    """Until the server has let go of every socket of ``session_id``."""
+    deadline = time.time() + timeout
+    while ar.AGENT_SESSIONS[session_id].websocket_clients and time.time() < deadline:
+        time.sleep(0.02)
+    assert not ar.AGENT_SESSIONS[session_id].websocket_clients
+
+
+def test_a_reconnect_without_a_position_gets_the_lines_written_while_away(claude_ws, cli_dir):
+    """The Portal's attemptReconnect() sends {type: reconnect, operator} only."""
+    _mode(cli_dir, gate="go", lines=40, line_delay=0.05)
+    with claude_ws.websocket_connect("/ws/agent/sess-gap") as first:
+        _prompt(first, "stream")
+        assert first.receive_json()["type"] == "provenance"
+    _wait_detached("sess-gap")
+    (cli_dir / "go").write_text("")
+    time.sleep(0.8)               # lines are written while nobody is attached
+    with claude_ws.websocket_connect("/ws/agent/sess-gap") as second:
+        second.send_json({"type": "reconnect", "operator": "Alice"})
+        frames = _collect(second)
+    assert _texts(frames) == [f"line {i}" for i in range(40)]
+
+
+def test_a_reconnect_after_the_turn_ended_replays_its_tail(claude_ws, cli_dir):
+    _mode(cli_dir, gate="go", lines=5)
+    with claude_ws.websocket_connect("/ws/agent/sess-tail") as first:
+        _prompt(first, "stream")
+        assert first.receive_json()["type"] == "provenance"
+    _wait_detached("sess-tail")
+    (cli_dir / "go").write_text("")
+    deadline = time.time() + 15
+    while ar.AGENT_SESSIONS["sess-tail"].transport.running and time.time() < deadline:
+        time.sleep(0.05)
+    with claude_ws.websocket_connect("/ws/agent/sess-tail") as second:
+        second.send_json({"type": "reconnect", "operator": "Alice"})
+        frames = _collect(second)
+        # The replay is used once: the next reconnect has nothing to replay.
+        second.send_json({"type": "reconnect", "operator": "Alice"})
+        assert second.receive_json() == {"type": "completed", "data": None}
+    assert _texts(frames) == [f"line {i}" for i in range(5)]
+
+
+def test_a_reconnect_position_from_an_earlier_turn_reaches_the_running_turn(claude_ws, cli_dir):
+    with claude_ws.websocket_connect("/ws/agent/sess-turns") as ws:
+        _prompt(ws, "one")
+        _collect(ws)
+        _mode(cli_dir, gate="go", lines=3)
+        ws.send_json({"type": "input", "text": "two"})
+        with claude_ws.websocket_connect("/ws/agent/sess-turns") as late:
+            late.send_json({"type": "reconnect", "operator": "Alice", "since_seq": 0})
+            assert late.receive_json()["type"] == "info"
+            skipped = late.receive_json()
+            assert skipped["type"] == "info" and "earlier turn" in skipped["data"]
+            (cli_dir / "go").write_text("")
+            frames = _collect(late)
+        _collect(ws)
+    assert _texts(frames) == ["line 0", "line 1", "line 2"]
+
+
+# ── the reaper keeps a conversation for its own socket session ───────────────────
+
+def test_after_eviction_the_same_session_resumes_and_a_new_one_starts_fresh(claude_ws, cli_dir, monkeypatch):
+    persisted = {}
+    monkeypatch.setattr(ar, "PERSISTED_AGENT_SESSIONS", persisted)
+    with claude_ws.websocket_connect("/ws/agent/sess-evict") as ws:
+        _prompt(ws, "one")
+        _collect(ws)
+    conversation = _flag(_argvs(cli_dir)[0], "--session-id")
+    assert ar.AGENT_SESSION_REAPER.sweep(now=time.monotonic() + 31 * 60) == ["sess-evict"]
+    # Kept for a restart (the state file's last conversation of the operator).
+    assert persisted["Alice"]["claude_session_id"] == conversation
+    with claude_ws.websocket_connect("/ws/agent/sess-brand-new") as ws:
+        _prompt(ws, "a new chat")
+        frames = _collect(ws)
+    with claude_ws.websocket_connect("/ws/agent/sess-evict") as ws:
+        _prompt(ws, "back again")
+        _collect(ws)
+    _, brand_new, back = _argvs(cli_dir)
+    assert _flag(brand_new, "--session-id") not in (None, conversation)
+    assert "--resume" not in brand_new
+    assert _flag(back, "--resume") == conversation
+    assert _texts(frames) == ["line 0"]
+
+
+def test_after_a_restart_a_new_session_resumes_the_persisted_conversation(claude_ws, cli_dir, monkeypatch):
+    """Nothing was reaped in this run: the persisted entry is the operator's last
+    conversation from before the restart, resumed as it always was."""
+    monkeypatch.setattr(ar, "PERSISTED_AGENT_SESSIONS",
+                        {"Alice": {"claude_session_id": "from-before-restart", "message_count": 3}})
+    with claude_ws.websocket_connect("/ws/agent/sess-after-restart") as ws:
+        _prompt(ws, "hello again")
+        _collect(ws)
+    (argv,) = _argvs(cli_dir)
+    assert _flag(argv, "--resume") == "from-before-restart"
+
+
+# ── input frames get the operator check; a missing directory says so ────────────
+
+def test_an_input_frame_cannot_drive_another_operators_session(claude_ws, cli_dir):
+    with claude_ws.websocket_connect("/ws/agent/sess-shared") as alice:
+        _prompt(alice, "hi")
+        _collect(alice)
+    with claude_ws.websocket_connect("/ws/agent/sess-shared") as bob:
+        _prompt(bob, "hi", operator="Bob")
+        assert [f["type"] for f in _collect(bob)] == ["error", "completed"]
+        bob.send_json({"type": "input", "text": "now as input", "operator": "Bob"})
+        refused = _collect(bob)
+    assert [f["type"] for f in refused] == ["error", "completed"]
+    assert "another operator" in refused[0]["data"]
+    assert len(_argvs(cli_dir)) == 1
+
+
+def test_a_missing_working_directory_is_not_reported_as_a_missing_cli(claude_ws, cli_dir, tmp_path):
+    missing = str(tmp_path / "no-such-folder")
+    with claude_ws.websocket_connect("/ws/agent/sess-nodir") as ws:
+        _prompt(ws, "x", working_dir=missing)
+        frames = _collect(ws)
+    errors = [f["data"] for f in frames if f["type"] == "error"]
+    assert errors and "working directory" in errors[0] and missing in errors[0]
+    assert "Install" not in errors[0]
+    assert _argvs(cli_dir) == []
+
+
 # ── Gemini: resume by the captured session id, never "latest" ────────────────────
 
 @pytest.fixture
@@ -357,6 +582,7 @@ def gemini_ws(cli_dir, monkeypatch):
     monkeypatch.setattr(gr, "get_gemini_path", lambda: fake)
     monkeypatch.setattr(gr, "retrieve_for_agent", lambda **k: ("", {"recent": []}))
     monkeypatch.setattr(gr, "resolve_operator", lambda raw, prefix: raw)
+    monkeypatch.setattr(gr, "_GEMINI_RESUME_IDS", OrderedDict())
     before = set(gr.GEMINI_AGENT_SESSIONS)
     app = FastAPI()
     app.add_api_websocket_route("/ws/gemini-agent/{session_id}", gr.gemini_agent_websocket)
@@ -408,3 +634,59 @@ def test_gemini_end_session_as_first_frame(gemini_ws):
     with gemini_ws.websocket_connect("/ws/gemini-agent/g-end") as ws:
         ws.send_json({"type": "end_session"})
         assert ws.receive_json()["type"] == "session_ended"
+
+
+def test_gemini_follow_up_after_eviction_resumes_the_conversation(gemini_ws, cli_dir):
+    """The Portal's Gemini handler reopens a closed socket and sends a plain
+    prompt (no resume_session): after the reaper evicted the idle session, that
+    follow-up still continues the same conversation."""
+    with gemini_ws.websocket_connect("/ws/gemini-agent/g-evict") as ws:
+        _gemini_prompt(ws, "first", "Alice")
+        sid = _contents(_collect(ws))[0].split()[-1]
+    assert gr.GEMINI_SESSION_REAPER.sweep(now=time.monotonic() + 31 * 60) == ["g-evict"]
+    with gemini_ws.websocket_connect("/ws/gemini-agent/g-evict") as ws:
+        ws.send_json({"type": "prompt", "text": "second", "operator": "Alice", "yolo_mode": True})
+        second = _collect(ws)
+    assert _argvs(cli_dir)[-1][_argvs(cli_dir)[-1].index("--resume") + 1] == sid
+    assert _contents(second) == [f"reply in {sid}"]
+    assert not [f for f in second if f["type"] == "info" and "not known" in f["data"]]
+
+
+def test_gemini_resume_of_a_session_the_cli_lost_starts_a_new_one(gemini_ws, cli_dir):
+    with gemini_ws.websocket_connect("/ws/gemini-agent/g-lost") as ws:
+        _gemini_prompt(ws, "first", "Alice")
+        first_sid = _contents(_collect(ws))[0].split()[-1]
+        (cli_dir / "sessions.txt").write_text("")      # the CLI no longer has it
+        ws.send_json({"type": "input", "text": "second"})
+        second = _collect(ws)
+        ws.send_json({"type": "input", "text": "third"})
+        third = _collect(ws)
+    new_sid = _contents(second)[0].split()[-1]
+    assert new_sid != first_sid
+    assert [f["type"] for f in second if f["type"] in ("info", "error")][-1:] == ["info"]
+    assert not [f for f in second if f["type"] == "error"]
+    assert _contents(third) == [f"reply in {new_sid}"]
+
+
+def test_gemini_input_frame_cannot_drive_another_operators_session(gemini_ws, cli_dir):
+    with gemini_ws.websocket_connect("/ws/gemini-agent/g-shared") as alice:
+        _gemini_prompt(alice, "hi", "Alice")
+        _collect(alice)
+    with gemini_ws.websocket_connect("/ws/gemini-agent/g-shared") as bob:
+        bob.send_json({"type": "input", "text": "as Bob", "operator": "Bob"})
+        refused = _collect(bob)
+    assert [f["type"] for f in refused] == ["error", "completed"]
+    assert len(_argvs(cli_dir)) == 1
+
+
+def test_gemini_session_ended_after_eviction_is_not_resumed(gemini_ws, cli_dir):
+    with gemini_ws.websocket_connect("/ws/gemini-agent/g-ended") as ws:
+        _gemini_prompt(ws, "first", "Alice")
+        _collect(ws)
+    gr.GEMINI_SESSION_REAPER.sweep(now=time.monotonic() + 31 * 60)
+    with gemini_ws.websocket_connect("/ws/gemini-agent/g-ended") as ws:
+        ws.send_json({"type": "end_session", "operator": "Alice"})
+        assert ws.receive_json()["type"] == "session_ended"
+        _gemini_prompt(ws, "fresh start", "Alice")
+        _collect(ws)
+    assert "--resume" not in _argvs(cli_dir)[-1]

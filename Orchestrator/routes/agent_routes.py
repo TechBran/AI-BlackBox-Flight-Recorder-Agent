@@ -15,10 +15,11 @@ import re
 import socket
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from urllib.parse import urlsplit
 
 # External library imports
@@ -34,11 +35,17 @@ from Orchestrator.checkpoint import app
 from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
 from Orchestrator.cli_agent.transport import (
     CliAgentTransport,
+    Cursor,
+    FailureHook,
     SessionReaper,
     SpawnSpec,
     cancel_task,
+    refuse_turn,
     relay,
+    requested_seq,
     safe_ws_send as _safe_ws_send,
+    skipped_notice,
+    spawn_error_text,
 )
 from Orchestrator.startup import GenIn, ImageData, VideoExtensionIn
 from Orchestrator.utils.paths import blackbox_root
@@ -405,7 +412,10 @@ async def test_agent_endpoint():
 # later one with --resume. --continue picked "the most recent conversation in
 # this directory", and every operator shares the default directory, so a
 # follow-up could resume another operator's transcript (O06-frontier-agent-13).
-# The id is the one chosen here until the CLI reports another one.
+# The id is the one chosen here until the CLI reports another one. A resume
+# whose conversation the CLI no longer has (never written, or its transcript
+# cleaned up) starts a new conversation in the same turn instead of failing
+# every turn after it.
 # =============================================================================
 
 # A prompt that arrives while the previous turn still runs waits this long for
@@ -414,11 +424,97 @@ PREVIOUS_TURN_WAIT_SECONDS = 5.0
 OTHER_OPERATOR_MESSAGE = (
     "This agent session belongs to another operator. Start a new session to talk "
     "to the agent as yourself.")
+LOST_CONVERSATION_MESSAGE = (
+    "The earlier conversation for this session is no longer on this box (Claude Code "
+    "may have cleaned up its transcript), so this starts a new conversation with "
+    "your memory context.")
+# What claude says (stderr, and its result event's errors) for --resume <id>
+# when it has no such conversation; it then exits 1.
+_CLAUDE_MISSING_CONVERSATION = "No conversation found with session ID"
+
+# The conversation of each (operator, socket session id) the reaper evicted, so
+# the same socket session resumes it and a NEW session id of that operator
+# starts fresh (resuming PERSISTED_AGENT_SESSIONS stays the after-restart and
+# phone behaviour). Bounded; lost on restart.
+_CLAUDE_REAPED: "OrderedDict[Tuple[str, str], dict]" = OrderedDict()
+_CLAUDE_REAPED_MAX = 512
+
+
+def claude_conversation_missing(diagnostics: str) -> bool:
+    """Whether a failed `claude --resume <id>` run failed because the CLI has no
+    such conversation (``diagnostics``: its stderr tail and last stdout lines)."""
+    return _CLAUDE_MISSING_CONVERSATION in (diagnostics or "")
+
+
+def _existing_dir(path: Optional[str], fallback: str) -> str:
+    """``path`` when it is still a directory, else ``fallback``: a resumed
+    session keeps its working directory, which may have been deleted since
+    (claude finds the conversation from any directory)."""
+    if path and os.path.isdir(path):
+        return path
+    if path:
+        print(f"[AGENT] Working directory {path} is gone; using {fallback}")
+    return fallback
+
+
+def _forget_claude_conversation(operator: str, claude_session_id: str) -> None:
+    """Nothing resumes a conversation the CLI no longer has."""
+    if not claude_session_id:
+        return
+    persisted = PERSISTED_AGENT_SESSIONS.get(operator)
+    if persisted and persisted.get("claude_session_id") == claude_session_id:
+        del PERSISTED_AGENT_SESSIONS[operator]
+    for key, record in list(_CLAUDE_REAPED.items()):
+        if record.get("claude_session_id") == claude_session_id:
+            del _CLAUDE_REAPED[key]
+
+
+def _reaped_elsewhere(operator: str, claude_session_id: str) -> bool:
+    """True when the reaper took this conversation from another socket session of
+    ``operator`` in this run: it is that session's, not a new session's."""
+    return any(op == operator and record.get("claude_session_id") == claude_session_id
+               for (op, _), record in _CLAUDE_REAPED.items())
+
+
+def _new_conversation_if_missing(session: AgentSession, prompt_text: str, *, cwd: str,
+                                 model: str, permission_mode: str,
+                                 fossil_text: Optional[str] = None) -> FailureHook:
+    """on_failure for a resumed turn: when the CLI has no such conversation, the
+    turn starts a new one (new id, memory context) and later turns continue that
+    one. Never --continue (see build_claude_argv)."""
+    async def start_new(returncode: int, diagnostics: str):
+        if not claude_conversation_missing(diagnostics):
+            return None
+        lost = session.claude_session_id or ""
+        print(f"[AGENT] Conversation {lost[:8]}... is gone (rc={returncode}); starting a new one "
+              f"for session {session.session_id[:8]}")
+        _forget_claude_conversation(session.operator, lost)
+        session.claude_session_id = str(uuid.uuid4())
+        session.message_count = 1
+        save_operator_state()
+        context = fossil_text
+        if context is None:
+            context, _ = retrieve_for_agent(
+                user_text=prompt_text,
+                operator=resolve_operator(session.operator, "[AGENT]"),
+                log_prefix="[AGENT]",
+            )
+        spec = claude_spawn_spec(
+            cwd, compose_with_fossils(context, prompt_text),
+            claude_session_id=session.claude_session_id,
+            resume_session=False,
+            model=model,
+            permission_mode=permission_mode,
+        )
+        return spec, LOST_CONVERSATION_MESSAGE
+    return start_new
 
 
 def _note_claude_line(session: AgentSession, line: str) -> None:
     """Every stdout line, client attached or not: stamp activity and follow the
-    conversation id the CLI reports (system/init and result events carry it)."""
+    conversation id the CLI reports (system/init and result events carry it; a
+    failed run's error result names the id it could not resume, so it is not
+    followed)."""
     session.last_activity = now_utc_iso()
     if '"session_id"' not in line:
         return
@@ -426,7 +522,8 @@ def _note_claude_line(session: AgentSession, line: str) -> None:
         event = json.loads(line)
     except ValueError:
         return
-    if not isinstance(event, dict) or event.get("type") not in ("system", "result"):
+    if (not isinstance(event, dict) or event.get("type") not in ("system", "result")
+            or event.get("is_error")):
         return
     reported = event.get("session_id")
     if isinstance(reported, str) and reported and reported != session.claude_session_id:
@@ -614,29 +711,20 @@ def _frame_operator(data: dict) -> str:
     return raw.strip() if isinstance(raw, str) else ""
 
 
-def _since_seq(data: dict, transport: CliAgentTransport) -> int:
-    """Where a reconnecting client resumes: its ``since_seq`` (the ``next_seq``
-    /agent/session handed it), else the live tail (it already shows the rest)."""
-    raw = data.get("since_seq")
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-        return raw
-    return transport.buffer.next_seq
-
-
-async def _start_turn(send, session, spec: SpawnSpec, cli_label: str) -> Optional[int]:
-    """Start one turn; when it cannot start, tell the client (an error, then the
-    `completed` that closes its pending reply) and return None."""
+async def _start_turn(send, session, spec: SpawnSpec, cli_label: str,
+                      on_failure: Optional[FailureHook] = None) -> Optional[int]:
+    """Start one turn; when it cannot start, tell the client (refuse_turn) and
+    return None."""
     try:
-        return await session.transport.start(spec)
+        return await session.transport.start(spec, on_failure=on_failure)
     except RuntimeError:
         # Another client's prompt started a turn while this one waited.
         message = "The agent is still working on another message in this session. Try again when it finishes."
     except OSError as e:
-        print(f"[AGENT] Could not start {spec.argv[0]}: {e}")
-        message = (f"Could not start the {cli_label} CLI ({os.path.basename(spec.argv[0])}): "
-                   f"{e.strerror or e}. Install it or sign in to it on this box, then try again.")
-    await send({"type": "error", "data": message})
-    await send({"type": "completed", "data": None})
+        print(f"[AGENT] Could not start {spec.argv[0]} in {spec.cwd}: {e}")
+        message = spawn_error_text(e, spec, cli_label,
+                                   "Install it or sign in to it on this box, then try again.")
+    await refuse_turn(send, message)
     return None
 
 
@@ -651,6 +739,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
     print(f"[AGENT] WebSocket accepted for session: {session_id}")
 
     relay_task: Optional[asyncio.Task] = None
+    # The transport this socket's relay reads and how far it got: kept on the
+    # transport when the socket closes, so this client's reconnect replays what
+    # it missed (resume_position).
+    relay_cursor: Optional[Tuple[CliAgentTransport, Cursor]] = None
     # The operator this socket acts for: named by a frame, else its session's.
     # Never assumed: end_session used to read it unbound (O06-frontier-agent-04).
     bound_operator = ""
@@ -660,13 +752,15 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
 
     def follow(session: AgentSession, since_seq: int) -> None:
         """This socket's own reader of the session (replaces any earlier one)."""
-        nonlocal relay_task
+        nonlocal relay_task, relay_cursor
         cancel_task(relay_task)
         with agent_lock:
             if websocket not in session.websocket_clients:
                 session.websocket_clients.append(websocket)
+        cursor = Cursor(since_seq)
+        relay_cursor = (session.transport, cursor)
         relay_task = asyncio.create_task(
-            relay(session.transport, send, claude_event_frames, since_seq),
+            relay(session.transport, send, claude_event_frames, since_seq, cursor),
             name=f"agent-relay-{session_id[:8]}")
 
     try:
@@ -683,7 +777,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 operator = (_frame_operator(data) or (session.operator if session else "")
                             or bound_operator or current_default())
                 if session is not None and session.operator and operator != session.operator:
-                    await send({"type": "error", "data": OTHER_OPERATOR_MESSAGE})
+                    await refuse_turn(send, OTHER_OPERATOR_MESSAGE)
                     continue
                 bound_operator = operator
                 # Default to blackbox_poc folder instead of home directory
@@ -712,24 +806,35 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     await session.transport.finish_or_stop(PREVIOUS_TURN_WAIT_SECONDS)
 
                 # Which conversation this turn belongs to, always by id:
-                #   this session's own (a follow-up), else the operator's persisted
-                #   one from a previous server run (resume from disk), else a new one.
+                #   this session's own (a follow-up); else the one the reaper took
+                #   from this same socket session; else the operator's persisted
+                #   one (a previous server run, or the phone), unless the reaper
+                #   took it from another session in this run; else a new one.
                 persisted = PERSISTED_AGENT_SESSIONS.get(operator) or {}
+                reaped = _CLAUDE_REAPED.get((operator, session_id)) if session is None else None
+                record = {}
                 if session is not None and session.message_count > 0 and session.claude_session_id:
                     turn = "continue"
                     claude_session_id = session.claude_session_id
-                    cwd = session.working_directory or working_dir
-                elif session is None and persisted.get("claude_session_id"):
+                    cwd = _existing_dir(session.working_directory, working_dir)
+                elif reaped:
                     turn = "resume"
-                    claude_session_id = persisted["claude_session_id"]
-                    cwd = persisted.get("working_directory") or working_dir
-                    print(f"[AGENT] Found persisted session for {operator}, will resume: {claude_session_id[:8]}...")
+                    record = reaped
+                elif (session is None and persisted.get("claude_session_id")
+                      and not _reaped_elsewhere(operator, persisted["claude_session_id"])):
+                    turn = "resume"
+                    record = persisted
                 else:
                     turn = "new"
                     claude_session_id = str(uuid.uuid4())
                     cwd = working_dir
+                if turn == "resume":
+                    claude_session_id = record["claude_session_id"]
+                    cwd = _existing_dir(record.get("working_directory"), working_dir)
+                    print(f"[AGENT] Found {'reaped' if record is reaped else 'persisted'} session for "
+                          f"{operator}, will resume: {claude_session_id[:8]}...")
 
-                print(f"[AGENT] Session mode: {turn}, message_count: {session.message_count if session else persisted.get('message_count', 0)}, model: {model}, permission_mode: {permission_mode}")
+                print(f"[AGENT] Session mode: {turn}, message_count: {session.message_count if session else record.get('message_count', 0)}, model: {model}, permission_mode: {permission_mode}")
 
                 # Plan Task 4: only prepend fossil context to brand-new sessions.
                 # A resumed conversation already carries its prior turns;
@@ -748,7 +853,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         created_at=now_utc_iso(),
                         last_activity=now_utc_iso(),
                         claude_session_id=claude_session_id,
-                        message_count=persisted.get("message_count", 0) if turn == "resume" else 0,
+                        message_count=record.get("message_count", 0) if turn == "resume" else 0,
                         model=model,
                         permission_mode=permission_mode,
                         provenance=provenance,
@@ -756,6 +861,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if session.transport is None:
                     session.transport = _new_claude_transport(session)
                 session.claude_session_id = claude_session_id
+                session.working_directory = cwd
 
                 spec = claude_spawn_spec(
                     cwd, effective_prompt,
@@ -764,7 +870,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     model=model,
                     permission_mode=permission_mode,
                 )
-                start_seq = await _start_turn(send, session, spec, "Claude Code")
+                on_failure = None if turn == "new" else _new_conversation_if_missing(
+                    session, prompt_text, cwd=cwd, model=model,
+                    permission_mode=permission_mode, fossil_text=fossil_text)
+                start_seq = await _start_turn(send, session, spec, "Claude Code", on_failure)
                 if start_seq is None:
                     continue
 
@@ -803,7 +912,13 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if session is None or session.transport is None:
                     await send({"type": "error", "data": "No active session - start a new conversation"})
                     continue
-                bound_operator = bound_operator or session.operator
+                # The same operator check as prompt and reconnect: a socket refused
+                # as another operator must not drive the session with input frames.
+                operator = _frame_operator(data) or bound_operator or session.operator
+                if session.operator and operator != session.operator:
+                    await refuse_turn(send, OTHER_OPERATOR_MESSAGE)
+                    continue
+                bound_operator = operator
 
                 await session.transport.finish_or_stop(PREVIOUS_TURN_WAIT_SECONDS)
 
@@ -812,15 +927,25 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if "permission_mode" in data or "skip_permissions" in data:
                     session.permission_mode = resolve_permission_mode(data)
 
+                cwd = session.working_directory = _existing_dir(
+                    session.working_directory, str(blackbox_root()))
+                if not session.claude_session_id:
+                    session.claude_session_id = str(uuid.uuid4())
+                    resume = False
+                else:
+                    resume = True
                 spec = claude_spawn_spec(
-                    session.working_directory or str(blackbox_root()),
+                    cwd,
                     input_text,
-                    claude_session_id=session.claude_session_id or None,
-                    resume_session=bool(session.claude_session_id),
+                    claude_session_id=session.claude_session_id,
+                    resume_session=resume,
                     model=session.model,  # Use the session's model
                     permission_mode=session.permission_mode  # Use the session's permission mode
                 )
-                start_seq = await _start_turn(send, session, spec, "Claude Code")
+                on_failure = _new_conversation_if_missing(
+                    session, input_text, cwd=cwd, model=session.model,
+                    permission_mode=session.permission_mode) if resume else None
+                start_seq = await _start_turn(send, session, spec, "Claude Code", on_failure)
                 if start_seq is None:
                     continue
 
@@ -847,8 +972,11 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     session.message_count = 0
                 cancel_task(relay_task)
                 relay_task = None
+                relay_cursor = None
                 # Clear the owner's persisted session so they start fresh. Nobody
                 # else's: with no owner known, nothing is cleared.
+                if owner:
+                    _CLAUDE_REAPED.pop((owner, session_id), None)
                 if owner and owner in PERSISTED_AGENT_SESSIONS:
                     del PERSISTED_AGENT_SESSIONS[owner]
                     print(f"[AGENT] Cleared persisted session for operator: {owner}")
@@ -879,14 +1007,19 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     continue
                 bound_operator = operator
 
-                if session.transport is not None and session.transport.running:
-                    since = _since_seq(data, session.transport)
+                # Its own position, else where its reader stopped when its socket
+                # closed (the Portal's reconnect names none), else the live tail.
+                since, skipped = (session.transport.resume_position(requested_seq(data))
+                                  if session.transport is not None else (None, 0))
+                if since is not None:
                     await send({
                         "type": "info",
                         "data": f"Reconnected to session (msg #{session.message_count}). Resuming stream..."
                     })
+                    if skipped:
+                        await send(skipped_notice(skipped))
                     follow(session, since)
-                    print("[AGENT] Started streaming relay for reconnected client")
+                    print(f"[AGENT] Started streaming relay for reconnected client at seq {since}")
                 else:
                     # Process completed, send notification
                     with agent_lock:
@@ -908,8 +1041,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
         traceback.print_exc()
     finally:
         # This socket's reader goes with it; the turn and every other client's
-        # reader carry on.
+        # reader carry on. Where it stopped is kept for this client's reconnect.
         cancel_task(relay_task)
+        if relay_cursor is not None:
+            relay_cursor[0].detach(relay_cursor[1].seq)
         with agent_lock:
             session = AGENT_SESSIONS.get(session_id)
             if session and websocket in session.websocket_clients:
@@ -918,25 +1053,33 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
 
 
 def _remember_reaped_claude_session(session: AgentSession) -> None:
-    """A reaped session's conversation stays resumable: its id goes where the
-    operator's next prompt looks (PERSISTED_AGENT_SESSIONS, the resume-from-disk
-    path), unless a newer session of theirs is live or already recorded there."""
+    """A reaped session's conversation stays resumable by the same socket session
+    id (_CLAUDE_REAPED). It is also recorded where the state file keeps the
+    operator's last conversation (PERSISTED_AGENT_SESSIONS, the after-restart
+    path), unless a newer session of theirs is live or already recorded there;
+    in this run a new session id still starts fresh (_reaped_elsewhere)."""
     operator = session.operator
     if not operator or not session.claude_session_id:
         return
-    with agent_lock:
-        if any(s.operator == operator for s in AGENT_SESSIONS.values()):
-            return
-    current = PERSISTED_AGENT_SESSIONS.get(operator) or {}
-    if (current.get("last_activity") or "") > (session.last_activity or ""):
-        return
-    PERSISTED_AGENT_SESSIONS[operator] = {
+    record = {
         "claude_session_id": session.claude_session_id,
         "message_count": session.message_count,
         "model": session.model,
         "working_directory": session.working_directory,
         "last_activity": session.last_activity,
     }
+    key = (operator, session.session_id)
+    _CLAUDE_REAPED[key] = record
+    _CLAUDE_REAPED.move_to_end(key)
+    while len(_CLAUDE_REAPED) > _CLAUDE_REAPED_MAX:
+        _CLAUDE_REAPED.popitem(last=False)
+    with agent_lock:
+        if any(s.operator == operator for s in AGENT_SESSIONS.values()):
+            return
+    current = PERSISTED_AGENT_SESSIONS.get(operator) or {}
+    if (current.get("last_activity") or "") > (session.last_activity or ""):
+        return
+    PERSISTED_AGENT_SESSIONS[operator] = dict(record)
     save_operator_state()
 
 
@@ -957,7 +1100,8 @@ async def get_agent_session_for_operator(operator: str):
 
     ``output_buffer`` is the session's bounded tail of stdout lines and
     ``next_seq`` the position right after it: a client that sends it as
-    ``since_seq`` in its reconnect frame misses nothing in between.
+    ``since_seq`` in its reconnect frame misses nothing of the turn in between
+    (if another turn has started since, it gets that turn and a notice).
     """
     with agent_lock:
         for session_id, session in AGENT_SESSIONS.items():

@@ -2963,8 +2963,9 @@ The user's speech is being transcribed and sent to you. Respond conversationally
         pipe writes, so a long answer came back empty), drains stderr, and stops
         the CLI's whole process tree on the timeout.
         """
+        import uuid
         from Orchestrator.cli_agent.transport import OUT, CliAgentTransport
-        from Orchestrator.routes.agent_routes import claude_spawn_spec
+        from Orchestrator.routes.agent_routes import claude_conversation_missing, claude_spawn_spec
         from Orchestrator.state import PERSISTED_AGENT_SESSIONS, save_operator_state
         from Orchestrator.volume import now_utc_iso
 
@@ -3004,9 +3005,63 @@ The user's speech is being transcribed and sent to you. Respond conversationally
                 model="sonnet",  # Use sonnet for faster responses
                 permission_mode="yolo"
             )
-            transport = CliAgentTransport(f"phone-{self.phone_session.session_id}")
+
+            async def new_conversation_if_missing(returncode: int, diagnostics: str):
+                """A resume whose conversation the CLI does not have (an id saved
+                for a call that hung up before any turn ran, or a transcript Claude
+                Code cleaned up) starts a new conversation in this same turn, so
+                the caller is answered and later turns continue the new one."""
+                if not claude_conversation_missing(diagnostics):
+                    return None
+                lost = self._claude_session_id or ""
+                self._claude_session_id = str(uuid.uuid4())
+                self._claude_message_count = 1
+                self._resume_from_disk = False
+                print(f"[PHONE-BRIDGE] Conversation {lost[:8]}... is gone (rc={returncode}); "
+                      f"starting {self._claude_session_id[:8]}...")
+                if operator in PERSISTED_AGENT_SESSIONS:
+                    PERSISTED_AGENT_SESSIONS[operator]["claude_session_id"] = self._claude_session_id
+                    PERSISTED_AGENT_SESSIONS[operator]["message_count"] = 1
+                    save_operator_state()
+                fresh_prompt = (prompt if is_first_message_this_call
+                                else f"{self._claude_phone_context}\n\nUser says: {user_text}")
+                fresh = claude_spawn_spec(
+                    working_dir,
+                    fresh_prompt,
+                    claude_session_id=self._claude_session_id,
+                    resume_session=False,
+                    model="sonnet",
+                    permission_mode="yolo"
+                )
+                return fresh, "The earlier conversation is gone; starting a new one."
+
+            def note_session_id(line: str) -> None:
+                """Follow the conversation id the CLI reports (init/result events).
+                The transport's on_line hook: it runs as each line is read, so
+                before new_conversation_if_missing, and an error result (the
+                failed attempt's) changes nothing."""
+                if '"session_id"' not in line:
+                    return
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    return
+                if (not isinstance(event, dict) or event.get("type") not in ("system", "result")
+                        or event.get("is_error")):
+                    return
+                reported = event.get("session_id")
+                if isinstance(reported, str) and reported and reported != self._claude_session_id:
+                    print(f"[PHONE-BRIDGE] Claude reports conversation {reported[:8]}...")
+                    self._claude_session_id = reported
+                    if operator in PERSISTED_AGENT_SESSIONS:
+                        PERSISTED_AGENT_SESSIONS[operator]["claude_session_id"] = reported
+                        save_operator_state()
+
+            transport = CliAgentTransport(f"phone-{self.phone_session.session_id}",
+                                          on_line=note_session_id)
             self._claude_process = transport
-            start_seq = await transport.start(spec)
+            start_seq = await transport.start(
+                spec, on_failure=None if is_new_session else new_conversation_if_missing)
 
             # After resume, switch to continuation mode for subsequent messages
             if is_resume:
@@ -3024,16 +3079,6 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             start_time = loop.time()
             timeout = 120  # 2 minute max
             state = {"text": "", "tools": 0, "last_log": start_time}
-
-            def note_session_id(event: dict) -> None:
-                """Follow the conversation id the CLI reports (init/result events)."""
-                reported = event.get("session_id")
-                if isinstance(reported, str) and reported and reported != self._claude_session_id:
-                    print(f"[PHONE-BRIDGE] Claude reports conversation {reported[:8]}...")
-                    self._claude_session_id = reported
-                    if operator in PERSISTED_AGENT_SESSIONS:
-                        PERSISTED_AGENT_SESSIONS[operator]["claude_session_id"] = reported
-                        save_operator_state()
 
             async def collect() -> None:
                 async for kind, payload in transport.follow(start_seq):
@@ -3054,10 +3099,7 @@ The user's speech is being transcribed and sent to you. Respond conversationally
                         continue
                     event_type = event.get("type", "")
 
-                    if event_type == "system":
-                        note_session_id(event)
-
-                    elif event_type == "assistant":
+                    if event_type == "assistant":
                         # Collect text content; tool uses are content blocks here
                         message = event.get("message", {})
                         content = message.get("content", []) if isinstance(message, dict) else []
@@ -3077,8 +3119,11 @@ The user's speech is being transcribed and sent to you. Respond conversationally
                             state["text"] += delta.get("text", "")
 
                     elif event_type == "result":
+                        if event.get("is_error"):
+                            # A failed attempt: its fallback (a new conversation)
+                            # or the turn's end follows.
+                            continue
                         # Final result
-                        note_session_id(event)
                         result = event.get("result", "")
                         if result and not state["text"] and isinstance(result, str):
                             state["text"] = result

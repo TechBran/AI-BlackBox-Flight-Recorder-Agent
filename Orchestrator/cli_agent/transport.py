@@ -21,10 +21,14 @@ CliAgentTransport runs one CLI turn at a time as an asyncio subprocess in its
 own process group. A pump task reads stdout as whole lines into a bounded,
 sequence-numbered OutputBuffer and drains stderr; when the CLI exits it
 appends an ERROR entry (non-zero exit: the stderr tail) and an EXIT entry. A
+turn may name a fallback for a known failure (on_failure: a resume whose
+conversation is gone becomes a new conversation): the transport runs it in the
+same turn, after an INFO entry, so the client's reply still arrives. A
 consumer never shares a cursor: follow(since_seq) yields entries from its own
 position, and relay() forwards them to one socket, so cancelling that socket's
-task on disconnect touches nobody else. stop() kills the whole process tree.
-SessionReaper evicts finished sessions nobody watches.
+task on disconnect touches nobody else; the position it stopped at is kept
+(detach) for that client's reconnect. stop() kills the CLI's process group and
+its live descendants. SessionReaper evicts finished sessions nobody watches.
 
 Everything here runs on the event loop that started the turn; nothing blocks it.
 """
@@ -46,6 +50,7 @@ from Orchestrator.secret_redaction import redact
 OUT = "out"          # one stdout line (str)
 ERROR = "error"      # why a turn failed (str): the stderr tail of a non-zero exit
 EXIT = "exit"        # the turn ended (int return code); always the turn's last entry
+INFO = "info"        # a notice for the client (str), e.g. why the turn started over
 DROPPED = "dropped"  # yielded by follow() only: entries evicted before a slow reader got them
 
 # Bounds. A session keeps at most this much output for late readers and
@@ -61,6 +66,9 @@ _READ_CHUNK = 64 * 1024
 STDERR_TAIL_LINES = 40
 STDERR_TAIL_CHARS = 2000
 STDERR_LOG_LINES = 20
+# The last stdout lines of each attempt, kept for on_failure (a CLI may report
+# why it failed in a result event as well as on stderr).
+STDOUT_TAIL_LINES = 5
 
 # After the CLI exits its output is already in the pipe. A tool it backgrounded
 # can inherit the pipe and hold it open forever, so the readers get this long
@@ -81,6 +89,31 @@ class SpawnSpec:
     argv: List[str]
     cwd: str
     env: Dict[str, str] = field(repr=False)
+
+
+# on_failure(returncode, diagnostics) for start(): the spec to run in the failed
+# attempt's place and the notice the client gets, or None to let the turn fail.
+# ``diagnostics`` is the attempt's stderr tail and last stdout lines.
+FailureHook = Callable[[int, str], Awaitable[Optional[Tuple[SpawnSpec, str]]]]
+
+
+def spawn_error_text(error: OSError, spec: SpawnSpec, cli_label: str, hint: str) -> str:
+    """What to tell the client when a turn cannot start. A missing working
+    directory raises the same FileNotFoundError as a missing CLI, so it is told
+    apart instead of sending the user off to reinstall a CLI that is there."""
+    if getattr(error, "filename", None) == spec.cwd or not os.path.isdir(spec.cwd):
+        return (f"The working directory {spec.cwd} does not exist on this box. "
+                f"Choose another folder and try again.")
+    name = os.path.basename(spec.argv[0]) if spec.argv else "CLI"
+    return f"Could not start the {cli_label} CLI ({name}): {error.strerror or error}. {hint}"
+
+
+class Cursor:
+    """A reader's position (a seq), updated by follow() as entries are consumed."""
+    __slots__ = ("seq",)
+
+    def __init__(self, seq: int):
+        self.seq = seq
 
 
 class OutputBuffer:
@@ -251,11 +284,14 @@ def _escaped_descendants(pid: int, pgid: int) -> list:
 
 
 async def kill_process_tree(proc, grace: float = KILL_GRACE_SECONDS, label: str = "") -> None:
-    """SIGTERM a CLI's whole process tree, wait up to ``grace``, then SIGKILL.
+    """SIGTERM a CLI's process group and live descendants, wait up to
+    ``grace``, then SIGKILL.
 
     The CLI leads its own process group (start_new_session), so the group
     signal reaches every tool it ran; a descendant that left the group is
-    signalled by pid. Never blocks the event loop.
+    signalled by pid. A tool that daemonized (forked, called setsid and let its
+    parent exit) is in neither and survives: only a cgroup per turn would catch
+    it. Never blocks the event loop.
     """
     pgid = proc.pid
     if not _group_is_ours(proc):
@@ -300,13 +336,18 @@ class CliAgentTransport:
         self.on_exit = on_exit
         self.returncode: Optional[int] = None
         self.last_activity = time.monotonic()
+        # The seq of the current (or last) turn's first entry.
+        self.turn_start_seq = 0
         self._proc = None
         self._pump: Optional[asyncio.Task] = None
         self._turn_open = False
         self._starting = False
         self._stopping = False
         self._stderr_tail: deque = deque(maxlen=STDERR_TAIL_LINES)
+        self._stdout_tail: deque = deque(maxlen=STDOUT_TAIL_LINES)
         self._cli_name = ""
+        # Where the reader of the client that disconnected last stopped.
+        self._detached_seq: Optional[int] = None
 
     @property
     def running(self) -> bool:
@@ -323,42 +364,59 @@ class CliAgentTransport:
     def stdout_lines(self) -> List[str]:
         return self.buffer.lines()
 
-    async def start(self, spec: SpawnSpec) -> int:
+    def _begin_attempt(self, spec: SpawnSpec) -> None:
+        self.returncode = None
+        self._stderr_tail.clear()
+        self._stdout_tail.clear()
+        self._cli_name = os.path.basename(spec.argv[0]) if spec.argv else "CLI"
+
+    async def _spawn(self, spec: SpawnSpec):
+        # stdin is never a pipe: print mode reads nothing from it, and an open,
+        # never-closed pipe makes a CLI wait for piped input.
+        proc = await asyncio.create_subprocess_exec(
+            *spec.argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=spec.cwd,
+            env=spec.env,
+            start_new_session=True,
+        )
+        print(f"[CLI-TRANSPORT] {self.label}: started {self._cli_name} "
+              f"PID={proc.pid} in {spec.cwd}")
+        return proc
+
+    async def start(self, spec: SpawnSpec, *, on_failure: Optional[FailureHook] = None) -> int:
         """Spawn one turn. Returns the seq of its first entry (where its reader
-        starts). Raises OSError when the CLI cannot be started (not installed)."""
+        starts). Raises OSError when the CLI cannot be started (not installed,
+        or the working directory is gone: see spawn_error_text).
+
+        ``on_failure`` is asked once, when the attempt exits non-zero, for a
+        spec to run in its place (see FailureHook); its notice becomes an INFO
+        entry and the turn goes on with the new process.
+        """
         if self._turn_open or self._starting:
             raise RuntimeError(f"{self.label}: a turn is already running")
         start_seq = self.buffer.next_seq
         self._stopping = False
-        self.returncode = None
-        self._stderr_tail.clear()
-        self._cli_name = os.path.basename(spec.argv[0]) if spec.argv else "CLI"
-        # stdin is never a pipe: print mode reads nothing from it, and an open,
-        # never-closed pipe makes a CLI wait for piped input.
+        self._begin_attempt(spec)
         self._starting = True
         try:
-            self._proc = await asyncio.create_subprocess_exec(
-                *spec.argv,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=spec.cwd,
-                env=spec.env,
-                start_new_session=True,
-            )
+            self._proc = await self._spawn(spec)
         finally:
             self._starting = False
+        self.turn_start_seq = start_seq
         self._turn_open = True
         self.last_activity = time.monotonic()
-        self._pump = asyncio.create_task(self._run(self._proc), name=f"cli-pump-{self.label}")
-        print(f"[CLI-TRANSPORT] {self.label}: started {self._cli_name} "
-              f"PID={self._proc.pid} in {spec.cwd}")
+        self._pump = asyncio.create_task(self._run(self._proc, on_failure),
+                                         name=f"cli-pump-{self.label}")
         return start_seq
 
     async def _read_stdout(self, stream) -> None:
         async for line in iter_lines(stream, label=self.label):
             self.last_activity = time.monotonic()
             self.buffer.append(OUT, line)
+            self._stdout_tail.append(line)
             if self.on_line is not None:
                 try:
                     self.on_line(line)
@@ -381,14 +439,17 @@ class CliAgentTransport:
             tail = "..." + tail[-STDERR_TAIL_CHARS:]
         return redact(f"{name} {how}" + (f": {tail}" if tail else "."))
 
-    async def _run(self, proc) -> None:
-        rc: Optional[int] = None
+    def _diagnostics(self) -> str:
+        return "\n".join(list(self._stderr_tail) + list(self._stdout_tail))
+
+    async def _pump_one(self, proc) -> None:
+        """Read one process's output until it is done; returns once it is reaped."""
         readers = [asyncio.create_task(self._read_stdout(proc.stdout)),
                    asyncio.create_task(self._drain_stderr(proc.stderr))]
         try:
-            # The turn ends when the CLI does: both pipes at EOF, or the CLI gone
-            # and its pipes given PIPE_DRAIN_GRACE_SECONDS to empty (a tool it
-            # backgrounded may hold them open indefinitely).
+            # The attempt ends when the CLI does: both pipes at EOF, or the CLI
+            # gone and its pipes given PIPE_DRAIN_GRACE_SECONDS to empty (a tool
+            # it backgrounded may hold them open indefinitely).
             pending = set(readers)
             while pending and proc.returncode is None:
                 _, pending = await asyncio.wait(pending, timeout=0.1)
@@ -407,7 +468,6 @@ class CliAgentTransport:
                 if task.done() and not task.cancelled() and task.exception() is not None:
                     print(f"[CLI-TRANSPORT] {self.label}: reader failed: {task.exception()}")
             await wait_reaped(proc)
-            rc = proc.returncode
         except asyncio.CancelledError:
             # The loop is shutting down under a running turn: do not leave the
             # CLI and its tools behind.
@@ -416,10 +476,45 @@ class CliAgentTransport:
             if proc.returncode is None:
                 _signal_group(proc.pid, signal.SIGKILL)
             raise
+
+    async def _replacement(self, on_failure: Optional[FailureHook]) -> Optional[Tuple[SpawnSpec, str]]:
+        """What on_failure says to run in place of the attempt that just failed."""
+        rc = self._proc.returncode if self._proc is not None else None
+        if on_failure is None or rc in (0, None) or self._stopping:
+            return None
+        try:
+            return await on_failure(rc, self._diagnostics())
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — the turn then fails as it is
+            print(f"[CLI-TRANSPORT] {self.label}: on_failure hook failed: {e}")
+            return None
+
+    async def _run(self, proc, on_failure: Optional[FailureHook] = None) -> None:
+        failure: Optional[str] = None
+        try:
+            await self._pump_one(proc)
+            replacement = await self._replacement(on_failure)
+            if replacement is not None and not self._stopping:
+                spec, notice = replacement
+                print(f"[CLI-TRANSPORT] {self.label}: attempt failed (rc={proc.returncode}); {notice}")
+                self.buffer.append(INFO, notice)
+                self._begin_attempt(spec)
+                try:
+                    proc = self._proc = await self._spawn(spec)
+                except OSError as e:
+                    failure = redact(spawn_error_text(e, spec, self._cli_name, "").strip())
+                else:
+                    if self._stopping:
+                        # stop() ran while this process was being started.
+                        _signal_group(proc.pid, signal.SIGKILL)
+                    await self._pump_one(proc)
         finally:
-            self.returncode = proc.returncode if rc is None else rc
-            if self.returncode not in (0, None) and not self._stopping:
-                self.buffer.append(ERROR, self._failure_text(self.returncode))
+            self.returncode = proc.returncode
+            if failure is None and self.returncode not in (0, None) and not self._stopping:
+                failure = self._failure_text(self.returncode)
+            if failure is not None:
+                self.buffer.append(ERROR, failure)
             # running flips with the EXIT append, in the same step, so a caller
             # that sees running=True can always wait for this EXIT entry.
             self._turn_open = False
@@ -451,14 +546,17 @@ class CliAgentTransport:
         return True
 
     async def stop(self, grace: float = KILL_GRACE_SECONDS) -> None:
-        """End the running turn: kill the CLI's whole process tree, then wait
-        for its EXIT entry. A finished turn is left alone (a server the agent
-        started on purpose keeps running)."""
+        """End the running turn: kill the CLI's process tree (kill_process_tree),
+        then wait for its EXIT entry. A finished turn is left alone (a server
+        the agent started on purpose keeps running)."""
         proc = self._proc
         if proc is None or not self._turn_open:
             return
         self._stopping = True
         await kill_process_tree(proc, grace=grace, label=self.label)
+        if self._proc is not proc and self._turn_open:
+            # The turn moved on to its on_failure replacement meanwhile.
+            await kill_process_tree(self._proc, grace=grace, label=self.label)
         await self.wait_finished(timeout=PIPE_DRAIN_GRACE_SECONDS + 1.0)
 
     async def finish_or_stop(self, wait: float) -> None:
@@ -467,23 +565,69 @@ class CliAgentTransport:
             print(f"[CLI-TRANSPORT] {self.label}: previous turn still running after {wait:.0f}s, stopping it")
             await self.stop()
 
-    async def follow(self, since_seq: int) -> AsyncIterator[Tuple[str, Any]]:
-        """Yield entries from ``since_seq`` on, through the next EXIT entry.
+    def follow(self, since_seq: int, cursor: Optional[Cursor] = None) -> AsyncIterator[Tuple[str, Any]]:
+        """Yield entries from ``since_seq`` on, through the end of a turn.
 
-        A reader that fell behind the buffer's bounds gets one (DROPPED, n)
-        first. Every caller has its own cursor; nobody else's reads move it.
+        It stops at the EXIT of the turn running when follow() is called (when
+        none is, at the first EXIT after ``since_seq``); the EXIT of an earlier
+        turn on the way is passed over, so a cursor from before that turn still
+        reaches the one running. A reader that fell behind the buffer's bounds
+        gets one (DROPPED, n) first. Every caller has its own cursor; nobody
+        else's reads move it. ``cursor.seq``, when given, is kept at the first
+        entry not yet consumed.
         """
-        cursor = since_seq
+        floor = self.turn_start_seq if self.running else 0
+        return self._follow(since_seq, floor, cursor)
+
+    async def _follow(self, since_seq: int, floor: int,
+                      cursor: Optional[Cursor]) -> AsyncIterator[Tuple[str, Any]]:
+        position = since_seq
         while True:
-            entries, cursor, dropped = self.buffer.read_from(cursor)
+            entries, end, dropped = self.buffer.read_from(position)
+            first = end - len(entries)
             if dropped:
+                if cursor is not None:
+                    cursor.seq = first
                 yield DROPPED, dropped
-            for kind, payload in entries:
+            for offset, (kind, payload) in enumerate(entries):
+                seq = first + offset
+                if kind == EXIT and seq < floor:
+                    if cursor is not None:
+                        cursor.seq = seq + 1
+                    continue
                 yield kind, payload
+                if cursor is not None:
+                    cursor.seq = seq + 1
                 if kind == EXIT:
                     return
+            position = end
             if not entries:
-                await self.buffer.wait_beyond(cursor)
+                await self.buffer.wait_beyond(position)
+
+    def detach(self, seq: int) -> None:
+        """A client's socket closed with its reader at ``seq``: the next
+        reconnect that names no position resumes there (resume_position)."""
+        self._detached_seq = seq if self._detached_seq is None else min(self._detached_seq, seq)
+
+    def resume_position(self, since_seq: Optional[int]) -> Tuple[Optional[int], int]:
+        """``(start, skipped)`` for a reconnecting client's reader.
+
+        ``since_seq`` is the client's own position; None takes the one a
+        disconnected reader stopped at (detach, used once), else the live tail.
+        A position in an earlier turn while another runs starts at the running
+        turn instead, and ``skipped`` counts the entries passed over. ``start``
+        is None when nothing is running and nothing was missed.
+        """
+        if since_seq is None:
+            since_seq, self._detached_seq = self._detached_seq, None
+        if since_seq is None:
+            return (self.buffer.next_seq if self.running else None), 0
+        since_seq = min(max(since_seq, 0), self.buffer.next_seq)
+        if self.running:
+            if since_seq < self.turn_start_seq:
+                return self.turn_start_seq, self.turn_start_seq - since_seq
+            return since_seq, 0
+        return (since_seq if since_seq < self.buffer.next_seq else None), 0
 
 
 Send = Callable[[dict], Awaitable[bool]]
@@ -506,22 +650,55 @@ def dropped_notice(count: int) -> dict:
             "data": f"{count} earlier output lines were dropped (this session keeps a bounded tail)."}
 
 
-async def relay(transport: CliAgentTransport, send: Send, translate: Translate,
-                since_seq: int) -> None:
+def requested_seq(frame: dict) -> Optional[int]:
+    """A reconnect frame's ``since_seq`` (the ``next_seq`` the agent's session
+    endpoint handed the client), or None: resume_position then resumes where
+    this client's reader stopped when its socket closed, else at the live tail."""
+    raw = frame.get("since_seq")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return None
+
+
+async def refuse_turn(send: Send, message: str) -> None:
+    """Refuse a prompt: the error, then the ``completed`` that closes the
+    client's pending reply."""
+    await send({"type": "error", "data": message})
+    await send({"type": "completed", "data": None})
+
+
+def skipped_notice(count: int) -> dict:
+    return {"type": "info",
+            "data": f"{count} output lines from an earlier turn were skipped; "
+                    f"this shows the turn that is running now."}
+
+
+def relay(transport: CliAgentTransport, send: Send, translate: Translate,
+          since_seq: int, cursor: Optional[Cursor] = None) -> Awaitable[None]:
     """Forward one turn to one client, from that client's own cursor.
 
     stdout lines go through ``translate`` (provider event -> client frames);
-    a failed turn's ERROR entry becomes an ``error`` frame and its EXIT a
-    ``completed`` frame. Returns at EXIT, or as soon as ``send`` reports the
-    client gone. Run it as that client's task and cancel it on disconnect.
+    an INFO entry becomes an ``info`` frame, a failed turn's ERROR entry an
+    ``error`` frame and its EXIT a ``completed`` frame. Returns at EXIT, or as
+    soon as ``send`` reports the client gone. Run it as that client's task and
+    cancel it on disconnect; ``cursor`` then says where it stopped (detach).
+    Which turn's EXIT ends it is fixed when relay() is called (follow()), not
+    when its task first runs.
     """
-    async for kind, payload in transport.follow(since_seq):
+    return _relay(transport, transport.follow(since_seq, cursor), send, translate)
+
+
+async def _relay(transport: CliAgentTransport, entries: AsyncIterator[Tuple[str, Any]],
+                 send: Send, translate: Translate) -> None:
+    async for kind, payload in entries:
         if kind == OUT:
             try:
                 frames = translate(payload)
             except Exception as e:  # noqa: BLE001 — one odd event never ends the stream
                 print(f"[CLI-TRANSPORT] {transport.label}: could not translate a line: {e}")
                 frames = []
+        elif kind == INFO:
+            frames = [{"type": "info", "data": payload}]
         elif kind == ERROR:
             frames = [{"type": "error", "data": payload}]
         elif kind == DROPPED:

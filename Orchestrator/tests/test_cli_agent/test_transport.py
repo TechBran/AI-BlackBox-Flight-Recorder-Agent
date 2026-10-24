@@ -15,7 +15,12 @@ Pinned:
     SIGTERM or left the process group; a tool holding the CLI's stdout open
     does not keep a finished turn "running";
   * the child gets exactly the spec's env;
-  * the reaper evicts only finished, unattached, idle sessions.
+  * the reaper evicts only finished, unattached, idle sessions;
+  * on_failure replaces a failed attempt within the same turn (once), after an
+    INFO entry, and stop() still ends a turn that is switching attempts;
+  * a reader whose cursor is in an earlier turn reaches the running one; a
+    disconnected reader's position is kept for its reconnect (resume_position);
+  * a missing working directory is not reported as a missing CLI.
 """
 from __future__ import annotations
 
@@ -378,3 +383,175 @@ def test_a_second_start_while_a_turn_runs_is_refused(tmp_path):
         return [k for k, _ in t.buffer.read_from(0)[0]]
 
     assert asyncio.run(run()) == [tr.EXIT]
+
+
+
+# ── on_failure: a known failure is replaced within the same turn ─────────────────
+
+def _failing(marker: str) -> str:
+    return f"import sys\nprint('{{\"type\": \"result\", \"is_error\": true}}', flush=True)\n" \
+           f"sys.stderr.write('{marker}\\n'); sys.exit(1)\n"
+
+
+def test_on_failure_runs_the_replacement_in_the_same_turn(tmp_path):
+    asked = []
+
+    async def on_failure(returncode, diagnostics):
+        asked.append((returncode, diagnostics))
+        return _spec("print('second attempt')", tmp_path), "starting over"
+
+    async def run():
+        t = tr.CliAgentTransport("retry")
+        start = await t.start(_spec(_failing("conversation gone"), tmp_path), on_failure=on_failure)
+        return [e async for e in t.follow(start)], t
+
+    entries, t = asyncio.run(run())
+    assert (asked[0][0], "conversation gone" in asked[0][1], '"is_error"' in asked[0][1]) == (1, True, True)
+    kinds = [k for k, _ in entries]
+    assert tr.ERROR not in kinds
+    assert entries[-3:] == [(tr.INFO, "starting over"), (tr.OUT, "second attempt"), (tr.EXIT, 0)]
+    assert t.returncode == 0 and not t.running
+
+
+def test_on_failure_is_asked_once_and_never_after_success(tmp_path):
+    asked = []
+
+    async def on_failure(returncode, diagnostics):
+        asked.append(returncode)
+        return _spec(_failing("still failing"), tmp_path), "again"
+
+    async def run():
+        t = tr.CliAgentTransport("once")
+        ok = await _run_turn_with(t, _spec("print('fine')", tmp_path), on_failure)
+        bad = await _run_turn_with(t, _spec(_failing("first"), tmp_path), on_failure)
+        return ok, bad
+
+    ok, bad = asyncio.run(run())
+    assert ok[-1] == (tr.EXIT, 0)
+    assert asked == [1]                     # not for the success, once for the failure
+    assert bad[-1] == (tr.EXIT, 1)
+    assert [p for k, p in bad if k == tr.ERROR] and "still failing" in [p for k, p in bad if k == tr.ERROR][0]
+
+
+async def _run_turn_with(transport, spec, on_failure):
+    start = await transport.start(spec, on_failure=on_failure)
+    return [e async for e in transport.follow(start)]
+
+
+def test_on_failure_that_declines_leaves_the_failure_as_it_was(tmp_path):
+    async def on_failure(returncode, diagnostics):
+        return None
+
+    entries = asyncio.run(_run_turn_with(tr.CliAgentTransport("decline"),
+                                         _spec(_failing("bad key"), tmp_path), on_failure))
+    errors = [p for k, p in entries if k == tr.ERROR]
+    assert errors and "bad key" in errors[0] and entries[-1] == (tr.EXIT, 1)
+    assert tr.INFO not in [k for k, _ in entries]
+
+
+def test_stop_while_a_replacement_runs_ends_the_turn(tmp_path):
+    async def on_failure(returncode, diagnostics):
+        return _spec("import time; print('replacement', flush=True); time.sleep(60)", tmp_path), "over"
+
+    async def run():
+        t = tr.CliAgentTransport("stop-retry")
+        start = await t.start(_spec(_failing("gone"), tmp_path), on_failure=on_failure)
+        async for kind, payload in t.follow(start):
+            if payload == "replacement":
+                break
+        pid = t.pid
+        await t.stop(grace=1.0)
+        return t, pid
+
+    t, pid = asyncio.run(run())
+    assert not t.running and t.buffer.read_from(0)[0][-1][0] == tr.EXIT
+    assert _wait_dead(pid)
+
+
+def test_a_replacement_that_cannot_start_fails_the_turn(tmp_path):
+    async def on_failure(returncode, diagnostics):
+        return tr.SpawnSpec(argv=[str(tmp_path / "no-such-cli")], cwd=str(tmp_path), env={}), "over"
+
+    entries = asyncio.run(_run_turn_with(tr.CliAgentTransport("nostart"),
+                                         _spec(_failing("gone"), tmp_path), on_failure))
+    errors = [p for k, p in entries if k == tr.ERROR]
+    assert errors and "no-such-cli" in errors[0]
+    assert entries[-1][0] == tr.EXIT and entries[-1][1] != 0
+
+
+# ── readers across turns, and reconnect positions ────────────────────────────────
+
+def test_a_cursor_from_an_earlier_turn_reaches_the_running_turn(tmp_path):
+    async def run():
+        t = tr.CliAgentTransport("turns")
+        first = await _run_turn(t, _spec("print('turn one')", tmp_path))
+        stale = 0                                    # a position inside turn one
+        await t.start(_spec("import time; time.sleep(0.3); print('turn two')", tmp_path))
+        got = [e async for e in t.follow(stale)]
+        return first, got
+
+    first, got = asyncio.run(run())
+    assert first[-1] == (tr.EXIT, 0)
+    # Turn one's EXIT is passed over; the reader ends with turn two's.
+    assert [e for e in got if e[0] == tr.EXIT] == [(tr.EXIT, 0)]
+    assert (tr.OUT, "turn two") in got
+
+
+def test_resume_position_replays_a_detached_readers_gap_once():
+    t = tr.CliAgentTransport("pos")
+    t.buffer.append(tr.OUT, "a")
+    t.buffer.append(tr.EXIT, 0)
+    assert t.resume_position(None) == (None, 0)          # nothing running, nothing missed
+    t.detach(0)
+    assert t.resume_position(None) == (0, 0)             # replay the finished turn's tail
+    assert t.resume_position(None) == (None, 0)          # used once
+    t._turn_open = True
+    t.turn_start_seq = t.buffer.next_seq
+    t.buffer.append(tr.OUT, "b")
+    assert t.resume_position(None) == (3, 0)             # live tail
+    t.detach(2)
+    t.detach(3)
+    assert t.resume_position(None) == (2, 0)             # the earliest detached position
+    assert t.resume_position(0) == (2, 2)                # an earlier turn: skipped, counted
+    assert t.resume_position(99) == (3, 0)               # clamped to the tail
+
+
+def test_relay_keeps_the_cursor_at_the_first_unsent_entry(tmp_path):
+    async def run():
+        t = tr.CliAgentTransport("cursor")
+        await _run_turn(t, _spec("print('one'); print('two'); print('three')", tmp_path))
+        sent = []
+
+        async def send(frame):
+            if frame.get("data") == "two":
+                return False                     # the socket went away here
+            sent.append(frame)
+            return True
+
+        cursor = tr.Cursor(0)
+        await tr.relay(t, send, lambda line: [{"type": "content", "data": line}], 0, cursor)
+        return sent, cursor.seq
+
+    sent, seq = asyncio.run(run())
+    assert [f["data"] for f in sent] == ["one"]
+    assert seq == 1                              # "two" (seq 1) is replayed on reconnect
+
+
+def test_a_missing_working_directory_is_not_called_a_missing_cli(tmp_path):
+    missing = str(tmp_path / "gone")
+    spec = tr.SpawnSpec(argv=[sys.executable, "-c", "pass"], cwd=missing, env={})
+
+    async def run():
+        try:
+            await tr.CliAgentTransport("nodir").start(spec)
+        except OSError as e:
+            return e
+        raise AssertionError("start() did not fail")
+
+    error = asyncio.run(run())
+    text = tr.spawn_error_text(error, spec, "Claude Code", "Install it.")
+    assert missing in text and "working directory" in text and "Install" not in text
+    no_cli = tr.SpawnSpec(argv=[str(tmp_path / "claude")], cwd=str(tmp_path), env={})
+    text = tr.spawn_error_text(FileNotFoundError(2, "No such file or directory", no_cli.argv[0]),
+                               no_cli, "Claude Code", "Install it.")
+    assert text.startswith("Could not start the Claude Code CLI (claude)") and "Install it." in text
