@@ -19,6 +19,9 @@
 #                        and `: > "$STUB_UNITS"` forgets them all)
 #   STUB_VRAM_MB         nvidia-smi memory.total (default 16380)
 #   STUB_COMPUTE_CAP     nvidia-smi compute_cap, one GPU per line (default 8.9)
+#   STUB_NVIDIA_SMI_FAIL exit code every nvidia-smi call fails with, printing the
+#                        driver-dead message (unset: the driver answers)
+#   STUB_LSPCI           lspci output (default: one NVIDIA VGA line; "" = no card)
 #   STUB_NVCC_ARCHS      `nvcc --list-gpu-arch` output, space-separated (default:
 #                        Ubuntu 24.04's apt CUDA 12.0, compute_50 .. compute_90);
 #                        "none" makes it fail like an nvcc without the option
@@ -142,10 +145,22 @@ STUB
     cat > "$STUB_BIN/nvidia-smi" <<'STUB'
 #!/usr/bin/env bash
 echo "nvidia-smi $*" >> "$STUB_LOG"
+if [[ -n "${STUB_NVIDIA_SMI_FAIL:-}" ]]; then
+    echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."
+    exit "$STUB_NVIDIA_SMI_FAIL"
+fi
 case "$*" in
+    -L) echo "GPU 0: Stub NVIDIA GPU (UUID: GPU-00000000-0000-0000-0000-000000000000)" ;;
     *memory.total*) echo "${STUB_VRAM_MB:-16380}" ;;
     *compute_cap*) printf '%s\n' "${STUB_COMPUTE_CAP:-8.9}" ;;
 esac
+STUB
+
+    # lspci: the NVIDIA card the nvidia-smi stub stands for, so the GPU
+    # preflight sees the same box on every host.
+    cat > "$STUB_BIN/lspci" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${STUB_LSPCI-01:00.0 VGA compatible controller: NVIDIA Corporation Stub GPU (rev a1)}"
 STUB
 
     # python3.12 / python3: `-m venv DIR` builds a stub venv whose pip logs its

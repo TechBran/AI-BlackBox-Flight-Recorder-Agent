@@ -135,7 +135,8 @@ stub_log_has '^orch-pip install sentence-transformers==[0-9]+\.[0-9]+\.[0-9]+ tr
 # records (in $STUB_UNITS), so each step sees what the previous one left.
 LOCALSTACK_SH="$REPO_ROOT/installer/templates/blackbox-install-localstack.sh"
 [[ -f "$LOCALSTACK_SH" ]] || fail "missing $LOCALSTACK_SH"
-for f in llama-swap-version llamacpp-version llama-swap-config.yaml.template blackbox-models.service; do
+for f in llama-swap-version llamacpp-version llama-swap-config.yaml.template blackbox-models.service \
+         blackbox-gpu-preflight.sh; do
     cp "$REPO_ROOT/installer/templates/$f" "$ROOT/installer/templates/"
 done
 LS_VER="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/installer/templates/llama-swap-version" | head -n1 | tr -d '[:space:]')"

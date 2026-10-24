@@ -30,6 +30,8 @@
 #       installer charset
 #   4 — download/verify or venv creation failed
 #   6 — blackbox-models.service never answered on :9098 in time
+#   7 — an NVIDIA card is on the PCI bus but its driver does not answer
+#       nvidia-smi (blackbox-gpu-preflight.sh); nothing was changed
 #
 # install.sh invokes this NON-FATALLY: cloud STT/TTS/embeddings/rerank keep
 # working and the wizard's local_models step shows the remediation.
@@ -88,6 +90,20 @@ VERIFY_TIMEOUT_S=180
 SPEACHES_PIN="git+https://github.com/speaches-ai/speaches.git@v0.9.0-rc.3"
 
 PYBIN="$(command -v python3.12 || command -v python3)"
+
+# ── GPU preflight (fails CLOSED on a dead driver) ──────────────────────────
+# The build selector below reads nvidia-smi; on a box whose card is on the
+# PCI bus but whose driver is dead (the Aug 2026 Secure Boot outage) that read
+# fails, and the selector would rebuild llama-server for CPU, so every member
+# silently ran on CPU after the "fix". Same gate blackbox-models.service runs
+# at every start (blackbox-gpu-preflight.sh; a CPU box or a never-set-up card
+# passes). Read-only — nothing has been changed yet when this refuses.
+if ! bash "$TEMPLATE_DIR/blackbox-gpu-preflight.sh"; then
+    echo "[install-localstack] ERROR: refusing to provision the local model stack while the NVIDIA" >&2
+    echo "[install-localstack] driver is not responding (see above). Fix the driver, then re-run:" >&2
+    echo "[install-localstack]   sudo bash installer/templates/blackbox-install-localstack.sh" >&2
+    exit 7
+fi
 
 # Everything lives under the user's home, owned by REAL_USER.
 sudo -u "$REAL_USER" mkdir -p "$LOCALSTACK_BIN" "$LOCALSTACK_MODELS"
@@ -488,6 +504,7 @@ render_models_unit() {
         -e "s|REAL_HOME_PLACEHOLDER|$REAL_HOME|g" \
         -e "s|LOCALSTACK_HOME_PLACEHOLDER|$LOCALSTACK_HOME|g" \
         -e "s|LOCALSTACK_BIN_PLACEHOLDER|$LOCALSTACK_BIN|g" \
+        -e "s|BLACKBOX_ROOT_PLACEHOLDER|$BLACKBOX_ROOT|g" \
         "$TEMPLATE_DIR/blackbox-models.service"
 }
 render_models_unit | sudo tee /etc/systemd/system/blackbox-models.service >/dev/null

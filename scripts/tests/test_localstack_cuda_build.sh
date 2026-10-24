@@ -49,7 +49,8 @@ USER_NAME="$(id -un)"
 ROOT="$WORK/root"
 HOME_DIR="$WORK/home"
 mkdir -p "$ROOT/installer/templates" "$HOME_DIR"
-for f in llama-swap-version llamacpp-version llama-swap-config.yaml.template blackbox-models.service; do
+for f in llama-swap-version llamacpp-version llama-swap-config.yaml.template blackbox-models.service \
+         blackbox-gpu-preflight.sh; do
     cp "$REPO_ROOT/installer/templates/$f" "$ROOT/installer/templates/"
 done
 LS_VER="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/installer/templates/llama-swap-version" | head -n1 | tr -d '[:space:]')"
@@ -156,6 +157,23 @@ rc="$(run_stack 3.5)"
 built && fail "7: a CUDA build was configured for sm_35, which nvcc 12.0 cannot target"
 stub_log_has '^git clone' && fail "7: llama.cpp was cloned for a CUDA build that cannot target the card"
 grep -q 'Vulkan' "$WORK/run.log" || fail "7: the sm_35 run did not fall back to the Vulkan prebuilt: $(tail -5 "$WORK/run.log")"
+
+# ── 8. a dead NVIDIA driver is refused, not rebuilt for CPU ──────────────────
+# The Aug 2026 outage shape: the card is on the PCI bus, nvidia-smi fails. The
+# build selector's VRAM read used to fail too and the run swapped the CUDA
+# llama-server for the CPU prebuilt. Now the GPU preflight refuses (exit 7)
+# before anything changes.
+echo "${LC_VER}-cuda-sm89" > "$MARKER"
+: > "$STUB_LOG"
+STUB_NVIDIA_SMI_FAIL=9 bash "$LOCALSTACK_SH" "$USER_NAME" "$HOME_DIR" "$ROOT" > "$WORK/dead.log" 2>&1; rc=$?
+[[ "$rc" == 7 ]] || fail "8: a dead driver did not stop the install with exit 7 (rc=$rc): $(tail -5 "$WORK/dead.log")"
+grep -q 'NVIDIA driver not responding' "$WORK/dead.log" || fail "8: the refusal does not say the driver is not responding"
+[[ "$(cat "$MARKER")" == "${LC_VER}-cuda-sm89" ]] || fail "8: the CUDA build marker was rewritten to '$(cat "$MARKER")'"
+stub_log_has '^(cmake|curl|sudo|systemctl)' && fail "8: the refused run still changed the box: $(cat "$STUB_LOG")"
+# A CPU box (no NVIDIA card on the bus) is not gated at all.
+STUB_LSPCI="" STUB_NVIDIA_SMI_FAIL=9 bash "$LOCALSTACK_SH" "$USER_NAME" "$HOME_DIR" "$ROOT" > "$WORK/cpu.log" 2>&1; rc=$?
+[[ "$rc" == 7 ]] && fail "8: a box with no NVIDIA card was refused by the GPU preflight"
+grep -q 'no NVIDIA card on the PCI bus' "$WORK/cpu.log" || fail "8: the CPU-box run did not pass the preflight: $(head -5 "$WORK/cpu.log")"
 
 echo "ALL TESTS PASSED"
 exit 0

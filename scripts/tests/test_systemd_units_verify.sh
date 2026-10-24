@@ -136,6 +136,9 @@ grep -qx "ReadWritePaths=$BLACKBOX_ROOT" "$UNITS/blackbox.service" \
     || fail "blackbox.service ReadWritePaths is not the bare install root"
 grep -qx "ExecStart=$BLACKBOX_ROOT/MCP/venv/bin/python $BLACKBOX_ROOT/MCP/blackbox_mcp_server.py --transport http" \
     "$UNITS/blackbox-mcp.service" || fail "blackbox-mcp.service ExecStart did not render the sample root"
+# The GPU gate runs from the checkout, so the rendered path must be the root.
+grep -qx "ExecStartPre=/bin/bash $BLACKBOX_ROOT/installer/templates/blackbox-gpu-preflight.sh --wait 60" \
+    "$UNITS/blackbox-models.service" || fail "blackbox-models.service ExecStartPre did not render the GPU preflight under the sample root"
 
 # ── systemd-analyze verify ────────────────────────────────────────────────────
 if ! command -v systemd-analyze >/dev/null 2>&1; then

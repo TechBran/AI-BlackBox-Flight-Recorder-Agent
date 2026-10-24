@@ -1,13 +1,14 @@
 """Host hardware probe (WI-9, M10 task 10.1).
 
-All command output is monkeypatched at the hardware._run seam — no real
-nvidia-smi/lspci ever runs from tests. Fixture shapes are the box matrix from
+All command output is monkeypatched at the hardware._run_detailed seam — no
+real nvidia-smi/lspci ever runs from tests. Fixture shapes are the box matrix from
 the plan: this box (no GPU, AMD iGPU), an 8GB-VRAM box, a 16GB box, and the
 nvidia-smi-missing-but-lspci-shows-NVIDIA rung.
 """
 import pytest
 
 from Orchestrator import hardware
+from Orchestrator.tests import gpu_driver_cases as gdc
 
 # This box's real /proc/meminfo MemTotal (2026-07-03): 31915476 kB → 31167 MB.
 MEMINFO_FIXTURE = (
@@ -39,12 +40,21 @@ def fresh_probe(tmp_path, monkeypatch):
 
 
 def _fake_run(monkeypatch, outputs: dict, calls: list | None = None):
-    """hardware._run stand-in: outputs maps cmd[0] → stdout str or None."""
+    """hardware._run_detailed stand-in: outputs maps cmd[0] to the stdout of a
+    clean exit (str), None for a binary that is not installed, gdc.TIMEOUT, or
+    a gdc.Fail(rc, message) for a command that ran and failed."""
     def run(cmd):
         if calls is not None:
             calls.append(cmd[0])
-        return outputs.get(cmd[0])
-    monkeypatch.setattr(hardware, "_run", run)
+        out = outputs.get(cmd[0])
+        if out is None:
+            return None, hardware.NOT_INSTALLED
+        if out == gdc.TIMEOUT:
+            return None, "timed out after 5s"
+        if isinstance(out, gdc.Fail):
+            return None, f"exit {out.rc}: {out.message}"
+        return out, None
+    monkeypatch.setattr(hardware, "_run_detailed", run)
 
 
 # ── the box matrix ───────────────────────────────────────────────────────────
@@ -55,6 +65,7 @@ def test_no_gpu_box_amd_igpu(monkeypatch):
     assert hardware.probe() == {
         "gpu": False, "gpu_name": None, "vram_mb": None,
         "ram_mb": 31167, "source": "none", "tier": "LOW",
+        "driver_ok": None, "gpu_reason": None,
     }
 
 
@@ -63,6 +74,7 @@ def test_8gb_vram_box(monkeypatch):
     assert hardware.probe() == {
         "gpu": True, "gpu_name": "NVIDIA GeForce RTX 3070", "vram_mb": 8192,
         "ram_mb": 31167, "source": "nvidia-smi", "tier": "HIGH",
+        "driver_ok": True, "gpu_reason": None,
     }
 
 
@@ -82,11 +94,17 @@ def test_nvidia_smi_missing_but_lspci_shows_nvidia(monkeypatch):
     """Driver not installed yet: GPU presence without VRAM (vram_mb None —
     the preflight treats unverifiable VRAM as doesn't-fit → CPU)."""
     _fake_run(monkeypatch, {"nvidia-smi": None, "lspci": LSPCI_NVIDIA})
-    assert hardware.probe() == {
+    result = hardware.probe()
+    reason = result.pop("gpu_reason")
+    assert result == {
         "gpu": True,
         "gpu_name": "NVIDIA Corporation GA104 [GeForce RTX 3070] (rev a1)",
         "vram_mb": None, "ram_mb": 31167, "source": "lspci", "tier": "HIGH",
+        # No NVIDIA userspace at all is a box never set up for this card, not
+        # a dead driver: unknown, so nothing downstream is disabled by it.
+        "driver_ok": None,
     }
+    assert "nvidia-smi is not installed" in reason
 
 
 # ── fail-soft + degradation edges ────────────────────────────────────────────
@@ -97,6 +115,7 @@ def test_everything_fails_never_raises(monkeypatch, tmp_path):
     assert hardware.probe() == {
         "gpu": False, "gpu_name": None, "vram_mb": None,
         "ram_mb": 0, "source": "none", "tier": "LOW",
+        "driver_ok": None, "gpu_reason": None,
     }
 
 
@@ -105,6 +124,23 @@ def test_run_seam_is_failsoft_for_real():
     non-zero exit — the two live failure modes on this box."""
     assert hardware._run(["definitely-no-such-binary-xyz"]) is None
     assert hardware._run(["false"]) is None
+
+
+def test_run_detailed_says_why_a_command_failed():
+    """The reason survives (the probe needs it to tell a driver that is dead
+    from one that was never installed): absent binary, non-zero exit with the
+    command's own first line, success."""
+    assert hardware._run_detailed(["definitely-no-such-binary-xyz"]) == (
+        None, hardware.NOT_INSTALLED)
+    out, why = hardware._run_detailed(["sh", "-c", "echo 'driver gone' >&2; exit 9"])
+    assert out is None and why == "exit 9: driver gone"
+    assert hardware._run_detailed(["sh", "-c", "echo hi"]) == ("hi\n", None)
+
+
+def test_run_detailed_reports_a_timeout(monkeypatch):
+    monkeypatch.setattr(hardware, "_CMD_TIMEOUT_S", 0.2)
+    out, why = hardware._run_detailed(["sleep", "5"])
+    assert out is None and "timed out" in why
 
 
 def test_nvidia_smi_empty_output_falls_to_lspci(monkeypatch):
@@ -148,6 +184,44 @@ def test_probe_returns_copies(monkeypatch):
     assert hardware.probe()["gpu"] is True  # cache unharmed
 
 
+# ── driver state: the decision table shared with the unit preflight ─────────
+
+@pytest.mark.parametrize("case", gdc.CASES, ids=lambda c: c.name)
+def test_driver_state_decision_table(monkeypatch, case):
+    _fake_run(monkeypatch, {"nvidia-smi": case.smi, "lspci": case.lspci})
+    hw = hardware.probe()
+    assert (hw["gpu"], hw["source"], hw["driver_ok"]) == (
+        case.gpu, case.source, case.driver_ok)
+    if case.driver_ok is False:
+        # Loud and actionable: names the driver, the failing command and
+        # what it said, so the status card does not just say "no GPU".
+        assert "driver" in hw["gpu_reason"].lower()
+        assert "nvidia-smi" in hw["gpu_reason"]
+    if case.driver_ok is True:
+        assert hw["gpu_reason"] is None
+
+
+def test_driver_dead_keeps_the_legacy_fields_and_tier(monkeypatch):
+    """The storm-outage shape, field by field: the legacy keys are exactly
+    what they were (six consumers read them), the tier is NOT demoted (D3 —
+    rerank_routes would start refusing GPU selections), and the new fields
+    carry the truth."""
+    _fake_run(monkeypatch, {"nvidia-smi": gdc.DRIVER_DEAD, "lspci": gdc.LSPCI_NVIDIA})
+    hw = hardware.probe()
+    assert hw["gpu"] is True and hw["vram_mb"] is None and hw["source"] == "lspci"
+    assert hw["tier"] == "HIGH"
+    assert hw["driver_ok"] is False
+    assert "couldn't communicate with the NVIDIA driver" in hw["gpu_reason"]
+    assert "AD107GL" in hw["gpu_reason"]  # which card, from lspci
+
+
+def test_nvidia_smi_success_path_is_byte_identical(monkeypatch):
+    _fake_run(monkeypatch, {"nvidia-smi": gdc.OK_SMI})
+    hw = hardware.probe()
+    assert hw["gpu"] is True and hw["vram_mb"] == 16380
+    assert hw["source"] == "nvidia-smi" and hw["driver_ok"] is True
+
+
 # ── tier derivation (reranker tiering M1) ────────────────────────────────────
 
 def test_tier_low_no_gpu_under_32gb():
@@ -183,6 +257,7 @@ def test_probe_still_returns_legacy_keys(monkeypatch):
     for k in ("gpu", "gpu_name", "vram_mb", "ram_mb", "source"):
         assert k in result
     assert result["tier"] == "HIGH"
+    assert {"driver_ok", "gpu_reason"} <= set(result)
 
 
 # ── disk_free_mb (M1: local-model download gate) ──────────────────────────────

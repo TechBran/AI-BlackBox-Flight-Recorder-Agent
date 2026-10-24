@@ -124,9 +124,19 @@ def gpu_preflight() -> dict:
     on-box embeddings cutover on ok=true: the retrieval group lazy-loads
     ~11.5-13GB on the first re-embed and would CUDA-OOM if the old pinned
     Ollama 8B / vLLM reranker were still resident. Fail-open on a GPU-less
-    box (no VRAM contention is possible)."""
+    box (no VRAM contention is possible) — but only once the hardware probe
+    agrees there is no card: nvidia-smi failing on a box whose card is on the
+    PCI bus is a dead driver, and the retrieval group would then load onto a
+    GPU it cannot use (O19-local-stack-06). That fails CLOSED."""
     g = _probe_gpu_usage()
     if not g["present"]:
+        from Orchestrator import hardware
+        hw = hardware.probe()
+        if hw.get("driver_ok") is False:
+            return {"ok": False, "present": True, "driver_ok": False,
+                    "used_mib": None, "total_mib": None, "processes": [],
+                    "detail": (f"{hw.get('gpu_reason')}. Fix the driver before "
+                               "loading the on-box retrieval group onto this GPU.")}
         return {"ok": True, "present": False, "used_mib": None, "total_mib": None,
                 "processes": [], "detail": "No NVIDIA GPU detected — no VRAM contention."}
     ok = (g["used_mib"] or 0) <= _GPU_IDLE_CEIL_MIB

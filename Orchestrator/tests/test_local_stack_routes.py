@@ -83,10 +83,39 @@ def test_gpu_preflight_busy_blocks(client, monkeypatch):
     assert r.json()["used_mib"] == 7100
 
 
+_CPU_BOX_HW = {"gpu": False, "gpu_name": None, "vram_mb": None, "ram_mb": 31167,
+               "source": "none", "tier": "LOW", "driver_ok": None, "gpu_reason": None}
+
+
 def test_gpu_preflight_no_gpu_is_ok(client, monkeypatch):
+    from Orchestrator import hardware
     from Orchestrator.routes import local_stack_routes as lsr
+    monkeypatch.setattr(hardware, "probe", lambda *a, **k: dict(_CPU_BOX_HW))
     monkeypatch.setattr(lsr, "_probe_gpu_usage",
                         lambda: {"present": False, "used_mib": None,
                                  "total_mib": None, "processes": []})
     r = client.get("/local-models/gpu-preflight")
     assert r.status_code == 200 and r.json()["ok"] is True  # CPU box: no contention
+    assert r.json()["present"] is False
+
+
+def test_gpu_preflight_fails_closed_when_the_driver_is_dead(client, monkeypatch):
+    """O19-local-stack-06, the storm-outage shape: the card is on the bus but
+    nvidia-smi fails. The wizard used to hear "No NVIDIA GPU detected — no
+    VRAM contention" and run the embeddings cutover onto a GPU it cannot use."""
+    from Orchestrator import hardware
+    from Orchestrator.routes import local_stack_routes as lsr
+    monkeypatch.setattr(lsr, "_probe_gpu_usage",
+                        lambda: {"present": False, "used_mib": None,
+                                 "total_mib": None, "processes": []})
+    reason = ("NVIDIA driver not responding: RTX 2000 Ada is on the PCI bus but "
+              "nvidia-smi failed (exit 9: NVIDIA-SMI has failed)")
+    monkeypatch.setattr(hardware, "probe", lambda *a, **k: dict(
+        _CPU_BOX_HW, gpu=True, source="lspci", tier="HIGH",
+        driver_ok=False, gpu_reason=reason))
+    body = client.get("/local-models/gpu-preflight").json()
+    assert body["ok"] is False
+    assert body["present"] is True
+    assert body["driver_ok"] is False
+    assert reason in body["detail"]
+    assert "No NVIDIA GPU detected" not in body["detail"]

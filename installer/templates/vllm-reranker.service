@@ -17,15 +17,25 @@
 #
 # TimeoutStartSec=600: the first start downloads the model weights from
 # Hugging Face (~1.2 GB) before the engine can bind the port.
+#
+# Fail fast (2026-08-11 plan Task 11): `nvidia-smi -L` gates every start, so a
+# box whose driver is dead fails at once instead of burning the 600 s start
+# timeout per attempt, and three starts in 300 s leave the unit `failed`
+# rather than looping (RestartSec=15 outlasted systemd's default 10 s window,
+# so the limiter never tripped: 3366+ restarts on MS02). This unit is GPU-only,
+# so the gate is hard — unlike blackbox-models.service, which CPU boxes run.
 
 [Unit]
 Description=vLLM Qwen3-Reranker 0.6B (BlackBox M11 reranker)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 User=REAL_USER_PLACEHOLDER
 WorkingDirectory=REAL_HOME_PLACEHOLDER
+ExecStartPre=/usr/bin/nvidia-smi -L
 ExecStart=REAL_HOME_PLACEHOLDER/start-reranker.sh
 Restart=on-failure
 RestartSec=15

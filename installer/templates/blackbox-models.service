@@ -9,24 +9,43 @@
 # auto-restarts the whole proxy on any config edit (§6).
 #
 # REAL_USER_PLACEHOLDER / REAL_HOME_PLACEHOLDER / LOCALSTACK_BIN_PLACEHOLDER /
-# LOCALSTACK_HOME_PLACEHOLDER are substituted at install time (same
-# sed-template flow as vllm-reranker.service / zellij-web.service).
+# LOCALSTACK_HOME_PLACEHOLDER / BLACKBOX_ROOT_PLACEHOLDER are substituted at
+# install time (same sed-template flow as vllm-reranker.service /
+# zellij-web.service).
 #
 # GPU and CPU boxes both run this unit; only the member builds/models differ
 # (§7). Members lazy-load on first request, so the front door answers /health
 # with ZERO weights resident — weights download later in the wizard
 # (disk-gated, POST /local-models/download). LD_LIBRARY_PATH points at the
 # localstack bin dir so a CUDA llama-server prebuilt finds its bundled libs.
+#
+# GPU gate (2026-08-11 plan Track B, audit W11): ExecStartPre runs
+# blackbox-gpu-preflight.sh from the checkout (BLACKBOX_ROOT_PLACEHOLDER), so a
+# git pull updates it. A CPU box, or a card with no NVIDIA driver installed,
+# passes; an NVIDIA card on the PCI bus whose driver does not answer
+# nvidia-smi (after waiting 60 s for a late module load) FAILS the start with
+# the reason and the fix in the journal, instead of serving every member on
+# CPU behind a green /health. Opt out on purpose with a drop-in setting
+# Environment=BLACKBOX_GPU_PREFLIGHT=off.
+#
+# Start limit: RestartSec=15 is longer than systemd's default 10 s start-limit
+# window, so the limiter could never trip and a broken start looped forever
+# (MS02 logged 3366+ restarts). Three starts in 300 s, then the unit stays
+# `failed` until `systemctl reset-failed` — loud, not looping. systemd >= 229
+# reads both keys from [Unit].
 
 [Unit]
 Description=BlackBox local model stack (llama-swap front door :9098)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 User=REAL_USER_PLACEHOLDER
 WorkingDirectory=REAL_HOME_PLACEHOLDER
 Environment=LD_LIBRARY_PATH=LOCALSTACK_BIN_PLACEHOLDER
+ExecStartPre=/bin/bash BLACKBOX_ROOT_PLACEHOLDER/installer/templates/blackbox-gpu-preflight.sh --wait 60
 ExecStart=LOCALSTACK_BIN_PLACEHOLDER/llama-swap --config LOCALSTACK_HOME_PLACEHOLDER/llama-swap-config.yaml --listen 127.0.0.1:9098 --watch-config
 Restart=on-failure
 RestartSec=15
