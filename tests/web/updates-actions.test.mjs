@@ -45,6 +45,8 @@ const STATUS = {
 };
 let status = { ...STATUS };
 let bootId = "boot-A";            // what /health answers; null = down
+let updateState = { has_state: false, state: null, in_progress: false };  // GET /update/state
+const gets = [];                   // GET urls, in order
 const posts = [];                  // [url, parsed body]
 let postReplies = {};              // url -> [reply factories]
 
@@ -59,7 +61,9 @@ globalThis.fetch = window.fetch = (url, opts = {}) => {
         if (u === "/update/preflight") return reply(200, status);
         return reply(404, { detail: "not found" });
     }
+    gets.push(u);
     if (u === "/update/status") return reply(200, status);
+    if (u === "/update/state") return reply(200, updateState);
     if (u === "/health") {
         return bootId === null
             ? Promise.reject(new TypeError("Failed to fetch"))
@@ -82,8 +86,9 @@ async function panel(withStatus) {
 }
 
 function reset() {
-    answers = []; asked.length = 0; alerts.length = 0; posts.length = 0;
+    answers = []; asked.length = 0; alerts.length = 0; posts.length = 0; gets.length = 0;
     streams.length = 0; postReplies = {}; bootId = "boot-A";
+    updateState = { has_state: false, state: null, in_progress: false };
     const modal = document.getElementById("updatesLogModal");
     if (modal) modal.classList.add("hide");
 }
@@ -222,4 +227,71 @@ test("Restart Service reports a refused restart instead of waiting", async () =>
     document.getElementById("btnRestart").click();
     await settle();
     assert.match(alerts[0] || "", /password is required/);
+});
+
+// ── review follow-ups ────────────────────────────────────────────────────
+
+async function installAndDropTheStream(taskId) {
+    await panel({});
+    answers = [true];
+    postReplies["/update/start"] = [() => reply(200, { task_id: taskId, status: "started" })];
+    document.getElementById("btnInstallUpdate").click();
+    await settle();
+    streams[0].onerror();                // Doze, a network blip: no complete event
+}
+
+test("a dropped stream keeps waiting through the restart its update scheduled", async () => {
+    reset();
+    // The update finished and released the lock; its restart is 2 s away and
+    // the old process still answers. That is not "the service did not restart".
+    updateState = { has_state: true, in_progress: false,
+                    state: { task_id: "update-5", phase: "complete" } };
+    await installAndDropTheStream("update-5");
+    await settle(2300);                  // the poll modal opens 2 s after the drop
+    assert.ok(gets.includes("/update/state"), gets.join(" "));
+    assert.doesNotMatch(logText(), /did not restart|No restart/);
+    bootId = "boot-B";
+    await settle(2100);
+    assert.match(logText(), /back online/);
+});
+
+test("a dropped stream stops waiting once its update ended without a restart", async () => {
+    reset();
+    updateState = { has_state: true, in_progress: false,
+                    state: { task_id: "update-6", phase: "failed", error: "apt failed" } };
+    await installAndDropTheStream("update-6");
+    await settle(2300);
+    assert.match(logText(), /did not restart/);
+    assert.doesNotMatch(logText(), /back online/);
+});
+
+test("a rollback conflict refreshes from status, keeping the failed state's anchor", async () => {
+    // POST /update/preflight deletes a failed state, and with it the tag a
+    // rollback needs.
+    reset();
+    await panel({ commits_behind: 0, last_state: { phase: "failed", pre_update_tag: "pre-update-1" } });
+    answers = [true];
+    postReplies["/update/rollback"] = [() => reply(409, { detail: "An update or rollback is already in progress." })];
+    document.getElementById("btnRollbackUpdate").click();
+    await settle();
+    assert.match(alerts[0] || "", /already in progress/);
+    assert.deepEqual(posts.filter(([u]) => u === "/update/preflight"), []);
+});
+
+test("the onboarding hub's Install Now uses the panel's confirm and stash-and-retry", async () => {
+    reset();
+    status = { ...STATUS, commits_behind: 2, dirty_files: ["Orchestrator/config.py"] };
+    const { mountUpdatesBadge } = await import("../../Portal/onboarding/hub-controls.js");
+    const updates = await import("../../Portal/modules/updates-manager.js");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    await mountUpdatesBadge(host, { loadUpdates: async () => updates });
+    answers = [true];
+    postReplies["/update/start"] = [() => reply(200, { task_id: "update-7", status: "started" })];
+    host.querySelector("[data-ob-update-install]").click();
+    await settle();
+    assert.match(asked[0], /Install 2 update.*Orchestrator\/config\.py.*stashes them/s);
+    const [, body] = posts.find(([u]) => u === "/update/start");
+    assert.deepEqual(body, { confirm_sha: "b".repeat(40), discard_local_changes: true });
+    assert.match(streams[0].url, /task_id=update-7/);
 });

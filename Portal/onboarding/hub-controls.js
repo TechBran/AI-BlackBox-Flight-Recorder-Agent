@@ -6,7 +6,8 @@
 // surface passes its own DOM:
 //   - openLogsModal()                  — live SSE journalctl modal (self-contained)
 //   - mountRestartControl(btn, statusEl) — E9 status-aware Restart state machine
-//   - mountUpdatesBadge(hostEl)        — T9 update-available badge
+//   - mountUpdatesBadge(hostEl)        — T9 update-available badge (Install Now
+//                                        runs the Updates panel's startInstall)
 //
 // completeAndOpen (Open Portal POST /complete) stays in done.js — it's
 // done-specific (the hub is post-completion, a plain /ui link suffices).
@@ -294,7 +295,15 @@ async function pollRestartCleared(timeoutMs, intervalMs) {
 //
 // Parameterized by hostEl (the container) — inner button lookups are scoped
 // to hostEl.querySelector(...) so the done/hub instances never collide on ids.
-export async function mountUpdatesBadge(hostEl) {
+//
+// Install Now runs the Updates panel's own flow (updates-manager.js
+// startInstall, audit rank 43): the confirm names CLI sessions and local
+// changes to tracked files, consent is sent with the request, and a
+// dirty-tree 409 asks to stash and retry instead of alerting raw JSON.
+// `loadUpdates` loads that module (tests pass it in).
+export async function mountUpdatesBadge(hostEl, {
+    loadUpdates = () => import("/ui/modules/updates-manager.js"),
+} = {}) {
     if (!hostEl) return;
     let status;
     try {
@@ -331,21 +340,9 @@ export async function mountUpdatesBadge(hostEl) {
 
     if (!isMajor) {
         hostEl.querySelector("[data-ob-update-install]").addEventListener("click", async () => {
-            if (!window.confirm(`Install ${n} update${n === 1 ? "" : "s"} now?\n\nThis restarts the BlackBox service (60–90 s of downtime).`)) return;
             try {
-                const r = await fetch("/update/start", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ confirm_sha: status.latest_sha }),
-                });
-                if (!r.ok) {
-                    const t = await r.text();
-                    window.alert("Couldn't start update: " + t.substring(0, 200));
-                    return;
-                }
-                const { task_id } = await r.json();
-                const mod = await import("/ui/modules/updates-manager.js");
-                mod.openUpdateLogModal(task_id);
+                const mod = await loadUpdates();
+                await mod.startInstall(status);
             } catch (e) {
                 window.alert("Network error: " + e.message);
             }

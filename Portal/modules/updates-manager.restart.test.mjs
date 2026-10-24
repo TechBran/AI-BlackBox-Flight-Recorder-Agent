@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-    restartObserved, restartExpected, waitForRestart, readBootId,
+    restartObserved, restartExpected, waitForRestart, readBootId, taskVerdict, readTaskState,
     installConfirmText, rollbackConfirmText, RESTART_CONFIRM_TEXT, RESTART_GRACE_MS,
 } from "./updates-manager.js";
 
@@ -72,18 +72,88 @@ test("waitForRestart reports a restart that never happened, not 'still down'", a
     assert.equal(res.lastUp, true, "the old process was still answering");
 });
 
-test("waitForRestart can give up when the old process says nothing is running", async () => {
-    const probes = [];
-    probes.last = "A";
-    const s = scripted(probes);
-    let asked = 0;
-    const res = await waitForRestart({
-        priorBootId: "A", ...s, timeoutMs: 180_000, intervalMs: 2000, graceMs: 10_000,
-        giveUp: async ({ elapsedMs }) => { asked += 1; return elapsedMs >= 12_000; },
+// ── a dropped log stream (A13-ui-ops-06) ────────────────────────────────
+
+// A clock-driven box: /health answers `boot(t)` and /update/state `task(t)`.
+function timeline({ boot, task }) {
+    let t = 0;
+    return {
+        now: () => t,
+        sleep: async (ms) => { t += ms; },
+        readBoot: async () => boot(t),
+        taskState: async () => task(t),
+    };
+}
+
+test("taskVerdict: running under the lock, restarting once its task finished, else ended", () => {
+    assert.equal(taskVerdict({ in_progress: true, state: null }, "update-1"), "running");
+    for (const phase of ["restart_pending", "complete", "rolled_back"]) {
+        assert.equal(taskVerdict({ in_progress: false, state: { task_id: "update-1", phase } }, "update-1"), "restarting");
+    }
+    assert.equal(taskVerdict({ in_progress: false, state: { task_id: "update-1", phase: "failed" } }, "update-1"), "ended");
+    // An older update's "complete" says nothing about this one (refused, or up to date).
+    assert.equal(taskVerdict({ in_progress: false, state: { task_id: "update-0", phase: "complete" } }, "update-1"), "ended");
+    assert.equal(taskVerdict({ in_progress: false, state: null }, "update-1"), "ended");
+});
+
+test("readTaskState asks /update/state, and null when it cannot", async () => {
+    const urls = [];
+    const ok = async (url) => { urls.push(url); return { ok: true, json: async () => ({ in_progress: true }) }; };
+    assert.equal(await readTaskState("update-1", ok), "running");
+    assert.deepEqual(urls, ["/update/state"]);
+    assert.equal(await readTaskState("update-1", async () => ({ ok: false })), null);
+    assert.equal(await readTaskState("update-1", async () => { throw new TypeError("down"); }), null);
+});
+
+test("the review regression: the lock is free ~2 s before the restart, keep waiting", async () => {
+    // The update completes at 20 s and releases the lock; the restart fires at
+    // 22 s; the new process answers at 80 s. Giving up on !in_progress alone
+    // ended the wait at 20 s with "the service did not restart".
+    const s = timeline({
+        boot: (t) => (t < 22_000 ? "OLD" : t < 80_000 ? null : "NEW"),
+        task: (t) => (t < 20_000 ? "running" : "restarting"),
     });
+    const res = await waitForRestart({ priorBootId: "OLD", ...s, intervalMs: 2000 });
+    assert.equal(res.restarted, true, JSON.stringify(res));
+    assert.equal(res.elapsedMs, 80_000);
+});
+
+test("waitForRestart gives up once the task ended without a restart", async () => {
+    let asked = 0;
+    const s = timeline({ boot: () => "A", task: (t) => { asked += 1; return t >= 12_000 ? "ended" : "running"; } });
+    const res = await waitForRestart({ priorBootId: "A", ...s, timeoutMs: 180_000, intervalMs: 2000 });
     assert.equal(res.gaveUp, true);
     assert.equal(res.restarted, false);
-    assert.ok(asked >= 1 && res.elapsedMs >= 12_000 && res.elapsedMs < 20_000);
+    assert.ok(asked >= 1 && res.elapsedMs === 12_000);
+});
+
+test("a long pip phase keeps the wait going past the timeout", async () => {
+    // pip alone may run 10 minutes; "restart it yourself" at 180 s would
+    // interrupt a running update.
+    const s = timeline({
+        boot: (t) => (t < 602_000 ? "A" : t < 650_000 ? null : "B"),
+        task: (t) => (t < 600_000 ? "running" : "restarting"),
+    });
+    const res = await waitForRestart({ priorBootId: "A", ...s, timeoutMs: 180_000, intervalMs: 2000 });
+    assert.equal(res.restarted, true, JSON.stringify(res));
+    assert.equal(res.elapsedMs, 650_000);
+});
+
+test("an update that never finishes is reported as still running, at the cap", async () => {
+    const s = timeline({ boot: () => "A", task: () => "running" });
+    const res = await waitForRestart({ priorBootId: "A", ...s, timeoutMs: 20_000, maxMs: 60_000, intervalMs: 2000 });
+    assert.equal(res.restarted, false);
+    assert.equal(res.stillRunning, true);
+    assert.ok(res.elapsedMs > 60_000 && res.elapsedMs <= 62_000, String(res.elapsedMs));
+});
+
+test("without a task probe the timeout is not extended", async () => {
+    const s = timeline({ boot: () => "A", task: () => "running" });
+    const res = await waitForRestart({ priorBootId: "A", now: s.now, sleep: s.sleep, readBoot: s.readBoot,
+                                       timeoutMs: 20_000, intervalMs: 2000 });
+    assert.equal(res.restarted, false);
+    assert.equal(res.stillRunning, undefined);
+    assert.equal(res.lastUp, true);
 });
 
 test("readBootId: the id, '' from an older backend, null when down", async () => {

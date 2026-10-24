@@ -45,7 +45,9 @@
 // the backend stashes them; a 409 that lists dirty_files asks again. After any
 // action that restarts the service the modal waits for /health's boot_id to
 // CHANGE (A13-ui-ops-01) instead of trusting the first 200, which the old
-// process answers for the ~2 s before the restart fires.
+// process answers for the ~2 s before the restart fires. When the log stream
+// drops mid-update, /update/state says whether that task is still running,
+// finished with a restart coming, or ended without one (A13-ui-ops-06).
 
 import { escapeHtml, toastError } from "./core-utils.js";
 
@@ -334,23 +336,65 @@ export function restartExpected(event) {
 }
 
 /**
+ * What /update/state says about update task `taskId` once its log stream has
+ * dropped: "running" while the update lock is held; "restarting" once that
+ * task finished and scheduled the restart (the lock is free ~2 s before the
+ * restart fires, while the old process still answers); "ended" when it
+ * failed, was refused or had nothing to do, so no restart is coming.
+ */
+export function taskVerdict(state, taskId) {
+    if (state.in_progress) return "running";
+    const last = state.state;
+    if (last && last.task_id === taskId
+        && ["restart_pending", "complete", "rolled_back"].includes(last.phase)) {
+        return "restarting";
+    }
+    return "ended";
+}
+
+/** taskVerdict from GET /update/state (no git call, unlike /update/status);
+ * null when it did not answer. */
+export async function readTaskState(taskId, fetchImpl = (...a) => fetch(...a)) {
+    try {
+        const r = await fetchImpl("/update/state", { cache: "no-store" });
+        if (!r.ok) return null;
+        return taskVerdict(await r.json(), taskId);
+    } catch (_) {
+        return null;
+    }
+}
+
+/**
  * Poll /health until the service has restarted, or `timeoutMs` passes.
  * Resolves { restarted, elapsedMs, lastUp } — lastUp says the final probe was
- * answered (by the old process, if not restarted). `giveUp({elapsedMs})`, when
- * given, is asked after the grace period each time the OLD process answers;
- * true ends the wait early with { restarted: false, gaveUp: true }.
+ * answered (by the old process, if not restarted).
+ *
+ * `taskState()`, when given (the log stream dropped, see taskVerdict), is
+ * asked each time the OLD process answers. "ended" ends the wait early with
+ * { restarted: false, gaveUp: true }. "running" keeps it going until
+ * `timeoutMs` after the task was last seen running (a pip phase alone can
+ * take 10 minutes), at most `maxMs`; a wait that reaches maxMs while the
+ * update still runs resolves { restarted: false, stillRunning: true }.
  */
 export async function waitForRestart({
     priorBootId, seenDown = false, readBoot = readBootId,
     now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-    timeoutMs = 180_000, intervalMs = 2000, graceMs = RESTART_GRACE_MS,
-    onTick = null, giveUp = null,
+    timeoutMs = 180_000, maxMs = 3_600_000, intervalMs = 2000, graceMs = RESTART_GRACE_MS,
+    onTick = null, taskState = null,
 } = {}) {
     const start = now();
     let lastUp = false;
+    let verdict = null;
+    let runningAt = null;  // elapsedMs when the task was last seen running
     for (;;) {
         const elapsedMs = now() - start;
-        if (elapsedMs > timeoutMs) return { restarted: false, elapsedMs, lastUp };
+        const deadline = runningAt === null ? timeoutMs
+            : Math.max(timeoutMs, Math.min(maxMs, runningAt + timeoutMs));
+        if (elapsedMs > deadline) {
+            return lastUp && verdict === "running"
+                ? { restarted: false, stillRunning: true, elapsedMs, lastUp }
+                : { restarted: false, elapsedMs, lastUp };
+        }
         if (onTick) onTick(elapsedMs);
         const bootId = await readBoot();
         lastUp = bootId !== null;
@@ -358,8 +402,10 @@ export async function waitForRestart({
             seenDown = true;
         } else if (restartObserved({ priorBootId, bootId, seenDown, elapsedMs, graceMs })) {
             return { restarted: true, elapsedMs, lastUp };
-        } else if (giveUp && elapsedMs >= graceMs && await giveUp({ elapsedMs })) {
-            return { restarted: false, gaveUp: true, elapsedMs, lastUp };
+        } else if (taskState) {
+            verdict = await taskState();
+            if (verdict === "ended") return { restarted: false, gaveUp: true, elapsedMs, lastUp };
+            if (verdict === "running") runningAt = elapsedMs;
         }
         await sleep(intervalMs);
     }
@@ -386,8 +432,11 @@ function _wireButtons() {
  * POST an update action; on a 409 that lists dirty_files, ask once to stash
  * them and retry with discard_local_changes. Resolves the JSON body, or null
  * when the operator declined or the request failed (already reported).
+ * `freshOnConflict`: refresh the panel from a new fetch (preflight) after any
+ * other 409. A rollback passes false: preflight deletes a failed state, and
+ * with it the tag the rollback needs.
  */
-async function _postUpdateAction(url, body, action) {
+async function _postUpdateAction(url, body, action, { freshOnConflict = true } = {}) {
     const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -398,10 +447,11 @@ async function _postUpdateAction(url, body, action) {
         const dirty = Array.isArray(detail.dirty_files) ? detail.dirty_files : [];
         if (dirty.length && !body.discard_local_changes) {
             if (!window.confirm(_stashRetryText(dirty, action))) return null;
-            return _postUpdateAction(url, { ...body, discard_local_changes: true }, action);
+            return _postUpdateAction(url, { ...body, discard_local_changes: true }, action,
+                                     { freshOnConflict });
         }
         window.alert(`${action} conflict: ${detail.detail || "another update may be in progress."}`);
-        await refreshPanel(true);
+        await refreshPanel(freshOnConflict);
         return null;
     }
     if (!r.ok) {
@@ -420,21 +470,35 @@ async function _onInitClick() {
     await refreshPanel(true);
 }
 
-async function _onInstallClick() {
-    if (!_lastStatus || !_lastStatus.commits_behind) return;
-    if (!window.confirm(installConfirmText(_lastStatus))) return;
+function _onInstallClick() {
+    return startInstall(_lastStatus);
+}
+
+/**
+ * The Install flow, shared with the onboarding hub's Install Now badge
+ * (Portal/onboarding/hub-controls.js): confirm (naming CLI sessions and local
+ * changes), POST /update/start with consent for the files the confirm named,
+ * ask again on a dirty-tree 409, then stream the task and wait for the
+ * restart. `status` is a /update/status reply. Resolves true when an update
+ * was started.
+ */
+export async function startInstall(status) {
+    if (!status || !status.commits_behind) return false;
+    if (!window.confirm(installConfirmText(status))) return false;
     try {
         // Read before the action: the old process's id is what must change.
         const priorBootId = await readBootId();
         const body = await _postUpdateAction("/update/start", {
-            confirm_sha: _lastStatus.latest_sha,
+            confirm_sha: status.latest_sha,
             // The confirm just named these files; agreeing to it is consent.
-            discard_local_changes: (_lastStatus.dirty_files || []).length > 0,
+            discard_local_changes: (status.dirty_files || []).length > 0,
         }, "Update");
-        if (!body) return;
+        if (!body) return false;
         openUpdateLogModal(body.task_id, { priorBootId });
+        return true;
     } catch (e) {
         window.alert(`Network error starting update: ${e.message}`);
+        return false;
     }
 }
 
@@ -451,7 +515,7 @@ async function _onRollbackClick() {
         const priorBootId = await readBootId();
         const body = await _postUpdateAction("/update/rollback", {
             discard_local_changes: ((_lastStatus && _lastStatus.dirty_files) || []).length > 0,
-        }, "Rollback");
+        }, "Rollback", { freshOnConflict: false });
         if (!body) return;
         const tag = body.reverted_to || "(unknown)";
         if (body.task_id) {
@@ -820,34 +884,24 @@ export function openUpdateLogModal(taskId, { priorBootId, title } = {}) {
         _appendLog(log, "\n(stream disconnected — service may be restarting)");
         evt.close();
         // The runner keeps going without the stream. Wait for the restart,
-        // but stop waiting once the old process says nothing is running any
-        // more (the update failed or was refused, so no restart is coming).
+        // asking /update/state about THIS task: keep waiting while it runs or
+        // once it scheduled its restart, stop once it ended without one.
         setTimeout(async () => {
             modal.classList.add("hide");
             openHealthPollModal("Service appears to be restarting…", {
                 priorBootId: await prior,
-                giveUp: _updateNoLongerRunning,
+                taskState: () => readTaskState(taskId),
             });
         }, 2000);
     };
 }
 
-async function _updateNoLongerRunning() {
-    try {
-        const r = await fetch("/update/status", { cache: "no-store" });
-        if (!r.ok) return false;
-        return !(await r.json()).in_progress;
-    } catch (_) {
-        return false;
-    }
-}
-
 /**
  * After a restart was requested, poll /health every 2s for up to 180s with
  * progressive copy (audit C5) until boot_id differs from `priorBootId`
- * (A13-ui-ops-01), then refresh the panel.
+ * (A13-ui-ops-01), then refresh the panel. `taskState`: see waitForRestart.
  */
-export function openHealthPollModal(initialMsg, { priorBootId, giveUp = null } = {}) {
+export function openHealthPollModal(initialMsg, { priorBootId, taskState = null } = {}) {
     const modal = _ensureLogModal();
     const log = modal.querySelector(".updates-log-pre");
     const header = modal.querySelector(".updates-log-header");
@@ -866,7 +920,7 @@ export function openHealthPollModal(initialMsg, { priorBootId, giveUp = null } =
             seenDown = prior === null;
         }
         const result = await waitForRestart({
-            priorBootId: prior, seenDown, timeoutMs, giveUp,
+            priorBootId: prior, seenDown, timeoutMs, taskState,
             onTick: (elapsed) => {
                 // Progressive 3-stage copy (audit C5)
                 header.textContent = elapsed < 30000
@@ -884,13 +938,17 @@ export function openHealthPollModal(initialMsg, { priorBootId, giveUp = null } =
             }, 1500);
         } else if (result.gaveUp) {
             header.textContent = "No restart";
-            _appendLog(log, "\nThe update is no longer running and the service did not restart. See the Updates panel for what happened.");
+            _appendLog(log, "\nThe update ended and the service did not restart. See the Updates panel for what happened.");
+            refreshPanel(false).catch(() => {});
+        } else if (result.stillRunning) {
+            header.textContent = "Still updating";
+            _appendLog(log, `\nThe update is still running on the box after ${Math.round(result.elapsedMs / 60000)} min. The Updates panel shows its progress; the service restarts when it finishes.`);
             refreshPanel(false).catch(() => {});
         } else if (result.lastUp) {
             header.textContent = "Not restarted";
-            _appendLog(log, `\n⚠ After ${Math.round(timeoutMs / 1000)}s the service is still the process that was running before: the restart did not happen. Restart it from System Controls, or run \`sudo systemctl restart blackbox.service\` on the box.`);
+            _appendLog(log, `\n⚠ After ${Math.round(result.elapsedMs / 1000)}s the service is still the process that was running before: the restart did not happen. Restart it from System Controls, or run \`sudo systemctl restart blackbox.service\` on the box.`);
         } else {
-            _appendLog(log, `\n⚠ Still down after ${Math.round(timeoutMs / 1000)}s. Check the logs manually.`);
+            _appendLog(log, `\n⚠ Still down after ${Math.round(result.elapsedMs / 1000)}s. Check the logs manually.`);
         }
     })();
 }
