@@ -4,15 +4,43 @@
  * Works in both web (two-panel) and Android/mobile (full-screen) contexts
  */
 import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml } from './core-utils.js';
-import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
+import {
+    getOperator, OPERATOR_REQUIRED_MESSAGE, fetchAvailableModels, getHydratedModels, getProviderName,
+} from './state-management.js';
+import { normalizePhone, parsePhoneInput } from './phone.js';
 
 let _pollTimer = null;
+// The open thread: its key (the box's phone_number, last 10 digits) and where a send
+// from it goes (the number as typed for a new conversation, digits only).
 let _currentPhone = null;
+let _currentTo = null;
 let _isOpen = false;
 // Our sendable lines (enabled gateways' enabled ports with a phone number)
 let _lines = [];
 // Selected "from" line for outbound SMS; '' = use backend default gateway
 let _selectedFromNumber = '';
+
+// The open conversation as shown, oldest first: the newest page the box serves plus
+// any older pages loaded with "Load earlier". _hasMore/_nextBeforeId describe what is
+// older than its first message; _convSig is what was last rendered.
+let _messages = [];
+let _hasMore = false;
+let _nextBeforeId = null;
+let _convSig = '';
+// Bumped per thread open, so a read that lands after another thread opened is dropped.
+let _convSeq = 0;
+let _modelSeq = 0;
+// The model the box runs an "Auto" SMS reply on, for the provider it was asked for
+// (GET /sms/preferences sms_model_resolved).
+let _resolved = { provider: '', model: '' };
+
+const PAGE_SIZE = 100;
+// Within this many px of the bottom counts as "at the bottom": new messages follow.
+const BOTTOM_SLACK_PX = 40;
+// Providers an SMS reply can run on: the chat providers of the box's non-streaming
+// /chat worker (tasks.process_chat_task). Each one's models come from its live catalog
+// (/models/<provider>); custom is offered once a LAN server is set up.
+const SMS_PROVIDERS = ['anthropic', 'google', 'openai', 'xai', 'custom'];
 
 // ============================================================================
 // Helpers
@@ -47,12 +75,30 @@ function dateLabel(isoTimestamp) {
 
 function truncate(str, len = 38) {
     if (!str) return '';
-    return str.length > len ? str.slice(0, len) + '\u2026' : str;
+    return str.length > len ? str.slice(0, len) + '…' : str;
 }
 
 function escapeHtml(text) {
     // Shared helper: also escapes quotes (used in data-phone / value attributes)
     return sharedEscapeHtml(text);
+}
+
+/** One thread, however each side wrote the number. */
+function samePhone(a, b) {
+    return !!a && !!b && normalizePhone(a) === normalizePhone(b);
+}
+
+function isAtBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK_PX;
+}
+
+/** Jump without the message area's smooth scrolling (keeping a reader's place must
+ *  not animate the view past what they were reading). */
+function jumpScrollTop(el, top) {
+    const prev = el.style.scrollBehavior;
+    el.style.scrollBehavior = 'auto';
+    el.scrollTop = top;
+    el.style.scrollBehavior = prev;
 }
 
 const SEND_ICON = `<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
@@ -66,18 +112,6 @@ function smsProviderId(raw) {
     const id = String(raw || '').trim();
     if (id === 'gemini') return 'google';
     return id || 'anthropic';
-}
-
-/** Show [id] in the provider select, adding an option for one it does not list, so a
- *  stored provider is never shown blank (and then saved back as another one). */
-function showProvider(sel, id) {
-    if (!Array.from(sel.options).some(o => o.value === id)) {
-        const opt = document.createElement('option');
-        opt.value = id;
-        opt.textContent = id;
-        sel.appendChild(opt);
-    }
-    sel.value = id;
 }
 
 // ============================================================================
@@ -95,14 +129,25 @@ async function fetchThreads() {
     return data.threads || [];
 }
 
-async function fetchMessages(phone) {
+/**
+ * The newest page of a thread, or the page just before message [beforeId] (the box
+ * serves the newest window; next_before_id is the cursor for the page above it).
+ * @returns {Promise<{messages: Array, hasMore: boolean, nextBeforeId: (number|null)} | null>}
+ *          null while no operator is resolved
+ */
+async function fetchMessages(phone, beforeId = null) {
     const op = getOperator();
-    if (!op) return [];
-    const res = await fetch(`/sms/messages?operator=${encodeURIComponent(op)}&phone=${encodeURIComponent(phone)}&limit=100`);
+    if (!op) return null;
+    let url = `/sms/messages?operator=${encodeURIComponent(op)}&phone=${encodeURIComponent(phone)}&limit=${PAGE_SIZE}`;
+    if (beforeId != null) url += `&before_id=${encodeURIComponent(beforeId)}`;
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`);
     const data = await res.json();
-    markThreadRead(op, phone);
-    return data.messages || [];
+    return {
+        messages: data.messages || [],
+        hasMore: !!data.has_more,
+        nextBeforeId: data.next_before_id ?? null,
+    };
 }
 
 // The thread is on screen: mark it read. GET /sms/messages is read-only, so
@@ -129,7 +174,9 @@ async function sendMessage(to, message) {
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
-        throw new Error(data.error || data.detail || 'Send failed');
+        // A 422 carries FastAPI's list of field errors, not a string.
+        const detail = Array.isArray(data.detail) ? data.detail.map(d => d.msg).join('; ') : data.detail;
+        throw new Error(data.error || detail || 'Send failed');
     }
     return data;
 }
@@ -182,93 +229,230 @@ async function fetchPreferences() {
     return await res.json();
 }
 
-/** @returns {Promise<boolean>} false when nothing was saved (no operator resolved) */
+/** @returns {Promise<boolean>} false when nothing was saved (no operator, or the box refused) */
 async function savePreferences(provider, model) {
     const op = getOperator();
     if (!op) {
         toastError(OPERATOR_REQUIRED_MESSAGE);
         return false;
     }
-    await fetch('/sms/preferences', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator: op, sms_provider: provider, sms_model: model })
-    });
+    try {
+        const res = await fetch('/sms/preferences', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ operator: op, sms_provider: provider, sms_model: model })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+        toastError(`SMS model not saved: ${err.message}`);
+        return false;
+    }
     return true;
+}
+
+// ============================================================================
+// Reply model: providers and models from the live catalogs (P06-comms-web-09)
+// ============================================================================
+
+function addOption(sel, value, label) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    sel.appendChild(opt);
+}
+
+/** List the SMS providers (custom once a LAN server is set up) and show [selected],
+ *  adding it when the list lacks it, so a stored provider is never shown blank (and
+ *  then saved back as another one). */
+function renderProviderOptions(selected) {
+    const sel = $('smsProviderSelect');
+    if (!sel) return;
+    const offered = SMS_PROVIDERS.filter(p => p !== 'custom' || getHydratedModels('custom').length > 0);
+    if (selected && !offered.includes(selected)) offered.push(selected);
+    if (Array.from(sel.options).map(o => o.value).join('\n') !== offered.join('\n')) {
+        const keep = selected || sel.value;
+        sel.textContent = '';
+        for (const p of offered) addOption(sel, p, getProviderName(p));
+        if (keep) sel.value = keep;
+    }
+    if (selected) sel.value = selected;
+}
+
+/** "(Auto - <the model the box runs>)" when the box said which; else the catalog's. */
+function autoLabel(provider) {
+    const models = getHydratedModels(provider);
+    if (_resolved.provider === provider && _resolved.model) {
+        const named = models.find(m => m.id === _resolved.model);
+        return `(Auto - ${named ? named.name : _resolved.model})`;
+    }
+    const auto = models.find(m => m.id === '');
+    return auto ? auto.name : '(Auto)';
+}
+
+/** Fill the model select from [provider]'s live catalog and show [selectedId]: a stored
+ *  id the catalog does not list is shown as itself, never as Auto or another model. */
+async function renderModelOptions(provider, selectedId) {
+    const seq = ++_modelSeq;
+    await fetchAvailableModels(provider);
+    const sel = $('smsModelSelect');
+    if (seq !== _modelSeq || !sel) return;  // a newer provider pick won
+    sel.textContent = '';
+    addOption(sel, '', autoLabel(provider));
+    const models = getHydratedModels(provider).filter(m => m.id !== '');
+    for (const m of models) addOption(sel, m.id, m.name);
+    const want = selectedId || '';
+    if (want && !models.some(m => m.id === want)) addOption(sel, want, want);
+    sel.value = want;
+}
+
+/** Re-read which model an Auto reply runs on (it moves with the saved provider). */
+async function refreshResolvedModel() {
+    try {
+        const prefs = await fetchPreferences();
+        _resolved = { provider: smsProviderId(prefs.sms_provider), model: prefs.sms_model_resolved || '' };
+        const sel = $('smsModelSelect');
+        const provider = $('smsProviderSelect')?.value;
+        if (sel && sel.options.length && provider) sel.options[0].textContent = autoLabel(provider);
+    } catch (_) { /* the label stays as it was */ }
+}
+
+async function loadPreferences() {
+    const prefs = await fetchPreferences();
+    const provider = smsProviderId(prefs.sms_provider);
+    _resolved = { provider, model: prefs.sms_model_resolved || '' };
+    await fetchAvailableModels('custom');  // is a LAN server set up? (never cached)
+    renderProviderOptions(provider);
+    await renderModelOptions(provider, prefs.sms_model || '');
 }
 
 // ============================================================================
 // Rendering
 // ============================================================================
 
-function renderThreadList(threads) {
+/**
+ * The thread list's fixed part — "+ New Message", its number row and the reply-model
+ * bar — rendered ONCE, above #smsThreadRows. A poll only diffs the rows: rebuilding the
+ * bar reset the saved provider/model (and the next edit saved the wrong provider) and
+ * wiped a number being typed (audit P06-comms-web-03).
+ * @returns {HTMLElement|null} the rows container
+ */
+function ensureThreadListChrome() {
     const el = $('smsThreadList');
-    if (!el) return;
+    if (!el) return null;
+    const existing = $('smsThreadRows');
+    if (existing && el.contains(existing)) return existing;
 
-    let html = `<div class="sms-new-msg-btn" id="smsNewMsgBtn">+ New Message</div>`;
+    el.innerHTML = `<div class="sms-new-msg-btn" id="smsNewMsgBtn">+ New Message</div>
+        <div class="sms-new-msg" id="smsNewMsg" style="display:none;">
+            <input type="text" id="smsNewPhone" placeholder="+1 (555) 123-4567" inputmode="tel" autocomplete="tel" />
+            <button id="btnNewMsgStart" class="btn">Go</button>
+        </div>
+        <div class="sms-prefs-bar" id="smsPrefsBar">
+            <label class="sms-prefs-label" for="smsProviderSelect">SMS Model:</label>
+            <select id="smsProviderSelect" class="sms-prefs-select" title="Provider for SMS replies"></select>
+            <select id="smsModelSelect" class="sms-prefs-select sms-prefs-input" title="Model for SMS replies"></select>
+        </div>
+        <div class="sms-thread-rows" id="smsThreadRows"></div>`;
+    _wireThreadListChrome();
+    renderProviderOptions();
+    return $('smsThreadRows');
+}
 
-    html += `<div class="sms-new-msg" id="smsNewMsg" style="display:none;">
-        <input type="text" id="smsNewPhone" placeholder="+1 (555) 123-4567" inputmode="tel" />
-        <button id="btnNewMsgStart" class="btn">Go</button>
-    </div>`;
-
-    html += `<div class="sms-prefs-bar" id="smsPrefsBar">
-        <label class="sms-prefs-label">SMS Model:</label>
-        <select id="smsProviderSelect" class="sms-prefs-select">
-            <option value="anthropic">Anthropic</option>
-            <option value="google">Google</option>
-            <option value="openai">OpenAI</option>
-            <option value="xai">xAI</option>
-        </select>
-        <input type="text" id="smsModelInput" class="sms-prefs-input" placeholder="Auto (box default)" />
-    </div>`;
-
-    if (!threads.length) {
-        html += `<div class="sms-empty">
-            <span class="sms-empty-icon">💬</span>
-            No conversations yet
-        </div>`;
-    } else {
-        for (const t of threads) {
-            const active = _currentPhone === t.phone_number ? ' active' : '';
-            const unread = t.unread_count > 0 ? ' has-unread' : '';
-            const name = escapeHtml(t.contact_name || t.phone_number);
-            const phone = escapeHtml(t.phone_number);
-            const dirIcon = t.direction === 'outbound' ? '↗ ' : '';
-            const preview = escapeHtml(truncate(dirIcon + (t.last_message || '')));
-            const time = t.last_timestamp ? timeAgo(t.last_timestamp) : '';
-            const badge = t.unread_count > 0
-                ? `<span class="sms-thread-badge">${t.unread_count}</span>`
-                : '';
-            const lineNumber = (t.line_number || '').trim();
-            const lineLabel = lineNumber
-                ? `<div class="sms-thread-line">via ${escapeHtml(lineNumber)}</div>`
-                : '';
-
-            html += `<div class="sms-thread${active}${unread}" data-phone="${escapeHtml(t.phone_number)}">
-                <div class="sms-thread-name">${name}</div>
+function threadRowHtml(t) {
+    const name = escapeHtml(t.contact_name || t.phone_number);
+    const phone = escapeHtml(t.phone_number);
+    const dirIcon = t.direction === 'outbound' ? '↗ ' : '';
+    const preview = escapeHtml(truncate(dirIcon + (t.last_message || '')));
+    const time = t.last_timestamp ? timeAgo(t.last_timestamp) : '';
+    const badge = t.unread_count > 0
+        ? `<span class="sms-thread-badge">${escapeHtml(t.unread_count)}</span>`
+        : '';
+    const lineNumber = (t.line_number || '').trim();
+    const lineLabel = lineNumber
+        ? `<div class="sms-thread-line">via ${escapeHtml(lineNumber)}</div>`
+        : '';
+    return `<div class="sms-thread-name">${name}</div>
                 <div class="sms-thread-phone">${phone}</div>
                 ${lineLabel}
                 <div class="sms-thread-preview">${preview}</div>
                 <div class="sms-thread-meta">
-                    <span class="sms-thread-time">${time}</span>
+                    <span class="sms-thread-time">${escapeHtml(time)}</span>
                     ${badge}
-                </div>
-            </div>`;
-        }
-    }
-
-    el.innerHTML = html;
-    _wireThreadListEvents(el);
+                </div>`;
 }
 
-function _wireThreadListEvents(el) {
-    el.querySelectorAll('.sms-thread').forEach(item => {
-        item.addEventListener('click', () => {
-            const phone = item.getAttribute('data-phone');
-            if (phone) selectThread(phone);
-        });
+/** What a row shows; the row is rebuilt only when this changes. */
+function threadSignature(t) {
+    return JSON.stringify([t.contact_name, t.phone_number, t.last_message, t.direction,
+        t.unread_count, t.line_number, t.last_timestamp ? timeAgo(t.last_timestamp) : '']);
+}
+
+function renderThreadList(threads) {
+    const rows = ensureThreadListChrome();
+    if (!rows) return;
+
+    // The box lists one row per phone; never show two rows for one thread anyway.
+    const seen = new Set();
+    const list = threads.filter((t) => {
+        const key = normalizePhone(t.phone_number) || String(t.phone_number || '');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
     });
+
+    if (!list.length) {
+        if (!rows.querySelector(':scope > .sms-empty')) {
+            rows.innerHTML = `<div class="sms-empty">
+            <span class="sms-empty-icon">💬</span>
+            No conversations yet
+        </div>`;
+        }
+        return;
+    }
+    rows.querySelector(':scope > .sms-empty')?.remove();
+
+    // Keyed diff: a row is rebuilt only when what it shows changed, and moved only
+    // when the order changed, so an unchanged poll touches nothing.
+    const byPhone = new Map();
+    rows.querySelectorAll(':scope > .sms-thread').forEach(el => byPhone.set(el.dataset.phone, el));
+    const wanted = list.map((t) => {
+        const phone = String(t.phone_number);
+        let item = byPhone.get(phone);
+        byPhone.delete(phone);
+        if (!item) {
+            item = document.createElement('div');
+            item.dataset.phone = phone;
+        }
+        const sig = threadSignature(t);
+        if (item.dataset.sig !== sig) {
+            item.className = `sms-thread${t.unread_count > 0 ? ' has-unread' : ''}`;
+            item.innerHTML = threadRowHtml(t);
+            item.dataset.sig = sig;
+        }
+        const active = samePhone(phone, _currentPhone);
+        if (item.classList.contains('active') !== active) item.classList.toggle('active', active);
+        return item;
+    });
+    for (const gone of byPhone.values()) gone.remove();
+    let cursor = rows.firstElementChild;
+    for (const item of wanted) {
+        if (item === cursor) {
+            cursor = cursor.nextElementSibling;
+        } else {
+            rows.insertBefore(item, cursor);
+        }
+    }
+}
+
+function _wireThreadListChrome() {
+    // One delegated listener: rows come and go, the listener stays.
+    const rows = $('smsThreadRows');
+    if (rows) {
+        rows.addEventListener('click', (e) => {
+            const item = e.target.closest('.sms-thread');
+            if (item && rows.contains(item) && item.dataset.phone) selectThread(item.dataset.phone);
+        });
+    }
 
     const newBtn = $('smsNewMsgBtn');
     if (newBtn) newBtn.addEventListener('click', handleNewMessage);
@@ -286,23 +470,32 @@ function _wireThreadListEvents(el) {
     }
 
     const provSel = $('smsProviderSelect');
-    const modInput = $('smsModelInput');
+    const modSel = $('smsModelSelect');
     if (provSel) {
         provSel.addEventListener('change', async () => {
+            const provider = provSel.value;
             // A new provider starts on Auto: the previous provider's model id is
             // foreign to it (a Claude id sent to OpenAI fails every reply).
-            const field = $('smsModelInput');
+            const field = $('smsModelSelect');
             if (field) field.value = '';
-            if (await savePreferences(provSel.value, '')) toastSuccess('SMS provider updated');
+            const saved = await savePreferences(provider, '');
+            await renderModelOptions(provider, '');
+            if (saved) {
+                toastSuccess('SMS provider updated');
+                refreshResolvedModel();
+            }
         });
     }
-    if (modInput) {
-        modInput.addEventListener('change', async () => {
-            // The provider the select shows (showProvider keeps a stored one listed);
-            // never a fallback that would switch the reply provider behind the model.
+    if (modSel) {
+        modSel.addEventListener('change', async () => {
+            // The provider the select shows (renderProviderOptions keeps a stored one
+            // listed); never a fallback that would switch the reply provider behind the model.
             const prov = $('smsProviderSelect')?.value;
             if (!prov) return;
-            if (await savePreferences(prov, modInput.value)) toastSuccess('SMS model updated');
+            if (await savePreferences(prov, modSel.value)) {
+                toastSuccess('SMS model updated');
+                refreshResolvedModel();
+            }
         });
     }
 }
@@ -316,89 +509,196 @@ function _startNewConversation() {
         toastError(OPERATOR_REQUIRED_MESSAGE);
         return;
     }
-    selectThread(val);
+    // The thread is filed under the box's key for the number, and the send goes to the
+    // number without its punctuation (the gateway refuses spaces and dashes).
+    const parsed = parsePhoneInput(val);
+    if (!parsed) {
+        toastError('Enter a phone number with at least 10 digits');
+        phoneInput.focus();
+        return;
+    }
+    selectThread(parsed.key, parsed.to);
     const newArea = $('smsNewMsg');
     if (newArea) newArea.style.display = 'none';
 }
 
-function renderConversation(messages, phone) {
-    // Header with back button for mobile
+function renderHeader(phone, contactName) {
     const header = $('smsConvHeader');
-    if (header) {
-        const contactName = messages.length > 0 && messages[0].contact_name
-            ? escapeHtml(messages[0].contact_name) : '';
+    if (!header) return;
+    const sig = JSON.stringify([phone, contactName || '']);
+    if (header.dataset.sig === sig) return;
+    header.dataset.sig = sig;
 
-        const nameHtml = contactName
-            ? `<div class="sms-conv-name">${contactName}</div><div class="sms-conv-phone">${escapeHtml(phone)}</div>`
-            : `<div class="sms-conv-name">${escapeHtml(phone)}</div>`;
+    const nameHtml = contactName
+        ? `<div class="sms-conv-name">${escapeHtml(contactName)}</div><div class="sms-conv-phone">${escapeHtml(phone)}</div>`
+        : `<div class="sms-conv-name">${escapeHtml(phone)}</div>`;
 
-        header.innerHTML = `
+    header.innerHTML = `
             <span class="sms-conv-back" id="smsBackBtn" title="Back">&larr;</span>
             <div class="sms-conv-header-info">${nameHtml}</div>
             <div class="sms-conv-status" title="Connected"></div>
         `;
 
-        // Wire back button
-        const backBtn = $('smsBackBtn');
-        if (backBtn) {
-            backBtn.addEventListener('click', () => {
-                _currentPhone = null;
-                const conv = $('smsConversation');
-                if (conv) conv.classList.remove('sms-conv-visible');
-                refreshThreads();
-            });
-        }
+    // Wire back button
+    const backBtn = $('smsBackBtn');
+    if (backBtn) {
+        backBtn.addEventListener('click', () => {
+            _currentPhone = null;
+            _currentTo = null;
+            const conv = $('smsConversation');
+            if (conv) conv.classList.remove('sms-conv-visible');
+            refreshThreads();
+        });
     }
+}
 
-    // Messages with date separators
+function clearHeader() {
+    const header = $('smsConvHeader');
+    if (!header) return;
+    header.innerHTML = '';
+    delete header.dataset.sig;
+}
+
+function conversationSignature() {
+    return JSON.stringify([_hasMore, _messages.map(m => [m.id, m.status, m.body, m.timestamp])]);
+}
+
+/**
+ * Render the open conversation. [mode]: 'bottom' shows its newest message (a thread
+ * opened, our own send); 'follow' (a poll) keeps the reader where they are unless they
+ * were already at the bottom (audit P06-comms-web-12); 'prepend' (older page loaded)
+ * keeps the message they were reading in place.
+ */
+function renderMessages(mode) {
     const container = $('smsMessages');
     if (!container) return;
+    const wasAtBottom = isAtBottom(container);
+    const prevHeight = container.scrollHeight;
+    const prevTop = container.scrollTop;
 
-    if (!messages.length) {
+    if (!_messages.length) {
         container.innerHTML = `<div class="sms-empty">
             <span class="sms-empty-icon">✉️</span>
             No messages yet. Send the first one!
         </div>`;
-    } else {
-        let html = '';
-        let lastDate = '';
+        return;
+    }
 
-        for (const m of messages) {
-            // Insert date separator when day changes
-            const msgDate = dateLabel(m.timestamp);
-            if (msgDate !== lastDate) {
-                lastDate = msgDate;
-                html += `<div class="sms-date-sep"><span>${escapeHtml(msgDate)}</span></div>`;
-            }
+    let html = _hasMore
+        ? `<div class="sms-load-earlier"><button type="button" id="smsLoadEarlier" class="btn">Load earlier messages</button></div>`
+        : '';
+    let lastDate = '';
+    for (const m of _messages) {
+        // Insert date separator when day changes
+        const msgDate = dateLabel(m.timestamp);
+        if (msgDate !== lastDate) {
+            lastDate = msgDate;
+            html += `<div class="sms-date-sep"><span>${escapeHtml(msgDate)}</span></div>`;
+        }
 
-            const cls = m.direction === 'inbound' ? 'sms-bubble-in' : 'sms-bubble-out';
-            const body = escapeHtml(m.body || '');
-            const time = formatTime(m.timestamp);
-            const statusAttr = m.status ? ` data-status="${escapeHtml(m.status)}"` : '';
-            const status = m.direction === 'outbound' && m.status
-                ? `<span class="sms-bubble-status"${statusAttr}>${escapeHtml(m.status)}</span>`
-                : '';
+        const cls = m.direction === 'inbound' ? 'sms-bubble-in' : 'sms-bubble-out';
+        const body = escapeHtml(m.body || '');
+        const time = escapeHtml(formatTime(m.timestamp));
+        const statusAttr = m.status ? ` data-status="${escapeHtml(m.status)}"` : '';
+        const status = m.direction === 'outbound' && m.status
+            ? `<span class="sms-bubble-status"${statusAttr}>${escapeHtml(m.status)}</span>`
+            : '';
 
-            html += `<div class="${cls}">
+        html += `<div class="${cls}">
                 <div class="sms-bubble-body">${body}</div>
                 <div class="sms-bubble-footer">
                     <span class="sms-bubble-time">${time}</span>
                     ${status}
                 </div>
             </div>`;
-        }
-        container.innerHTML = html;
     }
+    container.innerHTML = html;
 
-    // Scroll to bottom
-    requestAnimationFrame(() => {
+    if (mode === 'bottom' || (mode === 'follow' && wasAtBottom)) {
         container.scrollTop = container.scrollHeight;
-    });
+    } else if (mode === 'prepend') {
+        jumpScrollTop(container, container.scrollHeight - prevHeight + prevTop);
+    } else {
+        jumpScrollTop(container, prevTop);
+    }
+}
 
-    // Show compose area (with from-number selector if we have sendable lines)
-    const compose = $('smsCompose');
-    if (compose) compose.style.display = 'flex';
-    renderFromSelector();
+/**
+ * Fold the box's newest page into what is shown: messages older than the page (pages
+ * loaded with "Load earlier", or ones that slid out of the newest window) stay; the
+ * page replaces the rest. A page that does not overlap what is shown starts afresh.
+ * @returns {boolean} true when the page started afresh
+ */
+function mergeNewestPage(page) {
+    if (!_messages.length || !page.length) {
+        _messages = page.slice();
+        return true;
+    }
+    const at = _messages.findIndex(m => m.id === page[0].id);
+    if (at < 0) {
+        _messages = page.slice();
+        return true;
+    }
+    _messages = _messages.slice(0, at).concat(page);
+    return false;
+}
+
+/** Read the open thread's newest page and show it if anything changed. */
+async function loadConversation(mode) {
+    const phone = _currentPhone;
+    if (!phone) return;
+    const seq = _convSeq;
+    let page;
+    try {
+        page = await fetchMessages(phone);
+    } catch (err) {
+        if (mode === 'bottom') toastError('Failed to load messages');
+        console.error('[SMS] fetchMessages error:', err);
+        return;
+    }
+    if (!page || seq !== _convSeq || phone !== _currentPhone) return;
+
+    const shownIds = new Set(_messages.map(m => m.id));
+    if (mergeNewestPage(page.messages)) {
+        _hasMore = page.hasMore;
+        _nextBeforeId = page.nextBeforeId;
+    }
+    const sig = conversationSignature();
+    if (sig === _convSig) return;
+    _convSig = sig;
+    renderMessages(mode);
+
+    const contactName = _messages.find(m => m.contact_name)?.contact_name || '';
+    if (contactName) renderHeader(phone, contactName);
+    // On screen now: the thread was opened, or a new inbound text arrived in it.
+    const op = getOperator();
+    const newInbound = _messages.some(m => m.direction === 'inbound' && !shownIds.has(m.id));
+    if (op && (mode === 'bottom' || newInbound)) markThreadRead(op, phone);
+}
+
+/** "Load earlier": the page just above the oldest message shown (the box's cursor). */
+async function loadEarlier() {
+    const phone = _currentPhone;
+    if (!phone || !_hasMore || _nextBeforeId == null) return;
+    const seq = _convSeq;
+    const btn = $('smsLoadEarlier');
+    if (btn) btn.disabled = true;
+    let page;
+    try {
+        page = await fetchMessages(phone, _nextBeforeId);
+    } catch (err) {
+        toastError('Failed to load earlier messages');
+        console.error('[SMS] loadEarlier error:', err);
+        if (btn) btn.disabled = false;
+        return;
+    }
+    if (!page || seq !== _convSeq || phone !== _currentPhone) return;
+    const shownIds = new Set(_messages.map(m => m.id));
+    _messages = page.messages.filter(m => !shownIds.has(m.id)).concat(_messages);
+    _hasMore = page.hasMore;
+    _nextBeforeId = page.nextBeforeId;
+    _convSig = conversationSignature();
+    renderMessages('prepend');
 }
 
 function renderFromSelector() {
@@ -443,14 +743,27 @@ function updateUnreadBadge(count) {
 // Event Handlers
 // ============================================================================
 
-async function selectThread(phone) {
+/**
+ * Open the thread filed under [phone] (the box's key for the number); sends from it go
+ * to [to] (default: the key itself, which is what an existing thread replies to).
+ */
+async function selectThread(phone, to = phone) {
     _currentPhone = phone;
+    _currentTo = to;
+    _convSeq++;
+    _messages = [];
+    _hasMore = false;
+    _nextBeforeId = null;
+    _convSig = '';
 
     // Highlight in list
+    let row = null;
     const threadList = $('smsThreadList');
     if (threadList) {
         threadList.querySelectorAll('.sms-thread').forEach(el => {
-            el.classList.toggle('active', el.getAttribute('data-phone') === phone);
+            const active = samePhone(el.getAttribute('data-phone'), phone);
+            if (active) row = el;
+            if (el.classList.contains('active') !== active) el.classList.toggle('active', active);
         });
     }
 
@@ -458,17 +771,20 @@ async function selectThread(phone) {
     const conv = $('smsConversation');
     if (conv) conv.classList.add('sms-conv-visible');
 
+    // The row names the contact (its name line shows the number when there is none).
+    const named = row?.querySelector('.sms-thread-name')?.textContent || '';
+    renderHeader(phone, named && named !== row.dataset.phone ? named : '');
+
     // Show loading state
     const container = $('smsMessages');
     if (container) container.innerHTML = `<div class="sms-empty">Loading...</div>`;
 
-    try {
-        const messages = await fetchMessages(phone);
-        renderConversation(messages, phone);
-    } catch (err) {
-        toastError('Failed to load messages');
-        console.error('[SMS] fetchMessages error:', err);
-    }
+    // Show compose area (with from-number selector if we have sendable lines)
+    const compose = $('smsCompose');
+    if (compose) compose.style.display = 'flex';
+    renderFromSelector();
+
+    await loadConversation('bottom');
 
     const input = $('smsInput');
     if (input) input.focus();
@@ -492,9 +808,8 @@ async function handleSend() {
     if (compose) compose.classList.add('sms-sending');
 
     try {
-        await sendMessage(_currentPhone, message);
-        const messages = await fetchMessages(_currentPhone);
-        renderConversation(messages, _currentPhone);
+        await sendMessage(_currentTo || _currentPhone, message);
+        await loadConversation('bottom');
         // Also refresh thread list to update preview
         refreshThreads();
     } catch (err) {
@@ -531,14 +846,10 @@ async function refreshThreads() {
 function startPolling() {
     stopPolling();
     _pollTimer = setInterval(async () => {
-        if (!_isOpen) return;
+        // Nobody is looking: skip the tick (the next visible one catches up).
+        if (!_isOpen || document.hidden) return;
         await refreshThreads();
-        if (_currentPhone) {
-            try {
-                const messages = await fetchMessages(_currentPhone);
-                renderConversation(messages, _currentPhone);
-            } catch (_) { /* ignore */ }
-        }
+        if (_currentPhone) await loadConversation('follow');
     }, 10000);
 }
 
@@ -550,17 +861,29 @@ function stopPolling() {
 // Init & Export
 // ============================================================================
 
+function closeInbox() {
+    const modal = $('smsInboxModal');
+    if (modal) modal.classList.add('hide');
+    _isOpen = false;
+    _currentPhone = null;
+    _currentTo = null;
+    _convSeq++;
+    stopPolling();
+}
+
+/** "Load earlier" is re-rendered with the messages; one delegated listener serves it. */
+function ensureConversationWiring() {
+    const container = $('smsMessages');
+    if (!container || container.dataset.wired) return;
+    container.dataset.wired = '1';
+    container.addEventListener('click', (e) => {
+        if (e.target.closest('#smsLoadEarlier')) loadEarlier();
+    });
+}
+
 export function initSMSInbox() {
     const btnClose = $('btnCloseSMS');
-    if (btnClose) {
-        btnClose.addEventListener('click', () => {
-            const modal = $('smsInboxModal');
-            if (modal) modal.classList.add('hide');
-            _isOpen = false;
-            _currentPhone = null;
-            stopPolling();
-        });
-    }
+    if (btnClose) btnClose.addEventListener('click', closeInbox);
 
     const btnSend = $('btnSMSSend');
     if (btnSend) btnSend.addEventListener('click', handleSend);
@@ -576,18 +899,16 @@ export function initSMSInbox() {
     const modal = $('smsInboxModal');
     if (modal) {
         modal.addEventListener('click', (e) => {
-            if (e.target === modal) {
-                modal.classList.add('hide');
-                _isOpen = false;
-                _currentPhone = null;
-                stopPolling();
-            }
+            if (e.target === modal) closeInbox();
         });
     }
 
     // Hide compose until thread selected
     const compose = $('smsCompose');
     if (compose) compose.style.display = 'none';
+
+    ensureThreadListChrome();
+    ensureConversationWiring();
 }
 
 export async function openSMSInbox() {
@@ -597,7 +918,16 @@ export async function openSMSInbox() {
     modal.classList.remove('hide');
     _isOpen = true;
     _currentPhone = null;
+    _currentTo = null;
     _selectedFromNumber = '';
+    _convSeq++;
+    _messages = [];
+    _convSig = '';
+
+    ensureThreadListChrome();
+    ensureConversationWiring();
+    const newArea = $('smsNewMsg');
+    if (newArea) newArea.style.display = 'none';
 
     // Load our sendable lines (enabled gateways' enabled ports) for the from-number selector
     try {
@@ -607,8 +937,7 @@ export async function openSMSInbox() {
     }
 
     // Clear conversation panel
-    const header = $('smsConvHeader');
-    if (header) header.innerHTML = '';
+    clearHeader();
     const messages = $('smsMessages');
     if (messages) messages.innerHTML = `<div class="sms-empty">
         <span class="sms-empty-icon">💬</span>
@@ -624,13 +953,9 @@ export async function openSMSInbox() {
     await refreshThreads();
     if (!getOperator()) toastError(OPERATOR_REQUIRED_MESSAGE);
 
-    // Load and display SMS preferences
+    // Load and display SMS preferences (once per open: a poll never touches them)
     try {
-        const prefs = await fetchPreferences();
-        const provSel = $('smsProviderSelect');
-        const modInput = $('smsModelInput');
-        if (provSel) showProvider(provSel, smsProviderId(prefs.sms_provider));
-        if (modInput) modInput.value = prefs.sms_model || '';
+        await loadPreferences();
     } catch (_) {}
 
     startPolling();

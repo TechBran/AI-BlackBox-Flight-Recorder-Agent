@@ -2,7 +2,8 @@
 // X05-architecture-08 client half, A14-ui-misc-14). Auto is an EMPTY model: the box
 // resolves its own configured default for the provider. The inbox used to fill
 // claude-sonnet-4-5 in whenever the box had no preference, and kept the previous
-// provider's model id across a provider switch (a Claude id sent to Gemini).
+// provider's model id across a provider switch (a Claude id sent to Gemini). The model
+// is picked from the provider's live catalog (sms-inbox-poll.test.mjs), Auto first.
 //
 // Run: cd tests/web && npm ci && node --test
 import test from "node:test";
@@ -58,12 +59,13 @@ test("no preference on the box shows Auto, never a pinned model", async () => {
     state.setOperator("Ana");
     serve(null);
     await openAndClose(() => {
-        assert.equal(document.getElementById("smsModelInput").value, "");
-        assert.match(document.getElementById("smsModelInput").placeholder, /auto/i);
+        const model = document.getElementById("smsModelSelect");
+        assert.equal(model.value, "");
+        assert.match(model.selectedOptions[0].textContent, /auto/i);
     });
     serve({ sms_provider: "anthropic", sms_model: "" });
     await openAndClose(() => {
-        assert.equal(document.getElementById("smsModelInput").value, "");
+        assert.equal(document.getElementById("smsModelSelect").value, "");
     });
 });
 
@@ -71,7 +73,7 @@ test("switching provider saves Auto, not the previous provider's model", async (
     state.setOperator("Ana");
     const posts = serve({ sms_provider: "anthropic", sms_model: "claude-opus-4-8" });
     await openAndClose(async () => {
-        assert.equal(document.getElementById("smsModelInput").value, "claude-opus-4-8");
+        assert.equal(document.getElementById("smsModelSelect").value, "claude-opus-4-8");
         const sel = document.getElementById("smsProviderSelect");
         sel.value = "openai";
         sel.dispatchEvent(new Event("change"));
@@ -79,7 +81,7 @@ test("switching provider saves Auto, not the previous provider's model", async (
         const saved = posts.find((p) => p.url === "/sms/preferences");
         assert.ok(saved, "the switch is saved");
         assert.deepEqual(saved.body, { operator: "Ana", sms_provider: "openai", sms_model: "" });
-        assert.equal(document.getElementById("smsModelInput").value, "");
+        assert.equal(document.getElementById("smsModelSelect").value, "");
     });
 });
 
@@ -93,8 +95,9 @@ test("an Android-saved 'gemini' provider loads as Google and stays Google", asyn
     await openAndClose(async () => {
         const sel = document.getElementById("smsProviderSelect");
         assert.equal(sel.value, "google");
-        const input = document.getElementById("smsModelInput");
+        const input = document.getElementById("smsModelSelect");
         input.value = "gemini-2.5-pro";
+        assert.equal(input.value, "gemini-2.5-pro", "listed by the catalog");
         input.dispatchEvent(new Event("change"));
         await settle();
         const saved = posts.find((p) => p.url === "/sms/preferences");
@@ -108,8 +111,9 @@ test("a provider the select does not list is kept, not replaced by Anthropic", a
     await openAndClose(async () => {
         const sel = document.getElementById("smsProviderSelect");
         assert.equal(sel.value, "custom", "the stored provider is shown");
-        const input = document.getElementById("smsModelInput");
-        input.value = "gemma-box::gemma-31b";
+        const input = document.getElementById("smsModelSelect");
+        assert.equal(input.value, "gemma-box::gemma-26b", "the stored model is shown as itself");
+        input.value = "";  // back to Auto
         input.dispatchEvent(new Event("change"));
         await settle();
         const saved = posts.find((p) => p.url === "/sms/preferences");

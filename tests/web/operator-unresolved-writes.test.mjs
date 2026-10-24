@@ -156,8 +156,8 @@ test("SMS: the reply model is not saved for operator ''", async () => {
         sel.value = "openai";
         sel.dispatchEvent(new Event("change"));
         await settle();
-        const input = $("smsModelInput");
-        input.value = "gpt-5";
+        const input = $("smsModelSelect");
+        input.value = input.options[input.options.length - 1].value;
         input.dispatchEvent(new Event("change"));
         await settle();
         assert.deepEqual(calls.filter((c) => c.url === "/sms/preferences" && c.method === "POST"), []);

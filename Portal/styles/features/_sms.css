@@ -326,6 +326,18 @@
     border-radius: var(--radius-full);
 }
 
+/* "Load earlier messages", above the oldest message shown */
+.sms-load-earlier {
+    display: flex;
+    justify-content: center;
+    padding: 2px 0 8px;
+}
+
+.sms-load-earlier .btn {
+    padding: 6px 14px;
+    font-size: 0.8rem;
+}
+
 /* --------------------------------------------------------------------------
    Message Bubbles
    -------------------------------------------------------------------------- */

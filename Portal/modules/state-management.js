@@ -744,6 +744,18 @@ export function getHydratedModels(provider) {
 }
 
 /**
+ * Display name of a provider catalog key ("Google", "Custom (Local Network)", …), the
+ * same name the chat composer's catalog uses; the key itself for one it does not name.
+ *
+ * @param {string} provider - canonical catalog key
+ * @returns {string}
+ */
+export function getProviderName(provider) {
+    const config = MODEL_CONFIG[provider];
+    return (config && config.name) || provider;
+}
+
+/**
  * Abbreviate operator name for compact display
  * - No spaces in abbreviated form
  * - Full name shown in dropdown and as title
