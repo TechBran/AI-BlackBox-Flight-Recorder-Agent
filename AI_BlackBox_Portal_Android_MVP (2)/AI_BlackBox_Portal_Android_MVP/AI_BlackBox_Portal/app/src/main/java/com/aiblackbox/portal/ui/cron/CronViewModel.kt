@@ -121,6 +121,13 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     private val _schedulePreview = MutableStateFlow(SchedulePreview())
     val schedulePreview: StateFlow<SchedulePreview> = _schedulePreview.asStateFlow()
 
+    // -- The box's scheduling zone (A12-voice-cron-14) --
+    // Every schedule is read against the box's clock, which the phone may not share,
+    // so the Simple editor labels its time fields "box time (<zone>)". From the
+    // tz_abbrev the job list and the preview carry; "" until a box that sends it answers.
+    private val _boxZone = MutableStateFlow("")
+    val boxZone: StateFlow<String> = _boxZone.asStateFlow()
+
     private var previewJob: Job? = null
     // Monotonic token so a stale in-flight response can't clobber a newer one
     // (debounce stops most overlap, but a slow request could still land late).
@@ -187,6 +194,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
                 val response = api.get(path)
                 val parsed = json.decodeFromString(CronJobsResponse.serializer(), response)
                 _allJobs.value = parsed.jobs
+                parsed.tzAbbrev?.takeIf { it.isNotBlank() }?.let { _boxZone.value = it }
                 _error.value = null
             } catch (e: Exception) {
                 _error.value = "Failed to load jobs: ${e.message}"
@@ -201,9 +209,9 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
         val api = api ?: return
         viewModelScope.launch {
             try {
-                _actionMessage.value = "Running job..."
+                // The route only starts the run (202); its outcome lands in History.
                 api.post("/api/cron/jobs/$jobId/run", "{}")
-                _actionMessage.value = "Job executed"
+                _actionMessage.value = "Job started; its result will appear in History"
                 loadJobs()
             } catch (e: Exception) {
                 _actionMessage.value = "Failed to run: ${e.message}"
@@ -347,7 +355,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
 
     /** UI state for the next-run preview shown near the schedule field. */
     data class SchedulePreview(
-        val runs: List<String> = emptyList(),  // formatted box-local labels
+        val runs: List<String> = emptyList(),  // labels in the phone's zone, zone named
         val invalid: Boolean = false,           // mid-edit invalid cron (400)
         val visible: Boolean = false            // hidden until there's something to show
     )
@@ -384,7 +392,8 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
                 val response = api.post("/api/cron/preview", body)
                 if (seq != previewSeq) return@launch  // superseded by a newer request
                 val parsed = json.decodeFromString(CronPreviewResponse.serializer(), response)
-                val labels = parsed.nextRuns.map { formatPreviewTime(it) }
+                parsed.tzAbbrev?.takeIf { it.isNotBlank() }?.let { _boxZone.value = it }
+                val labels = parsed.nextRuns.map { CronTimeFormat.absolute(it) }
                 _schedulePreview.value = SchedulePreview(
                     runs = labels,
                     invalid = false,
@@ -413,19 +422,6 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
         previewSeq++
         lastPreviewedSchedule = null
         _schedulePreview.value = SchedulePreview()
-    }
-
-    /** Render a box-local ISO fire time as a compact "Jun 25, 3:00 PM" label.
-     *  The backend returns tz-aware ISO strings; we parse the offset and present
-     *  the wall-clock time. Best-effort — falls back to the raw string. */
-    private fun formatPreviewTime(isoStr: String): String {
-        return try {
-            val odt = java.time.OffsetDateTime.parse(isoStr)
-            val fmt = java.time.format.DateTimeFormatter.ofPattern("MMM d, h:mm a")
-            odt.format(fmt)
-        } catch (_: Exception) {
-            isoStr
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -692,6 +688,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
                     val response = api?.get(path) ?: continue
                     val parsed = json.decodeFromString(CronJobsResponse.serializer(), response)
                     _allJobs.value = parsed.jobs
+                    parsed.tzAbbrev?.takeIf { it.isNotBlank() }?.let { _boxZone.value = it }
                 } catch (_: Exception) {
                     // Silent poll failure
                 }

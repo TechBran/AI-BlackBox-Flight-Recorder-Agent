@@ -34,8 +34,14 @@ data class CronJob(
     @SerialName("last_status") val lastStatus: String? = null
 )
 
+// timezone / tz_abbrev: the box's scheduling zone (every schedule is box-local), for
+// the editor's "box time (EDT)" label. Absent on an older box.
 @Serializable
-data class CronJobsResponse(val jobs: List<CronJob> = emptyList())
+data class CronJobsResponse(
+    val jobs: List<CronJob> = emptyList(),
+    val timezone: String? = null,
+    @SerialName("tz_abbrev") val tzAbbrev: String? = null
+)
 
 @Serializable
 data class CronJobResponse(val job: CronJob? = null)
@@ -63,7 +69,9 @@ data class CronPreviewRequest(
 
 @Serializable
 data class CronPreviewResponse(
-    @SerialName("next_runs") val nextRuns: List<String> = emptyList()
+    @SerialName("next_runs") val nextRuns: List<String> = emptyList(),
+    val timezone: String? = null,
+    @SerialName("tz_abbrev") val tzAbbrev: String? = null
 )
 
 @Serializable
@@ -75,7 +83,8 @@ data class CronJobCreateRequest(
     // M4.4: canonical catalog provider key sent alongside the specific model id
     // (identical to chat + Portal). Null = let the backend derive it from `model`.
     val provider: String? = null,
-    val model: String = "gemini",
+    // "" = Auto (the provider's default), never a provider word foreign to `provider` (W18).
+    val model: String = "",
     val delivery: String = "snapshot",
     @SerialName("delivery_target") val deliveryTarget: String? = null,
     val operator: String = "",

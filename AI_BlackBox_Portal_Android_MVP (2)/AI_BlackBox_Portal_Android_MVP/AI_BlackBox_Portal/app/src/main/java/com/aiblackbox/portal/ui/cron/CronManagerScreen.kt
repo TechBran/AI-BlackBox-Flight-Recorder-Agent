@@ -528,8 +528,8 @@ private fun CronJobCard(
                 if (job.runCount > 0) {
                     MetaTag("${job.runCount} runs")
                 }
-                job.lastRunAt?.let { MetaTag("Last: ${formatRelativeTime(it)}") }
-                job.nextRunAt?.let { MetaTag("Next: ${formatRelativeTime(it)}") }
+                job.lastRunAt?.let { MetaTag("Last: ${CronTimeFormat.card(it)}") }
+                job.nextRunAt?.let { MetaTag("Next: ${CronTimeFormat.card(it)}") }
             }
 
             Spacer(Modifier.height(10.dp))
@@ -673,11 +673,18 @@ private fun EditJobDialog(
 ) {
     var name by remember(job) { mutableStateOf(job?.name ?: "") }
     var prompt by remember(job) { mutableStateOf(job?.prompt ?: "") }
-    var frequency by remember(job) { mutableStateOf("daily") }
-    var timeHour by remember(job) { mutableStateOf("07") }
-    var timeMinute by remember(job) { mutableStateOf("00") }
+    // A12-voice-cron-01: an existing job's schedule opens in Simple only when
+    // Simple rebuilds it exactly; anything else opens in Advanced, verbatim, so
+    // saving never changes when the job runs. Resolved before the first frame.
+    val simple = remember(job) { job?.schedule?.let { CronScheduleForm.parse(it) } }
+    var frequency by remember(job) { mutableStateOf(simple?.frequency ?: CronScheduleForm.DAILY) }
+    var timeHour by remember(job) { mutableStateOf((simple?.hour ?: 7).toString().padStart(2, '0')) }
+    var timeMinute by remember(job) { mutableStateOf((simple?.minute ?: 0).toString().padStart(2, '0')) }
+    // Standard cron weekday (0 = Sunday); Monday for a new weekly job.
+    var weekday by remember(job) { mutableStateOf(simple?.weekday ?: 1) }
     var cronExpression by remember(job) { mutableStateOf(job?.schedule ?: "") }
-    var useAdvanced by remember(job) { mutableStateOf(false) }
+    var useAdvanced by remember(job) { mutableStateOf(job != null && job.schedule.isNotBlank() && simple == null) }
+    val boxZone by viewModel.boxZone.collectAsState()
     // M4.4: canonical provider key + specific model id (or "" = Auto). For an
     // existing job, preselect from job.provider (or derive it for legacy rows);
     // model holds the saved specific id.
@@ -728,44 +735,19 @@ private fun EditJobDialog(
     // M5c: next-run preview. Recompute the cron string from whichever schedule
     // input is active (the SAME logic the save path uses) and ask the VM to
     // preview it (debounced ~300ms). Re-runs whenever any schedule input changes.
+    // An invalid Simple time previews nothing (the form says what to fix).
     val schedulePreview by viewModel.schedulePreview.collectAsState()
-    LaunchedEffect(useAdvanced, frequency, timeHour, timeMinute, cronExpression) {
-        val scheduleStr = if (useAdvanced) {
-            cronExpression.trim()
-        } else {
-            buildSimpleCron(frequency, timeHour, timeMinute)
-        }
+    val simpleCron = CronScheduleForm.fromFields(frequency, timeHour, timeMinute, weekday)
+        ?.let { CronScheduleForm.build(it) }
+    LaunchedEffect(useAdvanced, frequency, timeHour, timeMinute, weekday, cronExpression) {
+        val scheduleStr = if (useAdvanced) cronExpression.trim() else simpleCron.orEmpty()
         viewModel.previewSchedule(scheduleStr)
     }
-
-    // Parse existing cron expression into simple mode
-    LaunchedEffect(job) {
-        if (job != null && job.schedule.isNotBlank()) {
-            val parts = job.schedule.split(" ")
-            if (parts.size == 5) {
-                val (min, hour, dom, _, dow) = parts
-                when {
-                    min == "0" && hour == "*" -> {
-                        frequency = "hourly"; useAdvanced = false
-                    }
-                    min.startsWith("*/") && hour == "*" -> {
-                        frequency = "custom"; useAdvanced = true; cronExpression = job.schedule
-                    }
-                    dom == "*" && dow == "*" && min.all { it.isDigit() } && hour.all { it.isDigit() } -> {
-                        frequency = "daily"
-                        timeHour = hour.padStart(2, '0')
-                        timeMinute = min.padStart(2, '0')
-                        useAdvanced = false
-                    }
-                    dom == "*" && dow.all { it.isDigit() } && min.all { it.isDigit() } && hour.all { it.isDigit() } -> {
-                        frequency = "weekly"; useAdvanced = true; cronExpression = job.schedule
-                    }
-                    else -> {
-                        useAdvanced = true; cronExpression = job.schedule
-                    }
-                }
-            }
-        }
+    // Save stays off while the schedule cannot be saved as shown.
+    val scheduleValid = if (useAdvanced) {
+        cronExpression.isNotBlank() && !schedulePreview.invalid
+    } else {
+        simpleCron != null
     }
 
     Dialog(
@@ -839,8 +821,8 @@ private fun EditJobDialog(
                     ScheduleTab("Advanced", useAdvanced) {
                         useAdvanced = true
                         // Sync cron from simple
-                        if (cronExpression.isBlank()) {
-                            cronExpression = buildSimpleCron(frequency, timeHour, timeMinute)
+                        if (cronExpression.isBlank() && simpleCron != null) {
+                            cronExpression = simpleCron
                         }
                     }
                 }
@@ -852,7 +834,16 @@ private fun EditJobDialog(
                             frequency = it
                         }
                     }
-                    if (frequency == "daily" || frequency == "weekly") {
+                    if (frequency == CronScheduleForm.WEEKLY) {
+                        // A12-voice-cron-15: weekly runs on the day picked here, not
+                        // always Monday.
+                        FormField("ON") {
+                            WeekdaySelector(weekday) { weekday = it }
+                        }
+                    }
+                    if (frequency == CronScheduleForm.DAILY || frequency == CronScheduleForm.WEEKLY) {
+                        val hourError = CronScheduleForm.hourOf(timeHour) == null
+                        val minuteError = CronScheduleForm.minuteOf(timeMinute) == null
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -863,6 +854,7 @@ private fun EditJobDialog(
                                 onValueChange = { if (it.length <= 2 && it.all { c -> c.isDigit() }) timeHour = it },
                                 modifier = Modifier.width(60.dp),
                                 singleLine = true,
+                                isError = hourError,
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = Neutral900),
                                 colors = glassTextFieldColors(),
                                 shape = RoundedCornerShape(RadiusSm)
@@ -873,19 +865,28 @@ private fun EditJobDialog(
                                 onValueChange = { if (it.length <= 2 && it.all { c -> c.isDigit() }) timeMinute = it },
                                 modifier = Modifier.width(60.dp),
                                 singleLine = true,
+                                isError = minuteError,
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = Neutral900),
                                 colors = glassTextFieldColors(),
                                 shape = RoundedCornerShape(RadiusSm)
+                            )
+                            // A12-voice-cron-14: the hour and minute are the box's clock,
+                            // which the phone may not share.
+                            Text(
+                                if (boxZone.isNotBlank()) "box time ($boxZone)" else "box time",
+                                color = Neutral500,
+                                fontSize = 12.sp
                             )
                         }
                     }
 
                     // Schedule preview
-                    val preview = describeSimpleSchedule(frequency, timeHour, timeMinute)
+                    val simpleSchedule = CronScheduleForm.fromFields(frequency, timeHour, timeMinute, weekday)
                     Text(
-                        "Runs $preview",
+                        if (simpleSchedule != null) "Runs ${CronScheduleForm.describe(simpleSchedule)}"
+                        else "Enter an hour from 0 to 23 and a minute from 0 to 59",
                         fontSize = 12.sp,
-                        color = Neutral500,
+                        color = if (simpleSchedule != null) Neutral500 else HistoryErrorRed,
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1024,14 +1025,16 @@ private fun EditJobDialog(
                             val hint: String
                             if (useAdvanced) {
                                 schedule = cronExpression
-                                hint = describeCronExpression(cronExpression)
+                                hint = CronScheduleForm.describeExpression(cronExpression)
                             } else {
-                                schedule = buildSimpleCron(frequency, timeHour, timeMinute)
-                                hint = describeSimpleSchedule(frequency, timeHour, timeMinute)
+                                val s = CronScheduleForm.fromFields(frequency, timeHour, timeMinute, weekday)
+                                    ?: return@Button
+                                schedule = CronScheduleForm.build(s) ?: return@Button
+                                hint = CronScheduleForm.describe(s)
                             }
                             onSave(name, prompt, schedule, hint, provider, model, delivery, deliveryTarget, operator, oneShot)
                         },
-                        enabled = !isSaving,
+                        enabled = !isSaving && scheduleValid,
                         colors = ButtonDefaults.buttonColors(containerColor = BbxAccent)
                     ) {
                         if (isSaving) {
@@ -1136,7 +1139,9 @@ private fun RowScope.ScheduleTab(text: String, selected: Boolean, onClick: () ->
 private fun FrequencySelector(selected: String, onSelect: (String) -> Unit) {
     val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
-    val options = listOf("hourly" to "Every hour", "daily" to "Daily", "weekly" to "Weekly")
+    val options = listOf(
+        CronScheduleForm.HOURLY to "Every hour", CronScheduleForm.DAILY to "Daily", CronScheduleForm.WEEKLY to "Weekly"
+    )
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
         OutlinedTextField(
             value = options.find { it.first == selected }?.second ?: selected,
@@ -1154,6 +1159,34 @@ private fun FrequencySelector(selected: String, onSelect: (String) -> Unit) {
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
             options.forEach { (value, label) ->
                 DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { feedback(); onSelect(value); expanded = false })
+            }
+        }
+    }
+}
+
+/** Weekly day picker (A12-voice-cron-15), storing the standard cron weekday (0 = Sunday). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WeekdaySelector(selected: Int, onSelect: (Int) -> Unit) {
+    val feedback = rememberPressFeedback()
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = CronScheduleForm.weekdayName(selected),
+            onValueChange = {},
+            readOnly = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = Neutral900),
+            colors = glassTextFieldColors(),
+            singleLine = true,
+            shape = RoundedCornerShape(RadiusSm)
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
+            CronScheduleForm.WEEKDAYS.forEach { (day, label) ->
+                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { feedback(); onSelect(day); expanded = false })
             }
         }
     }
@@ -1445,7 +1478,14 @@ private fun HistoryDialog(
 @Composable
 private fun HistoryItem(entry: CronHistoryEntry) {
     val hasError = entry.error != null
-    val accentColor = if (hasError) HistoryErrorRed else StatusActiveGreen
+    // A run the box could not see the end of may still have delivered (O15-02/-03):
+    // amber, labelled as such, never the red of a known failure.
+    val outcomeUnknown = entry.deliveryStatus == "outcome_unknown"
+    val accentColor = when {
+        outcomeUnknown -> StatusPausedAmber
+        hasError -> HistoryErrorRed
+        else -> StatusActiveGreen
+    }
 
     Box(
         modifier = Modifier
@@ -1465,7 +1505,7 @@ private fun HistoryItem(entry: CronHistoryEntry) {
         Column(modifier = Modifier.padding(start = 14.dp, end = 12.dp, top = 12.dp, bottom = 12.dp)) {
             // Time
             Text(
-                formatRelativeTime(entry.runAt),
+                CronTimeFormat.card(entry.runAt),
                 fontSize = 12.sp,
                 color = Neutral700,
                 fontWeight = FontWeight.Medium
@@ -1476,7 +1516,7 @@ private fun HistoryItem(entry: CronHistoryEntry) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 MetaTag(entry.model)
                 MetaTag("${entry.durationMs}ms")
-                MetaTag(entry.deliveryStatus ?: "completed")
+                MetaTag(if (outcomeUnknown) "outcome unknown" else entry.deliveryStatus ?: "completed")
             }
 
             // Result preview
@@ -1504,7 +1544,7 @@ private fun HistoryItem(entry: CronHistoryEntry) {
                 Text(
                     error,
                     fontSize = 12.sp,
-                    color = HistoryErrorRed,
+                    color = if (outcomeUnknown) StatusPausedAmber else HistoryErrorRed,
                     lineHeight = 17.sp,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1533,48 +1573,3 @@ private fun glassTextFieldColors() = OutlinedTextFieldDefaults.colors(
     focusedTextColor = Neutral900,
     unfocusedTextColor = Neutral900
 )
-
-private fun buildSimpleCron(frequency: String, hour: String, minute: String): String {
-    val h = hour.toIntOrNull() ?: 7
-    val m = minute.toIntOrNull() ?: 0
-    return when (frequency) {
-        "hourly" -> "0 * * * *"
-        "daily" -> "$m $h * * *"
-        "weekly" -> "$m $h * * 1"
-        else -> "0 7 * * *"
-    }
-}
-
-private fun describeSimpleSchedule(frequency: String, hour: String, minute: String): String {
-    val h = hour.toIntOrNull() ?: 7
-    val m = minute.toIntOrNull() ?: 0
-    val ampm = if (h >= 12) "PM" else "AM"
-    val h12 = if (h % 12 == 0) 12 else h % 12
-    val timeStr = "$h12:${m.toString().padStart(2, '0')} $ampm"
-    return when (frequency) {
-        "hourly" -> "every hour"
-        "daily" -> "daily at $timeStr"
-        "weekly" -> "weekly at $timeStr"
-        else -> "daily at $timeStr"
-    }
-}
-
-private fun describeCronExpression(cron: String): String {
-    val parts = cron.trim().split("\\s+".toRegex())
-    if (parts.size != 5) return "Cron: $cron"
-    val (min, hour) = parts
-    if (min == "0" && hour == "*") return "Every hour"
-    if (min.startsWith("*/")) return "Every ${min.drop(2)} minutes"
-    if (hour.startsWith("*/")) return "Every ${hour.drop(2)} hours"
-    return "Cron: $cron"
-}
-
-private fun formatRelativeTime(isoStr: String): String {
-    if (isoStr.isBlank()) return ""
-    return try {
-        // Simple relative time -- just show the raw timestamp shortened
-        if (isoStr.length > 16) isoStr.substring(5, 16).replace("T", " ") else isoStr
-    } catch (_: Exception) {
-        isoStr
-    }
-}
