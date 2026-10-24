@@ -15,6 +15,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.TimeUnit
@@ -82,6 +83,28 @@ class ContactsBookApiTest {
         save(name = "Brand new")
         val created = Json.parseToJsonElement(taken().body!!.utf8()).jsonObject
         assertNull("a create carries no id", created["id"])
+    }
+
+    // Review follow-up: a box that still matches by name saves a rename as a NEW contact;
+    // the app must not answer that with "Contact updated".
+    private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    @Test fun `an edit the box saved in place says updated`() {
+        val response = """{"success":true,"contact":{"id":"c-42","name":"Renamed"}}"""
+        assertEquals("Contact updated", contactSavedMessage("c-42", response, lenient))
+    }
+
+    @Test fun `an edit the box saved under a new id says it made a new contact`() {
+        val response = """{"success":true,"contact":{"id":"c-99","name":"Renamed"}}"""
+        val message = contactSavedMessage("c-42", response, lenient)
+        assertTrue(message, message.startsWith("Saved as a new contact"))
+    }
+
+    @Test fun `a create says created and the box's warning always wins`() {
+        assertEquals("Contact created", contactSavedMessage(null, """{"success":true,"contact":{"id":"c-1"}}""", lenient))
+        val warned = """{"success":true,"contact":{"id":"c-99"},"warning":"This number is already flagged"}"""
+        assertEquals("This number is already flagged", contactSavedMessage("c-42", warned, lenient))
+        assertEquals("an unreadable reply is not an error", "Contact updated", contactSavedMessage("c-42", "not json", lenient))
     }
 
     @Test fun `with no operator the book is neither read nor written`() = runBlocking {
