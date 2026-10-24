@@ -22,6 +22,11 @@ from Orchestrator.browser.config import (
 )
 from Orchestrator.browser.chrome import ChromeInstance
 from Orchestrator.browser.actions import ActionExecutor
+# The screenshot budget is shared with every CU driver (frontier drivers
+# included); re-exported here, where the Anthropic driver and tests import it.
+from Orchestrator.utils.cu_history import (  # noqa: F401
+    budget_screenshots_in_history, trim_anthropic_history,
+)
 
 
 def _cancel_task_cross_loop(agent_task) -> None:
@@ -200,12 +205,13 @@ class ComputerUseSession:
 
     def trim_history(self, max_messages: int = 200):
         """Cap conversation history to prevent token explosion.
-        Keeps first 2 messages (system context) + most recent messages.
+
+        Cuts only between whole tool rounds (trim_anthropic_history): the old
+        head+tail slice orphaned tool_use/tool_result pairs and every session
+        past 200 messages 400'd on its next request (audit O13-computer-use-05).
         """
-        if len(self.conversation_history) > max_messages:
-            self.conversation_history = (
-                self.conversation_history[:2] + self.conversation_history[-(max_messages - 2):]
-            )
+        self.conversation_history = trim_anthropic_history(
+            self.conversation_history, max_messages)
 
     def is_alive(self) -> bool:
         """Check if the browser/desktop is available."""
@@ -499,84 +505,6 @@ def fold_event_to_reasoning(session, evt: dict) -> None:
         session.reasoning_tail = tail[-REASONING_TAIL_MAX_CHARS:]
     except Exception:
         pass
-
-
-def budget_screenshots_in_history(history: list, keep_images: int = 3) -> list:
-    """Return a copy of an Anthropic-format history with only the most recent
-    ``keep_images`` image blocks intact; every older screenshot becomes a
-    one-line text placeholder in the same position (tool_use/tool_result
-    pairing preserved). Non-mutating and idempotent.
-
-    THE 413 guard (2026-07-23): the CU send loop re-sends the whole history
-    every iteration, so without a per-turn budget a long run accumulates up to
-    CU_MAX_ITERATIONS full-res PNGs and dies on Anthropic's per-request caps
-    (~100 images / ~32MB — surfaced as "request_too_large" at step ~10 on a
-    native 3440x1440 capture). Call this at the top of EVERY send.
-    """
-    placeholder_text = ("[Earlier screenshot elided to keep the request under "
-                        "the API size caps]")
-
-    def _count(msgs) -> int:
-        n = 0
-        for msg in msgs:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if block.get("type") == "image":
-                    n += 1
-                elif (block.get("type") == "tool_result"
-                      and isinstance(block.get("content"), list)):
-                    n += sum(1 for item in block["content"]
-                             if item.get("type") == "image")
-        return n
-
-    total = _count(history)
-    if total <= keep_images:
-        return history
-
-    cutoff = total - keep_images  # image ordinals 1..cutoff get elided
-    seen = 0
-    out = []
-    for msg in history:
-        content = msg.get("content")
-        if not isinstance(content, list):
-            out.append(msg)
-            continue
-        new_content = []
-        changed = False
-        for block in content:
-            if block.get("type") == "image":
-                seen += 1
-                if seen <= cutoff:
-                    new_content.append({"type": "text", "text": placeholder_text})
-                    changed = True
-                else:
-                    new_content.append(block)
-            elif (block.get("type") == "tool_result"
-                  and isinstance(block.get("content"), list)):
-                inner_new = []
-                inner_changed = False
-                for item in block["content"]:
-                    if item.get("type") == "image":
-                        seen += 1
-                        if seen <= cutoff:
-                            inner_new.append({"type": "text",
-                                              "text": placeholder_text})
-                            inner_changed = True
-                        else:
-                            inner_new.append(item)
-                    else:
-                        inner_new.append(item)
-                if inner_changed:
-                    new_content.append({**block, "content": inner_new})
-                    changed = True
-                else:
-                    new_content.append(block)
-            else:
-                new_content.append(block)
-        out.append({**msg, "content": new_content} if changed else msg)
-    return out
 
 
 def strip_screenshots_from_history(history: list) -> list:

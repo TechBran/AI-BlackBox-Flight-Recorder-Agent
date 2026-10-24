@@ -525,7 +525,7 @@ def test_gemini_cu_routes_refuse_hostile_operator(client, monkeypatch, route):
         started.append(a)
 
     monkeypatch.setattr(gr, "get_registry", lambda: _FakeRegistry())
-    monkeypatch.setattr(gr, "get_or_create_session", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(gr, "create_task_session", lambda *a, **k: started.append(a))
     monkeypatch.setattr(gr, "_run_task", _no_run)
     monkeypatch.setattr(tasks, "create_task", lambda *a, **k: started.append(k) or
                         type("T", (), {"task_id": "t-1"})())

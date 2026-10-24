@@ -128,27 +128,35 @@ From `ResidentTools.INTENT_ACTIONS` (`ResidentTools.kt:123`) / `IntentActuator.p
 
 `action.json` / `observation.json` / `action_result.json` describe the **message
 payloads**. On the wire the M2 loop wraps an `action` payload in a tiny **transport
-envelope**: `POST /action`'s JSON body is a full `action.json` frame **PLUS two sibling
+envelope**: `POST /action`'s JSON body is a full `action.json` frame **PLUS three sibling
 framing keys** —
 
 ```jsonc
 {
   "msg": "action", "type": "element_set_text", "resource_id": "…", "text": "…",  // action.json payload
   "task_id": "3f9c…",   // transport: the correlation id the loop minted (both channels share it)
-  "operator": "Brandon" // transport: the operator scope (fail-closed in authorize())
+  "operator": "Brandon", // transport: the operator scope (fail-closed in authorize())
+  "action_id": "9b1e…"  // transport: the idempotency key of THIS action (optional on the device)
 }
 ```
 
 - `task_id` correlates the `/action`↓ and `/stream`↑ halves of one session; `operator`
   is re-checked in `authorize()` (a foreign operator's hub can't actuate the device).
+- `action_id` is minted once per dispatched action (`frontier_agent_loop._wire_frame`) and
+  every retry of that action re-posts the same frame. The device runs a given
+  (`task_id`, `action_id`) once (`ActionReplayCache`): a retry that arrives while the first
+  POST is still in flight (the user is looking at the confirm card) waits for it, and one
+  that arrives after it finished gets the recorded `action_result` back. Without it, a
+  response lost after the device acted made the loop tap "Send" twice. A frame with no
+  `action_id` (an older box) is dispatched every time, as before.
 - **Why it isn't a schema violation:** each `action.json` variant is
-  `additionalProperties: false`, so `task_id`/`operator` are **not** valid *inside* the
-  action payload. They are the **framing around it**. A strict validator MUST therefore
-  validate the action variant **after stripping** `task_id` + `operator` (the device side
+  `additionalProperties: false`, so `task_id`/`operator`/`action_id` are **not** valid
+  *inside* the action payload. They are the **framing around it**. A strict validator MUST
+  therefore validate the action variant **after stripping** the framing keys (the device side
   does exactly this — `ACTION_JSON` is `ignoreUnknownKeys=true` and `ActionEnvelope` reads
-  only `msg`/`task_id`/`operator`, handing the untouched body to `parseAction`, which keys
-  on the variant `type`). This split is intentional: the payload stays a clean, portable
-  contract while the transport carries only correlation + scope.
+  only `msg`/`task_id`/`operator`/`action_id`, handing the untouched body to `parseAction`,
+  which keys on the variant `type`). This split is intentional: the payload stays a clean,
+  portable contract while the transport carries only correlation, scope and idempotency.
 - The response (`action_result.json`) carries **no** envelope — it is the bare payload
   (the loop already knows the `task_id` it POSTed).
 - **Pairing header (audit X02/X04).** Every request to the device's listener except

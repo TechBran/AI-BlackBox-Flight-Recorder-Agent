@@ -58,23 +58,37 @@ TOOLSET = "computer_toolset_20260801"
 
 
 class _FakeAnthropicClient:
-    """Stand-in for AsyncAnthropic: canned `beta.messages.create` responses (one per turn).
+    """Stand-in for AsyncAnthropic: canned responses (one per turn) through the streaming
+    surface the driver uses (`beta.messages.stream(...)` → `get_final_message()`).
     A script entry is a content list, or (content, stop_reason)."""
 
     def __init__(self, script):
         script = list(script)
 
+        class _Stream:
+            def __init__(self, message):
+                self._message = message
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get_final_message(self):
+                return self._message
+
         class _Messages:
             def __init__(self):
                 self.calls = []
 
-            async def create(self, **kwargs):
+            def stream(self, **kwargs):
                 # snapshot the history: the driver keeps appending to the same list
                 self.calls.append(dict(kwargs, messages=list(kwargs["messages"])))
                 entry = script.pop(0)
                 content, stop = entry if isinstance(entry, tuple) else (
                     entry, "tool_use" if entry else "end_turn")
-                return _ns(content=content, stop_reason=stop)
+                return _Stream(_ns(content=content, stop_reason=stop))
 
         self.beta = _ns(messages=_Messages())
 

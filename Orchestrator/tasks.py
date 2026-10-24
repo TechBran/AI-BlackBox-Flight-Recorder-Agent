@@ -341,8 +341,11 @@ def cancel_task(task_id: str) -> Dict[str, Any]:
         _kill_process_group(handle.get("pid"), task_id)
         detail = "process-group-kill"
     elif handle and handle.get("kind") == "cu":
+        # The handle is registered before the session exists on the headless
+        # path; the row learns its session id at launch, so fall back to it.
         _signal_cu_cancel(handle.get("operator", task.operator or ""),
-                          handle.get("session_id", ""), handle.get("model", ""))
+                          handle.get("session_id") or getattr(task, "session_id", "") or "",
+                          handle.get("model", ""))
         detail = "cu-stop"
     elif task.task_type in _CU_TASK_TYPES:
         # No registered handle but a CU-shaped row (e.g. a GEMINI_CU task, which

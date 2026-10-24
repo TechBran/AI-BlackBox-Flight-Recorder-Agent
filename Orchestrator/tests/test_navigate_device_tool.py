@@ -240,8 +240,10 @@ def test_one_shot_frame_shape(monkeypatch):
     assert frame["task_id"]                                    # correlation id present
     assert frame["params"] == {"destination": "1247 Main St W, Hamilton, ON",
                                "mode": "d", "avoid": "tf", "delivery": "auto"}
-    # no screenshot / observation / session keys leak into the frame
-    assert set(frame) == {"msg", "task_id", "operator", "type", "name", "params"}
+    # no screenshot / observation / session keys leak into the frame; action_id is the
+    # transport idempotency key every /action frame carries
+    assert set(frame) == {"msg", "task_id", "operator", "action_id", "type", "name", "params"}
+    assert frame["action_id"]
     assert res.data["device"] == NODE.dns_name
     assert res.data["task_id"] == frame["task_id"]
     assert "Hamilton" in res.result

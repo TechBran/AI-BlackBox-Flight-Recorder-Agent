@@ -423,18 +423,23 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     else:
                         action_result = session.actions.execute(action, **action_params)
 
-                    if is_member and isinstance(action_result, dict) and action_result.get("success") is False:
-                        toolset_failed = True
+                    # A failed action is reported as failed on both protocols: the
+                    # executor surfaces real input-tool failures (O13-computer-use-04),
+                    # and a legacy screenshot after one would read as success.
+                    if isinstance(action_result, dict) and action_result.get("success") is False:
+                        toolset_failed = toolset_failed or is_member
                         err = action_result.get("message") or action_result.get("error") or f"{action} failed"
-                        tool_results.append(_computer_result(tool_id, f"Error: {err}", True, is_error=True))
+                        tool_results.append(_computer_result(tool_id, f"Error: {err}", is_member, is_error=True))
                         continue
 
-                    if action not in ("screenshot", "wait", "zoom"):
+                    if action not in ("screenshot", "wait", "zoom", "cursor_position"):
                         await asyncio.sleep(0.5)
 
-                    if is_member and tool_id != last_member_id and action not in ("screenshot", "zoom"):
+                    # cursor_position answers with coordinates, not a screenshot (W19).
+                    if action == "cursor_position" or (
+                            is_member and tool_id != last_member_id and action not in ("screenshot", "zoom")):
                         msg = (action_result.get("message") if isinstance(action_result, dict) else "") or "OK"
-                        tool_results.append(_computer_result(tool_id, [{"type": "text", "text": msg}], True))
+                        tool_results.append(_computer_result(tool_id, [{"type": "text", "text": msg}], is_member))
                         continue
 
                     try:

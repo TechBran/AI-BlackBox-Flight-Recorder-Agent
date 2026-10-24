@@ -7797,8 +7797,16 @@ def resolve_cu_session(operator: str, session_id: str = "", model: str = ""):
     string-sniff model ids (test_cu_catalog.py:269 pins this). Anthropic AND
     OpenAI share the browser session manager; Google uses the gemini one. Returns
     the resolved ComputerUseSession/GeminiCUSession, or None. ``session_id`` is
-    honored by the browser lookup; empty falls back to the operator's session."""
+    honored by both lookups; empty falls back to the operator's session."""
     session = None
+    if session_id:
+        # A task-scoped Gemini session lives only in the gemini store, never
+        # behind the operator's MRU pointer: resolve it by id first, or a cancel
+        # of that task would stop the operator's chat session instead.
+        from Orchestrator.gemini_cu.session_manager import get_session_by_id as gemini_by_id
+        by_id = gemini_by_id(session_id)
+        if by_id is not None and by_id.operator == operator:
+            return by_id
     if model and resolve_backend(model) == "google":
         from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
         session = gemini_get_session(operator)

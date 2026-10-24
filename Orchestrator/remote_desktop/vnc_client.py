@@ -56,22 +56,51 @@ class VNCClient:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
+    async def _checked(self, *args, timeout: int = 15) -> str:
+        """Run a vncdotool command and raise unless it succeeded, so a refused
+        connection or a timeout is a failed action, not a silent success
+        (audit O13-computer-use-04)."""
+        rc, output = await self._run(*args, timeout=timeout)
+        if rc != 0:
+            reason = (output or "").strip().splitlines()
+            raise RuntimeError(
+                f"VNC {args[0]} failed: {reason[-1][:200] if reason else f'exit code {rc}'}")
+        return output
+
     async def click(self, x: int, y: int, button: int = 1):
         """Click at coordinates on the remote desktop."""
-        await self._run("move", str(x), str(y))
-        await self._run("click", str(button))
+        await self._checked("move", str(x), str(y))
+        await self._checked("click", str(button))
 
     async def type_text(self, text: str):
-        """Type text on the remote desktop."""
-        await self._run("type", text)
+        """Type text on the remote desktop. vncdotool takes everything after
+        the command word as data, so a leading '-' is typed, not parsed. The
+        timeout grows with the text: one keypress per character."""
+        await self._checked("type", text, timeout=15 + len(text) // 20)
 
     async def key(self, key: str):
         """Press a key or key combination."""
-        await self._run("key", key)
+        await self._checked("key", key)
 
     async def move(self, x: int, y: int):
         """Move mouse to coordinates."""
-        await self._run("move", str(x), str(y))
+        await self._checked("move", str(x), str(y))
+
+    async def scroll_click(self, button: int):
+        """One wheel tick: button 4 scrolls up, 5 down."""
+        await self._checked("click", str(button))
+
+    async def mouse_down(self, button: int = 1):
+        await self._checked("mousedown", str(button))
+
+    async def mouse_up(self, button: int = 1):
+        await self._checked("mouseup", str(button))
+
+    async def key_down(self, key: str):
+        await self._checked("keydown", key)
+
+    async def key_up(self, key: str):
+        await self._checked("keyup", key)
 
     async def is_reachable(self) -> bool:
         """Check if the VNC server is reachable."""

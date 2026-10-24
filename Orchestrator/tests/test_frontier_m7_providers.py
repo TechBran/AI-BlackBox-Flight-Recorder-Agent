@@ -233,19 +233,34 @@ def test_openai_action_to_op_table():
 
 # ── fake SDK clients ─────────────────────────────────────────────────────────────────
 class _FakeAnthropicClient:
-    """Stand-in for AsyncAnthropic: canned `beta.messages.create` responses (one per turn)."""
+    """Stand-in for AsyncAnthropic: canned responses (one per turn) through the streaming
+    surface the driver uses (`beta.messages.stream(...)` → `get_final_message()`)."""
 
     def __init__(self, script):
         script = list(script)
+
+        class _Stream:
+            def __init__(self, message):
+                self._message = message
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get_final_message(self):
+                return self._message
 
         class _Messages:
             def __init__(self):
                 self.calls = []
 
-            async def create(self, **kwargs):
+            def stream(self, **kwargs):
                 self.calls.append(kwargs)
                 content = script.pop(0)
-                return _ns(content=content, stop_reason="tool_use" if content else "end_turn")
+                return _Stream(_ns(content=content,
+                                   stop_reason="tool_use" if content else "end_turn"))
 
         self.beta = _ns(messages=_Messages())
 

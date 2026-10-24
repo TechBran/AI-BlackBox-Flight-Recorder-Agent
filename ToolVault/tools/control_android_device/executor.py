@@ -13,13 +13,11 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(False, "device_id is required. Use list_devices to see available devices.")
 
     try:
-        import asyncio
         from Orchestrator.device_registry import get_registry, DeviceProtocol
         from Orchestrator.tasks import create_task
         from Orchestrator.models import TaskType
-        from Orchestrator.gemini_cu import get_or_create_session, run_gemini_cu_loop
         from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL
-        from Orchestrator.routes.gemini_cu_routes import _run_task
+        from Orchestrator.routes.gemini_cu_routes import start_gemini_cu_task
 
         # Validate device exists and is ADB
         registry = get_registry()
@@ -48,11 +46,11 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             }
         )
 
-        # Fire-and-forget the background task
-        asyncio.create_task(_run_task(
-            task.task_id, ctx.operator, device_id, "android",
-            prompt, DEFAULT_CU_MODEL, None, None
-        ))
+        # Background driver: start_gemini_cu_task keeps a strong reference and
+        # records a crash on the task row, so get_task_status never sticks on
+        # "running" (audit O18-toolvault-modules-10).
+        start_gemini_cu_task(task.task_id, ctx.operator, device_id, "android",
+                             prompt, DEFAULT_CU_MODEL)
 
         return ToolResult(
             True,

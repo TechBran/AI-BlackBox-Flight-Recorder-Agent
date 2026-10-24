@@ -59,6 +59,7 @@ from urllib.parse import urlsplit
 
 from Orchestrator import provider_billing
 from Orchestrator.device_registry import pairing
+from Orchestrator.utils.cu_history import budget_anthropic_request, budget_genai_images
 from Orchestrator.frontier_grounding import (
     CoordinateAdapter,
     GeminiCoordinateAdapter,
@@ -317,9 +318,15 @@ PRESS_KEYS = ("enter", "back", "home", "recents", "tab", "delete")
 
 def _wire_frame(task_id: str, operator: str, variant: Dict) -> Dict:
     """Wrap a grounded action VARIANT in the on-wire transport envelope: the ``msg`` kind plus
-    the ``task_id`` / ``operator`` framing keys (see docs/schema/README.md → Transport
-    envelope). The device strips the framing and validates the variant on its own."""
-    frame: Dict = {"msg": "action", "task_id": task_id, "operator": operator}
+    the ``task_id`` / ``operator`` / ``action_id`` framing keys (see docs/schema/README.md →
+    Transport envelope). The device strips the framing and validates the variant on its own.
+
+    ``action_id`` is the idempotency key: minted once per dispatched action, and every retry
+    re-posts this same frame (:func:`_post_with_retry`). A retry after a lost response — the
+    device acted, or is still waiting on the user's confirm card past the per-action timeout —
+    is answered from the device's record of that action instead of actuating twice."""
+    frame: Dict = {"msg": "action", "task_id": task_id, "operator": operator,
+                   "action_id": uuid.uuid4().hex}
     frame.update(variant)
     return frame
 
@@ -1060,6 +1067,9 @@ class GeminiMobileDriver(FrontierDriver):
 
         self._contents.append(types.Content(role="user", parts=parts))
         self._pending_calls = []
+        # Keep the newest screenshots only — the same policy as the Gemini CU desktop loop.
+        # Unbudgeted, step 40 re-sent 40 phone screenshots (O06-frontier-agent-07).
+        budget_genai_images(self._contents)
 
         response = await self._client.aio.models.generate_content(
             model=self.model, contents=self._contents, config=self._config)
@@ -1380,9 +1390,19 @@ class AnthropicDriver(FrontierDriver):
             extra["betas"] = [beta]
         if cu_tool.get("type") == _anthropic_toolset_type():   # one grounded action per turn
             extra["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
-        resp = await self._client.beta.messages.create(
-            model=self.model, max_tokens=4096, system=self._system,
-            tools=self._tools(cu_tool), messages=self._messages, **extra)
+        # W20: the model's real output cap, streamed. A 4096 cap ended every always-thinking
+        # 5.5 turn whose thinking ate the budget as model_error, and the SDK refuses a large
+        # cap on a non-streaming create. The explicit timeout keeps a stalled connection
+        # inside the loop's per-turn budget.
+        from Orchestrator.browser.config import anthropic_cu_max_tokens
+        async with self._client.beta.messages.stream(
+                model=self.model, max_tokens=anthropic_cu_max_tokens(self.model),
+                system=self._system, tools=self._tools(cu_tool),
+                # Newest screenshots only (O06-frontier-agent-07); the full history is
+                # kept, the request carries a budgeted copy.
+                messages=budget_anthropic_request(self._messages),
+                timeout=_per_turn_secs(), **extra) as stream:
+            resp = await stream.get_final_message()
 
         blocks = list(getattr(resp, "content", None) or [])
         assistant, texts, tool_uses = [], [], []

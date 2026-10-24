@@ -7,14 +7,20 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 
-from Orchestrator.gemini_cu import (
-    get_or_create_session, get_session, destroy_session, run_gemini_cu_loop
-)
+from Orchestrator.gemini_cu import get_session, destroy_session, run_gemini_cu_loop
 from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL
+from Orchestrator.gemini_cu.session_manager import (
+    create_task_session, destroy_task_session,
+)
 from Orchestrator.device_registry import get_registry, DeviceProtocol
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 
 router = APIRouter(prefix="/gemini-cu", tags=["gemini-cu"])
+
+# Strong references to the background drivers start_gemini_cu_task launches: the
+# event loop holds only a weak reference to a task, so a bare create_task can be
+# garbage-collected mid-run (audit O13-computer-use-15, O18-toolvault-modules-10).
+_BACKGROUND_TASKS: set = set()
 
 
 async def _snapshot_cu_result(task_id: str, operator: str, device_id: str,
@@ -112,10 +118,9 @@ async def run_gemini_cu(body: GeminiCURequest):
         }
     )
 
-    asyncio.create_task(_run_task(
+    start_gemini_cu_task(
         task.task_id, body.operator, body.device_id, environment,
-        body.prompt, body.model, body.system_prompt, body.url
-    ))
+        body.prompt, body.model, body.system_prompt, body.url)
 
     return {
         "task_id": task.task_id,
@@ -125,23 +130,71 @@ async def run_gemini_cu(body: GeminiCURequest):
     }
 
 
+def start_gemini_cu_task(task_id, operator, device_id, environment, prompt,
+                         model=DEFAULT_CU_MODEL, system_prompt=None, url=None) -> asyncio.Task:
+    """Launch _run_task in the background for an already-created GEMINI_CU task row.
+
+    The public entry point for every caller (this router's /run and the
+    control_android_device tool). The task is kept in _BACKGROUND_TASKS until it
+    finishes, and an exception that escapes the runner is logged and written to
+    the task row instead of leaving it on "running" forever."""
+    bg = asyncio.create_task(_run_task(
+        task_id, operator, device_id, environment, prompt, model, system_prompt, url),
+        name=f"gemini-cu:{task_id}")
+    _BACKGROUND_TASKS.add(bg)
+
+    def _done(t: asyncio.Task):
+        _BACKGROUND_TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is None:
+            return
+        print(f"[GEMINI CU] Task {task_id} crashed: {type(exc).__name__}: {exc}")
+        try:
+            from Orchestrator.tasks import update_task
+            from Orchestrator.models import TaskStatus
+            update_task(task_id, status=TaskStatus.FAILED,
+                        error_message=str(exc) or type(exc).__name__)
+        except Exception as e:  # pragma: no cover - best effort bookkeeping
+            print(f"[GEMINI CU] could not record the crash of task {task_id}: {e}")
+
+    bg.add_done_callback(_done)
+    return bg
+
+
 async def _run_task(task_id, operator, device_id, environment,
                     prompt, model, system_prompt, url):
-    """Background task that runs the Gemini CU loop and updates the task."""
-    from Orchestrator.tasks import task_db
+    """Background task that runs the Gemini CU loop and updates the task.
+
+    The task drives its OWN session (create_task_session), built with exactly the
+    requested device/environment and an empty history, and torn down on exit. The
+    operator-cached chat session used to be borrowed here: a cache hit came back
+    as-is, so a session made for an ADB phone kept driving the phone when the next
+    task targeted the desktop (audit O13-computer-use-15), and the task inherited
+    the chat's history and a previous task's stop flag."""
+    from Orchestrator.tasks import (
+        task_db, is_cancel_requested, register_cancel_handle, unregister_cancel_handle,
+    )
     from Orchestrator.models import TaskStatus
     task = task_db.get_task(task_id)
     if not task:
         return
 
-    session = get_or_create_session(operator, device_id, environment)
-    # A fresh task = fresh stop state (G2-T8). get_or_create_session returns the
-    # PERSISTENT per-operator session (300s TTL). A cancel of a PRIOR task left
-    # stop_requested=True on it, and the task path never resets it (run_gemini_cu_loop
-    # resets status/current_step but NOT stop_requested, and _run_task doesn't call
-    # reset_task_state — only the chat CU path does). Without this line the operator's
-    # NEXT task would break at step 1 and be silently voided by the mint guard below.
-    session.stop_requested = False
+    try:
+        session = create_task_session(operator, device_id, environment)
+    except Exception as e:
+        task.status = TaskStatus.FAILED
+        task.result_data["error"] = f"Cannot start Gemini CU: {e}"
+        task_db.save_task(task)
+        return
+    # The row learns its session (live view + cancel find THIS desktop), and a
+    # cancel resolves this session by id rather than the operator's chat session.
+    task.session_id = session.session_id
+    if isinstance(task.result_data, dict):
+        task.result_data["session_id"] = session.session_id
+    register_cancel_handle(task_id, "cu", operator=operator,
+                           session_id=session.session_id, model=model or "")
     screenshots = []
     final_text = ""
 
@@ -161,6 +214,8 @@ async def _run_task(task_id, operator, device_id, environment,
             task.status = TaskStatus.FAILED
             task.result_data["error"] = f"Cannot start Gemini CU — {owner.describe()}. Stop it first."
             task_db.save_task(task)
+            unregister_cancel_handle(task_id)
+            destroy_task_session(session)
             return
 
     try:
@@ -169,6 +224,14 @@ async def _run_task(task_id, operator, device_id, environment,
         async for event in run_gemini_cu_loop(
             session, prompt, model, system_prompt, url
         ):
+            # A cancel stops the driver at its next step even when the cu-stop
+            # lookup could not reach this session.
+            if is_cancel_requested(task_id) and not session.stop_requested:
+                stop = getattr(session, "request_stop", None)
+                if callable(stop):
+                    stop()
+                else:
+                    session.stop_requested = True
             event_type = event.get("type")
             if event_type == "cu_step":
                 print(f"[GEMINI CU] Task {task_id} — Step {event['data']['step']}/{event['data']['total']}")
@@ -202,15 +265,12 @@ async def _run_task(task_id, operator, device_id, environment,
         # SIGNAL: session.stop_requested is authoritative and race-free HERE.
         # request_stop() sets it on the exact session this task drives, and the
         # gemini loop exits cleanly via `break` (not an exception), so we reach
-        # this point. It reflects only THIS task's cancel because _run_task
-        # cleared it at entry (see the reset above) — reset_task_state() DOES
-        # clear stop_requested and HAS callers (the chat CU path in chat_routes),
-        # but the task path does not use it, hence that explicit reset. The worker
-        # thread's process_task `finally` clears the per-task_id is_cancel_requested
-        # flag (GEMINI_CU returns from process_task early) but never touches
+        # this point. It reflects only THIS task's cancel because the session is
+        # this task's own (created un-stopped above). The worker thread's
+        # process_task `finally` clears the per-task_id is_cancel_requested flag
+        # (GEMINI_CU returns from process_task early) but never touches
         # stop_requested. is_cancel_requested is OR'd in for symmetry with the
         # USE_COMPUTER guard + a flag-only cancel.
-        from Orchestrator.tasks import is_cancel_requested
         if getattr(session, "stop_requested", False) or is_cancel_requested(task_id):
             task.status = TaskStatus.CANCELLED
             if isinstance(task.result_data, dict):
@@ -251,8 +311,11 @@ async def _run_task(task_id, operator, device_id, environment,
     finally:
         # Release the per-launch display claim on every exit (invariant 4).
         # Idempotent + a no-op for android (never claimed). The driver runs inline
-        # in this task, so this task's completion IS the driver's lifecycle.
+        # in this task, so this task's completion IS the driver's lifecycle — and
+        # so is this task's own session.
         release_claim(_claim_id)
+        unregister_cancel_handle(task_id)
+        destroy_task_session(session)
 
 
 @router.post("/stream")
@@ -274,13 +337,13 @@ async def stream_gemini_cu(body: GeminiCURequest):
     else:
         environment = "browser"
 
-    session = get_or_create_session(body.operator, body.device_id, environment)
-
     # ── Per-launch display claim (M1-T6). The driver runs INLINE in this
     #    generator (not a detached background task), so the generator's finally IS
     #    the driver's lifecycle — no Hole-3 disconnect window here. Android never
     #    claims. Claim + release live inside the generator so a stream that is
-    #    never consumed cannot leak a claim. ──
+    #    never consumed cannot leak a claim — and so does the stream's own session
+    #    (create_task_session: exactly the requested target, empty history; see
+    #    _run_task). ──
     from Orchestrator.browser.display_arbiter import (
         try_claim, release_claim, is_local_environment,
     )
@@ -288,6 +351,7 @@ async def stream_gemini_cu(body: GeminiCURequest):
     _claim_id = f"gemini-route-stream:{uuid.uuid4()}"
 
     async def event_stream():
+        session = create_task_session(body.operator, body.device_id, environment)
         try:
             if _claims_display:
                 owner = try_claim("gemini-task", body.operator, _claim_id,
@@ -302,6 +366,7 @@ async def stream_gemini_cu(body: GeminiCURequest):
             yield "data: [DONE]\n\n"
         finally:
             release_claim(_claim_id)
+            destroy_task_session(session)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

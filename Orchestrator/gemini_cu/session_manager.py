@@ -7,9 +7,12 @@ import uuid
 from typing import Optional, Dict, List, Any
 
 from Orchestrator.utils.operators import validate_operator
-
-MAX_ITERATIONS = 50
-SESSION_TIMEOUT = 300
+from Orchestrator.utils.cu_history import trim_genai_history
+# Single-sourced in gemini_cu/config.py (-> Orchestrator.config [computer_use]).
+# This module used to re-hardcode 50 / 300: the activity feed reported a 50-step
+# total for a 150-step run and a Gemini chat session expired between two turns
+# five minutes apart (audit O13-computer-use-13).
+from Orchestrator.gemini_cu.config import MAX_ITERATIONS, SESSION_TIMEOUT
 
 
 def _cancel_task_cross_loop(agent_task) -> None:
@@ -153,11 +156,11 @@ class GeminiCUSession:
         return True
 
     def trim_history(self, max_messages: int = 200):
-        """Cap conversation history to prevent token explosion."""
-        if len(self.conversation_history) > max_messages:
-            self.conversation_history = (
-                self.conversation_history[:2] + self.conversation_history[-(max_messages - 2):]
-            )
+        """Cap conversation history to prevent token explosion, cutting only
+        between whole function_call / function_response rounds (the old
+        head+tail slice orphaned them — audit O13-computer-use-05)."""
+        self.conversation_history = trim_genai_history(
+            self.conversation_history, max_messages)
 
     def sync_usage(self):
         """Sync total_tokens (Gemini format) → usage (Anthropic format) for compat."""
@@ -301,7 +304,7 @@ def create_task_session(operator: str, device_id: str,
 
 def cleanup_expired_sessions() -> int:
     """Sweep expired, non-running Gemini sessions so their per-session displays
-    free promptly. Without this, an expired (300s) chat session pinned one of
+    free promptly. Without this, an expired chat session pinned one of
     the MAX_VIRTUAL_SESSIONS display slots for the full 1800s display TTL —
     three stale gemini chat turns could exhaust the allocator (review find,
     2026-07-23). Called from the startup TTL sweep alongside the browser

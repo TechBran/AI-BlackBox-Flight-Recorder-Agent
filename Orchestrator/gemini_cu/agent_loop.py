@@ -24,6 +24,7 @@ from Orchestrator.gemini_cu.config import (
     BROWSER_ONLY_FUNCTIONS
 )
 from Orchestrator.gemini_cu.session_manager import GeminiCUSession
+from Orchestrator.utils.cu_history import budget_genai_images
 from Orchestrator.utils.paths import safe_filename, uploads_dir
 from Orchestrator.config import GOOGLE_API_KEY
 from Orchestrator.agent_context import (
@@ -174,34 +175,39 @@ def _get_android_function_declarations() -> list:
     ]
 
 
-def _budget_contents_images(contents, keep_images: int = 3) -> None:
-    """Replace all but the most recent ``keep_images`` inline images in the
-    request contents with small text parts, IN PLACE (function_call /
-    function_response pairing untouched).
+# The token-budget guard, shared with the frontier GeminiMobileDriver (one
+# screenshot policy for every Gemini CU path): keep the newest K inline images,
+# elide older ones in place. See Orchestrator/utils/cu_history.py.
+_budget_contents_images = budget_genai_images
 
-    The gemini twin of budget_screenshots_in_history (Anthropic 413 fix): the
-    loop re-sends the whole contents list every step and appends one full-res
-    screenshot per step, so an unbudgeted run blows Gemini's 131,072-token
-    input cap at ~step 20 (Brandon's MS02 chess game died exactly this way,
-    2026-07-23). Idempotent — elided parts are plain text on later passes.
+# One mouse-wheel tick scrolls roughly this many pixels in Chrome and GTK apps.
+_PX_PER_WHEEL_TICK = 100
+# Google's computer-use reference agent defaults scroll_at's magnitude to 800.
+_DEFAULT_SCROLL_MAGNITUDE = 800
+
+
+def _magnitude_to_ticks(executor, direction: str, magnitude) -> int:
+    """Wheel ticks for a scroll_at ``magnitude``.
+
+    The magnitude is in the model's 0-999 normalized space (a fraction of the
+    screen; the reference agent denormalizes it like a coordinate). Passing it
+    through as a tick count turned the default 800 into 800 wheel clicks (audit
+    O13-computer-use-07). De-normalize it against the session display through
+    the executor's own coordinate mapping, then convert pixels to ticks; the
+    executor clamps the result to its 1..50 scroll range.
     """
-    def _is_image(p) -> bool:
-        inline = getattr(p, "inline_data", None)
-        return inline is not None and (inline.mime_type or "").startswith("image/")
+    try:
+        m = float(magnitude)
+    except (TypeError, ValueError):
+        m = float(_DEFAULT_SCROLL_MAGNITUDE)
+    m = min(max(m, 0.0), 999.0)
+    px_x, px_y = executor.to_native(int(m), int(m))
+    px = px_x if direction in ("left", "right") else px_y
+    return max(1, round(px / _PX_PER_WHEEL_TICK))
 
-    total = sum(1 for c in contents for p in (c.parts or []) if _is_image(p))
-    if total <= keep_images:
-        return
-    cutoff = total - keep_images
-    seen = 0
-    for c in contents:
-        parts = c.parts or []
-        for idx, p in enumerate(parts):
-            if _is_image(p):
-                seen += 1
-                if seen <= cutoff:
-                    parts[idx] = types.Part.from_text(
-                        text="[earlier screenshot elided to fit the input window]")
+
+def _failed(result) -> bool:
+    return isinstance(result, dict) and result.get("success") is False
 
 
 async def _capture_screenshot(session: GeminiCUSession) -> bytes:
@@ -270,15 +276,23 @@ async def _execute_predefined_action(session: GeminiCUSession,
             return await asyncio.to_thread(
                 executor.execute, "left_click", coordinate=[x, y])
         elif action_name == "type_text_at":
+            # Each step's real outcome is reported: a failed click or a failed
+            # (e.g. timed-out) type must not come back as "Typed at".
             x, y = args.get("x", 0), args.get("y", 0)
-            await asyncio.to_thread(
+            clicked = await asyncio.to_thread(
                 executor.execute, "left_click", coordinate=[x, y])
+            if _failed(clicked):
+                return clicked
             await asyncio.sleep(0.2)
             if args.get("clear_before_typing", False):
-                await asyncio.to_thread(executor.execute, "key", text="ctrl+a")
+                cleared = await asyncio.to_thread(executor.execute, "key", text="ctrl+a")
+                if _failed(cleared):
+                    return cleared
                 await asyncio.sleep(0.1)
-            await asyncio.to_thread(
+            typed = await asyncio.to_thread(
                 executor.execute, "type", text=args.get("text", ""))
+            if _failed(typed):
+                return typed
             return {"success": True, "message": f"Typed at ({x},{y})"}
         elif action_name == "hover_at":
             x, y = args.get("x", 0), args.get("y", 0)
@@ -293,11 +307,12 @@ async def _execute_predefined_action(session: GeminiCUSession,
         elif action_name == "scroll_at":
             x, y = args.get("x", 0), args.get("y", 0)
             direction = args.get("direction", "down")
-            magnitude = args.get("magnitude", 3)
+            ticks = _magnitude_to_ticks(
+                executor, direction, args.get("magnitude", _DEFAULT_SCROLL_MAGNITUDE))
             return await asyncio.to_thread(
                 executor.execute,
                 "scroll", coordinate=[x, y],
-                direction=direction, amount=max(1, int(magnitude)))
+                direction=direction, amount=ticks)
         elif action_name == "scroll_document":
             direction = args.get("direction", "down")
             # Screen center in gemini 0-999 space
@@ -307,11 +322,14 @@ async def _execute_predefined_action(session: GeminiCUSession,
                 direction=direction, amount=5)
         elif action_name == "navigate":
             url = args.get("url", "")
-            await asyncio.to_thread(executor.execute, "key", text="ctrl+l")
-            await asyncio.sleep(0.2)
-            await asyncio.to_thread(executor.execute, "type", text=url)
-            await asyncio.sleep(0.1)
-            await asyncio.to_thread(executor.execute, "key", text="Return")
+            for verb, params, pause in (("key", {"text": "ctrl+l"}, 0.2),
+                                        ("type", {"text": url}, 0.1),
+                                        ("key", {"text": "Return"}, 0)):
+                result = await asyncio.to_thread(executor.execute, verb, **params)
+                if _failed(result):
+                    return result
+                if pause:
+                    await asyncio.sleep(pause)
             return {"success": True, "action": "navigate", "url": url}
         elif action_name == "wait_5_seconds":
             await asyncio.sleep(5)
@@ -572,7 +590,11 @@ async def run_gemini_cu_loop(
     print(f"[GEMINI CU] Screenshot saved: {screenshot_url}")
     yield {"type": "cu_screenshot", "data": {"url": screenshot_url, "step": 0}}
 
-    # Build initial content — reuse conversation history for multi-turn
+    # Build initial content — reuse conversation history for multi-turn, capped
+    # between whole function_call / function_response rounds.
+    trim = getattr(session, "trim_history", None)
+    if session.conversation_history and callable(trim):
+        trim()
     if session.conversation_history:
         contents = list(session.conversation_history)
         contents.append(types.Content(role="user", parts=[

@@ -353,11 +353,12 @@ def _run_gemini_task(task_id, operator, stopped, loop_events, fake_db, monkeypat
     class FakeSession:
         def __init__(self):
             self.session_id = "gsess-" + task_id
-            self.stop_requested = False   # _run_task resets at entry anyway
+            self.stop_requested = False   # a task session starts un-stopped
             self.current_step = 2
             self.total_tokens = {"input": 0, "output": 0}
 
-    monkeypatch.setattr(gcr, "get_or_create_session", lambda *a, **k: FakeSession())
+    monkeypatch.setattr(gcr, "create_task_session", lambda *a, **k: FakeSession())
+    monkeypatch.setattr(gcr, "destroy_task_session", lambda s: None)
 
     async def fake_loop(session, prompt, model, system_prompt, url):
         # A real cancel fires request_stop() DURING the run (AFTER _run_task's
@@ -408,23 +409,20 @@ def test_gemini_successful_task_still_mints(fake_task_db, monkeypatch):
 
 
 def test_gemini_fresh_task_clears_stale_stop_flag(fake_task_db, monkeypatch):
-    """A stale stop_requested left on the PERSISTENT per-operator session by a
-    cancelled PRIOR task must NOT void the operator's NEXT task (G2-T8 Issue 1).
-    _run_task resets stop_requested at entry, so task B runs and mints normally.
-    Without the reset, B breaks at step 1 and the mint guard voids it."""
+    """A stale stop_requested left on the operator's session by a cancelled PRIOR
+    task must NOT void the operator's NEXT task (G2-T8 Issue 1). Each task now
+    drives its OWN session (O13-computer-use-15), so task B never sees A's flag:
+    it runs and mints normally, and the stale session is left alone."""
+    from Orchestrator.gemini_cu import session_manager as gsm
     from Orchestrator.routes import gemini_cu_routes as gcr
 
-    class FakeSession:
-        def __init__(self):
-            self.session_id = "shared-op-sess"
-            self.stop_requested = True   # leftover from cancelled task A
-            self.current_step = 0
-            self.total_tokens = {"input": 0, "output": 0}
-
-    shared = FakeSession()  # SAME instance returned for the operator (persistent)
-    monkeypatch.setattr(gcr, "get_or_create_session", lambda *a, **k: shared)
+    stale = gsm.get_or_create_session("Brandon", "android", "android")
+    stale.stop_requested = True   # leftover from cancelled task A
+    seen = {}
 
     async def fake_loop(session, prompt, model, system_prompt, url):
+        seen["session"] = session
+        seen["stopped_at_entry"] = session.stop_requested
         yield {"type": "done", "data": {"content": "task B result"}}
 
     monkeypatch.setattr(gcr, "run_gemini_cu_loop", fake_loop)
@@ -439,12 +437,15 @@ def test_gemini_fresh_task_clears_stale_stop_flag(fake_task_db, monkeypatch):
     _seed(fake_task_db, "gcu-B", task_type=TaskType.GEMINI_CU, operator="Brandon")
     fake_task_db["gcu-B"].result_data = {}
 
-    asyncio.run(gcr._run_task("gcu-B", "Brandon", "android", "android",
-                              "task B", "gemini-x", None, None))
+    try:
+        asyncio.run(gcr._run_task("gcu-B", "Brandon", "android", "android",
+                                  "task B", "gemini-x", None, None))
+    finally:
+        gsm.destroy_session("Brandon")
 
     assert len(minted) == 1, "task B (not cancelled) must run and mint"
     assert fake_task_db["gcu-B"].status == TaskStatus.COMPLETED
-    assert shared.stop_requested is False, "task entry must clear the stale flag"
+    assert seen["session"] is not stale and seen["stopped_at_entry"] is False
 
 
 def test_successful_cu_task_still_mints(fake_task_db, monkeypatch):

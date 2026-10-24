@@ -20,6 +20,7 @@ import copy
 import io
 import json
 import math
+import subprocess
 import sys
 
 import pytest
@@ -482,8 +483,10 @@ async def test_signed_thinking_round_trips_unchanged_with_toolset(driver_env, mo
 
 @pytest.mark.asyncio
 async def test_legacy_computer_block_path_unchanged(driver_env, monkeypatch):
-    """computer_20251124 tool_use: no toolset_name anywhere, every action gets a
-    screenshot, and an executor failure is NOT surfaced (pre-fix behavior)."""
+    """computer_20251124 tool_use: no toolset_name anywhere, every successful
+    action gets a screenshot, and a failed action is reported as an error result
+    (O13-computer-use-04: a screenshot after a failed click read as success).
+    Later legacy calls still run — only toolset batches stop at a failure."""
     actions = _RecordingActions(fail={"left_click"})
     api_calls, _ = await _run(monkeypatch, [
         _turn(_tool("a", "computer", {"action": "left_click", "coordinate": [5, 6]}, toolset=False),
@@ -493,12 +496,38 @@ async def test_legacy_computer_block_path_unchanged(driver_env, monkeypatch):
     assert actions.calls == [("left_click", {"coordinate": [5, 6]}), ("type", {"text": "x"})]
     results = _last_user_results(api_calls[1]["payload"])
     assert [r["tool_use_id"] for r in results] == ["a", "b"]
-    for r in results:
-        assert set(r) == {"type", "tool_use_id", "content"}
-        assert _is_image_result(r)
-    assert driver_env["n"] == 2
+    assert results[0] == {"type": "tool_result", "tool_use_id": "a", "is_error": True,
+                          "content": "Error: Action 'left_click' failed: boom"}
+    assert set(results[1]) == {"type", "tool_use_id", "content"}
+    assert _is_image_result(results[1])
+    assert driver_env["n"] == 1
     replay = _assistant(api_calls[1]["payload"])
     assert all("toolset_name" not in b for b in replay)
+
+
+@pytest.mark.asyncio
+async def test_cursor_position_answers_with_text_on_both_protocols(driver_env, monkeypatch):
+    """W19: cursor_position is a coordinate answer, never a screenshot — also when it is
+    the batch's last member or a legacy computer call."""
+    class _Pos(_RecordingActions):
+        def execute(self, action, **params):
+            self.calls.append((action, params))
+            return {"success": True, "message": "Cursor position: (12, 34)",
+                    "coordinate": [12, 34]}
+
+    api_calls, _ = await _run(monkeypatch, [_turn(_tool("a", "cursor_position")), END_TURN],
+                              actions=_Pos())
+    r = _last_user_results(api_calls[1]["payload"])[0]
+    assert r["content"] == [{"type": "text", "text": "Cursor position: (12, 34)"}]
+    assert r["toolset_name"] == "computer" and "is_error" not in r
+
+    api_calls, _ = await _run(monkeypatch, [_turn(_tool(
+        "b", "computer", {"action": "cursor_position"}, toolset=False)), END_TURN],
+        model="claude-opus-4-8", actions=_Pos())
+    r = _last_user_results(api_calls[1]["payload"])[0]
+    assert r == {"type": "tool_result", "tool_use_id": "b",
+                 "content": [{"type": "text", "text": "Cursor position: (12, 34)"}]}
+    assert driver_env["n"] == 0
 
 
 @pytest.mark.asyncio
@@ -604,7 +633,8 @@ def executor(monkeypatch):
     ex = act.ActionExecutor(native_mode=False)
     ex.use_ydotool = False
     xdo = []
-    monkeypatch.setattr(act, "_run_xdotool", lambda *a, **k: xdo.append(a))
+    ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    monkeypatch.setattr(act, "_run_xdotool", lambda *a, **k: xdo.append(a) or ok)
     return ex, xdo
 
 
