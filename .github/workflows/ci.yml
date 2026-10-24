@@ -2,6 +2,7 @@
 # the repo, hermetic and offline, on every push and pull request to main.
 #
 #   python   pytest's default selection (pytest.ini) + the ToolVault validator
+#            + ruff's event-loop blocking rules (Orchestrator/ruff.toml)
 #   mcp      MCP/run_tests.sh in a venv built from MCP/requirements.txt
 #   web      scripts/run_web_tests.sh (Portal + tests/web node suites)
 #   shell    scripts/tests/run_all.sh (installer / sudoers perimeter suites)
@@ -73,6 +74,11 @@ jobs:
 
       - name: ToolVault modules validate
         run: python -m Orchestrator.toolvault.validate
+
+      # Event-loop blocking gate (audit rank 46): only the flake8-async rules,
+      # from Orchestrator/ruff.toml. A lint check; nothing is reformatted.
+      - name: Ruff (event-loop blocking rules)
+        run: python -m ruff check Orchestrator
 
       - name: pytest
         run: python -m pytest -p no:cacheprovider -rfEs

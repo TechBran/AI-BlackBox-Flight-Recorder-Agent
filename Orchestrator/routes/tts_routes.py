@@ -1237,9 +1237,8 @@ async def generate_video(inp: GenIn):
                 raise HTTPException(status_code=404, detail=str(e))
             except UploadPathError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid image_url: {e}")
-            # Read and encode file
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
+            # Read and encode file (up to INLINE_MAX_BYTES: off the loop)
+            image_bytes = await asyncio.to_thread(file_path.read_bytes)
             image_b64 = base64.b64encode(image_bytes).decode()
 
             # Determine MIME type from extension

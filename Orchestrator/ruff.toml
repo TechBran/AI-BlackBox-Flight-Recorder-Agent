@@ -1,0 +1,43 @@
+# Event-loop blocking gate for the Orchestrator (2026-10-09 audit, rank 46).
+#
+# The server runs every chat stream, voice bridge, STT socket and CU agent on
+# ONE asyncio event loop, so a blocking call inside an `async def` (sync HTTP,
+# subprocess.run, time.sleep, open()) freezes all of them. This config selects
+# only ruff's flake8-async rules (ASYNC*): it is a lint gate, not a style
+# pass, and nothing here formats code. CI runs it from the repo root:
+#
+#     ruff check Orchestrator
+#
+# The rules see direct calls only. A blocking call reached through a helper
+# (a requests-based provider module, the ledger readers) is caught by the
+# loop-stall tests (test_*_off_loop.py) and, for ToolVault executors, by
+# Orchestrator/toolvault/tests/test_executors_off_loop.py.
+
+target-version = "py312"
+extend-exclude = ["venv", "tokenizers_vendored"]
+
+[lint]
+select = ["ASYNC"]
+# Not stalls: ASYNC109 asks for asyncio.timeout() instead of a `timeout`
+# parameter, ASYNC110 for an Event instead of a sleep-poll loop. Both are API
+# style; the gate is about blocking the loop.
+ignore = ["ASYNC109", "ASYNC110"]
+
+[lint.per-file-ignores]
+# Baseline: blocking calls in async functions that predate this gate, each
+# waived only for the rules it hits today. Fix the call, then delete its
+# entry; do not add files here (hand the blocking work to asyncio.to_thread).
+"adb/commands.py" = ["ASYNC230"]
+"asterisk/ivr_audio.py" = ["ASYNC221"]
+"cellular/hotplug.py" = ["ASYNC251"]
+"cellular/ivr.py" = ["ASYNC230"]
+"cli_agent/smoke_test.py" = ["ASYNC210"]
+"localstack_downloads.py" = ["ASYNC230"]
+"onboarding/tailscale_actuator.py" = ["ASYNC220"]
+"routes/admin_routes.py" = ["ASYNC230"]
+"routes/agent_routes.py" = ["ASYNC230"]
+"routes/chat_routes.py" = ["ASYNC230"]
+"routes/cli_agent_routes.py" = ["ASYNC230"]
+"routes/onboarding_routes.py" = ["ASYNC220", "ASYNC221"]
+"routes/stt_ws_routes.py" = ["ASYNC230"]
+"routes/twilio_routes.py" = ["ASYNC210"]
