@@ -35,6 +35,7 @@ def ledger(tmp_path, monkeypatch):
     for name, value in (("VOL_PATH", vol), ("ARC_DIR", arc), ("MANIFEST", manifest),
                         ("GM_PATH", gm), ("GM_HASH", gm_hash)):
         monkeypatch.setattr(volume, name, value)
+    monkeypatch.setattr(volume, "_latest_copy", None)
     return {"vol": vol, "arc": arc, "manifest": manifest, "gm": gm, "gm_hash": gm_hash}
 
 
@@ -96,7 +97,7 @@ def test_dry_run_deletes_nothing(ledger):
     stats = volume.cleanup_old_archives(days_to_keep=0, max_size_gb=5.0, max_files=200, dry_run=True)
     assert all(p.exists() for p in paths)
     assert stats["dry_run"] is True
-    assert sorted(stats["would_delete"]) == sorted(p.name for p in paths)
+    assert sorted(stats["would_delete"]) == sorted(p.name for p in paths[:-1])   # never the newest
     assert stats["deleted_files"] == 0
 
 
@@ -121,6 +122,21 @@ def test_free_space_floor_deletes_oldest_but_keeps_the_newest(ledger, monkeypatc
     monkeypatch.setattr(volume.shutil, "disk_usage", lambda _p: DiskUsage(100 * GB, 100 * GB, 0))
     volume.cleanup_old_archives(days_to_keep=3650, max_size_gb=50, max_files=200, min_free_gb=1000)
     assert [p.exists() for p in paths] == [False, False, False, True]
+
+
+@pytest.mark.parametrize("rule", [
+    {"days_to_keep": 0, "max_size_gb": 50.0, "max_files": 200},       # age
+    {"days_to_keep": 3650, "max_size_gb": 0.0, "max_files": 200},     # size
+    {"days_to_keep": 3650, "max_size_gb": 50.0, "max_files": 0},      # count
+])
+def test_retention_never_deletes_the_newest_copy(ledger, rule):
+    """The age rule now runs hourly: an idle box (or one whose every archive
+    was skipped for low disk) must still keep its newest ledger backup."""
+    paths = _archives(ledger["arc"], [1, 1, 1])
+    for p in paths:
+        os.utime(p, (time.time() - 40 * 86400, p.stat().st_mtime - 40 * 86400))
+    volume.cleanup_old_archives(**rule)
+    assert [p.exists() for p in paths] == [False, False, True]
 
 
 def test_cleanup_sweeps_stale_temp_litter_only(ledger):
@@ -159,6 +175,104 @@ def test_archive_copy_is_skipped_below_the_free_space_floor(ledger, monkeypatch)
     assert list(ledger["arc"].iterdir()) == []
 
 
+
+def _snap(n: int) -> bytes:
+    sid = f"SNAP-20260101-{n:03d}"
+    return (f"=== START SNAPSHOT — UTC 2026-01-01T00:00:00Z — {sid} (7.1.0) ===\n"
+            f"body {n}\n"
+            f"=== END SNAPSHOT — {sid} — UTC 2026-01-01T00:00:00Z ===\n").encode()
+
+
+def _manifest(ledger):
+    return json.loads(ledger["manifest"].read_text())
+
+
+def test_an_archive_copy_is_the_committed_prefix_never_a_concurrent_append(ledger, monkeypatch):
+    """Mints archive after mint_lock is released, so another mint may be half
+    way through its append: the copy is the size this mint committed."""
+    monkeypatch.setattr(volume, "archive_min_free_gb", lambda: 0.0)
+    a = _snap(1)
+    ledger["vol"].write_bytes(a + _snap(2)[:40])          # mint 2 is mid-append
+    arc, digest, _utc = volume.archive_volume(upto=len(a))
+    assert Path(arc).read_bytes() == a
+    assert digest == hashlib.sha256(a).hexdigest() == _manifest(ledger)["latest_sha256"]
+    volume.parse_tail(Path(arc).read_text())               # a whole ledger, not torn
+
+
+def test_an_archive_without_a_size_measures_it_under_mint_lock(ledger, monkeypatch):
+    import threading
+    from Orchestrator import state
+    monkeypatch.setattr(volume, "archive_min_free_gb", lambda: 0.0)
+    a, b = _snap(1), _snap(2)
+    ledger["vol"].write_bytes(a)
+    out = {}
+    with state.mint_lock:                                  # a mint is appending
+        with open(ledger["vol"], "ab") as f:
+            f.write(b[:40])
+        worker = threading.Thread(target=lambda: out.setdefault("arc", volume.archive_volume()))
+        worker.start()
+        worker.join(0.3)
+        assert "arc" not in out, "the copy did not wait for the mint in flight"
+        with open(ledger["vol"], "ab") as f:
+            f.write(b[40:])
+    worker.join(5)
+    assert Path(out["arc"][0]).read_bytes() == a + b
+
+
+def test_an_out_of_order_archive_never_regresses_the_manifest(ledger, monkeypatch):
+    """Two mints' post-lock archive steps finish in reverse order: the older
+    prefix is already inside the newer copy, so it is not copied again and
+    the manifest keeps describing the newest committed ledger."""
+    monkeypatch.setattr(volume, "archive_min_free_gb", lambda: 0.0)
+    a, b = _snap(1), _snap(2)
+    ledger["vol"].write_bytes(a + b)
+    newer = volume.archive_volume(upto=len(a + b))
+    older = volume.archive_volume(upto=len(a))
+    man = _manifest(ledger)
+    assert man["latest_sha256"] == hashlib.sha256(a + b).hexdigest()
+    assert len(man["archive"]) == 1 and len(list(ledger["arc"].glob("Volume_*.txt"))) == 1
+    assert older[:2] == newer[:2]                          # covered by the newer copy
+
+
+def test_copies_made_in_the_same_second_never_replace_each_other(ledger, monkeypatch):
+    monkeypatch.setattr(volume, "archive_min_free_gb", lambda: 0.0)
+    monkeypatch.setattr(volume, "now_utc_iso", lambda: "2026-01-01T00:00:00Z")
+    a, b = _snap(1), _snap(2)
+    ledger["vol"].write_bytes(a)
+    first = volume.archive_volume(upto=len(a))
+    ledger["vol"].write_bytes(a + b)
+    second = volume.archive_volume(upto=len(a + b))
+    assert first[0] != second[0]
+    for entry in _manifest(ledger)["archive"]:
+        assert hashlib.sha256(Path(entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
+    assert Path(first[0]).read_bytes() == a and Path(second[0]).read_bytes() == a + b
+
+
+def test_a_replaced_ledger_is_archived_again(ledger, monkeypatch):
+    """The out-of-order rule compares copies of the same ledger file only."""
+    monkeypatch.setattr(volume, "archive_min_free_gb", lambda: 0.0)
+    ledger["vol"].write_bytes(_snap(1) + _snap(2))
+    volume.archive_volume(upto=len(_snap(1) + _snap(2)))
+    fresh = ledger["vol"].with_name("fresh.txt")
+    fresh.write_bytes(_snap(3))
+    os.replace(fresh, ledger["vol"])                       # a new ledger file
+    arc, digest, _ = volume.archive_volume(upto=len(_snap(3)))
+    assert Path(arc).read_bytes() == _snap(3)
+    assert _manifest(ledger)["latest_sha256"] == digest
+
+
+def test_min_free_gb_is_read_fresh_from_config_ini(tmp_path, monkeypatch):
+    from Orchestrator.utils import config_ini
+    ini = tmp_path / "config.ini"
+    ini.write_text("[archive]\nmin_free_gb = 3\n")
+    monkeypatch.setattr(config_ini, "DEFAULT_PATH", ini)
+    assert volume.archive_min_free_gb() == 3.0
+    ini.write_text("[archive]\nmin_free_gb = 7\n")       # a hand edit, no restart
+    assert volume.archive_min_free_gb() == 7.0
+    ini.write_text("[archive]\nmin_free_gb = lots\n")
+    assert volume.archive_min_free_gb() == 2.0
+
+
 # ── the schedule ─────────────────────────────────────────────────────────────
 
 def test_storage_maintenance_bounds_archives_and_upload_sessions(ledger, tmp_path, monkeypatch):
@@ -174,6 +288,11 @@ def test_storage_maintenance_bounds_archives_and_upload_sessions(ledger, tmp_pat
     monkeypatch.setattr(maintenance, "ARCHIVE_RETENTION",
                         {"days_to_keep": 3650, "max_size_gb": 50.0, "max_files": 2})
     monkeypatch.setattr(volume, "archive_min_free_gb", lambda: 0.0)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "expired.txt").write_text("old")
+    os.utime(artifacts / "expired.txt", (time.time() - 400 * 86400, time.time() - 400 * 86400))
+    monkeypatch.setattr(volume, "ARTIFACTS_DIR", artifacts)
 
     report = maintenance.run_storage_maintenance()
 
@@ -181,6 +300,7 @@ def test_storage_maintenance_bounds_archives_and_upload_sessions(ledger, tmp_pat
     assert not old.exists() and new.exists()
     assert report["archives"]["deleted_files"] == 3
     assert report["upload_sessions_removed"] == 1
+    assert not (artifacts / "expired.txt").exists()
 
 
 def test_storage_maintenance_is_scheduled_by_a_gated_boot_hook():

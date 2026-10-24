@@ -476,7 +476,9 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
     # Save operator state after mint
     _best_effort(warnings, "operator state", snap_id, save_operator_state)
     embed_dims = _embed_and_store(warnings, snap_id, body)
-    archived = _best_effort(warnings, "archive copy", snap_id, archive_volume)
+    # The copy is the ledger as this mint committed it (byte_end, measured
+    # under mint_lock), never a later mint's half-written append.
+    archived = _best_effort(warnings, "archive copy", snap_id, archive_volume, upto=byte_end)
 
     result = {"snap_id": snap_id,
               "assert_sha256": archived[1] if archived else None,
@@ -554,7 +556,7 @@ def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_
         _index_entry(warnings, snap_id, byte_start, byte_end, operator, utc, snap_type=snap_type)
 
     _embed_and_store(warnings, snap_id, body)
-    archived = _best_effort(warnings, "archive copy", snap_id, archive_volume)
+    archived = _best_effort(warnings, "archive copy", snap_id, archive_volume, upto=byte_end)
 
     result = {"snap_id": snap_id,
               "assert_sha256": archived[1] if archived else None,

@@ -430,7 +430,7 @@ def mint_site(env, monkeypatch, tmp_path):
     monkeypatch.setattr(checkpoint, "append_snapshot_text", lambda _b: None)
     monkeypatch.setattr(checkpoint, "VOL_PATH", tmp_path / "nonexistent-vol.txt")
     monkeypatch.setattr(
-        checkpoint, "archive_volume", lambda: ("/tmp/arc.txt", "deadbeef", TS)
+        checkpoint, "archive_volume", lambda *_a, **_k: ("/tmp/arc.txt", "deadbeef", TS)
     )
     return checkpoint
 

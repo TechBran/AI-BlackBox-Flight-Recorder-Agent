@@ -428,7 +428,7 @@ def mint_env(save_env, monkeypatch, tmp_path):
     monkeypatch.setattr(ckpt, "VOL_PATH", tmp_path / "no-such-volume.txt")
     monkeypatch.setattr(ckpt, "_embed_for_index", lambda *a, **k: {})
     monkeypatch.setattr(ckpt, "update_snapshot_index", lambda *a, **k: None)
-    monkeypatch.setattr(ckpt, "archive_volume", lambda: ("/tmp/arc.txt", "deadbeef", "utc"))
+    monkeypatch.setattr(ckpt, "archive_volume", lambda *_a, **_k: ("/tmp/arc.txt", "deadbeef", "utc"))
     return save_env, bodies
 
 

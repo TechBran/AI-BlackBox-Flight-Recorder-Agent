@@ -64,6 +64,7 @@ def box(isolated_stores, tmp_path, monkeypatch):
                         ("GM_PATH", gm), ("GM_HASH", gm_hash)):
         monkeypatch.setattr(volume, name, value)
     monkeypatch.setattr(volume, "archive_min_free_gb", lambda: 0.0)
+    monkeypatch.setattr(volume, "_latest_copy", None)
     monkeypatch.setattr(ckpt, "VOL_PATH", vol)
     index_path = root / "snapshot_index.json"
     stores_dir = root / "embeddings"
@@ -125,7 +126,7 @@ def test_embed_failure_after_append_leaves_the_ledger_consistent_and_reembeddabl
 def test_archive_failure_after_append_never_remints_the_same_turns(box, monkeypatch):
     box.provider(FakeProvider())
 
-    def disk_full():
+    def disk_full(*_a, **_k):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(ckpt, "archive_volume", disk_full)
@@ -142,7 +143,7 @@ def test_archive_failure_after_append_never_remints_the_same_turns(box, monkeypa
 
 def test_mint_with_content_reports_a_failed_archive_instead_of_raising(box, monkeypatch):
     box.provider(FakeProvider())
-    monkeypatch.setattr(ckpt, "archive_volume", lambda: (_ for _ in ()).throw(OSError(28, "full")))
+    monkeypatch.setattr(ckpt, "archive_volume", lambda *a, **k: (_ for _ in ()).throw(OSError(28, "full")))
     result = ckpt.mint_with_content(OP, "direct content", reason="TEST")
     assert _snapshots(box.vol) == [result["snap_id"]]
     assert result["archived"] is None and result["warnings"]
@@ -179,6 +180,66 @@ def test_concurrent_mints_each_land_once_in_ledger_and_index(box):
     ids = [r["snap_id"] for r in results]
     assert sorted(_snapshots(box.vol)) == sorted(ids) and len(set(ids)) == 6
     assert set(ids) <= set(fossils.load_snapshot_index())
+
+
+
+def test_an_archive_copy_never_captures_a_concurrent_append(box, monkeypatch):
+    """Mint A archives after releasing mint_lock while mint B is half way
+    through its append: A's copy is the ledger A committed, never a torn one
+    (a START with no END), and the manifest ends on the newest ledger."""
+    box.provider(FakeProvider())
+    real_append = ckpt.append_snapshot_text
+    real_archive = volume.archive_volume
+    b_half_written, a_archived, a_unlocked = threading.Event(), threading.Event(), threading.Event()
+    copies = {}
+
+    def slow_append(text):
+        if "OPERATOR: Bob" not in text:
+            return real_append(text)
+        half = len(text) // 2
+        real_append(text[:half])
+        b_half_written.set()
+        a_archived.wait(5)
+        with open(volume.VOL_PATH, "ab") as f:
+            f.write(text[half:].encode())
+
+    def archive(*args, **kwargs):
+        if "A" not in copies:
+            assert b_half_written.wait(5)
+            out = real_archive(*args, **kwargs)
+            copies["A"] = Path(out[0]).read_text()
+            a_archived.set()
+            return out
+        return real_archive(*args, **kwargs)
+
+    real_embed_store = ckpt._embed_and_store
+
+    def embed_store(warnings, snap_id, body):
+        if "OPERATOR: Ann" in body:
+            a_unlocked.set()
+        return real_embed_store(warnings, snap_id, body)
+
+    monkeypatch.setattr(ckpt, "append_snapshot_text", slow_append)
+    monkeypatch.setattr(ckpt, "archive_volume", archive)
+    monkeypatch.setattr(ckpt, "_embed_and_store", embed_store)
+    _turn("Ann", 1)
+    _turn("Bob", 1)
+    results = {}
+    ta = threading.Thread(target=lambda: results.__setitem__("A", ckpt.perform_mint("Ann", "T")))
+    ta.start()
+    assert a_unlocked.wait(5)
+    tb = threading.Thread(target=lambda: results.__setitem__("B", ckpt.perform_mint("Bob", "T")))
+    tb.start()
+    ta.join(10)
+    tb.join(10)
+    copy = copies["A"]
+    assert copy.count("=== START SNAPSHOT") == copy.count("=== END SNAPSHOT") == 1
+    assert "OPERATOR: Bob" not in copy
+    volume.parse_tail(copy)
+    ledger = box.vol.read_bytes()
+    man = json.loads(volume.MANIFEST.read_text())
+    assert man["latest_sha256"] == hashlib.sha256(ledger).hexdigest()
+    assert results["B"]["assert_sha256"] == man["latest_sha256"]
 
 
 # ── the embed ceiling ───────────────────────────────────────────────────────

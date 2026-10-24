@@ -197,7 +197,7 @@ You can read, analyze, or manipulate these files using your tools.
 - **PDFs/Documents**: Use `Read` tool
 - **Code files**: Use `Read` tool
 
-**Cleanup**: Session folders are swept ONLY by the manual `POST /upload/cleanup` endpoint (3-day cutoff) — nothing schedules it, so folders persist until someone calls it. (Terminal-attach uploads under `Portal/uploads/terminal/{session}` are different: they're deleted automatically when their zellij session is deleted or reaped.)
+**Cleanup**: Session folders older than 3 days (by folder mtime) are swept every hour by the `startup_storage_maintenance` boot hook (`Orchestrator/maintenance.py`, skipped under `BLACKBOX_TESTING`); `POST /upload/cleanup` runs the same sweep on demand. The same hourly pass applies the `Archive/` retention (30 days / 5 GB / 200 copies, plus the `[archive] min_free_gb` free-space floor; the newest copy is always kept) and the expired-artifact sweep. (Terminal-attach uploads under `Portal/uploads/terminal/{session}` are different: they're deleted automatically when their zellij session is deleted or reaped.)
 
 ### Task Management
 
