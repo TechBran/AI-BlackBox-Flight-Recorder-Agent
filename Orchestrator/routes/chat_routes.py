@@ -7400,7 +7400,7 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
 _MEDIA_ROUTE_KEEP = frozenset({"google", "gemini", "custom"})
 
 
-def media_auto_route(messages: list, provider: str) -> Tuple[str, bool]:
+def media_auto_route(messages: list, provider: str) -> tuple[str, bool]:
     """The provider a chat turn runs on, given what is attached to it.
 
     An audio or video part moves the turn to Google, which reads both; a PDF

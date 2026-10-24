@@ -617,8 +617,7 @@ def get_recent_flight_reports(count: int = 1) -> List[str]:
     from the FR chain. Other operators' checkpoint pins are untouched."""
     if count <= 0:
         return []
-    from Orchestrator.fossils import load_snapshot_index
-    from Orchestrator.volume import read_volume_bytes
+    from Orchestrator.fossils import VolumeRanges, load_snapshot_index
     index = load_snapshot_index()
     matching = [(sid, meta) for sid, meta in index.items()
                 if meta.get("operator") == FLIGHT_RECORDER_OPERATOR
@@ -626,12 +625,14 @@ def get_recent_flight_reports(count: int = 1) -> List[str]:
     if not matching:
         return []
     matching.sort(key=lambda x: _snap_key(x[0]))
-    vol_bytes = read_volume_bytes(VOL_PATH)
     out = []
-    for sid, meta in matching[-count:]:
-        try:
-            out.append(vol_bytes[meta["byte_start"]:meta["byte_end"]].decode(
-                "utf-8", errors="replace"))
-        except Exception:
-            continue
+    # Just the pinned reports' byte ranges, not the whole volume (every
+    # Flight Recorder turn pins these).
+    with VolumeRanges() as vol:
+        for sid, meta in matching[-count:]:
+            try:
+                out.append(vol.read(meta["byte_start"], meta["byte_end"]).decode(
+                    "utf-8", errors="replace"))
+            except Exception:
+                continue
     return out

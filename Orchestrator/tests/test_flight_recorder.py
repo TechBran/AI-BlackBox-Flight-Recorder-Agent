@@ -256,8 +256,8 @@ def test_collector_survives_broken_sources(monkeypatch):
 
 # ── M5: flight-report pin filter + min-activity skip ───────────────────────
 
-def test_flight_report_pin_filters_type_and_operator(monkeypatch):
-    from Orchestrator import fossils, volume
+def test_flight_report_pin_filters_type_and_operator(monkeypatch, isolated_stores):
+    from Orchestrator import fossils
     fake_index = {
         "SNAP-20260723-0001": {"operator": "Brandon", "type": "checkpoint",
                                "byte_start": 0, "byte_end": 5},
@@ -269,7 +269,9 @@ def test_flight_report_pin_filters_type_and_operator(monkeypatch):
                                "byte_start": 10, "byte_end": 15},
     }
     monkeypatch.setattr(fossils, "load_snapshot_index", lambda: fake_index)
-    monkeypatch.setattr(volume, "read_volume_bytes", lambda p: b"AAAAABBBBBCCCCC")
+    # The pin reads each report's byte range from the volume file itself.
+    fossils.VOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fossils.VOL_PATH.write_bytes(b"AAAAABBBBBCCCCC")
     reports = oversight.get_recent_flight_reports(count=5)
     assert reports == ["BBBBB"]     # only the FR flight_report block
 

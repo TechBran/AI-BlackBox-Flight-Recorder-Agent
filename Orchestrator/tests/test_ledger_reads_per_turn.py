@@ -268,3 +268,19 @@ def test_get_snapshot_by_id_reads_only_that_snapshot(ledger, volume_reads):
                                "byte_end": meta["byte_end"]}
     assert volume_reads["bytes"] == meta["byte_end"] - meta["byte_start"]
     assert fossils.get_snapshot_by_id("SNAP-19990101-1") is None
+
+
+def test_flight_recorder_pin_reads_only_its_reports(ledger, volume_reads, monkeypatch):
+    """Every Flight Recorder turn pins its latest reports; that read only
+    their byte ranges now, not the whole volume."""
+    from Orchestrator import oversight
+    from Orchestrator.config import FLIGHT_RECORDER_OPERATOR
+    reports = {}
+    for sid in ("SNAP-20261001-50", "SNAP-20261001-60", "SNAP-20261001-70"):
+        reports[sid] = dict(ledger[sid], operator=FLIGHT_RECORDER_OPERATOR, type="flight_report")
+    monkeypatch.setattr(fossils, "load_snapshot_index", lambda: {**ledger, **reports})
+
+    pinned = oversight.get_recent_flight_reports(count=2)
+
+    assert fossils.extract_snap_ids(pinned) == ["SNAP-20261001-60", "SNAP-20261001-70"]
+    assert volume_reads["bytes"] == _size(ledger, ["SNAP-20261001-60", "SNAP-20261001-70"])

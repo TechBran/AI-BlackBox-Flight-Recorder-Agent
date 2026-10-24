@@ -9,12 +9,9 @@ at most 4 KB of each listed snapshot for its preview (Android polls it every
 """
 from __future__ import annotations
 
-import pytest
-
 from Orchestrator import fossils
 from Orchestrator.config import VOL_PATH
 from Orchestrator.tests.test_ledger_reads_per_turn import (  # noqa: F401 (fixtures)
-    _block,
     ledger,
     volume_reads,
 )
