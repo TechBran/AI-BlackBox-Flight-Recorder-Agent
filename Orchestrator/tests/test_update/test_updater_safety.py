@@ -519,12 +519,18 @@ def _push_adds(box, files):
 
 def test_paths_in_the_way_lists_untracked_files_a_reset_would_overwrite(tmp_path):
     b = make_box(tmp_path)
-    target = _push_adds(b, {"docs/plan.md": "upstream\n", "top.md": "upstream\n"})
+    target = _push_adds(b, {"docs/plan.md": "upstream\n", "top.md": "upstream\n",
+                            "uploads/keep.md": "upstream\n"})
     git(b.root, "fetch", "-q", "origin")
     (b.root / "docs").write_text("a file where the update needs a directory\n")
     (b.root / "top.md").write_text("operator's copy\n")
     (b.root / "scratch.log").write_text("unrelated runtime file\n")
-    assert git_ops.paths_in_the_way(b.root, target) == ["docs", "top.md"]
+    # A symlinked directory: git replaces the link, it does not write through it.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.md").write_text("the operator's uploads\n")
+    (b.root / "uploads").symlink_to(elsewhere)
+    assert git_ops.paths_in_the_way(b.root, target) == ["docs", "top.md", "uploads"]
     assert git_ops.paths_in_the_way(b.root, "HEAD") == []
 
 

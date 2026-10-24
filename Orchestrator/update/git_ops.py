@@ -217,15 +217,16 @@ def paths_in_the_way(root: Path, target: str) -> list[str]:
                "--diff-filter=A", "HEAD", target).stdout
     hits: set[str] = set()
     for rel in filter(None, out.split("\0")):
-        if os.path.lexists(root / rel):
-            hits.add(rel)
-            continue
-        # A file (or a symlink) where the target puts a directory.
+        # A file or a symlink where the target puts a directory, checked from
+        # the top: git does not follow a symlink there, it replaces it.
         for parent in reversed(Path(rel).parents[:-1]):
             p = root / parent
             if p.is_symlink() or (p.exists() and not p.is_dir()):
                 hits.add(parent.as_posix())
                 break
+        else:
+            if os.path.lexists(root / rel):
+                hits.add(rel)
     return sorted(hits)
 
 

@@ -312,6 +312,23 @@ def test_an_untracked_file_where_the_update_adds_one_is_moved_aside(sh):
     assert "docs/audit.md" in r.stdout
 
 
+def test_a_file_where_the_update_needs_a_directory_is_moved_aside(sh):
+    box = sh()
+    (box.seed / "docs").mkdir()
+    (box.seed / "docs" / "a.md").write_text("upstream a\n")
+    (box.seed / "docs" / "b.md").write_text("upstream b\n")
+    git(box.seed, "add", "-A")
+    git(box.seed, "commit", "-q", "-m", "v3 adds docs/")
+    git(box.seed, "push", "-q", "origin", "main")
+    (box.root / "docs").write_text("operator's notes in a file called docs\n")
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (box.root / "docs" / "a.md").read_text() == "upstream a\n"
+    kept = list((box.root / "Manifest" / "displaced").glob("pre-update-*/docs"))
+    assert len(kept) == 1 and kept[0].read_text() == "operator's notes in a file called docs\n"
+
+
 def test_a_rollback_that_cannot_stash_leaves_the_code_and_says_so(sh):
     box = sh()
     r = run_update(box, "--yes", STUB_INSTALL_RC="1", STUB_ITA="1")

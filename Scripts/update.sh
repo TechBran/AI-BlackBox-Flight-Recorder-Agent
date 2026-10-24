@@ -258,20 +258,21 @@ keep_local_work() {  # <stash message> <reset target> <displaced dir name>
         echo "[update] Recover them with: git stash list && git stash apply <that SHA>"
     fi
     while IFS= read -r -d '' rel; do
-        if [[ -e "$rel" || -L "$rel" ]]; then
-            in_way+=("$rel")
-            continue
-        fi
-        # A file (or symlink) where the target needs a directory.
+        # A file or symlink where the target needs a directory, checked from
+        # the top (git replaces a symlink there, it does not follow it)...
         IFS=/ read -r -a segs <<< "$rel"
         part=""
         for seg in "${segs[@]:0:${#segs[@]}-1}"; do
             part="${part:+$part/}$seg"
             if [[ -L "$part" || ( -e "$part" && ! -d "$part" ) ]]; then
                 in_way+=("$part")
-                break
+                continue 2
             fi
         done
+        # ...or the file itself.
+        if [[ -e "$rel" || -L "$rel" ]]; then
+            in_way+=("$rel")
+        fi
     done < <(git diff --name-only -z --no-renames --diff-filter=A HEAD "$target")
     for rel in ${in_way[@]+"${in_way[@]}"}; do
         [[ -e "$rel" || -L "$rel" ]] || continue  # already moved (a shared parent)
