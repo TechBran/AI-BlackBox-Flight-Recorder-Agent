@@ -175,6 +175,13 @@ def _resolve_attachment(url, allowed_exts) -> Optional[Path]:
     return _load_attachment(url, allowed_exts)[0]
 
 
+# The part a user-attachment loader adds when reading an upload FAILED (its
+# `except Exception` branch). These loaders used to only print, so an error
+# there (W04: an UnboundLocalError on every non-stream turn) dropped every
+# attachment and the model answered as if nothing had been sent.
+_ATTACHMENT_ERROR_NOTE = "[Note: an attached file could not be loaded.]"
+
+
 def _checked_operator(raw) -> str:
     """The request's operator, safe to join into a path or write to the ledger.
 
@@ -428,6 +435,7 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                                 new_content.append(part)
                         except Exception as e:
                             print(f"Could not process image for OpenAI: {e}")
+                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
                             new_content.append(part)
                     elif part.get("type") == "video_url":
                         # Handle videos - OpenAI doesn't support video directly, provide a note
@@ -459,6 +467,7 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                                     })
                         except Exception as e:
                             print(f"Could not process document for OpenAI: {e}")
+                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
                     else:
                         new_content.append(part)
                 processed_messages.append({"role": m["role"], "content": new_content})
@@ -540,7 +549,6 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                     # BlackBoxToolExecutor instead of reporting "Unknown tool".
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, args))
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result:
@@ -679,6 +687,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                                 new_content.append({"type": "text", "text": refused})
                         except Exception as e:
                             print(f"Could not process local image for Anthropic: {e}")
+                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
                     elif part.get("type") == "video_url":
                         # Handle videos - Anthropic doesn't support video directly, provide a note
                         url = part["video_url"]["url"]
@@ -711,6 +720,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                                     })
                         except Exception as e:
                             print(f"Could not process document for Anthropic: {e}")
+                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
                     elif part.get("type") == "text":
                         new_content.append(part)
                 amsgs.append({"role": m["role"], "content": new_content})
@@ -1042,7 +1052,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     message = tool_input.get("message", "")
                     print(f"[ANTHROPIC] Executing send_sms to {phone_number}: {message[:50]}...")
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("send_sms", {"phone_number": phone_number, "message": message})
                     )
@@ -1063,7 +1072,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     backend = tool_input.get("backend", "openai_realtime")
                     print(f"[ANTHROPIC] Executing make_phone_call to {phone_number}")
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_phone_call", {
                             "phone_number": phone_number,
@@ -1088,7 +1096,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     voice = tool_input.get("voice", "onyx")
                     print(f"[ANTHROPIC] Executing make_voice_call to {phone_number}: {message[:50]}...")
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_voice_call", {
                             "phone_number": phone_number,
@@ -1107,7 +1114,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                 elif tool_name == "search_contacts":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_contacts", tool_input)
                     )
@@ -1121,7 +1127,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                 elif tool_name == "save_contact":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("save_contact", tool_input)
                     )
@@ -1135,7 +1140,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                 elif tool_name == "create_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("create_cron_job", tool_input)
                     )
@@ -1149,7 +1153,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                 elif tool_name == "edit_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("edit_cron_job", tool_input)
                     )
@@ -1163,7 +1166,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                 elif tool_name == "search_cron_jobs":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_cron_jobs", tool_input)
                     )
@@ -1182,7 +1184,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     # device_id + model.
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute("use_computer", tool_input))
                     result_message = tool_result.result
                     print(f"[ANTHROPIC] use_computer: {result_message[:100]}")
@@ -1198,7 +1199,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                                    "gemini_pro_tts", "extend_video"):
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute(tool_name, tool_input)
                     )
@@ -1212,7 +1212,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                 elif tool_name in ("list_devices", "control_android_device"):
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, tool_input))
                     result_message = tool_result.result
                     print(f"[ANTHROPIC] {tool_name}: {result_message[:100]}")
@@ -1225,7 +1224,6 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                     # Catch-all: route ANY tool through BlackBoxToolExecutor
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, tool_input))
                     result_message = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result_message:
@@ -1352,6 +1350,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                                 })
                         except Exception as e:
                             print(f"Could not process local media for Gemini: {e}")
+                            content_parts.append({"text": _ATTACHMENT_ERROR_NOTE})
                     # --- END NEW BLOCK ---
             else: # Text-only messages
                 content_parts.append({"text": str(content)})
@@ -1645,7 +1644,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                     message = func_args.get("message", "")
                     print(f"[GEMINI] Executing send_sms to {phone_number}: {message[:50]}...")
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("send_sms", {"phone_number": phone_number, "message": message})
                     )
@@ -1660,7 +1658,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                     backend = func_args.get("backend", "openai_realtime")
                     print(f"[GEMINI] Executing make_phone_call to {phone_number}")
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_phone_call", {
                             "phone_number": phone_number,
@@ -1679,7 +1676,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                     voice = func_args.get("voice", "onyx")
                     print(f"[GEMINI] Executing make_voice_call to {phone_number}: {message[:50]}...")
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_voice_call", {
                             "phone_number": phone_number,
@@ -1692,7 +1688,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                 elif func_name == "search_contacts":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_contacts", func_args)
                     )
@@ -1701,7 +1696,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                 elif func_name == "save_contact":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("save_contact", func_args)
                     )
@@ -1710,7 +1704,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                 elif func_name == "create_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("create_cron_job", func_args)
                     )
@@ -1719,7 +1712,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                 elif func_name == "edit_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("edit_cron_job", func_args)
                     )
@@ -1728,7 +1720,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                 elif func_name == "search_cron_jobs":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_cron_jobs", func_args)
                     )
@@ -1737,14 +1728,12 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                 elif func_name == "use_computer":
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute("use_computer", func_args))
                     result = tool_result.result
                     print(f"[GEMINI] use_computer: {result[:100]}")
                 elif func_name in ("list_devices", "control_android_device"):
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute(func_name, func_args))
                     result = tool_result.result
                     print(f"[GEMINI] {func_name}: {result[:100]}")
@@ -1759,7 +1748,6 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                     # BlackBoxToolExecutor instead of reporting "Unknown function".
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute(func_name, func_args))
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result:
@@ -1933,6 +1921,7 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                                     })
                         except Exception as e:
                             print(f"Could not process document for xAI: {e}")
+                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
                     else:
                         new_content.append(part)
                 processed_messages.append({"role": m["role"], "content": new_content})
@@ -1993,7 +1982,6 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                     # BlackBoxToolExecutor instead of reporting "Unknown tool".
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, args))
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result:
@@ -2232,6 +2220,7 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                                     })
                         except Exception as e:
                             print(f"Could not process document for custom server: {e}")
+                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
                     else:
                         new_content.append(part)
                 processed_messages.append({"role": m["role"], "content": new_content})
@@ -2314,7 +2303,6 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                     # BlackBoxToolExecutor instead of reporting "Unknown tool".
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
-                    import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, args))
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result:
@@ -3124,6 +3112,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 new_content.append({"type": "text", "text": refused})
                         except Exception as e:
                             print(f"Could not process image for Anthropic streaming: {e}")
+                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
                     elif part.get("type") == "text":
                         cleaned_text = strip_media_blobs(part.get("text", ""))
                         if cleaned_text:  # Skip empty text parts
@@ -5190,6 +5179,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 })
                         except Exception as e:
                             print(f"Could not process media for Gemini streaming: {e}")
+                            content_parts.append({"text": _ATTACHMENT_ERROR_NOTE})
             else:
                 content_parts.append({"text": str(content)})
 
