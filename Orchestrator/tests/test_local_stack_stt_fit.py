@@ -107,6 +107,27 @@ def test_driver_dead_gpu_falls_back_to_cpu_floor_tier(monkeypatch, tmp_path):
     assert local_stack.stt_batch_model() == "Systran/faster-whisper-base"
 
 
+def test_a_card_with_no_driver_installed_gets_the_cpu_floor_tier(monkeypatch, tmp_path):
+    """O19-local-stack-07, the other lspci state: the card is on the bus but
+    nvidia-smi was never installed. The installer built CPU and the GPU
+    preflight treats the box as CPU-only, so Speaches runs on CPU here too:
+    the float16 flagship would be the same 10-21 s per utterance."""
+    from Orchestrator.tests.gpu_driver_cases import LSPCI_NVIDIA
+    _fresh(monkeypatch, tmp_path)
+
+    def run(cmd):
+        if cmd[0] == "nvidia-smi":
+            return None, hardware.NOT_INSTALLED
+        return LSPCI_NVIDIA, None
+    monkeypatch.setattr(hardware, "_run_detailed", run)
+    monkeypatch.setattr(hardware, "_cache", None)
+    hw = hardware.probe()
+    assert (hw["gpu"], hw["source"], hw["driver_ok"]) == (True, "lspci", None)
+    assert local_stack.resolve_whisper_fit()["tier"] == "cpu"
+    assert local_stack.stt_stream_model() == "Systran/faster-whisper-small"
+    assert local_stack.stt_batch_model() == "Systran/faster-whisper-base"
+
+
 # ── fresh-read sidecar override (future wizard) ──────────────────────────────
 
 def test_sidecar_override_wins_and_is_fresh_read(monkeypatch, tmp_path):

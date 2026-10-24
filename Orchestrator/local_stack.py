@@ -668,9 +668,10 @@ SPEACHES_STATIC_PORT = 9099
 # Streaming defaults to the turbo ct2 build (parity with today's gemma-box path);
 # batch uses full large-v3 for quality. These now double as the FAIL-OPEN
 # fallback the getters return when the hardware probe can't determine a fit — a
-# probe error, or a GPU whose VRAM is unverifiable (an lspci-discovered card):
-# the flagship 16 GB pairing, matching hardware.derive_tier's "unverifiable VRAM
-# => HIGH" stance. Wizard-overridable via the fresh-read sidecar (below).
+# probe error, or a working GPU whose VRAM reads unparseable: the flagship
+# 16 GB pairing, matching hardware.derive_tier's "unverifiable VRAM => HIGH"
+# stance (an lspci-only card has no usable driver, so it gets the CPU floor
+# instead). Wizard-overridable via the fresh-read sidecar (below).
 ONBOX_STT_STREAM_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
 ONBOX_STT_BATCH_MODEL = "Systran/faster-whisper-large-v3"
 
@@ -727,11 +728,13 @@ def read_whisper_fit_sidecar() -> dict:
 
 def resolve_whisper_fit() -> "dict | None":
     """Best-fit WHISPER_FIT tier for THIS box from the hardware probe's VRAM, or
-    None when the probe can't determine a fit (a probe error, or a GPU whose VRAM
-    is unverifiable — an lspci-discovered card) so the getters fall back to
-    today's flagship constants. A CPU-only box (no GPU) resolves the int8 floor
-    tier — never the GPU flagship. Never raises; the probe itself is fail-soft
-    and 60 s-cached (hardware.probe)."""
+    None when the probe can't determine a fit (a probe error, or a working
+    driver whose VRAM reads unparseable) so the getters fall back to today's
+    flagship constants. A box whose whisper runs on CPU resolves the int8
+    floor tier — never the GPU flagship: no GPU, an NVIDIA card whose driver
+    is dead (driver_ok False), or one with no driver installed (an
+    lspci-only card, driver_ok None). Never raises; the probe itself is
+    fail-soft and 60 s-cached (hardware.probe)."""
     try:
         from Orchestrator import hardware  # stdlib-only import; cycle-proof
         hw = hardware.probe()
@@ -746,10 +749,15 @@ def resolve_whisper_fit() -> "dict | None":
         # served large-v3 on CPU at 10-21 s per utterance). `is False`, not
         # falsiness: a probe without the key keeps the unverifiable-VRAM path.
         return WHISPER_FIT[-1]
+    if hw.get("source") == "lspci" and "driver_ok" in hw and hw["driver_ok"] is None:
+        # Card on the bus, no NVIDIA driver installed at all (O19-local-stack-07):
+        # the installer built CPU and the GPU preflight treats the box as
+        # CPU-only, so whisper runs on CPU here as well.
+        return WHISPER_FIT[-1]
     vram = hw.get("vram_mb")
     if not isinstance(vram, int):
-        # GPU present but VRAM unverifiable (lspci) — defer to the flagship
-        # constants (matches derive_tier's "unverifiable VRAM => HIGH").
+        # GPU present but VRAM unverifiable — defer to the flagship constants
+        # (matches derive_tier's "unverifiable VRAM => HIGH").
         return None
     for tier in WHISPER_FIT:
         if vram >= tier["min_vram_mb"]:

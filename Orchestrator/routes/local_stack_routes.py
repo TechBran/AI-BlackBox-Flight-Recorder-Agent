@@ -127,11 +127,13 @@ def gpu_preflight() -> dict:
     box (no VRAM contention is possible) — but only once the hardware probe
     agrees there is no card: nvidia-smi failing on a box whose card is on the
     PCI bus is a dead driver, and the retrieval group would then load onto a
-    GPU it cannot use (O19-local-stack-06). That fails CLOSED."""
+    GPU it cannot use (O19-local-stack-06). That fails CLOSED. The probe is
+    re-run, not read from its 60 s cache: a driver that died inside that
+    window would otherwise still read "OK" here."""
     g = _probe_gpu_usage()
     if not g["present"]:
         from Orchestrator import hardware
-        hw = hardware.probe()
+        hw = hardware.probe(ttl_s=0)
         if hw.get("driver_ok") is False:
             return {"ok": False, "present": True, "driver_ok": False,
                     "used_mib": None, "total_mib": None, "processes": [],

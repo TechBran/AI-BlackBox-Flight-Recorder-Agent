@@ -119,3 +119,25 @@ def test_gpu_preflight_fails_closed_when_the_driver_is_dead(client, monkeypatch)
     assert body["driver_ok"] is False
     assert reason in body["detail"]
     assert "No NVIDIA GPU detected" not in body["detail"]
+
+
+def test_gpu_preflight_rechecks_a_cached_healthy_probe_when_nvidia_smi_fails(client, monkeypatch):
+    """hardware.probe() is cached for 60 s. A driver that died inside that
+    window (nvidia-smi just failed here) must not be answered from a cached
+    "driver OK" with "No NVIDIA GPU detected" — the fail-open this route had."""
+    import time
+    from Orchestrator import hardware
+    from Orchestrator.routes import local_stack_routes as lsr
+    monkeypatch.setattr(lsr, "_probe_gpu_usage",
+                        lambda: {"present": False, "used_mib": None,
+                                 "total_mib": None, "processes": []})
+    healthy = dict(_CPU_BOX_HW, gpu=True, gpu_name="RTX 2000 Ada", vram_mb=16380,
+                   source="nvidia-smi", tier="HIGH", driver_ok=True)
+    monkeypatch.setattr(hardware, "_cache", (time.monotonic(), healthy))
+    reason = "NVIDIA driver not responding: RTX 2000 Ada is on the PCI bus but nvidia-smi failed"
+    monkeypatch.setattr(hardware, "_probe_gpu",
+                        lambda: (True, "RTX 2000 Ada", None, "lspci", False, reason))
+    body = client.get("/local-models/gpu-preflight").json()
+    assert body["ok"] is False and body["driver_ok"] is False
+    assert reason in body["detail"]
+    assert hardware.probe()["driver_ok"] is False      # the fresh probe refreshed the cache
