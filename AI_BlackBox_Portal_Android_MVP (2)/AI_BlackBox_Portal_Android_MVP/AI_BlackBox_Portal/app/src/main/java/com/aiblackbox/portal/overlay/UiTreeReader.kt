@@ -198,24 +198,36 @@ class UiTreeReader(
      * Reads the live tree's input focus ([AccessibilityNodeInfo.findFocus] with
      * [AccessibilityNodeInfo.FOCUS_INPUT]) and runs the SAME pure
      * [isPasswordField] gate the reader uses (node flag OR password [inputType]).
-     * Returns false when the service isn't connected (null root) or nothing is
-     * focused — the caller treats "can't tell" as "not a password" (capture
-     * proceeds); the explicit-refusal value is true ONLY when a password field is
-     * confirmed focused. Never throws (a malformed tree degrades to false).
+     * Returns true ONLY when a password field is confirmed focused; "can't tell"
+     * reads as false here (the user-invoked, fail-open meaning). An autonomous
+     * caller must use the tri-state [passwordFocus] instead and refuse on
+     * [PasswordFocus.UNKNOWN]. Never throws.
      *
      * LIMITATION (shared with [isPasswordField]): a WebView `<input type=password>`
      * or a Compose `VisualTransformation` field exposes neither `isPassword` nor a
      * password `inputType`, so this can't detect those — they remain a known
      * false-negative surface, tracked at the redaction layer.
      */
-    fun isPasswordFieldFocused(): Boolean {
-        // FAIL-OPEN: "can't tell" (no tree / nothing focused / query throws below)
-        // returns false so the capture PROCEEDS. Safe ONLY because capture is
-        // user-invoked today; a FUTURE autonomous capture path MUST flip this to
-        // fail-CLOSED (treat "can't tell" as password-present → refuse the capture).
-        val root = rootProvider() ?: return false
+    fun isPasswordFieldFocused(): Boolean = passwordFocus() == PasswordFocus.PASSWORD
+
+    /**
+     * (A03-overlay-rest-04) The TRI-STATE focus probe behind every capture gate:
+     *  - [PasswordFocus.PASSWORD] — a password field is input-focused;
+     *  - [PasswordFocus.NOT_PASSWORD] — the tree was read and nothing, or a non-password
+     *    field, holds input focus;
+     *  - [PasswordFocus.UNKNOWN] — no tree (service disconnected, a transient null root) or
+     *    the query threw: the probe cannot tell.
+     *
+     * The two-state read folded UNKNOWN into "not a password", which was safe only while
+     * capture was user-invoked. The frontier loop now captures autonomously, and exactly
+     * when the tree is blind, so its capture refuses on UNKNOWN ([shouldRefuseCapture]).
+     * Never throws.
+     */
+    fun passwordFocus(): PasswordFocus {
         return try {
-            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+            val root = rootProvider() ?: return PasswordFocus.UNKNOWN
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: return PasswordFocus.NOT_PASSWORD
             val pw = isPasswordField(focused.isPassword, focused.inputType)
             @Suppress("DEPRECATION")
             try {
@@ -223,13 +235,12 @@ class UiTreeReader(
             } catch (_: Exception) {
                 // recycle() may be a no-op / throw on some versions; never crash here.
             }
-            pw
+            if (pw) PasswordFocus.PASSWORD else PasswordFocus.NOT_PASSWORD
         } catch (e: Exception) {
-            // Defensive: a focus query on a malformed tree must not crash the gate.
-            // Fail OPEN (not a password) — the caller's other guards still apply; the
-            // password case is the one we positively detect, never assume.
-            Log.w(TAG, "isPasswordFieldFocused: focus query failed (${e.javaClass.simpleName}) -> false")
-            false
+            // Defensive: a focus query on a malformed tree must not crash the gate. It
+            // reports UNKNOWN; whether that refuses is the caller's (autonomy) decision.
+            Log.w(TAG, "passwordFocus: focus query failed (${e.javaClass.simpleName}) -> UNKNOWN")
+            PasswordFocus.UNKNOWN
         }
     }
 

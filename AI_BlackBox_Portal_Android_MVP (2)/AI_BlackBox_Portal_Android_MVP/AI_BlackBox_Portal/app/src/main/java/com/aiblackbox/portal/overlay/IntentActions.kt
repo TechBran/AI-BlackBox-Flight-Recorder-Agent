@@ -546,12 +546,17 @@ val DANGEROUS_SEND_INTENT_ACTIONS: Set<String> = setOf(
  * plain Strings — so no dangerous flag can be smuggled in through this function's
  * callers either. Credential handoff is never bypassed: a fire-and-forget intent
  * cannot type into a field, and the safe actions here never carry secrets.
+ *
+ * 4. (A03-overlay-rest-13) [pkg] must not be this app's own [selfPackage]: the hatch
+ *    exists for OTHER apps, and BlackBox's own activities (settings, overlay control)
+ *    are not something a model tool call should open.
  */
 fun sendIntentRejectionReason(
     action: String?,
     uri: String?,
     @Suppress("UNUSED_PARAMETER") mime: String?,
-    @Suppress("UNUSED_PARAMETER") pkg: String?,
+    pkg: String?,
+    selfPackage: String? = null,
 ): String? {
     val act = action?.trim().orEmpty()
     if (act.isEmpty()) return "action required"
@@ -561,5 +566,38 @@ fun sendIntentRejectionReason(
         if (scheme.isEmpty()) return "uri scheme required"
         if (scheme in UNSAFE_URI_SCHEMES) return "unsafe uri scheme"
     }
+    val target = pkg?.trim()?.lowercase()
+    if (!target.isNullOrEmpty() && target == selfPackage?.trim()?.lowercase()) {
+        return "package not permitted via send_intent"
+    }
     return null
 }
+
+// ---- (W27) honest launch results ------------------------------------------------
+//
+// Android's Background Activity Launch (BAL) rules DISCARD an activity launch from a
+// process with no visible window, and `startActivity` does NOT throw when that happens.
+// Only `navigate` knew this (M3); every other intent answered success after a bare
+// startActivity, so an unattended cron or remote task reported "alarm set" / "opened
+// maps" on a phone where nothing opened.
+
+/** The refusal detail for a launch the OS would discard. Token-prefixed so the /action
+ *  classifier lifts [BACKGROUND_LAUNCH_BLOCKED] into the wire error. */
+const val LAUNCH_BLOCKED_DETAIL: String =
+    "$BACKGROUND_LAUNCH_BLOCKED — the BlackBox app is not on screen, so Android would " +
+        "discard this launch and NOTHING would open. Open the BlackBox app on the phone " +
+        "first and try again."
+
+/**
+ * PURE: the refusal for a direct `startActivity`, or null when the launch can reach the
+ * screen. It can when the app has a visible activity ([appForeground]) or another BAL
+ * exemption holds ([launchExempt] — a visible overlay window, or the system-bound
+ * accessibility service). With neither, attempting the launch is a silent no-op the
+ * actuator cannot detect, so it is refused instead of reported as done.
+ */
+fun launchRefusal(appForeground: Boolean, launchExempt: Boolean): String? =
+    if (appForeground || launchExempt) null else LAUNCH_BLOCKED_DETAIL
+
+/** The detail for an intent no installed app can handle (ActivityNotFoundException). */
+fun noHandlerDetail(name: String): String =
+    "$name failed: no app on this phone handles it (ActivityNotFoundException)"

@@ -546,3 +546,46 @@ fun describeIntent(name: String, primaryArg: String?): String {
         else -> "Run $name"
     }
 }
+
+/**
+ * PURE (A03-overlay-rest-13): the confirm message for the generic `send_intent` hatch —
+ * [describeIntent]'s action line PLUS what the intent targets, so the consent is informed:
+ * the URI's scheme and host ([uriTargetSummary]), the explicit [pkg], the [mime] type and
+ * HOW MANY string extras ride along. Before this the card read only
+ * `Run the app action "android.intent.action.VIEW"`, hiding that the VIEW went to an
+ * `sms:` recipient in a specific messaging app.
+ *
+ * SECURITY: never the URI's path, query, fragment or user-info (they can carry a message
+ * body, an amount or a token) and never an extra's key or value — only their count.
+ */
+fun describeSendIntent(action: String?, uri: String?, pkg: String?, mime: String?, extrasCount: Int): String {
+    val parts = mutableListOf(describeIntent("send_intent", action))
+    uriTargetSummary(uri)?.let { parts += "on $it" }
+    pkg?.trim()?.takeIf { it.isNotEmpty() }?.let { parts += "in $it" }
+    mime?.trim()?.takeIf { it.isNotEmpty() }?.let { parts += "as $it" }
+    if (extrasCount > 0) parts += "with $extrasCount extra field" + if (extrasCount == 1) "" else "s"
+    return parts.joinToString(" ")
+}
+
+/**
+ * PURE: [uri] reduced to what a consent prompt may show — `scheme://host` for a
+ * hierarchical URI (user-info and port dropped, IPv6 brackets kept) and `scheme:…` for an
+ * opaque one (`sms:`, `tel:`, `mailto:`, `geo:`), whose scheme-specific part is the
+ * recipient or the payload. Null when [uri] is blank or has no valid scheme.
+ */
+fun uriTargetSummary(uri: String?): String? {
+    val u = uri?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val scheme = u.substringBefore(":", "")
+    if (!URI_SCHEME.matches(scheme)) return null
+    val rest = u.substring(scheme.length + 1)
+    val s = scheme.lowercase()
+    if (!rest.startsWith("//")) return "$s:…"
+    val authority = rest.substring(2).takeWhile { it != '/' && it != '?' && it != '#' }
+    val hostPort = authority.substringAfterLast('@')
+    val host = if (hostPort.startsWith("[")) hostPort.substringBefore(']', hostPort) + "]"
+    else hostPort.substringBefore(':')
+    return if (host.isEmpty() || host == "]") "$s://…" else "$s://${host.lowercase()}"
+}
+
+/** RFC 3986 scheme: a letter, then letters, digits, `+`, `-`, `.`. */
+private val URI_SCHEME = Regex("[A-Za-z][A-Za-z0-9+.-]*")

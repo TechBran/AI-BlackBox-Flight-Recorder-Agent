@@ -101,6 +101,13 @@ import kotlinx.serialization.json.jsonPrimitive
  *   launch is not permitted (prod: [com.aiblackbox.portal.BlackBoxNotificationManager]).
  *   `null` → the notify delivery reports [NOTIFICATION_DELIVERY_FAILED_DETAIL] rather
  *   than silently dropping the request.
+ * @param launchExempt (W27) reads whether another Background-Activity-Launch exemption
+ *   holds while the app has no visible activity — a visible overlay window, or the
+ *   system-bound accessibility service (prod: [OverlayService.isRunning] or a connected
+ *   [BlackBoxA11yService]). With neither that nor [foreground], every activity launch is
+ *   REFUSED with [LAUNCH_BLOCKED_DETAIL] instead of reported as done ([launchRefusal]).
+ *   Defaults to `{ false }`; with the `{ true }` foreground default an un-wired call-site
+ *   behaves as before.
  */
 class IntentActuator(
     private val context: () -> android.content.Context?,
@@ -108,6 +115,7 @@ class IntentActuator(
     private val confirm: ConfirmUi = AutoApproveConfirmUi,
     private val foreground: () -> Boolean = { true },
     private val navNotifier: NavigationNotifier? = null,
+    private val launchExempt: () -> Boolean = { false },
 ) {
 
     /**
@@ -281,16 +289,8 @@ class IntentActuator(
                         type = "text/plain"
                         putExtra(Intent.EXTRA_TEXT, text)
                     }
-                    try {
-                        ctx.startActivity(
-                            Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                        )
-                        logFired(name, true)
-                        ActuatorResult(true, "share sheet opened")
-                    } catch (e: Exception) {
-                        logFired(name, false)
-                        ActuatorResult(false, "$name failed (${e.javaClass.simpleName})")
-                    }
+                    // The chooser always resolves; [fire] supplies the reachability check.
+                    fire(ctx, name, Intent.createChooser(send, null), "share sheet opened")
                 }
 
                 // 13. open_settings_panel — which optional; settingsPanelAction never null.
@@ -445,6 +445,11 @@ class IntentActuator(
             val launch = ctx.packageManager?.getLaunchIntentForPackage(packageName)
             // `launch == null` → the not-found result (pure, unit-tested); otherwise proceed.
             openAppNotFound(launchable = launch != null, packageName = packageName)?.let { return it }
+            // W27: a launch the OS would discard is refused, never reported as "launched".
+            launchRefusal(foreground(), launchExempt())?.let {
+                logFired("open_app", false)
+                return ActuatorResult(false, it)
+            }
             // Safe !! — openAppNotFound returned non-null (and we returned) whenever launch was null.
             ctx.startActivity(launch!!.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             logFired("open_app", true)
@@ -465,6 +470,11 @@ class IntentActuator(
      */
     fun goHome(): ActuatorResult {
         val ctx = context()?.applicationContext ?: return ActuatorResult(false, "app context unavailable")
+        // W27: refuse a launch the OS would discard instead of answering "home".
+        launchRefusal(foreground(), launchExempt())?.let {
+            logFired("home", false)
+            return ActuatorResult(false, it)
+        }
         return try {
             val intent = Intent(Intent.ACTION_MAIN).apply {
                 addCategory(Intent.CATEGORY_HOME)
@@ -524,11 +534,15 @@ class IntentActuator(
         val uri = str(args, "uri")
         val mime = str(args, "mime")
         val pkg = str(args, "package")
-        // (a) pure safety-envelope reject BEFORE building/gating.
-        sendIntentRejectionReason(action, uri, mime, pkg)?.let { return ActuatorResult(false, it) }
-        // (b) high-consequence confirm-gate — ask BEFORE building/firing.
+        val extras = args["extras"] as? JsonObject
+        // (a) pure safety-envelope reject BEFORE building/gating (incl. this app itself).
+        sendIntentRejectionReason(action, uri, mime, pkg, selfPackage = ctx.packageName)
+            ?.let { return ActuatorResult(false, it) }
+        // (b) high-consequence confirm-gate — ask BEFORE building/firing. The card names
+        // the target (uri scheme + host, package, extras count), never its content.
         if (shouldConfirmIntent(mode(), "send_intent")) {
-            if (!confirm.confirm(describeIntent("send_intent", action))) {
+            val extrasCount = extras?.count { (_, v) -> (v as? JsonPrimitive)?.contentOrNull != null } ?: 0
+            if (!confirm.confirm(describeSendIntent(action, uri, pkg, mime, extrasCount))) {
                 return ActuatorResult(false, "user declined")
             }
         }
@@ -543,7 +557,7 @@ class IntentActuator(
             }
             if (pkg != null) setPackage(pkg)
             // Extras coerced to plain Strings — no flag/parcelable smuggling.
-            (args["extras"] as? JsonObject)?.forEach { (k, v) ->
+            extras?.forEach { (k, v) ->
                 (v as? JsonPrimitive)?.contentOrNull?.let { putExtra(k, it) }
             }
         }
@@ -728,25 +742,35 @@ class IntentActuator(
     /**
      * Fire a built [intent] via `startActivity` (NEW_TASK, required to launch from a
      * non-Activity [Context] like the Application context). Returns `success=true, okDetail` on
-     * launch; an [ActivityNotFoundException] / any error →
-     * `success=false, "<name> failed (<ExceptionClass>)"`. [okDetail] MUST be a
-     * fixed, NON-sensitive phrase — it is never derived from the args.
+     * launch; [okDetail] MUST be a fixed, NON-sensitive phrase — it is never derived from the
+     * args. Honest by construction (W27):
+     *  - a launch Android would discard (no visible activity and no other launch exemption —
+     *    [launchRefusal]) is NOT attempted and returns [LAUNCH_BLOCKED_DETAIL], instead of the
+     *    old `success=true` after a `startActivity` that silently did nothing;
+     *  - no handler installed ([ActivityNotFoundException]) → [noHandlerDetail];
+     *  - any other error → `"<name> failed (<ExceptionClass>)"`.
      */
     private fun fire(
         ctx: Context,
         name: String,
         intent: Intent,
         okDetail: String,
-    ): ActuatorResult = try {
-        ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        logFired(name, true)
-        ActuatorResult(true, okDetail)
-    } catch (e: ActivityNotFoundException) {
-        logFired(name, false)
-        ActuatorResult(false, "$name failed (${e.javaClass.simpleName})")
-    } catch (e: Exception) {
-        logFired(name, false)
-        ActuatorResult(false, "$name failed (${e.javaClass.simpleName})")
+    ): ActuatorResult {
+        launchRefusal(foreground(), launchExempt())?.let {
+            logFired(name, false)
+            return ActuatorResult(false, it)
+        }
+        return try {
+            ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            logFired(name, true)
+            ActuatorResult(true, okDetail)
+        } catch (e: ActivityNotFoundException) {
+            logFired(name, false)
+            ActuatorResult(false, noHandlerDetail(name))
+        } catch (e: Exception) {
+            logFired(name, false)
+            ActuatorResult(false, "$name failed (${e.javaClass.simpleName})")
+        }
     }
 
     /**
@@ -807,8 +831,15 @@ class IntentActuator(
                 com.aiblackbox.portal.BlackBoxNotificationManager(appContext.applicationContext)
                     .postNavigation(push)
             },
+            // (W27) The launch exemptions besides a visible activity: the floating overlay
+            // (a visible TYPE_APPLICATION_OVERLAY window) and the connected accessibility
+            // service (a system-bound service). Either lets a launch through, as before.
+            launchExempt: () -> Boolean = {
+                OverlayService.isRunning() || BlackBoxA11yService.instance != null
+            },
         ): IntentActuator =
-            IntentActuator({ appContext.applicationContext }, mode, confirm, foreground, navNotifier)
+            IntentActuator({ appContext.applicationContext }, mode, confirm, foreground, navNotifier,
+                launchExempt)
     }
 }
 

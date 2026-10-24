@@ -11,6 +11,7 @@ import com.aiblackbox.portal.overlay.navigationDedupKey
 import com.aiblackbox.portal.overlay.navigationRejectionReason
 import com.aiblackbox.portal.overlay.navigationTargetPackage
 import fi.iki.elonen.NanoHTTPD
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -116,7 +117,9 @@ object WireMessageType {
  * nested action-variant `type`; the concrete params are intentionally left opaque at M0 (the
  * real action.json payload + actuator binding land in M1). `operator` scopes the action to
  * the device's bound operator via [authorize], mirroring `/task`; `task_id` correlates it to
- * a submitted task.
+ * a submitted task. `action_id` (rank 64) is the per-action idempotency key the box mints once
+ * and repeats on every retry of that action; [handleActionRequest] runs each
+ * (task_id, action_id) once via [ActionReplayCache]. Blank = an older box: no dedupe.
  */
 @Serializable
 data class ActionEnvelope(
@@ -124,7 +127,57 @@ data class ActionEnvelope(
     @SerialName("task_id") val taskId: String = "",
     val operator: String = "",
     val kind: String = "",
+    @SerialName("action_id") val actionId: String = "",
 )
+
+/**
+ * (audit rank 64) Runs each `(task_id, action_id)` ONCE.
+ *
+ * The box retries an `/action` whose response it never received: the device acted and the
+ * reply was lost, or the user was still looking at the confirm card when the box's
+ * per-action timeout fired. Re-dispatching that retry tapped "Send" a second time. Here a
+ * duplicate that arrives while the first run is still in flight WAITS for it, and one that
+ * arrives afterwards gets the recorded result back — the action itself happens once.
+ *
+ * Bounded: past [capacity] the oldest FINISHED runs are forgotten (an in-flight run is never
+ * evicted). A run that throws is forgotten at once so a retry can try again. Thread-safe: the
+ * listener serves each request on its own NanoHTTPD worker thread under `runBlocking`.
+ */
+class ActionReplayCache(private val capacity: Int = 64) {
+    private val lock = Any()
+    private val runs = LinkedHashMap<String, CompletableDeferred<ActionResultEnvelope>>()
+
+    suspend fun runOnce(key: String, block: suspend () -> ActionResultEnvelope): ActionResultEnvelope {
+        var owner = false
+        val run = synchronized(lock) {
+            runs[key] ?: CompletableDeferred<ActionResultEnvelope>().also {
+                runs[key] = it
+                owner = true
+                evictFinishedLocked()
+            }
+        }
+        if (!owner) return run.await()
+        return try {
+            block().also { run.complete(it) }
+        } catch (t: Throwable) {
+            synchronized(lock) { runs.remove(key) }
+            run.completeExceptionally(t)
+            throw t
+        }
+    }
+
+    private fun evictFinishedLocked() {
+        val entries = runs.entries.iterator()
+        while (runs.size > capacity && entries.hasNext()) {
+            if (entries.next().value.isCompleted) entries.remove()
+        }
+    }
+
+    companion object {
+        /** The listener's process-wide record (one device, one box loop at a time). */
+        val shared = ActionReplayCache()
+    }
+}
 
 /**
  * The `action_result` frame returned UP for a dispatched action. Conforms to
@@ -584,6 +637,8 @@ fun buildTelemetryResponse(path: String, operator: String, telemetry: TelemetryR
  *    error:"not_wired"}` — the honest handler-less state (M0 README decision 1);
  *  - otherwise → 200 with the dispatched `action_result` (a malformed action VARIANT is a
  *    conforming `success:false` result, not a transport error — more useful to the loop).
+ *  - (rank 64) a frame carrying an `action_id` is dispatched once per (task_id, action_id)
+ *    through [replay]: the box's retry of the same action gets the first run's result.
  *
  * The `dispatcher` is JVM-unit-tested via [PhoneActionDispatcher] over a fake controller;
  * this shell adds only the framing above (tested via a fake [RemoteActionDispatcher]).
@@ -593,6 +648,7 @@ suspend fun handleActionRequest(
     method: String,
     body: String,
     dispatcher: RemoteActionDispatcher?,
+    replay: ActionReplayCache = ActionReplayCache.shared,
 ): RemoteResponse {
     if (method.uppercase() != "POST") {
         return RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
@@ -620,7 +676,14 @@ suspend fun handleActionRequest(
             ),
         )
     }
-    val result = dispatcher.dispatch(body, env.taskId, env.operator)
+    val actionId = env.actionId.trim()
+    val result = if (actionId.isEmpty()) {
+        dispatcher.dispatch(body, env.taskId, env.operator)
+    } else {
+        replay.runOnce("${env.taskId}\u0000$actionId") {
+            dispatcher.dispatch(body, env.taskId, env.operator)
+        }
+    }
     return RemoteResponse(200, WIRE_JSON.encodeToString(result))
 }
 

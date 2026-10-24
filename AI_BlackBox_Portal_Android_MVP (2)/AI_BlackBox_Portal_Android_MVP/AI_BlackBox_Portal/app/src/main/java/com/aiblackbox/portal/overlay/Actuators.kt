@@ -111,17 +111,26 @@ class Actuators(
      * which a tap never targets in practice), so no secret can leak into the
      * confirm message. The gate/redaction operate on the resolved node regardless
      * of how it was addressed (resource id vs index).
+     *
+     * **Acts on what was approved (audit rank 64).** The confirm card can sit for up to
+     * 30 s while the screen keeps changing. After an Allow the node is RE-RESOLVED and
+     * compared with what the user saw ([approvedTargetChanged]); if a different control
+     * now answers to [ref] (a recycled list row, a new screen) the tap is aborted with
+     * [SCREEN_CHANGED_SINCE_APPROVAL] instead of landing on it.
      */
     suspend fun tap(ref: NodeRef): ActuatorResult {
         val svc = service() ?: return notEnabled()
-        val node = resolve(svc, ref) ?: return nodeNotFound(ref)
+        var node = resolve(svc, ref) ?: return nodeNotFound(ref)
 
         // Autonomy gate: never read a password node's text into the label. Use the
         // same text-or-contentDescription label read_screen uses, so an icon-only
         // high-consequence button (label lives in contentDescription) still gates.
-        val isPasswordTarget = isPasswordField(node.isPassword, node.inputType)
-        val label = if (isPasswordTarget) null else (node.text ?: node.contentDescription)?.toString()
-        gate("tap", label, isPasswordTarget)?.let { return it }
+        val approved = approvedTargetOf(node)
+        when (gate("tap", approved.label, approved.isPassword)) {
+            GateDecision.DECLINED -> return ActuatorResult(false, "user declined")
+            GateDecision.APPROVED -> node = recheckApproved(ref, approved) { return it }
+            GateDecision.NOT_ASKED -> Unit
+        }
 
         val target = ref.describe()
         return try {
@@ -186,11 +195,23 @@ class Actuators(
      * [GestureDescription.Builder.setDisplayId] (API 30+). Defaults to [Display.DEFAULT_DISPLAY]
      * (0) — the current single-display behavior — so a future DeX/external-display target can be
      * addressed without changing any existing call-site.
+     *
+     * (rank 64) After an Allow the coordinate is hit-tested AGAIN: if it no longer
+     * resolves to the control the user approved, the tap is aborted with
+     * [SCREEN_CHANGED_SINCE_APPROVAL] rather than landing on whatever moved under it.
      */
     suspend fun tap(x: Int, y: Int, displayId: Int = Display.DEFAULT_DISPLAY): ActuatorResult {
         // C1: recover a label + gate BEFORE the service check, so the confirm-gate is
         // consulted even for an unresolved/tree-blind coordinate (fail-safe high-consequence).
-        coordinateGate(coordinateLabeler(x, y))?.let { return it }
+        val hit = coordinateLabeler(x, y)
+        when (coordinateGate(hit)) {
+            GateDecision.DECLINED -> return ActuatorResult(false, "user declined")
+            GateDecision.APPROVED -> if (coordinateLabeler(x, y) != hit) {
+                Log.i(TAG, "autonomy: coordinate target changed after approval — aborted")
+                return ActuatorResult(false, SCREEN_CHANGED_SINCE_APPROVAL)
+            }
+            GateDecision.NOT_ASKED -> Unit
+        }
 
         val svc = service() ?: return notEnabled()
         return try {
@@ -252,7 +273,7 @@ class Actuators(
      */
     suspend fun type(ref: NodeRef, text: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
-        val node = resolve(svc, ref) ?: return nodeNotFound(ref)
+        var node = resolve(svc, ref) ?: return nodeNotFound(ref)
         val target = ref.describe()
 
         val isPasswordTarget = isPasswordField(node.isPassword, node.inputType)
@@ -277,8 +298,14 @@ class Actuators(
 
         return try {
             // Autonomy gate for a non-password type. Label is the field's text
-            // (the FIELD name/placeholder), never the value being typed.
-            gate("type", node.text?.toString(), isPasswordTarget = false)?.let { return it }
+            // (the FIELD name/placeholder), never the value being typed. An approved
+            // type re-resolves its field first, like an approved tap.
+            val approved = approvedTargetOf(node)
+            when (gate("type", node.text?.toString(), isPasswordTarget = false)) {
+                GateDecision.DECLINED -> return ActuatorResult(false, "user declined")
+                GateDecision.APPROVED -> node = recheckApproved(ref, approved) { return it }
+                GateDecision.NOT_ASKED -> Unit
+            }
 
             val args = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
@@ -462,53 +489,80 @@ class Actuators(
      * [shouldConfirm] whether to ask the user.
      *
      * Returns:
-     *  - `null` → proceed (benign, or YOLO, or the user allowed it).
-     *  - a non-null [ActuatorResult] (`success=false, "user declined"`) → ABORT;
-     *    the caller must return it without actuating.
+     *  - [GateDecision.NOT_ASKED] → proceed (benign, or YOLO).
+     *  - [GateDecision.APPROVED] → the user allowed it; the caller re-checks the target
+     *    before acting, since the screen may have changed while the card was up.
+     *  - [GateDecision.DECLINED] → ABORT with `success=false, "user declined"`.
      *
      * SECURITY: [describeAction] is fed only the action + [label]; for a password
      * target [label] is null by construction, so the confirm message is the fixed
      * generic "Type into password field" — the typed text can never reach it.
      */
-    private suspend fun gate(action: String, label: String?, isPasswordTarget: Boolean): ActuatorResult? {
+    private suspend fun gate(action: String, label: String?, isPasswordTarget: Boolean): GateDecision {
         val hc = isHighConsequence(action, label, isPasswordTarget)
-        if (!shouldConfirm(mode(), hc)) return null
+        if (!shouldConfirm(mode(), hc)) return GateDecision.NOT_ASKED
         val allowed = confirm.confirm(describeAction(action, label))
         if (allowed) {
             // Log the DECISION only — never the label/text (leak discipline).
             Log.i(TAG, "autonomy: $action allowed by user")
-            return null
+            return GateDecision.APPROVED
         }
         Log.i(TAG, "autonomy: $action declined by user")
-        return ActuatorResult(false, "user declined")
+        return GateDecision.DECLINED
     }
 
     /**
      * (C1, M4) The COORDINATE-tap autonomy gate. Given the [hit] recovered from
      * hit-testing `(x,y)`, decides via the pure [isHighConsequenceCoordinateTap] +
-     * [shouldConfirm] whether to ask the user.
-     *
-     * Returns:
-     *  - `null` → proceed (benign labeled coordinate, or YOLO, or the user allowed it).
-     *  - a non-null [ActuatorResult] (`success=false, "user declined"`) → ABORT; the caller
-     *    returns it without actuating.
+     * [shouldConfirm] whether to ask the user. Same three outcomes as [gate].
      *
      * The confirm message is [describeAction] `("tap", label)`: for an unresolved/unlabeled
      * coordinate the label is null → generic "Tap this control"; a recovered dangerous label
      * surfaces `Tap "<label>"`. A password node contributes a null label upstream
      * ([UiTreeReader.labelAtPoint]), so no secret can reach the message.
      */
-    private suspend fun coordinateGate(hit: CoordinateHit): ActuatorResult? {
+    private suspend fun coordinateGate(hit: CoordinateHit): GateDecision {
         val hc = isHighConsequenceCoordinateTap(hit)
-        if (!shouldConfirm(mode(), hc)) return null
+        if (!shouldConfirm(mode(), hc)) return GateDecision.NOT_ASKED
         val label = (hit as? CoordinateHit.Node)?.label
         val allowed = confirm.confirm(describeAction("tap", label))
         if (allowed) {
             Log.i(TAG, "autonomy: coordinate tap allowed by user")
-            return null
+            return GateDecision.APPROVED
         }
         Log.i(TAG, "autonomy: coordinate tap declined by user")
-        return ActuatorResult(false, "user declined")
+        return GateDecision.DECLINED
+    }
+
+    /**
+     * (rank 64) After an Allow, resolve [ref] AGAIN on the live tree and hand back the
+     * fresh node — or [abort] with [SCREEN_CHANGED_SINCE_APPROVAL] when the control that
+     * now answers to [ref] is not the one the user approved (or is gone). Acting on the
+     * pre-confirm node would click whatever now owns its accessibility id, or tap its
+     * stale bounds.
+     */
+    private inline fun recheckApproved(
+        ref: NodeRef,
+        approved: ApprovedTarget,
+        abort: (ActuatorResult) -> Nothing,
+    ): AccessibilityNodeInfo {
+        val svc = service() ?: abort(notEnabled())
+        val fresh = resolve(svc, ref)
+        approvedTargetChanged(approved, fresh?.let { approvedTargetOf(it) })?.let {
+            Log.i(TAG, "autonomy: ${ref.describe()} changed after approval — aborted")
+            abort(it)
+        }
+        return fresh ?: abort(ActuatorResult(false, SCREEN_CHANGED_SINCE_APPROVAL))
+    }
+
+    /** The redaction-safe identity of [node] the user approves: never a password's text. */
+    private fun approvedTargetOf(node: AccessibilityNodeInfo): ApprovedTarget {
+        val isPassword = isPasswordField(node.isPassword, node.inputType)
+        return ApprovedTarget(
+            label = if (isPassword) null else (node.text ?: node.contentDescription)?.toString(),
+            isPassword = isPassword,
+            className = node.className?.toString(),
+        )
     }
 
     private fun globalAction(name: String): ActuatorResult {
@@ -624,6 +678,40 @@ class Actuators(
 
 /** A small outcome the agent loop (4.5) feeds back to the model. */
 data class ActuatorResult(val success: Boolean, val detail: String)
+
+/** What the autonomy gate concluded for one action (see [Actuators] `gate`). */
+internal enum class GateDecision {
+    /** Benign, or YOLO: no one was asked. */
+    NOT_ASKED,
+
+    /** The user tapped Allow — the target must be re-checked before acting. */
+    APPROVED,
+
+    /** The user declined (or the card timed out): do not act. */
+    DECLINED,
+}
+
+/**
+ * (rank 64) The identity of the control a confirm card asked about: its redaction-safe
+ * label (null for a password field), whether it is a password field, and its class. An
+ * approved action re-resolves its node and acts only if this still matches.
+ */
+data class ApprovedTarget(val label: String?, val isPassword: Boolean, val className: String?)
+
+/**
+ * The detail an approved action returns when the screen changed under the confirm card.
+ * Deliberately neither "declined" (a user decision, no wire error) nor "not found"
+ * (node_not_found): it is a dispatch failure the model re-plans from a fresh screen.
+ */
+const val SCREEN_CHANGED_SINCE_APPROVAL =
+    "screen changed since the action was approved — re-read the screen and try again"
+
+/**
+ * PURE: `null` when the re-resolved [fresh] target is the control the user [approved],
+ * else the abort result. A vanished node ([fresh] == null) aborts too.
+ */
+fun approvedTargetChanged(approved: ApprovedTarget, fresh: ApprovedTarget?): ActuatorResult? =
+    if (fresh == approved) null else ActuatorResult(false, SCREEN_CHANGED_SINCE_APPROVAL)
 
 /**
  * (C1, M4) The production coordinate LABELER: hit-tests `(x,y)` against the live a11y

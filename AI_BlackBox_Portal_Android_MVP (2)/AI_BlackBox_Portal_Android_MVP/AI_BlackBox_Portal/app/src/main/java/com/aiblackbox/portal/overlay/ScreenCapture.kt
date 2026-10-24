@@ -11,9 +11,10 @@ import kotlin.coroutines.resume
  * ## Security guarantee (the point of the redaction gate)
  * A screenshot would bypass the accessibility-text password redaction (which masks
  * password NODE text via [nodeText]). So before capturing, the implementation asks
- * whether a password field is currently focused ([UiTreeReader.isPasswordFieldFocused])
+ * whether a password field is currently focused ([UiTreeReader.passwordFocus])
  * and, if so, REFUSES the capture — returning [ScreenCaptureResult.RefusedPassword]
- * instead of bytes. A credential entry is NEVER screenshotted.
+ * instead of bytes. A credential entry is NEVER screenshotted. An AUTONOMOUS capture
+ * (the frontier loop's) also refuses when the probe cannot tell.
  *
  * ## Ephemerality guarantee
  * The captured PNG bytes are EPHEMERAL: they are produced in memory (no file), used
@@ -68,6 +69,28 @@ sealed interface ScreenCaptureResult {
  */
 fun shouldRefuseCapture(passwordFocused: Boolean): Boolean = passwordFocused
 
+/** What the focus probe ([UiTreeReader.passwordFocus]) could establish. */
+enum class PasswordFocus {
+    /** The tree was read: nothing, or a non-password field, holds input focus. */
+    NOT_PASSWORD,
+
+    /** A password field holds input focus. */
+    PASSWORD,
+
+    /** No tree to ask (service off, transient null root) or the query failed. */
+    UNKNOWN,
+}
+
+/**
+ * (A03-overlay-rest-04) THE TRI-STATE REDACTION DECISION. A focused password always
+ * refuses. "Can't tell" refuses only an [autonomous] capture — a frame the cloud loop
+ * takes on its own, typically because the tree is blind, which is exactly when the
+ * probe cannot see a focused password field. A user-invoked capture ("look at my
+ * screen") keeps today's fail-open behaviour.
+ */
+fun shouldRefuseCapture(focus: PasswordFocus, autonomous: Boolean): Boolean =
+    focus == PasswordFocus.PASSWORD || (autonomous && focus == PasswordFocus.UNKNOWN)
+
 /** Customer-facing reasons for an [ScreenCaptureResult.Unavailable]. */
 const val CAPTURE_UNAVAILABLE_NO_OVERLAY =
     "Screen capture isn't available right now. Start the BlackBox overlay (which grants screen access) and try again."
@@ -83,19 +106,22 @@ const val CAPTURE_UNAVAILABLE_NO_FRAME =
  * Every framework fact is a constructor SEAM (a lambda) so the gate ordering +
  * result mapping unit-test with plain JUnit — no Service, no Robolectric, no
  * AccessibilityNodeInfo:
- * @param passwordFocused whether a password field is focused; production reads the
- *   live tree via [UiTreeReader.fromService] → [UiTreeReader.isPasswordFieldFocused].
+ * @param passwordFocus the tri-state focus probe; production reads the live tree via
+ *   [UiTreeReader.fromService] → [UiTreeReader.passwordFocus].
  * @param overlayRunning whether the overlay (and thus the MediaProjection) is up;
  *   production is [OverlayService.isRunning].
  * @param overlayCapture the framework capture hop; production is
  *   [OverlayService.Companion.captureScreenPng].
+ * @param autonomous true when nobody asked for this frame (the frontier fallback):
+ *   "can't tell" then refuses. Default false — the user-invoked chat path.
  */
 class OverlayScreenCapture(
-    private val passwordFocused: () -> Boolean = { UiTreeReader.fromService().isPasswordFieldFocused() },
+    private val passwordFocus: () -> PasswordFocus = { UiTreeReader.fromService().passwordFocus() },
     private val overlayRunning: () -> Boolean = { OverlayService.isRunning() },
     private val overlayCapture: ((ByteArray?) -> Unit) -> Unit = { cb ->
         OverlayService.captureScreenPng(cb)
     },
+    private val autonomous: Boolean = false,
 ) : ScreenCapture {
 
     override suspend fun capture(): ScreenCaptureResult {
@@ -103,7 +129,7 @@ class OverlayScreenCapture(
         //    (No logging here: this method is JVM-unit-tested via injected lambdas,
         //    and android.util.Log throws in the unit-test android.jar; the result
         //    type already communicates the refusal.)
-        if (shouldRefuseCapture(passwordFocused())) {
+        if (shouldRefuseCapture(passwordFocus(), autonomous)) {
             return ScreenCaptureResult.RefusedPassword
         }
         // 2. Grab one frame via the overlay's MediaProjection (callback -> suspend).
@@ -129,25 +155,31 @@ class OverlayScreenCapture(
  * because it needs no running overlay / projection and survives lock/background.
  *
  * The SAME password-refusal gate applies FIRST ([shouldRefuseCapture] over
- * [passwordFocused]) — a credential screen is never captured, closing the leak the
+ * [passwordFocus]) — a credential screen is never captured, closing the leak the
  * accessibility-text redaction would otherwise miss. Every framework fact is a
  * constructor seam so the gate ordering unit-tests with plain JUnit.
  *
- * @param passwordFocused whether a password field is focused; production reads the live
- *   tree via [UiTreeReader.isPasswordFieldFocused].
+ * AUTONOMOUS by default (A03-overlay-rest-04): this is the frontier observation's capture,
+ * taken with nobody asking, so a probe that cannot tell (no tree) refuses rather than
+ * shipping a possible credential screen to the cloud model.
+ *
+ * @param passwordFocus the tri-state focus probe; production reads the live tree via
+ *   [UiTreeReader.passwordFocus].
  * @param a11yCapture the silent capture hop; production delegates to the connected
  *   [BlackBoxA11yService] (null bytes when no service is connected → Unavailable).
+ * @param autonomous see above; default true.
  */
 class A11yScreenCapture(
-    private val passwordFocused: () -> Boolean = { UiTreeReader.fromService().isPasswordFieldFocused() },
+    private val passwordFocus: () -> PasswordFocus = { UiTreeReader.fromService().passwordFocus() },
     private val a11yCapture: ((ByteArray?) -> Unit) -> Unit = { cb ->
         val svc = BlackBoxA11yService.instance
         if (svc == null) cb(null) else svc.takeScreenshotPng(cb)
     },
+    private val autonomous: Boolean = true,
 ) : ScreenCapture {
     override suspend fun capture(): ScreenCaptureResult {
         // 1. REDACTION GATE FIRST — never capture a frame of a password entry.
-        if (shouldRefuseCapture(passwordFocused())) {
+        if (shouldRefuseCapture(passwordFocus(), autonomous)) {
             return ScreenCaptureResult.RefusedPassword
         }
         // 2. Silent capture via the accessibility service (callback -> suspend).
@@ -168,10 +200,14 @@ class A11yScreenCapture(
  * [OverlayScreenCapture]. A password refusal from the silent path is a HARD stop — it
  * is NOT retried on the overlay path (the same gate would refuse it, and we never want
  * a credential screen captured by either route).
+ *
+ * Both routes are AUTONOMOUS here: this is the frontier observation's capture
+ * ([com.aiblackbox.portal.data.remote.ObservationBuilder]), so an unreadable focus
+ * refuses on either path.
  */
 class PreferredScreenCapture(
-    private val silent: ScreenCapture = A11yScreenCapture(),
-    private val fallback: ScreenCapture = OverlayScreenCapture(),
+    private val silent: ScreenCapture = A11yScreenCapture(autonomous = true),
+    private val fallback: ScreenCapture = OverlayScreenCapture(autonomous = true),
 ) : ScreenCapture {
     override suspend fun capture(): ScreenCaptureResult {
         val first = silent.capture()

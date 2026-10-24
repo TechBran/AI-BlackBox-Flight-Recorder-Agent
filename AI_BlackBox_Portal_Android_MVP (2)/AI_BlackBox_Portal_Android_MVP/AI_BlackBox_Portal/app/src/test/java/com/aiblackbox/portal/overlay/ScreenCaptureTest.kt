@@ -32,7 +32,7 @@ class ScreenCaptureTest {
     fun `capture refuses BEFORE grabbing a frame when a password is focused`() = runTest {
         var captureInvoked = false
         val cap = OverlayScreenCapture(
-            passwordFocused = { true },
+            passwordFocus = { PasswordFocus.PASSWORD },
             overlayRunning = { true },
             overlayCapture = { cb -> captureInvoked = true; cb(byteArrayOf(1, 2, 3)) },
         )
@@ -47,7 +47,7 @@ class ScreenCaptureTest {
     fun `capture returns Unavailable with the no-overlay reason when the overlay is down`() = runTest {
         var captureInvoked = false
         val cap = OverlayScreenCapture(
-            passwordFocused = { false },
+            passwordFocus = { PasswordFocus.NOT_PASSWORD },
             overlayRunning = { false },
             overlayCapture = { cb -> captureInvoked = true; cb(byteArrayOf(1)) },
         )
@@ -61,7 +61,7 @@ class ScreenCaptureTest {
     fun `capture returns Success with the PNG bytes on a clean grab`() = runTest {
         val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47) // PNG magic-ish
         val cap = OverlayScreenCapture(
-            passwordFocused = { false },
+            passwordFocus = { PasswordFocus.NOT_PASSWORD },
             overlayRunning = { true },
             overlayCapture = { cb -> cb(png) },
         )
@@ -73,7 +73,7 @@ class ScreenCaptureTest {
     @Test
     fun `capture returns Unavailable with the no-frame reason when the grab yields null`() = runTest {
         val cap = OverlayScreenCapture(
-            passwordFocused = { false },
+            passwordFocus = { PasswordFocus.NOT_PASSWORD },
             overlayRunning = { true },
             overlayCapture = { cb -> cb(null) },
         )
@@ -87,12 +87,62 @@ class ScreenCaptureTest {
     @Test
     fun `capture treats an empty byte array as no-frame (not a valid Success)`() = runTest {
         val cap = OverlayScreenCapture(
-            passwordFocused = { false },
+            passwordFocus = { PasswordFocus.NOT_PASSWORD },
             overlayRunning = { true },
             overlayCapture = { cb -> cb(byteArrayOf()) },
         )
         val result = cap.capture()
         assertTrue("empty bytes -> Unavailable, never a Success", result is ScreenCaptureResult.Unavailable)
+    }
+
+    // ---- (A03-overlay-rest-04) autonomous capture fails CLOSED on "can't tell" -------
+
+    @Test
+    fun `the tri-state decision refuses UNKNOWN only for an autonomous capture`() {
+        assertTrue(shouldRefuseCapture(PasswordFocus.PASSWORD, autonomous = false))
+        assertTrue(shouldRefuseCapture(PasswordFocus.PASSWORD, autonomous = true))
+        assertTrue("autonomous + can't tell -> refuse", shouldRefuseCapture(PasswordFocus.UNKNOWN, autonomous = true))
+        assertFalse("user-invoked keeps today's behaviour", shouldRefuseCapture(PasswordFocus.UNKNOWN, autonomous = false))
+        assertFalse(shouldRefuseCapture(PasswordFocus.NOT_PASSWORD, autonomous = true))
+        assertFalse(shouldRefuseCapture(PasswordFocus.NOT_PASSWORD, autonomous = false))
+    }
+
+    @Test
+    fun `the silent frontier capture refuses when the focus cannot be read`() = runTest {
+        var captureInvoked = false
+        val cap = A11yScreenCapture(
+            passwordFocus = { PasswordFocus.UNKNOWN },
+            a11yCapture = { cb -> captureInvoked = true; cb(byteArrayOf(1)) },
+        )
+        assertEquals(ScreenCaptureResult.RefusedPassword, cap.capture())
+        assertFalse("a blind tree must not ship a frame to the cloud model", captureInvoked)
+    }
+
+    @Test
+    fun `the frontier fallback capture is autonomous too`() = runTest {
+        var overlayInvoked = false
+        val cap = PreferredScreenCapture(
+            silent = A11yScreenCapture(passwordFocus = { PasswordFocus.NOT_PASSWORD },
+                a11yCapture = { cb -> cb(null) }),                 // silent path unavailable
+            fallback = OverlayScreenCapture(
+                passwordFocus = { PasswordFocus.UNKNOWN },
+                overlayRunning = { true },
+                overlayCapture = { cb -> overlayInvoked = true; cb(byteArrayOf(1)) },
+                autonomous = true,
+            ),
+        )
+        assertEquals(ScreenCaptureResult.RefusedPassword, cap.capture())
+        assertFalse(overlayInvoked)
+    }
+
+    @Test
+    fun `a user-invoked overlay capture still proceeds when the focus cannot be read`() = runTest {
+        val cap = OverlayScreenCapture(
+            passwordFocus = { PasswordFocus.UNKNOWN },
+            overlayRunning = { true },
+            overlayCapture = { cb -> cb(byteArrayOf(7)) },
+        )
+        assertTrue(cap.capture() is ScreenCaptureResult.Success)
     }
 
     @Test

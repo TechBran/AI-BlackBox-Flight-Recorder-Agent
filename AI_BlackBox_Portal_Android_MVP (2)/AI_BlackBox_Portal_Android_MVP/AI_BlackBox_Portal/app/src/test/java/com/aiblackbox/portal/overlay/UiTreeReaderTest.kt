@@ -322,4 +322,26 @@ class UiTreeReaderTest {
         assertTrue(json.contains("·····"))
         assertTrue(json.contains("\"is_password\":true"))
     }
+
+    // ---- (A03-overlay-rest-04) the password-focus probe is tri-state ----------
+    //
+    // "Can't tell" used to read as "no password" (capture proceeds). That was safe only
+    // while every capture was user-invoked; the frontier loop now captures autonomously,
+    // precisely when the tree is blind, so the probe must say UNKNOWN and let the
+    // autonomous caller refuse.
+
+    @Test
+    fun `passwordFocus is UNKNOWN when there is no tree to ask`() {
+        val reader = UiTreeReader(rootProvider = { null })
+        assertEquals(PasswordFocus.UNKNOWN, reader.passwordFocus())
+        // The legacy two-state read keeps its user-invoked fail-open meaning.
+        assertFalse(reader.isPasswordFieldFocused())
+    }
+
+    @Test
+    fun `passwordFocus is UNKNOWN when the tree query throws`() {
+        val reader = UiTreeReader(rootProvider = { throw IllegalStateException("service rebinding") })
+        assertEquals(PasswordFocus.UNKNOWN, reader.passwordFocus())
+        assertFalse(reader.isPasswordFieldFocused())
+    }
 }

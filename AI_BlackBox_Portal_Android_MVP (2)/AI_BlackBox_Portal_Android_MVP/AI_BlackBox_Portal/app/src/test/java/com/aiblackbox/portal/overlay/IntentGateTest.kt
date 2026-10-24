@@ -2,6 +2,7 @@ package com.aiblackbox.portal.overlay
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -193,5 +194,74 @@ class IntentGateTest {
         // is no path for any other text to appear. Pin the exact strings.
         assertEquals("Send an email to \"a@b.com\"", describeIntent("send_email", "a@b.com"))
         assertEquals("Send a text to \"5551234\"", describeIntent("send_sms", "5551234"))
+    }
+
+    // ---- (A03-overlay-rest-13) send_intent consent shows what it targets ------------
+
+    @Test
+    fun `describeSendIntent shows the uri scheme and host, the package and the extras count`() {
+        assertEquals(
+            "Run the app action \"android.intent.action.VIEW\" on https://bank.example.com " +
+                "in com.android.chrome",
+            describeSendIntent("android.intent.action.VIEW",
+                "https://user:pw@bank.example.com:8443/transfer?to=123&amount=900#confirm",
+                "com.android.chrome", null, 0),
+        )
+        assertEquals(
+            "Run the app action \"android.intent.action.SENDTO\" on sms:… " +
+                "in com.google.android.apps.messaging with 1 extra field",
+            describeSendIntent("android.intent.action.SENDTO", "sms:+15550100",
+                "com.google.android.apps.messaging", null, 1),
+        )
+        assertEquals(
+            "Run the app action \"com.example.SHARE\" as text/plain with 3 extra fields",
+            describeSendIntent("com.example.SHARE", null, null, "text/plain", 3),
+        )
+        // Nothing to add -> exactly the old text.
+        assertEquals(describeIntent("send_intent", "com.example.X"),
+            describeSendIntent("com.example.X", null, null, null, 0))
+    }
+
+    @Test
+    fun `describeSendIntent never shows a path, query, fragment, credential or extra value`() {
+        val text = describeSendIntent("android.intent.action.VIEW",
+            "myapp://pay.example/send/all?token=s3cret#now", "com.example", null, 2)
+        for (leak in listOf("send/all", "token", "s3cret", "now")) {
+            assertFalse("must not show '$leak': $text", text.contains(leak))
+        }
+        assertTrue(text, text.contains("myapp://pay.example"))
+    }
+
+    @Test
+    fun `uriTargetSummary reduces a uri to scheme and host`() {
+        assertEquals("https://example.com", uriTargetSummary("HTTPS://Example.com/a/b?c=d"))
+        assertEquals("geo:…", uriTargetSummary("geo:0,0?q=home"))
+        assertEquals("mailto:…", uriTargetSummary("mailto:someone@example.com"))
+        assertEquals("http://[::1]", uriTargetSummary("http://[::1]:8080/x"))
+        assertEquals("myapp://…", uriTargetSummary("myapp:///deep"))
+        assertNull(uriTargetSummary(null))
+        assertNull(uriTargetSummary("   "))
+        assertNull(uriTargetSummary("no scheme here"))
+    }
+
+    // ---- (W27) a launch the OS would discard is refused, never reported as success -----
+
+    @Test
+    fun `launchRefusal blocks only when no launch exemption holds`() {
+        assertNull(launchRefusal(appForeground = true, launchExempt = false))
+        assertNull(launchRefusal(appForeground = false, launchExempt = true))
+        assertNull(launchRefusal(appForeground = true, launchExempt = true))
+        val refused = launchRefusal(appForeground = false, launchExempt = false)
+        assertEquals(LAUNCH_BLOCKED_DETAIL, refused)
+        // Lifted verbatim into the wire error by the /action classifier.
+        assertEquals(BACKGROUND_LAUNCH_BLOCKED,
+            com.aiblackbox.portal.data.remote.classifyActuatorError(refused!!))
+    }
+
+    @Test
+    fun `the no-handler detail names the action and is a dispatch failure`() {
+        val detail = noHandlerDetail("set_timer")
+        assertTrue(detail, detail.startsWith("set_timer failed"))
+        assertEquals("dispatch_failed", com.aiblackbox.portal.data.remote.classifyActuatorError(detail))
     }
 }

@@ -305,6 +305,22 @@ class IntentActionsTest {
     }
 
     @Test
+    fun `sendIntentRejectionReason refuses an intent aimed at this app itself`() {
+        // The generic hatch must not target BlackBox's own components (its settings,
+        // its overlay, its exported receivers) from a model tool call.
+        val self = "com.aiblackbox.portal"
+        assertEquals("package not permitted via send_intent",
+            sendIntentRejectionReason("android.intent.action.VIEW", null, null, self, selfPackage = self))
+        assertEquals("package not permitted via send_intent",
+            sendIntentRejectionReason("android.intent.action.VIEW", null, null, " COM.AIBLACKBOX.PORTAL ",
+                selfPackage = self))
+        assertNull(sendIntentRejectionReason("android.intent.action.VIEW", null, null, "com.example",
+            selfPackage = self))
+        assertNull(sendIntentRejectionReason("android.intent.action.VIEW", null, null, null,
+            selfPackage = self))
+    }
+
+    @Test
     fun `sendIntentRejectionReason requires a non-blank action`() {
         assertEquals("action required", sendIntentRejectionReason(null, null, null, null))
         assertEquals("action required", sendIntentRejectionReason("   ", null, null, null))

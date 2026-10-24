@@ -277,6 +277,92 @@ class ActuatorsTest {
         assertEquals("accessibility service not enabled", r.detail)
     }
 
+    // ---- (rank 64) the approved target is re-checked after Allow ------------
+    //
+    // The confirm card can sit for up to 30 s. If the screen changed meanwhile, the
+    // coordinate (or the recycled node) now belongs to a different control, and acting
+    // on it would execute something the user never approved.
+
+    /** A labeler that answers from a script, one hit per call (last one repeats). */
+    private class ScriptedLabeler(vararg hits: CoordinateHit) : (Int, Int) -> CoordinateHit {
+        private val queue = ArrayDeque(hits.toList())
+        var calls = 0
+        override fun invoke(x: Int, y: Int): CoordinateHit {
+            calls++
+            return if (queue.size > 1) queue.removeFirst() else queue.first()
+        }
+    }
+
+    @Test
+    fun `PERMISSION coordinate tap aborts when the approved control changed during the confirm`() = runBlocking {
+        val confirm = RecordingConfirm(answer = true)
+        val labeler = ScriptedLabeler(CoordinateHit.Node("Send"), CoordinateHit.Node("Delete account"))
+        val r = Actuators(service = { null }, mode = { AutonomyMode.PERMISSION },
+            confirm = confirm, coordinateLabeler = labeler).tap(10, 20)
+        assertFalse(r.success)
+        assertEquals(SCREEN_CHANGED_SINCE_APPROVAL, r.detail)
+        assertEquals("the user was asked once", 1, confirm.calls)
+        assertEquals("the target was re-read after the Allow", 2, labeler.calls)
+    }
+
+    @Test
+    fun `PERMISSION coordinate tap proceeds when the approved control is still there`() = runBlocking {
+        val confirm = RecordingConfirm(answer = true)
+        val labeler = ScriptedLabeler(CoordinateHit.Node("Send"), CoordinateHit.Node("Send"))
+        val r = Actuators(service = { null }, mode = { AutonomyMode.PERMISSION },
+            confirm = confirm, coordinateLabeler = labeler).tap(10, 20)
+        // Passed the gate and the re-check → the (null) service check.
+        assertEquals("accessibility service not enabled", r.detail)
+        assertEquals(2, labeler.calls)
+    }
+
+    @Test
+    fun `an unresolved coordinate that now resolves to a control aborts`() = runBlocking {
+        val labeler = ScriptedLabeler(CoordinateHit.None, CoordinateHit.Node("Pay now"))
+        val r = Actuators(service = { null }, mode = { AutonomyMode.PERMISSION },
+            confirm = RecordingConfirm(answer = true), coordinateLabeler = labeler).tap(10, 20)
+        assertEquals(SCREEN_CHANGED_SINCE_APPROVAL, r.detail)
+    }
+
+    @Test
+    fun `a benign or YOLO coordinate tap is not re-checked`() = runBlocking {
+        val benign = ScriptedLabeler(CoordinateHit.Node("Settings"), CoordinateHit.Node("Send"))
+        Actuators(service = { null }, mode = { AutonomyMode.PERMISSION },
+            confirm = RecordingConfirm(answer = true), coordinateLabeler = benign).tap(1, 1)
+        assertEquals("nothing was approved, so nothing is re-checked", 1, benign.calls)
+        val yolo = ScriptedLabeler(CoordinateHit.Node("Send"), CoordinateHit.Node("Delete"))
+        Actuators(service = { null }, mode = { AutonomyMode.YOLO },
+            confirm = RecordingConfirm(answer = true), coordinateLabeler = yolo).tap(1, 1)
+        assertEquals(1, yolo.calls)
+    }
+
+    @Test
+    fun `approvedTargetChanged accepts only the same control`() {
+        val send = ApprovedTarget(label = "Send", isPassword = false, className = "android.widget.Button")
+        assertNull(approvedTargetChanged(send, send.copy()))
+        for (fresh in listOf(
+            null,                                              // node is gone
+            send.copy(label = "Delete"),                       // a different control took the slot
+            send.copy(className = "android.widget.ImageButton"),
+            send.copy(label = null, isPassword = true),        // now a password field
+        )) {
+            val r = approvedTargetChanged(send, fresh)
+            assertNotNull("must abort for $fresh", r)
+            assertFalse(r!!.success)
+            assertEquals(SCREEN_CHANGED_SINCE_APPROVAL, r.detail)
+        }
+    }
+
+    @Test
+    fun `the screen-changed abort is a dispatch failure, never a user decision`() {
+        // classifyActuatorError treats "declined" as a user decision (no error) and "not found"
+        // as node_not_found; the abort must be neither.
+        assertFalse(SCREEN_CHANGED_SINCE_APPROVAL.contains("declined"))
+        assertFalse(SCREEN_CHANGED_SINCE_APPROVAL.contains("not found"))
+        assertEquals("dispatch_failed",
+            com.aiblackbox.portal.data.remote.classifyActuatorError(SCREEN_CHANGED_SINCE_APPROVAL))
+    }
+
     @Test
     fun `recents with no service returns not-enabled gracefully`() {
         val actuators = Actuators({ null })
