@@ -450,6 +450,7 @@ export function setupGenerationModal() {
                 // Use native Android file picker for images only
                 console.log('[RefImages] Using native Android file picker');
                 window.referenceImageSelectionActive = true;
+                window.videoStartImageSelectionActive = false; // a cancelled start-image pick
                 try {
                     AndroidFilePicker.openFileChooser('image/*');
                 } catch (e) {
@@ -1314,6 +1315,7 @@ export function setupVideoGenerationModal() {
                 // Use native Android file picker for images
                 console.log('[VideoStartImage] Using native Android file picker');
                 window.videoStartImageSelectionActive = true;
+                window.referenceImageSelectionActive = false; // a cancelled reference pick
                 try {
                     AndroidFilePicker.openFileChooser('image/*');
                 } catch (e) {

@@ -438,6 +438,26 @@ function handleScreenScroll(e) {
     setTimeout(refreshScreenshot, 200);
 }
 
+/**
+ * Keys sent to the remote desktop as xdotool key names: by the modal's own
+ * keydown handler, and (bar the space, which arrives as typed text) by the
+ * mobile typing bar's.
+ */
+const DESKTOP_KEYS = {
+    'Enter': 'Return',
+    'Backspace': 'BackSpace',
+    'Tab': 'Tab',
+    'ArrowUp': 'Up',
+    'ArrowDown': 'Down',
+    'ArrowLeft': 'Left',
+    'ArrowRight': 'Right',
+    'Delete': 'Delete',
+    'Home': 'Home',
+    'End': 'End',
+    'PageUp': 'Prior',
+    'PageDown': 'Next',
+};
+
 function handleKeyDown(e) {
     if (e.key === 'Escape') return;
     // The typing bar has its own handler (handleTypingKeyDown) and its text
@@ -450,21 +470,7 @@ function handleKeyDown(e) {
     e.preventDefault();
     e.stopPropagation();
 
-    const keyMap = {
-        'Enter': 'Return',
-        'Backspace': 'BackSpace',
-        'Tab': 'Tab',
-        'ArrowUp': 'Up',
-        'ArrowDown': 'Down',
-        'ArrowLeft': 'Left',
-        'ArrowRight': 'Right',
-        'Delete': 'Delete',
-        'Home': 'Home',
-        'End': 'End',
-        'PageUp': 'Prior',
-        'PageDown': 'Next',
-        ' ': 'space',
-    };
+    const keyMap = { ...DESKTOP_KEYS, ' ': 'space' };
 
     if (e.ctrlKey || e.metaKey) {
         const combo = 'ctrl+' + e.key.toLowerCase();
@@ -539,15 +545,13 @@ function handleTypingInput(e) {
 }
 
 /**
- * Handle special keys from the typing bar (Enter, Backspace on physical keyboard).
- * On Android soft keyboard, Enter triggers this before input event.
+ * Handle special keys from the typing bar (Enter, Backspace, the arrows and
+ * the other navigation keys of a physical or soft keyboard). On Android soft
+ * keyboard, Enter triggers this before input event. The modal's handler
+ * skips the bar's keys, so every desktop key the bar sends is mapped here.
  */
 function handleTypingKeyDown(e) {
-    const keyMap = {
-        'Enter': 'Return',
-        'Backspace': 'BackSpace',
-        'Tab': 'Tab',
-    };
+    const keyMap = DESKTOP_KEYS;
 
     if (keyMap[e.key]) {
         e.preventDefault();

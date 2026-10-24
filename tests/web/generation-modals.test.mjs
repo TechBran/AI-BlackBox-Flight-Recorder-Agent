@@ -122,3 +122,33 @@ test("the extension, SSML and Gemini Pro mic buttons start dictation into their 
         assert.ok(document.getElementById(input), `${input} exists next to ${mic}`);
     }
 });
+
+// A cancelled reference / start-image pick leaves its selection flag set:
+// Android calls no JS on a cancel. The next large CHAT attachment (any type)
+// was then base64'd into the generation modal instead of the composer.
+test("after a cancelled reference pick, the composer's next pick still reaches the chat", async () => {
+    routes = [["/ui/uploads/talk.mp4", () => new Response(new Uint8Array([0, 0, 0, 24]), { status: 200 })]];
+    const opened = [];
+    globalThis.AndroidFilePicker = { openFileChooser: (accept) => opened.push(accept) };
+    const got = [];
+    window.referenceImageSelectionCallback = (...args) => got.push(args);
+    window.referenceImageSelectionActive = true;      // "Add reference" tapped, then cancelled
+    window.videoStartImageSelectionActive = true;     // likewise for a start image
+    try {
+        fileUpload.openNativeAttachPicker("image/*,video/*");
+        assert.deepEqual(opened, ["image/*,video/*"]);
+        const before = fileUpload.getAttachedFiles().length;
+        window.onNativeFileUploaded("/ui/uploads/talk.mp4", "video/mp4", "talk.mp4");
+        await settle(80);
+        assert.deepEqual(got, [], "the generation modal does not claim the chat's pick");
+        assert.equal(fileUpload.getAttachedFiles().length, before + 1);
+    } finally {
+        delete globalThis.AndroidFilePicker;
+    }
+});
+
+test("the composer's attach button opens the picker through openNativeAttachPicker", () => {
+    const src = readFileSync(resolve(PORTAL, "modules", "app-init.js"), "utf8");
+    assert.match(src, /openNativeAttachPicker\(acceptTypes\)/);
+    assert.ok(!/AndroidFilePicker\.openFileChooser\(acceptTypes\)/.test(src));
+});

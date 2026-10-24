@@ -37,6 +37,41 @@ test("an external link the box cannot open is opened on this device", async () =
     assert.deepEqual(opened, [], "opened on the box: nothing more here");
 });
 
+// The box can take seconds to answer {ok:false} (each browser it tries gets a
+// 4 s probe, then gio and the portal 10 s each). By then the click's user
+// activation has expired, the popup is blocked, and navigating this tab to
+// the link threw away whatever the operator had typed into the wizard.
+test("a link that cannot open anywhere is offered inline; the wizard tab never navigates away", async () => {
+    const { openExternalUrl } = await import("../../Portal/onboarding/open-url.js");
+    const errors = [];
+    const realError = console.error;
+    console.error = (...args) => { errors.push(args.map(String).join(" ")); };
+    const opened = [];
+    let blocked = true;
+    window.open = (url, target) => { opened.push([url, target]); return blocked ? null : { opener: window }; };
+    globalThis.fetch = window.fetch = async () => json({ ok: false, error: "no browser available" });
+    try {
+        assert.equal(await openExternalUrl("https://console.cloud.google.com/apis/credentials"), false);
+        await sleep(10);
+    } finally {
+        console.error = realError;
+    }
+    assert.ok(!errors.some((e) => /navigation/i.test(e)), `the wizard tab navigated away: ${errors.join(" | ")}`);
+    const notice = document.querySelector(".ob-open-link-notice");
+    assert.ok(notice, "the link is offered where the operator can tap it");
+    const link = notice.querySelector("a");
+    assert.equal(link.getAttribute("href"), "https://console.cloud.google.com/apis/credentials");
+    assert.equal(link.textContent, "https://console.cloud.google.com/apis/credentials");
+    assert.equal(link.dataset.openWired, "1", "the wizard's open-url interceptor leaves it alone");
+
+    // The tap is a fresh user gesture: it opens the tab synchronously.
+    blocked = false;
+    opened.length = 0;
+    link.click();
+    assert.deepEqual(opened, [["https://console.cloud.google.com/apis/credentials", "_blank"]]);
+    assert.equal(document.querySelector(".ob-open-link-notice"), null, "and the notice goes");
+});
+
 // ── two-tap inline confirm instead of confirm() ──────────────────────────
 test("confirmInline arms on the first tap and confirms on the second", async () => {
     const { confirmInline } = await import("../../Portal/onboarding/inline-confirm.js");

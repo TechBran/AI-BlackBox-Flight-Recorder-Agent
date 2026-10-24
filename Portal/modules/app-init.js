@@ -61,7 +61,8 @@ import { loadAudioCache } from './state-management.js';
 import {
     renderPreviews,
     setupNativeFileCallback,
-    addAttachedFile
+    addAttachedFile,
+    openNativeAttachPicker
 } from './file-upload.js';
 import { taskManager } from './task-manager.js';
 
@@ -456,7 +457,7 @@ function setupFileAttachment() {
             const acceptTypes = 'image/*,video/*,audio/*,application/pdf,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
             console.log('[FileAttachment] Using native Android file picker with types:', acceptTypes);
             try {
-                AndroidFilePicker.openFileChooser(acceptTypes);
+                openNativeAttachPicker(acceptTypes);
             } catch (e) {
                 console.error('[FileAttachment] Native file picker error:', e);
                 toast('Failed to open file picker');

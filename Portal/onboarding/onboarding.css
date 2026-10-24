@@ -2670,6 +2670,35 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     color: var(--ob-accent);
     border-color: var(--ob-accent);
 }
+/* A link the box could not open, offered for a fresh tap (open-url.js) */
+.ob-open-link-notice {
+    position: fixed;
+    left: 50%;
+    bottom: var(--ob-space-8, 2rem);
+    transform: translateX(-50%);
+    z-index: 10001;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--ob-space-3, 0.75rem);
+    max-width: min(40rem, calc(100vw - 2rem));
+    padding: var(--ob-space-3, 0.75rem) var(--ob-space-4, 1rem);
+    background: var(--ob-surface-elevated, #0a0a0a);
+    color: var(--ob-text-primary, #fff);
+    border: 1px solid var(--ob-accent, #cc0000);
+    font-family: var(--ob-font-body, ui-monospace, monospace);
+    font-size: var(--ob-text-sm, 0.875rem);
+}
+.ob-open-link-notice a {
+    color: var(--ob-accent, #cc0000);
+    overflow-wrap: anywhere;
+}
+.ob-open-link-dismiss {
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
 
 /* ── Task 13 (pluggable embeddings): Memory & Search wizard step ────
  * Model picker grid + migration/pull progress. Cards reuse the

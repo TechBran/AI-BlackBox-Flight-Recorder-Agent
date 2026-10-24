@@ -90,6 +90,30 @@ test("one Enter in the CU typing bar sends exactly one /browser/key", async () =
     cu.close();
 });
 
+test("navigation keys typed into the CU typing bar reach the desktop, once each", async () => {
+    const calls = [];
+    globalThis.fetch = window.fetch = async (url, opts = {}) => {
+        calls.push({ url: String(url), body: opts.body ? JSON.parse(opts.body) : null });
+        return new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const cu = await import("../../Portal/modules/cu-interact.js");
+    cu.open("/ui/uploads/shot.png", "blackbox");
+    try {
+        const input = document.querySelector(".cu-interact-typing-input");
+        calls.length = 0;
+        const keys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Delete", "Home", "End", "PageUp", "PageDown"];
+        for (const key of keys) {
+            const ev = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+            input.dispatchEvent(ev);
+            assert.equal(ev.defaultPrevented, true, `${key} is the desktop's, not the empty input's`);
+        }
+        assert.deepEqual(calls.filter((c) => c.url === "/browser/key").map((c) => c.body.key),
+            ["Up", "Down", "Left", "Right", "Delete", "Home", "End", "Prior", "Next"]);
+    } finally {
+        cu.close(); // stops its screenshot poller, pass or fail
+    }
+});
+
 // ── TaskManager: a finished task is shown once ───────────────────────────
 test("a task resumed after reload completes exactly once (resume + poll)", async () => {
     const { TaskManager } = await import("../../Portal/modules/task-manager.js");

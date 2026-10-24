@@ -269,6 +269,19 @@ export async function handleSessionFileUpload(file, sessionId) {
 // =============================================================================
 
 /**
+ * Open the Android file picker for a chat attachment. A reference / start
+ * image pick the operator cancelled leaves its selection flag set (Android
+ * calls no JS on a cancel), so generation-modals.js would hand this pick to
+ * that modal; the composer claims the picker back first.
+ * @param {string} acceptTypes - The picker's MIME accept list
+ */
+export function openNativeAttachPicker(acceptTypes) {
+    window.referenceImageSelectionActive = false;
+    window.videoStartImageSelectionActive = false;
+    AndroidFilePicker.openFileChooser(acceptTypes);
+}
+
+/**
  * Setup native Android file selection callback
  */
 export function setupNativeFileCallback() {
