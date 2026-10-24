@@ -32,6 +32,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -66,7 +68,12 @@ import com.aiblackbox.portal.data.voice.AudioRecorderManager
 import com.aiblackbox.portal.data.voice.MicSourcePolicy
 import com.aiblackbox.portal.data.voice.PcmAudioRecorder
 import com.aiblackbox.portal.data.voice.SttEvent
+import com.aiblackbox.portal.data.voice.SttFrames
 import com.aiblackbox.portal.data.voice.SttStreamClient
+import com.aiblackbox.portal.ui.components.AboveAnchorPositionProvider
+import com.aiblackbox.portal.ui.components.SttStatusChip
+import com.aiblackbox.portal.ui.components.SttSwitchProviderDialog
+import com.aiblackbox.portal.ui.components.fetchSttCatalog
 import com.aiblackbox.portal.navigation.BlackBoxNavGraph
 import com.aiblackbox.portal.ui.chat.AttachmentItem
 import com.aiblackbox.portal.ui.chat.ChatState
@@ -337,6 +344,38 @@ class NativeMainActivity : ComponentActivity() {
                 // send-while-live it would repopulate the just-cleared box, so
                 // sttDiscardTrailingFinal drops exactly that one late final.
                 var sttDiscardTrailingFinal by remember { mutableStateOf(false) }
+
+                // Live-dictation status + provider switch (audit rank 52). The chip names
+                // the provider the mic really uses after a provider_override, or the on-box
+                // warm-up; a switchable stt_error offers another provider from /stt/catalog.
+                val sttApi = remember(origin) { BlackBoxApi(origin) }
+                val sttStatus by sttClient.status.collectAsState()
+                var sttProviderLabels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+                LaunchedEffect(sttStatus.overrideProvider) {
+                    if (sttStatus.overrideProvider != null && sttProviderLabels.isEmpty()) {
+                        sttProviderLabels = SttFrames.labels(fetchSttCatalog(sttApi))
+                    }
+                }
+                val sttStatusText = SttFrames.statusText(sttStatus, sttProviderLabels)
+                var sttSwitchOffer by remember { mutableStateOf<SttEvent.Error?>(null) }
+                // The provider picked in the switch prompt, for this activity's life ("" = the box's choice).
+                var sttProviderPick by remember { mutableStateOf("") }
+
+                // Start dictation at the caret: the mic tap, and a provider picked in the
+                // switch prompt.
+                fun startDictation() {
+                    withMicPermission {
+                        // Fresh dictation: don't drop the first final.
+                        sttDiscardTrailingFinal = false
+                        // Capture the caret-anchored base for the
+                        // cumulative-delta applier BEFORE starting.
+                        val cur = chatViewModel.inputText.value
+                        val insert = cur.selection.start.coerceIn(0, cur.text.length)
+                        sttBaseBefore = cur.text.substring(0, insert)
+                        sttBaseAfter = cur.text.substring(insert)
+                        sttClient.start(provider = sttProviderPick)
+                    }
+                }
 
                 // Raw audio recorder for Gemini audio analysis — AudioRecord, so there is real PCM
                 // to both upload and ANALYSE. Its ribbon used to be a single MediaRecorder peak
@@ -617,7 +656,10 @@ class NativeMainActivity : ComponentActivity() {
                             is SttEvent.Error -> {
                                 Toast.makeText(applicationContext, event.message, Toast.LENGTH_SHORT).show()
                                 sttClient.stop()
+                                if (event.switchable) sttSwitchOffer = event
                             }
+                            // Drives sttClient.status, rendered as the chip above the composer.
+                            is SttEvent.Status -> Unit
                             is SttEvent.SessionEnded -> {
                                 // Terminal marker from stop(): nothing further will
                                 // arrive for this session. If a send-while-live armed
@@ -1242,17 +1284,7 @@ class NativeMainActivity : ComponentActivity() {
                                 if (sttClient.isStreaming.value) {
                                     sttClient.stop()
                                 } else {
-                                    withMicPermission {
-                                        // Fresh dictation: don't drop the first final.
-                                        sttDiscardTrailingFinal = false
-                                        // Capture the caret-anchored base for the
-                                        // cumulative-delta applier BEFORE starting.
-                                        val cur = chatViewModel.inputText.value
-                                        val insert = cur.selection.start.coerceIn(0, cur.text.length)
-                                        sttBaseBefore = cur.text.substring(0, insert)
-                                        sttBaseAfter = cur.text.substring(insert)
-                                        sttClient.start()
-                                    }
+                                    startDictation()
                                 }
                             },
                             onRecordAudio = {
@@ -1404,6 +1436,17 @@ class NativeMainActivity : ComponentActivity() {
                                 }
                             },
                         )
+                        // Live-dictation status chip, floating above the composer while the
+                        // mic is live (a Popup: no layout space taken).
+                        if (isWhisperStreaming && sttStatusText != null) {
+                            val chipGapPx = with(density) { 8.dp.roundToPx() }
+                            Popup(
+                                popupPositionProvider = remember(chipGapPx) { AboveAnchorPositionProvider(chipGapPx) },
+                                properties = PopupProperties(focusable = false),
+                            ) {
+                                SttStatusChip(sttStatusText)
+                            }
+                        }
                     }
 
                     // Layer 5: highest activity-owned chrome, permanently mounted.
@@ -1414,6 +1457,20 @@ class NativeMainActivity : ComponentActivity() {
 
                 }
                 } // end CompositionLocalProvider(LocalEmberMode)
+
+                // A switchable stt_error (quota_exceeded first): offer another provider.
+                sttSwitchOffer?.let { offer ->
+                    SttSwitchProviderDialog(
+                        api = sttApi,
+                        error = offer,
+                        onPick = { choice ->
+                            sttSwitchOffer = null
+                            sttProviderPick = choice.id
+                            startDictation()
+                        },
+                        onDismiss = { sttSwitchOffer = null },
+                    )
+                }
 
                 // Settings sheet
                 if (showSettings) {

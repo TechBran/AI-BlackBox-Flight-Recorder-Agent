@@ -17,6 +17,11 @@ package com.aiblackbox.portal.ui.cli_agent
 // are shown live in a floating preview chip above the mic, and the FINAL
 // transcript is pasted via onTranscript: (String) -> Unit (the caller wraps it in
 // a {"type":"paste","text":transcript} text frame).
+//
+// The same chip shows the server's stt_status (the provider the mic really uses
+// after a provider_override, the on-box warm-up). An stt_error ends the session:
+// the client stops capture, this button stops it too, and a switchable error
+// offers another provider from /stt/catalog (audit rank 52).
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -35,6 +40,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
@@ -51,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,8 +84,11 @@ import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.voice.MicSourcePolicy
 import com.aiblackbox.portal.data.voice.SttEvent
+import com.aiblackbox.portal.data.voice.SttFrames
 import com.aiblackbox.portal.data.voice.SttStreamClient
 import com.aiblackbox.portal.ui.components.MicIcon
+import com.aiblackbox.portal.ui.components.SttSwitchProviderDialog
+import com.aiblackbox.portal.ui.components.fetchSttCatalog
 import kotlinx.coroutines.delay
 
 /**
@@ -165,6 +175,19 @@ fun CliMicButton(
     var committed by remember { mutableStateOf("") }
     // Set true by the stop tap so the trailing final finishes + pastes.
     var stopping by remember { mutableStateOf(false) }
+    // A switchable stt_error waiting for the operator to pick another provider,
+    // and the provider picked (kept for this button's life; "" = the box's choice).
+    var switchOffer by remember { mutableStateOf<SttEvent.Error?>(null) }
+    var providerPick by remember { mutableStateOf("") }
+    // The session's stt_status, and catalog labels to name providers by.
+    val sttStatus by sttClient.status.collectAsState()
+    var providerLabels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(sttStatus.overrideProvider) {
+        if (sttStatus.overrideProvider != null && providerLabels.isEmpty()) {
+            providerLabels = SttFrames.labels(fetchSttCatalog(api))
+        }
+    }
+    val statusText = SttFrames.statusText(sttStatus, providerLabels)
 
     // Keep the latest callback without restarting the events collector.
     val currentOnTranscript by rememberUpdatedState(onTranscript)
@@ -175,7 +198,7 @@ fun CliMicButton(
         committed = ""
         stopping = false
         state = MicState.Recording
-        sttClient.start()
+        sttClient.start(provider = providerPick)
     }
 
     // Single reset path for every terminal exit (trailing final, error,
@@ -228,9 +251,15 @@ fun CliMicButton(
                     // else: a mid-stream final (VAD endpoint / reconnect) — keep recording.
                 }
                 is SttEvent.Error -> {
+                    // Terminal: end the client's session too (it already stopped
+                    // capture). Without this the mic stayed open behind an idle
+                    // button (A08-cli-agent-ui-07); the chat composer always did it.
+                    sttClient.stop()
                     Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
                     resetToIdle()
+                    if (event.switchable) switchOffer = event
                 }
+                is SttEvent.Status -> Unit  // drives sttClient.status, rendered in the chip
                 is SttEvent.SessionEnded -> {
                     // Terminal: the stop window is over (server stt_done, client
                     // backstop, or dead socket) and nothing further will arrive.
@@ -391,14 +420,29 @@ fun CliMicButton(
         contentAlignment = Alignment.Center,
     ) {
         // Live transcription preview — floats above the mic while recording /
-        // finalizing. The Popup occupies no layout space in the button Box.
-        if ((isRecording || isTranscribing) && interimText.isNotBlank()) {
+        // finalizing, with the server's status (provider override, on-box
+        // warm-up) above it. The Popup occupies no layout space in the button Box.
+        if ((isRecording || isTranscribing) && (interimText.isNotBlank() || statusText != null)) {
             Popup(
                 popupPositionProvider = chipPositionProvider,
                 properties = PopupProperties(focusable = false),
             ) {
-                TranscriptPreviewChip(text = interimText)
+                TranscriptPreviewChip(text = interimText, status = statusText)
             }
+        }
+        switchOffer?.let { offer ->
+            SttSwitchProviderDialog(
+                api = api,
+                error = offer,
+                onPick = { choice ->
+                    // Same dictation, another provider: the mic permission was
+                    // granted for the session that just failed.
+                    switchOffer = null
+                    providerPick = choice.id
+                    beginStreaming()
+                },
+                onDismiss = { switchOffer = null },
+            )
         }
         when {
             isTranscribing -> {
@@ -434,7 +478,7 @@ fun CliMicButton(
 private const val PREVIEW_CHIP_MAX_CHARS = 120
 
 @Composable
-private fun TranscriptPreviewChip(text: String) {
+private fun TranscriptPreviewChip(text: String, status: String? = null) {
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -444,21 +488,31 @@ private fun TranscriptPreviewChip(text: String) {
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier.widthIn(max = 280.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            MicIcon(
-                modifier = Modifier.size(14.dp),
-                color = MaterialTheme.colorScheme.error,
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = previewTail(text, max = PREVIEW_CHIP_MAX_CHARS),
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-            )
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            if (status != null) {
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (text.isNotBlank()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    MicIcon(
+                        modifier = Modifier.size(14.dp),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = previewTail(text, max = PREVIEW_CHIP_MAX_CHARS),
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
     }
 }

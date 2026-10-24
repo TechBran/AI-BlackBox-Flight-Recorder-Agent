@@ -52,8 +52,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  *     then repeated `{"type":"stt_audio","pcm":"<base64 PCM16>"}` then `{"type":"stt_stop"}`.
  *   - Server → client: `{"type":"stt_delta","text":"<CUMULATIVE interim>","target":...}`,
  *     `{"type":"stt_final","text":"<full final>","target":...}`,
- *     `{"type":"stt_error","message":...}`,
+ *     `{"type":"stt_error","message":...,"code":...,"provider":...,"switchable":...}`,
+ *     `{"type":"stt_status","state":"provider_override"|"loading_models"|...}`,
  *     `{"type":"stt_done"}` — TERMINAL, always the server's last frame (2026-07-09).
+ *
+ * An `stt_error` ends the session (audit rank 52, A08-cli-agent-ui-07 / W24): capture stops at
+ * once and the reconnect loop does not resume, so an exhausted provider is not re-dialed and no
+ * UI can leave the mic streaming behind an idle button. `stt_status` frames feed [status]. Frame
+ * parsing lives in [SttFrames]; tests/fixtures/stt_ws_frames.json pins it for this app, the
+ * server and the Portal.
  *
  * The `stt_delta.text` is CUMULATIVE (full interim so far); this client emits it
  * verbatim — the applier that replaces the interim region lives downstream.
@@ -151,6 +158,14 @@ class SttStreamClient(
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
+    /**
+     * The current session's `stt_status`: the provider the server really streams with when it
+     * overrode the pick, and whether the on-box models are warming. Clean at every start() and
+     * whenever the session ends, so a chip rendered from it lives exactly as long as the session.
+     */
+    private val _status = MutableStateFlow(SttUiStatus())
+    val status: StateFlow<SttUiStatus> = _status.asStateFlow()
+
     private var scope: CoroutineScope? = null
     private var connectionJob: Job? = null
     private var captureJob: Job? = null
@@ -219,6 +234,7 @@ class SttStreamClient(
         }
         val epoch = ++sessionEpoch
         _isStreaming.value = true
+        _status.value = SttUiStatus()
         silenceRibbon()
         // A new press is a new speaker, a new distance and a new room: a fresh tap re-seeds the
         // gain and re-runs the warm-up rather than inheriting the last press's.
@@ -278,14 +294,14 @@ class SttStreamClient(
                 // leg's capture loop releases its own recorder, on its own thread, within
                 // one read. Releasing it from here raced that loop's in-flight read().
                 legCapture?.set(false)
-                // User stop(), a newer session, or a clean end after our stt_stop →
-                // end the logical session WITHOUT reconnecting.
+                // User stop(), a newer session, a server stt_error (terminal: it
+                // cleared _isStreaming), or a clean end after our stt_stop → end the
+                // logical session WITHOUT reconnecting.
                 if (userStopped || !_isStreaming.value || epoch != sessionEpoch) break
-                // FOLLOW-UP (not implemented): a received stt_done with NO stop
-                // pending marks a DELIBERATE server-side session end — it could
-                // discriminate that from a transport drop here and skip the
-                // reconnect. Today doneSignal is simply re-armed below and the
-                // drop heuristics decide.
+                // FOLLOW-UP (not implemented): a bare stt_done with NO stop pending
+                // and no stt_error also marks a deliberate server-side end; it could
+                // skip the reconnect too. Today doneSignal is simply re-armed below
+                // and the drop heuristics decide.
                 // Unexpected mid-recording drop → reconnect + resume.
                 reconnectAttempts++
                 if (reconnectAttempts > maxReconnects) {
@@ -315,6 +331,7 @@ class SttStreamClient(
                 // a stop() waiting on stt_done must not park until its backstop.
                 doneSignal.complete(Unit)
                 _isStreaming.value = false
+                _status.value = SttUiStatus()
             }
         }
     }
@@ -336,6 +353,7 @@ class SttStreamClient(
         // its socket closes after the stt_stop below.
         userStopped = true
         _isStreaming.value = false
+        _status.value = SttUiStatus()
 
         // End the capture leg by SIGNAL only: its loop stops and releases the mic itself, in its
         // own finally, within one read. Releasing it here, on the caller's thread (the CLI mic tap,
@@ -534,30 +552,40 @@ class SttStreamClient(
         if (epoch != sessionEpoch) return   // a newer session started — drop late events
         try {
             val obj = json.parseToJsonElement(raw).jsonObject
-            val type = obj["type"]?.jsonPrimitive?.content ?: return
-            when (type) {
-                "stt_delta" -> {
-                    val text = obj["text"]?.jsonPrimitive?.content ?: ""
-                    lastInterim = text  // newest partial — replayed as a Final on reconnect
-                    _events.emit(SttEvent.Delta(text)) // cumulative — emit verbatim
+            if (obj["type"]?.jsonPrimitive?.content == "stt_done") {
+                // Terminal marker — ALWAYS the server's last frame (after any
+                // trailing final / error). Wakes the stop() coordinator so
+                // teardown happens the moment the session is truly over.
+                android.util.Log.d(TAG, "Received stt_done (terminal)")
+                doneSignal.complete(Unit)
+                return
+            }
+            when (val event = SttFrames.parse(obj) ?: return) {
+                is SttEvent.Delta -> {
+                    lastInterim = event.text  // newest partial — replayed as a Final on reconnect
+                    _events.emit(event) // cumulative — emit verbatim
                 }
-                "stt_final" -> {
-                    val text = obj["text"]?.jsonPrimitive?.content ?: ""
+                is SttEvent.Final -> {
                     lastInterim = ""  // committed — nothing pending for a reconnect
-                    _events.emit(SttEvent.Final(text))
+                    _events.emit(event)
                 }
-                "stt_error" -> {
-                    val msg = obj["message"]?.jsonPrimitive?.content ?: "Transcription error"
-                    _events.emit(SttEvent.Error(msg))
-                    android.util.Log.e(TAG, "Server error: $msg")
+                is SttEvent.Error -> {
+                    // TERMINAL: stop capture now and keep the reconnect loop from
+                    // resuming when the server closes the socket. Before, capture
+                    // streamed on and the reconnect re-dialed the same exhausted
+                    // provider while the CLI mic showed idle (A08-cli-agent-ui-07, W24).
+                    android.util.Log.e(TAG, "Server error (${event.code}, provider=${event.provider}): ${event.message}")
+                    _isStreaming.value = false
+                    _status.value = SttUiStatus()
+                    signalCaptureStop()
+                    silenceRibbon()
+                    _events.emit(event)
                 }
-                "stt_done" -> {
-                    // Terminal marker — ALWAYS the server's last frame (after any
-                    // trailing final / error). Wakes the stop() coordinator so
-                    // teardown happens the moment the session is truly over.
-                    android.util.Log.d(TAG, "Received stt_done (terminal)")
-                    doneSignal.complete(Unit)
+                is SttEvent.Status -> {
+                    _status.value = _status.value.reduce(event)
+                    _events.emit(event)
                 }
+                is SttEvent.SessionEnded -> Unit  // client-side only, never parsed
             }
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Parse error: ${e.message}")
@@ -633,7 +661,25 @@ class SttStreamClient(
 sealed class SttEvent {
     data class Delta(val text: String) : SttEvent()   // cumulative interim
     data class Final(val text: String) : SttEvent()
-    data class Error(val message: String) : SttEvent()
+
+    /**
+     * The session is over (an stt_error is terminal, and so is a client-side failure).
+     * [code]/[provider]/[switchable] come from the server (see [SttFrames]); [switchable] means
+     * another provider could serve the dictation, so the UI offers the switch-provider prompt.
+     */
+    data class Error(
+        val message: String,
+        val code: String = SttFrames.CODE_PROVIDER_ERROR,
+        val provider: String? = null,
+        val switchable: Boolean = false,
+    ) : SttEvent()
+
+    /** A server `stt_status` frame; [SttStreamClient.status] holds its effect on the session. */
+    data class Status(
+        val state: String,
+        val provider: String? = null,
+        val overriddenFrom: String? = null,
+    ) : SttEvent()
 
     /**
      * Terminal (2026-07-09): the stop window is over and NOTHING further will be
