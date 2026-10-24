@@ -735,6 +735,7 @@ for t in scripts/tests/test_*.sh; do bash "$t" || echo "FAILED: $t"; done
 | **Waveform M0** — measurement floor | ✅ **DONE.** +18 tests; 2× read defect pinned (mutation-verified) |
 | Waveform M1-M8 | ✅ implemented 2026-08-12 (SNAP-20260812-9042), uncommitted pending the Fold walk of a rebuilt APK |
 | Preflight → real-traffic evidence | ✅ **DONE, committed de14392d** |
+| **Track B** — Tasks 5-12a (audit rank 69, M4 unit U33, 2026-10-23) | ✅ **DONE in code**: probe `driver_ok`/`gpu_reason`; `blackbox-gpu-preflight.sh` as the models unit's ExecStartPre + StartLimit on both model units; `gpu_ready()` + per-capability breaker gating the TTS/STT gates; CPU-floor whisper on a dead driver; coded qwen-tts 503s (`no_gpu`/`vram`) and a no-retry `QwenCapabilityUnavailable`; honest `/local-models/status` (`gpu`, `reason`, `breaker`, `gpu-unavailable`/`degraded`). Plus one llama-swap config renderer re-run at every boot, the reranker GGUF build script with pins, the `/rerank/select` built-member gate, and pinned qwen-tts venv. **Operator step:** re-run `blackbox-install-localstack.sh` on each box to install the new unit. Open: Portal/Android rendering of the new reasons; the :9092 telephony check of 12a |
 | Task 18 / Task 19 / chat_routes defects | not started (see docs/plans/2026-10-09-unfinished-work-audit.md W04, W37) |
 
 ## The VRAM arbitration fault (new, resolved)
