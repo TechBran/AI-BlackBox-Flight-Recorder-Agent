@@ -4115,10 +4115,18 @@ You are serving operator: {operator}
 
 
 async def execute_bash_command(command: str, timeout: int = 120) -> dict:
-    """Execute a bash command and return output. Caps output at 10KB."""
-    import subprocess
+    """Execute a bash command and return output. Caps output at 10KB.
+
+    The CU driver awaits this on the server's event loop, where the old
+    subprocess.run froze every stream and voice call for up to ``timeout``
+    (audit O02-chat-routes-A-02). It is an asyncio subprocess now, started in
+    its own session so it leads a process group: on timeout or cancellation
+    (the E-stop) the whole group is killed, and a child the command put in the
+    background (``cmd &``) cannot outlive the step.
+    """
     from Orchestrator.browser.config import ACTIVE_DISPLAY, NATIVE_MODE, get_native_env
     from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
+    proc = None
     try:
         # Scrubbed env + ensure DISPLAY is set for GUI commands. This is the CU
         # driver's model-driven `bash` tool (every Anthropic CU run offers it),
@@ -4129,26 +4137,61 @@ async def execute_bash_command(command: str, timeout: int = 120) -> dict:
             env.update(get_native_env())
         else:
             env["DISPLAY"] = f":{ACTIVE_DISPLAY}"
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
-            timeout=timeout, cwd=str(blackbox_root()),
-            env=env
+        proc = await asyncio.create_subprocess_shell(
+            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=str(blackbox_root()), env=env, start_new_session=True,
         )
-        output = result.stdout or ""
-        stderr = result.stderr or ""
+        try:
+            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            await _kill_process_group(proc)
+            return {"output": f"Command timed out after {timeout}s", "exit_code": -1}
+        output = _decode_command_output(out_b)
+        stderr = _decode_command_output(err_b)
         combined = output + ("\n" + stderr if stderr else "")
         # Cap output to prevent token explosion
         if len(combined) > 10000:
             combined = combined[:10000] + "\n... [OUTPUT TRUNCATED at 10KB]"
-        return {"output": combined, "exit_code": result.returncode}
-    except subprocess.TimeoutExpired:
-        return {"output": f"Command timed out after {timeout}s", "exit_code": -1}
+        return {"output": combined, "exit_code": proc.returncode}
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            await _kill_process_group(proc)
+        raise
     except Exception as e:
         return {"output": f"Error executing command: {e}", "exit_code": -1}
 
 
+def _decode_command_output(data: bytes) -> str:
+    """Bytes to text the way subprocess's text=True gave it (universal newlines),
+    without failing on bytes that are not UTF-8."""
+    text = (data or b"").decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+async def _kill_process_group(proc) -> None:
+    """SIGKILL ``proc``'s whole process group (it leads one: start_new_session)
+    and reap it, so neither it nor a backgrounded child outlives the CU step."""
+    import os
+    import signal
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), 5)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
+
+
 async def execute_text_editor(command: str, path: str, **params) -> dict:
-    """Execute str_replace_editor commands (view, create, str_replace, insert)."""
+    """Execute str_replace_editor commands (view, create, str_replace, insert).
+
+    The file reads and writes run in a worker thread: the CU driver awaits this
+    on the server's event loop."""
+    return await asyncio.to_thread(_execute_text_editor_sync, command, path, **params)
+
+
+def _execute_text_editor_sync(command: str, path: str, **params) -> dict:
     from pathlib import Path as P
     try:
         if command == "view":
@@ -4544,15 +4587,17 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
         session.user_message = user_text
 
         # ── Capture initial screenshot ──
+        # (capture and save are blocking subprocess/disk work: off the loop)
         initial_b64 = None
         try:
             if session.device_id != "blackbox":
                 initial_png = await capture_remote_screenshot(session.device_id)
             else:
-                initial_png = session.capture_screenshot_bytes()
+                initial_png = await asyncio.to_thread(session.capture_screenshot_bytes)
             initial_b64 = screenshot_to_base64(initial_png)
             session.screenshot_count += 1
-            screenshot_url = save_screenshot_to_uploads(initial_png, f"cu_{operator}", session.screenshot_count)
+            screenshot_url = await asyncio.to_thread(
+                save_screenshot_to_uploads, initial_png, f"cu_{operator}", session.screenshot_count)
             yield {"type": "cu_screenshot", "data": {"url": screenshot_url, "step": 0}}
         except Exception as e:
             print(f"[CU-STREAM] Initial screenshot failed: {e}")

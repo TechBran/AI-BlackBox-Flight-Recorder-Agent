@@ -1,6 +1,7 @@
 """
 Sovereign Browser REST API endpoints
 """
+import asyncio
 import time
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
@@ -128,6 +129,10 @@ def browser_screenshot():
 
 
 # ── Interactive viewer endpoints ──────────────────────────────────────────
+# Local input runs xdotool/ydotool with sleeps (a long type is ~12 ms a
+# character) and a live capture spawns the portal helper or scrot, so they run
+# in worker threads: the viewer polls these, and on the event loop each call
+# stalled every stream and voice call on the box (audit O13-computer-use-02).
 
 
 @app.post("/browser/click")
@@ -140,7 +145,7 @@ async def browser_click(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "left_click" if button == "left" else "right_click", coordinate=[x, y])
     else:
-        result = click(x, y, button, session_id=body.get("session_id"))
+        result = await asyncio.to_thread(click, x, y, button, session_id=body.get("session_id"))
     return result
 
 
@@ -152,7 +157,7 @@ async def browser_type(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "type", text=text)
     else:
-        result = type_text(text, session_id=body.get("session_id"))
+        result = await asyncio.to_thread(type_text, text, session_id=body.get("session_id"))
     return result
 
 
@@ -164,7 +169,7 @@ async def browser_key(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "key", text=key)
     else:
-        result = press_key(key, session_id=body.get("session_id"))
+        result = await asyncio.to_thread(press_key, key, session_id=body.get("session_id"))
     return result
 
 
@@ -179,7 +184,8 @@ async def browser_scroll(body: dict = Body(...)):
         from Orchestrator.browser.actions import execute_remote_action
         result = await execute_remote_action(device_id, "scroll", coordinate=[x, y], direction=direction, amount=clicks)
     else:
-        result = scroll(x, y, direction, clicks, session_id=body.get("session_id"))
+        result = await asyncio.to_thread(
+            scroll, x, y, direction, clicks, session_id=body.get("session_id"))
     return result
 
 
@@ -191,42 +197,49 @@ async def browser_screenshot_live(request: Request = None):
     """
     try:
         from Orchestrator.browser.screenshot import capture_screenshot, capture_remote_screenshot
-        from Orchestrator.config import UPLOADS_DIR
-        from PIL import Image
-        import io
 
         device_id = request.query_params.get("device_id", "blackbox") if request else "blackbox"
         if device_id != "blackbox":
             png_bytes = await capture_remote_screenshot(device_id)
         else:
-            png_bytes = capture_screenshot()
-        ts = int(time.time() * 1000)
-
-        # Convert to JPEG for much smaller file size (100-150KB vs 800KB PNG)
-        img = Image.open(io.BytesIO(png_bytes))
-        if img.mode == 'RGBA':
-            img = img.convert('RGB')
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=70, optimize=True)
-        jpg_bytes = buf.getvalue()
-
-        filename = f"browser_live_{ts}.jpg"
-        save_path = UPLOADS_DIR / filename
-        save_path.write_bytes(jpg_bytes)
-        url = f"/ui/uploads/{filename}"
-
-        # Clean up old live screenshots (keep last 5)
-        for pattern in ["browser_live_*.jpg", "browser_live_*.png"]:
-            live_files = sorted(UPLOADS_DIR.glob(pattern), key=lambda p: p.stat().st_mtime)
-            for old_file in live_files[:-5]:
-                try:
-                    old_file.unlink()
-                except OSError:
-                    pass
-
-        return {"url": url, "timestamp": ts}
+            png_bytes = await asyncio.to_thread(capture_screenshot)
+        # JPEG encode, save and the uploads-dir cleanup sweep: off the loop too.
+        return await asyncio.to_thread(_save_live_jpeg, png_bytes)
     except Exception as e:
         return {"error": str(e), "success": False}
+
+
+def _save_live_jpeg(png_bytes: bytes) -> dict:
+    """Save a live capture as a small JPEG under /ui/uploads; keep the last 5."""
+    from Orchestrator.config import UPLOADS_DIR
+    from PIL import Image
+    import io
+
+    ts = int(time.time() * 1000)
+
+    # Convert to JPEG for much smaller file size (100-150KB vs 800KB PNG)
+    img = Image.open(io.BytesIO(png_bytes))
+    if img.mode == 'RGBA':
+        img = img.convert('RGB')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=70, optimize=True)
+    jpg_bytes = buf.getvalue()
+
+    filename = f"browser_live_{ts}.jpg"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(jpg_bytes)
+    url = f"/ui/uploads/{filename}"
+
+    # Clean up old live screenshots (keep last 5)
+    for pattern in ["browser_live_*.jpg", "browser_live_*.png"]:
+        live_files = sorted(UPLOADS_DIR.glob(pattern), key=lambda p: p.stat().st_mtime)
+        for old_file in live_files[:-5]:
+            try:
+                old_file.unlink()
+            except OSError:
+                pass
+
+    return {"url": url, "timestamp": ts}
 
 
 @app.get("/cu/preflight")

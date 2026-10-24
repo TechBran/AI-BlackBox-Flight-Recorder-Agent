@@ -533,7 +533,8 @@ async def run_gemini_cu_loop(
     # session's own :N — never the operator's real desktop. One choke point
     # covers every launch path (chat stream, headless task, /run route).
     # start_url threads through so a url task gets Chrome ON this display.
-    if not session.ensure_display(start_url=url):
+    # Allocation + Chrome start block for seconds: off the event loop.
+    if not await asyncio.to_thread(session.ensure_display, start_url=url):
         session.status = "error"
         yield {"type": "error", "data": {"message": "Virtual display allocation failed"}}
         return
@@ -550,7 +551,10 @@ async def run_gemini_cu_loop(
     # shared with per-step screenshots; an uncapped retrieval once injected
     # 311,810 chars and every long run 400'd at ~step 20 (MS02 chess,
     # 2026-07-23). ~20K chars ≈ 5K tokens of memory — plenty for CU hints.
-    fossil_text, provenance = retrieve_for_agent(
+    # Retrieval embeds, reranks and reads the ledger: off the event loop, as
+    # the Anthropic CU path runs build_cu_context.
+    fossil_text, provenance = await asyncio.to_thread(
+        retrieve_for_agent,
         user_text=prompt,
         operator=operator,
         log_prefix="[GEMINI-CU]",

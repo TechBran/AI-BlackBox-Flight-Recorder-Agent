@@ -13,6 +13,7 @@ reconnect to specific sessions. Prompt queuing lets users send new
 prompts while a task is running. E-stop allows immediate cancellation.
 """
 import asyncio
+import threading
 import time
 import uuid
 from typing import Dict, List, Optional
@@ -69,6 +70,10 @@ class ComputerUseSession:
         self.device_id: str = device_id
         self.created_at: float = time.time()
         self.chrome = ChromeInstance(operator=operator)
+        # Serializes Chrome launches: ensure_browser starts Chrome in a worker
+        # thread, so two concurrent starts of this session could both pass its
+        # is_running() check without it.
+        self._chrome_start_lock = threading.Lock()
         self.native_mode: bool = False       # virtual by default; native is opt-in (M9)
         self.display = None                  # DisplayHandle when virtual, else None
         self.actions = ActionExecutor()
@@ -228,7 +233,15 @@ class ComputerUseSession:
         return (time.time() - self.last_activity) > timeout
 
     async def ensure_browser(self, url: str = "about:blank", backend: str = "anthropic") -> bool:
-        """Start this session's display + Chrome. Native: nothing to start."""
+        """Start this session's display + Chrome. Native: nothing to start.
+
+        Allocating a desktop spawns Xvfb, the WM, VNC and websockify with
+        readiness sleeps, and Chrome waits ~3 s for CDP; the chat routes await
+        this on the server's event loop, so both run in a worker thread (they
+        froze every stream and voice call ~4.5 s per new desktop, audit
+        O13-computer-use-09). Allocation is idempotent per session, and Chrome
+        launches under this session's start lock.
+        """
         if self.native_mode:
             return True
         from Orchestrator.browser.display import get_allocator
@@ -242,12 +255,13 @@ class ComputerUseSession:
                   f"{self.session_id[:8]} was reaped — reallocating")
             self.display = None
             try:
-                self.chrome.stop()
+                await asyncio.to_thread(self.chrome.stop)
             except Exception:
                 pass
         if self.display is None:
             try:
-                self.display = get_allocator().allocate(
+                self.display = await asyncio.to_thread(
+                    get_allocator().allocate,
                     self.session_id, backend=backend, operator=self.operator)
             except Exception as e:
                 print(f"[CU-SESSION] display allocation failed for {self.operator}: {e}")
@@ -264,8 +278,14 @@ class ComputerUseSession:
         self.last_error = ""
         self.display.touch()
         if not self.chrome.is_running():
-            return self.chrome.start(url, handle=self.display)
+            return await asyncio.to_thread(self._start_chrome, url, self.display)
         return True
+
+    def _start_chrome(self, url: str, handle) -> bool:
+        # ChromeInstance.start returns early when Chrome already runs, so under
+        # the lock a second concurrent start finds the first one's process.
+        with self._chrome_start_lock:
+            return self.chrome.start(url, handle=handle)
 
     def destroy(self):
         """Release this session's virtual display + Chrome.

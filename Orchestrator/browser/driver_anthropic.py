@@ -100,13 +100,11 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
     # Names that previously resolved from chat_routes module scope.
     # Imported lazily (at call time) so this module never imports
     # chat_routes at module level (no import cycle).
-    from Orchestrator.config import VOL_PATH
     from Orchestrator.fossils import format_snapshot_for_delivery, hybrid_retrieve
     from Orchestrator.models import TaskType
     from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
     from Orchestrator.tasks import create_task, generate_prompt_slug
     from Orchestrator.utils.async_helpers import run_blocking
-    from Orchestrator.volume import read_text_safe
     from Orchestrator.web_tools import perform_web_fetch
     from Orchestrator.routes.chat_routes import (
         _cu_safe_params, _cu_save_to_blackbox,
@@ -114,11 +112,16 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
         execute_get_media, execute_list_media, execute_search_media,
     )
 
+    # This loop runs as a task on the server's event loop (the chat path), so
+    # every blocking step -- an input action (xdotool/ydotool, sleeps up to
+    # 10 s), a capture (portal helper or scrot, up to 15 s), a screenshot write
+    # -- runs in a worker thread, as the Gemini and OpenAI drivers already do
+    # (audit O13-computer-use-01).
     async def _capture_ss():
         """Capture screenshot from local or remote device based on session.device_id."""
         if session.device_id != "blackbox":
             return await capture_remote_screenshot(session.device_id)
-        return session.capture_screenshot_bytes()
+        return await asyncio.to_thread(session.capture_screenshot_bytes)
 
     async def emit(evt):
         # M4: mirror narration onto the session's bounded tail — the live-view
@@ -462,7 +465,9 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                         png_b64 = screenshot_to_base64(png_bytes)
                         consecutive_screenshot_failures = 0
                         session.screenshot_count += 1
-                        ss_url = save_screenshot_to_uploads(png_bytes, f"cu_{operator}", session.screenshot_count)
+                        ss_url = await asyncio.to_thread(
+                            save_screenshot_to_uploads, png_bytes, f"cu_{operator}",
+                            session.screenshot_count)
                         await emit({"type": "cu_screenshot", "data": {"url": ss_url, "step": step}})
 
                         tool_results.append(_computer_result(tool_id, [{"type": "image", "source": {
@@ -578,15 +583,15 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     await emit({"type": "music_task", "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}})
 
                 elif tool_name == "get_media":
-                    result = execute_get_media(url=tool_input.get("url", ""), task_id=tool_input.get("task_id", ""))
+                    result = await run_blocking(execute_get_media, url=tool_input.get("url", ""), task_id=tool_input.get("task_id", ""))
                     tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": json.dumps(result, indent=2)})
 
                 elif tool_name == "list_media":
-                    result = execute_list_media(media_type=tool_input.get("media_type"), limit=tool_input.get("limit", 20))
+                    result = await run_blocking(execute_list_media, media_type=tool_input.get("media_type"), limit=tool_input.get("limit", 20))
                     tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": json.dumps(result, indent=2)})
 
                 elif tool_name == "search_media":
-                    result = execute_search_media(query=tool_input.get("query", ""), media_type=tool_input.get("media_type"), limit=tool_input.get("limit", 10))
+                    result = await run_blocking(execute_search_media, query=tool_input.get("query", ""), media_type=tool_input.get("media_type"), limit=tool_input.get("limit", 10))
                     tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": json.dumps(result, indent=2)})
 
                 elif tool_name == "search_snapshots":
@@ -596,6 +601,8 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                         result_msg = "Error: No search query provided."
                     else:
                         try:
+                            # hybrid_retrieve ignores its vol_txt argument (retrieve()
+                            # reads the ledger itself), so no 58 MB read here.
                             search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
                             if not search_results:
                                 result_msg = f"No snapshots found matching: {query}"
@@ -723,7 +730,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                 if session.device_id != "blackbox":
                     fresh_png = await capture_remote_screenshot(session.device_id)
                 else:
-                    fresh_png = session.capture_screenshot_bytes()
+                    fresh_png = await asyncio.to_thread(session.capture_screenshot_bytes)
                 fresh_b64 = screenshot_to_base64(fresh_png)
                 session.screenshot_count += 1
             except Exception:
