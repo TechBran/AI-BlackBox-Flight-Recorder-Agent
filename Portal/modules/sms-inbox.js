@@ -668,8 +668,9 @@ async function loadConversation(mode) {
     _convSig = sig;
     renderMessages(mode);
 
+    // A number with no contact is stored with the number as its "name".
     const contactName = _messages.find(m => m.contact_name)?.contact_name || '';
-    if (contactName) renderHeader(phone, contactName);
+    if (contactName && !samePhone(contactName, phone)) renderHeader(phone, contactName);
     // On screen now: the thread was opened, or a new inbound text arrived in it.
     const op = getOperator();
     const newInbound = _messages.some(m => m.direction === 'inbound' && !shownIds.has(m.id));
@@ -773,7 +774,7 @@ async function selectThread(phone, to = phone) {
 
     // The row names the contact (its name line shows the number when there is none).
     const named = row?.querySelector('.sms-thread-name')?.textContent || '';
-    renderHeader(phone, named && named !== row.dataset.phone ? named : '');
+    renderHeader(phone, named && !samePhone(named, phone) ? named : '');
 
     // Show loading state
     const container = $('smsMessages');

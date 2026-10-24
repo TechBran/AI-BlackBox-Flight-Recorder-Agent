@@ -381,3 +381,30 @@ test("no LAN server, no custom option; a stored model the catalog lacks is shown
         close();
     }
 });
+
+test("the header names a contact, and a number with no contact only once", async (t) => {
+    // The box stores a number with no contact under the number itself as its "name".
+    const box = {
+        threads: [thread("5550100333", { contact_name: "+15550100333" }), thread("5550100444", { contact_name: "Pat" })],
+        thread: {
+            "5550100333": [msg(1, { contact_name: "+15550100333" })],
+            "5550100444": [msg(2, { contact_name: "Pat" })],
+        },
+    };
+    serve(box);
+    await open(t);
+    try {
+        const header = $("smsConvHeader");
+        document.querySelector('.sms-thread[data-phone="5550100333"]').click();
+        await settle();
+        assert.equal(header.querySelector(".sms-conv-name").textContent, "5550100333");
+        assert.equal(header.querySelector(".sms-conv-phone"), null);
+
+        document.querySelector('.sms-thread[data-phone="5550100444"]').click();
+        await settle();
+        assert.equal(header.querySelector(".sms-conv-name").textContent, "Pat");
+        assert.equal(header.querySelector(".sms-conv-phone").textContent, "5550100444");
+    } finally {
+        close();
+    }
+});
