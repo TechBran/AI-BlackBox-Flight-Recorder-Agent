@@ -477,9 +477,11 @@ def test_worker_maps_a_retired_claude_id_to_its_successor(monkeypatch):
 
 
 def test_worker_media_auto_route_runs_the_new_providers_default(monkeypatch):
-    # Audio on anthropic switches the turn to Gemini; the Claude id the client
-    # sent must not be dispatched to Gemini.
+    # Audio on anthropic switches the turn to Gemini (a Google key is set);
+    # the Claude id the client sent must not be dispatched to Gemini.
+    import Orchestrator.routes.chat_routes as cr
     from Orchestrator.models import TaskStatus
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "test-google-key")
     audio = [{"role": "user", "content": [
         {"type": "text", "text": "What does this say?"},
         {"type": "audio_url", "audio_url": {"url": "/ui/uploads/clip.mp3"}},

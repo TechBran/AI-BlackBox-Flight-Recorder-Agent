@@ -9,6 +9,12 @@ is now the one rule both paths apply: audio/video -> google unless the
 provider reads them already or is "custom" (a LAN llama.cpp server has no
 audio/video path and a custom-only box has no Google key, so the switch would
 fail the turn instead of replying), and a PDF on OpenAI -> google.
+
+The switch also needs a Google key. Onboarding accepts any one LLM key, so a
+box set up with only an Anthropic, OpenAI or xAI key has nothing to switch to:
+moving the turn there ended it in "GOOGLE_API_KEY not set" where the requested
+provider would have answered. Such a turn stays put and its handler turns the
+attachment into a note (test_unreadable_media_parts.py).
 """
 from __future__ import annotations
 
@@ -30,6 +36,21 @@ def _msgs(*parts):
             {"role": "user", "content": [{"type": "text", "text": "what is this?"}, *parts]}]
 
 
+@pytest.fixture(autouse=True)
+def google_key(monkeypatch):
+    """A Google key is configured unless a test removes it: the handlers the
+    switch hands a turn to (call_gemini, stream_gemini_with_thinking) check
+    chat_routes.GOOGLE_API_KEY, and so does the switch."""
+    from Orchestrator.routes import chat_routes as cr
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "test-google-key")
+
+
+@pytest.fixture
+def no_google_key(monkeypatch):
+    from Orchestrator.routes import chat_routes as cr
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "")
+
+
 @pytest.mark.parametrize("provider", ["anthropic", "openai", "xai", "computer-use"])
 @pytest.mark.parametrize("part", [AUDIO, VIDEO])
 def test_audio_and_video_switch_to_google(provider, part):
@@ -48,6 +69,14 @@ def test_pdf_moves_only_openai():
     assert media_auto_route(_msgs(PDF), "openai") == ("google", True)
     assert media_auto_route(_msgs(PDF), "anthropic") == ("anthropic", False)
     assert media_auto_route(_msgs(TXT), "openai") == ("openai", False)
+
+
+@pytest.mark.parametrize("provider, part", [
+    ("anthropic", AUDIO), ("anthropic", VIDEO), ("openai", AUDIO), ("xai", VIDEO),
+    ("computer-use", AUDIO), ("openai", PDF)])
+def test_without_a_google_key_the_turn_stays(no_google_key, provider, part):
+    from Orchestrator.routes.chat_routes import media_auto_route
+    assert media_auto_route(_msgs(part), provider) == (provider, False)
 
 
 def test_text_and_images_never_switch():
@@ -109,6 +138,22 @@ def test_stream_routes_audio_to_gemini_with_its_default_model(stream_fakes, app_
     assert stream_fakes["stream"] == "gemini"
     # The context (and its window guard) is built for the provider that runs.
     assert stream_fakes["context_provider"] == "google"
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "xai"])
+def test_stream_without_a_google_key_answers_on_the_requested_provider(
+        stream_fakes, app_client, no_google_key, provider):
+    """Before, this turn moved to Gemini and ended in 'GOOGLE_API_KEY not set'."""
+    r = app_client.post("/chat/stream", json={
+        "messages": _msgs(AUDIO), "provider": provider, "model": "", "operator": "TestOp"})
+    assert r.status_code == 200
+    start = _stream_start(r.text)
+    assert start["provider"] == provider
+    assert start["model"] == config.resolve_default_model(provider, None)
+    assert stream_fakes["stream"] == provider
+    assert stream_fakes["context_provider"] == provider
+    assert "GOOGLE_API_KEY not set" not in r.text
+    assert 'data: "ok"' in r.text
 
 
 def test_stream_keeps_custom_with_audio(stream_fakes, app_client):

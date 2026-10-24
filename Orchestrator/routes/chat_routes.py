@@ -444,6 +444,9 @@ def call_openai(messages: List[Dict], model: str, operator: str):
                             "type": "text",
                             "text": f"[Note: Video file attached: {url}. OpenAI GPT models don't support direct video analysis. Please use Google Gemini for video analysis.]"
                         })
+                    elif part.get("type") == "audio_url":
+                        # A turn media_auto_route kept here (no Google key)
+                        new_content.extend(_unreadable_attachment_parts(part))
                     elif part.get("type") == "document_url":
                         # For OpenAI, extract text from documents and append as text
                         url = part["document_url"]["url"]
@@ -772,6 +775,9 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                             "type": "text",
                             "text": f"[Note: Video file attached: {url}. Anthropic Claude models don't support direct video analysis. Please use Google Gemini for video analysis.]"
                         })
+                    elif part.get("type") == "audio_url":
+                        # A turn media_auto_route kept here (no Google key)
+                        new_content.extend(_unreadable_attachment_parts(part))
                     elif part.get("type") == "document_url":
                         # Anthropic supports PDF documents
                         url = part["document_url"]["url"]
@@ -1979,6 +1985,9 @@ def call_xai(messages: List[Dict], model: str, operator: str):
                             "type": "text",
                             "text": f"[Note: Video file attached: {url}. Grok models don't support direct video analysis.]"
                         })
+                    elif part.get("type") == "audio_url":
+                        # A turn media_auto_route kept here (no Google key)
+                        new_content.extend(_unreadable_attachment_parts(part))
                     elif part.get("type") == "document_url":
                         # For xAI, extract text from documents and append as text
                         url = part["document_url"]["url"]
@@ -2433,6 +2442,10 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
     if not OPENAI_API_KEY:
         yield {"type": "error", "data": "OPENAI_API_KEY not set"}
         return
+
+    # Chat Completions rejects audio_url/video_url/document_url parts: a turn
+    # media_auto_route kept here (no Google key) gets a note per attachment.
+    messages = _unreadable_attachments_as_text(messages)
 
     # Determine if this is a reasoning-capable model
     # O-series: o1, o1-mini, o1-pro, o3, o3-mini, o4-mini
@@ -3203,6 +3216,10 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                         cleaned_text = strip_media_blobs(part.get("text", ""))
                         if cleaned_text:  # Skip empty text parts
                             new_content.append({"type": "text", "text": cleaned_text})
+                    else:
+                        # Audio, video and documents used to vanish here; Claude
+                        # reads a PDF itself and gets a note for the rest.
+                        new_content.extend(_unreadable_attachment_parts(part, pdf_block=True) or [])
                 if new_content:  # Skip messages with no content parts
                     amsgs.append({"role": m["role"], "content": new_content})
             else:
@@ -6068,7 +6085,10 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 print(f"[XAI-STREAM] ERROR: {e}")
                                 new_content.append({"type": "text", "text": f"[Image error: {e}]"})
                     else:
-                        new_content.append(part)
+                        # Audio, video and document parts become notes: forwarded
+                        # raw they fail the request far-end.
+                        stand_in = _unreadable_attachment_parts(part)
+                        new_content.extend(stand_in if stand_in is not None else [part])
                 processed_messages.append({"role": m["role"], "content": new_content})
             else:
                 processed_messages.append(m)
@@ -6623,7 +6643,10 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 print(f"[CUSTOM-STREAM] ERROR: {e}")
                                 new_content.append({"type": "text", "text": f"[Image error: {e}]"})
                     else:
-                        new_content.append(part)
+                        # Audio, video and document parts become notes: forwarded
+                        # raw they fail the request far-end.
+                        stand_in = _unreadable_attachment_parts(part)
+                        new_content.extend(stand_in if stand_in is not None else [part])
                 processed_messages.append({"role": m["role"], "content": new_content})
             else:
                 processed_messages.append(m)
@@ -7400,6 +7423,68 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
 _MEDIA_ROUTE_KEEP = frozenset({"google", "gemini", "custom"})
 
 
+def _unreadable_attachment_parts(part, pdf_block: bool = False) -> Optional[List[Dict]]:
+    """The parts that stand in for an audio, video or document attachment the
+    turn's provider cannot read, or None for any other part (the caller keeps
+    handling it).
+
+    Audio and video become a note naming the file; a document's text is
+    inlined when it is plain text, a PDF becomes Claude's native document
+    block when ``pdf_block`` is set, and anything else is a note. This is how
+    a turn degrades when media_auto_route keeps it off Google (provider
+    "custom", or a box with no Google key): the model is told what was
+    attached instead of the raw part being forwarded (llama.cpp 500s on an
+    audio_url part; OpenAI and xAI reject part types they do not know) or
+    silently dropped, as the Anthropic stream did.
+    """
+    if not isinstance(part, dict):
+        return None
+    kind = part.get("type")
+    if kind not in ("audio_url", "video_url", "document_url"):
+        return None
+    ref = part.get(kind)
+    url = ref.get("url", "") if isinstance(ref, dict) else ""
+    if kind == "video_url":
+        return [{"type": "text", "text": f"[Note: Video file attached: {url}. This model doesn't support direct video analysis.]"}]
+    if kind == "audio_url":
+        return [{"type": "text", "text": f"[Note: Audio file attached: {url}. This model doesn't support audio input.]"}]
+    try:
+        local_path, refused = _load_attachment(url, DOC_EXTS)
+        if refused:
+            return [{"type": "text", "text": refused}]
+        if local_path is None:
+            return [{"type": "text", "text": f"[Note: an attached document could not be found: {url}]"}]
+        suffix = local_path.suffix.lower()
+        if suffix == ".pdf" and pdf_block:
+            data = base64.b64encode(local_path.read_bytes()).decode("utf-8")
+            return [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}]
+        if suffix in (".txt", ".md", ".csv"):
+            text = local_path.read_text(encoding="utf-8", errors="replace")
+            return [{"type": "text", "text": f"[Document content: {local_path.name}]\n\n{text}"}]
+        return [{"type": "text", "text": f"[Note: Document {local_path.name} attached but content extraction is not supported for this file type with this model]"}]
+    except Exception as e:
+        print(f"[ATTACH] Could not read document {str(url)[:120]!r}: {e}")
+        return [{"type": "text", "text": f"[Note: an attached document could not be read: {url}]"}]
+
+
+def _unreadable_attachments_as_text(messages: List[Dict]) -> List[Dict]:
+    """``messages`` with each audio, video and document part replaced by what
+    _unreadable_attachment_parts gives for it; every other part and message
+    passes through as it is."""
+    out = []
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+        new_content = []
+        for part in content:
+            stand_in = _unreadable_attachment_parts(part)
+            new_content.extend(stand_in if stand_in is not None else [part])
+        out.append({**m, "content": new_content})
+    return out
+
+
 def media_auto_route(messages: list, provider: str) -> tuple[str, bool]:
     """The provider a chat turn runs on, given what is attached to it.
 
@@ -7407,6 +7492,13 @@ def media_auto_route(messages: list, provider: str) -> tuple[str, bool]:
     moves an OpenAI turn there too. Returns (provider, switched): `provider` is
     unchanged unless switched, and a switched caller resolves Google's own
     default model, since the requested id belongs to the original provider.
+
+    The switch needs a Google key: onboarding accepts any one LLM key, and on
+    a box set up with only an Anthropic, OpenAI or xAI key the Google handlers
+    (call_gemini, stream_gemini_with_thinking - they check this module's
+    GOOGLE_API_KEY) end the turn in "GOOGLE_API_KEY not set". There the turn
+    stays on its provider, whose handler notes the attachment instead
+    (_unreadable_attachment_parts).
 
     The one rule for every chat path - /chat/stream (Portal, Android, cron)
     and the non-stream worker (/chat, inbound SMS). It used to live only in
@@ -7430,12 +7522,16 @@ def media_auto_route(messages: list, provider: str) -> tuple[str, bool]:
                 if isinstance(url, str) and url.lower().endswith(".pdf"):
                     has_pdf = True
     if has_audio_or_video and provider not in _MEDIA_ROUTE_KEEP:
-        print(f"[AUTO-ROUTE] Switched from {provider} to google (video/audio detected)")
-        return "google", True
-    if has_pdf and provider == "openai":
-        print("[AUTO-ROUTE] Switched from openai to google (PDF document detected)")
-        return "google", True
-    return provider, False
+        reason = "video/audio detected"
+    elif has_pdf and provider == "openai":
+        reason = "PDF document detected"
+    else:
+        return provider, False
+    if not GOOGLE_API_KEY:
+        print(f"[AUTO-ROUTE] Kept {provider} ({reason}): no Google key is configured")
+        return provider, False
+    print(f"[AUTO-ROUTE] Switched from {provider} to google ({reason})")
+    return "google", True
 
 
 def build_streaming_context(messages: list, operator: str, provider: str = "openai",

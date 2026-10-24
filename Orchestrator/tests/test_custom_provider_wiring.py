@@ -776,10 +776,11 @@ def test_worker_custom_audio_skips_media_autoroute(custom_registry, monkeypatch)
 
 def test_worker_audio_autoroute_untouched_for_other_providers(custom_registry, monkeypatch):
     """The exemption is custom-ONLY: audio on any other provider still switches
-    to google (byte-identical existing behavior)."""
+    to google (byte-identical existing behavior) on a box with a Google key."""
     import Orchestrator.routes.chat_routes as cr
     from Orchestrator.models import TaskStatus
 
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "test-google-key")
     hit = {}
 
     def fake_call_gemini(msgs, mdl, operator="?"):

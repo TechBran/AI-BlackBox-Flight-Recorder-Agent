@@ -124,16 +124,33 @@ def test_worker_builds_context_for_the_provider_that_runs(retrieval, monkeypatch
     assert kwargs["window_guard_tokens"] is None
 
 
+AUDIO_TURN = [{"role": "user", "content": [
+    {"type": "text", "text": "keyword question"},
+    {"type": "audio_url", "audio_url": {"url": "/ui/uploads/clip.wav"}}]}]
+
+
 def test_worker_audio_turn_builds_context_for_google(retrieval, monkeypatch):
-    audio = [{"role": "user", "content": [
-        {"type": "text", "text": "keyword question"},
-        {"type": "audio_url", "audio_url": {"url": "/ui/uploads/clip.wav"}}]}]
-    seen = _run_worker(monkeypatch, provider="openai", messages=audio, task_id="parity-audio")
+    import Orchestrator.routes.chat_routes as cr
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "test-google-key")
+    seen = _run_worker(monkeypatch, provider="openai", messages=AUDIO_TURN, task_id="parity-audio")
     (args, kwargs, _out), = seen["builder_calls"]
     assert seen["call"] == "gemini"
     assert seen["model"] == config.resolve_default_model("google", None)
     assert kwargs["provider"] == "google"
     assert args[0] == "keyword question"
+
+
+def test_worker_audio_turn_without_a_google_key_stays_on_its_provider(retrieval, monkeypatch):
+    """A box onboarded with only an OpenAI key: moving the turn to Gemini
+    failed the task ("GOOGLE_API_KEY not set"); call_openai answers it with a
+    note for the recording instead."""
+    import Orchestrator.routes.chat_routes as cr
+    monkeypatch.setattr(cr, "GOOGLE_API_KEY", "")
+    seen = _run_worker(monkeypatch, provider="openai", messages=AUDIO_TURN, task_id="parity-audio-nokey")
+    (_args, kwargs, _out), = seen["builder_calls"]
+    assert seen["call"] == "openai"
+    assert seen["model"] == config.resolve_default_model("openai", None)
+    assert kwargs["provider"] == "openai"
 
 
 def test_worker_guards_every_cloud_window(retrieval, monkeypatch):
