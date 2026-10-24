@@ -718,7 +718,8 @@ fun TelephonyScreen(
                     if (error == null) {
                         viewModel.clearDiscovered()
                         showForm = false
-                    } else {
+                    } else if (showForm) {
+                        // (A form cancelled while saving does not carry the error over.)
                         formError = error
                     }
                 }
