@@ -53,6 +53,9 @@ for f in llama-swap-version llamacpp-version llama-swap-config.yaml.template bla
          blackbox-gpu-preflight.sh; do
     cp "$REPO_ROOT/installer/templates/$f" "$ROOT/installer/templates/"
 done
+# Step 5's config renderer (Orchestrator/localstack_render.py, stdlib only).
+mkdir -p "$ROOT/Orchestrator"
+cp "$REPO_ROOT/Orchestrator/localstack_render.py" "$ROOT/Orchestrator/"
 LS_VER="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/installer/templates/llama-swap-version" | head -n1 | tr -d '[:space:]')"
 LC_VER="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/installer/templates/llamacpp-version" | head -n1 | tr -d '[:space:]')"
 BIN="$HOME_DIR/.blackbox/localstack/bin"
@@ -90,6 +93,17 @@ rc="$(run_stack 8.6)"
 [[ "$rc" == 0 ]] || fail "2: re-run exited $rc: $(tail -20 "$WORK/run.log")"
 built && fail "2: llama.cpp was rebuilt although the GPU did not change"
 [[ "$(cat "$MARKER")" == "${LC_VER}-cuda-sm86" ]] || fail "2: marker changed on a no-op re-run"
+
+# ── 2b. a re-run keeps the box's keep-warm choices ───────────────────────────
+# Step 5 used to re-sed the template and reset every member to ttl 600
+# (audit O19-local-stack-09); the renderer applies the recorded overrides.
+CFG="$HOME_DIR/.blackbox/localstack/llama-swap-config.yaml"
+printf '{"ttl": {"embed-qwen3-8b": 0}}\n' > "$HOME_DIR/.blackbox/localstack/llama-swap-overrides.json"
+rc="$(run_stack 8.6)"
+[[ "$rc" == 0 ]] || fail "2b: re-run exited $rc: $(tail -20 "$WORK/run.log")"
+grep -A 40 '^  "embed-qwen3-8b":' "$CFG" | grep -m 1 -E '^    ttl:' | grep -qE '^    ttl: 0 ' \
+    || fail "2b: the installer re-run reset the keep-warm embed member: $(grep -E '^    ttl:' "$CFG")"
+grep -q 'keep-warm' "$CFG" || fail "2b: the rendered config lost the template comments"
 
 # ── 3. GPU swap: rebuild ──────────────────────────────────────────────────────
 rc="$(run_stack 8.9)"

@@ -1,0 +1,264 @@
+"""Orchestrator/localstack_render.py — the ONE writer of the live llama-swap
+config (audit O19-local-stack-09, 2026-08-11 plan Track B).
+
+Before it, two writers fought over ~/.blackbox/localstack/llama-swap-config.yaml
+with no coordination: the installer re-ran a sed over the template on every
+run (resetting every keep-warm member to ttl 600), set_member_ttl rewrote the
+file through yaml.safe_dump (dropping every comment), and a committed template
+fix reached a box only when someone re-ran the installer by hand. Now the
+installer, set_member_ttl and the Orchestrator's boot reconcile all render
+template + keep-warm overrides through the same function.
+
+The golden fixture is the config deployed on MS02 (fetched read-only,
+2026-10-23): rendering today's template for that box must reproduce it byte
+for byte, so landing this renderer rewrites nothing there.
+"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+from Orchestrator import localstack_render as lr
+
+REPO = Path(__file__).resolve().parents[2]
+GOLDEN = Path(__file__).parent / "fixtures" / "llama-swap-config.ms02.yaml"
+MS02_HOME = "/home/bbx/.blackbox/localstack"
+MS02_ROOT = "/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main"
+MEMBERS = ("embed-qwen3-8b", "rerank-qwen3-8b", "speaches", "qwen-tts")
+
+
+def _template() -> str:
+    return lr.template_path(str(REPO)).read_text(encoding="utf-8")
+
+
+def test_golden_render_equals_the_config_deployed_on_ms02():
+    assert lr.render(_template(), MS02_HOME, MS02_ROOT) == GOLDEN.read_text(encoding="utf-8")
+
+
+def test_render_matches_the_installer_sed_it_replaces():
+    """Same six substitutions, same order, nothing else: ${PORT},
+    ${llama-server} and ${models-dir} stay for llama-swap."""
+    out = lr.render(_template(), "/h/.blackbox/localstack", "/r")
+    assert "${LOCALSTACK" not in out and "${SPEACHES_VENV}" not in out
+    assert "${QWEN_TTS_VENV}" not in out and "${LOCALMODELS}" not in out
+    assert "${PORT}" in out and "${llama-server}" in out and "${models-dir}" in out
+    assert "PYTHONPATH=/r/LocalModels exec /h/.blackbox/localstack/qwen-tts-venv/bin/uvicorn" in out
+
+
+def test_rendered_yaml_parses_and_lists_every_member():
+    cfg = yaml.safe_load(lr.render(_template(), MS02_HOME, MS02_ROOT))
+    assert tuple(cfg["models"]) == MEMBERS
+    assert {m: v["ttl"] for m, v in cfg["models"].items()} == dict.fromkeys(MEMBERS, 600)
+
+
+def test_template_defaults_are_read_from_the_template():
+    assert lr.member_ttls(_template()) == dict.fromkeys(MEMBERS, 600)
+
+
+def test_ttl_override_edits_only_that_member_and_keeps_every_comment():
+    base = lr.render(_template(), MS02_HOME, MS02_ROOT)
+    warm = lr.render(_template(), MS02_HOME, MS02_ROOT, {"embed-qwen3-8b": 0})
+    cfg = yaml.safe_load(warm)
+    assert cfg["models"]["embed-qwen3-8b"]["ttl"] == 0
+    assert all(cfg["models"][m]["ttl"] == 600 for m in MEMBERS[1:])
+    changed = [(a, b) for a, b in zip(base.splitlines(), warm.splitlines()) if a != b]
+    assert len(changed) == 1                       # one line, nothing else touched
+    old, new = changed[0]
+    assert old.split("#")[1] == new.split("#")[1]  # its comment survives
+    assert old.index("#") == new.index("#")        # ... in the same column
+    assert base.count("#") == warm.count("#")      # safe_dump used to drop them all
+
+
+def test_unknown_member_or_bad_ttl_is_refused():
+    with pytest.raises(ValueError):
+        lr.render(_template(), MS02_HOME, MS02_ROOT, {"not-a-member": 0})
+    for bad in (-1, "warm", 1.5, True):
+        with pytest.raises(ValueError):
+            lr.render(_template(), MS02_HOME, MS02_ROOT, {"embed-qwen3-8b": bad})
+
+
+# ── reconcile: what the installer, set_member_ttl and boot all run ───────────
+
+@pytest.fixture
+def box(tmp_path):
+    home = tmp_path / "home" / ".blackbox" / "localstack"
+    home.mkdir(parents=True)
+    return home
+
+
+def test_reconcile_writes_a_fresh_box(box):
+    res = lr.reconcile(str(box), str(REPO))
+    dest = box / "llama-swap-config.yaml"
+    assert res["changed"] is True and Path(res["path"]) == dest
+    assert dest.read_text(encoding="utf-8") == lr.render(_template(), str(box), str(REPO))
+    assert oct(dest.stat().st_mode & 0o777) == "0o644"
+    assert not list(box.glob("*.tmp"))
+
+
+def test_reconcile_is_a_no_op_when_the_live_file_already_matches(box):
+    lr.reconcile(str(box), str(REPO))
+    dest = box / "llama-swap-config.yaml"
+    before = dest.stat().st_mtime_ns
+    assert lr.reconcile(str(box), str(REPO))["changed"] is False
+    # --watch-config restarts the whole proxy on ANY write, so an unchanged
+    # render must not touch the file.
+    assert dest.stat().st_mtime_ns == before
+
+
+def test_reconcile_reverts_a_hand_patch_to_the_template(box):
+    """The Aug 2026 fixes were sed'ed into live files; a hand edit that breaks
+    the `cmd: |` block survived until the next reboot. The template wins."""
+    lr.reconcile(str(box), str(REPO))
+    dest = box / "llama-swap-config.yaml"
+    dest.write_text(dest.read_text(encoding="utf-8").replace("-b 8192", "-b 512"), encoding="utf-8")
+    res = lr.reconcile(str(box), str(REPO))
+    assert res["changed"] is True and res["lines_changed"] >= 1
+    assert "-b 512" not in dest.read_text(encoding="utf-8")
+
+
+def test_reconcile_keeps_keep_warm_choices_across_re_renders(box):
+    lr.set_ttl_override(str(box), "speaches", 0)
+    res = lr.reconcile(str(box), str(REPO))
+    cfg = yaml.safe_load((box / "llama-swap-config.yaml").read_text(encoding="utf-8"))
+    assert cfg["models"]["speaches"]["ttl"] == 0
+    assert res["ttl_overrides"] == {"speaches": 0}
+    # back to the template default removes the override instead of pinning 600
+    lr.set_ttl_override(str(box), "speaches", 600)
+    assert json.loads((box / lr.OVERRIDES_NAME).read_text())["ttl"] == {}
+
+
+def test_first_reconcile_adopts_keep_warm_from_an_old_live_config(box):
+    """A box whose keep-warm was set through the old yaml.safe_dump path has
+    no overrides file: its ttl choices are harvested, not reset to 600 (the
+    installer re-run used to do exactly that)."""
+    old = yaml.safe_load(lr.render(_template(), str(box), str(REPO)))
+    old["models"]["embed-qwen3-8b"]["ttl"] = 0
+    (box / "llama-swap-config.yaml").write_text(yaml.safe_dump(old, sort_keys=False),
+                                                encoding="utf-8")
+    res = lr.reconcile(str(box), str(REPO))
+    assert res["ttl_overrides"] == {"embed-qwen3-8b": 0}
+    cfg = yaml.safe_load((box / "llama-swap-config.yaml").read_text(encoding="utf-8"))
+    assert cfg["models"]["embed-qwen3-8b"]["ttl"] == 0
+    assert "#" in (box / "llama-swap-config.yaml").read_text(encoding="utf-8")  # comments back
+    assert json.loads((box / lr.OVERRIDES_NAME).read_text())["ttl"] == {"embed-qwen3-8b": 0}
+
+
+def test_a_corrupt_overrides_file_is_not_silently_treated_as_empty(box):
+    (box / lr.OVERRIDES_NAME).write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError):
+        lr.reconcile(str(box), str(REPO))
+    assert not (box / "llama-swap-config.yaml").exists()
+
+
+# ── the Orchestrator side: keep-warm + the boot step ─────────────────────────
+
+@pytest.fixture
+def installed(box, monkeypatch):
+    from Orchestrator import local_stack
+    lr.reconcile(str(box), str(REPO))
+    dest = box / "llama-swap-config.yaml"
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: dest)
+    return local_stack, dest
+
+
+def test_keep_warm_survives_an_installer_re_run(installed, box):
+    """O19-local-stack-09: the installer's step 5 used to regenerate the file
+    from the template and silently reset every keep-warm member to 600."""
+    local_stack, dest = installed
+    local_stack.set_member_ttl("embed-qwen3-8b", local_stack.TTL_WARM)
+    assert local_stack.get_member_ttl("embed-qwen3-8b") == 0
+    lr.main(["--localstack-home", str(box), "--blackbox-root", str(REPO)])  # the installer
+    assert local_stack.get_member_ttl("embed-qwen3-8b") == 0
+    assert "# keep-warm" in dest.read_text(encoding="utf-8")       # comments kept
+
+
+def test_boot_reconcile_lands_a_template_change(installed, monkeypatch, caplog):
+    local_stack, dest = installed
+    dest.write_text(dest.read_text(encoding="utf-8").replace("-ub 8192", "-ub 512"),
+                    encoding="utf-8")
+    caplog.set_level("WARNING", logger=local_stack.logger.name)
+    res = local_stack.reconcile_llama_swap_config()
+    assert res["changed"] is True
+    assert "-ub 512" not in dest.read_text(encoding="utf-8")
+    assert any("re-rendered from the template" in r.getMessage() for r in caplog.records)
+    assert local_stack.reconcile_llama_swap_config()["changed"] is False
+
+
+def test_boot_reconcile_never_raises_and_leaves_the_file_alone(installed, box, caplog):
+    local_stack, dest = installed
+    before = dest.read_text(encoding="utf-8")
+    (box / lr.OVERRIDES_NAME).write_text("{broken", encoding="utf-8")
+    assert local_stack.reconcile_llama_swap_config() is None
+    assert dest.read_text(encoding="utf-8") == before
+    assert any("could not re-render" in r.getMessage() for r in caplog.records)
+
+
+def test_boot_reconcile_is_a_no_op_without_the_stack(monkeypatch):
+    from Orchestrator import local_stack
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: None)
+    assert local_stack.reconcile_llama_swap_config() is None
+
+
+def test_boot_sweep_says_loudly_when_the_driver_is_dead(monkeypatch, caplog):
+    from Orchestrator import hardware, local_stack
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: None)
+    monkeypatch.setattr(hardware, "probe", lambda *a, **k: {
+        "gpu": True, "driver_ok": False,
+        "gpu_reason": "NVIDIA driver not responding: RTX 2000 Ada is on the PCI bus"})
+    caplog.set_level("WARNING", logger=local_stack.logger.name)
+    local_stack.boot_sweep()
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert errors[0].getMessage().startswith("[GPU] preflight failed: NVIDIA driver not responding")
+
+
+def test_boot_sweep_is_quiet_on_a_healthy_or_cpu_box(monkeypatch, caplog):
+    from Orchestrator import hardware, local_stack
+    monkeypatch.setattr(local_stack, "llama_swap_config_path", lambda: None)
+    for hw in ({"gpu": True, "driver_ok": True, "gpu_reason": None},
+               {"gpu": False, "driver_ok": None, "gpu_reason": None}):
+        monkeypatch.setattr(hardware, "probe", lambda *a, _hw=hw, **k: dict(_hw))
+        caplog.clear()
+        caplog.set_level("WARNING", logger=local_stack.logger.name)
+        local_stack.boot_sweep()
+        assert not caplog.records
+
+
+def test_startup_hook_runs_the_sweep_off_the_event_loop(monkeypatch):
+    """A boot hook (skipped under BLACKBOX_TESTING) whose nvidia-smi + file
+    IO never blocks the event loop."""
+    import asyncio
+    import threading
+    from Orchestrator import local_stack, startup
+    from Orchestrator.utils import testing
+    seen = {}
+    monkeypatch.setattr(local_stack, "boot_sweep",
+                        lambda: seen.setdefault("thread", threading.current_thread()))
+    asyncio.run(startup.startup_local_stack_sweep())
+    assert seen["thread"] is not threading.main_thread()
+    hooks = [h for h in startup.app.router.on_startup
+             if getattr(h, "__wrapped__", None) is startup.startup_local_stack_sweep]
+    assert len(hooks) == 1 and getattr(hooks[0], testing.BOOT_HOOK_ATTR, False)
+
+
+def test_cli_is_stdlib_only_and_runs_isolated(box):
+    """The installer runs it with the system python3 -I, before any venv
+    exists, as the box's user."""
+    src = (REPO / "Orchestrator" / "localstack_render.py").read_text(encoding="utf-8")
+    assert "import yaml" not in src and "from Orchestrator" not in src
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, "-I", str(REPO / "Orchestrator" / "localstack_render.py"),
+                        "--localstack-home", str(box), "--blackbox-root", str(REPO)],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert "wrote" in r.stdout
+    assert (box / "llama-swap-config.yaml").read_text(encoding="utf-8") == \
+        lr.render(_template(), str(box), str(REPO))
+    r = subprocess.run([sys.executable, "-I", str(REPO / "Orchestrator" / "localstack_render.py"),
+                        "--localstack-home", str(box), "--blackbox-root", str(REPO)],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and "unchanged" in r.stdout

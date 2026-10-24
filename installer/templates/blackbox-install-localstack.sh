@@ -481,21 +481,22 @@ elif (( QWEN_OK )); then
     sudo -u "$REAL_USER" "$QWEN_TTS_VENV/bin/pip" install --upgrade fastapi uvicorn || true
 fi
 
-# ── 5. Write llama-swap config.yaml from the template ──────────────────────
-# Substitute ONLY the four localstack path vars; ${PORT}/${llama-server}/
-# ${models-dir} stay literal for llama-swap. sed with | delimiter; $ before {
-# is literal in BRE, backslash-escaped so bash does not expand it.
-TMP_CFG="$(mktemp)"
-sed -e "s|\${LOCALSTACK_BIN}|$LOCALSTACK_BIN|g" \
-    -e "s|\${LOCALSTACK_MODELS}|$LOCALSTACK_MODELS|g" \
-    -e "s|\${SPEACHES_VENV}|$SPEACHES_VENV|g" \
-    -e "s|\${QWEN_TTS_VENV}|$QWEN_TTS_VENV|g" \
-    -e "s|\${LOCALMODELS}|$BLACKBOX_ROOT/LocalModels|g" \
-    -e "s|\${LOCALSTACK_HOME}|$LOCALSTACK_HOME|g" \
-    "$TEMPLATE_DIR/llama-swap-config.yaml.template" > "$TMP_CFG"
-sudo install -m 0644 -o "$REAL_USER" -g "$REAL_USER" "$TMP_CFG" "$CONFIG_DEST"
-rm -f "$TMP_CFG"
-echo "[install-localstack] Wrote $CONFIG_DEST"
+# ── 5. Render llama-swap config.yaml (the ONE renderer) ─────────────────────
+# Orchestrator/localstack_render.py owns this file (audit O19-local-stack-09):
+# the same function renders it here, on every keep-warm toggle and at every
+# Orchestrator boot (so a pulled template fix lands without re-running this
+# installer). It keeps the box's keep-warm overrides (llama-swap-overrides.json
+# beside the config) instead of resetting every member to ttl 600, and writes
+# nothing when the render is unchanged (--watch-config restarts the proxy on
+# any write). Stdlib-only, so the system python runs it isolated (-I), as the
+# box's user, before any venv exists. ${PORT}/${llama-server}/${models-dir}
+# stay literal for llama-swap.
+if ! sudo -u "$REAL_USER" "$PYBIN" -I "$BLACKBOX_ROOT/Orchestrator/localstack_render.py" \
+        --localstack-home "$LOCALSTACK_HOME" --blackbox-root "$BLACKBOX_ROOT" \
+        --dest "$CONFIG_DEST"; then
+    echo "[install-localstack] ERROR: could not render $CONFIG_DEST from the template (see above)" >&2
+    exit 4
+fi
 
 # ── 6. Install blackbox-models.service (sed-template flow like reranker) ────
 # A function so scripts/tests/test_systemd_units_verify.sh can verify its output.

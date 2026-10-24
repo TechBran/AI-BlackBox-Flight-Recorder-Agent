@@ -863,6 +863,18 @@ async def startup_web_search_floor_check():
 
 
 @boot_hook(app, "startup")
+async def startup_local_stack_sweep():
+    """Say at boot when an NVIDIA card's driver is dead, and re-render the
+    llama-swap config from the template (2026-08-11 plan Task 12a, audit
+    O19-local-stack-09). Both updaters end in a restart of this service, so
+    this is how a pulled template change reaches the live config. Probe +
+    file IO run off the event loop; local_stack.boot_sweep never raises."""
+    import asyncio
+    from Orchestrator import local_stack
+    await asyncio.to_thread(local_stack.boot_sweep)
+
+
+@boot_hook(app, "startup")
 async def startup_asterisk():
     """Initialize Asterisk ARI connection and AudioSocket server."""
     from Orchestrator.config import ASTERISK_ENABLED

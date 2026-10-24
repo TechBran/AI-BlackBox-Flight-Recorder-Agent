@@ -472,31 +472,75 @@ def get_member_ttl(member: str) -> "int | None":
 
 
 def set_member_ttl(member: str, ttl: int) -> None:
-    """Surgically set one member's ttl and atomically rewrite the config.
+    """Record one member's keep-warm ttl and re-render the config through the
+    ONE renderer (Orchestrator/localstack_render.py, audit
+    O19-local-stack-09): the choice lives in the overrides sidecar beside the
+    config, so an installer re-run or a boot re-render keeps it, and the
+    template's comments survive (yaml.safe_dump used to drop them all).
 
     WARNING (§6): the service runs with --watch-config, which auto-restarts the
     WHOLE proxy on any edit (unloads every member — there is no in-place reload,
     llama-swap #160/#547). Batch config writes; one keep-warm toggle is one
-    write and one brief full-stack reload. Raises if the stack isn't installed or
-    the config is unreadable/corrupt (RuntimeError) or the member isn't in the
-    config (ValueError)."""
+    write and one brief full-stack reload (none when the render is unchanged).
+    Raises if the stack isn't installed or the template / overrides are
+    unreadable (RuntimeError) or the member isn't in the template (ValueError)."""
+    from Orchestrator import localstack_render
+    from Orchestrator.utils.paths import blackbox_root
     path = llama_swap_config_path()
     if path is None:
         raise RuntimeError("local stack not installed — no llama-swap config to edit")
+    home, root = str(path.parent), str(blackbox_root())
     try:
-        cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise RuntimeError(f"llama-swap config unreadable at {path}: {exc}") from exc
-    models = (cfg or {}).get("models") or {}
-    if member not in models or not isinstance(models[member], dict):
-        raise ValueError(f"llama-swap config has no member {member!r}")
-    models[member]["ttl"] = int(ttl)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+        localstack_render.set_ttl_override(home, member, int(ttl), blackbox_root=root)
+        localstack_render.reconcile(home, root, dest=path)
+    except localstack_render.UnknownMember:
+        raise                      # a ValueError: the caller named a non-member
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"llama-swap config could not be rendered at {path}: {exc}") from exc
+
+
+def reconcile_llama_swap_config() -> "dict | None":
+    """Re-render the live llama-swap config from the template + overrides
+    (the boot step that lands a pulled template change on this box). None
+    when the stack is not installed (no live config). Never raises: a render
+    failure is logged and the live file is left as it was."""
+    path = llama_swap_config_path()
+    if path is None:
+        return None
+    try:
+        from Orchestrator import localstack_render
+        from Orchestrator.utils.paths import blackbox_root
+        res = localstack_render.reconcile(str(path.parent), str(blackbox_root()), dest=path)
+    except Exception as exc:  # noqa: BLE001 - a boot step must not take the app down
+        logger.error("[LOCAL STACK] could not re-render the llama-swap config at %s "
+                     "(left as it was): %s", path, exc)
+        return None
+    if res["changed"]:
+        logger.warning("[LOCAL STACK] llama-swap config re-rendered from the template "
+                       "(%d line(s) changed, keep-warm overrides %s); llama-swap "
+                       "--watch-config reloads it", res["lines_changed"],
+                       res["ttl_overrides"] or "none")
+    return res
+
+
+def boot_sweep() -> None:
+    """Startup capability sweep (plan Task 12a): say at boot, loudly, when an
+    NVIDIA card's driver is dead — the Aug 7-11 outage ran four days with
+    nothing in the journal — then converge the llama-swap config onto the
+    template. Blocking (subprocess + file IO): run it off the event loop.
+    Never raises."""
+    try:
+        from Orchestrator import hardware
+        hw = hardware.probe()
+        if hw.get("driver_ok") is False:
+            logger.error("[GPU] preflight failed: %s — on-box TTS is unavailable and "
+                         "STT/embeddings/rerank run on CPU until the driver is fixed",
+                         hw.get("gpu_reason"))
+        elif hw.get("gpu_reason"):
+            logger.warning("[GPU] %s", hw.get("gpu_reason"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[GPU] hardware probe failed at boot: %s", exc)
+    reconcile_llama_swap_config()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -139,6 +139,9 @@ for f in llama-swap-version llamacpp-version llama-swap-config.yaml.template bla
          blackbox-gpu-preflight.sh; do
     cp "$REPO_ROOT/installer/templates/$f" "$ROOT/installer/templates/"
 done
+# Step 5's config renderer (Orchestrator/localstack_render.py, stdlib only).
+mkdir -p "$ROOT/Orchestrator"
+cp "$REPO_ROOT/Orchestrator/localstack_render.py" "$ROOT/Orchestrator/"
 LS_VER="$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/installer/templates/llama-swap-version" | head -n1 | tr -d '[:space:]')"
 SEQ_HOME="$WORK/seq/home"
 mkdir -p "$SEQ_HOME/.blackbox/localstack/bin"
