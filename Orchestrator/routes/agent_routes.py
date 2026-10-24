@@ -8,19 +8,17 @@ agent_routes.py - Claude Code agent, WebSocket, session management
 
 # Standard library imports
 import asyncio
-import fcntl
 import json
 import os
 import platform
 import re
 import socket
-import subprocess
 import time
 import uuid
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Optional, List
 from urllib.parse import urlsplit
 
 # External library imports
@@ -34,6 +32,14 @@ from fastapi.responses import StreamingResponse, Response
 # Local imports
 from Orchestrator.checkpoint import app
 from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
+from Orchestrator.cli_agent.transport import (
+    CliAgentTransport,
+    SessionReaper,
+    SpawnSpec,
+    cancel_task,
+    relay,
+    safe_ws_send as _safe_ws_send,
+)
 from Orchestrator.startup import GenIn, ImageData, VideoExtensionIn
 from Orchestrator.utils.paths import blackbox_root
 
@@ -49,6 +55,7 @@ from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.state import save_app_registry, save_operator_state, agent_lock, APP_REGISTRY, PERSISTED_AGENT_SESSIONS, AGENT_SESSIONS
 from Orchestrator.volume import now_utc_iso
 from Orchestrator.security.perimeter import ZELLIJ_WEB_PORT, proxy_port_allowed, reserved_port_reason
+from Orchestrator.utils.testing import boot_hook
 from starlette.websockets import WebSocketState
 
 
@@ -76,17 +83,6 @@ async def _inject_fossil_context(
     # if we emit after stream completion, the event lands on the next bubble.
     await _safe_ws_send(websocket, {"type": "provenance", "data": provenance})
     return fossil_text, provenance
-
-
-async def _safe_ws_send(websocket, data: dict) -> bool:
-    """Send JSON to WebSocket, return False if connection is dead."""
-    try:
-        if websocket.application_state == WebSocketState.CONNECTED:
-            await websocket.send_json(data)
-            return True
-    except Exception:
-        pass
-    return False
 
 
 # Claude Code permission modes the agent surfaces offer (audit P03/O06). Only modes that
@@ -140,10 +136,16 @@ def resolve_permission_mode(data: dict) -> str:
 
 def build_claude_argv(claude_path: str, prompt: str, *, permission_mode: str,
                       model: str = None, claude_session_id: str = None,
-                      continue_session: bool = False, resume_session: bool = False) -> List[str]:
+                      resume_session: bool = False) -> List[str]:
     """The exact argv for a print-mode Claude Code run. Any mode other than yolo gets the
     read-only plan argv (fail safe): ``--permission-mode plan`` plus the pinned
-    PLAN_MODE_TOOLS, no MCP servers and the mutating built-ins denied."""
+    PLAN_MODE_TOOLS, no MCP servers and the mutating built-ins denied.
+
+    The conversation is always named by id: ``--resume <id>`` continues it,
+    ``--session-id <id>`` starts it under that id. There is no ``--continue``: it
+    resumes the most recent conversation in the working directory, which every
+    operator shares, so it could hand one operator another's transcript (audit
+    O06-frontier-agent-13)."""
     cmd = [
         claude_path,
         "-p",  # Print mode - skips trust dialog
@@ -167,13 +169,9 @@ def build_claude_argv(claude_path: str, prompt: str, *, permission_mode: str,
     if model:
         cmd.extend(["--model", model])
 
-    # Add session continuity flags (priority: resume > continue > session-id)
-    if resume_session and claude_session_id:
-        cmd.extend(["--resume", claude_session_id])  # Resume a specific session from disk
-    elif continue_session:
-        cmd.append("--continue")  # Continue the most recent conversation in this directory
-    elif claude_session_id:
-        cmd.extend(["--session-id", claude_session_id])
+    # Session continuity: this conversation, by id
+    if claude_session_id:
+        cmd.extend(["--resume" if resume_session else "--session-id", claude_session_id])
 
     # Add the prompt
     cmd.append(prompt)
@@ -196,104 +194,41 @@ def _claude_child_path(claude_path: str) -> str:
     return ":".join(dict.fromkeys(dirs))
 
 
-def create_claude_streaming(working_dir: str, prompt: str, claude_session_id: str = None, continue_session: bool = False, resume_session: bool = False, model: str = None, permission_mode: str = PERMISSION_MODE_YOLO) -> subprocess.Popen:
-    """Create Claude Code process in streaming print mode.
-    Uses -p (print) mode with stream-json output for programmatic use.
-    This completely skips trust dialogs and interactive prompts.
+def claude_spawn_spec(working_dir: str, prompt: str, *, claude_session_id: str = None,
+                      resume_session: bool = False, model: str = None,
+                      permission_mode: str = PERMISSION_MODE_YOLO) -> SpawnSpec:
+    """The print-mode Claude Code run for one agent turn; CliAgentTransport starts it.
+
+    Uses -p (print) mode with stream-json output, which skips trust dialogs and
+    interactive prompts.
     Args:
-        working_dir: Working directory for Claude Code
+        working_dir: Working directory for Claude Code (a resumed conversation
+            must run where it started: the CLI keeps conversations per directory)
         prompt: The prompt to send
-        claude_session_id: UUID for Claude's session tracking (for --session-id or --resume)
-        continue_session: If True, use --continue to continue the conversation
-        resume_session: If True, use --resume to restore a session from disk (requires claude_session_id)
+        claude_session_id: The conversation's UUID
+        resume_session: True resumes that conversation (--resume); False starts
+            it under that id (--session-id)
         model: Model to use (opus, sonnet, haiku). If None, uses default.
         permission_mode: "yolo" (default, every tool approved) or "plan" (read-only).
-    Returns:
-        subprocess.Popen with stdout pipe for reading JSON stream
     """
     claude_path = _claude_path()
 
     cmd = build_claude_argv(
         claude_path, prompt, permission_mode=permission_mode, model=model,
-        claude_session_id=claude_session_id, continue_session=continue_session,
-        resume_session=resume_session)
-    if resume_session and claude_session_id:
-        print(f"[AGENT] Resuming session from disk: {claude_session_id[:8]}...")
+        claude_session_id=claude_session_id, resume_session=resume_session)
 
-    print(f"[AGENT] Claude command: {' '.join(cmd[:8])}... (mode={permission_mode}, continue={continue_session}, resume={resume_session}, session_id={claude_session_id[:8] if claude_session_id else 'None'})")
+    print(f"[AGENT] Claude command: {' '.join(cmd[:8])}... (mode={permission_mode}, resume={resume_session}, session_id={claude_session_id[:8] if claude_session_id else 'None'})")
     print(f"[AGENT] Model specified: {model}")
 
-    # stdin is never a pipe: print mode reads no approvals from it, and an open,
-    # never-closed pipe makes the CLI wait for piped input (the old 'ask' hang).
-    process = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=working_dir,
-        # Scrubbed env (shared env_scrub table): claude must authenticate with
-        # the operator's subscription login, never bill an inherited
-        # ANTHROPIC_API_KEY, and a YOLO agent must not hold the server's other
-        # credentials (audit O14-cli-agents-devices-02/-03).
-        env={
-            **scrubbed_child_env(),
-            "PATH": _claude_child_path(claude_path),
-        },
-        start_new_session=True
-    )
-
-    # Set stdout to non-blocking
-    flags = fcntl.fcntl(process.stdout.fileno(), fcntl.F_GETFL)
-    fcntl.fcntl(process.stdout.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    print(f"[AGENT] Created Claude Code streaming process PID={process.pid} in {working_dir}")
-    return process
-
-
-def create_claude_pty(working_dir: str) -> Tuple[Any, int]:
-    """Create PTY-controlled Claude Code process (legacy - for interactive mode).
-    Returns:
-        Tuple of (subprocess.Popen, master_fd)
-    """
-    import subprocess
-
-    master_fd, slave_fd = pty.openpty()
-
-    # Set terminal size (120 cols x 40 rows)
-    cols, rows = 120, 40
-    winsize = struct.pack('HHHH', rows, cols, 0, 0)
-    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
-
-    # Set non-blocking mode on master
-    flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-    fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    # Launch Claude Code CLI - use full path since service might not have ~/.local/bin in PATH
-    claude_path = _claude_path()
-
-    # Use --dangerously-skip-permissions to bypass trust dialog and permission prompts
-    # This allows for smooth streaming without interactive prompts
-    process = subprocess.Popen(
-        [claude_path, "--dangerously-skip-permissions"],
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        cwd=working_dir,
-        env={
-            **scrubbed_child_env(),  # same rule as create_claude_streaming
-            "TERM": "xterm-256color",
-            "COLUMNS": str(cols),
-            "LINES": str(rows),
-            "PATH": _claude_child_path(claude_path)
-        },
-        start_new_session=True
-    )
-
-    # Close slave fd in parent process
-    os.close(slave_fd)
-
-    print(f"[AGENT] Created Claude Code process PID={process.pid} in {working_dir}")
-    return process, master_fd
+    # Scrubbed env (shared env_scrub table): claude must authenticate with
+    # the operator's subscription login, never bill an inherited
+    # ANTHROPIC_API_KEY, and a YOLO agent must not hold the server's other
+    # credentials (audit O14-cli-agents-devices-02/-03).
+    env = {
+        **scrubbed_child_env(),
+        "PATH": _claude_child_path(claude_path),
+    }
+    return SpawnSpec(argv=cmd, cwd=working_dir, env=env)
 
 
 def detect_agent_permission(text: str) -> Optional[Dict]:
@@ -442,70 +377,6 @@ def ansi_to_html(text: str) -> str:
     return result
 
 
-async def stream_agent_output(session: AgentSession):
-    """Stream raw terminal output from Claude Code CLI.
-    Simple approach: just pass through everything so user sees exactly what CLI shows.
-    Yields 'waiting' periodically but keeps running to catch delayed output.
-    """
-    print(f"[AGENT] Starting RAW output stream for session {session.session_id}")
-
-    idle_count = 0
-    total_idle = 0
-    max_idle_before_yield = 20  # 2 seconds (20 * 0.1s) before yielding "waiting"
-    max_total_idle = 300  # 30 seconds total idle before giving up
-
-    while session.process and session.process.poll() is None:
-        readable, _, _ = select.select([session.pty_master], [], [], 0.05)
-
-        if readable:
-            idle_count = 0  # Reset idle counter when we get output
-            total_idle = 0
-            try:
-                raw_chunk = os.read(session.pty_master, 4096)
-                if not raw_chunk:
-                    continue
-
-                chunk = raw_chunk.decode('utf-8', errors='replace')
-                print(f"[AGENT] Got output ({len(chunk)} bytes): {repr(chunk[:80])}...")
-
-                # Convert ANSI to HTML for display
-                html_chunk = ansi_to_html(chunk)
-                # Clean up carriage returns (terminal cursor movement)
-                html_chunk = html_chunk.replace('\r\n', '\n').replace('\r', '\n')
-
-                # Send raw output immediately
-                if html_chunk:
-                    yield {"type": "raw", "data": html_chunk}
-                    session.last_activity = now_utc_iso()
-
-            except OSError as e:
-                print(f"[AGENT] OSError: {e}")
-                break
-            except Exception as e:
-                print(f"[AGENT] Error: {e}")
-                break
-        else:
-            idle_count += 1
-            total_idle += 1
-
-            # Periodically yield "waiting" to let frontend know we're still alive
-            if idle_count >= max_idle_before_yield:
-                print(f"[AGENT] Idle for {idle_count * 0.1:.1f}s, yielding 'waiting', total idle: {total_idle * 0.1:.1f}s")
-                yield {"type": "waiting", "data": None}
-                idle_count = 0  # Reset for next yield cycle
-
-            # Give up after extended idle
-            if total_idle >= max_total_idle:
-                print(f"[AGENT] Extended idle timeout ({total_idle * 0.1:.1f}s), returning")
-                return
-
-        await asyncio.sleep(0.1)
-
-    print(f"[AGENT] Stream ended - process exited for session {session.session_id}")
-    session.status = "completed"
-    yield {"type": "completed", "data": None}
-
-
 @app.get("/agent/test")
 async def test_agent_endpoint():
     """Test endpoint to verify agent functionality is available."""
@@ -522,111 +393,58 @@ async def test_agent_endpoint():
     }
 
 
-async def pty_reader_task(session: AgentSession, websocket: WebSocket):
-    """Background task that reads PTY output and sends to WebSocket."""
-    print(f"[AGENT] PTY reader task started for session {session.session_id}")
+# =============================================================================
+# Claude agent sessions over CliAgentTransport (audit rank 56)
+#
+# One AgentSession per socket session id; its transport runs one `claude -p`
+# turn at a time and keeps the session's bounded output. Each socket follows
+# it with its own relay task (cancelled when that socket goes), so a second
+# client or a reconnect never takes lines from another.
+#
+# Every turn names its conversation by id: the first with --session-id, every
+# later one with --resume. --continue picked "the most recent conversation in
+# this directory", and every operator shares the default directory, so a
+# follow-up could resume another operator's transcript (O06-frontier-agent-13).
+# The id is the one chosen here until the CLI reports another one.
+# =============================================================================
 
+# A prompt that arrives while the previous turn still runs waits this long for
+# it, then stops it.
+PREVIOUS_TURN_WAIT_SECONDS = 5.0
+OTHER_OPERATOR_MESSAGE = (
+    "This agent session belongs to another operator. Start a new session to talk "
+    "to the agent as yourself.")
+
+
+def _note_claude_line(session: AgentSession, line: str) -> None:
+    """Every stdout line, client attached or not: stamp activity and follow the
+    conversation id the CLI reports (system/init and result events carry it)."""
+    session.last_activity = now_utc_iso()
+    if '"session_id"' not in line:
+        return
     try:
-        while session.process and session.process.poll() is None:
-            readable, _, _ = select.select([session.pty_master], [], [], 0.1)
-
-            if readable:
-                try:
-                    raw_chunk = os.read(session.pty_master, 4096)
-                    if not raw_chunk:
-                        continue
-
-                    chunk = raw_chunk.decode('utf-8', errors='replace')
-                    print(f"[AGENT] Got output ({len(chunk)} bytes): {repr(chunk[:80])}...")
-
-                    # Convert ANSI to HTML for display
-                    html_chunk = ansi_to_html(chunk)
-                    html_chunk = html_chunk.replace('\r\n', '\n').replace('\r', '\n')
-
-                    if html_chunk:
-                        if not await _safe_ws_send(websocket, {"type": "raw", "data": html_chunk}):
-                            print(f"[AGENT] Client disconnected during PTY stream, stopping reader")
-                            return
-                        session.last_activity = now_utc_iso()
-
-                except OSError as e:
-                    print(f"[AGENT] PTY read error: {e}")
-                    break
-
-            await asyncio.sleep(0.1)  # Small sleep to yield control
-
-    except Exception as e:
-        print(f"[AGENT] PTY reader error: {e}")
-
-    print(f"[AGENT] PTY reader task ended for session {session.session_id}")
-    session.status = "completed"
-    await _safe_ws_send(websocket, {"type": "completed", "data": None})
+        event = json.loads(line)
+    except ValueError:
+        return
+    if not isinstance(event, dict) or event.get("type") not in ("system", "result"):
+        return
+    reported = event.get("session_id")
+    if isinstance(reported, str) and reported and reported != session.claude_session_id:
+        print(f"[AGENT] Claude reports conversation {reported[:8]}... for session {session.session_id[:8]}")
+        session.claude_session_id = reported
+        save_operator_state()
 
 
-def background_process_reader(session: AgentSession):
-    """Background thread that continuously reads from Claude Code process.
-    This runs independently of WebSocket connections, allowing the agent to
-    continue executing even if the portal disconnects or restarts.
-    """
-    print(f"[AGENT] Background reader started for session {session.session_id}")
-
-    line_buffer = ""
-
-    try:
-        while session.process and session.process.poll() is None:
-            try:
-                # Try to read from stdout (non-blocking)
-                raw_data = session.process.stdout.read(4096)
-                if raw_data:
-                    line_buffer += raw_data.decode('utf-8', errors='replace')
-
-                    # Process complete lines
-                    while '\n' in line_buffer:
-                        line, line_buffer = line_buffer.split('\n', 1)
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        # Store in output buffer for reconnection
-                        with agent_lock:
-                            session.output_buffer.append(line)
-                            session.last_activity = now_utc_iso()
-
-            except (BlockingIOError, IOError):
-                # No data available yet
-                pass
-            except Exception as e:
-                print(f"[AGENT] Background reader error: {e}")
-                break
-
-            time.sleep(0.02)  # Small sleep to prevent busy-waiting
-
-        # Process any remaining data
-        try:
-            remaining = session.process.stdout.read()
-            if remaining:
-                line_buffer += remaining.decode('utf-8', errors='replace')
-                for line in line_buffer.split('\n'):
-                    if line.strip():
-                        with agent_lock:
-                            session.output_buffer.append(line.strip())
-        except:
-            pass
-
-    except Exception as e:
-        print(f"[AGENT] Background reader fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print(f"[AGENT] Background reader ended for session {session.session_id}")
+def _finish_claude_turn(session: AgentSession, returncode: int) -> None:
+    """The one completion point of a turn: it runs when the CLI exits whether or
+    not any client is attached, so it is where a disconnected operator learns the
+    run finished."""
     with agent_lock:
         session.status = "completed"
+        session.last_activity = now_utc_iso()
 
-    # MN.7: agent/CLI session completion. This thread runs INDEPENDENTLY of any
-    # WebSocket client (the process keeps going even if the Portal disconnects),
-    # so it is the right place to tell a disconnected operator the run finished.
-    # Sync thread → fire-and-forget via the bridge; fully isolated so a notify
-    # failure never affects the reader's own completion bookkeeping. An
+    # MN.7: agent/CLI session completion. Fire-and-forget via the bridge; fully
+    # isolated so a notify failure never affects the completion bookkeeping. An
     # unattributed session (no operator) is suppressed to avoid spam.
     try:
         operator = (session.operator or "").strip()
@@ -638,255 +456,245 @@ def background_process_reader(session: AgentSession):
                 category="agent",
                 dedup_key=f"agent:{session.session_id}:{session.message_count}",
             )
-    except Exception as e:  # noqa: BLE001 — never let a notify break the reader
+    except Exception as e:  # noqa: BLE001 — never let a notify break completion
         print(f"[AGENT] completion notification failed (non-fatal): {e}")
 
 
-async def streaming_reader_task(session: AgentSession, websocket: WebSocket):
-    """Background task that broadcasts buffered output to this WebSocket.
-    Reads from session.output_buffer which is populated by background_process_reader.
-    Uses session.output_cursor to track position across multiple reader tasks.
+def _new_claude_transport(session: AgentSession) -> CliAgentTransport:
+    return CliAgentTransport(
+        f"agent-{session.session_id[:8]}",
+        on_line=lambda line: _note_claude_line(session, line),
+        on_exit=lambda returncode: _finish_claude_turn(session, returncode),
+    )
+
+
+def _claude_user_event_frames(event: dict) -> List[dict]:
+    """Tool results (and file reads / edit diffs) from a stream-json "user" event.
+
+    Structure: {"type":"user","message":{"content":[{"type":"tool_result","content":"..."}]},"tool_use_result":{...}}
     """
-    print(f"[AGENT] Streaming reader task started for session {session.session_id}, cursor at {session.output_cursor}")
+    frames: List[dict] = []
+    message = event.get("message", {})
+    # Handle case where message might be a list
+    if isinstance(message, list):
+        content_blocks = message
+    elif isinstance(message, dict):
+        content_blocks = message.get("content", [])
+    else:
+        content_blocks = []
 
-    try:
-        while session.process and session.process.poll() is None:
-            # Get new output from buffer using session's cursor
-            with agent_lock:
-                if session.output_cursor < len(session.output_buffer):
-                    new_lines = session.output_buffer[session.output_cursor:]
-                    session.output_cursor = len(session.output_buffer)
-                else:
-                    new_lines = []
-            
-            # Send new lines to WebSocket
-            for line in new_lines:
-                if not line.strip():
+    tool_use_result = event.get("tool_use_result", {})
+    # Handle case where tool_use_result might be a list
+    if not isinstance(tool_use_result, dict):
+        tool_use_result = {}
+
+    for block in content_blocks if isinstance(content_blocks, list) else []:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            tool_content = block.get("content", "")
+            if tool_content:
+                frames.append({"type": "tool_result", "data": tool_content})
+
+    # Also send structured file info if available (for diffs, file reads, edits)
+    if tool_use_result:
+        result_type = tool_use_result.get("type", "")
+
+        # Handle Read tool results (file content)
+        if result_type == "text" and isinstance(tool_use_result.get("file"), dict):
+            file_info = tool_use_result["file"]
+            frames.append({
+                "type": "file_result",
+                "data": {
+                    "filePath": file_info.get("filePath", ""),
+                    "content": file_info.get("content", ""),
+                    "numLines": file_info.get("numLines", 0),
+                    "startLine": file_info.get("startLine", 1)
+                }
+            })
+
+        # Handle Edit tool results (diffs with structuredPatch)
+        elif tool_use_result.get("structuredPatch"):
+            # Build unified diff from structuredPatch
+            diff_lines = []
+            for patch in tool_use_result.get("structuredPatch", []):
+                if not isinstance(patch, dict):
                     continue
-                    
-                try:
-                    event = json.loads(line)
-                    event_type = event.get("type", "")
-                    print(f"[AGENT-STREAM] Event type: {event_type}")
+                old_start = patch.get("oldStart", 1)
+                old_lines = patch.get("oldLines", 0)
+                new_start = patch.get("newStart", 1)
+                new_lines = patch.get("newLines", 0)
+                diff_lines.append(f"@@ -{old_start},{old_lines} +{new_start},{new_lines} @@")
+                diff_lines.extend(patch.get("lines", []))
+            frames.append({
+                "type": "edit_diff",
+                "data": {
+                    "filePath": tool_use_result.get("filePath", ""),
+                    "oldString": tool_use_result.get("oldString", ""),
+                    "newString": tool_use_result.get("newString", ""),
+                    "diff": "\n".join(diff_lines)
+                }
+            })
+    return frames
 
-                    if event_type == "assistant":
-                        # The "assistant" event contains the COMPLETE message.
-                        # This may come INSTEAD of content_block_delta (non-streaming)
-                        # or AFTER content_block_delta (streaming, duplicate).
-                        # We'll send it but mark it as "assistant_message" so frontend can dedupe if needed.
-                        message = event.get("message", {})
-                        content = message.get("content", [])
-                        for block in content:
-                            if block.get("type") == "text":
-                                text = block.get("text", "")
-                                if text:
-                                    # Send as special type so frontend knows this is complete message
-                                    if not await _safe_ws_send(websocket, {"type": "assistant_message", "data": text}):
-                                        print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                        return
-                            elif block.get("type") == "tool_use":
-                                tool_name = block.get("name", "")
-                                tool_input = block.get("input", {})
 
-                                # Special handling for TodoWrite tool - send as dedicated message type
-                                if tool_name == "TodoWrite":
-                                    todos = tool_input.get("todos", [])
-                                    if not await _safe_ws_send(websocket, {
-                                        "type": "todo_write",
-                                        "data": todos
-                                    }):
-                                        print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                        return
-                                    print(f"[AGENT] TodoWrite: {len(todos)} todos")
-                                    continue  # Don't send as generic tool_use
+def claude_event_frames(line: str) -> List[dict]:
+    """Client frames for one `claude -p --output-format stream-json` line.
 
-                                # The CLI already decided this tool (YOLO approves it; plan
-                                # never offers one that writes); there is no approval to ask for.
-                                if not await _safe_ws_send(websocket, {
-                                    "type": "tool_use",
-                                    "data": {"name": tool_name, "input": tool_input}
-                                }):
-                                    print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                    return
-                    
-                    elif event_type == "content_block_delta":
-                        delta = event.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                if not await _safe_ws_send(websocket, {"type": "content", "data": text}):
-                                    print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                    return
-                        elif delta.get("type") == "thinking_delta":
-                            thinking = delta.get("thinking", "")
-                            if thinking:
-                                if not await _safe_ws_send(websocket, {"type": "thinking", "data": thinking}):
-                                    print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                    return
+    The mapping the Portal and Android clients render; a line that is not a
+    JSON object goes out as ``raw``.
+    """
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return [{"type": "raw", "data": line}]
+    if not isinstance(event, dict):
+        return [{"type": "raw", "data": line}]
+    event_type = event.get("type", "")
+    frames: List[dict] = []
 
-                    elif event_type == "user":
-                        # User events contain tool results from Claude Code's tool execution
-                        # Structure: {"type":"user","message":{"content":[{"type":"tool_result","content":"..."}]},"tool_use_result":{...}}
-                        message = event.get("message", {})
-                        # Handle case where message might be a list
-                        if isinstance(message, list):
-                            content_blocks = message
-                        elif isinstance(message, dict):
-                            content_blocks = message.get("content", [])
-                        else:
-                            content_blocks = []
+    if event_type == "assistant":
+        # The "assistant" event contains the COMPLETE message. It may come
+        # INSTEAD of content_block_delta (non-streaming) or AFTER it (streaming,
+        # duplicate), so it goes out as "assistant_message" for the client to dedupe.
+        message = event.get("message", {})
+        content = message.get("content", []) if isinstance(message, dict) else []
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text", "")
+                if text:
+                    frames.append({"type": "assistant_message", "data": text})
+            elif block.get("type") == "tool_use":
+                tool_name = block.get("name", "")
+                tool_input = block.get("input", {})
+                # TodoWrite goes out as its own message type
+                if tool_name == "TodoWrite":
+                    todos = tool_input.get("todos", []) if isinstance(tool_input, dict) else []
+                    frames.append({"type": "todo_write", "data": todos})
+                    continue
+                # The CLI already decided this tool (YOLO approves it; plan never
+                # offers one that writes); there is no approval to ask for.
+                frames.append({"type": "tool_use", "data": {"name": tool_name, "input": tool_input}})
 
-                        tool_use_result = event.get("tool_use_result", {})
-                        # Handle case where tool_use_result might be a list
-                        if not isinstance(tool_use_result, dict):
-                            tool_use_result = {}
+    elif event_type == "content_block_delta":
+        delta = event.get("delta", {})
+        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+            if delta.get("text"):
+                frames.append({"type": "content", "data": delta["text"]})
+        elif isinstance(delta, dict) and delta.get("type") == "thinking_delta":
+            if delta.get("thinking"):
+                frames.append({"type": "thinking", "data": delta["thinking"]})
 
-                        print(f"[AGENT-STREAM] User event with {len(content_blocks)} content blocks, tool_use_result type: {tool_use_result.get('type', 'none')}")
+    elif event_type == "user":
+        # User events carry the tool results of Claude Code's tool execution
+        frames.extend(_claude_user_event_frames(event))
 
-                        for block in content_blocks:
-                            if isinstance(block, dict) and block.get("type") == "tool_result":
-                                tool_content = block.get("content", "")
-                                if tool_content:
-                                    print(f"[AGENT-STREAM] Sending tool_result, preview: {str(tool_content)[:100]}...")
-                                    if not await _safe_ws_send(websocket, {"type": "tool_result", "data": tool_content}):
-                                        print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                        return
+    elif event_type == "tool_result":
+        # Legacy handling for direct tool_result events (may not be used)
+        tool_result = event.get("tool_result", {})
+        content = tool_result.get("content", "") if isinstance(tool_result, dict) else ""
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                    frames.append({"type": "tool_result", "data": block["text"]})
+        elif isinstance(content, str) and content:
+            frames.append({"type": "tool_result", "data": content})
 
-                        # Also send structured file info if available (for diffs, file reads, edits)
-                        if tool_use_result:
-                            result_type = tool_use_result.get("type", "")
+    elif event_type == "error":
+        error = event.get("error", {})
+        message = error.get("message") if isinstance(error, dict) else error
+        frames.append({"type": "error", "data": message or "Unknown error"})
 
-                            # Handle Read tool results (file content)
-                            if result_type == "text" and tool_use_result.get("file"):
-                                file_info = tool_use_result.get("file", {})
-                                if not await _safe_ws_send(websocket, {
-                                    "type": "file_result",
-                                    "data": {
-                                        "filePath": file_info.get("filePath", ""),
-                                        "content": file_info.get("content", ""),
-                                        "numLines": file_info.get("numLines", 0),
-                                        "startLine": file_info.get("startLine", 1)
-                                    }
-                                }):
-                                    print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                    return
+    # "result" carries a summary that duplicates the streamed text: not sent.
+    return frames
 
-                            # Handle Edit tool results (diffs with structuredPatch)
-                            elif tool_use_result.get("structuredPatch"):
-                                file_path = tool_use_result.get("filePath", "")
-                                old_string = tool_use_result.get("oldString", "")
-                                new_string = tool_use_result.get("newString", "")
-                                patches = tool_use_result.get("structuredPatch", [])
 
-                                # Build unified diff from structuredPatch
-                                diff_lines = []
-                                for patch in patches:
-                                    old_start = patch.get("oldStart", 1)
-                                    old_lines = patch.get("oldLines", 0)
-                                    new_start = patch.get("newStart", 1)
-                                    new_lines = patch.get("newLines", 0)
-                                    diff_lines.append(f"@@ -{old_start},{old_lines} +{new_start},{new_lines} @@")
-                                    diff_lines.extend(patch.get("lines", []))
+def _frame_operator(data: dict) -> str:
+    raw = data.get("operator")
+    return raw.strip() if isinstance(raw, str) else ""
 
-                                diff_text = "\n".join(diff_lines)
-                                print(f"[AGENT-STREAM] Sending edit_diff for {file_path}: {len(diff_lines)} lines")
 
-                                if not await _safe_ws_send(websocket, {
-                                    "type": "edit_diff",
-                                    "data": {
-                                        "filePath": file_path,
-                                        "oldString": old_string,
-                                        "newString": new_string,
-                                        "diff": diff_text
-                                    }
-                                }):
-                                    print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                    return
+def _since_seq(data: dict, transport: CliAgentTransport) -> int:
+    """Where a reconnecting client resumes: its ``since_seq`` (the ``next_seq``
+    /agent/session handed it), else the live tail (it already shows the rest)."""
+    raw = data.get("since_seq")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return transport.buffer.next_seq
 
-                    elif event_type == "tool_result":
-                        # Legacy handling for direct tool_result events (may not be used)
-                        tool_result = event.get("tool_result", {})
-                        print(f"[AGENT-STREAM] Direct tool_result event, keys: {list(tool_result.keys())}")
-                        content = tool_result.get("content", "")
-                        if isinstance(content, list):
-                            for block in content:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    text = block.get("text", "")
-                                    if text:
-                                        if not await _safe_ws_send(websocket, {"type": "tool_result", "data": text}):
-                                            print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                            return
-                        elif isinstance(content, str) and content:
-                            if not await _safe_ws_send(websocket, {"type": "tool_result", "data": content}):
-                                print(f"[AGENT] Client disconnected during stream, stopping reader")
-                                return
 
-                    elif event_type == "result":
-                        # The "result" event contains a summary/final output.
-                        # This may duplicate content already sent via content_block_delta.
-                        # Log it for debugging but don't send to avoid duplication.
-                        result = event.get("result", "")
-                        if result:
-                            print(f"[AGENT-STREAM] Result event (not sending to avoid dupe): {result[:100]}...")
-                    
-                    elif event_type == "error":
-                        error = event.get("error", {}).get("message", "Unknown error")
-                        if not await _safe_ws_send(websocket, {"type": "error", "data": error}):
-                            print(f"[AGENT] Client disconnected during stream, stopping reader")
-                            return
-                        
-                except json.JSONDecodeError:
-                    # Not JSON, send as raw
-                    if not await _safe_ws_send(websocket, {"type": "raw", "data": line}):
-                        print(f"[AGENT] Client disconnected during stream, stopping reader")
-                        return
-                except Exception as e:
-                    print(f"[AGENT] Error processing line: {e}")
-            
-            await asyncio.sleep(0.1)
-
-        # Process completed
-        with agent_lock:
-            session.status = "completed"
-        await _safe_ws_send(websocket, {"type": "completed", "data": None})
-
-    except Exception as e:
-        print(f"[AGENT] Streaming reader error: {e}")
-        import traceback
-        traceback.print_exc()
+async def _start_turn(send, session, spec: SpawnSpec, cli_label: str) -> Optional[int]:
+    """Start one turn; when it cannot start, tell the client (an error, then the
+    `completed` that closes its pending reply) and return None."""
+    try:
+        return await session.transport.start(spec)
+    except RuntimeError:
+        # Another client's prompt started a turn while this one waited.
+        message = "The agent is still working on another message in this session. Try again when it finishes."
+    except OSError as e:
+        print(f"[AGENT] Could not start {spec.argv[0]}: {e}")
+        message = (f"Could not start the {cli_label} CLI ({os.path.basename(spec.argv[0])}): "
+                   f"{e.strerror or e}. Install it or sign in to it on this box, then try again.")
+    await send({"type": "error", "data": message})
+    await send({"type": "completed", "data": None})
+    return None
 
 
 @app.websocket("/ws/agent/{session_id}")
 async def agent_websocket(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for Claude Code CLI streaming.
-    Uses streaming JSON mode (-p --output-format stream-json) for reliable output.
-    Supports session continuity with --continue flag for follow-up messages.
+    Uses streaming JSON mode (-p --output-format stream-json) for reliable output;
+    a follow-up resumes the conversation by id (see the block comment above).
     """
     print(f"[AGENT] WebSocket endpoint hit for session: {session_id}")
     await websocket.accept()
     print(f"[AGENT] WebSocket accepted for session: {session_id}")
 
-    reader_task = None
-    session = None
+    relay_task: Optional[asyncio.Task] = None
+    # The operator this socket acts for: named by a frame, else its session's.
+    # Never assumed: end_session used to read it unbound (O06-frontier-agent-04).
+    bound_operator = ""
+
+    async def send(frame: dict) -> bool:
+        return await _safe_ws_send(websocket, frame)
+
+    def follow(session: AgentSession, since_seq: int) -> None:
+        """This socket's own reader of the session (replaces any earlier one)."""
+        nonlocal relay_task
+        cancel_task(relay_task)
+        with agent_lock:
+            if websocket not in session.websocket_clients:
+                session.websocket_clients.append(websocket)
+        relay_task = asyncio.create_task(
+            relay(session.transport, send, claude_event_frames, since_seq),
+            name=f"agent-relay-{session_id[:8]}")
 
     try:
         while True:
             data = await websocket.receive_json()
-            print(f"[AGENT] Received message type: {data.get('type')}")
+            if not isinstance(data, dict):
+                continue
+            msg_type = data.get("type")
+            print(f"[AGENT] Received message type: {msg_type}")
 
-            if data["type"] == "prompt":
-                operator = data.get("operator", current_default())
+            if msg_type == "prompt":
+                with agent_lock:
+                    session = AGENT_SESSIONS.get(session_id)
+                operator = (_frame_operator(data) or (session.operator if session else "")
+                            or bound_operator or current_default())
+                if session is not None and session.operator and operator != session.operator:
+                    await send({"type": "error", "data": OTHER_OPERATOR_MESSAGE})
+                    continue
+                bound_operator = operator
                 # Default to blackbox_poc folder instead of home directory
-                default_dir = str(blackbox_root())
-                working_dir = data.get("working_dir") or default_dir
+                working_dir = data.get("working_dir") or str(blackbox_root())
                 prompt_text = data.get("text", "")
                 model = data.get("model", "sonnet")  # Default to sonnet
                 permission_mode = resolve_permission_mode(data)
-                print(f"[AGENT] RAW WebSocket data received: {data}")
                 print(f"[AGENT] Permission mode: {permission_mode}")
 
                 if not prompt_text:
-                    await _safe_ws_send(websocket, {"type": "error", "data": "No prompt provided"})
+                    await send({"type": "error", "data": "No prompt provided"})
                     continue
 
                 # Plan Task 4: inject fossil retrieval at session start.
@@ -900,95 +708,75 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     log_prefix="[AGENT]",
                 )
 
-                # Check if we have an existing session to continue
-                with agent_lock:
-                    session = AGENT_SESSIONS.get(session_id)
+                if session is not None and session.transport is not None:
+                    await session.transport.finish_or_stop(PREVIOUS_TURN_WAIT_SECONDS)
 
-                # Wait for any previous process to complete
-                if session and session.process and session.process.poll() is None:
-                    print(f"[AGENT] Waiting for previous process to complete...")
-                    # Wait up to 5 seconds for process to finish
-                    for _ in range(50):
-                        if session.process.poll() is not None:
-                            break
-                        await asyncio.sleep(0.1)
-                    if session.process.poll() is None:
-                        session.process.terminate()
-
-                # Check for persisted session from previous server run
-                persisted_session = PERSISTED_AGENT_SESSIONS.get(operator)
-                is_resume_from_disk = False
-
-                # Determine if this is a continuation or resume
-                if session is not None and session.message_count > 0:
-                    # Active session in memory - continue it
-                    is_continuation = True
-                    is_resume_from_disk = False
+                # Which conversation this turn belongs to, always by id:
+                #   this session's own (a follow-up), else the operator's persisted
+                #   one from a previous server run (resume from disk), else a new one.
+                persisted = PERSISTED_AGENT_SESSIONS.get(operator) or {}
+                if session is not None and session.message_count > 0 and session.claude_session_id:
+                    turn = "continue"
                     claude_session_id = session.claude_session_id
-                elif persisted_session and not session:
-                    # No active session but we have persisted data - resume from disk
-                    is_continuation = False
-                    is_resume_from_disk = True
-                    claude_session_id = persisted_session.get("claude_session_id")
+                    cwd = session.working_directory or working_dir
+                elif session is None and persisted.get("claude_session_id"):
+                    turn = "resume"
+                    claude_session_id = persisted["claude_session_id"]
+                    cwd = persisted.get("working_directory") or working_dir
                     print(f"[AGENT] Found persisted session for {operator}, will resume: {claude_session_id[:8]}...")
                 else:
-                    # Brand new session
-                    is_continuation = False
-                    is_resume_from_disk = False
+                    turn = "new"
                     claude_session_id = str(uuid.uuid4())
+                    cwd = working_dir
 
-                print(f"[AGENT] Session mode: continuation={is_continuation}, resume_from_disk={is_resume_from_disk}, message_count: {session.message_count if session else (persisted_session.get('message_count', 0) if persisted_session else 0)}, model: {model}, permission_mode: {permission_mode}")
+                print(f"[AGENT] Session mode: {turn}, message_count: {session.message_count if session else persisted.get('message_count', 0)}, model: {model}, permission_mode: {permission_mode}")
 
                 # Plan Task 4: only prepend fossil context to brand-new sessions.
-                # Continuations and resume-from-disk already carry prior turns
-                # via Claude Code CLI's `--continue` / `--resume` flags; re-
-                # injecting fossils every message would blow the prompt budget.
+                # A resumed conversation already carries its prior turns;
+                # re-injecting fossils every message would blow the prompt budget.
                 effective_prompt = prompt_text
-                if not is_continuation and not is_resume_from_disk:
+                if turn == "new":
                     effective_prompt = compose_with_fossils(fossil_text, prompt_text)
-
-                # Create new streaming process
-                process = create_claude_streaming(
-                    working_dir,
-                    effective_prompt,
-                    claude_session_id=claude_session_id if (is_resume_from_disk or not is_continuation) else None,
-                    continue_session=is_continuation,
-                    resume_session=is_resume_from_disk,
-                    model=model,
-                    permission_mode=permission_mode
-                )
 
                 if session is None:
                     # Create new session (or restore from persisted)
-                    restored_msg_count = persisted_session.get("message_count", 0) if is_resume_from_disk else 0
                     session = AgentSession(
                         session_id=session_id,
                         operator=operator,
-                        process=process,
-                        pty_master=None,
                         mode="streaming",
-                        working_directory=working_dir,
+                        working_directory=cwd,
                         created_at=now_utc_iso(),
                         last_activity=now_utc_iso(),
-                        status="running",
                         claude_session_id=claude_session_id,
-                        message_count=restored_msg_count + 1,
+                        message_count=persisted.get("message_count", 0) if turn == "resume" else 0,
                         model=model,
                         permission_mode=permission_mode,
                         provenance=provenance,
                     )
-                    if is_resume_from_disk:
-                        print(f"[AGENT] Restored session from disk with {restored_msg_count} previous messages")
-                else:
-                    # Update existing session
-                    session.process = process
-                    session.last_activity = now_utc_iso()
-                    session.status = "running"
-                    session.message_count += 1
-                    session.model = model  # Update model in case user changed it
-                    session.permission_mode = permission_mode  # Update permission mode
-                    # Refresh provenance to reflect the latest user prompt
-                    session.provenance = provenance
+                if session.transport is None:
+                    session.transport = _new_claude_transport(session)
+                session.claude_session_id = claude_session_id
+
+                spec = claude_spawn_spec(
+                    cwd, effective_prompt,
+                    claude_session_id=claude_session_id,
+                    resume_session=turn != "new",
+                    model=model,
+                    permission_mode=permission_mode,
+                )
+                start_seq = await _start_turn(send, session, spec, "Claude Code")
+                if start_seq is None:
+                    continue
+
+                session.status = "running"
+                session.last_activity = now_utc_iso()
+                session.message_count += 1
+                session.model = model  # Update model in case user changed it
+                session.permission_mode = permission_mode  # Update permission mode
+                # Refresh provenance to reflect the latest user prompt
+                session.provenance = provenance
+                if turn == "resume":
+                    print(f"[AGENT] Restored session from disk with {session.message_count - 1} previous messages")
 
                 with agent_lock:
                     AGENT_SESSIONS[session_id] = session
@@ -996,219 +784,185 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 # Save session state immediately so we don't lose it on crash
                 save_operator_state()
 
-                print(f"[AGENT] {'Resumed' if is_resume_from_disk else ('Continuing' if is_continuation else 'Created')} session (msg #{session.message_count}): {prompt_text[:50]}...")
+                print(f"[AGENT] {'Resumed' if turn == 'resume' else ('Continuing' if turn == 'continue' else 'Created')} session (msg #{session.message_count}): {prompt_text[:50]}...")
+                follow(session, start_seq)
 
-                # Start background reader thread if not already running
-                if session.background_reader is None or not session.background_reader.is_alive():
-                    import threading
-                    session.background_reader = threading.Thread(
-                        target=background_process_reader,
-                        args=(session,),
-                        daemon=True,
-                        name=f"agent-reader-{session_id[:8]}"
-                    )
-                    session.background_reader.start()
-                    print(f"[AGENT] Started background reader thread for session {session_id[:8]}")
-
-                # Add this websocket to the session's client list
-                with agent_lock:
-                    if websocket not in session.websocket_clients:
-                        session.websocket_clients.append(websocket)
-
-                # Start streaming reader in background task
-                if reader_task is not None and not reader_task.done():
-                    reader_task.cancel()
-                reader_task = asyncio.create_task(streaming_reader_task(session, websocket))
-                print(f"[AGENT] Started streaming reader task")
-
-            elif data["type"] == "input":
+            elif msg_type == "input":
                 # Handle follow-up input as a continuation prompt
-                input_text = data.get("text", "").strip()
+                input_text = data.get("text", "")
+                input_text = input_text.strip() if isinstance(input_text, str) else ""
                 if not input_text:
-                    await _safe_ws_send(websocket, {
-                        "type": "info",
-                        "data": "Empty input ignored"
-                    })
+                    await send({"type": "info", "data": "Empty input ignored"})
                     continue
 
                 print(f"[AGENT] Processing input as follow-up: {input_text[:50]}...")
 
-                # Get existing session
                 with agent_lock:
                     session = AGENT_SESSIONS.get(session_id)
 
-                if session is None:
-                    await _safe_ws_send(websocket, {
-                        "type": "error",
-                        "data": "No active session - start a new conversation"
-                    })
+                if session is None or session.transport is None:
+                    await send({"type": "error", "data": "No active session - start a new conversation"})
                     continue
+                bound_operator = bound_operator or session.operator
 
-                # Wait for any previous process to complete
-                if session.process and session.process.poll() is None:
-                    print(f"[AGENT] Waiting for previous process to complete...")
-                    for _ in range(50):
-                        if session.process.poll() is not None:
-                            break
-                        await asyncio.sleep(0.1)
-                    if session.process.poll() is None:
-                        session.process.terminate()
+                await session.transport.finish_or_stop(PREVIOUS_TURN_WAIT_SECONDS)
 
                 # A follow-up may switch modes (the user flipped Plan/YOLO between turns);
                 # one that names no mode keeps the session's.
                 if "permission_mode" in data or "skip_permissions" in data:
                     session.permission_mode = resolve_permission_mode(data)
 
-                # Create continuation process with --continue flag
-                process = create_claude_streaming(
-                    session.working_directory,
+                spec = claude_spawn_spec(
+                    session.working_directory or str(blackbox_root()),
                     input_text,
-                    claude_session_id=None,
-                    continue_session=True,  # Use --continue for follow-up
+                    claude_session_id=session.claude_session_id or None,
+                    resume_session=bool(session.claude_session_id),
                     model=session.model,  # Use the session's model
                     permission_mode=session.permission_mode  # Use the session's permission mode
                 )
+                start_seq = await _start_turn(send, session, spec, "Claude Code")
+                if start_seq is None:
+                    continue
 
-                # Update session
-                session.process = process
                 session.last_activity = now_utc_iso()
                 session.status = "running"
                 session.message_count += 1
-
-                with agent_lock:
-                    AGENT_SESSIONS[session_id] = session
 
                 # Save session state after each message
                 save_operator_state()
 
                 print(f"[AGENT] Continuing session (msg #{session.message_count}): {input_text[:50]}...")
+                follow(session, start_seq)
 
-                # Start background reader thread if not already running
-                if session.background_reader is None or not session.background_reader.is_alive():
-                    import threading
-                    session.background_reader = threading.Thread(
-                        target=background_process_reader,
-                        args=(session,),
-                        daemon=True,
-                        name=f"agent-reader-{session_id[:8]}"
-                    )
-                    session.background_reader.start()
-                    print(f"[AGENT] Started background reader thread for continuation")
-
-                # Start streaming reader
-                if reader_task is not None and not reader_task.done():
-                    reader_task.cancel()
-                reader_task = asyncio.create_task(streaming_reader_task(session, websocket))
-                print(f"[AGENT] Started streaming reader task for follow-up")
-
-            elif data["type"] == "end_session":
+            elif msg_type == "end_session":
                 # End the current session and clear persisted data
                 with agent_lock:
-                    session = AGENT_SESSIONS.get(session_id)
-                    if session:
-                        if session.process and session.process.poll() is None:
-                            session.process.terminate()
-                        session.status = "completed"
-                        session.message_count = 0
-                        del AGENT_SESSIONS[session_id]
-                        session = None
-                # Clear persisted session for this operator so they start fresh
-                if operator in PERSISTED_AGENT_SESSIONS:
-                    del PERSISTED_AGENT_SESSIONS[operator]
-                    print(f"[AGENT] Cleared persisted session for operator: {operator}")
+                    session = AGENT_SESSIONS.pop(session_id, None)
+                owner = (session.operator if session else "") or _frame_operator(data) or bound_operator
+                if session is not None:
+                    if session.transport is not None:
+                        # A running turn dies with the tools it started.
+                        await session.transport.stop()
+                    session.status = "completed"
+                    session.message_count = 0
+                cancel_task(relay_task)
+                relay_task = None
+                # Clear the owner's persisted session so they start fresh. Nobody
+                # else's: with no owner known, nothing is cleared.
+                if owner and owner in PERSISTED_AGENT_SESSIONS:
+                    del PERSISTED_AGENT_SESSIONS[owner]
+                    print(f"[AGENT] Cleared persisted session for operator: {owner}")
                 # Save state to persist the cleared session
                 save_operator_state()
-                await _safe_ws_send(websocket, {"type": "session_ended", "data": "Session ended. Start a new conversation."})
+                await send({"type": "session_ended", "data": "Session ended. Start a new conversation."})
                 print(f"[AGENT] Session ended by user: {session_id}")
 
-            elif data["type"] == "permission_response":
+            elif msg_type == "permission_response":
                 # No approval round-trip exists (see PERMISSION_MODE_*): print mode reads no
                 # y/n from stdin, so an answer has nowhere to go. Say so instead of
                 # pretending it was delivered.
-                await _safe_ws_send(websocket, {"type": "error", "data": UNSUPPORTED_APPROVAL_MESSAGE})
+                await send({"type": "error", "data": UNSUPPORTED_APPROVAL_MESSAGE})
 
-            elif data["type"] == "reconnect":
+            elif msg_type == "reconnect":
                 # Reconnect to existing session to resume streaming
-                operator = data.get("operator", current_default())
-                print(f"[AGENT] Reconnect request from operator: {operator}")
+                print(f"[AGENT] Reconnect request from operator: {_frame_operator(data) or '(unnamed)'}")
 
                 with agent_lock:
                     session = AGENT_SESSIONS.get(session_id)
 
                 if session is None:
-                    await _safe_ws_send(websocket, {
-                        "type": "error",
-                        "data": "No active session found to reconnect to"
-                    })
+                    await send({"type": "error", "data": "No active session found to reconnect to"})
                     continue
+                operator = _frame_operator(data) or bound_operator or session.operator
+                if session.operator and operator != session.operator:
+                    await send({"type": "error", "data": OTHER_OPERATOR_MESSAGE})
+                    continue
+                bound_operator = operator
 
-                # Add this websocket to the session's client list
-                with agent_lock:
-                    if websocket not in session.websocket_clients:
-                        session.websocket_clients.append(websocket)
-
-                # If process is still running, start streaming reader
-                if session.process and session.process.poll() is None:
-                    # Start background reader thread if not already running
-                    if session.background_reader is None or not session.background_reader.is_alive():
-                        import threading
-                        session.background_reader = threading.Thread(
-                            target=background_process_reader,
-                            args=(session,),
-                            daemon=True,
-                            name=f"agent-reader-{session_id[:8]}"
-                        )
-                        session.background_reader.start()
-                        print(f"[AGENT] Started background reader for reconnected session")
-
-                    # Start streaming reader task
-                    if reader_task is not None and not reader_task.done():
-                        reader_task.cancel()
-                    reader_task = asyncio.create_task(streaming_reader_task(session, websocket))
-                    print(f"[AGENT] Started streaming reader for reconnected client")
-
-                    await _safe_ws_send(websocket, {
+                if session.transport is not None and session.transport.running:
+                    since = _since_seq(data, session.transport)
+                    await send({
                         "type": "info",
                         "data": f"Reconnected to session (msg #{session.message_count}). Resuming stream..."
                     })
+                    follow(session, since)
+                    print("[AGENT] Started streaming relay for reconnected client")
                 else:
                     # Process completed, send notification
-                    await _safe_ws_send(websocket, {
-                        "type": "completed",
-                        "data": None
-                    })
-                    print(f"[AGENT] Reconnected to completed session, notified client")
+                    with agent_lock:
+                        if websocket not in session.websocket_clients:
+                            session.websocket_clients.append(websocket)
+                    await send({"type": "completed", "data": None})
+                    print("[AGENT] Reconnected to completed session, notified client")
 
-            elif data["type"] == "ping":
-                await _safe_ws_send(websocket, {"type": "pong"})
+            elif msg_type == "ping":
+                await send({"type": "pong"})
 
     except WebSocketDisconnect:
         print(f"[AGENT] WebSocket disconnected: {session_id}")
-        # Remove this websocket from session's client list
+        # Note: Process continues running in background!
+        print("[AGENT] Agent process continues running, can reconnect later")
+    except Exception as e:
+        print(f"[AGENT] WebSocket error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # This socket's reader goes with it; the turn and every other client's
+        # reader carry on.
+        cancel_task(relay_task)
         with agent_lock:
             session = AGENT_SESSIONS.get(session_id)
             if session and websocket in session.websocket_clients:
                 session.websocket_clients.remove(websocket)
                 print(f"[AGENT] Removed websocket from session {session_id[:8]}, {len(session.websocket_clients)} clients remaining")
-        # Note: Process continues running in background!
-        print(f"[AGENT] Agent process continues running, can reconnect later")
-    except Exception as e:
-        print(f"[AGENT] WebSocket error: {e}")
-        import traceback
-        traceback.print_exc()
-        # Also remove websocket on error
-        with agent_lock:
-            session = AGENT_SESSIONS.get(session_id)
-            if session and websocket in session.websocket_clients:
-                session.websocket_clients.remove(websocket)
+
+
+def _remember_reaped_claude_session(session: AgentSession) -> None:
+    """A reaped session's conversation stays resumable: its id goes where the
+    operator's next prompt looks (PERSISTED_AGENT_SESSIONS, the resume-from-disk
+    path), unless a newer session of theirs is live or already recorded there."""
+    operator = session.operator
+    if not operator or not session.claude_session_id:
+        return
+    with agent_lock:
+        if any(s.operator == operator for s in AGENT_SESSIONS.values()):
+            return
+    current = PERSISTED_AGENT_SESSIONS.get(operator) or {}
+    if (current.get("last_activity") or "") > (session.last_activity or ""):
+        return
+    PERSISTED_AGENT_SESSIONS[operator] = {
+        "claude_session_id": session.claude_session_id,
+        "message_count": session.message_count,
+        "model": session.model,
+        "working_directory": session.working_directory,
+        "last_activity": session.last_activity,
+    }
+    save_operator_state()
+
+
+# Finished sessions nobody is attached to are evicted after a grace period
+# (their transcripts used to stay in RAM forever: O06-frontier-agent-15).
+AGENT_SESSION_REAPER = SessionReaper(
+    AGENT_SESSIONS, agent_lock, label="agent", on_evict=_remember_reaped_claude_session)
+
+
+@boot_hook(app, "startup")
+async def start_agent_session_reaper():
+    AGENT_SESSION_REAPER.start()
 
 
 @app.get("/agent/session/{operator}")
 async def get_agent_session_for_operator(operator: str):
-    """Get existing agent session for an operator."""
+    """Get existing agent session for an operator.
+
+    ``output_buffer`` is the session's bounded tail of stdout lines and
+    ``next_seq`` the position right after it: a client that sends it as
+    ``since_seq`` in its reconnect frame misses nothing in between.
+    """
     with agent_lock:
         for session_id, session in AGENT_SESSIONS.items():
             if session.operator == operator and session.status != "completed":
+                transport = session.transport
                 return {
                     "session": {
                         "session_id": session.session_id,
@@ -1218,7 +972,8 @@ async def get_agent_session_for_operator(operator: str):
                         "last_activity": session.last_activity,
                         "apps": session.apps
                     },
-                    "output_buffer": session.output_buffer
+                    "output_buffer": transport.stdout_lines() if transport else [],
+                    "next_seq": transport.buffer.next_seq if transport else 0,
                 }
     return {"session": None}
 
@@ -1939,27 +1694,14 @@ async def get_system_metrics():
 
 @app.delete("/agent/session/{session_id}")
 async def terminate_agent_session(session_id: str):
-    """Terminate an agent session and cleanup."""
+    """Terminate an agent session and cleanup: a running turn is killed with its
+    whole process tree (off the lock, without blocking the event loop)."""
     with agent_lock:
-        session = AGENT_SESSIONS.get(session_id)
-        if session:
-            if session.process and session.process.poll() is None:
-                session.process.terminate()
-                try:
-                    session.process.wait(timeout=5)
-                except:
-                    session.process.kill()
-
-            if session.pty_master:
-                try:
-                    os.close(session.pty_master)
-                except:
-                    pass
-
-            del AGENT_SESSIONS[session_id]
-            print(f"[AGENT] Terminated session {session_id}")
-            return {"status": "terminated"}
-
-    return {"status": "not_found"}
-
-
+        session = AGENT_SESSIONS.pop(session_id, None)
+    if session is None:
+        return {"status": "not_found"}
+    if session.transport is not None:
+        await session.transport.stop()
+    session.status = "completed"
+    print(f"[AGENT] Terminated session {session_id}")
+    return {"status": "terminated"}

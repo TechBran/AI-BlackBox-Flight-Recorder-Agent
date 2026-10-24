@@ -1,7 +1,7 @@
 """MN.7 — agent/CLI session completion notify wiring tests.
 
-When a Claude Code CLI process exits, ``background_process_reader`` (a SYNC
-background thread that runs independently of any WebSocket connection — so a
+When a Claude Code CLI turn exits, ``_finish_claude_turn`` (the transport's
+on_exit hook, which runs independently of any WebSocket connection — so a
 disconnected operator still learns the run finished) marks the session
 "completed". That is the single completion choke-point, so it fires a
 fire-and-forget notify(category="agent") via the sync→async bridge.
@@ -17,24 +17,10 @@ import Orchestrator.routes.agent_routes as agent_routes
 from Orchestrator.models import AgentSession
 
 
-class _FakeProc:
-    """A process that has already exited and yields no further output."""
-
-    def __init__(self):
-        self.stdout = self
-
-    def poll(self):
-        return 0  # exited
-
-    def read(self, *a):
-        return b""  # no remaining output
-
-
 def _session(operator="Brandon"):
     return AgentSession(
         session_id="sess-abc123",
         operator=operator,
-        process=_FakeProc(),
         status="running",
     )
 
@@ -55,7 +41,7 @@ def captured(monkeypatch):
 def test_session_completion_fires_agent_notify(captured):
     session = _session(operator="Brandon")
 
-    agent_routes.background_process_reader(session)
+    agent_routes._finish_claude_turn(session, 0)
 
     assert session.status == "completed"
     assert len(captured) == 1
@@ -68,7 +54,7 @@ def test_system_or_empty_operator_suppressed(captured):
     """An unattributed agent session (no operator) does not spam."""
     session = _session(operator="")
 
-    agent_routes.background_process_reader(session)
+    agent_routes._finish_claude_turn(session, 0)
 
     assert session.status == "completed"  # still marked completed
     assert captured == []
@@ -83,6 +69,6 @@ def test_notify_failure_does_not_break_completion(monkeypatch):
 
     monkeypatch.setattr(agent_routes, "notify_in_background", boom)
 
-    agent_routes.background_process_reader(session)
+    agent_routes._finish_claude_turn(session, 0)
 
     assert session.status == "completed"  # completion still happened

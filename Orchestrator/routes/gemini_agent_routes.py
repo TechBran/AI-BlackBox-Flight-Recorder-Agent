@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 
 """
 gemini_agent_routes.py - Gemini CLI agent, WebSocket, session management
-Mirrors the Claude Code CLI integration for Gemini CLI
+Mirrors the Claude Code CLI integration for Gemini CLI, over the same
+CliAgentTransport (Orchestrator/cli_agent/transport.py)
 """
 
 # Standard library imports
 import asyncio
-import fcntl
 import json
 import os
-import subprocess
 import threading
-import time
-import uuid
-from typing import Dict, Any, Optional, List
+from collections import OrderedDict
+from typing import Dict, Optional, List, Tuple
 
 # External library imports
 from fastapi import WebSocket, WebSocketDisconnect
@@ -29,8 +27,17 @@ from Orchestrator.agent_context import (
 )
 from Orchestrator.checkpoint import app
 from Orchestrator.cli_agent.env_scrub import scrubbed_child_env
+from Orchestrator.cli_agent.transport import (
+    CliAgentTransport,
+    SessionReaper,
+    SpawnSpec,
+    cancel_task,
+    relay,
+    safe_ws_send,
+)
 from Orchestrator.config import GEMINI_API_KEY, current_default
 from Orchestrator.utils.paths import blackbox_root
+from Orchestrator.utils.testing import boot_hook
 from Orchestrator.volume import now_utc_iso
 
 
@@ -47,10 +54,7 @@ async def _inject_fossil_context_gemini(
         operator=operator,
         log_prefix=log_prefix,
     )
-    try:
-        await websocket.send_json({"type": "provenance", "data": provenance})
-    except Exception:
-        pass
+    await safe_ws_send(websocket, {"type": "provenance", "data": provenance})
     return fossil_text, provenance
 
 # =============================================================================
@@ -62,7 +66,10 @@ class GeminiAgentSession:
     """Represents a Gemini CLI agent session."""
     session_id: str
     operator: str = ""
-    process: Optional[subprocess.Popen] = None
+    # Runs the session's CLI turns and holds its bounded output.
+    transport: Optional[CliAgentTransport] = None
+    # The Gemini CLI's own id for this conversation, from its "init" event.
+    cli_session_id: str = ""
     mode: str = "streaming"  # streaming or interactive
     working_directory: str = ""
     created_at: str = ""
@@ -70,10 +77,7 @@ class GeminiAgentSession:
     status: str = "idle"  # idle, running, completed, error
     message_count: int = 0
     yolo_mode: bool = True  # Auto-approve all tool calls
-    output_buffer: List[str] = field(default_factory=list)
-    output_cursor: int = 0
     websocket_clients: List[WebSocket] = field(default_factory=list)
-    background_reader: Optional[threading.Thread] = None
     apps: List[Dict] = field(default_factory=list)
     # Snapshot retrieval provenance from build_fossil_context (Plan Task 4)
     provenance: Dict[str, List[str]] = field(default_factory=dict)
@@ -82,6 +86,22 @@ class GeminiAgentSession:
 # Global storage for Gemini agent sessions
 GEMINI_AGENT_SESSIONS: Dict[str, GeminiAgentSession] = {}
 gemini_agent_lock = threading.Lock()
+
+# The CLI session id of each (operator, socket session id) seen since startup,
+# kept when the reaper evicts the session, so a later "resume" names the right
+# conversation. Bounded; lost on restart (then a resume starts fresh).
+_GEMINI_RESUME_IDS: "OrderedDict[Tuple[str, str], str]" = OrderedDict()
+_GEMINI_RESUME_IDS_MAX = 512
+
+
+def _remember_resume_id(operator: str, session_id: str, cli_session_id: str) -> None:
+    if not cli_session_id:
+        return
+    key = (operator, session_id)
+    _GEMINI_RESUME_IDS[key] = cli_session_id
+    _GEMINI_RESUME_IDS.move_to_end(key)
+    while len(_GEMINI_RESUME_IDS) > _GEMINI_RESUME_IDS_MAX:
+        _GEMINI_RESUME_IDS.popitem(last=False)
 
 
 # =============================================================================
@@ -109,24 +129,21 @@ def _gemini_spawn_path(gemini_path: str, base_path: str) -> str:
     return os.pathsep.join(dict.fromkeys(dirs))
 
 
-def create_gemini_streaming(
+def gemini_spawn_spec(
     working_dir: str,
     prompt: str,
     yolo_mode: bool = True,
-    continue_session: bool = False,
-    resume_session: str = None
-) -> subprocess.Popen:
-    """Create Gemini CLI process in streaming JSON mode.
+    resume_session: Optional[str] = None,
+) -> SpawnSpec:
+    """The Gemini CLI run (streaming JSON mode) for one agent turn.
 
     Args:
         working_dir: Working directory for Gemini CLI
         prompt: The prompt to send
         yolo_mode: If True, auto-approve all tool calls (-y flag)
-        continue_session: If True, continue the conversation
-        resume_session: Session index to resume (e.g., "latest" or number)
-
-    Returns:
-        subprocess.Popen with stdout pipe for reading JSON stream
+        resume_session: The CLI session id to resume. Never "latest": that is
+            the most recent session in the working directory, which every
+            operator shares (audit O06-frontier-agent-13).
     """
     gemini_path = get_gemini_path()
 
@@ -142,7 +159,7 @@ def create_gemini_streaming(
     else:
         cmd.extend(["--approval-mode", "default"])
 
-    # Session continuity
+    # Session continuity: this conversation, by id
     if resume_session:
         cmd.extend(["--resume", str(resume_session)])
         print(f"[GEMINI-AGENT] Resuming session: {resume_session}")
@@ -167,292 +184,124 @@ def create_gemini_streaming(
     # does not rely on a gemini sign-in), so it re-adds exactly that variable.
     env["GEMINI_API_KEY"] = GEMINI_API_KEY
 
-    process = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=working_dir,
-        env=env,
-        start_new_session=True
-    )
-
-    # Set stdout to non-blocking
-    flags = fcntl.fcntl(process.stdout.fileno(), fcntl.F_GETFL)
-    fcntl.fcntl(process.stdout.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    print(f"[GEMINI-AGENT] Created Gemini CLI process PID={process.pid} in {working_dir}")
-    return process
+    return SpawnSpec(argv=cmd, cwd=working_dir, env=env)
 
 
 # =============================================================================
-# Background Reader
+# Session hooks and the event translator
 # =============================================================================
 
-def background_process_reader(session: GeminiAgentSession):
-    """Background thread that continuously reads from Gemini CLI process.
-    Runs independently of WebSocket connections.
-    """
-    print(f"[GEMINI-AGENT] Background reader started for session {session.session_id}")
-
-    line_buffer = ""
-
+def _note_gemini_line(session: GeminiAgentSession, line: str) -> None:
+    """Every stdout line, client attached or not: stamp activity and capture the
+    CLI's session id from its "init" event (the id the next turn resumes)."""
+    session.last_activity = now_utc_iso()
+    if '"init"' not in line:
+        return
     try:
-        while session.process and session.process.poll() is None:
-            try:
-                raw_data = session.process.stdout.read(4096)
-                if raw_data:
-                    line_buffer += raw_data.decode('utf-8', errors='replace')
+        event = json.loads(line)
+    except ValueError:
+        return
+    if not isinstance(event, dict) or event.get("type") != "init":
+        return
+    cli_session = event.get("session_id")
+    if isinstance(cli_session, str) and cli_session:
+        session.cli_session_id = cli_session
+        _remember_resume_id(session.operator, session.session_id, cli_session)
+        print(f"[GEMINI-AGENT] Init event - model: {event.get('model', 'unknown')}, session: {cli_session[:8]}...")
 
-                    # Process complete lines
-                    while '\n' in line_buffer:
-                        line, line_buffer = line_buffer.split('\n', 1)
-                        line = line.strip()
-                        if not line:
-                            continue
 
-                        with gemini_agent_lock:
-                            session.output_buffer.append(line)
-                            session.last_activity = now_utc_iso()
-
-            except (BlockingIOError, IOError):
-                pass
-            except Exception as e:
-                print(f"[GEMINI-AGENT] Background reader error: {e}")
-                break
-
-            time.sleep(0.02)
-
-        # Process remaining data
-        try:
-            remaining = session.process.stdout.read()
-            if remaining:
-                line_buffer += remaining.decode('utf-8', errors='replace')
-                for line in line_buffer.split('\n'):
-                    if line.strip():
-                        with gemini_agent_lock:
-                            session.output_buffer.append(line.strip())
-        except:
-            pass
-
-    except Exception as e:
-        print(f"[GEMINI-AGENT] Background reader fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print(f"[GEMINI-AGENT] Background reader ended for session {session.session_id}")
+def _finish_gemini_turn(session: GeminiAgentSession, returncode: int) -> None:
     with gemini_agent_lock:
         session.status = "completed"
+        session.last_activity = now_utc_iso()
 
 
-# =============================================================================
-# Streaming Reader Task
-# =============================================================================
+def _new_gemini_transport(session: GeminiAgentSession) -> CliAgentTransport:
+    return CliAgentTransport(
+        f"gemini-{session.session_id[:8]}",
+        on_line=lambda line: _note_gemini_line(session, line),
+        on_exit=lambda returncode: _finish_gemini_turn(session, returncode),
+    )
 
-async def streaming_reader_task(session: GeminiAgentSession, websocket: WebSocket):
-    """Background task that broadcasts buffered output to WebSocket.
-    Parses Gemini CLI stream-json events and forwards to frontend.
-    """
-    print(f"[GEMINI-AGENT] Streaming reader started for session {session.session_id}")
 
+def gemini_event_frames(line: str) -> List[dict]:
+    """Client frames for one Gemini CLI stream-json line (one parser: it used to
+    be duplicated, slightly differently, for the live loop and the final drain)."""
     try:
-        while session.process and session.process.poll() is None:
-            # Get new output from buffer
-            with gemini_agent_lock:
-                if session.output_cursor < len(session.output_buffer):
-                    new_lines = session.output_buffer[session.output_cursor:]
-                    session.output_cursor = len(session.output_buffer)
-                else:
-                    new_lines = []
+        event = json.loads(line)
+    except ValueError:
+        # Not JSON, send as raw output
+        return [{"type": "raw", "data": line}]
+    if not isinstance(event, dict):
+        return [{"type": "raw", "data": line}]
+    event_type = event.get("type", "")
 
-            # Process new lines
-            for line in new_lines:
-                if not line.strip():
-                    continue
+    # Skip user/prompt events - these echo the user's input
+    if event_type in ("user", "prompt", "input", "user_message"):
+        return []
 
-                try:
-                    event = json.loads(line)
-                    event_type = event.get("type", "")
-                    print(f"[GEMINI-AGENT] Event type: {event_type}")
+    if event_type == "message":
+        # Message event contains response text; skip the user's own messages
+        if event.get("role", "assistant") == "user":
+            return []
+        content = event.get("content", "")
+        return [{"type": "content", "data": content}] if content else []
 
-                    # Handle different event types from Gemini CLI
-                    # Skip user/prompt events - these echo the user's input
-                    if event_type in ("user", "prompt", "input", "user_message"):
-                        # Don't send user's input back - it's already shown
-                        continue
+    if event_type in ("tool_call", "tool_use"):
+        # Gemini CLI uses: tool_name, parameters; Claude uses: name, input
+        tool_name = event.get("tool_name") or event.get("name", "")
+        tool_input = event.get("parameters") or event.get("input", {})
+        return [{"type": "tool_use", "data": {"name": tool_name, "input": tool_input}}] if tool_name else []
 
-                    if event_type == "message":
-                        # Message event contains response text
-                        # Check if it's from assistant, not user
-                        role = event.get("role", "assistant")
-                        if role == "user":
-                            continue  # Skip user messages
-                        content = event.get("content", "")
-                        if content:
-                            await websocket.send_json({"type": "content", "data": content})
+    if event_type == "tool_result":
+        # Tool result - check multiple possible fields
+        result = event.get("result") or event.get("output") or event.get("content", "")
+        return [{"type": "tool_result", "data": result}] if result else []
 
-                    elif event_type in ("tool_call", "tool_use"):
-                        # Tool call/use event - handle both formats
-                        # Gemini CLI uses: tool_name, parameters
-                        # Claude uses: name, input
-                        tool_name = event.get("tool_name") or event.get("name", "")
-                        tool_input = event.get("parameters") or event.get("input", {})
-                        if tool_name:
-                            await websocket.send_json({
-                                "type": "tool_use",
-                                "data": {"name": tool_name, "input": tool_input}
-                            })
+    if event_type == "thinking":
+        thinking = event.get("content", "")
+        return [{"type": "thinking", "data": thinking}] if thinking else []
 
-                    elif event_type == "tool_result":
-                        # Tool result - check multiple possible fields
-                        result = event.get("result") or event.get("output") or event.get("content", "")
-                        if result:
-                            await websocket.send_json({"type": "tool_result", "data": result})
+    if event_type == "error":
+        error = event.get("message", event.get("error", "Unknown error"))
+        return [{"type": "error", "data": error}]
 
-                    elif event_type == "thinking":
-                        # Thinking/reasoning
-                        thinking = event.get("content", "")
-                        if thinking:
-                            await websocket.send_json({"type": "thinking", "data": thinking})
+    if event_type == "init":
+        # Session initialization event from Gemini CLI (its id is captured by _note_gemini_line)
+        return [{"type": "info", "data": f"Gemini session started: {event.get('model', 'unknown')}"}]
 
-                    elif event_type == "error":
-                        # Error event
-                        error = event.get("message", event.get("error", "Unknown error"))
-                        await websocket.send_json({"type": "error", "data": error})
+    if event_type in ("done", "end", "system", "result", "progress", "status"):
+        # Completion/status events: the turn's end comes from the process exit
+        return []
 
-                    elif event_type == "done" or event_type == "end":
-                        # Completion event
-                        pass  # Will be handled by process exit
-
-                    elif event_type == "init":
-                        # Session initialization event from Gemini CLI
-                        model = event.get("model", "unknown")
-                        cli_session = event.get("session_id", "")
-                        await websocket.send_json({
-                            "type": "info",
-                            "data": f"Gemini session started: {model}"
-                        })
-                        print(f"[GEMINI-AGENT] Init event - model: {model}, session: {cli_session[:8] if cli_session else 'N/A'}...")
-
-                    elif event_type in ("system", "result", "progress", "status"):
-                        # System/status events - log but don't necessarily display
-                        msg = event.get("message") or event.get("content") or event.get("status", "")
-                        if msg:
-                            print(f"[GEMINI-AGENT] {event_type}: {msg}")
-
-                    else:
-                        # Unknown event type - try to extract useful data
-                        if "text" in event:
-                            await websocket.send_json({"type": "content", "data": event["text"]})
-                        elif "content" in event:
-                            await websocket.send_json({"type": "content", "data": event["content"]})
-                        elif "message" in event:
-                            await websocket.send_json({"type": "content", "data": str(event["message"])})
-                        else:
-                            # Send raw for debugging
-                            print(f"[GEMINI-AGENT] Unknown event: {event}")
-
-                except json.JSONDecodeError:
-                    # Not JSON, send as raw output
-                    await websocket.send_json({"type": "raw", "data": line})
-                except Exception as e:
-                    print(f"[GEMINI-AGENT] Error processing line: {e}")
-
-            await asyncio.sleep(0.02)
-
-        # Process completed - CRITICAL: Drain remaining buffer before marking complete
-        # The background reader may have captured more output after the last loop iteration
-        print(f"[GEMINI-AGENT] Process exited, draining remaining buffer...")
-
-        # Give background reader a moment to capture any final output
-        await asyncio.sleep(0.1)
-
-        # Drain any remaining buffered output
-        with gemini_agent_lock:
-            if session.output_cursor < len(session.output_buffer):
-                remaining_lines = session.output_buffer[session.output_cursor:]
-                session.output_cursor = len(session.output_buffer)
-            else:
-                remaining_lines = []
-
-        print(f"[GEMINI-AGENT] Found {len(remaining_lines)} remaining lines to process")
-
-        # Process remaining lines (same logic as above)
-        for line in remaining_lines:
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-                event_type = event.get("type", "")
-                print(f"[GEMINI-AGENT] Final drain - Event type: {event_type}")
-
-                if event_type in ("user", "prompt", "input", "user_message"):
-                    continue
-
-                if event_type == "message":
-                    role = event.get("role", "assistant")
-                    if role == "user":
-                        continue
-                    content = event.get("content", "")
-                    if content:
-                        await websocket.send_json({"type": "content", "data": content})
-
-                elif event_type in ("tool_call", "tool_use"):
-                    tool_name = event.get("tool_name") or event.get("name", "")
-                    tool_input = event.get("parameters") or event.get("input", {})
-                    if tool_name:
-                        await websocket.send_json({
-                            "type": "tool_use",
-                            "data": {"name": tool_name, "input": tool_input}
-                        })
-
-                elif event_type == "tool_result":
-                    result = event.get("result") or event.get("output") or event.get("content", "")
-                    if result:
-                        await websocket.send_json({"type": "tool_result", "data": result})
-
-                elif event_type == "thinking":
-                    thinking = event.get("content", "")
-                    if thinking:
-                        await websocket.send_json({"type": "thinking", "data": thinking})
-
-                elif event_type == "result":
-                    # Result event contains stats - send as info
-                    stats = event.get("stats", {})
-                    status = event.get("status", "")
-                    if status == "success":
-                        print(f"[GEMINI-AGENT] Result stats: {stats}")
-
-                elif event_type == "error":
-                    error = event.get("message", event.get("error", "Unknown error"))
-                    await websocket.send_json({"type": "error", "data": error})
-
-                else:
-                    # Try to extract content from unknown events
-                    if "text" in event:
-                        await websocket.send_json({"type": "content", "data": event["text"]})
-                    elif "content" in event and event.get("role") != "user":
-                        await websocket.send_json({"type": "content", "data": event["content"]})
-
-            except json.JSONDecodeError:
-                await websocket.send_json({"type": "raw", "data": line})
-            except Exception as e:
-                print(f"[GEMINI-AGENT] Error processing remaining line: {e}")
-
-        with gemini_agent_lock:
-            session.status = "completed"
-        await websocket.send_json({"type": "completed", "data": None})
-        print(f"[GEMINI-AGENT] Session completed, sent completion signal")
-
-    except Exception as e:
-        print(f"[GEMINI-AGENT] Streaming reader error: {e}")
-        import traceback
-        traceback.print_exc()
+    # Unknown event type - try to extract useful data
+    if "text" in event:
+        return [{"type": "content", "data": event["text"]}]
+    if "content" in event and event.get("role") != "user":
+        return [{"type": "content", "data": event["content"]}]
+    if "message" in event:
+        return [{"type": "content", "data": str(event["message"])}]
+    print(f"[GEMINI-AGENT] Unknown event: {str(event)[:200]}")
+    return []
 
 
 # =============================================================================
 # WebSocket Endpoint
 # =============================================================================
+
+PREVIOUS_TURN_WAIT_SECONDS = 5.0
+OTHER_OPERATOR_MESSAGE = (
+    "This agent session belongs to another operator. Start a new session to talk "
+    "to the agent as yourself.")
+UNKNOWN_RESUME_MESSAGE = (
+    "The previous Gemini conversation for this session is not known to the server "
+    "any more (it restarted), so this starts a new conversation with your memory context.")
+
+
+def _frame_operator(data: dict) -> str:
+    raw = data.get("operator")
+    return raw.strip() if isinstance(raw, str) else ""
+
 
 @app.websocket("/ws/gemini-agent/{session_id}")
 async def gemini_agent_websocket(websocket: WebSocket, session_id: str):
@@ -464,30 +313,72 @@ async def gemini_agent_websocket(websocket: WebSocket, session_id: str):
     - end_session: End current session
     - reconnect: Reconnect to existing session
     - ping: Keep-alive
+
+    A follow-up resumes the conversation by the id the CLI reported in its
+    "init" event (--resume <id>), never --resume latest.
     """
     print(f"[GEMINI-AGENT] WebSocket connection for session: {session_id}")
     await websocket.accept()
 
-    reader_task = None
-    session = None
+    relay_task: Optional[asyncio.Task] = None
+    bound_operator = ""
+
+    async def send(frame: dict) -> bool:
+        return await safe_ws_send(websocket, frame)
+
+    def follow(session: GeminiAgentSession, since_seq: int) -> None:
+        """This socket's own reader of the session (replaces any earlier one)."""
+        nonlocal relay_task
+        cancel_task(relay_task)
+        with gemini_agent_lock:
+            if websocket not in session.websocket_clients:
+                session.websocket_clients.append(websocket)
+        relay_task = asyncio.create_task(
+            relay(session.transport, send, gemini_event_frames, since_seq),
+            name=f"gemini-relay-{session_id[:8]}")
+
+    async def start_turn(session: GeminiAgentSession, spec: SpawnSpec) -> Optional[int]:
+        """Start one turn; when it cannot start, tell the client (an error, then
+        the `completed` that closes its pending reply) and return None."""
+        try:
+            return await session.transport.start(spec)
+        except RuntimeError:
+            # Another client's prompt started a turn while this one waited.
+            message = "The agent is still working on another message in this session. Try again when it finishes."
+        except OSError as e:
+            print(f"[GEMINI-AGENT] Could not start {spec.argv[0]}: {e}")
+            message = (f"Could not start the Gemini CLI ({os.path.basename(spec.argv[0])}): "
+                       f"{e.strerror or e}. Install it on this box, then try again.")
+        await send({"type": "error", "data": message})
+        await send({"type": "completed", "data": None})
+        return None
 
     try:
         while True:
             data = await websocket.receive_json()
+            if not isinstance(data, dict):
+                continue
             msg_type = data.get("type", "")
             print(f"[GEMINI-AGENT] Received: {msg_type}")
 
             if msg_type == "prompt":
-                operator = data.get("operator", current_default())
+                with gemini_agent_lock:
+                    session = GEMINI_AGENT_SESSIONS.get(session_id)
+                operator = (_frame_operator(data) or (session.operator if session else "")
+                            or bound_operator or current_default())
+                if session is not None and session.operator and operator != session.operator:
+                    await send({"type": "error", "data": OTHER_OPERATOR_MESSAGE})
+                    continue
+                bound_operator = operator
                 default_dir = str(blackbox_root())
                 working_dir = data.get("working_dir") or default_dir
                 prompt_text = data.get("text", "")
                 yolo_mode = data.get("yolo_mode", True)
                 # Frontend tells us if user has a persisted session to resume
-                frontend_wants_resume = data.get("resume_session", False)
+                frontend_wants_resume = bool(data.get("resume_session", False))
 
                 if not prompt_text:
-                    await websocket.send_json({"type": "error", "data": "No prompt provided"})
+                    await send({"type": "error", "data": "No prompt provided"})
                     continue
 
                 # Plan Task 4: inject fossil retrieval at session start.
@@ -500,191 +391,168 @@ async def gemini_agent_websocket(websocket: WebSocket, session_id: str):
                     log_prefix="[GEMINI-AGENT]",
                 )
 
-                # Get or create session
-                with gemini_agent_lock:
-                    session = GEMINI_AGENT_SESSIONS.get(session_id)
+                if session is not None and session.transport is not None:
+                    await session.transport.finish_or_stop(PREVIOUS_TURN_WAIT_SECONDS)
 
-                # Wait for previous process to complete
-                if session and session.process and session.process.poll() is None:
-                    print(f"[GEMINI-AGENT] Waiting for previous process...")
-                    for _ in range(50):
-                        if session.process.poll() is not None:
-                            break
-                        await asyncio.sleep(0.1)
-                    if session.process.poll() is None:
-                        session.process.terminate()
+                # Which conversation to resume, by id: this session's own, else the
+                # one this operator last had on this socket session (kept across
+                # the reaper's eviction), else none - a new conversation.
+                resume_id = (session.cli_session_id if session else "") or ""
+                if not resume_id and (frontend_wants_resume or (session and session.message_count > 0)):
+                    resume_id = _GEMINI_RESUME_IDS.get((operator, session_id), "")
+                    if not resume_id:
+                        print(f"[GEMINI-AGENT] No known CLI session to resume for {session_id[:8]}; starting fresh")
+                        await send({"type": "info", "data": UNKNOWN_RESUME_MESSAGE})
 
-                # Determine if we should continue/resume:
-                # - Backend has existing session with messages, OR
-                # - Frontend explicitly wants to resume (has persisted session)
-                backend_has_session = session is not None and session.message_count > 0
-                should_resume = backend_has_session or frontend_wants_resume
+                print(f"[GEMINI-AGENT] Resume decision: backend_session={session is not None}, frontend_wants={frontend_wants_resume}, resume_id={resume_id[:8] if resume_id else 'None'}")
 
-                print(f"[GEMINI-AGENT] Resume decision: backend_session={backend_has_session}, frontend_wants={frontend_wants_resume}, should_resume={should_resume}")
-
-                # Plan Task 4: only prepend fossil context on brand-new sessions.
-                # Resume/continue paths already carry prior conversation turns
-                # via the CLI's own session flags.
+                # Plan Task 4: only prepend fossil context on brand-new conversations.
+                # A resumed conversation already carries its prior turns.
                 effective_prompt = prompt_text
-                if not should_resume:
+                if not resume_id:
                     effective_prompt = compose_with_fossils(fossil_text, prompt_text)
-
-                # Create streaming process
-                process = create_gemini_streaming(
-                    working_dir,
-                    effective_prompt,
-                    yolo_mode=yolo_mode,
-                    continue_session=should_resume,
-                    resume_session="latest" if should_resume else None
-                )
 
                 if session is None:
                     session = GeminiAgentSession(
                         session_id=session_id,
                         operator=operator,
-                        process=process,
                         working_directory=working_dir,
                         created_at=now_utc_iso(),
                         last_activity=now_utc_iso(),
-                        status="running",
-                        message_count=1,
                         yolo_mode=yolo_mode,
                         provenance=provenance,
                     )
-                else:
-                    session.process = process
-                    session.last_activity = now_utc_iso()
-                    session.status = "running"
-                    session.message_count += 1
-                    session.yolo_mode = yolo_mode
-                    session.provenance = provenance
+                if session.transport is None:
+                    session.transport = _new_gemini_transport(session)
+
+                spec = gemini_spawn_spec(
+                    session.working_directory or working_dir,
+                    effective_prompt,
+                    yolo_mode=yolo_mode,
+                    resume_session=resume_id or None,
+                )
+                # Set before the turn starts: its "init" event then reports the id
+                # the CLI actually uses (a new conversation's, or the resumed one).
+                session.cli_session_id = resume_id
+                start_seq = await start_turn(session, spec)
+                if start_seq is None:
+                    continue
+
+                session.last_activity = now_utc_iso()
+                session.status = "running"
+                session.message_count += 1
+                session.yolo_mode = yolo_mode
+                session.provenance = provenance
 
                 with gemini_agent_lock:
                     GEMINI_AGENT_SESSIONS[session_id] = session
 
-                print(f"[GEMINI-AGENT] {'Resuming' if should_resume else 'Created new'} session (msg #{session.message_count})")
-
-                # Start background reader
-                if session.background_reader is None or not session.background_reader.is_alive():
-                    session.background_reader = threading.Thread(
-                        target=background_process_reader,
-                        args=(session,),
-                        daemon=True,
-                        name=f"gemini-reader-{session_id[:8]}"
-                    )
-                    session.background_reader.start()
-
-                # Add websocket to clients
-                with gemini_agent_lock:
-                    if websocket not in session.websocket_clients:
-                        session.websocket_clients.append(websocket)
-
-                # Start streaming reader
-                if reader_task is not None and not reader_task.done():
-                    reader_task.cancel()
-                reader_task = asyncio.create_task(streaming_reader_task(session, websocket))
+                print(f"[GEMINI-AGENT] {'Resuming' if resume_id else 'Created new'} session (msg #{session.message_count})")
+                follow(session, start_seq)
 
             elif msg_type == "input":
                 # Handle follow-up input
-                input_text = data.get("text", "").strip()
+                input_text = data.get("text", "")
+                input_text = input_text.strip() if isinstance(input_text, str) else ""
                 if not input_text:
                     continue
 
                 with gemini_agent_lock:
                     session = GEMINI_AGENT_SESSIONS.get(session_id)
 
-                if session is None:
-                    await websocket.send_json({"type": "error", "data": "No active session"})
+                if session is None or session.transport is None:
+                    await send({"type": "error", "data": "No active session"})
                     continue
+                bound_operator = bound_operator or session.operator
 
-                # Wait for previous process
-                if session.process and session.process.poll() is None:
-                    for _ in range(50):
-                        if session.process.poll() is not None:
-                            break
-                        await asyncio.sleep(0.1)
-                    if session.process.poll() is None:
-                        session.process.terminate()
+                await session.transport.finish_or_stop(PREVIOUS_TURN_WAIT_SECONDS)
 
-                # Create continuation process
-                process = create_gemini_streaming(
-                    session.working_directory,
+                if not session.cli_session_id:
+                    await send({"type": "info", "data": UNKNOWN_RESUME_MESSAGE})
+                spec = gemini_spawn_spec(
+                    session.working_directory or str(blackbox_root()),
                     input_text,
                     yolo_mode=session.yolo_mode,
-                    resume_session="latest"
+                    resume_session=session.cli_session_id or None,
                 )
+                start_seq = await start_turn(session, spec)
+                if start_seq is None:
+                    continue
 
-                session.process = process
                 session.last_activity = now_utc_iso()
                 session.status = "running"
                 session.message_count += 1
-
-                # Start background reader
-                if session.background_reader is None or not session.background_reader.is_alive():
-                    session.background_reader = threading.Thread(
-                        target=background_process_reader,
-                        args=(session,),
-                        daemon=True
-                    )
-                    session.background_reader.start()
-
-                # Start streaming reader
-                if reader_task is not None and not reader_task.done():
-                    reader_task.cancel()
-                reader_task = asyncio.create_task(streaming_reader_task(session, websocket))
+                follow(session, start_seq)
 
             elif msg_type == "end_session":
                 with gemini_agent_lock:
-                    session = GEMINI_AGENT_SESSIONS.get(session_id)
-                    if session:
-                        if session.process and session.process.poll() is None:
-                            session.process.terminate()
-                        session.status = "completed"
-                        session.message_count = 0
-                        del GEMINI_AGENT_SESSIONS[session_id]
-                        session = None
+                    session = GEMINI_AGENT_SESSIONS.pop(session_id, None)
+                if session is not None:
+                    if session.transport is not None:
+                        # A running turn dies with the tools it started.
+                        await session.transport.stop()
+                    session.status = "completed"
+                    session.message_count = 0
+                    _GEMINI_RESUME_IDS.pop((session.operator, session_id), None)
+                cancel_task(relay_task)
+                relay_task = None
 
-                await websocket.send_json({"type": "session_ended", "data": "Session ended"})
+                await send({"type": "session_ended", "data": "Session ended"})
 
             elif msg_type == "reconnect":
-                operator = data.get("operator", current_default())
-
                 with gemini_agent_lock:
                     session = GEMINI_AGENT_SESSIONS.get(session_id)
 
                 if session is None:
-                    await websocket.send_json({"type": "error", "data": "No session found"})
+                    await send({"type": "error", "data": "No session found"})
                     continue
+                operator = _frame_operator(data) or bound_operator or session.operator
+                if session.operator and operator != session.operator:
+                    await send({"type": "error", "data": OTHER_OPERATOR_MESSAGE})
+                    continue
+                bound_operator = operator
 
-                with gemini_agent_lock:
-                    if websocket not in session.websocket_clients:
-                        session.websocket_clients.append(websocket)
-
-                if session.process and session.process.poll() is None:
-                    if reader_task is not None and not reader_task.done():
-                        reader_task.cancel()
-                    reader_task = asyncio.create_task(streaming_reader_task(session, websocket))
-
-                    await websocket.send_json({
+                if session.transport is not None and session.transport.running:
+                    raw = data.get("since_seq")
+                    since = (raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0
+                             else session.transport.buffer.next_seq)
+                    await send({
                         "type": "info",
                         "data": f"Reconnected to session (msg #{session.message_count})"
                     })
+                    follow(session, since)
                 else:
-                    await websocket.send_json({"type": "completed", "data": None})
+                    with gemini_agent_lock:
+                        if websocket not in session.websocket_clients:
+                            session.websocket_clients.append(websocket)
+                    await send({"type": "completed", "data": None})
 
             elif msg_type == "ping":
-                await websocket.send_json({"type": "pong"})
+                await send({"type": "pong"})
 
     except WebSocketDisconnect:
         print(f"[GEMINI-AGENT] WebSocket disconnected: {session_id}")
-        with gemini_agent_lock:
-            session = GEMINI_AGENT_SESSIONS.get(session_id)
-            if session and websocket in session.websocket_clients:
-                session.websocket_clients.remove(websocket)
     except Exception as e:
         print(f"[GEMINI-AGENT] WebSocket error: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        # This socket's reader goes with it; the turn and other clients carry on.
+        cancel_task(relay_task)
+        with gemini_agent_lock:
+            session = GEMINI_AGENT_SESSIONS.get(session_id)
+            if session and websocket in session.websocket_clients:
+                session.websocket_clients.remove(websocket)
+
+
+# Finished sessions nobody is attached to are evicted after a grace period
+# (audit O06-frontier-agent-15); _GEMINI_RESUME_IDS keeps what a resume needs.
+GEMINI_SESSION_REAPER = SessionReaper(GEMINI_AGENT_SESSIONS, gemini_agent_lock, label="gemini-agent")
+
+
+@boot_hook(app, "startup")
+async def start_gemini_session_reaper():
+    GEMINI_SESSION_REAPER.start()
 
 
 # =============================================================================
@@ -709,10 +577,12 @@ async def gemini_agent_status():
 
 @app.get("/gemini-agent/session/{operator}")
 async def get_gemini_session_for_operator(operator: str):
-    """Get existing Gemini agent session for an operator."""
+    """Get existing Gemini agent session for an operator (``output_buffer`` is
+    its bounded stdout tail, ``next_seq`` the reconnect position after it)."""
     with gemini_agent_lock:
         for session_id, session in GEMINI_AGENT_SESSIONS.items():
             if session.operator == operator and session.status != "completed":
+                transport = session.transport
                 return {
                     "session": {
                         "session_id": session.session_id,
@@ -723,25 +593,21 @@ async def get_gemini_session_for_operator(operator: str):
                         "message_count": session.message_count,
                         "yolo_mode": session.yolo_mode
                     },
-                    "output_buffer": session.output_buffer
+                    "output_buffer": transport.stdout_lines() if transport else [],
+                    "next_seq": transport.buffer.next_seq if transport else 0,
                 }
     return {"session": None}
 
 
 @app.delete("/gemini-agent/session/{session_id}")
 async def terminate_gemini_session(session_id: str):
-    """Terminate a Gemini agent session."""
+    """Terminate a Gemini agent session: a running turn is killed with its whole
+    process tree (off the lock, without blocking the event loop)."""
     with gemini_agent_lock:
-        session = GEMINI_AGENT_SESSIONS.get(session_id)
-        if session:
-            if session.process and session.process.poll() is None:
-                session.process.terminate()
-                try:
-                    session.process.wait(timeout=5)
-                except:
-                    session.process.kill()
-
-            del GEMINI_AGENT_SESSIONS[session_id]
-            return {"status": "terminated"}
-
-    return {"status": "not_found"}
+        session = GEMINI_AGENT_SESSIONS.pop(session_id, None)
+    if session is None:
+        return {"status": "not_found"}
+    if session.transport is not None:
+        await session.transport.stop()
+    session.status = "completed"
+    return {"status": "terminated"}

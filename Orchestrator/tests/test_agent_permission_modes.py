@@ -8,7 +8,7 @@ mode does not have, so the run hung or auto-denied behind a fake approval dialog
 Now there are exactly two modes, each mapped to a CLI flag that works in print mode:
 ``yolo`` -> ``--dangerously-skip-permissions``, ``plan`` -> ``--permission-mode plan``. The
 retired "normal"/"ask" request and anything unrecognised resolve to ``plan`` — a request is
-never escalated. Hermetic: no CLI is spawned (Popen is faked), no live app.
+never escalated. Hermetic: no CLI is spawned (the subprocess call is faked), no live app.
 
 ``--permission-mode plan`` alone is NOT read-only on a box whose Claude settings allow tools:
 the CLI honours the user's/project's allow rules (and its auto-mode classifier) in plan mode
@@ -102,7 +102,7 @@ def test_plan_offers_only_read_only_tools_whatever_the_settings_allow():
 
 @pytest.mark.parametrize("extra", [
     {}, {"model": "opus"}, {"claude_session_id": "abc-123"},
-    {"claude_session_id": "abc-123", "resume_session": True}, {"continue_session": True},
+    {"claude_session_id": "abc-123", "resume_session": True},
 ])
 def test_the_prompt_never_follows_a_variadic_tool_list(extra):
     argv = ar.build_claude_argv("/bin/claude", "the prompt", permission_mode="plan", **extra)
@@ -144,32 +144,61 @@ def test_session_flags_and_model_are_preserved():
     resumed = ar.build_claude_argv("/bin/claude", "hi", permission_mode="yolo",
                                    claude_session_id="abc-123", resume_session=True)
     assert resumed[resumed.index("--resume") + 1] == "abc-123"
-    cont = ar.build_claude_argv("/bin/claude", "hi", permission_mode="yolo",
-                                continue_session=True)
-    assert "--continue" in cont
+    assert "--session-id" not in resumed
 
 
-class _FakePopen:
-    last = None
+@pytest.mark.parametrize("mode", ["plan", "yolo"])
+@pytest.mark.parametrize("extra", [
+    {}, {"claude_session_id": "abc-123"},
+    {"claude_session_id": "abc-123", "resume_session": True},
+])
+def test_no_argv_resumes_the_directorys_most_recent_conversation(mode, extra):
+    # --continue resumes the newest conversation in the (shared) working directory,
+    # which may be another operator's (audit O06-frontier-agent-13).
+    argv = ar.build_claude_argv("/bin/claude", "hi", permission_mode=mode, **extra)
+    assert "--continue" not in argv and "-c" not in argv
 
-    def __init__(self, cmd, **kwargs):
-        _FakePopen.last = {"cmd": cmd, **kwargs}
-        self.pid = 4242
 
-        class _Out:
-            def fileno(self):
-                return 0
-        self.stdout = _Out()
+class _EofStream:
+    async def read(self, n=-1):
+        return b""
+
+
+class _FakeChild:
+    pid = 4242
+    returncode = 0
+
+    def __init__(self):
+        self.stdout = _EofStream()
+        self.stderr = _EofStream()
+
+    async def wait(self):
+        return 0
 
 
 @pytest.mark.parametrize("mode", ["plan", "yolo"])
 def test_the_cli_never_gets_an_open_stdin_pipe(monkeypatch, mode):
     # An open, never-closed stdin makes print mode wait for piped input (the old hang).
-    monkeypatch.setattr(ar.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(ar.fcntl, "fcntl", lambda *a, **k: 0)
-    ar.create_claude_streaming("/tmp", "hello", permission_mode=mode)
-    assert _FakePopen.last["stdin"] is subprocess.DEVNULL
-    assert (YOLO_FLAG in _FakePopen.last["cmd"]) is (mode == "yolo")
+    import asyncio
+    from Orchestrator.cli_agent import transport as tr
+    seen = {}
+
+    async def fake_exec(*argv, **kwargs):
+        seen.update(argv=list(argv), **kwargs)
+        return _FakeChild()
+
+    monkeypatch.setattr(tr.asyncio, "create_subprocess_exec", fake_exec)
+    spec = ar.claude_spawn_spec("/tmp", "hello", permission_mode=mode)
+
+    async def run():
+        t = tr.CliAgentTransport("perm-test")
+        await t.start(spec)
+        await t.wait_finished(timeout=5)
+
+    asyncio.run(run())
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert seen["argv"] == spec.argv
+    assert (YOLO_FLAG in seen["argv"]) is (mode == "yolo")
 
 
 # ── WebSocket: no stdin approval path, no fake approval dialog ────────────────────
@@ -203,7 +232,7 @@ def ws_client():
 def test_permission_response_never_writes_y_or_n_to_the_cli(ws_client):
     proc = _RunningProc()
     ar.AGENT_SESSIONS["perm-test"] = AgentSession(session_id="perm-test", operator="Alice",
-                                               process=proc, status="running")
+                                               transport=proc, status="running")
     try:
         with ws_client.websocket_connect("/ws/agent/perm-test") as ws:
             ws.send_json({"type": "permission_response", "approved": True})
@@ -218,35 +247,28 @@ def test_permission_response_never_writes_y_or_n_to_the_cli(ws_client):
         ar.AGENT_SESSIONS.pop("perm-test", None)
 
 
-class _Socket:
-    application_state = ar.WebSocketState.CONNECTED
-
-    def __init__(self):
-        self.sent = []
-
-    async def send_json(self, data):
-        self.sent.append(data)
-
-
-class _FinishingProc:
-    def __init__(self):
-        self._polls = [None]
-
-    def poll(self):
-        return self._polls.pop(0) if self._polls else 0
-
-
 def test_plan_session_streams_tool_use_and_never_a_permission_request():
+    import asyncio
+    from Orchestrator.cli_agent import transport as tr
     tool_event = {"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}}
-    session = AgentSession(session_id="stream-test", process=_FinishingProc(), status="running",
-                           output_buffer=[json.dumps(tool_event)], permission_mode="plan")
-    sock = _Socket()
-    import asyncio
-    asyncio.run(ar.streaming_reader_task(session, sock))
-    kinds = [m["type"] for m in sock.sent]
+    sent = []
+
+    async def send(frame):
+        sent.append(frame)
+        return True
+
+    async def run():
+        t = tr.CliAgentTransport("stream-test")
+        t.buffer.append(tr.OUT, json.dumps(tool_event))
+        t.buffer.append(tr.EXIT, 0)
+        await tr.relay(t, send, ar.claude_event_frames, 0)
+
+    asyncio.run(run())
+    kinds = [m["type"] for m in sent]
     assert "tool_use" in kinds
     assert "permission_request" not in kinds
+    assert kinds[-1] == "completed"
 
 
 # ── opt-in: the real CLI, with settings that allow everything, still cannot write ───

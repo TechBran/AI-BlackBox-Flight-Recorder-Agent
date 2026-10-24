@@ -32,11 +32,11 @@ class AgentSession:
     """Represents a Claude Code CLI session for an operator."""
     session_id: str
     operator: str = ""
-    process: Optional[Any] = None  # subprocess.Popen
-    pty_master: Optional[int] = None  # PTY file descriptor (for interactive mode)
-    mode: str = "streaming"  # "streaming" (print mode) or "interactive" (PTY mode)
-    status: str = "idle"  # idle, running, waiting_permission, waiting_ready, completed
-    output_buffer: List[str] = field(default_factory=list)
+    # cli_agent.transport.CliAgentTransport: runs the session's CLI turns and holds
+    # its bounded output (each client reads it at its own cursor).
+    transport: Optional[Any] = None
+    mode: str = "streaming"  # "streaming" (print mode)
+    status: str = "idle"  # idle, running, completed
     pending_permission: Optional[Dict] = None
     pending_prompt: str = ""  # Prompt to send after Claude is ready
     working_directory: str = ""
@@ -48,10 +48,8 @@ class AgentSession:
     message_count: int = 0  # Number of messages sent in this session
     model: str = "sonnet"  # Claude model to use (opus, sonnet, haiku)
     permission_mode: str = "yolo"  # "yolo" (every tool approved) or "plan" (read-only); see agent_routes
-    # Background execution support
-    background_reader: Optional[Any] = None  # Background thread reading process output
+    # Background execution support: the turn runs whether or not a client is attached
     websocket_clients: List[Any] = field(default_factory=list)  # Active WebSocket connections
-    output_cursor: int = 0  # Cursor for output buffer position (for reconnection)
     # Snapshot retrieval provenance from build_fossil_context (Plan Task 4)
     provenance: Dict[str, List[str]] = field(default_factory=dict)
 

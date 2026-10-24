@@ -2964,11 +2964,18 @@ The user's speech is being transcribed and sent to you. Respond conversationally
         return None
 
     async def _claude_respond(self, user_text: str) -> Optional[str]:
-        """Get response from Claude Code CLI session with full MCP tool access."""
-        from Orchestrator.routes.agent_routes import create_claude_streaming
+        """Get response from Claude Code CLI session with full MCP tool access.
+
+        Runs on the shared CliAgentTransport (audit O10-telephony-twilio-06): it
+        reads whole stream-json lines without blocking the event loop (the old
+        select()+readline() on a non-blocking pipe dropped any event split across
+        pipe writes, so a long answer came back empty), drains stderr, and stops
+        the CLI's whole process tree on the timeout.
+        """
+        from Orchestrator.cli_agent.transport import OUT, CliAgentTransport
+        from Orchestrator.routes.agent_routes import claude_spawn_spec
         from Orchestrator.state import PERSISTED_AGENT_SESSIONS, save_operator_state
         from Orchestrator.volume import now_utc_iso
-        import select
 
         try:
             self._claude_message_count += 1
@@ -2993,19 +3000,22 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             else:
                 prompt = user_text
 
-            # Create Claude CLI process with appropriate flags
+            # Every turn names this operator's conversation by id: --session-id
+            # starts it, --resume continues it. Never --continue, which resumes the
+            # most recent conversation in the shared working directory, possibly
+            # another operator's (audit O06-frontier-agent-13).
             working_dir = str(blackbox_root())
-            process = create_claude_streaming(
-                working_dir=working_dir,
-                prompt=prompt,
-                # Pass session_id for new sessions OR resume (to identify which session to resume)
-                claude_session_id=self._claude_session_id if (is_new_session or is_resume) else None,
-                continue_session=is_continuation,
-                resume_session=is_resume,
+            spec = claude_spawn_spec(
+                working_dir,
+                prompt,
+                claude_session_id=self._claude_session_id,
+                resume_session=not is_new_session,
                 model="sonnet",  # Use sonnet for faster responses
                 permission_mode="yolo"
             )
-            self._claude_process = process
+            transport = CliAgentTransport(f"phone-{self.phone_session.session_id}")
+            self._claude_process = transport
+            start_seq = await transport.start(spec)
 
             # After resume, switch to continuation mode for subsequent messages
             if is_resume:
@@ -3019,103 +3029,80 @@ The user's speech is being transcribed and sent to you. Respond conversationally
 
             print(f"[PHONE-BRIDGE] Claude CLI started (msg #{self._claude_message_count}, new={is_new_session}, resume={is_resume}, continue={is_continuation})")
 
-            # Read streaming JSON output
-            response_text = ""
-            loop = asyncio.get_event_loop()
-
-            # Set non-blocking
-            import fcntl
-            import os
-            fd = process.stdout.fileno()
-            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-
-            # Read with timeout
-            start_time = asyncio.get_event_loop().time()
+            loop = asyncio.get_running_loop()
+            start_time = loop.time()
             timeout = 120  # 2 minute max
-            last_status_log = start_time
-            tool_calls_seen = 0
+            state = {"text": "", "tools": 0, "last_log": start_time}
 
-            while process.poll() is None or process.stdout.readable():
-                current_time = asyncio.get_event_loop().time()
-                elapsed = current_time - start_time
+            def note_session_id(event: dict) -> None:
+                """Follow the conversation id the CLI reports (init/result events)."""
+                reported = event.get("session_id")
+                if isinstance(reported, str) and reported and reported != self._claude_session_id:
+                    print(f"[PHONE-BRIDGE] Claude reports conversation {reported[:8]}...")
+                    self._claude_session_id = reported
+                    if operator in PERSISTED_AGENT_SESSIONS:
+                        PERSISTED_AGENT_SESSIONS[operator]["claude_session_id"] = reported
+                        save_operator_state()
 
-                # Check timeout
-                if elapsed > timeout:
-                    print("[PHONE-BRIDGE] Claude CLI timeout")
-                    process.terminate()
-                    break
+            async def collect() -> None:
+                async for kind, payload in transport.follow(start_seq):
+                    now = loop.time()
+                    # Periodic status logging (every 10 seconds) when phone disconnected
+                    if self._phone_disconnected and now - state["last_log"] >= 10:
+                        state["last_log"] = now
+                        print(f"[BACKGROUND] Claude still working... ({now - start_time:.0f}s elapsed, {len(state['text'])} chars collected, {state['tools']} tool calls)")
+                    if kind != OUT:
+                        if isinstance(payload, str):
+                            print(f"[PHONE-BRIDGE] Claude CLI: {payload[:300]}")
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except ValueError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    event_type = event.get("type", "")
 
-                # Periodic status logging (every 10 seconds) when phone disconnected
-                if self._phone_disconnected and (current_time - last_status_log) >= 10:
-                    last_status_log = current_time
-                    print(f"[BACKGROUND] Claude still working... ({elapsed:.0f}s elapsed, {len(response_text)} chars collected, {tool_calls_seen} tool calls)")
+                    if event_type == "system":
+                        note_session_id(event)
 
-                # Try to read
-                try:
-                    ready, _, _ = select.select([process.stdout], [], [], 0.1)
-                    if ready:
-                        line = process.stdout.readline()
-                        if not line:
-                            if process.poll() is not None:
-                                break
-                            continue
-
-                        line = line.decode('utf-8', errors='replace').strip()
-                        if not line:
-                            continue
-
-                        # Parse JSON
-                        try:
-                            event = json.loads(line)
-                            event_type = event.get("type", "")
-
-                            if event_type == "assistant":
-                                # Collect text content
-                                message = event.get("message", {})
-                                content = message.get("content", [])
-                                for block in content:
-                                    if block.get("type") == "text":
-                                        response_text += block.get("text", "")
-
-                            elif event_type == "content_block_delta":
-                                delta = event.get("delta", {})
-                                if delta.get("type") == "text_delta":
-                                    response_text += delta.get("text", "")
-
-                            elif event_type == "tool_use":
-                                # Track tool calls for logging
-                                tool_calls_seen += 1
-                                tool_name = event.get("name", "unknown")
+                    elif event_type == "assistant":
+                        # Collect text content; tool uses are content blocks here
+                        message = event.get("message", {})
+                        content = message.get("content", []) if isinstance(message, dict) else []
+                        for block in content if isinstance(content, list) else []:
+                            if not isinstance(block, dict):
+                                continue
+                            if block.get("type") == "text":
+                                state["text"] += block.get("text", "")
+                            elif block.get("type") == "tool_use":
+                                state["tools"] += 1
                                 if self._phone_disconnected:
-                                    print(f"[BACKGROUND] Claude using tool: {tool_name}")
+                                    print(f"[BACKGROUND] Claude using tool: {block.get('name', 'unknown')}")
 
-                            elif event_type == "result":
-                                # Final result
-                                result = event.get("result", "")
-                                if result and not response_text:
-                                    response_text = result
-                                break
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                            state["text"] += delta.get("text", "")
 
-                        except json.JSONDecodeError:
-                            continue
-                    else:
-                        # No data ready, yield control
-                        await asyncio.sleep(0.05)
+                    elif event_type == "result":
+                        # Final result
+                        note_session_id(event)
+                        result = event.get("result", "")
+                        if result and not state["text"] and isinstance(result, str):
+                            state["text"] = result
+                        return
 
-                except Exception as e:
-                    if process.poll() is not None:
-                        break
-                    await asyncio.sleep(0.05)
+            try:
+                await asyncio.wait_for(collect(), timeout=timeout)
+            except asyncio.TimeoutError:
+                print("[PHONE-BRIDGE] Claude CLI timeout")
+            finally:
+                # The CLI exits right after its result; give it a moment, then
+                # stop it and every tool it started.
+                await transport.finish_or_stop(2)
 
-            # Clean up
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except:
-                    process.kill()
-
+            response_text = state["text"]
             print(f"[PHONE-BRIDGE] Claude responded: {response_text[:100]}...")
             return response_text.strip() if response_text else None
 

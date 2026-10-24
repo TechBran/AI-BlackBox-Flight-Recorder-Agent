@@ -230,28 +230,49 @@ async def test_pty_bridge_default_env_is_scrubbed(planted):
 # --- legacy agent-mode CLIs (Portal agent WS, phone bridge, Gemini agent) -----
 
 
-class _FakeChild:
-    def __init__(self):
-        r, w = os.pipe()
-        os.close(w)
-        self.stdout = os.fdopen(r, "rb")
-        self.pid = 4242
-
-
-def test_agent_mode_claude_streaming_env_is_scrubbed(planted, monkeypatch, tmp_path):
-    """claude must use its subscription login here, not bill the server key."""
-    from Orchestrator.routes import agent_routes
+def _spawned_env(spec) -> dict:
+    """The env the transport hands the child for ``spec``: the real start path,
+    with only the process creation faked."""
+    import asyncio
+    from Orchestrator.cli_agent import transport as tr
     captured = {}
 
-    def fake_popen(cmd, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return _FakeChild()
+    class _Eof:
+        async def read(self, n=-1):
+            return b""
 
-    monkeypatch.setattr(agent_routes.subprocess, "Popen", fake_popen)
-    proc = agent_routes.create_claude_streaming(str(tmp_path), "hi")
-    proc.stdout.close()
-    _assert_clean(captured["env"])
-    assert os.path.expanduser("~/.local/bin") in captured["env"]["PATH"]
+    class _Child:
+        pid, returncode = 4242, 0
+        stdout = stderr = _Eof()
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*argv, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _Child()
+
+    async def run():
+        real = tr.asyncio.create_subprocess_exec
+        tr.asyncio.create_subprocess_exec = fake_exec
+        try:
+            t = tr.CliAgentTransport("scrub-test")
+            await t.start(spec)
+            await t.wait_finished(timeout=5)
+        finally:
+            tr.asyncio.create_subprocess_exec = real
+
+    asyncio.run(run())
+    return captured["env"]
+
+
+def test_agent_mode_claude_streaming_env_is_scrubbed(planted, tmp_path):
+    """claude must use its subscription login here, not bill the server key.
+    (The phone bridge's Claude backend spawns through the same spec.)"""
+    from Orchestrator.routes import agent_routes
+    env = _spawned_env(agent_routes.claude_spawn_spec(str(tmp_path), "hi"))
+    _assert_clean(env)
+    assert os.path.expanduser("~/.local/bin") in env["PATH"]
 
 
 def test_gemini_agent_mode_keeps_only_its_one_key(planted, monkeypatch, tmp_path):
@@ -259,17 +280,8 @@ def test_gemini_agent_mode_keeps_only_its_one_key(planted, monkeypatch, tmp_path
     with the server's configured key. It keeps exactly that ONE variable and
     loses everything else."""
     from Orchestrator.routes import gemini_agent_routes
-    captured = {}
-
-    def fake_popen(cmd, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return _FakeChild()
-
     monkeypatch.setattr(gemini_agent_routes, "GEMINI_API_KEY", "fake-configured-gemini")
-    monkeypatch.setattr(gemini_agent_routes.subprocess, "Popen", fake_popen)
-    proc = gemini_agent_routes.create_gemini_streaming(str(tmp_path), "hi")
-    proc.stdout.close()
-    env = captured["env"]
+    env = _spawned_env(gemini_agent_routes.gemini_spawn_spec(str(tmp_path), "hi"))
     _assert_clean(env)
     assert env["GEMINI_API_KEY"] == "fake-configured-gemini"
 
