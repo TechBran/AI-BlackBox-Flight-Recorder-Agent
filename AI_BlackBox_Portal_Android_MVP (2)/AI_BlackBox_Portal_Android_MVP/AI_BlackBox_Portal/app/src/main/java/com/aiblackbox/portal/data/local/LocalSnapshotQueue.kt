@@ -68,10 +68,13 @@ data class DeadLetter(val reason: String, val request: SaveRequest)
  *    [IOException] (offline / unreachable) STOPS the drain, leaving that item and
  *    everything after it queued, in order, for the next flush. Nothing is dropped
  *    or reordered.
- *  - A turn the box REFUSES for good (a 4xx other than 408/429, e.g. 413 or 422, or a
- *    refusal repeated [MAX_REFUSED_ATTEMPTS] times) is moved to the dead-letter file
- *    and the drain goes on (A09-data-local-model-04). Before, every non-2xx was read as
- *    "offline", so one rejected head blocked every later on-device turn forever.
+ *  - A turn the box REFUSES for good (a 4xx other than 408/429, e.g. 413 or 422) is
+ *    moved to the dead-letter file and the drain goes on (A09-data-local-model-04).
+ *    Before, every non-2xx was read as "offline", so one rejected head blocked every
+ *    later on-device turn forever. A 5xx, 408 or 429 is the box failing NOW, not a
+ *    verdict on the turn: it stops the drain like an unreachable box and is retried,
+ *    however often, so a server outage never costs a turn (the box answers 500 for
+ *    any handler error, so a count-based cap would drop turns during a bad deploy).
  *
  * Concurrency: a [Mutex] serializes flushes so a fire-and-forget app-open flush
  * can't interleave with an enqueue-triggered flush and double-send / reorder.
@@ -93,12 +96,6 @@ class LocalSnapshotQueue(
     // Serializes mutations of the persisted queue across concurrent flushes.
     private val mutex = Mutex()
 
-    // How many times the box has REFUSED the current head (an HTTP status, not a dead
-    // socket). In memory only: a restart just grants the head a fresh set of attempts,
-    // and an offline phone never counts, however long the outage.
-    private var refusedHead: SaveRequest? = null
-    private var refusedCount = 0
-
     /**
      * Append [request] to the on-disk queue (persisted before we attempt any send,
      * so an offline turn survives even an immediate process kill), then try to
@@ -115,8 +112,8 @@ class LocalSnapshotQueue(
     /**
      * Drain the persisted queue in FIFO order. Removes each item from disk only on
      * a successful send; stops at the first [IOException] (offline), leaving the
-     * remainder queued in order. A refusal ([failureKind] PERMANENT, or a RETRYABLE
-     * one repeated [MAX_REFUSED_ATTEMPTS] times) parks the head in the dead-letter
+     * remainder queued in order; a RETRYABLE answer (5xx, 408, 429) stops it the same
+     * way. A PERMANENT refusal ([failureKind]) parks the head in the dead-letter
      * store and drains on. A non-IO error propagates WITHOUT dropping the
      * item — the queue is left exactly as far as it got, so no turn is silently
      * lost. Concurrent flushes are serialized by [the mutex] (kotlinx [Mutex] is
@@ -130,23 +127,15 @@ class LocalSnapshotQueue(
                 try {
                     sender.send(head)
                 } catch (e: IOException) {
-                    val kind = failureKind(e)
-                    if (kind == FailureKind.OFFLINE) {
-                        // Offline / unreachable: stop, keep head + the rest (already
-                        // persisted) for the next flush. No drop, no reorder.
+                    if (failureKind(e) != FailureKind.PERMANENT) {
+                        // Offline / unreachable, or the box failing for now: stop, keep
+                        // head + the rest (already persisted) for the next flush. No
+                        // drop, no reorder.
                         return
                     }
-                    if (refusedHead != head) {
-                        refusedHead = head
-                        refusedCount = 0
-                    }
-                    refusedCount++
-                    if (kind == FailureKind.RETRYABLE && refusedCount < MAX_REFUSED_ATTEMPTS) return
                     // The box will not take this turn: park it so the turns behind it
                     // still reach the ledger.
-                    store.deadLetter(head, "HTTP ${(e as ApiHttpException).code} after $refusedCount attempt(s): ${e.message}")
-                    refusedHead = null
-                    refusedCount = 0
+                    store.deadLetter(head, "HTTP ${(e as ApiHttpException).code}: ${e.message}")
                 }
                 // Sent (or parked): drop the head and persist the shorter queue
                 // immediately so a crash mid-drain can't re-send it.
@@ -158,9 +147,9 @@ class LocalSnapshotQueue(
 
     /** How a failed send is treated (see [failureKind]). */
     enum class FailureKind {
-        /** No HTTP answer (dead socket, timeout, DNS): keep the head, never counted. */
+        /** No HTTP answer (dead socket, timeout, DNS): keep the head and retry later. */
         OFFLINE,
-        /** The box answered but may accept later (5xx, 408, 429): counted toward the cap. */
+        /** The box answered but may accept later (5xx, 408, 429): keep the head and retry later. */
         RETRYABLE,
         /** The box refused this request for good (any other 4xx): dead-lettered at once. */
         PERMANENT,
@@ -168,9 +157,6 @@ class LocalSnapshotQueue(
 
     companion object {
         private const val QUEUE_FILE_NAME = "local_snapshot_queue.json"
-
-        /** Refusals of one head before it is dead-lettered (an unreachable box never counts). */
-        const val MAX_REFUSED_ATTEMPTS = 5
 
         /**
          * Classify a send failure. BlackBoxApi maps every non-2xx to [ApiHttpException]
