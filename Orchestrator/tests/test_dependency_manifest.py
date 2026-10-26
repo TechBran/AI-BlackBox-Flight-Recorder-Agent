@@ -296,10 +296,16 @@ def test_security_floor_is_declared_and_locked(dist, minimum):
     assert locked >= Version(minimum), f"lock pins {dist}=={locked}, below {minimum}"
 
 
-def test_protobuf_stays_below_6():
-    """google-generativeai's google-ai-generativelanguage needs protobuf<6."""
-    locked, _ = _lock_pins(LOCK)["protobuf"]
-    assert locked < Version("6")
+def test_protobuf_cap_follows_the_google_stack():
+    """protobuf<6 was held only for google-generativeai's
+    google-ai-generativelanguage, which is gone (audit rank 71). The cap now
+    sits where its remaining consumers put theirs: google-api-core,
+    google-cloud-speech, googleapis-common-protos and proto-plus all declare
+    protobuf<8, and grpcio-status follows grpcio."""
+    req, _ = _manifest()["protobuf"]
+    for version in ("5.29.6", "6.33.0", "7.36.2"):
+        assert req.specifier.contains(version), f"protobuf {req.specifier} refuses {version}"
+    assert not req.specifier.contains("8.0.0")
 
 
 def test_lock_is_fully_pinned_and_hashed():

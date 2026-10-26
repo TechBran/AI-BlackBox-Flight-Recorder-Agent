@@ -122,7 +122,7 @@ huggingface_hub>=1.31.0,<2      # local-model downloads (localstack_downloads.py
 PyYAML>=6.0.3,<7                # llama-swap config (local_stack.py)
 
 # === Security floors and caps on transitive dependencies ===
-protobuf>=5.29.6,<6             # [transitive] google-ai-generativelanguage needs <6; CVE-2026-0994
+protobuf>=5.29.6,<8             # [transitive] google-api-core / google-cloud-speech / proto-plus stack, which caps it <8 (the <6 hold left with google-generativeai); CVE-2026-0994
 pyasn1>=0.6.4,<0.7              # [transitive] google-auth (pyasn1-modules)
 h11>=0.16.0,<1                  # [transitive] uvicorn's HTTP/1.1 parser; CVE-2025-43859 (chunked smuggling)
 idna>=3.15,<4                   # [transitive] requests/httpx/yarl hostname encoding; CVE-2026-45409
