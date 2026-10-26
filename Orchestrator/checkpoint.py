@@ -573,7 +573,16 @@ def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_
 # The FastAPI app is defined here and exported to app.py via `from Orchestrator.checkpoint import *`
 # This placement avoids circular imports since checkpoint.py is imported early in the module chain.
 # Routes are registered by decorators in the route modules.
-app = FastAPI(title="BlackBox Orchestrator", version="2.0")
+#
+# One lifespan runs every startup and shutdown hook, in registration order, and
+# cancels the long-lived tasks they start (app.state.background_tasks) at
+# shutdown. The hooks register through boot_hook / lifespan_hook as their
+# modules import; see Orchestrator/lifespan.py for the order and the shutdown
+# sequence (audit O01-core-runtime-02).
+from Orchestrator.lifespan import APP_LIFESPAN
+
+app = FastAPI(title="BlackBox Orchestrator", version="2.0", lifespan=APP_LIFESPAN)
+APP_LIFESPAN.bind(app)
 
 # Gzip compress all responses > 500 bytes (huge win over Tailscale)
 app.add_middleware(GZipMiddleware, minimum_size=500)
@@ -599,5 +608,3 @@ from Orchestrator.security.origin_guard import OriginGuardMiddleware
 from Orchestrator.security.perimeter import build_origin_policy
 
 app.add_middleware(OriginGuardMiddleware, policy=build_origin_policy())
-
-# Graceful shutdown handler for systemd

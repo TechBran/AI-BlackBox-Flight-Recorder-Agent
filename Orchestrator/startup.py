@@ -33,9 +33,9 @@ from Orchestrator.utils.paths import portal_dir
 from Orchestrator.utils.static_guard import (
     PORTAL_MEDIA_DIRS, GuardedStaticFiles, drop_world_write, portal_refused_dirs,
 )
-# Every hook below that reaches outside this process registers through
-# boot_hook, which the app skips under BLACKBOX_TESTING=1 (the test suite);
-# startup_phone_pin_check only logs, so it stays a plain hook.
+# Every hook below registers through boot_hook, which the app skips under
+# BLACKBOX_TESTING=1 (the test suite). They run from the app's one lifespan in
+# the order they appear in this file (Orchestrator/lifespan.py).
 from Orchestrator.utils.testing import boot_hook
 from Orchestrator.fossils import (
     load_snapshot_index, rebuild_snapshot_index, update_snapshot_index,
@@ -54,6 +54,14 @@ from Orchestrator.scheduler import get_scheduler_manager
 # register replaced them and ended in sys.exit(0), so every systemctl
 # stop/restart skipped the graceful drain and every shutdown hook (audit
 # O01-core-runtime-01). Shutdown work belongs in a shutdown hook.
+
+
+def _track(task, name):
+    """Hand a long-lived task a hook started to the lifespan's registry
+    (app.state.background_tasks), which holds it, since the loop references
+    tasks only weakly, and cancels it at shutdown."""
+    return app.state.background_tasks.track(task, name)
+
 
 def _incremental_index_update(index, vol_bytes, scan_from_byte):
     """Process only new snapshots from a byte offset instead of full rebuild.
@@ -299,12 +307,7 @@ async def _cu_display_reaper():
             await asyncio.sleep(interval)
             await _cu_sweep_once()
 
-    asyncio.create_task(_loop())
-
-
-# The storage maintenance loop's task, held so it is not garbage-collected
-# mid-run (a bare create_task result can be).
-_storage_maintenance_task = None
+    _track(asyncio.create_task(_loop(), name="cu-display-reaper"), "cu-display-reaper")
 
 
 @boot_hook(app, "startup")
@@ -326,12 +329,7 @@ async def startup_storage_maintenance():
             except Exception as e:  # noqa: BLE001 — maintenance must never die
                 logger.error("Storage maintenance pass failed: %s", e)
 
-    global _storage_maintenance_task
-    _storage_maintenance_task = asyncio.create_task(_loop())
-
-
-# The memory watchdog's task, held like the storage maintenance one.
-_memory_watchdog_task = None
+    _track(asyncio.create_task(_loop(), name="storage-maintenance"), "storage-maintenance")
 
 
 @boot_hook(app, "startup")
@@ -340,10 +338,9 @@ async def startup_memory_watchdog():
     MemoryHigh=/MemoryMax= (Orchestrator/memory_watchdog.py), the bound that
     replaced the --limit-max-requests recycle (audit X06-ops-deploy-01). Warn
     only. Never raises."""
-    global _memory_watchdog_task
     try:
         from Orchestrator.memory_watchdog import start_memory_watchdog
-        _memory_watchdog_task = start_memory_watchdog()
+        _track(start_memory_watchdog(), "memory-watchdog")
     except Exception as e:  # noqa: BLE001 — maintenance, not boot criteria.
         logger.error("[MEM-WATCHDOG] failed to start (non-fatal): %s", e)
 
@@ -352,8 +349,8 @@ async def startup_memory_watchdog():
 def startup_embeddings_transcode():
     """One-time migration: inline index embeddings → binary vector store.
 
-    Registered immediately AFTER startup_check_index so the snapshot index
-    has been created/rebuilt/healed before we slim it (FastAPI runs startup
+    Registered AFTER startup_check_index so the snapshot index has been
+    created/rebuilt/healed before we slim it (the app's lifespan runs startup
     hooks in registration order). Runs synchronously ON PURPOSE: no request
     is served until startup hooks return, so nothing can mint a snapshot
     (rewriting the index) while transcode holds the full index in memory —
@@ -424,6 +421,7 @@ async def startup_embeddings_migration_resume():
         from Orchestrator.embeddings.migrate import resume_if_interrupted
         task = resume_if_interrupted()
         if task is not None:
+            # migrate._launch hands the task to the lifespan's registry.
             logger.info("[MIGRATE] resumed interrupted embeddings migration")
     except Exception as e:  # noqa: BLE001 — must never crash startup.
         logger.error("[MIGRATE] startup resume check failed (non-fatal): %s", e)
@@ -444,7 +442,7 @@ async def startup_embeddings_watcher():
     """
     try:
         from Orchestrator.embeddings.watcher import start_watcher
-        start_watcher()
+        _track(start_watcher(), "embeddings-watcher")
         logger.info("[WATCHER] embeddings deprecation watcher scheduled (daily)")
     except Exception as e:  # noqa: BLE001 — must never crash startup.
         logger.error("[WATCHER] failed to schedule watcher (non-fatal): %s", e)
@@ -485,7 +483,7 @@ async def startup_live_session_reaper():
     """
     try:
         from Orchestrator.live_session_reaper import start_reaper
-        start_reaper()
+        _track(start_reaper(), "live-session-reaper")
         logger.info("[LIVE-REAPER] live voice-session reaper started (sweep 60s)")
     except Exception as e:  # noqa: BLE001 — must never crash startup.
         logger.error("[LIVE-REAPER] failed to start reaper (non-fatal): %s", e)
@@ -954,8 +952,8 @@ async def startup_sms():
 async def startup_cli_agent_zellij():
     """Initialize the Zellij subsystem for the CLI Agent (Phase 2 T7).
 
-    Wired BEFORE the first request is served (FastAPI startup events
-    complete before request acceptance), satisfying audit C3's
+    Wired BEFORE the first request is served (the lifespan's startup
+    completes before request acceptance), satisfying audit C3's
     "reconcile MUST run before any route handler" constraint.
 
     Sequence (per Orchestrator/cli_agent/__init__.py):
@@ -1006,7 +1004,7 @@ async def startup_cli_agent_zellij_reaper():
         from Orchestrator.cli_agent.reaper import (
             start_zellij_reaper, ZELLIJ_REAP_INTERVAL_SEC,
         )
-        start_zellij_reaper()
+        _track(start_zellij_reaper(), "zellij-reaper")
         logger.info(
             "[ZELLIJ-REAPER] idle zellij-session reaper started (sweep %.0fs, "
             "7-day idle threshold)", ZELLIJ_REAP_INTERVAL_SEC,

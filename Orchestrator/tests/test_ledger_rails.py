@@ -308,6 +308,7 @@ def test_storage_maintenance_is_scheduled_by_a_gated_boot_hook():
     from Orchestrator.utils.testing import BOOT_HOOK_ATTR
     hook = getattr(startup, "startup_storage_maintenance", None)
     assert hook is not None, "nothing schedules archive and upload cleanup"
-    registered = [h for h in startup.app.router.on_startup
+    from Orchestrator.lifespan import lifespan_of
+    registered = [h for h in lifespan_of(startup.app).hooks("startup")
                   if getattr(h, "__wrapped__", None) is hook]
     assert registered and getattr(registered[0], BOOT_HOOK_ATTR, False)

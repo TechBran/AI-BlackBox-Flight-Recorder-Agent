@@ -473,17 +473,19 @@ _tts_executor = ThreadPoolExecutor(max_workers=8)
 # tts_queue.run_locked_sync — that route is sync-def and runs in the
 # threadpool). Cloud providers are unaffected.
 from Orchestrator import tts_queue as _tts_queue
+from Orchestrator.lifespan import lifespan_hook
 _qwen_batch_lock = _tts_queue.QWEN_SYNTH_LOCK
 
 
-@app.on_event("startup")
+# In-process hooks (the test suite runs them too): lifespan_hook, not boot_hook.
+@lifespan_hook(app, "startup")
 async def _tts_queue_capture_loop():
     """Let tts_queue.run_locked_sync reach the app loop from threadpool
     (sync-def route) threads — the /tts single-shot qwen lock discipline."""
     _tts_queue.capture_loop()
 
 
-@app.on_event("shutdown")
+@lifespan_hook(app, "shutdown")
 async def _tts_queue_shutdown():
     _tts_queue.shutdown_worker()
 

@@ -69,6 +69,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from Orchestrator import config
+from Orchestrator.lifespan import track_task
 from Orchestrator.embeddings import search
 from Orchestrator.embeddings.chunker import chunks_for_snapshot
 from Orchestrator.embeddings.providers import EmbeddingProviderError, get_provider
@@ -231,6 +232,9 @@ def _launch(target_slug: str, rebuild: bool = False,
         coro = _run_engine(target_slug)
     task = asyncio.get_running_loop().create_task(coro)
     task.add_done_callback(_log_engine_task_outcome)
+    # The lifespan cancels it at shutdown; the job is resumable, so a restart
+    # picks it up again (the CancelledError branch leaves it "running").
+    track_task(task, "embeddings-migration")
     _JOB_TASK = task
     return task
 

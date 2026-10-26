@@ -240,7 +240,8 @@ def test_startup_hook_runs_the_sweep_off_the_event_loop(monkeypatch):
                         lambda: seen.setdefault("thread", threading.current_thread()))
     asyncio.run(startup.startup_local_stack_sweep())
     assert seen["thread"] is not threading.main_thread()
-    hooks = [h for h in startup.app.router.on_startup
+    from Orchestrator.lifespan import lifespan_of
+    hooks = [h for h in lifespan_of(startup.app).hooks("startup")
              if getattr(h, "__wrapped__", None) is startup.startup_local_stack_sweep]
     assert len(hooks) == 1 and getattr(hooks[0], testing.BOOT_HOOK_ATTR, False)
 

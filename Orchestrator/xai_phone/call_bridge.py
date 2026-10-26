@@ -21,6 +21,7 @@ import asyncio
 import logging
 from typing import Optional
 
+from Orchestrator.lifespan import track_task
 from Orchestrator.live_session_reaper import release_payload
 from Orchestrator.models import GROK_LIVE_SESSIONS, GrokLiveSession
 from Orchestrator.routes.voice_ws_shared import cancel_task, retire_upstream
@@ -105,9 +106,9 @@ async def attach_call(call_id: str, payload: Optional[dict] = None) -> Optional[
     keepalive_task = asyncio.create_task(grok_keepalive_loop(session))
     session.listener_task = listener_task
     session.keepalive_task = keepalive_task
-    asyncio.create_task(
+    track_task(asyncio.create_task(
         _finalize_call(session, listener_task, keepalive_task, save_grok_session_to_blackbox)
-    )
+    ), "xai-phone-finalize")
     logger.info("[XAI-PHONE] attached to call %s as session %s", call_id, session_id)
     return session_id
 

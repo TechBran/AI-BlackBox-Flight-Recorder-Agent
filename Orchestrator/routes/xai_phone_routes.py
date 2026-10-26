@@ -18,6 +18,7 @@ import logging
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
+from Orchestrator.lifespan import track_task
 from Orchestrator.xai_phone import provisioning
 from Orchestrator.xai_phone.signature import verify_signature
 
@@ -92,7 +93,7 @@ def _spawn_attach(call_id: str, event: dict) -> None:
     """Fire-and-forget call attach. Module-level so tests monkeypatch it;
     late import keeps the route importable without the grok stack."""
     from Orchestrator.xai_phone.call_bridge import attach_call
-    asyncio.create_task(attach_call(call_id, event))
+    track_task(asyncio.create_task(attach_call(call_id, event)), "xai-phone-attach")
 
 
 @router.post("/voice/incoming")

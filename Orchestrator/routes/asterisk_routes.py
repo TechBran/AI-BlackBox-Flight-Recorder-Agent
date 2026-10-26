@@ -31,6 +31,7 @@ from typing import Optional, Dict, List
 from pydantic import BaseModel
 
 from Orchestrator.checkpoint import app
+from Orchestrator.lifespan import track_task
 from Orchestrator.volume import now_utc_iso
 from Orchestrator.phone.session import (
     PhoneSession,
@@ -170,8 +171,9 @@ async def asterisk_outbound_call(call_request: AsteriskCallRequest):
 
     PHONE_SESSIONS[session_id] = session
 
-    # Launch outbound call in background
-    asyncio.create_task(_handle_outbound_call(session, to_number, trunk))
+    # Launch outbound call in background (held and stopped by the lifespan)
+    track_task(asyncio.create_task(_handle_outbound_call(session, to_number, trunk)),
+               "asterisk-outbound-call")
 
     return {
         "status": "initiated",

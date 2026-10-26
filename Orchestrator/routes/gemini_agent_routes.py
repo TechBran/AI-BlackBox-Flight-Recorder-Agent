@@ -643,7 +643,7 @@ GEMINI_SESSION_REAPER = SessionReaper(GEMINI_AGENT_SESSIONS, gemini_agent_lock, 
 
 @boot_hook(app, "startup")
 async def start_gemini_session_reaper():
-    GEMINI_SESSION_REAPER.start()
+    app.state.background_tasks.track(GEMINI_SESSION_REAPER.start(), "gemini-session-reaper")
 
 
 # =============================================================================

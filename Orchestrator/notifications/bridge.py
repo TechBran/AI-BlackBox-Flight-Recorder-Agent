@@ -52,7 +52,7 @@ def set_main_loop(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
     """Capture the main event loop (call from an async startup hook).
 
     Defaults to ``asyncio.get_running_loop()`` so the common call site is simply
-    ``set_main_loop()`` from inside an ``@app.on_event("startup")`` coroutine —
+    ``set_main_loop()`` from inside an async startup hook (startup_notify_bridge) —
     mirroring ``scheduler.manager.start()``'s ``self._loop = get_running_loop()``.
     """
     global _MAIN_LOOP

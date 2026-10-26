@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 
 # Local imports
 from Orchestrator.checkpoint import app
+from Orchestrator.lifespan import track_task
 from Orchestrator.volume import now_utc_iso
 from Orchestrator.phone.session import (
     PhoneSession,
@@ -715,8 +716,8 @@ async def init_phone_system():
         freeswitch.on_dtmf = on_dtmf
         freeswitch.on_hangup = on_hangup
 
-        # Start event listener
-        asyncio.create_task(freeswitch.listen_events())
+        # Start event listener (held and stopped by the lifespan)
+        track_task(asyncio.create_task(freeswitch.listen_events()), "freeswitch-events")
 
         print("[PHONE] Phone system initialized successfully")
     else:

@@ -29,6 +29,7 @@ from apscheduler.triggers.cron import CronTrigger
 # searchable snapshot; we still wrap our calls in try/except so a bus regression
 # can never break a job's own error bookkeeping. Imported at module scope so
 # tests can monkeypatch `manager.notify`.
+from Orchestrator.lifespan import track_task
 from Orchestrator.notifications.bus import notify
 # W09: a run the provider refused for billing (executor.CronCreditsExhausted)
 # carries this error_kind and is not retried.
@@ -711,6 +712,8 @@ class CronJobManager:
         task = asyncio.ensure_future(_run())
         self._catchup_tasks.add(task)
         task.add_done_callback(self._catchup_tasks.discard)
+        # The lifespan cancels it at shutdown, before the scheduler stops.
+        track_task(task, "cron-catchup")
 
     def _mark_job_status(self, job_id: str, status: str) -> None:
         """Write a job's status via a direct UPDATE (M3.2 reload hardening).
@@ -827,6 +830,7 @@ class CronJobManager:
         ))
         self._catchup_tasks.add(task)
         task.add_done_callback(self._catchup_tasks.discard)
+        track_task(task, "cron-outcome-notify")
 
     def _mark_run_started(self, job_id: str, started_at: str, next_run_at: Optional[str]) -> None:
         """Persist the in-flight marker and the NEXT fire in one update (O15-03).

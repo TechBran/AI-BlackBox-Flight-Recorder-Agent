@@ -25,6 +25,7 @@ import httpx
 import psutil
 
 from Orchestrator import config
+from Orchestrator.lifespan import track_task
 
 GET_TIMEOUT = httpx.Timeout(2.0, connect=2.0)   # status probes: fail fast
 PULL_TIMEOUT = httpx.Timeout(None, connect=5.0)  # pulls are long: no read timeout
@@ -142,6 +143,7 @@ async def start_pull(model: str) -> dict:
         }
     task = asyncio.get_running_loop().create_task(_stream_pull(model))
     task.add_done_callback(_log_pull_task_outcome)
+    track_task(task, "ollama-pull")
     _PULL_TASK = task
     return pull_status()
 

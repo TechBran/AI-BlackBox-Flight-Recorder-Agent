@@ -18,6 +18,7 @@ from typing import Optional, Callable, Awaitable, Dict, Any
 
 import aiohttp
 
+from Orchestrator.lifespan import track_task
 from Orchestrator.asterisk.config import (
     ASTERISK_ARI_URL,
     ASTERISK_ARI_WS_URL,
@@ -197,13 +198,13 @@ class AsteriskARIClient:
             args = event.get("args", [])
             print(f"[ARI] StasisStart: channel={channel_id} caller={caller} callee={callee} args={args}")
             if self.on_stasis_start:
-                asyncio.create_task(self.on_stasis_start(channel_id, caller, callee, args))
+                self._spawn(self.on_stasis_start(channel_id, caller, callee, args), "ari-stasis-start")
 
         elif event_type == "StasisEnd":
             channel_id = event.get("channel", {}).get("id", "")
             print(f"[ARI] StasisEnd: channel={channel_id}")
             if self.on_stasis_end:
-                asyncio.create_task(self.on_stasis_end(channel_id))
+                self._spawn(self.on_stasis_end(channel_id), "ari-stasis-end")
 
         elif event_type == "ChannelDtmfReceived":
             channel_id = event.get("channel", {}).get("id", "")
@@ -211,19 +212,19 @@ class AsteriskARIClient:
             # Never log the digit: IVR PIN entry arrives through here.
             print(f"[ARI] DTMF received: channel={channel_id}")
             if self.on_dtmf:
-                asyncio.create_task(self.on_dtmf(channel_id, digit))
+                self._spawn(self.on_dtmf(channel_id, digit), "ari-dtmf")
 
         elif event_type == "ChannelHangupRequest":
             channel_id = event.get("channel", {}).get("id", "")
             print(f"[ARI] HangupRequest: channel={channel_id}")
             if self.on_hangup:
-                asyncio.create_task(self.on_hangup(channel_id))
+                self._spawn(self.on_hangup(channel_id), "ari-hangup")
 
         elif event_type == "ChannelDestroyed":
             channel_id = event.get("channel", {}).get("id", "")
             print(f"[ARI] ChannelDestroyed: channel={channel_id}")
             if self.on_hangup:
-                asyncio.create_task(self.on_hangup(channel_id))
+                self._spawn(self.on_hangup(channel_id), "ari-hangup")
 
         elif event_type == "PlaybackFinished":
             playback_id = event.get("playback", {}).get("id", "")
@@ -233,7 +234,14 @@ class AsteriskARIClient:
                 if evt:
                     evt.set()
                 if self.on_playback_finished:
-                    asyncio.create_task(self.on_playback_finished(playback_id))
+                    self._spawn(self.on_playback_finished(playback_id), "ari-playback-finished")
+
+    @staticmethod
+    def _spawn(coro, name: str) -> None:
+        """Run an event callback as its own task, held by the app's lifespan
+        registry until it ends (the StasisStart handler runs the whole call)
+        and cancelled at shutdown before this client disconnects."""
+        track_task(asyncio.create_task(coro, name=name), name)
 
     # ------------------------------------------------------------------
     # HTTP helpers

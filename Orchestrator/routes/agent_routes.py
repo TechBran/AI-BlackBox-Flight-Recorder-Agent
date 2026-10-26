@@ -1091,7 +1091,7 @@ AGENT_SESSION_REAPER = SessionReaper(
 
 @boot_hook(app, "startup")
 async def start_agent_session_reaper():
-    AGENT_SESSION_REAPER.start()
+    app.state.background_tasks.track(AGENT_SESSION_REAPER.start(), "agent-session-reaper")
 
 
 @app.get("/agent/session/{operator}")

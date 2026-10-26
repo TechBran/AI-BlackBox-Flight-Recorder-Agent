@@ -79,7 +79,12 @@ def test_suite_runs_with_testing_mode_on():
 
 
 def _startup_handlers(app):
-    return [*app.router.on_startup, *app.router.on_shutdown]
+    # The app's lifespan hooks, plus anything left on FastAPI's on_event lists
+    # (which a lifespan= app never runs: test_app_lifespan.py keeps them empty).
+    from Orchestrator.lifespan import lifespan_of
+    lifespan = lifespan_of(app)
+    return [*lifespan.hooks("startup"), *lifespan.hooks("shutdown"),
+            *getattr(app.router, "on_startup", []), *getattr(app.router, "on_shutdown", [])]
 
 
 def test_production_app_lifespan_runs_no_side_effect_hook(monkeypatch, tmp_path):
@@ -103,11 +108,10 @@ def test_production_app_lifespan_runs_no_side_effect_hook(monkeypatch, tmp_path)
             assert client.get("/toolvault/health").status_code == 200
 
 
-# The app hooks that only log or capture state inside this process, and so stay
-# registered as plain hooks. Every other startup/shutdown hook, in any module,
-# must go through boot_hook.
+# The app hooks that only capture or stop state inside this process, and so
+# register as plain lifespan hooks (lifespan_hook). Every other startup/shutdown
+# hook, in any module, must go through boot_hook.
 _IN_PROCESS_HOOKS = {
-    "Orchestrator.startup.startup_phone_pin_check",
     "Orchestrator.routes.tts_routes._tts_queue_capture_loop",
     "Orchestrator.routes.tts_routes._tts_queue_shutdown",
 }
@@ -135,14 +139,15 @@ def test_every_app_hook_is_gated():
 
     assert _ungated_hooks(app) == []
     gated = [h for h in _startup_handlers(app) if getattr(h, testing.BOOT_HOOK_ATTR, False)]
-    assert len(gated) >= 20  # every startup.py hook but the pin check
+    assert len(gated) >= 20  # every startup.py hook
 
 
 def test_the_hook_check_sees_a_plain_hook_from_any_module():
+    from Orchestrator.lifespan import lifespan_hook
     app = FastAPI()
 
     async def reaper():  # this module, not startup.py: still caught
         pass
 
-    app.add_event_handler("startup", reaper)
+    lifespan_hook(app, "startup")(reaper)
     assert _ungated_hooks(app) == [f"{__name__}.test_the_hook_check_sees_a_plain_hook_from_any_module.<locals>.reaper"]
