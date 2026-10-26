@@ -13,9 +13,9 @@ package com.aiblackbox.portal.ui.cli_agent
 //      them to the WebSocket; return true to prevent default routing
 //      through session.write() (which would go to the dead local sleep
 //      process).
-//   4. Resize: call session.updateSize(cols, rows) to keep the emulator
-//      grid right; call ws.sendResize(cols, rows) to keep the orchestrator
-//      tmux pty right.
+//   4. Resize: call session.resizeLike(view, cols, rows) (updateSize with the
+//      view's cell size) to keep the emulator grid right; call
+//      ws.sendResize(cols, rows) to keep the orchestrator tmux pty right.
 
 import android.content.Context
 import android.util.Log
@@ -200,7 +200,7 @@ fun TerminalScreen(
         Log.d(TAG, "Resize → ${cols}x${rows}")
         // Keep the emulator's grid in sync with the orchestrator pty.
         try {
-            terminalSession?.updateSize(cols, rows)
+            terminalSession?.resizeLike(terminalView, cols, rows)
         } catch (t: Throwable) {
             Log.w(TAG, "session.updateSize failed", t)
         }
@@ -312,7 +312,7 @@ fun TerminalScreen(
                             // TODO: wire to clipboard manager if/when needed.
                         }
 
-                        override fun onPasteTextFromClipboard(session: TerminalSession) {
+                        override fun onPasteTextFromClipboard(session: TerminalSession?) {
                             // TODO: pull from clipboard, ws.sendPaste(text).
                         }
 
@@ -326,6 +326,10 @@ fun TerminalScreen(
 
                         override fun onTerminalCursorStateChange(state: Boolean) {
                             // No-op for cursor blink toggles.
+                        }
+
+                        override fun setTerminalShellPid(session: TerminalSession, pid: Int) {
+                            // The local child is a placeholder sleep; its pid is never used.
                         }
 
                         override fun getTerminalCursorStyle(): Int {

@@ -347,7 +347,7 @@ fun ZellijTerminalScreen(
 
         Log.d(TAG, "Resize → ${cols}x${rows} (debounced)")
         try {
-            terminalSession?.updateSize(cols, rows)
+            terminalSession?.resizeLike(terminalView, cols, rows)
         } catch (t: Throwable) {
             Log.w(TAG, "session.updateSize failed", t)
         }
@@ -582,10 +582,12 @@ fun ZellijTerminalScreen(
                         override fun onTitleChanged(changedSession: TerminalSession) { /* no-op */ }
                         override fun onSessionFinished(finishedSession: TerminalSession) { /* no-op */ }
                         override fun onCopyTextToClipboard(session: TerminalSession, text: String) { /* TODO */ }
-                        override fun onPasteTextFromClipboard(session: TerminalSession) { /* TODO */ }
+                        override fun onPasteTextFromClipboard(session: TerminalSession?) { /* TODO */ }
                         override fun onBell(session: TerminalSession) { /* no-op */ }
                         override fun onColorsChanged(session: TerminalSession) { view.onScreenUpdated() }
                         override fun onTerminalCursorStateChange(state: Boolean) { /* no-op */ }
+                        // The local child is a placeholder sleep; its pid is never used.
+                        override fun setTerminalShellPid(session: TerminalSession, pid: Int) { /* no-op */ }
                         override fun getTerminalCursorStyle(): Int = TerminalEmulator.DEFAULT_TERMINAL_CURSOR_STYLE
                         override fun logError(tag: String, message: String) { Log.e(tag, message) }
                         override fun logWarn(tag: String, message: String) { Log.w(tag, message) }

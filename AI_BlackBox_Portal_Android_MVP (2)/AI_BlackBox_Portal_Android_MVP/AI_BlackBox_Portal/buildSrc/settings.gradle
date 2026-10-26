@@ -1,0 +1,13 @@
+// Build logic for the app (the native-library page-alignment check). It shares the app's
+// version catalog, and the root gradle/verification-metadata.xml verifies what it resolves.
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+    }
+    versionCatalogs {
+        libs {
+            from(files('../gradle/libs.versions.toml'))
+        }
+    }
+}
+rootProject.name = 'buildSrc'

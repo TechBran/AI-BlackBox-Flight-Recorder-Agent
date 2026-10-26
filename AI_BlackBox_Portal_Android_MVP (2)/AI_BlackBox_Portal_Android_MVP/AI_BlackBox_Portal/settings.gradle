@@ -17,7 +17,18 @@ dependencyResolutionManagement {
         // resolved (or confused) through JitPack (audit X02-deps-android-web-07).
         exclusiveContent {
             forRepository {
-                maven { url = 'https://jitpack.io' }
+                maven {
+                    url = 'https://jitpack.io'
+                    // JitPack rewrites termux's Gradle module metadata with file names it
+                    // does not serve (the AARs are published as <artifact>-<version>-release.aar).
+                    // Resolve from the POM, ignoring its pointer to that metadata;
+                    // app/build.gradle names the AAR.
+                    metadataSources {
+                        mavenPom()
+                        artifact()
+                        ignoreGradleMetadataRedirection()
+                    }
+                }
             }
             filter {
                 includeGroup 'com.github.termux.termux-app'

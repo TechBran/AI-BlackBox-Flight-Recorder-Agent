@@ -12,7 +12,7 @@
 # Regenerate from this project directory, rerunning tasks so every tool classpath resolves:
 #   ./gradlew --continue --rerun-tasks --write-verification-metadata sha256 help \
 #       :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest \
-#       :app:assembleDebugAndroidTest :app:lintDebug
+#       :app:assembleDebugAndroidTest :app:lintDebug :buildSrc:test
 # Gradle merges into the existing file; delete it first to drop superseded versions, and then
 # re-add the <trusted-artifacts> block and the aapt2 -osx/-windows jars, which a Linux run
 # does not record. Review the diff before committing.
@@ -31,7 +31,13 @@ robolectric = "4.17"
 # must match sdk= in app/src/test/resources/robolectric.properties.
 robolectric-android-all = "14-robolectric-10818077-i7"
 serialization = "1.8.1"
-termux = "v0.118.0"
+# termux-app master at 3b66f87996 (2026-08-24), built by JitPack with NDK 29: libtermux.so's
+# 64-bit LOAD segments are 16 KB-aligned. Every tag (v0.118.0-v0.119.0-beta.3) is built with
+# NDK 21 and is 4 KB-aligned. This commit also carries the v0.118.1-v0.118.3 terminal fixes
+# (combining-char overflow, CSI parameter cap, zero-width and selection AIOOBEs, Unicode 15
+# widths) and nothing from the September 2026 TerminalEmulator API rework. Move to a tag once
+# termux tags a 16 KB-aligned release.
+termux = "3b66f87996"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activity" }

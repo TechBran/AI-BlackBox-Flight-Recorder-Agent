@@ -6,7 +6,8 @@
 #   mcp      MCP/run_tests.sh in a venv built from MCP/requirements.txt
 #   web      scripts/run_web_tests.sh (Portal + tests/web node suites)
 #   shell    scripts/tests/run_all.sh (installer / sudoers perimeter suites)
-#   android  :app:testDebugUnitTest
+#   android  :app:testDebugUnitTest, :buildSrc:test, and :app:assembleDebug, which
+#            fails on a native library that is not 16 KB page-aligned
 #
 # No job needs a secret, and none may read one: the suites strip credential
 # variables, block non-loopback network and never start the app's side-effect
@@ -176,3 +177,8 @@ jobs:
 
       - name: ":app:testDebugUnitTest"
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+
+      # The page-alignment checker's own tests, then a real debug APK: assembleDebug
+      # runs checkDebugNativeLibAlignment and fails on a 4 KB-aligned library.
+      - name: ":buildSrc:test and :app:assembleDebug"
+        run: ./gradlew :buildSrc:test :app:assembleDebug --no-daemon --stacktrace

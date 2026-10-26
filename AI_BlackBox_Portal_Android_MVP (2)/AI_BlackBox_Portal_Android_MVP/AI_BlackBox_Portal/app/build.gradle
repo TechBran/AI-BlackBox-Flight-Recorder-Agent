@@ -1,3 +1,5 @@
+import com.aiblackbox.buildlogic.CheckNativeLibAlignment
+import com.android.build.api.artifact.SingleArtifact
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 // Versions: gradle/libs.versions.toml. Kotlin is compiled by AGP 9's built-in Kotlin support,
@@ -43,6 +45,12 @@ android {
         versionName = "1.13.1-m1-hardening" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "")
         buildConfigField "String", "FORCE_MIC_SOURCE", "\"${forceMicSource}\""
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // 64-bit ARM only: every phone, Fold and XR headset this app targets is arm64, and
+        // LiteRT-LM ships no 32-bit build. Dropping armeabi-v7a/x86/x86_64 keeps 4 KB-aligned
+        // 32-bit copies (and emulator-only libraries) out of the APK.
+        ndk {
+            abiFilters.add('arm64-v8a')
+        }
         manifestPlaceholders["cleartext"] = "true"
     }
 
@@ -135,6 +143,26 @@ android {
     }
 }
 
+// 16 KB page alignment (audit A01-activities-root-11). Android 15+ devices with 16 KB pages
+// cannot dlopen a 64-bit library whose LOAD segments are 4 KB-aligned, nor map an uncompressed
+// one that is not page-aligned inside the APK; Android 16 shows a page-size compat warning.
+// Every variant's final APK is checked (buildSrc NativeLibAlignment, the checks AOSP's
+// check_elf_alignment.sh and `zipalign -c -P 16` make), and assemble<Variant> and
+// install<Variant> fail on any offender, so a 4 KB library cannot ship or be sideloaded by
+// accident.
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        def variantName = variant.name.capitalize()
+        def alignmentCheck = tasks.register("check${variantName}NativeLibAlignment", CheckNativeLibAlignment) {
+            apkDirectory = variant.artifacts.get(SingleArtifact.APK.INSTANCE)
+            report = layout.buildDirectory.file("reports/native-lib-alignment/${variant.name}.txt")
+        }
+        tasks.named { it == "assemble${variantName}" || it == "install${variantName}" }.configureEach {
+            dependsOn alignmentCheck
+        }
+    }
+}
+
 // kotlinOptions {} is gone with the kotlin-android plugin. Built-in Kotlin would default the
 // JVM target to compileOptions.targetCompatibility; it is pinned here so the two cannot drift.
 kotlin {
@@ -200,9 +228,21 @@ dependencies {
     implementation libs.markdown.renderer.m3
     implementation libs.markdown.renderer.code
 
-    // CLI Agent — Termux terminal emulator + view (resolved via JitPack).
-    implementation libs.termux.terminal.emulator
-    implementation libs.termux.terminal.view
+    // CLI Agent — Termux terminal emulator + view (resolved via JitPack, see the termux
+    // version in the catalog). The release AAR serves every variant; its POM carries no
+    // dependencies (both are optional), so each is named here.
+    implementation(libs.termux.terminal.emulator) {
+        artifact {
+            classifier = 'release'
+            type = 'aar'
+        }
+    }
+    implementation(libs.termux.terminal.view) {
+        artifact {
+            classifier = 'release'
+            type = 'aar'
+        }
+    }
 
     // Unit testing
     testImplementation libs.junit
