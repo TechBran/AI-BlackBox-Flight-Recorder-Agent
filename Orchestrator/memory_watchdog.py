@@ -1,4 +1,4 @@
-"""Logged RSS watchdog for the orchestrator process. It warns; it never acts.
+"""Logged memory watchdog for blackbox.service. It warns; it never acts.
 
 blackbox.service used to recycle itself with uvicorn's --limit-max-requests
 100000: past that many requests uvicorn exits and systemd starts it again,
@@ -6,11 +6,17 @@ which on a busy box was an unplanned outage every few days (in-flight chat,
 voice, CU and WebSocket sessions dropped, then the 60-90 s index rebuild),
 leak or no leak (audit X06-ops-deploy-01). The unit now bounds memory instead:
 MemoryHigh= makes the kernel throttle and reclaim, MemoryMax= is the hard cap
-(an OOM kill, which Restart=always recovers). This loop reads the process's
-resident memory every CHECK_INTERVAL_S and logs a warning when it reaches
-WARN_FRACTION of the lowest of those limits, so a leak shows up in the journal
-as a climb well before either one bites. Off systemd (a dev run, cgroup v1)
-it measures against physical RAM.
+(an OOM kill, which Restart=always recovers). This loop reads, every
+CHECK_INTERVAL_S, the process's resident memory and the unit's working set,
+and logs a warning when the larger reaches WARN_FRACTION of the lowest of
+those limits, so a leak shows up in the journal as a climb well before either
+one bites. The kernel enforces the limits on the whole cgroup, not on this
+process: memory.current also counts the CLI agents KillMode=process keeps in
+the unit, the CU browsers and displays, the audio subprocess and page cache.
+The working set is memory.current less inactive_file, the page cache the
+kernel drops first (the kubelet measures a container the same way). It also
+logs each OOM kill the kernel records for the unit (memory.events). Off
+systemd (a dev run, cgroup v1) it measures RSS against physical RAM.
 
 Reads /proc and /sys only; stdlib plus psutil (already in requirements.in).
 """
@@ -20,7 +26,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger("blackbox.memory_watchdog")
 
@@ -72,6 +78,36 @@ def memory_limits(cgroup_dir: Optional[Path]) -> Dict[str, Optional[int]]:
     return {name: _read_limit(Path(cgroup_dir) / name) for name in _LIMIT_FILES}
 
 
+def _read_keyed(path: Path) -> Dict[str, int]:
+    """A cgroup "key value" file (memory.stat, memory.events) as ints; {} if unreadable."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return {}
+    values = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            values[parts[0]] = int(parts[1])
+    return values
+
+
+def unit_memory(cgroup_dir: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """The cgroup's memory.current, its working set (memory.current less
+    inactive_file) and its memory.events counters; None without a readable
+    memory.current (no cgroup v2)."""
+    if cgroup_dir is None:
+        return None
+    cgroup_dir = Path(cgroup_dir)
+    current = _read_limit(cgroup_dir / "memory.current")
+    if current is None:
+        return None
+    inactive_file = _read_keyed(cgroup_dir / "memory.stat").get("inactive_file", 0)
+    return {"current": current,
+            "working_set": max(0, current - inactive_file),
+            "events": _read_keyed(cgroup_dir / "memory.events")}
+
+
 def budget(limits: Dict[str, Optional[int]], total: int) -> Tuple[str, int]:
     """The (name, bytes) the watchdog measures against: the lowest set limit,
     else physical RAM."""
@@ -101,33 +137,77 @@ class MemoryWatchdog:
 
     def __init__(self, *, limits: Dict[str, Optional[int]],
                  rss: Callable[[], int] = rss_bytes,
+                 unit: Callable[[], Optional[Dict[str, Any]]] = lambda: None,
                  total: Optional[int] = None,
                  clock: Callable[[], float] = time.monotonic):
         self.limits = limits
         self._rss = rss
+        self._unit = unit
         self._clock = clock
         self.budget_name, self.budget_bytes = budget(
             limits, total if total is not None else _physical_ram())
         self._warned_at: Optional[float] = None
         self._warned_fraction = 0.0
+        self._oom_kills: Optional[int] = None
 
     def _describe_limits(self) -> str:
         parts = [f"{name}={_gib(value) if value else 'unset'}"
                  for name, value in self.limits.items()]
         return ", ".join(parts)
 
+    def _describe_usage(self, rss: Optional[int], unit: Optional[Dict[str, Any]]) -> str:
+        parts = []
+        if rss is not None:
+            parts.append(f"Process RSS {_gib(rss)}")
+        if unit:
+            high = (unit.get("events") or {}).get("high")
+            throttled = f"; memory.events high={high}" if high is not None else ""
+            parts.append(
+                f"unit working set {_gib(unit['working_set'])} (memory.current "
+                f"{_gib(unit['current'])}, which also counts the CLI agents, the CU "
+                f"browsers, the audio subprocess and page cache{throttled})")
+        return "; ".join(parts) + "."
+
+    def _note_oom_kills(self, events: Dict[str, int]) -> None:
+        kills = events.get("oom_kill")
+        if kills is None:
+            return
+        # The first reading is a baseline: the cgroup outlives a restart while
+        # KillMode=process children still run in it.
+        if self._oom_kills is not None and kills > self._oom_kills:
+            logger.warning(
+                "[MEM-WATCHDOG] the kernel OOM-killed %d process(es) in the unit "
+                "since the last check (memory.events oom_kill=%d)",
+                kills - self._oom_kills, kills)
+        self._oom_kills = kills
+
     def check(self) -> Optional[str]:
         try:
             rss = self._rss()
         except Exception as e:  # noqa: BLE001 - a watchdog must never die
             logger.debug("[MEM-WATCHDOG] RSS read failed: %s", e)
+            rss = None
+        try:
+            unit = self._unit()
+        except Exception as e:  # noqa: BLE001 - a watchdog must never die
+            logger.debug("[MEM-WATCHDOG] cgroup read failed: %s", e)
+            unit = None
+        if unit:
+            self._note_oom_kills(unit.get("events") or {})
+        readings = []
+        if rss is not None:
+            readings.append((rss, "RSS"))
+        if unit:
+            readings.append((unit["working_set"], "unit working set"))
+        if not readings:
             return None
-        fraction = rss / self.budget_bytes if self.budget_bytes else 0.0
+        used, label = max(readings)
+        fraction = used / self.budget_bytes if self.budget_bytes else 0.0
         now = self._clock()
         if fraction < WARN_FRACTION:
             if self._warned_at is not None and fraction < WARN_FRACTION - RECOVER_MARGIN:
-                logger.info("[MEM-WATCHDOG] RSS %s is back under %d%% of %s (%s)",
-                            _gib(rss), round(WARN_FRACTION * 100),
+                logger.info("[MEM-WATCHDOG] %s %s is back under %d%% of %s (%s)",
+                            label, _gib(used), round(WARN_FRACTION * 100),
                             self.budget_name, _gib(self.budget_bytes))
                 self._warned_at = None
                 self._warned_fraction = 0.0
@@ -138,8 +218,9 @@ class MemoryWatchdog:
         if not due:
             return None
         message = (
-            f"[MEM-WATCHDOG] RSS {_gib(rss)} is {round(fraction * 100)}% of "
+            f"[MEM-WATCHDOG] {label} {_gib(used)} is {round(fraction * 100)}% of "
             f"{self.budget_name} ({_gib(self.budget_bytes)}; {self._describe_limits()}). "
+            f"{self._describe_usage(rss, unit)} "
             "The kernel throttles the service at memory.high and kills it at "
             "memory.max (systemd then restarts it); a steady climb here is a leak.")
         logger.warning("%s", message)
@@ -149,8 +230,14 @@ class MemoryWatchdog:
 
 
 def default_watchdog() -> MemoryWatchdog:
-    """A watchdog over this process and the limits of its own cgroup."""
-    return MemoryWatchdog(limits=memory_limits(own_cgroup_dir()))
+    """A watchdog over this process and the limits of its own cgroup, and over
+    that cgroup's usage when it has a limit (a dev run's cgroup is a terminal
+    scope that holds whatever else the terminal runs)."""
+    cgroup = own_cgroup_dir()
+    limits = memory_limits(cgroup)
+    if not any(limits.values()):
+        return MemoryWatchdog(limits=limits)
+    return MemoryWatchdog(limits=limits, unit=lambda: unit_memory(cgroup))
 
 
 async def _watch(dog, interval: float) -> None:
@@ -163,7 +250,8 @@ def start_memory_watchdog(dog=None, interval: float = CHECK_INTERVAL_S) -> "asyn
     """Start the loop on the running event loop and return its task."""
     if dog is None:
         dog = default_watchdog()
-        logger.info("[MEM-WATCHDOG] watching RSS against %s (%s); warns at %d%%",
+        logger.info("[MEM-WATCHDOG] watching RSS and the unit's working set against "
+                    "%s (%s); warns at %d%%",
                     dog.budget_name, dog._describe_limits(), round(WARN_FRACTION * 100))
     return asyncio.get_running_loop().create_task(_watch(dog, interval),
                                                   name="memory-watchdog")

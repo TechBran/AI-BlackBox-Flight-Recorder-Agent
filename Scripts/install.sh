@@ -1049,7 +1049,8 @@ TimeoutStopSec=150
 # the leak backstop that replaced uvicorn's --limit-max-requests, which made
 # the service exit (an outage: dropped sessions, then the index rebuild) every
 # 100000 requests whether anything leaked or not. The orchestrator logs a
-# [MEM-WATCHDOG] warning as its RSS nears these (Orchestrator/memory_watchdog.py).
+# [MEM-WATCHDOG] warning as its RSS or the unit's working set nears these, and
+# each OOM kill in the unit (Orchestrator/memory_watchdog.py).
 # OOMPolicy=continue: a CLI agent the OOM killer picks (KillMode=process keeps
 # them in this unit) dies alone instead of stopping the orchestrator with it.
 MemoryHigh=70%

@@ -166,3 +166,103 @@ def test_the_watchdog_is_started_by_a_gated_boot_hook():
     registered = [h for h in lifespan_of(startup.app).hooks("startup")
                   if getattr(h, "__wrapped__", None) is hook]
     assert registered and getattr(registered[0], BOOT_HOOK_ATTR, False)
+
+
+# ── the unit's own usage, which is what the kernel enforces the limits on ────
+# memory.high and memory.max apply to the whole cgroup: the orchestrator plus
+# the CLI agents KillMode=process keeps in the unit, the CU browsers and
+# displays, the audio subprocess and page cache. RSS alone can sit far below
+# while the unit is throttled or OOM-killed.
+
+def _unit_files(tmp_path, current, stat, events):
+    unit = tmp_path / "unit"
+    unit.mkdir(exist_ok=True)
+    (unit / "memory.current").write_text(f"{current}\n")
+    if stat is not None:
+        (unit / "memory.stat").write_text(stat)
+    if events is not None:
+        (unit / "memory.events").write_text(events)
+    return unit
+
+
+def test_unit_memory_reads_current_working_set_and_events(tmp_path):
+    unit = _unit_files(
+        tmp_path, 9 * GIB,
+        f"anon {5 * GIB}\nfile {4 * GIB}\nactive_file {GIB}\ninactive_file {3 * GIB}\n",
+        "low 0\nhigh 7\nmax 1\noom 1\noom_kill 1\noom_group_kill 0\n")
+    usage = mw.unit_memory(unit)
+    assert usage["current"] == 9 * GIB
+    # The kubelet's working set: memory.current less the inactive page cache
+    # the kernel drops first.
+    assert usage["working_set"] == 6 * GIB
+    assert usage["events"] == {"low": 0, "high": 7, "max": 1, "oom": 1,
+                               "oom_kill": 1, "oom_group_kill": 0}
+
+
+def test_unit_memory_without_stat_or_events_or_a_cgroup(tmp_path):
+    unit = _unit_files(tmp_path, 2 * GIB, None, None)
+    assert mw.unit_memory(unit) == {"current": 2 * GIB, "working_set": 2 * GIB, "events": {}}
+    assert mw.unit_memory(None) is None
+    assert mw.unit_memory(tmp_path / "absent") is None
+
+
+def _unit_watchdog(rss, unit, clock):
+    return mw.MemoryWatchdog(
+        limits={"memory.high": 10 * GIB, "memory.max": 12 * GIB},
+        rss=lambda: rss[0], unit=lambda: unit[0], total=30 * GIB, clock=clock)
+
+
+def test_warns_on_the_units_working_set_while_rss_is_low(caplog):
+    rss = [2 * GIB]
+    unit = [{"current": 9 * GIB, "working_set": int(8.5 * GIB), "events": {"high": 3}}]
+    dog = _unit_watchdog(rss, unit, _Clock())
+    with caplog.at_level(logging.WARNING, logger="blackbox.memory_watchdog"):
+        message = dog.check()
+    assert message is not None
+    assert "85%" in message and "working set" in message and "memory.current" in message
+    assert "RSS 2.0 GiB" in message
+
+
+def test_the_unit_reading_is_optional(caplog):
+    rss = [int(8.5 * GIB)]
+    dog = _unit_watchdog(rss, [None], _Clock())
+    message = dog.check()
+    assert message is not None and "RSS 8.5 GiB" in message
+
+
+def test_an_oom_kill_in_the_unit_is_logged_once(caplog):
+    rss = [GIB]
+    unit = [{"current": 3 * GIB, "working_set": 3 * GIB, "events": {"oom_kill": 2}}]
+    clock = _Clock()
+    dog = _unit_watchdog(rss, unit, clock)
+    with caplog.at_level(logging.WARNING, logger="blackbox.memory_watchdog"):
+        # Counts from before this process started (the cgroup outlives a
+        # restart while KillMode=process children run) are only a baseline.
+        assert dog.check() is None
+        unit[0] = {"current": 3 * GIB, "working_set": 3 * GIB, "events": {"oom_kill": 3}}
+        clock.now += 120
+        dog.check()
+        clock.now += 120
+        dog.check()
+    oom = [r.getMessage() for r in caplog.records if "OOM" in r.getMessage()]
+    assert len(oom) == 1
+    assert "1 process" in oom[0] and "oom_kill=3" in oom[0]
+
+
+def test_default_watchdog_reads_its_own_cgroup(tmp_path, monkeypatch):
+    unit = _unit_files(tmp_path, 4 * GIB, f"inactive_file {GIB}\n", "oom_kill 0\n")
+    (unit / "memory.high").write_text(f"{10 * GIB}\n")
+    (unit / "memory.max").write_text("max\n")
+    monkeypatch.setattr(mw, "own_cgroup_dir", lambda: unit)
+    dog = mw.default_watchdog()
+    assert dog.budget_name == "memory.high"
+    assert dog._unit()["working_set"] == 3 * GIB
+
+
+def test_default_watchdog_ignores_a_cgroup_without_limits(tmp_path, monkeypatch):
+    """A dev run's cgroup is the terminal's scope: its usage is not ours."""
+    unit = _unit_files(tmp_path, 20 * GIB, None, "oom_kill 0\n")
+    monkeypatch.setattr(mw, "own_cgroup_dir", lambda: unit)
+    dog = mw.default_watchdog()
+    assert dog.budget_name == "physical RAM"
+    assert dog._unit() is None
