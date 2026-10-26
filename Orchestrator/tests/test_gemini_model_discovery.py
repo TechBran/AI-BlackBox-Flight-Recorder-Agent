@@ -168,6 +168,37 @@ def test_google_chat_catalog_without_a_key_leaves_the_sdk_its_env_lookup(fake_cl
     assert fake_client.instances[0].kwargs["api_key"] is None
 
 
+# ── live: the real catalog has the shape both filters rely on ────────────────
+# Opt-in (a free model listing on the box's own key):
+#   BLACKBOX_TEST_LIVE=1 pytest -m live_service Orchestrator/tests/test_gemini_model_discovery.py
+
+def _live_key():
+    from Orchestrator import config
+
+    if not config.GOOGLE_API_KEY:
+        pytest.skip("GOOGLE_API_KEY is not set on this box")
+
+
+@pytest.mark.live_service
+def test_live_catalog_lists_every_gemini_registry_model_as_embed_capable():
+    _live_key()
+    ids = asyncio.run(watcher._gemini_catalog())
+    for slug, entry in EMBEDDING_MODELS.items():
+        if entry["provider"] == "gemini":
+            assert entry["model_id"] in ids, f"{slug}: {entry['model_id']} not listed"
+
+
+@pytest.mark.live_service
+def test_live_chat_catalog_returns_gemini_chat_models():
+    _live_key()
+    from Orchestrator.routes import admin_routes
+
+    out = admin_routes._fetch_google_models()
+    assert out and out["source"] == "live" and out["models"]
+    assert all(m["id"].startswith("gemini") and "embedding" not in m["id"]
+               for m in out["models"])
+
+
 # ── the legacy SDK is gone from the runtime ─────────────────────────────────
 
 def test_no_runtime_module_loads_the_legacy_sdk():
