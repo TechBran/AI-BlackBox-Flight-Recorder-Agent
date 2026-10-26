@@ -75,6 +75,28 @@ def test_novnc_vendored_mount_serves_rfb_core():
     assert pako.status_code == 200
 
 
+def test_novnc_mount_revalidates_every_load():
+    """U37 review: noVNC was re-vendored 1.5 -> 1.7 under the SAME /cu/novnc
+    URLs, which sent no Cache-Control, so a browser or the Android live-view
+    WebView reused its heuristically cached 1.5 modules for days — or linked
+    the new rfb.js against a cached 1.5 util/browser.js that lacks the
+    supportsWebCodecsH264Decode export, a module SyntaxError that stops
+    cu-view.js before it boots. Like /ui JS: revalidate on every load, and the
+    ETag keeps an unchanged module a cheap 304."""
+    client = TestClient(app)
+    for path in ("/cu/novnc/core/rfb.js", "/cu/novnc/core/util/browser.js",
+                 "/cu/novnc/core/decoders/h264.js",
+                 "/cu/novnc/vendor/pako/lib/zlib/inflate.js"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert r.headers.get("cache-control") == "no-cache", path
+        etag = r.headers.get("etag")
+        assert etag, path
+        again = client.get(path, headers={"If-None-Match": etag})
+        assert again.status_code == 304, path
+        assert again.headers.get("cache-control") == "no-cache", path
+
+
 def test_view_page_unknown_session_is_friendly(monkeypatch):
     _fake_handle(monkeypatch)
     r = TestClient(app).get("/cu/view/nope")

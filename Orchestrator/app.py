@@ -235,11 +235,27 @@ app.mount(
 # whole mount is skipped only when NEITHER source exists, and cu_view() then
 # returns the install-notice page instead.
 import os as _os
+
+
+class _RevalidateStaticFiles(StaticFiles):
+    """Cache-Control: no-cache on every response, the policy /ui JS gets from
+    StaticCacheMiddleware. Without it browsers and the Android live-view
+    WebView cached the noVNC modules heuristically for days, so a re-vendor
+    under the same URLs (1.5 -> 1.7) kept running the old copy, or linked a
+    new rfb.js against a cached old util/browser.js (a missing export = a
+    module SyntaxError before cu-view.js boots). The ETag keeps an unchanged
+    module a cheap 304."""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 _novnc_dir = str(_resolve_path("Portal", "vendor", "novnc"))
 if not _os.path.isdir(_novnc_dir):
     _novnc_dir = "/usr/share/novnc"
 if _os.path.isdir(_novnc_dir):
-    app.mount("/cu/novnc", StaticFiles(directory=_novnc_dir), name="cu-novnc")
+    app.mount("/cu/novnc", _RevalidateStaticFiles(directory=_novnc_dir), name="cu-novnc")
 
 # =============================================================================
 # Entry point verification
