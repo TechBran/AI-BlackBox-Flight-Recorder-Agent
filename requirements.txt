@@ -28,7 +28,6 @@ filelock==4.2.4
 flatbuffers==25.12.19
 frozenlist==1.8.0
 fsspec==2026.6.0
-google-ai-generativelanguage==0.6.15
 google-api-core==2.30.3
 google-api-python-client==2.196.0
 google-auth==2.52.0
@@ -36,10 +35,9 @@ google-auth-httplib2==0.4.0
 google-auth-oauthlib==1.4.0
 google-cloud-speech==2.40.0
 google-genai==2.2.0
-google-generativeai==0.8.6
 googleapis-common-protos==1.75.0
-grpcio==1.80.0
-grpcio-status==1.71.2
+grpcio==1.84.1
+grpcio-status==1.84.1
 h11==0.16.0
 hf-xet==1.7.0
 httpcore==1.0.9
@@ -62,7 +60,7 @@ pillow==13.0.0
 primp==2.0.1
 propcache==0.5.2
 proto-plus==1.28.0
-protobuf==5.29.6
+protobuf==7.36.2
 psutil==7.2.2
 ptyprocess==0.7.0
 pyasn1==0.6.4
