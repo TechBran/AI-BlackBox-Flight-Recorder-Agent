@@ -20,11 +20,18 @@
 #      not built over — at any depth: an old root build leaves root-owned
 #      release/deps/ and bundle/deb/<pkg>/ entries under a target/ that is
 #      itself user-owned; a failed rebuild keeps the installed app, and only a
-#      box with no setup app at all fails the install.
+#      box with no setup app at all fails the install;
+#   6. a change to the app ships: install.sh rebuilds an installed app only on
+#      a version change, so the version agrees across tauri.conf.json,
+#      Cargo.toml and Cargo.lock, a box still on 0.1.1 (tauri 2.11.1 and the
+#      allow-everything WebKit permission handler, audit X02-deps-android-web-09
+#      and -10) rebuilds, and the app's build inputs match the fingerprint
+#      recorded for the current version below.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INSTALL_SH="$REPO_ROOT/Scripts/install.sh"
+REAL_GIT="$(command -v git || true)"   # before the stub kit shadows git (case 6)
 # shellcheck source=scripts/tests/lib/installer_stubs.sh
 source "$REPO_ROOT/scripts/tests/lib/installer_stubs.sh"
 
@@ -160,6 +167,46 @@ rc="$(STUB_CARGO_FAIL=1 STUB_DPKG_OWNER=black-box-setup STUB_DPKG_VERSION=0.0.1 
 grep -q 'WARN' "$WORK/fail-upgrade.log" || fail "5: a failed rebuild was not reported"
 rc="$(STUB_CARGO_FAIL=1 STUB_DPKG_OWNER='' STUB_DPKG_VERSION='' BLACKBOX_BUILD_TAURI='' run5 fail-fresh)"
 [[ "$rc" != 0 ]] || fail "5: a fresh box whose setup-app build failed reported success"
+
+# ── 6. a change to the app ships ─────────────────────────────────────────────
+# install.sh rebuilds an installed setup app only when its package version
+# differs from tauri.conf.json, and update.sh's sudo drops BLACKBOX_BUILD_TAURI,
+# so a dependency patch or a source change that keeps the version never
+# reaches a box that already has the app (it happened to the Tauri 2.12 patch
+# and, before c7fd02fd, to the mic fix). Changing anything the app is built
+# from fails the fingerprint check below until the version is bumped and the
+# new pair recorded here:
+#   1. bump "version" in installer/src-tauri/tauri.conf.json, the [package]
+#      version in installer/src-tauri/Cargo.toml and the `installer` entry in
+#      installer/src-tauri/Cargo.lock;
+#   2. run this test and copy the fingerprint it prints into SETUP_APP_INPUTS.
+SETUP_APP_VERSION=0.1.2
+SETUP_APP_INPUTS=fd79084b3bc984b81aec47d9345013bfa03a99b077ece6abe506bfc047c8edac
+TOML_VER="$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' \
+    "$REPO_ROOT/installer/src-tauri/Cargo.toml")"
+LOCK_VER="$(python3 -I -c 'import sys, tomllib
+pkgs = [p for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "installer"]
+print(pkgs[0]["version"] if len(pkgs) == 1 else "")' "$REPO_ROOT/installer/src-tauri/Cargo.lock")"
+[[ "$SRC_VER" == "$TOML_VER" && "$SRC_VER" == "$LOCK_VER" ]] \
+    || fail "6: the setup app version disagrees: tauri.conf.json $SRC_VER, Cargo.toml $TOML_VER, Cargo.lock $LOCK_VER"
+rc="$(STUB_DPKG_OWNER=ai-black-box-flight-recorder-agent-setup STUB_DPKG_VERSION=0.1.1 BLACKBOX_BUILD_TAURI='' run5 tauri-2-11)"
+[[ "$rc" == 0 ]] || fail "6: rc=$rc $(cat "$WORK/tauri-2-11.log")"
+built || fail "6: a box with the 0.1.1 setup app (tauri 2.11.1, every WebKit permission allowed) is not rebuilt: $(cat "$WORK/tauri-2-11.log")"
+installed_deb || fail "6: the rebuilt setup app was not installed over 0.1.1"
+[[ "$SRC_VER" == "$SETUP_APP_VERSION" ]] \
+    || fail "6: tauri.conf.json is at $SRC_VER but this test records $SETUP_APP_VERSION — record the new version and its fingerprint (see the note above)"
+if [[ -n "$REAL_GIT" ]] && "$REAL_GIT" -C "$REPO_ROOT" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    # Every tracked file the app is built from (path and bytes on disk).
+    INPUT_LIST="$WORK/setup-app-inputs"
+    "$REAL_GIT" -C "$REPO_ROOT" ls-files -z -- installer/src-tauri installer/src | sort -z > "$INPUT_LIST"
+    grep -qz '^installer/src-tauri/src/lib\.rs$' "$INPUT_LIST" \
+        || fail "6: git ls-files does not list installer/src-tauri/src/lib.rs"
+    INPUTS="$(cd "$REPO_ROOT" && xargs -0 sha256sum < "$INPUT_LIST" | sha256sum | cut -d' ' -f1)"
+    [[ "$INPUTS" == "$SETUP_APP_INPUTS" ]] \
+        || fail "6: the setup app's build inputs changed since $SETUP_APP_VERSION was recorded, but install.sh rebuilds an installed app only on a version change — bump the version (see the note above), then record SETUP_APP_INPUTS=$INPUTS"
+else
+    echo "note: not a git checkout, skipping the setup-app input fingerprint"
+fi
 
 echo "ALL TESTS PASSED"
 exit 0

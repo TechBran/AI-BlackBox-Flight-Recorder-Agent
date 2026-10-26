@@ -31,6 +31,6 @@
     }
   },
   "productName": "AI BlackBox Flight Recorder Agent Setup",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.blackbox.setup"
 }
