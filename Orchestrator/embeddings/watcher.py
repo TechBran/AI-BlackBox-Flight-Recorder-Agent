@@ -134,7 +134,8 @@ async def _gemini_catalog() -> list[str]:
     "models/<id>" (the registry's model_id format). supported_actions is the
     API's supportedGenerationMethods."""
     models = await asyncio.to_thread(_list_gemini_models)  # sync SDK, off the loop
-    return [m.name for m in models if "embedContent" in (m.supported_actions or [])]
+    return [m.name for m in models
+            if m.name and "embedContent" in (m.supported_actions or [])]
 
 
 async def _openai_catalog() -> list[str]:

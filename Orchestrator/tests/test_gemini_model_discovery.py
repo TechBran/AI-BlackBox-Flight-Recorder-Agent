@@ -33,6 +33,7 @@ CATALOG = [
     ("models/gemma-3-27b-it", ["generateContent", "countTokens"]),
     ("models/imagen-4.0-generate-001", ["predict"]),
     ("models/gemini-unlisted-actions", None),
+    (None, ["generateContent", "embedContent"]),  # the SDK types name Optional
 ]
 
 

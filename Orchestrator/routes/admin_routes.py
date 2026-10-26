@@ -721,7 +721,7 @@ def _fetch_google_models() -> dict | None:
         http_options=HttpOptions(timeout=5000),  # ms, per catalog page
     ) as client:
         for m in client.models.list():  # the pager walks every page
-            model_id = m.name.replace("models/", "")
+            model_id = (m.name or "").replace("models/", "")
             # supported_actions is the API's supportedGenerationMethods
             if "generateContent" not in (m.supported_actions or []):
                 continue
