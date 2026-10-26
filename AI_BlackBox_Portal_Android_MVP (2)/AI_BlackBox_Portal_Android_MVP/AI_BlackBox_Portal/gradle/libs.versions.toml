@@ -9,13 +9,20 @@
 #
 # Every artifact the build resolves is pinned by sha256 in gradle/verification-metadata.xml
 # (audit X02-deps-android-web-07), so a changed version fails the build until it is recorded.
-# Regenerate from this project directory, rerunning tasks so every tool classpath resolves:
-#   ./gradlew --continue --rerun-tasks --write-verification-metadata sha256 help \
+# Regenerate from this project directory with an EMPTY Gradle home. Gradle records only the
+# files it downloads or parses during the run: on a warm ~/.gradle it skips the parent POMs
+# and BOMs it already holds in parsed form, and a cold build (CI) then fails verification
+# while configuring the root project. Copy ~/.gradle/wrapper/dists into the new home to skip
+# the distribution download:
+#   export GRADLE_USER_HOME=$(mktemp -d)
+#   ./gradlew --no-daemon --continue --write-verification-metadata sha256 help \
 #       :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest \
 #       :app:assembleDebugAndroidTest :app:lintDebug :buildSrc:test
-# Gradle merges into the existing file; delete it first to drop superseded versions, and then
-# re-add the <trusted-artifacts> block and the aapt2 -osx/-windows jars, which a Linux run
-# does not record. Review the diff before committing.
+# Gradle merges into the existing file and keeps its <trusted-artifacts> block and the aapt2
+# -osx/-windows jars, which a Linux run does not record. To drop superseded versions, delete
+# the file first and re-add those two by hand. Then prove it from a second empty Gradle home
+# in strict mode with the android job's commands in .github/workflows/ci.yml, and review the
+# diff before committing.
 [versions]
 agp = "9.3.3"
 kotlin = "2.4.21"
