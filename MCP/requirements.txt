@@ -1,7 +1,8 @@
 # BlackBox MCP Server Dependencies
-# Kept in a SEPARATE venv (MCP/venv/) from Orchestrator/venv/ because mcp's
-# transitive starlette>=0.49 conflicts with fastapi 0.118's starlette<0.49
-# upper bound. Two venvs is the cost of isolation.
+# Kept in a SEPARATE, lean venv (MCP/venv/) from Orchestrator/venv/: it carries
+# only what the server imports, with its own pins. (The split began when mcp's
+# transitive starlette>=0.49 conflicted with fastapi 0.118's starlette<0.49;
+# the web-stack upgrade, audit rank 70, removed that conflict.)
 #
 # This venv serves the Funnel-exposed (public internet) HTTP transport, so every
 # package that parses attacker-controlled bytes carries a SECURITY FLOOR (the
@@ -27,8 +28,8 @@ lxml>=6.1.3               # the parser web_fetch asks bs4 for; CVE-2026-41066 fi
 # M2 (Streamable HTTP transport): the SDK's StreamableHTTPSessionManager runs in
 # a Starlette ASGI app served by uvicorn. Both are transitive deps of `mcp`;
 # they are listed here to make the HTTP transport's requirement EXPLICIT and to
-# carry the security floors. fastapi is deliberately NOT added (that is the
-# starlette-version conflict the lean venv exists to avoid).
+# carry the security floors. fastapi is deliberately NOT added: the server
+# does not import it, and this venv stays lean.
 starlette>=1.3.1,<2       # ASGI app + the public /authorize and /token form parsing; CVE-2026-48710, CVE-2026-54283
 python-multipart>=0.0.32  # starlette's form parser for /authorize + /token; CVE-2026-40347/-42561/-53537..-53540
 uvicorn>=0.38.0,<1        # ASGI server for the HTTP transport (the version the shipped boxes run)

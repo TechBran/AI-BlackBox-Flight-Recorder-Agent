@@ -23,6 +23,11 @@ from fastapi.testclient import TestClient
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
+try:  # fastapi 0.143+ keeps an included router's routes inside the router
+    from fastapi.routing import iter_route_contexts
+except ImportError:  # older fastapi copied them onto the app
+    iter_route_contexts = None
+
 import Orchestrator.app  # noqa: F401 — registers every route on the shared app
 from Orchestrator.checkpoint import app
 from Orchestrator.security.origin_guard import (
@@ -40,15 +45,23 @@ _SAMPLES = {"port": "1", "path": "guard-probe", "session_id": "guard-probe",
             "cli_session_id": "guard-probe"}
 
 
+def _flat(routes):
+    """(route, path) for every route, the ones of include_router()ed routers
+    too, with their prefix."""
+    if iter_route_contexts is None:
+        return [(r, getattr(r, "path", "")) for r in routes]
+    return [(ctx.original_route, ctx.path or "") for ctx in iter_route_contexts(routes)]
+
+
 def _ws_paths():
     out = []
 
     def walk(routes, prefix=""):
-        for r in routes:
+        for r, path in _flat(routes):
             if isinstance(r, WebSocketRoute):      # FastAPI's APIWebSocketRoute subclasses it
-                out.append(prefix + r.path)
+                out.append(prefix + path)
             elif isinstance(r, Mount) and getattr(r, "routes", None):
-                walk(r.routes, prefix + r.path)
+                walk(r.routes, prefix + path)
 
     walk(app.router.routes)
     return sorted(set(out))
@@ -62,14 +75,14 @@ def _get_paths():
     out = []
 
     def walk(routes, prefix=""):
-        for r in routes:
+        for r, path in _flat(routes):
             if isinstance(r, Route) and "GET" in (r.methods or ()):
-                out.append(prefix + r.path)
+                out.append(prefix + path)
             elif isinstance(r, Mount):
                 if getattr(r, "routes", None):
-                    walk(r.routes, prefix + r.path)
+                    walk(r.routes, prefix + path)
                 else:
-                    out.append(prefix + r.path + "/")
+                    out.append(prefix + path + "/")
 
     walk(app.router.routes)
     return sorted(set(out))

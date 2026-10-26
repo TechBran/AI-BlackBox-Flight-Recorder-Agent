@@ -224,7 +224,7 @@ async def get_cron_job(job_id: str):
 async def update_cron_job(job_id: str, body: CronJobUpdate):
     """Update an existing cron job."""
     manager = get_scheduler_manager()
-    updates = {k: v for k, v in body.dict().items() if v is not None}
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
         job = manager.update_job(job_id, **updates)
     except ValueError as e:

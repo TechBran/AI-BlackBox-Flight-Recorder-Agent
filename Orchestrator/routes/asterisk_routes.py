@@ -641,7 +641,7 @@ async def update_gateway_endpoint(gateway_id: str, req: GatewayUpdateRequest):
         update_gateway, redact_gateway, merge_ports, get_gateway,
     )
 
-    raw = req.dict(exclude_none=True)
+    raw = req.model_dump(exclude_none=True)
 
     # Pull the nested/structured fields out of the flat scalar update.
     http_user = raw.pop("http_user", None)

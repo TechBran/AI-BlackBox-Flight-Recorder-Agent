@@ -423,7 +423,7 @@ async def add_device(body: DeviceCreate):
 @router.put("/{device_id}")
 async def update_device(device_id: str, body: DeviceUpdate):
     registry = get_registry()
-    updates = {k: v for k, v in body.dict().items() if v is not None}
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
     # Validate port ranges before persisting
     for port_field in ("adb_port", "vnc_port", "rdp_port"):
         if port_field in updates:

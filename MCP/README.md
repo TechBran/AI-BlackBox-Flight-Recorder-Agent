@@ -71,4 +71,4 @@ bearer_token_env_var = "BLACKBOX_MCP_TOKEN"
 - Slow media tools return a `task_id` fast; poll with `get_task_status` (don't block — Claude
   Code aborts idle tool calls after ~5 min).
 - The lean `MCP/venv` (mcp, httpx, requests, bs4, starlette, uvicorn) is deliberately separate
-  from the backend venv to avoid the starlette/fastapi version conflict.
+  from the backend venv: it carries only what the server imports, with its own pins.

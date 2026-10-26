@@ -322,12 +322,14 @@ def test_lock_covers_every_requirements_in_entry():
 
 
 @pytest.mark.parametrize("dist,version", [
-    ("fastapi", "0.118.0"), ("starlette", "0.48.0"),
-    ("uvicorn", "0.30.0"), ("pydantic", "2.9.0"),
+    ("fastapi", "0.143.5"), ("starlette", "1.9.0"),
+    ("uvicorn", "0.54.0"), ("pydantic", "2.14.1"),
 ])
 def test_web_stack_held_at_validated_versions(dist, version):
-    """The FastAPI/Starlette/uvicorn/pydantic upgrade is its own milestone
-    (audit rank 70); the lock must not move them on the way."""
+    """The web stack moved as one unit (audit rank 70: fastapi 0.118 ->
+    0.143.5, starlette 0.48 -> 1.9.0, uvicorn 0.30 -> 0.54.0, pydantic 2.9 ->
+    2.14.1), validated by the full suite on a venv built from the lock. The
+    lock must not move them again without that."""
     assert _lock_pins(LOCK)[dist][0] == Version(version)
 
 

@@ -1745,7 +1745,7 @@ async def generate_google_ssml_async(inp: GoogleSSMLIn):
         task = create_task(
             TaskType.GOOGLE_TTS,
             operator=inp.operator,
-            result_data=inp.dict()
+            result_data=inp.model_dump()
         )
         return {
             "task_id": task.task_id,
@@ -2271,7 +2271,7 @@ async def generate_lyria_music_async(inp: LyriaMusicIn):
             TaskType.LYRIA_MUSIC,
             operator=inp.operator,
             prompt=inp.prompt,
-            result_data=inp.dict()
+            result_data=inp.model_dump()
         )
         return {
             "task_id": task.task_id,
@@ -2524,7 +2524,7 @@ async def generate_gemini_tts_async(inp: GeminiProTTSIn):
         task = create_task(
             TaskType.GEMINI_TTS,
             operator=inp.operator,
-            result_data=inp.dict()
+            result_data=inp.model_dump()
         )
         return {
             "task_id": task.task_id,

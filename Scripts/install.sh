@@ -547,10 +547,11 @@ if ! sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install \
 fi
 
 # ── Step 2b: BlackBox MCP server venv + per-CLI registration (audit E21) ──
-# MCP server lives in a SEPARATE venv from the Orchestrator because mcp's
-# transitive starlette>=0.49 conflicts with fastapi 0.118's starlette<0.49
-# upper bound — sharing the venv would brick the Orchestrator. Cheap cost:
-# MCP/venv only needs 4 packages (mcp, httpx, requests, beautifulsoup4).
+# MCP server lives in a SEPARATE, lean venv from the Orchestrator, with its
+# own pins (MCP/requirements.txt). It began as the way around mcp's
+# starlette>=0.49 against fastapi 0.118's starlette<0.49, which the web-stack
+# upgrade (audit rank 70) removed. Cheap cost: MCP/venv only needs a handful
+# of packages (mcp, httpx, requests, beautifulsoup4, starlette, uvicorn).
 # Server imports from Orchestrator/web_tools.py + Orchestrator/tools/
 # tool_registry.py — those only need stdlib + requests + bs4.
 #

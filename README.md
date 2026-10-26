@@ -364,9 +364,8 @@ Plus 4 read-only MCP **resources**: `Snapshot Index Statistics`,
 
 Registration happens via each CLI's official `mcp add -s user` subcommand
 in `Scripts/install.sh` Step 2b. The MCP server lives in its own venv
-(`MCP/venv/`) — separate from the Orchestrator's venv because the `mcp`
-package's transitive `starlette>=0.49` conflicts with FastAPI 0.118's
-upper bound.
+(`MCP/venv/`) — a lean venv, separate from the Orchestrator's, that
+carries only what the server imports, with its own pins.
 
 The CLI agents are themselves callable as tools from the Portal's chat —
 any frontier model can ask a CLI agent to do focused codebase work, and

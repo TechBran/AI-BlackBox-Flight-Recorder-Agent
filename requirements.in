@@ -23,8 +23,7 @@
 #       [runtime]     loaded by name, not by an import statement
 #   - Packages at 1.0 or later are capped below their next major. 0.x
 #     packages are capped below 1, or below their next minor where a minor
-#     release breaks us (httpx). The web stack stays at its validated versions
-#     until its upgrade lands (audit rank 70).
+#     release breaks us (httpx, fastapi, uvicorn).
 #   - A security floor is the first release with the fix. Floors are what
 #     move an EXISTING box: pip leaves an installed version that satisfies a
 #     requirement alone. Raise a floor when an advisory lands.
@@ -41,15 +40,17 @@
 # `Orchestrator/venv/bin/pip install -r requirements.txt` (same pins, no hash
 # check); run pip-audit on the venv afterwards.
 
-# === Web framework / ASGI: held at the validated versions (upgrade: rank 70) ===
-# Starlette 0.48 carries advisories fixed only in 0.49.1 and 1.x
-# (CVE-2025-62727, CVE-2026-48710, -48817, -48818, -54282, -54283). fastapi
-# 0.118 requires starlette<0.49, so they close with the fastapi upgrade; the
-# pip-audit gate lists them as known exceptions until then.
-fastapi==0.118.0
-starlette==0.48.0
-uvicorn[standard]==0.30.0
-pydantic==2.9.0
+# === Web framework / ASGI: upgraded as one unit (audit rank 70) ===
+# fastapi is held on 0.143: 0.144 to 0.162 shipped within one week (October
+# 2026) and changed how omitted form, query and body values default seven
+# times, reverting one change along the way. Move to a later minor once that
+# settles, re-running the route tests. 0.132 and later reject a JSON body sent
+# without a JSON Content-Type (strict_content_type, left on: it is a CSRF
+# defense for this no-auth LAN API); internal callers send the header.
+fastapi>=0.143.5,<0.144
+starlette>=1.3.1,<2             # CVE-2025-62727 (0.49.1), CVE-2026-48710 (1.0.1), -48817, -48818 (1.1.0), -54282 (1.3.0), -54283 (1.3.1); 1.0 removed on_event (the app runs one lifespan, Orchestrator/lifespan.py)
+uvicorn[standard]>=0.54.0,<0.55 # 0.50 moved `--ws auto` to the websockets-sansio server; a minor has changed defaults before
+pydantic>=2.14.1,<3
 python-multipart>=0.0.32,<0.1   # [runtime] starlette's form parser (File/Form uploads); CVE-2024-53981, CVE-2026-24486, -40347, -42561, -53538..-53540
                                 # Behaviour change from the 0.0.9 the boxes ran: a part named only by `filename*=UTF-8''...` (RFC 5987,
                                 # which RFC 7578 section 4.2 forbids) now parses as a text field, so a File endpoint answers 422. Browsers,
