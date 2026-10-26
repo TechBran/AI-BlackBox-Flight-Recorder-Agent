@@ -180,8 +180,11 @@ rc="$(STUB_CARGO_FAIL=1 STUB_DPKG_OWNER='' STUB_DPKG_VERSION='' BLACKBOX_BUILD_T
 #      version in installer/src-tauri/Cargo.toml and the `installer` entry in
 #      installer/src-tauri/Cargo.lock;
 #   2. run this test and copy the fingerprint it prints into SETUP_APP_INPUTS.
+#   The list is sorted in the C locale, so the fingerprint is the same on every
+#   machine: a UTF-8 locale orders Cargo.lock, icons/Square*.png and the rest
+#   differently, and the same bytes then hash differently (CI runs in C.UTF-8).
 SETUP_APP_VERSION=0.1.2
-SETUP_APP_INPUTS=fd79084b3bc984b81aec47d9345013bfa03a99b077ece6abe506bfc047c8edac
+SETUP_APP_INPUTS=0bc7b77ca790bb2c01850a33d8c7966601d959b969effdded971539672fc4ebc
 TOML_VER="$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' \
     "$REPO_ROOT/installer/src-tauri/Cargo.toml")"
 LOCK_VER="$(python3 -I -c 'import sys, tomllib
@@ -198,7 +201,7 @@ installed_deb || fail "6: the rebuilt setup app was not installed over 0.1.1"
 if [[ -n "$REAL_GIT" ]] && "$REAL_GIT" -C "$REPO_ROOT" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
     # Every tracked file the app is built from (path and bytes on disk).
     INPUT_LIST="$WORK/setup-app-inputs"
-    "$REAL_GIT" -C "$REPO_ROOT" ls-files -z -- installer/src-tauri installer/src | sort -z > "$INPUT_LIST"
+    "$REAL_GIT" -C "$REPO_ROOT" ls-files -z -- installer/src-tauri installer/src | LC_ALL=C sort -z > "$INPUT_LIST"
     grep -qz '^installer/src-tauri/src/lib\.rs$' "$INPUT_LIST" \
         || fail "6: git ls-files does not list installer/src-tauri/src/lib.rs"
     INPUTS="$(cd "$REPO_ROOT" && xargs -0 sha256sum < "$INPUT_LIST" | sha256sum | cut -d' ' -f1)"
