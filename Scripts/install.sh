@@ -1036,6 +1036,11 @@ ExecStart=$BLACKBOX_ROOT/Orchestrator/venv/bin/python -m uvicorn Orchestrator.ap
     --timeout-keep-alive 120 --timeout-graceful-shutdown 30 --loop uvloop
 Restart=always
 RestartSec=10
+# The stop timeout covers uvicorn's 30 s drain, then the lifespan's shutdown
+# (the task worker stop, the task cancels and each shutdown hook, each with its
+# own timeout: Orchestrator/lifespan.py, shutdown_budget_s), which the default
+# 90 s does not; past it systemd SIGKILLs whatever hook is still running.
+TimeoutStopSec=150
 
 # Memory bounds (audit Q4, X06-ops-deploy-01). MemoryHigh= is the soft cap at
 # 70 % of system RAM: past it the kernel throttles the unit and reclaims.

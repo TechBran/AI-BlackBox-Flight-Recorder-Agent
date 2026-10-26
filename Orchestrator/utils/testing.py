@@ -33,10 +33,10 @@ def testing_mode() -> bool:
 
 
 def boot_hook(app, event: str):
-    """Register a startup or shutdown hook on `app`'s lifespan (event is
-    "startup" or "shutdown"), for a hook with side effects outside this
-    process: the app does not run it while testing_mode() is on. A hook that
-    stays inside the process registers with lifespan.lifespan_hook instead.
+    """Register a startup, stopping or shutdown hook on `app`'s lifespan
+    (lifespan.EVENTS), for a hook with side effects outside this process: the
+    app does not run it while testing_mode() is on. A hook that stays inside
+    the process registers with lifespan.lifespan_hook instead.
 
     The check runs when the hook fires, not at import. The decorated name stays
     the undecorated function, so a test can still call the hook directly to test

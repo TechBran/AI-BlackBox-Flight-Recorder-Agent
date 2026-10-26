@@ -253,6 +253,9 @@ PRODUCTION_STARTUP = [
     "Orchestrator.routes.agent_routes.start_agent_session_reaper",
     "Orchestrator.routes.gemini_agent_routes.start_gemini_session_reaper",
 ]
+PRODUCTION_STOPPING = [
+    "Orchestrator.startup.shutdown_task_worker",
+]
 PRODUCTION_SHUTDOWN = [
     "Orchestrator.startup.shutdown_sms",
     "Orchestrator.startup.shutdown_asterisk",
@@ -277,7 +280,7 @@ from Orchestrator.app import app
 from Orchestrator.lifespan import hook_name, lifespan_of
 lifespan = lifespan_of(app)
 print(json.dumps({event: [hook_name(h) for h in lifespan.hooks(event)]
-                  for event in ("startup", "shutdown")}))
+                  for event in ("startup", "stopping", "shutdown")}))
 """
 
 
@@ -295,7 +298,35 @@ def test_production_hook_order(tmp_path):
     assert run.returncode == 0, run.stderr[-2000:]
     hooks = json.loads(run.stdout.strip().splitlines()[-1])
     assert hooks["startup"] == PRODUCTION_STARTUP
+    assert hooks["stopping"] == PRODUCTION_STOPPING
     assert hooks["shutdown"] == PRODUCTION_SHUTDOWN
+
+
+def _unit_seconds(pattern, default):
+    """A number from the blackbox.service install.sh renders, else `default`."""
+    text = (REPO / "Scripts" / "install.sh").read_text(encoding="utf-8")
+    body = text[text.index("render_blackbox_unit() {"):]
+    body = body[:body.index("\n}\n")]
+    found = re.search(pattern, body, re.MULTILINE)
+    return int(found.group(1)) if found else default
+
+
+def test_the_shutdown_budget_fits_the_units_stop_timeout():
+    """systemd SIGKILLs a unit still running TimeoutStopSec after SIGTERM (90 s
+    unless the unit says otherwise). That has to cover uvicorn's drain and then
+    every stopping and shutdown hook running into its timeout, or the last
+    hooks (the scheduler, the TTS queue) are killed instead of logged."""
+    from Orchestrator.app import app
+    ls = _lifespan()
+    drain = _unit_seconds(r"--timeout-graceful-shutdown (\d+)", None)
+    assert drain is not None, "the unit lost --timeout-graceful-shutdown"
+    stop_timeout = _unit_seconds(r"^TimeoutStopSec=(\d+)$", 90)
+    budget = ls.lifespan_of(app).shutdown_budget_s()
+    assert budget >= ls.TASK_CANCEL_TIMEOUT_S + 7 * ls.HOOK_TIMEOUT_S
+    margin = 15
+    assert drain + budget + margin <= stop_timeout, (
+        f"TimeoutStopSec={stop_timeout} cannot hold the {drain} s drain plus a "
+        f"{budget:.0f} s shutdown budget")
 
 
 def test_no_hook_bypasses_the_lifespan():

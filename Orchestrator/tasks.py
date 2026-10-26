@@ -693,14 +693,67 @@ def append_task_reasoning(task_id: str, chunk: str):
         print(f"[REASONING] append_task_reasoning({task_id}) failed (non-fatal): {e}")
 
 
+# ------------------------------ worker lifecycle ------------------------------
+# The app starts ONE worker thread at boot (startup_check_index) and stops it
+# first thing at shutdown (startup.shutdown_task_worker, the lifespan's
+# "stopping" phase), before the shutdown hooks tear down the SMS, Asterisk and
+# scheduler subsystems the tasks use (audit X05-architecture-04). Stopping only
+# ends the intake: a task already running keeps its pool thread and ends when
+# the process does (uvicorn re-raises SIGTERM once shutdown completes).
+# models_module.worker_running is the loop's run flag; it is cleared under
+# _worker_lock, which the loop also holds from its last check of the flag to
+# the submit, so once stop_background_worker has cleared it no queued task
+# starts.
+WORKER_STOP_TIMEOUT_S = 5.0   # the loop sleeps at most 0.5 s per pass
+_worker_lock = threading.Lock()
+_worker_thread: Optional[threading.Thread] = None
+_worker_futures: Dict[str, Any] = {}   # the running worker's task_id -> Future
+
+
+def start_background_worker() -> threading.Thread:
+    """Start the worker thread, once; returns it (the running one if any)."""
+    global _worker_thread
+    with _worker_lock:
+        if _worker_thread is not None and _worker_thread.is_alive():
+            return _worker_thread
+        thread = threading.Thread(target=background_worker, name="task-worker-loop",
+                                  daemon=True)
+        _worker_thread = thread
+    thread.start()
+    return thread
+
+
+def stop_background_worker(timeout: float = WORKER_STOP_TIMEOUT_S) -> List[str]:
+    """Stop the worker started by start_background_worker from starting queued
+    tasks, and wait up to `timeout` for its loop to end. Returns the ids of the
+    tasks it had started that are still running. A no-op (returns []) when
+    the app never started a worker, as under the test suite, so it never stops
+    a worker a test runs on its own."""
+    with _worker_lock:
+        thread = _worker_thread
+        if thread is None:
+            return []
+        models_module.worker_running = False
+    if thread is not threading.current_thread():
+        thread.join(timeout)
+        if thread.is_alive():
+            print(f"[WORKER] worker loop did not end within {timeout:.0f}s")
+    running = [tid for tid, f in list(_worker_futures.items()) if not f.done()]
+    print(f"[WORKER] Background worker stopped; {len(running)} task(s) still running"
+          + (f": {', '.join(running)}" if running else ""))
+    return running
+
+
 def background_worker():
     """Process tasks from the queue using a thread pool for concurrency.
 
     Uses ThreadPoolExecutor so slow tasks (checkpoints, video gen) don't block
     fast tasks (images, TTS). Two INDEPENDENT budgets (MAX_CONCURRENT for
     everything, MAX_CONCURRENT_CLI_AGENT for headless coding agents) so neither
-    class can starve the other. The pool is sized to their sum.
+    class can starve the other. The pool is sized to their sum. Runs until
+    models_module.worker_running is cleared (stop_background_worker).
     """
+    global _worker_futures
     from concurrent.futures import ThreadPoolExecutor, Future
     pool_size = MAX_CONCURRENT + MAX_CONCURRENT_CLI_AGENT
 
@@ -710,16 +763,22 @@ def background_worker():
 
     active_futures: dict[str, Future] = {}       # task_id -> Future
     active_types: dict[str, TaskType] = {}       # task_id -> TaskType (for budgeting)
+    _worker_futures = active_futures
 
     def _on_task_done(task_id: str, future: Future):
         """Callback when a task completes — clean up tracking."""
         active_futures.pop(task_id, None)
         active_types.pop(task_id, None)
+        if future.cancelled():   # never started: the pool shut down first
+            return
         exc = future.exception()
         if exc:
             print(f"[WORKER] Task {task_id} raised uncaught exception: {exc}")
 
-    with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="task-worker") as pool:
+    # Not `with ThreadPoolExecutor(...)`: its exit waits for every running task
+    # (a video or a CLI agent can take many minutes), and the stop must not.
+    pool = ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="task-worker")
+    try:
         while models_module.worker_running:
             # SUPERVISION (C1): this is a single unsupervised daemon thread with no
             # restart. ANY unhandled exception in one iteration would kill the whole
@@ -774,22 +833,31 @@ def background_worker():
                     continue
 
                 task = next(t for tid, t in candidates if tid == selected_id)
-                with task_lock:
-                    if selected_id in task_queue:
-                        task_queue.remove(selected_id)
+                with _worker_lock:
+                    # Stopped since the pass began: leave the task queued.
+                    if not models_module.worker_running:
+                        break
+                    with task_lock:
+                        if selected_id in task_queue:
+                            task_queue.remove(selected_id)
 
-                print(f"[WORKER] Submitting task {selected_id} ({task.task_type}) "
-                      f"[active_other={active_other}/{MAX_CONCURRENT}, "
-                      f"active_cli={active_cli}/{MAX_CONCURRENT_CLI_AGENT}]")
-                active_types[selected_id] = task.task_type
-                future = pool.submit(process_task, task)
-                active_futures[selected_id] = future
+                    print(f"[WORKER] Submitting task {selected_id} ({task.task_type}) "
+                          f"[active_other={active_other}/{MAX_CONCURRENT}, "
+                          f"active_cli={active_cli}/{MAX_CONCURRENT_CLI_AGENT}]")
+                    active_types[selected_id] = task.task_type
+                    future = pool.submit(process_task, task)
+                    active_futures[selected_id] = future
                 future.add_done_callback(lambda f, tid=selected_id: _on_task_done(tid, f))
             except Exception as e:  # noqa: BLE001 — supervision is the whole point
                 print(f"[WORKER] loop iteration error (recovered, worker stays alive): {e}")
                 import traceback
                 traceback.print_exc()
                 time.sleep(0.5)
+    finally:
+        # Running tasks keep their threads; one submitted but not yet started
+        # is dropped (its row stays PENDING, as a queued one does).
+        pool.shutdown(wait=False, cancel_futures=True)
+        print("[WORKER] Background worker loop ended")
 
 def process_task(task: Task):
     """Process a single task based on its type"""

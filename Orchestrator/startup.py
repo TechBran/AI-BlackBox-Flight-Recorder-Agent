@@ -34,8 +34,11 @@ from Orchestrator.utils.static_guard import (
     PORTAL_MEDIA_DIRS, GuardedStaticFiles, drop_world_write, portal_refused_dirs,
 )
 # Every hook below registers through boot_hook, which the app skips under
-# BLACKBOX_TESTING=1 (the test suite). They run from the app's one lifespan in
-# the order they appear in this file (Orchestrator/lifespan.py).
+# BLACKBOX_TESTING=1 (the test suite), except shutdown_task_worker, which only
+# stops what startup_check_index started (lifespan_hook). They run from the
+# app's one lifespan in the order they appear in this file
+# (Orchestrator/lifespan.py).
+from Orchestrator.lifespan import lifespan_hook
 from Orchestrator.utils.testing import boot_hook
 from Orchestrator.fossils import (
     load_snapshot_index, rebuild_snapshot_index, update_snapshot_index,
@@ -237,11 +240,11 @@ def startup_check_index():
     except Exception as e:
         logger.error("Sovereign Browser display boot-reap error: %s", e)
 
-    # Start background worker thread for task processing (lazy import to avoid circular import)
+    # Start background worker thread for task processing (lazy import to avoid
+    # circular import). shutdown_task_worker stops it.
     logger.info("Starting background worker thread...")
-    from Orchestrator.tasks import background_worker
-    worker_thread = threading.Thread(target=background_worker, daemon=True)
-    worker_thread.start()
+    from Orchestrator.tasks import start_background_worker
+    start_background_worker()
     logger.info("Background worker thread started")
 
 
@@ -1011,6 +1014,19 @@ async def startup_cli_agent_zellij_reaper():
         )
     except Exception as e:  # noqa: BLE001 — must never crash startup.
         logger.error("[ZELLIJ-REAPER] failed to start reaper (non-fatal): %s", e)
+
+
+@lifespan_hook(app, "stopping")
+async def shutdown_task_worker():
+    """Stop the background task worker taking queued tasks, first thing at
+    shutdown, before the registry's tasks are cancelled and the hooks below
+    stop SMS, Asterisk, cellular and the scheduler, which those tasks use
+    (audit X05-architecture-04). A task already running is left to finish or
+    to end with the process. The join takes up to a loop pass (0.5 s), so it
+    runs in a thread. A no-op when the worker was never started (the suite)."""
+    import asyncio
+    from Orchestrator import tasks
+    await asyncio.to_thread(tasks.stop_background_worker)
 
 
 @boot_hook(app, "shutdown")

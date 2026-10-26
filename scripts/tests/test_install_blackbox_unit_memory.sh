@@ -55,8 +55,12 @@ grep -vE '^[[:space:]]*#' "$INSTALL_SH" | grep -q -- '--limit-max-requests' \
 grep -vE '^[[:space:]]*#' "$OVERRIDE" | grep -q -- '--limit-max-requests' \
     && fail "the override drop-in passes --limit-max-requests"
 
-# The graceful drain stays.
+# The graceful drain stays, and the stop timeout holds it plus the lifespan's
+# shutdown hooks (Orchestrator/tests/test_app_lifespan.py checks the sum).
 [[ "$EXEC" == *"--timeout-graceful-shutdown 30"* ]] || fail "ExecStart lost --timeout-graceful-shutdown 30: $EXEC"
+STOP="$(sed -nE 's/^TimeoutStopSec=([0-9]+)$/\1/p' "$UNIT")"
+[[ -n "$STOP" ]] || fail "blackbox.service has no TimeoutStopSec=<seconds>: the 90 s default cuts off the shutdown hooks"
+(( STOP > 90 )) || fail "TimeoutStopSec=$STOP is no longer than systemd's 90 s default"
 
 # ── memory bounds ─────────────────────────────────────────────────────────────
 pct() {  # <key> — the percentage value of <key>= in the unit, or empty

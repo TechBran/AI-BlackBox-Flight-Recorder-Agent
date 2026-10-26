@@ -22,12 +22,18 @@ on_event ran them (nothing is served until startup returns). A hook that
 raises fails the startup, as before, after the shutdown half below has stopped
 whatever the earlier hooks started.
 
-Shutdown first cancels every task in the registry and waits up to
-TASK_CANCEL_TIMEOUT_S for them, so a task's own cleanup (a call handler
-hanging up its channel) still finds the subsystems it uses. Then it runs each
-shutdown hook in turn, an async one bounded by HOOK_TIMEOUT_S; a hook that
-raises or hangs is logged and the rest still run (under on_event the first
-failure skipped every later hook).
+Shutdown runs in three phases. First the "stopping" hooks, which stop new
+work from starting (the background task worker taking queued tasks:
+startup.shutdown_task_worker). Then it cancels every task in the registry and
+waits up to TASK_CANCEL_TIMEOUT_S for them, so a task's own cleanup (a call
+handler hanging up its channel) still finds the subsystems it uses. Then it
+runs each shutdown hook in turn. In both hook phases an async hook is bounded
+by HOOK_TIMEOUT_S, and a hook that raises or hangs is logged and the rest
+still run (under on_event the first failure skipped every later hook).
+uvicorn only starts the lifespan shutdown after its connection drain
+(--timeout-graceful-shutdown), so the worker can still start a task during
+the drain. The unit's TimeoutStopSec covers the drain plus
+shutdown_budget_s() (Orchestrator/tests/test_app_lifespan.py checks it).
 
 The registry is app.state.background_tasks (APP_LIFESPAN.tasks; track_task()
 reaches it from modules that do not import the app). It keeps a strong
@@ -36,7 +42,10 @@ weakly, so a task nobody references can be garbage-collected mid-run. Register
 a task that outlives the hook or request that started it (a maintenance loop,
 a call handler, a migration). A task scoped to one request or socket belongs
 to that handler, and a subsystem with its own stop (the cron scheduler, the
-SMS AMI client, the ARI client) stops its own tasks in its shutdown hook.
+SMS AMI client, the ARI client) stops its own tasks in its shutdown hook. The
+in-app update drive (update_routes._spawn) is deliberately not registered:
+cancelling it does not stop the git or pip process it is waiting on, so it
+would only skip the update's later phases sooner than the process exit does.
 
 Stdlib only.
 """
@@ -50,10 +59,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("blackbox.lifespan")
 
-EVENTS = ("startup", "shutdown")
+EVENTS = ("startup", "stopping", "shutdown")
 # How long shutdown waits for the cancelled tasks, then for each async
-# shutdown hook. systemd's stop timeout (90 s by default) also has to cover
-# uvicorn's 30 s connection drain (--timeout-graceful-shutdown).
+# stopping and shutdown hook. The unit's TimeoutStopSec has to cover these
+# (shutdown_budget_s) plus uvicorn's connection drain before them
+# (--timeout-graceful-shutdown), or systemd SIGKILLs the last hooks.
 TASK_CANCEL_TIMEOUT_S = 5.0
 HOOK_TIMEOUT_S = 10.0
 
@@ -89,7 +99,9 @@ class TaskRegistry:
 
     def names(self) -> List[str]:
         """The names of the tasks still running, in the order they were added."""
-        return [name for task, name in self._tasks.items() if not task.done()]
+        # list() copies in one step: a task of a worker thread's loop may be
+        # added or forgotten concurrently.
+        return [name for task, name in list(self._tasks.items()) if not task.done()]
 
     def __len__(self) -> int:
         return len(self.names())
@@ -133,6 +145,14 @@ class AppLifespan:
         """The hooks registered for `event`, in the order they run."""
         return list(self._hooks[event])
 
+    def shutdown_budget_s(self) -> float:
+        """The longest the shutdown half can take when every async hook runs
+        into its timeout. (A sync hook runs inline and is not bounded; keep
+        those quick.)"""
+        hooks = self.hooks("stopping") + self.hooks("shutdown")
+        async_hooks = sum(1 for h in hooks if inspect.iscoroutinefunction(h))
+        return TASK_CANCEL_TIMEOUT_S + async_hooks * HOOK_TIMEOUT_S
+
     def bind(self, app) -> None:
         """Make this the lifespan that lifespan_of(app) returns, and put its
         task registry on app.state. For an app built with FastAPI(lifespan=self)."""
@@ -173,18 +193,22 @@ class AppLifespan:
                 await result
 
     async def _shutdown(self) -> None:
+        await self._run_stop_hooks("stopping")
         await self.tasks.cancel_all(TASK_CANCEL_TIMEOUT_S)
-        for hook in self.hooks("shutdown"):
+        await self._run_stop_hooks("shutdown")
+
+    async def _run_stop_hooks(self, event: str) -> None:
+        for hook in self.hooks(event):
             try:
                 result = hook()
                 if inspect.isawaitable(result):
                     await asyncio.wait_for(result, HOOK_TIMEOUT_S)
             except TimeoutError:
-                logger.error("[LIFESPAN] shutdown hook %s did not finish within %.0fs; "
-                             "running the rest", hook_name(hook), HOOK_TIMEOUT_S)
+                logger.error("[LIFESPAN] %s hook %s did not finish within %.0fs; "
+                             "running the rest", event, hook_name(hook), HOOK_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — one failed stop must not skip the others.
-                logger.exception("[LIFESPAN] shutdown hook %s failed; running the rest",
-                                 hook_name(hook))
+                logger.exception("[LIFESPAN] %s hook %s failed; running the rest",
+                                 event, hook_name(hook))
 
 
 # The lifespan of the app this process serves (checkpoint.py binds it).
@@ -203,10 +227,10 @@ def lifespan_of(app) -> AppLifespan:
 
 
 def lifespan_hook(app, event: str):
-    """Decorator: register a startup or shutdown hook on `app`'s lifespan, for
-    work that stays inside this process (capturing the loop, stopping an
-    in-process worker), so the test suite runs it too. A hook with side
-    effects outside the process registers with boot_hook instead."""
+    """Decorator: register a startup, stopping or shutdown hook on `app`'s
+    lifespan, for work that stays inside this process (capturing the loop,
+    stopping an in-process worker), so the test suite runs it too. A hook with
+    side effects outside the process registers with boot_hook instead."""
     def register(fn):
         lifespan_of(app).add(event, fn)
         return fn
