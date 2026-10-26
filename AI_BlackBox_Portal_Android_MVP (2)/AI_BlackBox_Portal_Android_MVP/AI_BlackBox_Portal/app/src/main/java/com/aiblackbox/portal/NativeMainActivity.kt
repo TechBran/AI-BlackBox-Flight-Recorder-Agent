@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,6 +31,7 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
@@ -226,7 +228,14 @@ class NativeMainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // BlackBox-black bars with light icons. Android 15+ draws every app edge-to-edge and
+        // ignores bar colours (Window.statusBarColor/navigationBarColor are deprecated there);
+        // below it, enableEdgeToEdge sets the colours the BlackBoxTheme SideEffect used to.
+        // dark() also leaves nav-bar contrast unenforced, as Theme.AIBlackBox.NoBar asks.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(BbxBlack.toArgb()),
+            navigationBarStyle = SystemBarStyle.dark(BbxBlack.toArgb()),
+        )
 
         // Notification RECEIVER (MN.4): bring up the MODEL-FREE listener FGS that owns
         // the single control-port socket so the phone can receive a server push and post

@@ -1,10 +1,11 @@
 package com.aiblackbox.portal
 
 import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import android.widget.Button
 import android.widget.Toast
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.aiblackbox.portal.data.store.BlackBoxStore
@@ -24,23 +25,14 @@ class PairingActivity : AppCompatActivity() {
             finish(); return
         }
 
+        // Edge-to-edge with transparent status and navigation bars and light icons. Android
+        // 15+ enforces edge-to-edge and ignores bar colours (Window.statusBarColor is
+        // deprecated there); below it enableEdgeToEdge sets the same window flags and colours.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         setContentView(R.layout.activity_pairing)
-
-        // Enable edge-to-edge display (transparent status and navigation bars)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
-        } else {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = (
-                android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            )
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
-        }
 
         findViewById<Button>(R.id.btnScan).setOnClickListener {
             val integrator = IntentIntegrator(this)

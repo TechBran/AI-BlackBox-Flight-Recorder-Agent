@@ -8,9 +8,24 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Robolectric's framework jar (see testOptions below): one exact artifact, no transitives.
+configurations {
+    robolectricAndroidAll {
+        canBeConsumed = false
+        transitive = false
+    }
+}
+def robolectricAndroidAllDir = layout.buildDirectory.dir('robolectric-android-all')
+def robolectricAndroidAllJars = tasks.register('robolectricAndroidAllJars', Sync) {
+    from configurations.robolectricAndroidAll
+    into robolectricAndroidAllDir
+}
+
 android {
     namespace = 'com.aiblackbox.portal'
-    compileSdk = 36
+    // Compose 1.12 (compose-bom 2026.09.00) is built against API 37 and requires it. This is
+    // the API surface the app compiles against only; runtime behaviour follows targetSdk.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.aiblackbox.portal"
@@ -106,6 +121,16 @@ android {
             if (!project.hasProperty('includeDiagnostics')) {
                 test.filter { excludeTestsMatching '*Diagnostic' }
             }
+            // Robolectric would otherwise download its android-all framework jar at test time
+            // from Maven Central into ~/.m2, outside Gradle's cache, --offline and
+            // gradle/verification-metadata.xml. Gradle resolves and verifies it instead
+            // (the robolectricAndroidAll configuration above) and Robolectric runs offline
+            // against that copy.
+            test.inputs.files(robolectricAndroidAllJars)
+                .withPropertyName('robolectricAndroidAll')
+                .withPathSensitivity(PathSensitivity.NAME_ONLY)
+            test.systemProperty 'robolectric.offline', 'true'
+            test.systemProperty 'robolectric.dependency.dir', robolectricAndroidAllDir.get().asFile.absolutePath
         }
     }
 }
@@ -144,6 +169,7 @@ dependencies {
     implementation composeBom
     implementation libs.compose.ui
     implementation libs.compose.material3
+    implementation libs.compose.material.icons.core
     implementation libs.compose.foundation
     implementation libs.compose.ui.tooling.preview
     implementation libs.androidx.activity.compose
@@ -182,6 +208,8 @@ dependencies {
     testImplementation libs.junit
     testImplementation libs.coroutines.test
     testImplementation libs.okhttp.mockwebserver3.junit4
+    testImplementation libs.robolectric
+    robolectricAndroidAll libs.robolectric.android.all
 
     // Instrumented Compose UI testing
     androidTestImplementation composeBom

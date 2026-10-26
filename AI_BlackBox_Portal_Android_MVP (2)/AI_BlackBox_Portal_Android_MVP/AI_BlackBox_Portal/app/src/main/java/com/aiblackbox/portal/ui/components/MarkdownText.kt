@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.sp
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -277,7 +278,8 @@ fun MarkdownText(
             when (segment) {
                 is ContentSegment.CodeBlock -> {
                     // Full-height code block with copy button
-                    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                    val clipboard = androidx.compose.ui.platform.LocalClipboard.current
+                    val copyScope = androidx.compose.runtime.rememberCoroutineScope()
                     var copied by remember { mutableStateOf(false) }
                     LaunchedEffect(copied) {
                         if (copied) { kotlinx.coroutines.delay(1500); copied = false }
@@ -312,7 +314,7 @@ fun MarkdownText(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
                                     .clickFeedback {
-                                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(segment.code))
+                                        copyScope.launch { clipboard.setClipEntry(plainTextClipEntry(segment.code)) }
                                         copied = true
                                     }
                                     .padding(horizontal = 8.dp, vertical = 2.dp)

@@ -39,6 +39,8 @@ import android.webkit.URLUtil
 import android.widget.Button
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -297,6 +299,13 @@ class PortalActivity : AppCompatActivity() {
         // foregrounded Activity so the FGS start is permitted.
         NotificationListenerFgs.start(this)
 
+        // Edge-to-edge with transparent status and navigation bars and light icons. Android
+        // 15+ enforces edge-to-edge and ignores bar colours (Window.statusBarColor is
+        // deprecated there); below it enableEdgeToEdge sets the same window flags and colours.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         setContentView(R.layout.activity_portal)
 
         // (M5.5 / I1) Drive the foldable POSTURE monitor from repeatOnLifecycle(STARTED): the
@@ -312,24 +321,6 @@ class PortalActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 runCatching { FoldingFeatureMonitor.instance.start(this@PortalActivity, this) }
             }
-        }
-
-        // Enable edge-to-edge display (transparent status and navigation bars)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ modern approach
-            window.setDecorFitsSystemWindows(false)
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
-        } else {
-            // Android 10 and below
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = (
-                android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            )
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
         }
 
         web = findViewById(R.id.portalWeb)

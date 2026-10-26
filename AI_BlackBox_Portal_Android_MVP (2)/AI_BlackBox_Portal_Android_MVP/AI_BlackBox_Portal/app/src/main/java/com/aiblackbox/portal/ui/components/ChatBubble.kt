@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,11 +42,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -70,6 +70,7 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
 import com.aiblackbox.portal.ui.theme.RadiusLg
 import com.aiblackbox.portal.ui.theme.UserBubbleShape
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 // =============================================================================
 // ChatBubble — aligned with Portal .bubble, .bubble-controls, .bubble-btn
@@ -109,7 +110,8 @@ fun ChatBubble(
 ) {
     val isUser = message.role == "user"
     val view = LocalView.current
-    val clipboardManager = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val copyScope = rememberCoroutineScope()
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val maxUserBubbleWidth = screenWidth * 0.85f
 
@@ -126,7 +128,7 @@ fun ChatBubble(
     // (pointer long-press with haptic, and the TalkBack long-click action it
     // exposes via onLongClickLabel).
     val copyMessage = {
-        clipboardManager.setText(AnnotatedString(message.content))
+        copyScope.launch { clipboard.setClipEntry(plainTextClipEntry(message.content)) }
         isCopied = true
     }
     val bubbleInteractions = remember { MutableInteractionSource() }
@@ -625,7 +627,7 @@ fun ChatBubble(
                             .border(1.dp, copyBorder, RoundedCornerShape(RadiusMd))
                             .clickFeedback {
                                 android.util.Log.d("ChatBubble", "COPY BUTTON TAPPED: msg=${message.id.take(8)}")
-                                clipboardManager.setText(AnnotatedString(message.content))
+                                copyScope.launch { clipboard.setClipEntry(plainTextClipEntry(message.content)) }
                                 isCopied = true
                             },
                         contentAlignment = Alignment.Center

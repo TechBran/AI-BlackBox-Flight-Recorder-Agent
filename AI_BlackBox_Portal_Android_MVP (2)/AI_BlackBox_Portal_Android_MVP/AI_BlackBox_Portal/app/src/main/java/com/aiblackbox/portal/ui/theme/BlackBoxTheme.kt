@@ -1,15 +1,10 @@
 package com.aiblackbox.portal.ui.theme
 
-import android.app.Activity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ReadOnlyComposable
-import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalView
-import androidx.core.view.WindowCompat
 
 // =============================================================================
 // Dark Color Scheme — maps Portal CSS tokens onto Material3 color roles
@@ -65,19 +60,6 @@ private val ExtendedGlass = BlackBoxGlass()
 fun BlackBoxTheme(
     content: @Composable () -> Unit,
 ) {
-    val view = LocalView.current
-    if (!view.isInEditMode) {
-        SideEffect {
-            val window = (view.context as Activity).window
-            window.statusBarColor = BbxBlack.toArgb()
-            window.navigationBarColor = BbxBlack.toArgb()
-            WindowCompat.getInsetsController(window, view).apply {
-                isAppearanceLightStatusBars = false
-                isAppearanceLightNavigationBars = false
-            }
-        }
-    }
-
     CompositionLocalProvider(
         LocalBlackBoxColors provides ExtendedColors,
         LocalBlackBoxShapes provides ExtendedShapes,
