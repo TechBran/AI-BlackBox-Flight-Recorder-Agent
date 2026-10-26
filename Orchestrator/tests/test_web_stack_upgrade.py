@@ -9,9 +9,10 @@ request.url.path (CVE-2026-48710) and three more; the supply-chain gate
 waived all six.
 
 The locked versions themselves are pinned by test_dependency_manifest.py. The
-route tests run against the installed stack, so on a venv built before the
-upgrade they skip and say to rebuild it from requirements.lock.txt (an ops
-step of rank 70); CI builds from the lock and runs them.
+gate test reads the repo (hermetic on any venv). The route tests run against
+the installed stack, so on a venv built before the upgrade they skip and say
+to rebuild it from requirements.lock.txt (an ops step of rank 70); CI builds
+from the lock and runs them.
 """
 from __future__ import annotations
 
@@ -28,6 +29,13 @@ _STARLETTE_FLOOR = (1, 3, 1)
 
 def _version(text: str):
     return tuple(int(p) for p in re.findall(r"\d+", text)[:3])
+
+
+def test_the_supply_chain_gate_waives_no_advisory():
+    workflow = (REPO / ".github" / "workflows" / "supply-chain.yml").read_text()
+    waived = [line.strip() for line in workflow.splitlines()
+              if "--ignore-vuln" in line and not line.lstrip().startswith("#")]
+    assert waived == []
 
 
 def _require_upgraded_stack():

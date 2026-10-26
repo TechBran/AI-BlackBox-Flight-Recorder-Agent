@@ -367,9 +367,12 @@ def test_supply_chain_workflow_pins_actions_and_tools():
 
 def test_pip_audit_exceptions_are_documented_in_requirements_in():
     """Every advisory the gate ignores is named, with its reason, next to the
-    package it belongs to; an undocumented exception is a silenced alarm."""
-    ignored = re.findall(r"--ignore-vuln\s+(\S+)", WORKFLOW.read_text(encoding="utf-8"))
-    assert ignored, "expected the Starlette 0.48 exceptions until the rank-70 upgrade"
+    package it belongs to; an undocumented exception is a silenced alarm. (It
+    ignores none since the rank-70 web-stack upgrade closed the six Starlette
+    0.48 ones: test_web_stack_upgrade.py.)"""
+    steps = "\n".join(line for line in WORKFLOW.read_text(encoding="utf-8").splitlines()
+                      if not line.lstrip().startswith("#"))
+    ignored = re.findall(r"--ignore-vuln\s+(\S+)", steps)
     documented = REQ_IN.read_text(encoding="utf-8")
     for vuln in ignored:
         short = "-" + vuln.split("-", 2)[2]  # CVE-2026-48817 is listed as -48817

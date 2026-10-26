@@ -71,18 +71,12 @@ jobs:
           --disable-pip-version-check -c requirements.txt sentence-transformers
 
       - name: pip-audit requirements.lock.txt
-        # Known exceptions, all Starlette 0.48: the fixes are in 0.49.1 and
-        # 1.x, which need the fastapi upgrade (audit rank 70). Remove these
-        # with that upgrade; never add one without a tracking reason here.
+        # No known exceptions. (The six Starlette 0.48 ones closed with the
+        # web-stack upgrade, audit rank 70.) Never add an --ignore-vuln
+        # without a tracking reason here.
         run: >-
           "$RUNNER_TEMP/tools/bin/pip-audit" -r requirements.lock.txt
           --disable-pip --strict --progress-spinner off
-          --ignore-vuln CVE-2025-62727
-          --ignore-vuln CVE-2026-48710
-          --ignore-vuln CVE-2026-48817
-          --ignore-vuln CVE-2026-48818
-          --ignore-vuln CVE-2026-54282
-          --ignore-vuln CVE-2026-54283
 
       - name: pip-audit MCP/requirements.txt
         run: '"$RUNNER_TEMP/tools/bin/pip-audit" -r MCP/requirements.txt --strict --progress-spinner off'
