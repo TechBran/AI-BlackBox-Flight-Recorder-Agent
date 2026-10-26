@@ -117,11 +117,18 @@ export function openLogsModal() {
 //
 // On click: POST /onboarding/restart (fire-and-forget — the restart will
 // SIGTERM the service mid-response). Wait 5s, then poll /health every 2s
-// for up to 120s. When it returns 200, poll /restart-status until drift
-// clears, show "Restarted ✓" briefly, then fade back to State A.
+// for up to RESTART_HEALTH_WAIT_MS. When it returns 200, poll /restart-status
+// until drift clears, show "Restarted ✓" briefly, then fade back to State A.
 //
 // Parameterized by btn + statusEl so done (#ob-done-restart) and hub
 // (#ob-hub-restart) each mount against their own elements.
+
+// How long a restart may take to answer /health again: uvicorn first drains
+// open connections (up to 30 s: a chat stream in another tab, the Android
+// app, the logs modal), systemd waits RestartSec=10, then the snapshot index
+// rebuild takes 60-90 s. The Updates panel and the Android app wait as long.
+export const RESTART_HEALTH_WAIT_MS = 180_000;
+
 export async function mountRestartControl(btn, statusEl) {
     if (!btn || !statusEl) return;
 
@@ -211,10 +218,10 @@ async function doRestart(btn, statusEl) {
         // Wait 5s for service to start shutting down
         await sleep(5000);
 
-        // Poll /health every 2s for up to 120s
-        const healthy = await pollHealth(120_000, 2_000);
+        // Poll /health every 2s for up to RESTART_HEALTH_WAIT_MS
+        const healthy = await pollHealth(RESTART_HEALTH_WAIT_MS, 2_000);
         if (!healthy) {
-            throw new Error("Service did not come back within 120 seconds");
+            throw new Error(`Service did not come back within ${RESTART_HEALTH_WAIT_MS / 1000} seconds`);
         }
 
         // Confirm drift cleared via /restart-status
