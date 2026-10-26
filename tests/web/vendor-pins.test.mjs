@@ -13,6 +13,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PORTAL, VENDOR, VENDORED_PURIFY, htmlTags } from "./helpers/portal-dom.mjs";
+import { cssCrossOriginLoads, pageCrossOriginLoads, scriptCrossOriginLoads } from "./helpers/cross-origin-loads.mjs";
 
 const read = (p) => readFileSync(p);
 const sri384 = (buf) => "sha384-" + createHash("sha384").update(buf).digest("base64");
@@ -169,17 +170,65 @@ test("the vendored DOMPurify is a release with the published mXSS fixes", () => 
 
 test("no Portal page loads a script or stylesheet from another origin", () => {
     // Every HTML page under Portal/ (runtime uploads excluded), so a moved or
-    // newly added page cannot slip back onto a CDN.
-    const pages = walkFiles(PORTAL)
-        .filter((p) => p.endsWith(".html") && !/^(uploads|vendor)\//.test(p) && !p.includes("node_modules/"));
+    // newly added page cannot slip back onto a CDN; jsdom parses each one, so
+    // no quoting or spacing hides a tag (see helpers/cross-origin-loads.mjs).
+    const served = walkFiles(PORTAL).filter((p) => !/^(uploads|vendor)\//.test(p) && !p.includes("node_modules/"));
+    const pages = served.filter((p) => p.endsWith(".html"));
     assert.ok(pages.includes("index.html"), "Portal/index.html found");
     for (const page of pages) {
         const html = read(resolve(PORTAL, page)).toString("utf8");
-        for (const t of htmlTags(html)) {
-            const url = t.src || t.href;
-            if (!url) continue;
-            assert.doesNotMatch(url, /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i, `${page}: ${t.tag}`);
-        }
+        assert.deepEqual(pageCrossOriginLoads(html, `http://localhost:9091/ui/${page}`), [], page);
         assert.doesNotMatch(html, /https?:\/\/[^"']*(dompurify|marked|highlight\.js|xterm)/i, page);
     }
+    // The Portal's own modules and stylesheets (tests excluded: they run in
+    // node, never in the page) import nothing from another origin either.
+    const sources = served.filter((p) => /\.(m?js|css)$/.test(p) && !/\.test\.mjs$/.test(p));
+    assert.ok(sources.includes("app-modular.js") && sources.includes("styles/main.css"), "Portal sources found");
+    for (const file of sources) {
+        const text = read(resolve(PORTAL, file)).toString("utf8");
+        const loads = file.endsWith(".css") ? cssCrossOriginLoads(text) : scriptCrossOriginLoads(text);
+        assert.deepEqual(loads, [], file);
+    }
+});
+
+test("the cross-origin guard catches every spelling of a CDN load", () => {
+    const PAGE = "http://localhost:9091/ui/page.html";
+    const hostile = [
+        `<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>`,
+        `<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>`,
+        `<script src=https://cdn.jsdelivr.net/npm/chart.js></script>`,
+        `<script src = "https://cdn.example/x.js"></script>`,
+        `<SCRIPT SRC="//cdn.example/x.js"></SCRIPT>`,
+        `<script src="http://localhost:8080/x.js"></script>`,
+        `<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter'>`,
+        `<link rel=modulepreload href=https://esm.sh/x>`,
+        `<base href="https://cdn.example/"><script src="x.js"></script>`,
+        `<iframe src="https://example.com/"></iframe>`,
+        `<script type=module>import x from "https://esm.sh/lodash"</script>`,
+        `<script type="module">import {\n  a,\n  b\n} from 'https://esm.sh/x';</script>`,
+        `<script type=module>import "//cdn.example/side-effect.js"</script>`,
+        `<script type=module>export * from "https://esm.sh/x"</script>`,
+        `<script>import("https://esm.sh/x").then(() => {})</script>`,
+        `<script>new Worker('https://cdn.example/w.js')</script>`,
+        `<script type="importmap">{"imports": {"x": "https://esm.sh/x"}}</script>`,
+        `<style>@import url("https://fonts.googleapis.com/css")</style>`,
+        `<style>@import 'https://fonts.googleapis.com/css';</style>`,
+        `<div style="background: url(//cdn.example/a.png)"></div>`,
+    ];
+    for (const html of hostile) {
+        assert.ok(pageCrossOriginLoads(`<!doctype html><html><head>${html}</head><body></body></html>`, PAGE).length > 0, html);
+    }
+    const benign = `<!doctype html><html><head>
+        <script src="/ui/vendor/marked/marked.umd.js"></script>
+        <script src='./modules/x.js'></script>
+        <script src="http://localhost:9091/ui/vendor/xterm/xterm.js"></script>
+        <link rel=stylesheet href=styles/main.css>
+        <style>@import url('./_base.css'); .a { background: url(img/a.png) }</style>
+        <script type=module>import a from "./a.js"; import("/ui/b.js"); // see https://example.com/docs
+        </script>
+        </head><body><a href="https://login.tailscale.com/start">Tailscale</a><img src="/ui/x.png">
+        <iframe src="about:blank"></iframe></body></html>`;
+    assert.deepEqual(pageCrossOriginLoads(benign, PAGE), []);
+    assert.deepEqual(scriptCrossOriginLoads(`import test from "node:test";\nimport x from "./x.js";\nfetch("https://api.example/")`), []);
+    assert.deepEqual(cssCrossOriginLoads(`@import url('./components/_buttons.css?v=1');`), []);
 });
