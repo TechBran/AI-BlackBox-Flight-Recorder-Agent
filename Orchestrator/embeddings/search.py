@@ -84,17 +84,18 @@ def swap_active(slug: str) -> VectorStore:
 # ── sync→async bridge ────────────────────────────────────────────────────────
 
 # Provider coroutines run via per-call asyncio.run on this pool's threads
-# (fresh ephemeral loop per call — safe because providers create their network
-# clients per call; see providers.py — so no loop-bound state leaks between
-# calls or threads). Callers are sync functions invoked from plain threads
-# (checkpoint mint path, APScheduler executors) and occasionally from the
-# uvloop event-loop thread itself; in the latter case the blocking .result()
-# stalls the loop for the duration of the embed call — same as the legacy
-# blocking monitoring.generate_embedding. Four workers bound concurrent embeds
-# without serializing mints behind searches: a single worker queues every
-# embed box-wide behind the slowest in-flight call (e.g. a provider retry
-# storm). Never call generate_embedding_sync FROM the pool's own "emb"
-# threads: N nested calls from pool threads would exhaust the pool and
+# (fresh ephemeral loop per call — safe because no provider keeps loop-bound
+# state between calls: OpenAI, Ollama and LocalStack create their network
+# clients per call, and Gemini shares one sync client, bound to no loop, that
+# it calls on a worker thread; see providers.py). Callers are sync functions
+# invoked from plain threads (checkpoint mint path, APScheduler executors) and
+# occasionally from the uvloop event-loop thread itself; in the latter case the
+# blocking .result() stalls the loop for the duration of the embed call — same
+# as the legacy blocking monitoring.generate_embedding. Four workers bound
+# concurrent embeds without serializing mints behind searches: a single worker
+# queues every embed box-wide behind the slowest in-flight call (e.g. a
+# provider retry storm). Never call generate_embedding_sync FROM the pool's own
+# "emb" threads: N nested calls from pool threads would exhaust the pool and
 # deadlock (no caller does this — all production callers are external).
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="emb")
 

@@ -49,17 +49,63 @@ _MAX_ATTEMPTS = len(_BACKOFF_SECONDS) + 1   # initial attempt + 3 retries
 _GEMINI_TASK_TYPES = {"document": "RETRIEVAL_DOCUMENT", "query": "RETRIEVAL_QUERY"}
 
 # Per-request deadline for Gemini embeds. HttpOptions(timeout=...) is the SDK's
-# transport deadline (a total one on its aiohttp transport, per connect/read
-# phase on httpx); the asyncio.wait_for at 2x in GeminiProvider._embed is the
-# outer cap on each request whichever transport the SDK picked. Cancelling it
-# cancels the request itself: the call is native async, no worker thread is
-# left behind.
+# transport deadline, which its sync client hands to httpx per phase (connect,
+# write, pool wait and each read get up to 60 s): it is what bounds the worker
+# thread a request runs on. The asyncio.wait_for at 2x in GeminiProvider._embed
+# caps how long each attempt holds its caller, but it cannot cancel a thread:
+# a request it gives up on runs on until the httpx deadline ends it, and the
+# asyncio.run that started it waits for that thread on exit (its executor
+# shutdown, up to the 300 s join timeout).
 GEMINI_EMBED_TIMEOUT_S = 60.0
 
 # batchEmbedContents takes at most 100 requests per call. One snapshot can
 # chunk to more (pack_chunk_batches keeps a chunk group in ONE provider.embed
 # call), so GeminiProvider._embed splits longer inputs, in order.
 GEMINI_EMBED_BATCH_MAX = 100
+
+# The one google-genai client every Gemini embed in the process shares, with
+# the API key it was built with: (api_key, genai.Client), or None until the
+# first embed. See _shared_gemini_client.
+_gemini_client = None
+_gemini_client_lock = threading.Lock()
+
+
+def _shared_gemini_client():
+    """The process-wide google-genai client for Gemini embeds.
+
+    Built lazily, on the first embed: genai.Client() raises without a key, and
+    this module must import without one. config.GOOGLE_API_KEY is read on every
+    call, so a key pasted in the onboarding wizard applies on the next embed
+    with no restart: a changed key gets a new client. The old one is dropped,
+    not closed, since another thread may be mid-request on it (the SDK's
+    Client.__del__ closes it once the last holder lets go). An unset key passes
+    api_key=None, which leaves the SDK its own GOOGLE_API_KEY/GEMINI_API_KEY
+    lookup.
+
+    Only the client's SYNC half is used. Its async half binds to the event
+    loop that first uses it, and search._run_async runs every embed under a
+    fresh asyncio.run; the sync half binds to no loop and is safe to share
+    across threads. Read in google-genai 2.2.0 / httpx 0.28.1 / httpcore 1.0.9:
+    _api_client.py BaseApiClient builds ONE httpx.Client (SyncHttpxClient) per
+    Client, and _request_once does build_request + send on it, with each
+    request's http_options applied to a copy (patch_http_options), never to
+    the shared options. httpcore/_sync/connection_pool.py changes its request
+    queue and connection set only under _optional_thread_lock, a
+    threading.Lock in the sync pool (_synchronization.ThreadLock), and each
+    connection serializes its own use (_sync/connection.py _request_lock,
+    _sync/http11.py _state_lock), so concurrent threads each get their own
+    connection from the one pool. The SDK's shared tenacity.Retrying keeps its
+    per-call state in a threading.local (tenacity/__init__.py).
+    """
+    global _gemini_client
+    api_key = config.GOOGLE_API_KEY or None
+    with _gemini_client_lock:
+        cached = _gemini_client
+        if cached is None or cached[0] != api_key:
+            cached = (api_key, genai.Client(api_key=api_key))
+            _gemini_client = cached
+        return cached[1]
+
 
 # Ollama runs models on local CPU; a cold large model (e.g. Qwen3-8B, ~4.7GB)
 # loading off disk AND embedding a batch of 8 full documents is LEGITIMATELY
@@ -184,19 +230,18 @@ class GeminiProvider(_BaseProvider):
     them into ONE multi-part content for gemini-embedding-2 (its multimodal
     aggregate, one vector for the lot) while gemini-embedding-001 gets one
     request per string. An explicit Content per text is one request per text
-    on every model."""
+    on every model.
+
+    Every embed goes out on one shared SYNC client (_shared_gemini_client), on
+    a worker thread. The query hot path (search._run_async) runs each embed on
+    a fresh event loop, which no async client can be reused across, and a
+    client per call cost ~90 ms on every query embed (one-text queries on
+    gemini-embedding-2: 362 ms median against 259 ms on one reused client)."""
 
     def __init__(self, slug, entry):
         super().__init__(slug, entry)
-        # client per call, like OpenAIProvider: the SDK's async session binds
-        # to the event loop that first uses it, and the sync mint bridge runs
-        # each embed on a fresh loop. Built lazily inside _embed (genai.Client()
-        # raises without a key, and import must work without one); the key is
-        # read per call, and an unset one leaves the SDK its own env lookup.
-        # Injectable for tests.
-        self._client_factory = lambda: genai.Client(
-            api_key=config.GOOGLE_API_KEY or None
-        )
+        # The process-wide client; injectable for tests.
+        self._client_factory = _shared_gemini_client
 
     async def _embed(self, texts, purpose):
         request_config = genai_types.EmbedContentConfig(
@@ -206,36 +251,38 @@ class GeminiProvider(_BaseProvider):
             ),
         )
         vectors = []
-        # Built off the loop: a Client sets up its HTTP sessions and their TLS
-        # contexts up front (~30 ms measured), and the watcher and migrations
-        # embed on the server's one event loop.
+        # Off the loop: usually a lock and a compare, but the first embed (and
+        # the first after a key change) builds the Client, which sets up its
+        # HTTP sessions and their TLS contexts (~30 ms measured), and the
+        # watcher and migrations embed on the server's one event loop.
         client = await asyncio.to_thread(self._client_factory)
-        with client:
-            async with client.aio as aio:
-                for start in range(0, len(texts), GEMINI_EMBED_BATCH_MAX):
-                    batch = texts[start:start + GEMINI_EMBED_BATCH_MAX]
-                    # wait_for's TimeoutError feeds the retry loop like any
-                    # other transient failure (see GEMINI_EMBED_TIMEOUT_S).
-                    resp = await asyncio.wait_for(
-                        aio.models.embed_content(
-                            model=self.model_id,
-                            contents=[
-                                genai_types.Content(parts=[genai_types.Part(text=t)])
-                                for t in batch
-                            ],
-                            config=request_config,
-                        ),
-                        timeout=GEMINI_EMBED_TIMEOUT_S * 2,
-                    )
-                    embeddings = resp.embeddings or []
-                    # Per batch, so a short answer can never shift later
-                    # vectors onto the wrong texts.
-                    if len(embeddings) != len(batch):
-                        raise EmbeddingProviderError(
-                            f"{self.slug}: got {len(embeddings)} vectors for "
-                            f"{len(batch)} texts"
-                        )
-                    vectors.extend(list(e.values or []) for e in embeddings)
+        for start in range(0, len(texts), GEMINI_EMBED_BATCH_MAX):
+            batch = texts[start:start + GEMINI_EMBED_BATCH_MAX]
+            # The sync call runs on a worker thread, so it blocks no event
+            # loop. wait_for's TimeoutError feeds the retry loop like any other
+            # transient failure, but wait_for cannot cancel the thread: the
+            # HttpOptions timeout is what bounds it (see GEMINI_EMBED_TIMEOUT_S).
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.models.embed_content,
+                    model=self.model_id,
+                    contents=[
+                        genai_types.Content(parts=[genai_types.Part(text=t)])
+                        for t in batch
+                    ],
+                    config=request_config,
+                ),
+                timeout=GEMINI_EMBED_TIMEOUT_S * 2,
+            )
+            embeddings = resp.embeddings or []
+            # Per batch, so a short answer can never shift later vectors onto
+            # the wrong texts.
+            if len(embeddings) != len(batch):
+                raise EmbeddingProviderError(
+                    f"{self.slug}: got {len(embeddings)} vectors for "
+                    f"{len(batch)} texts"
+                )
+            vectors.extend(list(e.values or []) for e in embeddings)
         return vectors
 
 
