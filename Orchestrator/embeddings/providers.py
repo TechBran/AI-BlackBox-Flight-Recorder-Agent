@@ -28,9 +28,10 @@ AFTER clamping, so the Ollama query budget subtracts the prefix's tokens).
 import asyncio
 import threading
 
-import google.generativeai as genai
 import httpx
 import openai
+from google import genai
+from google.genai import types as genai_types
 
 from Orchestrator import config, tokenization
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
@@ -43,14 +44,22 @@ class EmbeddingProviderError(Exception):
 _BACKOFF_SECONDS = (1.0, 2.0, 4.0)          # sleep between attempts
 _MAX_ATTEMPTS = len(_BACKOFF_SECONDS) + 1   # initial attempt + 3 retries
 
-_GEMINI_TASK_TYPES = {"document": "retrieval_document", "query": "retrieval_query"}
+# The REST spelling of the TaskType enum values the legacy gRPC SDK sent as
+# retrieval_document / retrieval_query.
+_GEMINI_TASK_TYPES = {"document": "RETRIEVAL_DOCUMENT", "query": "RETRIEVAL_QUERY"}
 
-# Per-request deadline for Gemini embeds. request_options={"timeout": ...} is
-# the real gRPC deadline (frees the SDK call server-side); the asyncio.wait_for
-# at 2x in GeminiProvider._embed is the outer guard that unpins the embed-pool
-# worker even if the gRPC deadline never fires (DNS/connect hangs outside the
-# deadline scope) — without it a hung embed pins a worker forever.
+# Per-request deadline for Gemini embeds. HttpOptions(timeout=...) is the SDK's
+# transport deadline (a total one on its aiohttp transport, per connect/read
+# phase on httpx); the asyncio.wait_for at 2x in GeminiProvider._embed is the
+# outer cap on each request whichever transport the SDK picked. Cancelling it
+# cancels the request itself: the call is native async, no worker thread is
+# left behind.
 GEMINI_EMBED_TIMEOUT_S = 60.0
+
+# batchEmbedContents takes at most 100 requests per call. One snapshot can
+# chunk to more (pack_chunk_batches keeps a chunk group in ONE provider.embed
+# call), so GeminiProvider._embed splits longer inputs, in order.
+GEMINI_EMBED_BATCH_MAX = 100
 
 # Ollama runs models on local CPU; a cold large model (e.g. Qwen3-8B, ~4.7GB)
 # loading off disk AND embedding a batch of 8 full documents is LEGITIMATELY
@@ -132,6 +141,8 @@ class _BaseProvider:
             try:
                 vectors = await self._embed(texts, purpose)
                 break
+            except EmbeddingProviderError:
+                raise  # a malformed response from _embed: not transient, no retry
             except Exception as e:
                 if attempt == _MAX_ATTEMPTS - 1:
                     raise EmbeddingProviderError(
@@ -161,25 +172,70 @@ class _BaseProvider:
 
 
 class GeminiProvider(_BaseProvider):
+    """Gemini Developer API embeddings through google-genai.
+
+    One batchEmbedContents request per GEMINI_EMBED_BATCH_MAX texts, each text
+    carrying exactly what the legacy google.generativeai embed_content sent
+    (model id, text, task type; no output_dimensionality, so the model's full
+    dims). Vector parity with that SDK, which embedded every stored Gemini
+    vector, is pinned by Orchestrator/tests/test_embeddings_gemini_parity.py.
+
+    Each text goes in as its own Content: given plain strings, the SDK folds
+    them into ONE multi-part content for gemini-embedding-2 (its multimodal
+    aggregate, one vector for the lot) while gemini-embedding-001 gets one
+    request per string. An explicit Content per text is one request per text
+    on every model."""
+
+    def __init__(self, slug, entry):
+        super().__init__(slug, entry)
+        # client per call, like OpenAIProvider: the SDK's async session binds
+        # to the event loop that first uses it, and the sync mint bridge runs
+        # each embed on a fresh loop. Built lazily inside _embed (genai.Client()
+        # raises without a key, and import must work without one); the key is
+        # read per call, and an unset one leaves the SDK its own env lookup.
+        # Injectable for tests.
+        self._client_factory = lambda: genai.Client(
+            api_key=config.GOOGLE_API_KEY or None
+        )
+
     async def _embed(self, texts, purpose):
-        task_type = _GEMINI_TASK_TYPES[purpose]
+        request_config = genai_types.EmbedContentConfig(
+            task_type=_GEMINI_TASK_TYPES[purpose],
+            http_options=genai_types.HttpOptions(
+                timeout=int(GEMINI_EMBED_TIMEOUT_S * 1000)  # ms
+            ),
+        )
         vectors = []
-        for text in texts:  # one call per text; SDK batching optional later
-            # Double timeout (see GEMINI_EMBED_TIMEOUT_S): gRPC deadline via
-            # request_options + wait_for outer guard. wait_for's TimeoutError
-            # feeds the retry loop like any other transient failure (the
-            # orphaned to_thread worker dies when the gRPC deadline fires).
-            result = await asyncio.wait_for(
-                asyncio.to_thread(  # sync SDK — keep the loop free
-                    genai.embed_content,
-                    model=self.model_id,
-                    content=text,
-                    task_type=task_type,
-                    request_options={"timeout": GEMINI_EMBED_TIMEOUT_S},
-                ),
-                timeout=GEMINI_EMBED_TIMEOUT_S * 2,
-            )
-            vectors.append(list(result["embedding"]))
+        # Built off the loop: a Client sets up its HTTP sessions and their TLS
+        # contexts up front (~30 ms measured), and the watcher and migrations
+        # embed on the server's one event loop.
+        client = await asyncio.to_thread(self._client_factory)
+        with client:
+            async with client.aio as aio:
+                for start in range(0, len(texts), GEMINI_EMBED_BATCH_MAX):
+                    batch = texts[start:start + GEMINI_EMBED_BATCH_MAX]
+                    # wait_for's TimeoutError feeds the retry loop like any
+                    # other transient failure (see GEMINI_EMBED_TIMEOUT_S).
+                    resp = await asyncio.wait_for(
+                        aio.models.embed_content(
+                            model=self.model_id,
+                            contents=[
+                                genai_types.Content(parts=[genai_types.Part(text=t)])
+                                for t in batch
+                            ],
+                            config=request_config,
+                        ),
+                        timeout=GEMINI_EMBED_TIMEOUT_S * 2,
+                    )
+                    embeddings = resp.embeddings or []
+                    # Per batch, so a short answer can never shift later
+                    # vectors onto the wrong texts.
+                    if len(embeddings) != len(batch):
+                        raise EmbeddingProviderError(
+                            f"{self.slug}: got {len(embeddings)} vectors for "
+                            f"{len(batch)} texts"
+                        )
+                    vectors.extend(list(e.values or []) for e in embeddings)
         return vectors
 
 

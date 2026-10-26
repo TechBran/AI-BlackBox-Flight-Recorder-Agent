@@ -18,7 +18,13 @@ far below the floor: the wrong task type measures 0.89-0.95 on
 gemini-embedding-001, two different sentences 0.53-0.70, and contents merged
 into one request return one vector for N texts (the count guard). At the floor,
 for unit vectors, no retrieval score can move by more than
-sqrt(2 * (1 - PARITY_MIN_COSINE)).
+sqrt(2 * (1 - PARITY_MIN_COSINE)) (0.014).
+
+Measured on the google-genai port (dev box, 2026-10-25): cosine 1.0 on every
+case below, and every component bit-identical to the legacy float32 vectors
+once the REST floats are rounded to float32, on both models and both purposes,
+batched, one text per call and across a batch split. The floor is the shipping
+gate; the bit-identity is what says no store needs a re-embed.
 
 The live tests are opt-in: BLACKBOX_TEST_LIVE=1 pytest -m live_service
 Orchestrator/tests/test_embeddings_gemini_parity.py (cloud calls on the box's
@@ -139,3 +145,45 @@ def test_live_single_embed_matches_legacy_golden(slug, purpose):
     got = [asyncio.run(provider.embed([s], purpose))[0] for s in golden["sentences"]]
     _assert_parity(slug, purpose, got,
                    [_decode(v) for v in golden["vectors"][slug][purpose]])
+
+
+@pytest.mark.live_service
+@pytest.mark.parametrize("slug", GOLDEN_SLUGS)
+def test_live_split_batch_keeps_each_vector_on_its_text(slug):
+    """More texts than one batchEmbedContents call takes (GEMINI_EMBED_BATCH_MAX):
+    the golden sentences, placed on both sides of the split, come back at their
+    own positions with their own vectors."""
+    golden = _golden()
+    limit = providers.GEMINI_EMBED_BATCH_MAX
+    texts = [f"Filler line {i} of a long snapshot, about nothing in particular."
+             for i in range(limit + 4)]
+    positions = [0, limit - 2, limit - 1, limit, limit + 3]
+    for pos, sentence in zip(positions, golden["sentences"]):
+        texts[pos] = sentence
+    provider = _live_provider(slug)
+    got = asyncio.run(provider.embed(texts, "document"))
+    assert len(got) == len(texts)
+    _assert_parity(slug, "document (split batch)", [got[p] for p in positions],
+                   [_decode(v) for v in golden["vectors"][slug]["document"]])
+
+
+@pytest.mark.live_service
+@pytest.mark.parametrize("slug", GOLDEN_SLUGS)
+def test_live_full_batch_of_chunk_sized_texts_is_accepted(slug):
+    """The heaviest call a mint or a rebuild makes: GEMINI_EMBED_BATCH_MAX texts
+    in one request, chunk-sized (the chunker's 1024-token window on the chars/2
+    floor) plus one whole-snapshot text at the clamp budget. The API takes it
+    as one request."""
+    from Orchestrator.embeddings.chunker import chunks_for_snapshot
+
+    limit = providers.GEMINI_EMBED_BATCH_MAX
+    line = ("Step {i}: the operator re-ran the migration for store {i} and the "
+            "gap check reported {i} missing ids before the cutover.\n")
+    body = "".join(line.format(i=i) for i in range(4000))
+    chunks = chunks_for_snapshot(body, model_key=slug)
+    assert len(chunks) >= limit, "the synthetic snapshot must fill a batch"
+    texts = chunks[:limit]  # chunks[0] is the whole text, clamped by the provider
+    provider = _live_provider(slug)
+    got = asyncio.run(provider.embed(texts, "document"))
+    assert len(got) == limit
+    assert all(len(vec) == EMBEDDING_MODELS[slug]["dims"] for vec in got)

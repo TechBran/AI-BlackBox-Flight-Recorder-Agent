@@ -6,11 +6,11 @@ truncation, retry/backoff, purpose→task_type mapping (the retrieval_query
 fix), and a dims sanity guard. ALL network is mocked — zero live calls,
 zero real sleeps.
 """
+import asyncio
 import json
 import re
-import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -86,67 +86,270 @@ def _openai_mock_client(resp):
     return client
 
 
-# ── Gemini: purpose → task_type mapping ──────────────────────────────────────
+# ── Gemini: google-genai client, batched request ─────────────────────────────
+
+def _gemini_response(vectors):
+    """An EmbedContentResponse-shaped object: .embeddings[i].values."""
+    return SimpleNamespace(embeddings=[SimpleNamespace(values=v) for v in vectors])
+
+
+def _gemini_mock_client(dims=GEMINI_DIMS, side_effect=None):
+    """Stand-in for google.genai.Client. The provider opens one per _embed
+    call (`with client:` around `async with client.aio`) and awaits
+    aio.models.embed_content(model=, contents=[...], config=); by default it
+    answers one zero vector per content."""
+    async def answer(*, model, contents, config):
+        return _gemini_response([[0.0] * dims for _ in contents])
+
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.aio.__aenter__ = AsyncMock(return_value=client.aio)
+    client.aio.__aexit__ = AsyncMock(return_value=False)
+    client.aio.models.embed_content = AsyncMock(side_effect=side_effect or answer)
+    return client
+
+
+def _with_gemini_client(provider, client):
+    """Route the provider through `client`; returns the embed_content mock."""
+    provider._client_factory = lambda: client
+    return client.aio.models.embed_content
+
+
+def _sent_texts(call):
+    """The texts of one embed_content call: one single-part Content each."""
+    contents = call.kwargs["contents"]
+    assert all(len(c.parts) == 1 for c in contents)
+    return [c.parts[0].text for c in contents]
+
+
+def _assert_gemini_request(call, slug, texts, task_type):
+    """The request the legacy SDK sent, per text: the registry model id, the
+    text, the task type, and nothing else (no output_dimensionality: the
+    model's full dims, which the stores hold; no title)."""
+    assert call.kwargs["model"] == EMBEDDING_MODELS[slug]["model_id"]
+    assert _sent_texts(call) == texts
+    request_config = call.kwargs["config"]
+    assert request_config.task_type == task_type
+    assert request_config.output_dimensionality is None
+    assert request_config.title is None
+    assert request_config.http_options.timeout == int(providers.GEMINI_EMBED_TIMEOUT_S * 1000)
+
 
 @pytest.mark.asyncio
 async def test_gemini_document_maps_to_retrieval_document():
     provider = get_provider(GEMINI_SLUG)
-    fake = MagicMock(return_value={"embedding": [0.0] * GEMINI_DIMS})
-    with patch.object(providers.genai, "embed_content", fake):
-        result = await provider.embed(["hello world"], purpose="document")
+    embed = _with_gemini_client(provider, _gemini_mock_client())
+    result = await provider.embed(["hello world"], purpose="document")
     assert result == [[0.0] * GEMINI_DIMS]
-    fake.assert_called_once_with(
-        model=EMBEDDING_MODELS[GEMINI_SLUG]["model_id"],
-        content="hello world",
-        task_type="retrieval_document",
-        request_options={"timeout": providers.GEMINI_EMBED_TIMEOUT_S},
-    )
+    embed.assert_awaited_once()
+    _assert_gemini_request(embed.await_args, GEMINI_SLUG, ["hello world"],
+                           "RETRIEVAL_DOCUMENT")
 
 
 @pytest.mark.asyncio
 async def test_gemini_query_maps_to_retrieval_query():
     # THE bug fix: legacy generate_embedding used retrieval_document for queries
     provider = get_provider(GEMINI_SLUG)
-    fake = MagicMock(return_value={"embedding": [0.0] * GEMINI_DIMS})
-    with patch.object(providers.genai, "embed_content", fake):
-        await provider.embed(["find the css fix"], purpose="query")
-    fake.assert_called_once_with(
-        model=EMBEDDING_MODELS[GEMINI_SLUG]["model_id"],
-        content="find the css fix",
-        task_type="retrieval_query",
-        request_options={"timeout": providers.GEMINI_EMBED_TIMEOUT_S},
-    )
+    embed = _with_gemini_client(provider, _gemini_mock_client())
+    await provider.embed(["find the css fix"], purpose="query")
+    embed.assert_awaited_once()
+    _assert_gemini_request(embed.await_args, GEMINI_SLUG, ["find the css fix"],
+                           "RETRIEVAL_QUERY")
 
 
 @pytest.mark.asyncio
-async def test_gemini_one_call_per_text():
+async def test_gemini_batches_texts_in_one_call():
+    """The legacy SDK made one embed_content call per text; batchEmbedContents
+    takes them all in one request, in order."""
     provider = get_provider(GEMINI_SLUG)
-    fake = MagicMock(return_value={"embedding": [0.0] * GEMINI_DIMS})
-    with patch.object(providers.genai, "embed_content", fake):
-        result = await provider.embed(["a", "b", "c"], purpose="document")
+    embed = _with_gemini_client(provider, _gemini_mock_client())
+    result = await provider.embed(["a", "b", "c"], purpose="document")
     assert len(result) == 3
-    assert fake.call_count == 3
-    assert [c.kwargs["content"] for c in fake.call_args_list] == ["a", "b", "c"]
+    embed.assert_awaited_once()
+    _assert_gemini_request(embed.await_args, GEMINI_SLUG, ["a", "b", "c"],
+                           "RETRIEVAL_DOCUMENT")
+
+
+@pytest.mark.asyncio
+async def test_gemini_splits_at_the_batch_limit_and_keeps_order():
+    """batchEmbedContents refuses more than 100 requests, and one snapshot can
+    chunk to more than that (pack_chunk_batches keeps a chunk group in ONE
+    provider call). The provider splits, and vector i still belongs to text i."""
+    limit = providers.GEMINI_EMBED_BATCH_MAX
+    assert limit == 100
+    texts = [str(i) for i in range(2 * limit + 50)]
+
+    async def answer(*, model, contents, config):
+        return _gemini_response([[float(c.parts[0].text)] + [0.0] * (GEMINI_DIMS - 1)
+                                 for c in contents])
+
+    provider = get_provider(GEMINI_SLUG)
+    embed = _with_gemini_client(provider, _gemini_mock_client(side_effect=answer))
+    result = await provider.embed(texts, purpose="document")
+    assert [_sent_texts(c) for c in embed.await_args_list] == \
+        [texts[:limit], texts[limit:2 * limit], texts[2 * limit:]]
+    assert [vec[0] for vec in result] == [float(i) for i in range(len(texts))]
+
+
+@pytest.mark.asyncio
+async def test_gemini_short_batch_raises_provider_error_without_retry():
+    """A batch answered with fewer vectors than texts is a malformed response,
+    not a transient fault: no retry, and no misaligned vectors downstream."""
+    provider = get_provider(GEMINI_SLUG)
+    sleeps = _record_sleeps(provider)
+
+    async def short(*, model, contents, config):
+        return _gemini_response([[0.0] * GEMINI_DIMS])
+
+    embed = _with_gemini_client(provider, _gemini_mock_client(side_effect=short))
+    with pytest.raises(EmbeddingProviderError, match="got 1 vectors for 2 texts"):
+        await provider.embed(["a", "b"], purpose="document")
+    assert embed.await_count == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_embedding_without_values_hits_the_dims_guard():
+    provider = get_provider(GEMINI_SLUG)
+    sleeps = _record_sleeps(provider)
+
+    async def empty(*, model, contents, config):
+        return _gemini_response([None for _ in contents])
+
+    _with_gemini_client(provider, _gemini_mock_client(side_effect=empty))
+    with pytest.raises(EmbeddingProviderError, match="0-dim vector"):
+        await provider.embed(["a"], purpose="document")
+    assert sleeps == []
 
 
 @pytest.mark.asyncio
 async def test_gemini_hanging_call_times_out_to_provider_error(monkeypatch):
     """Review note (Task 16): a hung Gemini embed must not pin an embed-pool
-    worker forever. The asyncio.wait_for outer guard (2x the gRPC deadline,
+    worker forever. The asyncio.wait_for outer guard (2x the SDK deadline,
     patched short here) turns the hang into retried TimeoutErrors and finally
     an EmbeddingProviderError — never an indefinite block."""
     provider = get_provider(GEMINI_SLUG)
     sleeps = _record_sleeps(provider)
     monkeypatch.setattr(providers, "GEMINI_EMBED_TIMEOUT_S", 0.02)
 
-    def hang(**kwargs):
-        time.sleep(0.5)  # well past 2x the patched deadline
-        return {"embedding": [0.0] * GEMINI_DIMS}
+    async def hang(**kwargs):
+        await asyncio.sleep(0.5)  # well past 2x the patched deadline
+        return _gemini_response([[0.0] * GEMINI_DIMS])
 
-    with patch.object(providers.genai, "embed_content", hang):
-        with pytest.raises(EmbeddingProviderError, match="failed after 4 attempts"):
-            await provider.embed(["stuck"], purpose="document")
+    _with_gemini_client(provider, _gemini_mock_client(side_effect=hang))
+    with pytest.raises(EmbeddingProviderError, match="failed after 4 attempts"):
+        await provider.embed(["stuck"], purpose="document")
     assert sleeps == [1.0, 2.0, 4.0]  # full retry envelope, no real sleeping
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_per_call_is_closed_even_on_failure():
+    """One client per attempt (its async session binds to the loop that first
+    uses it, and the sync mint bridge runs a fresh loop per call), closed on
+    both sides whether the call succeeds or raises."""
+    provider = get_provider(GEMINI_SLUG)
+    _record_sleeps(provider)
+    clients = []
+
+    def factory():
+        good = _gemini_response([[0.0] * GEMINI_DIMS])
+        client = _gemini_mock_client(
+            side_effect=[good] if clients else [RuntimeError("boom")])
+        clients.append(client)
+        return client
+
+    provider._client_factory = factory
+    await provider.embed(["hello"], purpose="document")
+    assert len(clients) == 2
+    for client in clients:
+        client.__exit__.assert_called_once()
+        client.aio.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_is_built_off_the_event_loop():
+    """Building a Client sets up its HTTP sessions and TLS contexts (~30 ms);
+    the watcher and migrations embed on the server's one event loop."""
+    provider = get_provider(GEMINI_SLUG)
+    built_on_loop = []
+
+    def factory():
+        try:
+            asyncio.get_running_loop()
+            built_on_loop.append(True)
+        except RuntimeError:
+            built_on_loop.append(False)
+        return _gemini_mock_client()
+
+    provider._client_factory = factory
+    await provider.embed(["hello"], purpose="document")
+    assert built_on_loop == [False]
+
+
+def test_gemini_default_client_carries_the_box_key(monkeypatch):
+    """The legacy SDK got its key from config.py's import-time genai.configure;
+    the provider now hands it to every client it builds (read per call), and
+    an unset key leaves the SDK its own GOOGLE_API_KEY/GEMINI_API_KEY lookup."""
+    built = []
+    monkeypatch.setattr(providers.genai, "Client", lambda **kw: built.append(kw))
+    provider = GeminiProvider(GEMINI_SLUG, EMBEDDING_MODELS[GEMINI_SLUG])
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", "test-key-not-real")
+    provider._client_factory()
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", "")
+    provider._client_factory()
+    assert built == [{"api_key": "test-key-not-real"}, {"api_key": None}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("purpose,task_type", [("document", "RETRIEVAL_DOCUMENT"),
+                                               ("query", "RETRIEVAL_QUERY")])
+@pytest.mark.parametrize("slug", sorted(
+    s for s, e in EMBEDDING_MODELS.items() if e["provider"] == "gemini"))
+async def test_gemini_wire_request_matches_the_legacy_shape(slug, purpose, task_type):
+    """Through the REAL google-genai SDK (httpx MockTransport, no network): one
+    POST to {model}:batchEmbedContents on the Developer API with the key in a
+    header, and per text one request with the fields the legacy SDK's
+    embedContent carried (model, content.parts = [the text], taskType) and no
+    outputDimensionality. Per model: given plain strings, the SDK folds them
+    into one multi-part content for gemini-embedding-2 only."""
+    from google import genai
+    from google.genai import types as genai_types
+
+    dims = EMBEDDING_MODELS[slug]["dims"]
+    model_id = EMBEDDING_MODELS[slug]["model_id"]
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content.decode())
+        seen.append({"method": request.method, "url": str(request.url),
+                     "key": request.headers.get("x-goog-api-key"), "json": body})
+        return httpx.Response(200, json={"embeddings": [
+            {"values": [float(i)] * dims} for i in range(len(body["requests"]))]})
+
+    provider = GeminiProvider(slug, EMBEDDING_MODELS[slug])
+    provider._client_factory = lambda: genai.Client(
+        api_key="test-key-not-real",
+        http_options=genai_types.HttpOptions(
+            async_client_args={"transport": httpx.MockTransport(handler)}),
+    )
+    result = await provider.embed(["first text", "second text"], purpose)
+
+    assert result == [[0.0] * dims, [1.0] * dims]
+    assert len(seen) == 1
+    sent = seen[0]
+    assert sent["method"] == "POST"
+    assert sent["url"].startswith("https://generativelanguage.googleapis.com/")
+    assert sent["url"].endswith(f"/{model_id}:batchEmbedContents")
+    assert sent["key"] == "test-key-not-real"
+    requests_ = sent["json"]["requests"]
+    assert [r["content"]["parts"] for r in requests_] == \
+        [[{"text": "first text"}], [{"text": "second text"}]]
+    for r in requests_:
+        assert r["model"] == model_id
+        assert r["taskType"] == task_type
+        assert "outputDimensionality" not in r
+        assert "title" not in r
+        assert "role" not in r["content"]  # the legacy SDK sent none either
 
 
 # ── purpose validation ───────────────────────────────────────────────────────
@@ -155,11 +358,10 @@ async def test_gemini_hanging_call_times_out_to_provider_error(monkeypatch):
 @pytest.mark.parametrize("bad_purpose", ["retrieval_document", "doc", "", None])
 async def test_invalid_purpose_raises_valueerror(bad_purpose):
     provider = get_provider(GEMINI_SLUG)
-    fake = MagicMock()
-    with patch.object(providers.genai, "embed_content", fake):
-        with pytest.raises(ValueError):
-            await provider.embed(["hello"], purpose=bad_purpose)
-    fake.assert_not_called()
+    embed = _with_gemini_client(provider, _gemini_mock_client())
+    with pytest.raises(ValueError):
+        await provider.embed(["hello"], purpose=bad_purpose)
+    embed.assert_not_called()
 
 
 # ── Ollama: query-instruction prefixing ──────────────────────────────────────
@@ -359,10 +561,9 @@ async def test_per_model_budgets_differentiated_gemini_001_vs_2():
     for slug in (GEMINI_SLUG, "gemini-embedding-2"):
         provider = get_provider(slug)
         dims = EMBEDDING_MODELS[slug]["dims"]
-        fake = MagicMock(return_value={"embedding": [0.0] * dims})
-        with patch.object(providers.genai, "embed_content", fake):
-            await provider.embed([text], purpose="document")
-        sent = fake.call_args.kwargs["content"]
+        embed = _with_gemini_client(provider, _gemini_mock_client(dims))
+        await provider.embed([text], purpose="document")
+        sent = _sent_texts(embed.await_args)[0]
         # remote:* tokenizer → calibrated floor path: budget*2 chars exactly
         assert len(sent) == _clamp_budget(slug) * tokenization.CHARS_PER_TOKEN_FLOOR
         sent_lens[slug] = len(sent)
@@ -397,25 +598,25 @@ async def test_no_clamp_telemetry_when_under_budget(capsys):
 async def test_retry_then_success_records_backoff_sleeps():
     provider = get_provider(GEMINI_SLUG)
     sleeps = _record_sleeps(provider)
-    good = {"embedding": [0.0] * GEMINI_DIMS}
-    fake = MagicMock(side_effect=[RuntimeError("boom1"), RuntimeError("boom2"), good])
-    with patch.object(providers.genai, "embed_content", fake):
-        result = await provider.embed(["hello"], purpose="document")
+    good = _gemini_response([[0.0] * GEMINI_DIMS])
+    embed = _with_gemini_client(provider, _gemini_mock_client(
+        side_effect=[RuntimeError("boom1"), RuntimeError("boom2"), good]))
+    result = await provider.embed(["hello"], purpose="document")
     assert result == [[0.0] * GEMINI_DIMS]
     assert sleeps == [1.0, 2.0]
-    assert fake.call_count == 3
+    assert embed.await_count == 3
 
 
 @pytest.mark.asyncio
 async def test_retry_exhaustion_raises_provider_error():
     provider = get_provider(GEMINI_SLUG)
     sleeps = _record_sleeps(provider)
-    fake = MagicMock(side_effect=RuntimeError("api down"))
-    with patch.object(providers.genai, "embed_content", fake):
-        with pytest.raises(EmbeddingProviderError):
-            await provider.embed(["hello"], purpose="document")
+    embed = _with_gemini_client(provider, _gemini_mock_client(
+        side_effect=RuntimeError("api down")))
+    with pytest.raises(EmbeddingProviderError):
+        await provider.embed(["hello"], purpose="document")
     assert sleeps == [1.0, 2.0, 4.0]
-    assert fake.call_count == 4  # initial attempt + 3 retries
+    assert embed.await_count == 4  # initial attempt + 3 retries
 
 
 @pytest.mark.asyncio
@@ -437,11 +638,10 @@ async def test_dims_mismatch_raises_provider_error_without_retry():
     # catches vendor-side dim changes / wrong-model responses
     provider = get_provider(GEMINI_SLUG)
     sleeps = _record_sleeps(provider)
-    fake = MagicMock(return_value={"embedding": [0.0] * (GEMINI_DIMS - 1)})
-    with patch.object(providers.genai, "embed_content", fake):
-        with pytest.raises(EmbeddingProviderError):
-            await provider.embed(["hello"], purpose="document")
-    assert fake.call_count == 1  # guard fires after a "successful" call — no retries
+    embed = _with_gemini_client(provider, _gemini_mock_client(GEMINI_DIMS - 1))
+    with pytest.raises(EmbeddingProviderError):
+        await provider.embed(["hello"], purpose="document")
+    assert embed.await_count == 1  # guard fires after a "successful" call — no retries
     assert sleeps == []
 
 
@@ -467,10 +667,9 @@ async def test_count_mismatch_raises_provider_error_without_retry():
 @pytest.mark.asyncio
 async def test_empty_texts_returns_empty_without_calling_transport():
     provider = get_provider(GEMINI_SLUG)
-    fake = MagicMock()
-    with patch.object(providers.genai, "embed_content", fake):
-        assert await provider.embed([], purpose="document") == []
-    fake.assert_not_called()
+    embed = _with_gemini_client(provider, _gemini_mock_client())
+    assert await provider.embed([], purpose="document") == []
+    embed.assert_not_called()
 
 
 # ── factory ──────────────────────────────────────────────────────────────────
