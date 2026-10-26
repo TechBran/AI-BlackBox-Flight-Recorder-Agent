@@ -13,6 +13,7 @@ from Orchestrator.gemini_cu.session_manager import (
     create_task_session, destroy_task_session,
 )
 from Orchestrator.device_registry import get_registry, DeviceProtocol
+from Orchestrator.lifespan import track_task
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 
 router = APIRouter(prefix="/gemini-cu", tags=["gemini-cu"])
@@ -154,10 +155,14 @@ def start_gemini_cu_task(task_id, operator, device_id, environment, prompt,
         here = asyncio.get_running_loop()
     except RuntimeError:
         here = None
+    # Either way the lifespan's registry holds the driver, so shutdown cancels
+    # it while the device and display it drives still exist, and _done below
+    # marks the row interrupted instead of leaving it running.
+    name = f"gemini-cu:{task_id}"
     if server_loop is not None and server_loop is not here:
-        bg = asyncio.run_coroutine_threadsafe(coro, server_loop)
+        bg = asyncio.run_coroutine_threadsafe(_registered(coro, name), server_loop)
     elif here is not None:
-        bg = here.create_task(coro, name=f"gemini-cu:{task_id}")
+        bg = track_task(here.create_task(coro, name=name), name)
     else:
         coro.close()
         _record_task_failure(task_id, "No event loop is available to run the Gemini CU task")
@@ -182,6 +187,14 @@ def start_gemini_cu_task(task_id, operator, device_id, environment, prompt,
 
     bg.add_done_callback(_done)
     return bg
+
+
+async def _registered(coro, name: str):
+    """Run `coro` as a task the lifespan's registry holds, from inside the
+    loop it runs on (run_coroutine_threadsafe hands back only a
+    concurrent.futures.Future)."""
+    track_task(asyncio.current_task(), name)
+    return await coro
 
 
 def _record_task_failure(task_id: str, message: str, only_if_running: bool = False) -> None:

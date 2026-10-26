@@ -16,6 +16,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 from Orchestrator.checkpoint import app
+from Orchestrator.lifespan import track_task
 from Orchestrator.scheduler import get_scheduler_manager
 from Orchestrator.scheduler.manager import LOCAL_TZ
 
@@ -297,8 +298,10 @@ async def run_cron_job_now(job_id: str):
         except Exception:
             logger.exception("Background run-now failed for cron job %s", job_id)
 
-    # Retain a strong reference until the task completes (see _RUN_NOW_TASKS).
-    task = asyncio.create_task(_run())
+    # Retain a strong reference until the task completes (see _RUN_NOW_TASKS),
+    # and let the lifespan cancel it at shutdown, before the scheduler stops,
+    # as it does a catch-up run.
+    task = track_task(asyncio.create_task(_run()), "cron-run-now")
     _RUN_NOW_TASKS.add(task)
     task.add_done_callback(_RUN_NOW_TASKS.discard)
 

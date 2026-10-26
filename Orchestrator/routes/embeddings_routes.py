@@ -57,6 +57,7 @@ from Orchestrator.embeddings.store import (
 )
 from Orchestrator.embeddings.store import is_warm as store_is_warm
 from Orchestrator.embeddings.watcher import run_health_check
+from Orchestrator.lifespan import track_task
 
 VALIDATE_TIMEOUT_S = 15.0  # wizard-click probe cap; see review note in /validate
 
@@ -563,7 +564,8 @@ async def embeddings_keep_alive(req: KeepAliveRequest):
     value = set_keep_alive(req.slug, req.warm)
     if req.warm:
         global _WARMUP_TASK
-        _WARMUP_TASK = asyncio.create_task(_warmup_model(req.slug))
+        _WARMUP_TASK = track_task(asyncio.create_task(_warmup_model(req.slug)),
+                                  "embeddings-warmup")
         _WARMUP_TASK.add_done_callback(_log_warmup_outcome)
     return {"slug": req.slug, "warm": req.warm, "keep_alive": value}
 
