@@ -34,6 +34,8 @@ libc    = "0.2"
 # (microphone). WebKitGTK denies media-stream + the user-media permission by
 # default, so the STT mic is dead in the desktop app unless we opt in. Pinned
 # to match wry's webkit2gtk (2.0.2) so PlatformWebview::inner() type-unifies.
+# v2_8 exposes UserMediaPermissionRequest::is_for_audio_device, which scopes
+# the grant to the microphone (wry already enables v2_38, a superset).
 [target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk = "=2.0.2"
+webkit2gtk = { version = "=2.0.2", features = ["v2_8"] }
 

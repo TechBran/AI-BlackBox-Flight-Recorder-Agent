@@ -141,20 +141,37 @@ pub fn run_with_url(url: &str, mode: &str) {
 
             // Linux/WebKitGTK: getUserMedia (the STT microphone) is denied by
             // default — the desktop app's mic was dead while the browser worked
-            // (caught 2026-06-05). Enable the media-stream setting and auto-allow
-            // the user-media permission request. Safe: this webview only ever
-            // loads the trusted localhost:9091 Portal (on_navigation blocks all
-            // external navigation), so granting media to that single origin is fine.
+            // (caught 2026-06-05). Enable the media-stream setting and allow
+            // ONLY the microphone. This webview is not just the wizard: done.js
+            // sends it on to the full Portal (/ui), which renders model output
+            // and serves user/AI-generated apps same-origin through
+            // /app-proxy/{port}/, and on_navigation lets every localhost:9091
+            // URL load here. So a blanket allow would hand any generated app
+            // the camera, location, notifications, pointer lock, EME and
+            // clipboard silently (audit X02-deps-android-web-10). A user-media
+            // request for an audio device that asks for no camera is allowed;
+            // every other request is denied.
             #[cfg(target_os = "linux")]
             {
-                use webkit2gtk::{WebViewExt, SettingsExt, PermissionRequestExt};
+                use webkit2gtk::glib::Cast;
+                use webkit2gtk::{
+                    PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
+                    UserMediaPermissionRequestExt, WebViewExt,
+                };
                 let _ = _window.with_webview(|webview| {
                     let wv = webview.inner();
                     if let Some(settings) = WebViewExt::settings(&wv) {
                         settings.set_enable_media_stream(true);
                     }
                     wv.connect_permission_request(|_wv, req| {
-                        req.allow();
+                        let microphone_only = req
+                            .downcast_ref::<UserMediaPermissionRequest>()
+                            .is_some_and(|m| m.is_for_audio_device() && !m.is_for_video_device());
+                        if microphone_only {
+                            req.allow();
+                        } else {
+                            req.deny();
+                        }
                         true
                     });
                 });
