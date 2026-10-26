@@ -1118,9 +1118,11 @@ export class AgentChatHandler {
             </details>`;
         }
 
-        // Render main content as markdown (sanitized; fails closed to escaped text)
+        // Render main content as markdown (sanitized; fails closed to escaped
+        // text). Code is highlighted while parsing only when NOT streaming
+        // (prevents jitter, and the per-token re-render never runs highlight.js).
         if (this.outputBuffer) {
-            html += markdownToSafeHtml(this.outputBuffer);
+            html += markdownToSafeHtml(this.outputBuffer, { streaming: this.isStreaming });
         }
 
         bubbleText.innerHTML = html;
@@ -1130,16 +1132,9 @@ export class AgentChatHandler {
             this.startReasoningCycle(bubbleText);
         }
 
-        // Only apply syntax highlighting when NOT streaming (prevents jitter)
         if (!this.isStreaming) {
-            // Apply syntax highlighting
-            bubbleText.querySelectorAll('pre code').forEach((block) => {
-                if (block.classList.contains('language-diff')) {
-                    this.highlightDiff(block);
-                } else if (window.hljs) {
-                    hljs.highlightElement(block);
-                }
-            });
+            // Diff blocks get the add/remove line colouring
+            bubbleText.querySelectorAll('pre code.language-diff').forEach((block) => this.highlightDiff(block));
 
             // Apply custom text highlighting
             if (typeof applySyntaxHighlighting === 'function') {

@@ -567,22 +567,17 @@ export function createBubbleWithThinking(content, thinking, cuLog) {
         </div>
     `;
 
-    // Populate thinking content with markdown rendering
+    // Populate thinking content with markdown rendering (code is highlighted
+    // while parsing: these are final renders)
     const thinkingContent = bubble.querySelector('.thinking-content');
     if (thinkingContent && thinking) {
         thinkingContent.innerHTML = renderMarkdown(thinking);
-        thinkingContent.querySelectorAll('pre code').forEach((block) => {
-            if (window.hljs) hljs.highlightElement(block);
-        });
     }
 
     // Populate response content with markdown rendering
     const responseContent = bubble.querySelector('.response-content');
     if (responseContent && content) {
         responseContent.innerHTML = renderMarkdown(content);
-        responseContent.querySelectorAll('pre code').forEach((block) => {
-            if (window.hljs) hljs.highlightElement(block);
-        });
 
         // Apply syntax highlighting and snapshot click handling
         setTimeout(() => {
@@ -753,7 +748,9 @@ function updateThinkingStats(bubble) {
 
 /**
  * Append response content to bubble during streaming
- * NOTE: Syntax highlighting is deferred to finalizeStreamingBubble for smooth scrolling
+ * NOTE: Syntax highlighting is deferred to finalizeStreamingBubble for smooth
+ * scrolling: the coalesced renders here are streaming renders, which never
+ * run highlight.js
  * @param {HTMLElement} bubble - Bubble element
  * @param {string} text - Text to append
  * @param {string|null} fullResponse - Full response for markdown rendering
@@ -774,7 +771,7 @@ export function appendResponseContent(bubble, text, fullResponse = null) {
                 const latest = bubble._pendingRender;
                 bubble._pendingRender = null;
                 if (latest === null || latest === undefined) return;
-                responseContent.innerHTML = renderMarkdown(latest);
+                responseContent.innerHTML = renderMarkdown(latest, { streaming: true });
                 // Smooth scroll to bottom during streaming
                 scrollToBottomIfNeeded();
             });
@@ -898,13 +895,10 @@ export function finalizeStreamingBubble(bubble, fullResponse, fullThinking) {
 
     if (responseContent && fullResponse) {
         // CU panel is a sibling of .streaming-response-panel, not inside .response-content,
-        // so this innerHTML overwrite won't destroy it
+        // so this innerHTML overwrite won't destroy it. The final render
+        // highlights code while parsing.
         responseContent.innerHTML = renderMarkdown(fullResponse);
         console.log('[FINALIZE] Rendered markdown, innerHTML length:', responseContent.innerHTML.length);
-
-        responseContent.querySelectorAll('pre code').forEach((block) => {
-            if (window.hljs) hljs.highlightElement(block);
-        });
 
         if (typeof makeSnapshotsClickable === 'function') {
             console.log('[FINALIZE] Calling makeSnapshotsClickable (first)...');
@@ -920,10 +914,6 @@ export function finalizeStreamingBubble(bubble, fullResponse, fullThinking) {
     const thinkingContent = bubble.querySelector('.thinking-content');
     if (thinkingContent && fullThinking) {
         thinkingContent.innerHTML = renderMarkdown(fullThinking);
-
-        thinkingContent.querySelectorAll('pre code').forEach((block) => {
-            if (window.hljs) hljs.highlightElement(block);
-        });
 
         if (typeof makeSnapshotsClickable === 'function') {
             makeSnapshotsClickable(thinkingContent);
@@ -2719,10 +2709,6 @@ async function saveStreamedTurn(txt, result) {
                     if (contentDiv && saveResult.modified_response) {
                         const parsedContent = renderMarkdown(saveResult.modified_response);
                         contentDiv.innerHTML = parsedContent;
-
-                        contentDiv.querySelectorAll('pre code').forEach((block) => {
-                            if (window.hljs) hljs.highlightElement(block);
-                        });
 
                         if (typeof makeSnapshotsClickable === 'function') {
                             makeSnapshotsClickable(contentDiv);

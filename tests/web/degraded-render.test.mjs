@@ -1,6 +1,6 @@
 // When a rendering library is missing, the Portal must degrade SAFELY and
 // LOUDLY (audit P01-chat-core-web-03: "log a loud startup error if DOMPurify is
-// missing"). marked is CDN-only, so an offline or LAN-only box can lose it
+// missing"). marked is vendored, but a failed or blocked script load can lose it
 // while the vendored DOMPurify is present; generated-media placeholders must
 // still render there, because the pollers find them by class.
 //

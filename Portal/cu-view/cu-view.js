@@ -5,7 +5,7 @@
  * WebSocket rides the Orchestrator proxy at /cu/view/{sid}/ws.
  *
  * Architecture:
- *   - noVNC RFB (vendored 1.5.0) renders at NATIVE resolution into
+ *   - noVNC RFB (vendored 1.7.0) renders at NATIVE resolution into
  *     #cuvScreen; scaleViewport OFF, resizeSession NEVER (the agent's
  *     screen must not change — design D6).
  *   - #cuvTouchLayer covers the canvas (touch-action:none) so noVNC's
@@ -24,6 +24,7 @@
  */
 
 import RFB from "/cu/novnc/core/rfb.js";
+import { sendPointerEvent } from "./rfb-input.js";
 import { TouchpadMachine, ViewportTransform, MASK } from "./touch-gestures.js";
 import {
     KEYSYMS, MODIFIER_KEYSYMS, EXTRA_KEY_ROWS,
@@ -232,10 +233,15 @@ function setTouchMode(mode) {
 
 function sendPointer(x, y, mask) {
     if (!rfb || ended) return;
-    // _sendMouse is the 1.5.x seam (design D2 note): it gates on connection
-    // state + viewOnly and forwards display-absolute coords. Our canvas has
-    // internal scale 1 (scaleViewport off), so display coords pass through.
-    try { rfb._sendMouse(Math.round(x), Math.round(y), mask); } catch { /* connect race */ }
+    // noVNC's private _sendMouse seam (design D2 note), behind the adapter
+    // that owns it and is contract-tested against the vendored noVNC: it
+    // gates on connection state + viewOnly and forwards display-absolute
+    // coords. Our canvas has internal scale 1 (scaleViewport off), so
+    // display coords pass through.
+    sendPointerEvent(rfb, x, y, mask, () => {
+        console.error("[cu-view] noVNC RFB has no _sendMouse: pointer input is dead (see Portal/cu-view/rfb-input.js)");
+        diag("rfb-seam-missing", "RFB#_sendMouse");
+    });
 }
 
 function sendKeyEvent(keysym, down) {

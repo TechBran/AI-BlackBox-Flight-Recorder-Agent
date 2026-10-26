@@ -9,7 +9,7 @@
 
 import { $, toast } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory } from './state-management.js';
-import { renderMarkdown, addCopyButtonsToCodeBlocks, copyToClipboard, addTimestampToBubble } from './markdown-renderer.js';
+import { renderMarkdown, addCopyButtonsToCodeBlocks, copyToClipboard, addTimestampToBubble, highlightCodeBlocks } from './markdown-renderer.js';
 import { sanitizeAssistantHtml } from './sanitize.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
@@ -151,28 +151,18 @@ export function appendBubble(role, content) {
         span.innerHTML = sanitizeAssistantHtml(contentString);
         textContentForActions = span.textContent || span.innerText || "";
         setTimeout(() => {
-            span.querySelectorAll('pre code').forEach(block => {
-                if (window.hljs && !block.classList.contains('hljs')) {
-                    hljs.highlightElement(block);
-                }
-            });
+            highlightCodeBlocks(span);   // stored HTML: not highlighted at parse time
             addCopyButtonsToCodeBlocks(span);
             makeSnapshotsClickable(span);
             applySyntaxHighlighting(span);
         }, 0);
     } else if (role === 'assistant' && !containsMedia) {
+        // Code is highlighted while parsing (final render), not on a timer.
         span.innerHTML = renderMarkdown(contentString);
         textContentForActions = span.textContent || span.innerText || "";
         setTimeout(() => addCopyButtonsToCodeBlocks(span), 0);
         setTimeout(() => makeSnapshotsClickable(span), 0);
         setTimeout(() => applySyntaxHighlighting(span), 0);
-        setTimeout(() => {
-            span.querySelectorAll('pre code').forEach(block => {
-                if (window.hljs && !block.classList.contains('hljs')) {
-                    hljs.highlightElement(block);
-                }
-            });
-        }, 10);
     } else {
         span.textContent = contentString;
     }
@@ -450,18 +440,11 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
             span.innerHTML = sanitizeAssistantHtml(newContentString);
             textContentForActions = (span.textContent || "").trim();
         } else {
-            span.innerHTML = renderMarkdown(newContentString);
+            span.innerHTML = renderMarkdown(newContentString);   // highlights code while parsing
             textContentForActions = span.textContent || span.innerText || "";
             setTimeout(() => addCopyButtonsToCodeBlocks(span), 0);
             setTimeout(() => makeSnapshotsClickable(span), 0);
             setTimeout(() => applySyntaxHighlighting(span), 0);
-            setTimeout(() => {
-                span.querySelectorAll('pre code').forEach(block => {
-                    if (window.hljs && !block.classList.contains('hljs')) {
-                        hljs.highlightElement(block);
-                    }
-                });
-            }, 10);
         }
     }
 

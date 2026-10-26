@@ -6,8 +6,11 @@
  * Operator-locked decisions (2026-05-20, post hardware test):
  *  - xterm.js (standard VT100/xterm emulator) — simple <pre> couldn't render
  *    Claude Code's TUI (cursor escapes, box-drawing, alternate screen buffer).
- *  - Loaded via jsDelivr CDN as UMD scripts; globals window.Terminal +
- *    window.FitAddon consumed from this ES module.
+ *  - Loaded as UMD scripts by index.html from the vendored copies
+ *    (Portal/vendor/xterm, Portal/vendor/xterm-addon-fit — xterm 6 + fit 0.11,
+ *    see Portal/vendor/VENDORED.md); globals window.Terminal +
+ *    window.FitAddon consumed from this ES module. Smoke-tested end to end by
+ *    tests/web/cli-terminal.test.mjs.
  *  - In-modal terminal panel (no separate browser tab).
  *  - Provider radio: Claude / Gemini / Codex / Antigravity (backend supports
  *    all 4 per Orchestrator/routes/cli_agent_routes.py:47 SUPPORTED_PROVIDERS).
@@ -313,7 +316,7 @@ function ensureTerminal() {
     const container = document.getElementById('cliAgentsTerminal');
     if (!container) return null;
     if (!window.Terminal || !window.FitAddon) {
-        console.error('[CLI-AGENTS] xterm.js UMD globals not available — CDN load failed?');
+        console.error('[CLI-AGENTS] xterm.js UMD globals not available — /ui/vendor/xterm failed to load?');
         return null;
     }
     // FitAddon ships as window.FitAddon.FitAddon (UMD namespace wrapper)

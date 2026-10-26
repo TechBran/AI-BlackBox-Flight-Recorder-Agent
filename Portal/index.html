@@ -9,18 +9,21 @@
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
   <link rel="stylesheet" href="/ui/styles/main.css?v=genui340"/> <!-- v340: M4 reliability: SSE parser, pollers, modal/mic lifecycle, dead controls, catalog defaults; v339: M3 -->
-  <!-- Markdown and Syntax Highlighting. DOMPurify is VENDORED (Portal/vendor/VENDORED.md)
-       so the sanitizer is present on an offline/LAN-only box; marked and highlight.js
-       stay on their CDNs for now, pinned by SRI (a changed byte = not executed, and the
-       renderers then fail closed to escaped text). -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" integrity="sha384-oaMLBGEzBOJx3UHwac0cVndtX5fxGQIfnAeFZ35RTgqPcYlbprH9o9PUV/F8Le07" crossorigin="anonymous">
-  <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js" integrity="sha384-zbcZAIxlvJtNE3Dp5nxLXdXtXyxwOdnILY1TDPVmKFhl4r4nSUG1r8bcFXGVa4Te" crossorigin="anonymous"></script>
+  <!-- Third-party libraries, all VENDORED under Portal/vendor/ (versions, sources,
+       sha256 and licenses in Portal/vendor/VENDORED.md), so markdown, the sanitizer,
+       code highlighting and the CLI terminal work on an offline/LAN-only box. Each
+       tag pins its bytes by SRI (a changed byte = not executed, and the renderers
+       then fail closed to escaped text). marked-highlight runs highlight.js at parse
+       time on the non-streaming renders (Portal/modules/markdown-renderer.js). -->
+  <link rel="stylesheet" href="/ui/vendor/highlightjs/styles/atom-one-dark.min.css" integrity="sha384-oaMLBGEzBOJx3UHwac0cVndtX5fxGQIfnAeFZ35RTgqPcYlbprH9o9PUV/F8Le07">
+  <script src="/ui/vendor/marked/marked.umd.js" integrity="sha384-rATToyt6602Jnq8c7w8HZwmyOUgPL7mzxX01FBWoV48ns/EgkakGozpES+PnaYOI"></script>
+  <script src="/ui/vendor/marked-highlight/index.umd.js" integrity="sha384-BjBE0bY2PIGsLgdqaC1+iwO397c7jxwJdNszWabXYxrbMXBTS9QCPxXJElH8xOE/"></script>
   <script src="/ui/vendor/dompurify/purify.min.js" integrity="sha384-P0JNneQf81HOl9VwNXK76cQ9VMD6Nfsnepxb0cCOg8+UzEdzgPHAPV4wVQrvYQSx"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous"></script>
+  <script src="/ui/vendor/highlightjs/highlight.min.js" integrity="sha384-wjfDDhOPPdjtva8vWBhWeVprSpmxisEu5aYT3q1JyACqXpdKpo3PWZTMVq24MBix"></script>
   <!-- xterm.js — Track 3 fix: real VT100/xterm emulator for CLI Agents modal -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <link rel="stylesheet" href="/ui/vendor/xterm/xterm.css" integrity="sha384-n2n7twoohnW+d3myBKaUgl7DSiwidw6MkQy9oesGzkPpMjejKRR3XlnD+5yCdtBD">
+  <script src="/ui/vendor/xterm/xterm.js" integrity="sha384-f/1U6Z9wM4D71a5eRXEZnyOTMOvjqxr2XLwh+Go1OvIl3L3tOcvUrzudnhbECwl4"></script>
+  <script src="/ui/vendor/xterm-addon-fit/addon-fit.js" integrity="sha384-txoiwu4RR2GD3qySbaj+BbzibkLbSJRcfqGYMu6z1EqHil4A2dyBiBW5dlacG6OR"></script>
   <script type="module" src="/ui/app-modular.js?v=genui340"></script> <!-- v340: M4 reliability: SSE parser, pollers, modal/mic lifecycle, dead controls, catalog defaults; v339: M3 -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on

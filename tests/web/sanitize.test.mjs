@@ -258,8 +258,8 @@ test("renderMarkdown FAILS CLOSED without DOMPurify (escapes the source, not mar
 });
 
 test("renderMarkdown without marked still SANITIZES (never raw), keeping line breaks", () => {
-    // marked is CDN-only, so an offline box can lose it while the vendored
-    // DOMPurify is present: the text is then sanitized as HTML, not passed raw.
+    // A failed or blocked marked load (it is vendored) can leave the
+    // page with DOMPurify only: the text is then sanitized as HTML, not passed raw.
     unloadMarked();
     try {
         for (const [name, payload] of Object.entries(PAYLOADS)) {
@@ -322,7 +322,7 @@ test("markdownToSafeHtml without marked sanitizes the agent output (never raw)",
     }
 });
 
-test("configureMarked passes only options marked 11 honours (X04-security-clients-infra-08)", () => {
+test("configureMarked passes only options current marked honours (X04-security-clients-infra-08)", () => {
     configureMarked();
     for (const dead of ["highlight", "headerIds", "mangle", "sanitize"]) {
         assert.equal(Object.hasOwn(marked.defaults, dead), false, `${dead} is a removed marked option`);

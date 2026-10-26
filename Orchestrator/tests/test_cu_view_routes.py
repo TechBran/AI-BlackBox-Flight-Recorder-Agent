@@ -63,7 +63,7 @@ def test_view_client_carries_the_switcher_rail():
 
 def test_novnc_vendored_mount_serves_rfb_core():
     """D3: /cu/novnc serves the PINNED vendored noVNC (Portal/vendor/novnc,
-    v1.5.0) — the RFB entry module and its pako dependency closure must both
+    v1.7.0) — the RFB entry module and its pako dependency closure must both
     resolve, or the viewer's ES-module import chain 404s at runtime."""
     client = TestClient(app)
     rfb = client.get("/cu/novnc/core/rfb.js")

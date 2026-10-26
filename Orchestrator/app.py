@@ -228,7 +228,7 @@ app.mount(
 
 # noVNC live-view assets (M9 Task 9.5) so the per-session viewer page can
 # `import RFB from '/cu/novnc/core/rfb.js'`. D3 (2026-07-23 live-view design):
-# prefer the PINNED vendored copy (Portal/vendor/novnc, v1.5.0 — fresh-box
+# prefer the PINNED vendored copy (Portal/vendor/novnc, v1.7.0 — fresh-box
 # robust, ships in the repo; see its VENDORED.md) and fall back to the apt path
 # (/usr/share/novnc, 1.3.0) only when the vendored tree is absent. Mounted
 # AFTER the router includes so it never shadows the /cu/view API routes; the

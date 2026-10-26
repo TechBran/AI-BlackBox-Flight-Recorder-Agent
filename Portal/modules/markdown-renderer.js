@@ -16,23 +16,94 @@ import { sanitizeAssistantHtml, isSanitizerAvailable, plainTextHtml, warnDegrade
 // =============================================================================
 // Markdown Configuration
 // =============================================================================
+//
+// marked, marked-highlight and highlight.js are vendored (Portal/vendor/,
+// loaded as classic scripts by index.html) and read lazily from globalThis.
+// Every render goes through one of two PRIVATE marked instances over the
+// loaded library, both with MARKED_OPTIONS:
+//   - plain: the streaming renders. appendResponseContent and the agent
+//     handlers re-render the whole reply once per animation frame while tokens
+//     arrive, so they never run highlight.js;
+//   - highlighted: every other (final) render. marked-highlight runs
+//     highlight.js at PARSE time, once per code block.
+// This replaces the old post-render hljs.highlightElement sweeps on timers
+// (audit P01-chat-core-web-13). Sanitizing stays sanitize.js's job: the
+// highlighted HTML still goes through sanitizeAssistantHtml.
+
+/** marked options for every render: GFM, single newlines as <br>. */
+const MARKED_OPTIONS = Object.freeze({ breaks: true, gfm: true });
 
 /**
- * Configure marked library with custom options (GFM, single newlines as <br>).
+ * Configure the global marked instance (GFM, single newlines as <br>), for
+ * any caller outside this module; the Portal's own renders use the private
+ * instances below, which carry the same options.
  *
  * Code highlighting is NOT a marked option: marked removed `highlight`,
  * `headerIds`, `mangle` and `sanitize` in v8 and silently ignores them, so they
- * are not passed (audit X04-security-clients-infra-08). Code blocks are
- * highlighted after rendering, by hljs.highlightElement over `pre code` in the
- * bubble renderers, and sanitizing is sanitize.js's job.
+ * are not passed (audit X04-security-clients-infra-08).
  */
 export function configureMarked() {
-    if (typeof marked === 'undefined') return;
+    if (!isMarkedAvailable()) return;
+    marked.setOptions({ ...MARKED_OPTIONS });
+}
 
-    marked.setOptions({
-        breaks: true,
-        gfm: true
-    });
+/**
+ * highlight.js callback for marked-highlight. A fence labeled with a language
+ * highlight.js knows is highlighted as that language; an unlabeled fence is
+ * auto-detected (what hljs.highlightElement did); `nohighlight` or a label
+ * highlight.js lacks comes back unchanged, which marked then escapes.
+ * @param {string} code - The fence's text (raw)
+ * @param {string} lang - The first word of its info string ('' when none)
+ * @returns {string} Highlighted HTML, or `code` unchanged
+ */
+function highlightCode(code, lang) {
+    const hl = typeof hljs !== 'undefined' ? hljs : null;
+    if (!hl || typeof hl.highlight !== 'function') return code;
+    try {
+        if (!lang) return hl.highlightAuto(code).value;
+        if (hl.getLanguage(lang)) return hl.highlight(code, { language: lang, ignoreIllegals: true }).value;
+    } catch (e) {
+        console.warn('Code highlighting failed:', e);
+    }
+    return code;
+}
+
+// One {plain, highlighted} pair per loaded marked library.
+const _markedInstances = new WeakMap();
+
+/**
+ * The marked instance for a render, or null when marked is not loaded.
+ * Falls back to the global object itself when the loaded library has no
+ * Marked constructor (and to the plain instance without marked-highlight).
+ * @param {boolean} streaming - True for a mid-stream render
+ * @returns {{parse: Function}|null}
+ */
+function markedFor(streaming) {
+    if (!isMarkedAvailable()) return null;
+    const lib = marked;
+    let pair = _markedInstances.get(lib);
+    if (!pair) {
+        pair = { plain: lib, highlighted: lib };
+        try {
+            if (typeof lib.Marked === 'function') {
+                pair.plain = new lib.Marked({ ...MARKED_OPTIONS });
+                pair.highlighted = pair.plain;
+                const ext = typeof markedHighlight !== 'undefined' && markedHighlight
+                    ? markedHighlight.markedHighlight : null;
+                if (typeof ext === 'function') {
+                    pair.highlighted = new lib.Marked({ ...MARKED_OPTIONS }, ext({
+                        langPrefix: 'hljs language-',
+                        emptyLangClass: 'hljs',
+                        highlight: highlightCode,
+                    }));
+                }
+            }
+        } catch (e) {
+            console.warn('marked instances could not be created:', e);
+        }
+        _markedInstances.set(lib, pair);
+    }
+    return streaming ? pair.plain : pair.highlighted;
 }
 
 // =============================================================================
@@ -366,8 +437,8 @@ function isMarkedAvailable() {
 
 /**
  * The no-marked rendering of model text: newlines outside tags become <br>,
- * and the result is SANITIZED (never raw). marked is CDN-only, so an offline
- * or LAN-only box can lose it while the vendored DOMPurify is present; server-
+ * and the result is SANITIZED (never raw). marked is vendored, but a failed or
+ * blocked script load can still lose it while DOMPurify is present; server-
  * built markup (media placeholders the pollers find by class, artifact
  * download links) then still renders, only markdown syntax shows as typed.
  * @param {string} text - Model text (markdown and/or HTML)
@@ -389,9 +460,11 @@ function newlinesToBreaks(text) {
  * unavailable, or marked throws, the markdown SOURCE comes back escaped
  * (never unsanitized marked output); without marked it is sanitized as-is.
  * @param {string} text - Markdown text to render
+ * @param {{streaming?: boolean}} [options] - streaming: a mid-stream render
+ *   (code is highlighted only on the final, non-streaming one)
  * @returns {string} Safe HTML string
  */
-export function markdownToSafeHtml(text) {
+export function markdownToSafeHtml(text, { streaming = false } = {}) {
     const source = (text === null || text === undefined) ? '' : String(text);
     if (!isSanitizerAvailable()) {
         warnDegraded('sanitizer');
@@ -399,7 +472,7 @@ export function markdownToSafeHtml(text) {
     }
     if (!isMarkedAvailable()) return renderWithoutMarked(source);
     try {
-        return sanitizeAssistantHtml(marked.parse(source));
+        return sanitizeAssistantHtml(markedFor(streaming).parse(source));
     } catch (e) {
         console.warn('Markdown parse error:', e);
         return plainTextHtml(source);
@@ -411,9 +484,11 @@ export function markdownToSafeHtml(text) {
  * Also upgrades media URLs to embedded players (upgradeMediaUrls, after the
  * sanitizer: the URL is never spliced into markdown or markup)
  * @param {string} text - Markdown text to render
+ * @param {{streaming?: boolean}} [options] - streaming: a mid-stream render,
+ *   repeated per animation frame; code is highlighted only when it is false
  * @returns {string} Safe HTML string (fails closed to escaped text)
  */
-export function renderMarkdown(text) {
+export function renderMarkdown(text, { streaming = false } = {}) {
     const source = (text === null || text === undefined) ? '' : String(text);
     if (!isSanitizerAvailable()) {
         warnDegraded('sanitizer');
@@ -427,7 +502,7 @@ export function renderMarkdown(text) {
             warnDegraded('markdown');
             return sanitizeWithMediaPlayers(newlinesToBreaks(fenced));
         }
-        return sanitizeWithMediaPlayers(marked.parse(fenced));
+        return sanitizeWithMediaPlayers(markedFor(streaming).parse(fenced));
     } catch (e) {
         console.warn('Markdown parse error:', e);
         return plainTextHtml(source);
@@ -458,6 +533,31 @@ export function markdownCodeSpan(text) {
 // =============================================================================
 // Code Block Utilities
 // =============================================================================
+
+/**
+ * Highlight the `pre code` blocks in a container that are not highlighted
+ * yet: markup that did not come through a final renderMarkdown /
+ * markdownToSafeHtml (stored pre-rendered replies), whose blocks carry no
+ * `hljs` class. Blocks those renders emit are highlighted at parse time and
+ * are skipped, and so is a block labeled with a language highlight.js lacks
+ * (highlightElement throws on it). highlightElement highlights the element's
+ * TEXT, so it never turns sanitized text back into markup.
+ * @param {HTMLElement} container - Container element with code blocks
+ */
+export function highlightCodeBlocks(container) {
+    if (!container || typeof hljs === 'undefined' || !hljs || typeof hljs.highlightElement !== 'function') return;
+    container.querySelectorAll('pre code').forEach(block => {
+        if (block.classList.contains('hljs')) return;
+        const langClass = Array.from(block.classList).find(c => c.startsWith('language-'));
+        const lang = langClass ? langClass.slice('language-'.length) : '';
+        if (lang && !hljs.getLanguage(lang)) return;
+        try {
+            hljs.highlightElement(block);
+        } catch (e) {
+            console.warn('Code highlighting failed:', e);
+        }
+    });
+}
 
 /**
  * Add copy buttons to all code blocks in a container
