@@ -179,6 +179,7 @@ jobs:
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
 
       # The page-alignment checker's own tests, then a real debug APK: assembleDebug
-      # runs checkDebugNativeLibAlignment and fails on a 4 KB-aligned library.
+      # fails on a 4 KB-aligned library before packaging (checkDebugMergedNativeLibAlignment)
+      # and checks the APK it packaged (checkDebugNativeLibAlignment).
       - name: ":buildSrc:test and :app:assembleDebug"
         run: ./gradlew :buildSrc:test :app:assembleDebug --no-daemon --stacktrace

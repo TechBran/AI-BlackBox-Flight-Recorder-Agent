@@ -11,7 +11,11 @@
     @android.webkit.JavascriptInterface <methods>;
 }
 
-# Keep XR overlay classes (uses reflection for Spatial APIs)
+# Keep the device-control package whole: its services and activities, the actuators, and the
+# @Serializable posture, UI-tree and capability payloads it sends to the BlackBox. No code
+# here uses reflection since the androidx.xr alphas were dropped (audit
+# X02-deps-android-web-06); narrowing this rule is a release-build change that needs a
+# device walk.
 -keep class com.aiblackbox.portal.overlay.** { *; }
 
 # Keep data classes used in JSON serialization

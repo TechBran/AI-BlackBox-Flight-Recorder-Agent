@@ -1,6 +1,8 @@
 package com.aiblackbox.buildlogic;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -11,9 +13,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import org.gradle.api.GradleException;
+import org.gradle.api.Project;
+import org.gradle.testfixtures.ProjectBuilder;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -203,6 +210,138 @@ public class NativeLibAlignmentTest {
         Files.write(notApk, new byte[] {1, 2, 3, 4});
 
         assertEquals(1, NativeLibAlignment.checkApk(notApk, PAGE).size());
+    }
+
+    // ---- merged libraries, checked before any APK is written -----------------------------
+
+    @Test
+    public void aMerged4KbLibraryIsRejectedBeforePackaging() throws IOException {
+        Path libs = libDir(Map.of(
+            "lib/arm64-v8a/libtermux.so", elf64(ALIGN_4K, ALIGN_4K),
+            "lib/arm64-v8a/libLiteRt.so", elf64(ALIGN_16K)));
+
+        List<String> problems = NativeLibAlignment.checkLibraryDirectory(libs, Set.of(), PAGE);
+
+        assertEquals(problems.toString(), 1, problems.size());
+        assertTrue(problems.get(0), problems.get(0).startsWith("lib/arm64-v8a/libtermux.so: "));
+        assertTrue(problems.get(0), problems.get(0).contains("0x1000"));
+    }
+
+    @Test
+    public void mergedLibrariesThatAreAllAlignedPass() throws IOException {
+        Path libs = libDir(Map.of(
+            "lib/arm64-v8a/libtermux.so", elf64(ALIGN_16K, ALIGN_16K),
+            "lib/arm64-v8a/liblitertlm_jni.so", elf64(ALIGN_64K),
+            "lib/armeabi-v7a/libtermux.so", elf32(ALIGN_4K)));
+
+        assertEquals(List.of(), NativeLibAlignment.checkLibraryDirectory(libs, Set.of(), PAGE));
+    }
+
+    @Test
+    public void anAbiTheVariantFiltersOutIsNotChecked() throws IOException {
+        // AGP merges every ABI its dependencies ship and applies ndk.abiFilters only when it
+        // packages, so an x86_64 copy that never reaches the APK must not fail the build.
+        Path libs = libDir(Map.of(
+            "lib/arm64-v8a/libtermux.so", elf64(ALIGN_16K),
+            "lib/x86_64/libtermux.so", elf64(ALIGN_4K)));
+
+        assertEquals(List.of(),
+            NativeLibAlignment.checkLibraryDirectory(libs, Set.of("arm64-v8a"), PAGE));
+        assertEquals("with no filter every ABI is packaged, so every ABI is checked", 1,
+            NativeLibAlignment.checkLibraryDirectory(libs, Set.of(), PAGE).size());
+    }
+
+    @Test
+    public void aFilteredAbiStillHasItsLibrariesChecked() throws IOException {
+        Path libs = libDir(Map.of("lib/arm64-v8a/libbad.so", elf64(ALIGN_4K)));
+
+        assertEquals(1, NativeLibAlignment.checkLibraryDirectory(libs, Set.of("arm64-v8a"), PAGE).size());
+    }
+
+    @Test
+    public void aMergedLibraryThatIsNotElfIsRejected() throws IOException {
+        Path libs = libDir(Map.of("lib/arm64-v8a/libfake.so", "not elf".getBytes()));
+
+        List<String> problems = NativeLibAlignment.checkLibraryDirectory(libs, Set.of(), PAGE);
+
+        assertEquals(problems.toString(), 1, problems.size());
+        assertTrue(problems.get(0), problems.get(0).startsWith("lib/arm64-v8a/libfake.so: "));
+    }
+
+    @Test
+    public void aLibraryOutsideTheAbiLayoutIsRejected() throws IOException {
+        // Fail closed: a .so the check cannot place under lib/<abi>/ is not waved through.
+        Path libs = libDir(Map.of("libstray.so", elf64(ALIGN_4K)));
+
+        List<String> problems = NativeLibAlignment.checkLibraryDirectory(libs, Set.of("arm64-v8a"), PAGE);
+
+        assertEquals(problems.toString(), 1, problems.size());
+        assertTrue(problems.get(0), problems.get(0).startsWith("libstray.so: "));
+    }
+
+    @Test
+    public void otherMergedFilesAreIgnored() throws IOException {
+        Path libs = libDir(Map.of(
+            "lib/arm64-v8a/README.txt", "notes".getBytes(),
+            "lib/arm64-v8a/gdbserver", "#!/bin/sh".getBytes()));
+
+        assertEquals(List.of(), NativeLibAlignment.checkLibraryDirectory(libs, Set.of(), PAGE));
+    }
+
+    @Test
+    public void anEmptyMergeOutputPasses() throws IOException {
+        assertEquals(List.of(),
+            NativeLibAlignment.checkLibraryDirectory(tmp.newFolder("none").toPath(), Set.of(), PAGE));
+    }
+
+    // ---- the Gradle task that runs before package<Variant> -------------------------------
+
+    @Test
+    public void thePrePackageTaskFailsTheBuildOnA4KbLibrary() throws IOException {
+        Path libs = libDir(Map.of(
+            "lib/arm64-v8a/libtermux.so", elf64(ALIGN_4K),
+            "lib/x86_64/libtermux.so", elf64(ALIGN_4K)));
+        CheckMergedNativeLibAlignment task = mergedLibsTask(libs, Set.of("arm64-v8a"));
+
+        GradleException failure = assertThrows(GradleException.class, task::check);
+
+        assertTrue(failure.getMessage(), failure.getMessage().contains("lib/arm64-v8a/libtermux.so"));
+        assertFalse("a filtered-out ABI is not reported: " + failure.getMessage(),
+            failure.getMessage().contains("lib/x86_64/"));
+        String report = Files.readString(task.getReport().get().getAsFile().toPath());
+        assertTrue(report, report.contains("lib/arm64-v8a/libtermux.so"));
+    }
+
+    @Test
+    public void thePrePackageTaskPassesAlignedLibraries() throws IOException {
+        Path libs = libDir(Map.of("lib/arm64-v8a/libtermux.so", elf64(ALIGN_16K)));
+        CheckMergedNativeLibAlignment task = mergedLibsTask(libs, Set.of("arm64-v8a"));
+
+        task.check();
+
+        assertEquals(List.of("OK: 1 native library checked for arm64-v8a"),
+            Files.readAllLines(task.getReport().get().getAsFile().toPath()));
+    }
+
+    private CheckMergedNativeLibAlignment mergedLibsTask(Path libs, Set<String> abis) throws IOException {
+        Project project = ProjectBuilder.builder().withProjectDir(tmp.newFolder()).build();
+        CheckMergedNativeLibAlignment task = project.getTasks()
+            .register("checkMergedNativeLibAlignment", CheckMergedNativeLibAlignment.class).get();
+        task.getNativeLibsDirectory().set(libs.toFile());
+        task.getAbis().set(abis);
+        task.getReport().set(project.getLayout().getBuildDirectory().file("merged-alignment.txt"));
+        return task;
+    }
+
+    /** A merged-native-libs directory (AGP's out/ layout) holding {@code files}. */
+    private Path libDir(Map<String, byte[]> files) throws IOException {
+        Path root = tmp.newFolder().toPath();
+        for (Map.Entry<String, byte[]> f : files.entrySet()) {
+            Path target = root.resolve(f.getKey());
+            Files.createDirectories(target.getParent());
+            Files.write(target, f.getValue());
+        }
+        return root;
     }
 
     // ---- fixtures ------------------------------------------------------------------------

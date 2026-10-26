@@ -11,3 +11,9 @@ dependencies {
     implementation gradleApi()
     testImplementation libs.junit
 }
+
+tasks.named('test') {
+    // The CheckNativeLibAlignment tests build a throwaway project with ProjectBuilder, which
+    // defines Gradle's generated task classes through java.lang reflection that JDK 17 closes.
+    jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED'
+}

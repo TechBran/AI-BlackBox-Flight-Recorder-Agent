@@ -23,9 +23,11 @@ import org.gradle.api.tasks.TaskAction;
 /**
  * Fails the build when an APK in {@link #getApkDirectory()} carries a native library that a
  * 16 KB-page device cannot load (see {@link NativeLibAlignment}). The app wires one per
- * variant onto AGP's final APK artifact and makes {@code assemble<Variant>} and
- * {@code install<Variant>} depend on it, so a 4 KB-aligned library can never reach an
- * installable artifact unnoticed.
+ * variant onto AGP's final APK artifact, runs it after every {@code package<Variant>}, and makes
+ * {@code assemble<Variant>}, {@code install<Variant>} and {@code connected<Variant>AndroidTest}
+ * depend on it, so a 4 KB-aligned library can never reach an installed APK unnoticed. A
+ * misaligned ELF library is normally stopped earlier, before packaging, by
+ * {@link CheckMergedNativeLibAlignment}; this check adds the in-APK placement.
  */
 public abstract class CheckNativeLibAlignment extends DefaultTask {
 

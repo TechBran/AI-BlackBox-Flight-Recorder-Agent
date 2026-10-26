@@ -1,16 +1,20 @@
 package com.aiblackbox.buildlogic;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -82,6 +86,46 @@ public final class NativeLibAlignment {
                         + ", so it cannot be mapped from the APK on " + (pageSize / 1024)
                         + " KB-page devices (zipalign -P " + (pageSize / 1024) + ")");
                 }
+            }
+        }
+        return problems;
+    }
+
+    /**
+     * Checks the native libraries AGP merged for a variant ({@code lib/<abi>/<name>.so} under
+     * {@code libRoot}, the MERGED_NATIVE_LIBS layout) before they are packaged, so a library
+     * that a 16 KB-page device cannot load fails the build before any APK is written.
+     * {@code abis} is the variant's ndk.abiFilters (empty: every ABI is packaged). AGP merges
+     * every ABI the dependencies ship and filters only when it packages, so libraries for
+     * other ABIs never reach the APK and are skipped. Only the ELF alignment is checked here;
+     * where a library lands inside the APK is {@link #checkApk}'s part.
+     */
+    public static List<String> checkLibraryDirectory(Path libRoot, Set<String> abis, int pageSize)
+        throws IOException {
+        List<Path> files;
+        try (Stream<Path> walk = Files.walk(libRoot)) {
+            files = walk.filter(Files::isRegularFile).sorted().toList();
+        }
+        List<String> problems = new ArrayList<>();
+        for (Path file : files) {
+            String name = libRoot.relativize(file).toString().replace(File.separatorChar, '/');
+            if (!name.endsWith(".so")) {
+                continue;
+            }
+            if (!isNativeLibrary(name)) {
+                // Fail closed: a library this check cannot place under an ABI is not waved through.
+                problems.add(name + ": a native library outside lib/<abi>/, which this check cannot place");
+                continue;
+            }
+            if (!abis.isEmpty() && !abis.contains(name.split("/", -1)[1])) {
+                continue;
+            }
+            String elfProblem;
+            try (InputStream in = Files.newInputStream(file)) {
+                elfProblem = checkElf(in, pageSize);
+            }
+            if (elfProblem != null) {
+                problems.add(name + ": " + elfProblem);
             }
         }
         return problems;

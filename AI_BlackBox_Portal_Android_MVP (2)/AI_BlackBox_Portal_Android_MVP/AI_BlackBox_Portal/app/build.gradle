@@ -1,3 +1,4 @@
+import com.aiblackbox.buildlogic.CheckMergedNativeLibAlignment
 import com.aiblackbox.buildlogic.CheckNativeLibAlignment
 import com.android.build.api.artifact.SingleArtifact
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -146,18 +147,38 @@ android {
 // 16 KB page alignment (audit A01-activities-root-11). Android 15+ devices with 16 KB pages
 // cannot dlopen a 64-bit library whose LOAD segments are 4 KB-aligned, nor map an uncompressed
 // one that is not page-aligned inside the APK; Android 16 shows a page-size compat warning.
-// Every variant's final APK is checked (buildSrc NativeLibAlignment, the checks AOSP's
-// check_elf_alignment.sh and `zipalign -c -P 16` make), and assemble<Variant> and
-// install<Variant> fail on any offender, so a 4 KB library cannot ship or be sideloaded by
-// accident.
+// Two checks per variant (buildSrc NativeLibAlignment, the checks AOSP's check_elf_alignment.sh
+// and `zipalign -c -P 16` make):
+//  - check<Variant>MergedNativeLibAlignment runs before package<Variant> on the merged libraries
+//    of the ABIs the APK packages, so a 4 KB-aligned library fails the build before an APK is
+//    written and nothing new is left on the output path to sideload.
+//  - check<Variant>NativeLibAlignment runs after every package<Variant>, whichever task asked
+//    for the APK, and also checks where each uncompressed library sits inside it. On a failure
+//    there the APK is left in place (renaming it breaks AGP's incremental packaging), so do not
+//    install from a failed build. assemble<Variant>, install<Variant> and
+//    connected<Variant>AndroidTest wait for it, so none of them installs an unchecked APK.
+// App bundles (bundle<Variant>) get only the first check: this app ships as an APK.
 androidComponents {
     onVariants(selector().all()) { variant ->
         def variantName = variant.name.capitalize()
+        def mergedLibsCheck = tasks.register("check${variantName}MergedNativeLibAlignment", CheckMergedNativeLibAlignment) {
+            nativeLibsDirectory = variant.artifacts.get(SingleArtifact.MERGED_NATIVE_LIBS.INSTANCE)
+            abis.addAll(android.defaultConfig.ndk.abiFilters)
+            report = layout.buildDirectory.file("reports/native-lib-alignment/${variant.name}-merged.txt")
+        }
         def alignmentCheck = tasks.register("check${variantName}NativeLibAlignment", CheckNativeLibAlignment) {
             apkDirectory = variant.artifacts.get(SingleArtifact.APK.INSTANCE)
             report = layout.buildDirectory.file("reports/native-lib-alignment/${variant.name}.txt")
         }
-        tasks.named { it == "assemble${variantName}" || it == "install${variantName}" }.configureEach {
+        tasks.named { it == "package${variantName}" || it == "package${variantName}Bundle" }.configureEach {
+            dependsOn mergedLibsCheck
+        }
+        tasks.named { it == "package${variantName}" }.configureEach {
+            finalizedBy alignmentCheck
+        }
+        def gated = ["assemble${variantName}", "install${variantName}", "connected${variantName}AndroidTest"]
+            .collect { it.toString() }
+        tasks.named { it in gated }.configureEach {
             dependsOn alignmentCheck
         }
     }
