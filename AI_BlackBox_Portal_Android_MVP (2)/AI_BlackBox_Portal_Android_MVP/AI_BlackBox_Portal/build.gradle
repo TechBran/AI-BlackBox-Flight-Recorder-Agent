@@ -1,6 +1,7 @@
+// Versions live in gradle/libs.versions.toml. AGP 9 compiles Kotlin itself (built-in Kotlin),
+// so the org.jetbrains.kotlin.android plugin is gone (audit X02-deps-android-web-04).
 plugins {
-    id("com.android.application") version "8.13.1" apply false
-    id("org.jetbrains.kotlin.android") version "2.2.21" apply false
-    id("org.jetbrains.kotlin.plugin.compose") version "2.2.21" apply false
-    id("org.jetbrains.kotlin.plugin.serialization") version "2.2.21" apply false
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+    alias(libs.plugins.kotlin.serialization) apply false
 }

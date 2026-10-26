@@ -1026,7 +1026,7 @@ class OverlayService : Service() {
         createExpandedPanel()
     }
 
-    /** XR path: launch the transparent Activity that hosts SpatialPanels. */
+    /** XR path: launch the transparent Activity that floats as a Home Space panel (plain Compose). */
     private fun launchXrOverlayActivity() {
         Log.d(TAG, "launchXrOverlayActivity — about to startActivity")
         val intent = android.content.Intent(this, XrOverlayActivity::class.java).apply {

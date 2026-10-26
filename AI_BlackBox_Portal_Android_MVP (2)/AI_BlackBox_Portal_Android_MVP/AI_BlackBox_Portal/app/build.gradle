@@ -1,31 +1,34 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+// Versions: gradle/libs.versions.toml. Kotlin is compiled by AGP 9's built-in Kotlin support,
+// so no org.jetbrains.kotlin.android plugin is applied (audit X02-deps-android-web-04).
 plugins {
-    id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
-    id 'org.jetbrains.kotlin.plugin.compose'
-    id 'org.jetbrains.kotlin.plugin.serialization'
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
-    namespace 'com.aiblackbox.portal'
-    compileSdk 36
+    namespace = 'com.aiblackbox.portal'
+    compileSdk = 36
 
     defaultConfig {
-        applicationId "com.aiblackbox.portal"
-        minSdk 26
-        targetSdk 36
+        applicationId = "com.aiblackbox.portal"
+        minSdk = 26
+        targetSdk = 36
         // Phase 4 + Phase 5 CLI Agent zellij rewrite + master-token model.
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode 37
+        versionCode = 37
         // W10 mic A/B: `-PforceMicSource=VOICE_COMMUNICATION` builds a debug APK whose composer
         // mic is pinned to that source (MicSourcePolicy.simplexChain), named so it cannot be
         // mistaken for the shipping build. Empty, and pinned by MicSourcePolicyTest, otherwise.
         def forceMicSource = (project.findProperty('forceMicSource') ?: '').toString().trim()
-        versionName "1.13.1-m1-hardening" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "")
+        versionName = "1.13.1-m1-hardening" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "")
         buildConfigField "String", "FORCE_MIC_SOURCE", "\"${forceMicSource}\""
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        manifestPlaceholders.cleartext="true"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["cleartext"] = "true"
     }
 
     // (M8.5) Enterprise/sideload signing. The keystore is sourced from Gradle properties OR
@@ -38,18 +41,18 @@ android {
         release {
             def ksPath = project.findProperty('BLACKBOX_KEYSTORE_FILE') ?: System.getenv('BLACKBOX_KEYSTORE_FILE')
             if (ksPath) {
-                storeFile file(ksPath)
-                storePassword project.findProperty('BLACKBOX_KEYSTORE_PASSWORD') ?: System.getenv('BLACKBOX_KEYSTORE_PASSWORD')
-                keyAlias project.findProperty('BLACKBOX_KEY_ALIAS') ?: System.getenv('BLACKBOX_KEY_ALIAS')
-                keyPassword project.findProperty('BLACKBOX_KEY_PASSWORD') ?: System.getenv('BLACKBOX_KEY_PASSWORD')
+                storeFile = file(ksPath)
+                storePassword = project.findProperty('BLACKBOX_KEYSTORE_PASSWORD') ?: System.getenv('BLACKBOX_KEYSTORE_PASSWORD')
+                keyAlias = project.findProperty('BLACKBOX_KEY_ALIAS') ?: System.getenv('BLACKBOX_KEY_ALIAS')
+                keyPassword = project.findProperty('BLACKBOX_KEY_PASSWORD') ?: System.getenv('BLACKBOX_KEY_PASSWORD')
             }
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
+            minifyEnabled = true
+            shrinkResources = true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             // Use the enterprise keystore when configured; otherwise fall back to DEBUG signing so
             // the release build is still buildable/testable on a fresh box.
@@ -64,25 +67,22 @@ android {
             // the property to an EMPTY string, which Groovy's `?:` treats as falsy and would drop.
             def requireReleaseSigning = project.hasProperty('requireReleaseSigning') || System.getenv('BLACKBOX_REQUIRE_RELEASE_SIGNING') != null
             if (hasReleaseKeystore) {
-                signingConfig signingConfigs.release
+                signingConfig = signingConfigs.release
             } else if (requireReleaseSigning) {
                 throw new GradleException('[BlackBox] assembleRelease requires enterprise signing: set BLACKBOX_KEYSTORE_FILE / BLACKBOX_KEYSTORE_PASSWORD / BLACKBOX_KEY_ALIAS / BLACKBOX_KEY_PASSWORD (a debug-signed APK must NEVER be distributed). See docs/DEVICE_CONTROL_DEPLOYMENT.md.')
             } else {
                 // TODO(release): supply the enterprise keystore via BLACKBOX_KEYSTORE_* (env or
                 // gradle props) before distributing. This DEBUG-signed fallback keeps the release
                 // build green for CI/local; a debug-signed APK MUST NOT be shipped to customers.
-                signingConfig signingConfigs.debug
+                signingConfig = signingConfigs.debug
                 logger.warn('[BlackBox] RELEASE APK is DEBUG-SIGNED (no BLACKBOX_KEYSTORE_FILE set). Do not distribute; pass -PrequireReleaseSigning in the release pipeline to make this a hard failure. See docs/DEVICE_CONTROL_DEPLOYMENT.md')
             }
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = '17'
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures {
         compose = true
@@ -110,80 +110,83 @@ android {
     }
 }
 
+// kotlinOptions {} is gone with the kotlin-android plugin. Built-in Kotlin would default the
+// JVM target to compileOptions.targetCompatibility; it is pinned here so the two cannot drift.
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_17
+    }
+}
+
 dependencies {
-    implementation "androidx.core:core-ktx:1.17.0"
-    implementation "androidx.appcompat:appcompat:1.7.1"
-    implementation "com.google.android.material:material:1.13.0"
-    implementation "androidx.activity:activity-ktx:1.11.0"
-    implementation "androidx.webkit:webkit:1.14.0"
-    implementation "com.journeyapps:zxing-android-embedded:4.3.0"
-    implementation "com.google.zxing:core:3.5.4"
-    implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation libs.androidx.core.ktx
+    implementation libs.androidx.appcompat
+    implementation libs.google.material
+    implementation libs.androidx.activity.ktx
+    implementation libs.androidx.webkit
+    implementation libs.zxing.android.embedded
+    implementation libs.zxing.core
+    implementation platform(libs.okhttp.bom)
+    implementation libs.okhttp
 
     // Embedded HTTP listener for inbound remote control (control_phone, Task 5).
-    implementation "org.nanohttpd:nanohttpd:2.3.1"
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation libs.nanohttpd
+    implementation platform(libs.coroutines.bom)
+    implementation libs.coroutines.android
 
     // On-device Gemma engine (Task 2.6) — LiteRT-LM Kotlin runtime; function
     // calling is included in this artifact (no separate FC SDK). Drives the
     // concrete LiteRtEngine : LocalLlm, ToolCallingLlm.
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
+    implementation libs.litertlm.android
 
     // Jetpack Compose
-    def composeBom = platform("androidx.compose:compose-bom:2025.05.01")
+    def composeBom = platform(libs.compose.bom)
     implementation composeBom
-    implementation "androidx.compose.ui:ui"
-    implementation "androidx.compose.material3:material3"
-    implementation "androidx.compose.foundation:foundation"
-    implementation "androidx.compose.ui:ui-tooling-preview"
-    implementation "androidx.activity:activity-compose:1.11.0"
-    implementation "androidx.lifecycle:lifecycle-runtime-compose:2.9.0"
-    implementation "androidx.lifecycle:lifecycle-process:2.9.0"
-    debugImplementation "androidx.compose.ui:ui-tooling"
-
-    // Android XR
-    implementation "androidx.xr.compose:compose:1.0.0-alpha10"
-    implementation "androidx.xr.scenecore:scenecore:1.0.0-alpha10"
-    implementation "androidx.xr.runtime:runtime:1.0.0-alpha10"
+    implementation libs.compose.ui
+    implementation libs.compose.material3
+    implementation libs.compose.foundation
+    implementation libs.compose.ui.tooling.preview
+    implementation libs.androidx.activity.compose
+    implementation libs.androidx.lifecycle.runtime.compose
+    implementation libs.androidx.lifecycle.process
+    debugImplementation libs.compose.ui.tooling
 
     // Jetpack WindowManager (M5) — WindowInfoTracker / FoldingFeature posture for the
     // foldable / large-screen device-control path (FoldingFeatureMonitor).
-    implementation "androidx.window:window:1.3.0"
+    implementation libs.androidx.window
 
     // Serialization
-    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1"
+    implementation libs.serialization.json
 
     // Navigation
-    implementation "androidx.navigation:navigation-compose:2.9.0"
+    implementation libs.androidx.navigation.compose
 
     // DataStore
-    implementation "androidx.datastore:datastore-preferences:1.1.7"
+    implementation libs.androidx.datastore.preferences
 
     // Image loading
-    implementation "io.coil-kt:coil-compose:2.7.0"
+    implementation libs.coil.compose
 
     // Lifecycle ViewModel Compose
-    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0"
+    implementation libs.androidx.lifecycle.viewmodel.compose
 
     // Markdown rendering
-    implementation "com.mikepenz:multiplatform-markdown-renderer-m3:0.28.0"
-    implementation "com.mikepenz:multiplatform-markdown-renderer-code:0.28.0"
+    implementation libs.markdown.renderer.m3
+    implementation libs.markdown.renderer.code
 
     // CLI Agent — Termux terminal emulator + view (resolved via JitPack).
-    implementation "com.github.termux.termux-app:terminal-emulator:v0.118.0"
-    implementation "com.github.termux.termux-app:terminal-view:v0.118.0"
+    implementation libs.termux.terminal.emulator
+    implementation libs.termux.terminal.view
 
     // Unit testing
-    testImplementation "junit:junit:4.13.2"
-    testImplementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1"
-    testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2"
-    testImplementation "com.squareup.okhttp3:mockwebserver3-junit4:5.3.2"
+    testImplementation libs.junit
+    testImplementation libs.coroutines.test
+    testImplementation libs.okhttp.mockwebserver3.junit4
 
     // Instrumented Compose UI testing
     androidTestImplementation composeBom
-    androidTestImplementation "androidx.compose.ui:ui-test-junit4"
-    androidTestImplementation "androidx.test.ext:junit:1.2.1"
-    androidTestImplementation "androidx.test:runner:1.6.2"
-    debugImplementation "androidx.compose.ui:ui-test-manifest"
+    androidTestImplementation libs.compose.ui.test.junit4
+    androidTestImplementation libs.androidx.test.ext.junit
+    androidTestImplementation libs.androidx.test.runner
+    debugImplementation libs.compose.ui.test.manifest
 }

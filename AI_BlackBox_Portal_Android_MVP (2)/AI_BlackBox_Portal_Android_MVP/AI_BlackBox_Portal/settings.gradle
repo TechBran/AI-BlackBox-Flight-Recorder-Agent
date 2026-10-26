@@ -6,13 +6,23 @@ pluginManagement {
     }
 }
 dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositoriesMode = RepositoriesMode.PREFER_SETTINGS
     repositories {
         google()
         mavenCentral()
         // CLI Agent — Termux terminal-emulator/terminal-view artifacts are
-        // published on JitPack, not Maven Central.
-        maven { url 'https://jitpack.io' }
+        // published on JitPack, not Maven Central. JitPack builds on demand from
+        // GitHub and signs nothing, so it may serve ONLY the termux group, and
+        // the termux group may come ONLY from it: no other coordinate can be
+        // resolved (or confused) through JitPack (audit X02-deps-android-web-07).
+        exclusiveContent {
+            forRepository {
+                maven { url = 'https://jitpack.io' }
+            }
+            filter {
+                includeGroup 'com.github.termux.termux-app'
+            }
+        }
     }
 }
 rootProject.name = "AI BlackBox Portal"
