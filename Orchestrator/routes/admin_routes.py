@@ -709,21 +709,28 @@ def _default_model_id(provider: str) -> str:
 
 
 def _fetch_google_models() -> dict | None:
-    """Live-fetch chat-capable Gemini models via the google-generativeai SDK."""
-    import google.generativeai as genai
-    genai.configure(api_key=GOOGLE_API_KEY)
+    """Live-fetch chat-capable Gemini models via the google-genai SDK."""
+    from google import genai
+    from google.genai.types import HttpOptions
     models = []
     skip_keywords = ("embedding", "aqa", "bisheng", "learnlm")
-    for m in genai.list_models():
-        model_id = m.name.replace("models/", "")
-        if "generateContent" not in m.supported_generation_methods:
-            continue
-        if not model_id.startswith("gemini"):
-            continue
-        if any(kw in model_id.lower() for kw in skip_keywords):
-            continue
-        display_name = model_id.replace("gemini-", "Gemini ").replace("-", " ").title()
-        models.append({"id": model_id, "name": display_name})
+    # An unset key leaves the SDK its own GOOGLE_API_KEY/GEMINI_API_KEY lookup;
+    # no key at all raises, and the caller serves the fallback list.
+    with genai.Client(
+        api_key=GOOGLE_API_KEY or None,
+        http_options=HttpOptions(timeout=5000),  # ms, per catalog page
+    ) as client:
+        for m in client.models.list():  # the pager walks every page
+            model_id = m.name.replace("models/", "")
+            # supported_actions is the API's supportedGenerationMethods
+            if "generateContent" not in (m.supported_actions or []):
+                continue
+            if not model_id.startswith("gemini"):
+                continue
+            if any(kw in model_id.lower() for kw in skip_keywords):
+                continue
+            display_name = model_id.replace("gemini-", "Gemini ").replace("-", " ").title()
+            models.append({"id": model_id, "name": display_name})
     return _wrap("google", models, "live") if models else None
 
 

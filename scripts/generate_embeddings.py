@@ -5,7 +5,7 @@ Generate Embeddings & Dependencies for Code Manifest
 This script:
 1. Loads code_manifest.json
 2. Extracts each section using byte offsets
-3. Generates semantic embeddings (Gemini text-embedding-004)
+3. Generates semantic embeddings (the active embedding model)
 4. Analyzes dependencies (imports, function calls, globals)
 5. Outputs code_embeddings.json for semantic search
 
@@ -26,11 +26,10 @@ from typing import Dict, List, Set
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Import from Orchestrator (reuse existing embedding function)
+# Import from Orchestrator (reuse existing embedding function: the active
+# embedding provider, which carries its own key)
 try:
-    import google.generativeai as genai
-    from Orchestrator.app import generate_embedding, GOOGLE_API_KEY
-    genai.configure(api_key=GOOGLE_API_KEY)
+    from Orchestrator.app import generate_embedding
     EMBEDDINGS_AVAILABLE = True
 except Exception as e:
     print(f"⚠️  Warning: Could not import embedding function: {e}")

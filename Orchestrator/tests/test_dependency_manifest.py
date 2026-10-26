@@ -249,7 +249,10 @@ def test_requirements_in_declares_directly_imported_packages(dist):
     assert dist in _manifest(), f"{dist} is imported directly but not declared"
 
 
-@pytest.mark.parametrize("dist", ["mss", "miniaudio", "html2text", "pytz"])
+@pytest.mark.parametrize("dist", ["mss", "miniaudio", "html2text", "pytz",
+                                  # end-of-life Gemini SDK, replaced by google-genai
+                                  # (audit rank 71); its generativelanguage client
+                                  "google-generativeai", "google-ai-generativelanguage"])
 def test_requirements_in_drops_packages_nothing_imports(dist):
     assert dist not in _manifest()
 

@@ -36,7 +36,6 @@ import dotenv
 import enum
 import fastapi
 import fcntl
-import google
 import httpx
 import platform
 import psutil
@@ -99,7 +98,6 @@ from fastapi.middleware.cors import CORSMiddleware # IMPORTED FOR ANDROID/TAILSC
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import requests
-import google.generativeai as genai
 import httpx  # For async HTTP proxy
 import psutil  # For system monitoring metrics
 import platform
@@ -635,10 +633,6 @@ SECURITY_EXTRA_ALLOWED_HOSTS = [
 SECURITY_EXTRA_ALLOWED_ORIGINS = [
     o.strip() for o in CFG.get("security", "extra_allowed_origins", fallback="").split(",") if o.strip()
 ]
-
-# Configure Gemini for embeddings
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
 
 # API URLs
 OPENAI_URL     = "https://api.openai.com/v1/chat/completions"

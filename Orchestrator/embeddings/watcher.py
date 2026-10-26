@@ -71,9 +71,10 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-import google.generativeai as genai
 import httpx
 import openai
+from google import genai
+from google.genai import types as genai_types
 
 from Orchestrator import config
 from Orchestrator.embeddings.migrate import (
@@ -96,7 +97,7 @@ from Orchestrator.volume import read_volume_bytes
 HEALTH_FILE = "health.json"        # same name embeddings_routes reads
 PROBE_TIMEOUT_S = 30.0             # 1-string probe cap (provider retries inside)
 RETRY_PROBE_DELAY_S = 60.0         # in-run re-probe gap; outlives a 429 burst
-CATALOG_TIMEOUT_S = 20.0           # ollama /api/tags fetch
+CATALOG_TIMEOUT_S = 20.0           # ollama /api/tags fetch, each Gemini catalog page
 HEAL_CAP = 50                      # max gap-heal embeds per run
 WATCHER_FIRST_DELAY_S = 5 * 60     # don't pile onto startup
 WATCH_INTERVAL_OK_S = 24 * 3600    # daily while ok/superseded
@@ -118,13 +119,22 @@ _CLOUD_KEY_ATTRS = {"gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY"}
 
 # ── vendor catalog seams (each one mockable in tests — NO network there) ─────
 
+def _list_gemini_models() -> list:
+    """Every model of the live Gemini catalog (the sync pager walks all pages).
+    An unset key leaves the SDK its own GOOGLE_API_KEY/GEMINI_API_KEY lookup."""
+    with genai.Client(
+        api_key=config.GOOGLE_API_KEY or None,
+        http_options=genai_types.HttpOptions(timeout=int(CATALOG_TIMEOUT_S * 1000)),  # ms
+    ) as client:
+        return list(client.models.list())
+
+
 async def _gemini_catalog() -> list[str]:
-    """Embed-capable model names from the live Gemini catalog (sync SDK)."""
-    models = await asyncio.to_thread(lambda: list(genai.list_models()))
-    return [
-        m.name for m in models
-        if "embedContent" in (getattr(m, "supported_generation_methods", None) or [])
-    ]
+    """Embed-capable model names from the live Gemini catalog, as
+    "models/<id>" (the registry's model_id format). supported_actions is the
+    API's supportedGenerationMethods."""
+    models = await asyncio.to_thread(_list_gemini_models)  # sync SDK, off the loop
+    return [m.name for m in models if "embedContent" in (m.supported_actions or [])]
 
 
 async def _openai_catalog() -> list[str]:
