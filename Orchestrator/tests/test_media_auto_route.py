@@ -187,6 +187,6 @@ def test_both_paths_use_the_one_helper():
     import Orchestrator.tasks as tasks
     from Orchestrator.routes import chat_routes as cr
     worker = inspect.getsource(tasks.process_chat_task)
-    stream = inspect.getsource(cr.chat_stream_post)
+    stream = inspect.getsource(cr._resolve_stream_request)
     assert "media_auto_route(" in worker and "media_auto_route(" in stream
     assert '== "audio_url"' not in worker and "has_audio" not in worker

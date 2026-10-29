@@ -12,6 +12,7 @@ import contextvars
 import json
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -56,6 +57,7 @@ from Orchestrator.secret_redaction import redact
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
 from Orchestrator.browser.dispatch import resolve_backend
 from Orchestrator.onboarding import custom_servers
+from Orchestrator.turn_persistence import MintGate, persist_turn_and_maybe_mint
 # One tool-execution path for every provider loop (audit rank 74); the media /
 # browser / CLI event helpers are re-exported for chat_routes' importers.
 from Orchestrator.providers.tool_dispatch import (
@@ -286,6 +288,18 @@ def _provider_env(api_key: str, url: str, inline_max_bytes: Optional[int] = None
                        load_attachment=_load_attachment,
                        unreadable_parts=_unreadable_attachment_parts,
                        tool_context=_tool_context, inline_max_bytes=inline_max_bytes)
+
+
+def _mint_gate() -> MintGate:
+    """This module's auto-mint knobs and hooks, read per call: a stub on
+    chat_routes.perform_mint / AUTO_ENABLE / ... reaches the shared tail."""
+    return MintGate(
+        auto_enable=AUTO_ENABLE, on_red=ON_RED, on_yellow=ON_YELLOW,
+        tokens_threshold=TOKENS_THRESHOLD, turns_threshold=TURNS_THRESHOLD,
+        debounce_ms=DEBOUNCE_MS, perform_mint=perform_mint,
+        should_create_checkpoint=should_create_checkpoint, create_task=create_task,
+        save_operator_state=save_operator_state, drift_state_for=drift_state_for,
+    )
 
 
 # Cache the last injection result so _get_tools can reuse a single search
@@ -897,70 +911,16 @@ async def _cu_save_to_blackbox(operator: str, user_text: str, result_text: str, 
         print(f"[CU-SAVE] Not saving: {e}")
         return
     try:
-        s = get_state(operator)
-        utc_now = now_utc_iso()
-
-        # Add conversation turns
-        if user_text:
-            s.add_conversation_turn({"role": "user", "utc": utc_now, "text": user_text})
-        s.add_conversation_turn({
-            "role": "assistant", "utc": utc_now,
-            "text": result_text, "snap_text": result_text
-        })
-
-        # Update counters
-        total_tokens = session.usage.get("prompt_tokens", 0) + session.usage.get("completion_tokens", 0)
-        s.conv_turns_since += 1
-        s.conv_tokens_since += total_tokens
-        s.total_turns += 1
-        s.total_tokens += total_tokens
-
-        # Context metadata
-        s.last_context_meta["model"] = "computer-use"
-        s.last_context_meta["usage_last"] = {
-            "prompt_tokens": session.usage.get("prompt_tokens", 0),
-            "completion_tokens": session.usage.get("completion_tokens", 0),
-            "total_tokens": total_tokens
-        }
-
-        # Provenance — trace which fossils informed this CU session
-        provenance = getattr(session, "provenance", {})
-        if provenance:
-            s.last_context_meta["gm_excerpt"] = True
-            s.last_context_meta["recent_ids"] = provenance.get("recent", [])
-            relevant = provenance.get("keyword", []) + provenance.get("checkpoint", [])
-            s.last_context_meta["relevant_ids"] = relevant
-            print(f"[CU-SAVE] Provenance - Recent: {provenance.get('recent', [])}, Relevant: {relevant}")
-
-        # Check and trigger auto-mint
-        minted = False
-        if AUTO_ENABLE:
-            now_ms = int(time.time() * 1000)
-            should_mint, reason = False, None
-            d = drift_state_for(s)
-            if d == "red" and ON_RED == "auto":
-                should_mint, reason = True, "DRIFT_RED"
-            elif d == "yellow" and ON_YELLOW == "auto":
-                should_mint, reason = True, "DRIFT_YELLOW"
-            elif s.conv_tokens_since >= TOKENS_THRESHOLD:
-                should_mint, reason = True, "TOKENS"
-            elif s.conv_turns_since >= TURNS_THRESHOLD:
-                should_mint, reason = True, "TURNS"
-
-            if should_mint and (now_ms - s.last_mint_ms >= DEBOUNCE_MS):
-                result = await run_blocking(perform_mint, operator, reason or "AUTO")
-                s.last_mint_ms = int(time.time() * 1000)
-                minted = True
-                snap_id = result.get("snap_id")
-                print(f"[CU-SAVE] Auto-mint triggered for {operator}: {reason} -> {snap_id}")
-
-        # Checkpoint check
-        if should_create_checkpoint(operator):
-            print(f"[CU-SAVE] Creating checkpoint task for {operator}")
-            create_task(TaskType.CHECKPOINT, operator=operator, result_data={"manual": False})
-
-        save_operator_state()
-        print(f"[CU-SAVE] Saved conversation for {operator} (minted={minted})")
+        turn = await persist_turn_and_maybe_mint(
+            get_state(operator), operator, user_text, result_text, gate=_mint_gate(),
+            prompt_tokens=session.usage.get("prompt_tokens", 0),
+            completion_tokens=session.usage.get("completion_tokens", 0),
+            model="computer-use",
+            # Provenance — trace which fossils informed this CU session
+            provenance=getattr(session, "provenance", {}),
+            tag="[CU-SAVE]",
+        )
+        print(f"[CU-SAVE] Saved conversation for {operator} (minted={turn.minted})")
     except Exception as e:
         import traceback
         print(f"[CU-SAVE] Error saving: {e}\n{traceback.format_exc()}")
@@ -972,10 +932,10 @@ async def persist_local_turn_and_mint(
 ) -> dict:
     """Persist a completed on-device (local provider) turn and auto-mint it.
 
-    Mirrors _cu_save_to_blackbox / chat_save's persist+mint sequence but composes
-    the snapshot body SERVER-SIDE from the phone-supplied turn (the on-device 4B
-    never authors snapshot content). Reuses perform_mint for the actual mint.
-    Returns {"snap_id": str|None, "minted": bool, "checkpoint_triggered": bool}.
+    Composes the snapshot body SERVER-SIDE from the phone-supplied turn (the
+    on-device 4B never authors snapshot content), then records it through the
+    persist + mint tail every chat path shares. Returns {"snap_id": str|None,
+    "minted": bool, "checkpoint_triggered": bool}.
     """
     try:
         # --- Compose the assistant response SERVER-SIDE -------------------
@@ -1002,64 +962,15 @@ async def persist_local_turn_and_mint(
                 lines.append(f"- {name}({args_str}) -> {result_str}")
             assistant_response = final_response + "\n" + "\n".join(lines)
 
-        # --- Persist the turn (mirror _cu_save_to_blackbox / chat_save) ---
-        s = get_state(operator)
-        utc_now = now_utc_iso()
-        if prompt:
-            s.add_conversation_turn({"role": "user", "utc": utc_now, "text": prompt})
-        s.add_conversation_turn({
-            "role": "assistant", "utc": utc_now,
-            "text": assistant_response, "snap_text": assistant_response,
-        })
-
-        # Counters (token counts are 0 for an on-device turn).
-        s.conv_turns_since += 1
-        s.total_turns += 1
-
-        # Context metadata - model is the on-device provider.
-        s.last_context_meta["model"] = "local"
-
-        # Provenance - map the same way chat_save does (recent / relevant).
-        if provenance:
-            s.last_context_meta["gm_excerpt"] = True
-            s.last_context_meta["recent_ids"] = provenance.get("recent", [])
-            relevant = (
-                provenance.get("keyword", [])
-                + provenance.get("checkpoint", [])
-                + provenance.get("semantic", [])
-            )
-            s.last_context_meta["relevant_ids"] = relevant
-            print(f"[LOCAL-SAVE] Provenance - Recent: {provenance.get('recent', [])}, Relevant: {relevant}")
-
-        # --- Auto-mint (same gate as chat_save / _cu_save) ---------------
-        minted = False
-        snap_id = None
-        if AUTO_ENABLE:
-            now_ms = int(time.time() * 1000)
-            should_mint, reason = False, None
-            d = drift_state_for(s)
-            if d == "red" and ON_RED == "auto": should_mint, reason = True, "DRIFT_RED"
-            elif d == "yellow" and ON_YELLOW == "auto": should_mint, reason = True, "DRIFT_YELLOW"
-            elif s.conv_tokens_since >= TOKENS_THRESHOLD: should_mint, reason = True, "TOKENS"
-            elif s.conv_turns_since >= TURNS_THRESHOLD: should_mint, reason = True, "TURNS"
-
-            if should_mint and (now_ms - s.last_mint_ms >= DEBOUNCE_MS):
-                result = await run_blocking(perform_mint, operator, reason or "LOCAL_TURN")
-                s.last_mint_ms = int(time.time() * 1000)
-                minted = True
-                snap_id = result.get("snap_id")
-                print(f"[LOCAL-SAVE] Auto-mint triggered for {operator}: {reason} -> {snap_id}")
-
-        # --- Checkpoint cadence (same as chat_save) ----------------------
-        checkpoint_triggered = False
-        if should_create_checkpoint(operator):
-            print(f"[LOCAL-SAVE] Creating checkpoint task for {operator} at turn {s.total_turns}")
-            create_task(TaskType.CHECKPOINT, operator=operator, result_data={"manual": False})
-            checkpoint_triggered = True
-
-        save_operator_state()
-        print(f"[LOCAL-SAVE] Saved on-device turn for {operator} (minted={minted})")
-        return {"snap_id": snap_id, "minted": minted, "checkpoint_triggered": checkpoint_triggered}
+        # Token counts are 0 for an on-device turn; the model is the on-device provider.
+        turn = await persist_turn_and_maybe_mint(
+            get_state(operator), operator, prompt, assistant_response, gate=_mint_gate(),
+            model="local", record_usage=False, provenance=provenance,
+            relevant_keys=("keyword", "checkpoint", "semantic"), tag="[LOCAL-SAVE]",
+        )
+        print(f"[LOCAL-SAVE] Saved on-device turn for {operator} (minted={turn.minted})")
+        return {"snap_id": turn.snap_id, "minted": turn.minted,
+                "checkpoint_triggered": turn.checkpoint_triggered}
     except Exception as e:
         import traceback
         print(f"[LOCAL-SAVE] Error saving: {e}\n{traceback.format_exc()}")
@@ -2630,6 +2541,131 @@ def _error_detail_frame(event: dict) -> str:
 # Every client (Portal, Android, cron) POSTs.
 
 
+@dataclass
+class StreamRequest:
+    """A POST /chat/stream body resolved into what the turn runs with."""
+    messages: list
+    provider: str
+    model: str
+    operator: str
+    guard: Optional[int]          # window-guard tokens (custom servers); None = provider table
+    cu_session_id: Optional[str]  # CU session ID for reconnection/queuing
+    cu_device_id: str             # CU target device on the Tailscale mesh
+    location: Optional[dict]      # M1 per-turn location ride-along
+
+
+def _resolve_stream_request(body: dict):
+    """The StreamRequest for a POST /chat/stream body, or the 400 JSONResponse.
+
+    Stamps the request-scoped origin device (M3) and the turn's carried
+    location (M1) as it goes, in the order the route always did."""
+    messages = body.get("messages", [])
+    provider = body.get("provider") or _config.DEFAULT_PROVIDER
+    model = body.get("model")
+    try:
+        operator = _checked_operator(body.get("operator"))
+    except InvalidOperatorName as e:
+        return JSONResponse(status_code=400, content={"error": f"Invalid operator: {e}"})
+    cu_session_id = body.get("session_id")  # CU session ID for reconnection/queuing
+    cu_device_id = body.get("device_id", "blackbox")  # CU target device on Tailscale mesh
+    # M3: originating device (Android app self-reports its tailnet IPv4). Absent for
+    # Portal/MCP → None → operator's primary-device fallback. Request-scoped so it
+    # threads into every tool executor built during this turn.
+    _set_origin_device_id(body.get("origin_device_id"))
+    # M1: optional per-turn location object {lat, lon, city, state} sent by
+    # the Android app alongside the prompt. Absent (Portal/MCP/cron) -> None
+    # -> perfect no-op. Untrusted input: normalize() rejects anything junk.
+    turn_location = None
+    try:
+        turn_location = user_location.normalize(body.get("location"))
+    except Exception:
+        turn_location = None
+    _stash_turn_location(operator, turn_location)
+
+    if not messages:
+        return JSONResponse(status_code=400, content={"error": "messages required"})
+
+    # The media auto-route every chat path shares (media_auto_route): an
+    # audio/video turn moves to Google BEFORE the context build, so the
+    # window guard and the default model follow the provider that runs. A
+    # computer-use turn drives a desktop session and is never re-routed.
+    if provider != "computer-use":
+        provider, media_switched = media_auto_route(messages, provider)
+        if media_switched:
+            model = None  # the requested id belongs to the original provider
+
+    # Default models with thinking support
+    guard = None  # non-custom providers use context_builder's provider window table
+    if provider == "custom":
+        # Resolve the server BEFORE build_streaming_context (order matters:
+        # its context window sizes the window guard). Empty/Auto model ->
+        # the server's first discovered model, alias-qualified; unresolved
+        # server / no discovered models stay as-is — stream_custom_with_reasoning
+        # emits the clean error event. The guard budgets from the FINAL
+        # dispatched bare model (per-model model_context override on
+        # multi-model llama-swap hosts), falling back to context_tokens.
+        _srv, _bare = custom_servers.resolve_model(model or "")
+        if _srv is not None and (not model or _bare.strip().lower() == "auto"):
+            _discovered = _srv.get("last_models") or []
+            if _discovered:
+                _bare = _discovered[0]
+                model = custom_servers.qualify(_srv.get("alias", ""), _bare)
+        guard = custom_servers.window_guard_tokens(_srv, _bare)
+    else:
+        # Empty/"Auto" -> the provider's configured *_MODEL_DEFAULT (the same
+        # resolver /chat, cron and SMS use); a retired Claude id -> its
+        # successor. An unknown provider falls through to Gemini below.
+        model = _config.resolve_default_model(provider, model)
+    return StreamRequest(messages=messages, provider=provider, model=model, operator=operator,
+                         guard=guard, cu_session_id=cu_session_id, cu_device_id=cu_device_id,
+                         location=turn_location)
+
+
+def _open_provider_stream(req: StreamRequest, context_messages: list):
+    """The provider event stream for one /chat/stream turn."""
+    provider, model, operator = req.provider, req.model, req.operator
+    if provider == "openai":
+        return stream_openai_with_reasoning(context_messages, model, operator=operator)
+    if provider == "anthropic":
+        return stream_anthropic_with_thinking(context_messages, model, operator=operator)
+    if provider == "xai":
+        return stream_xai_with_reasoning(context_messages, model, operator=operator)
+    if provider == "custom":
+        return stream_custom_with_reasoning(context_messages, model, operator=operator)
+    if provider == "computer-use":
+        backend = resolve_backend(model)
+        if backend == "google":
+            return stream_gemini_computer_use(context_messages, model, operator=operator,
+                                              session_id=req.cu_session_id, device_id=req.cu_device_id)
+        if backend == "openai":
+            return stream_openai_computer_use(context_messages, model, operator=operator,
+                                              session_id=req.cu_session_id, device_id=req.cu_device_id)
+        return stream_computer_use(context_messages, model, operator=operator,
+                                   session_id=req.cu_session_id, device_id=req.cu_device_id)
+    return stream_gemini_with_thinking(context_messages, model, operator=operator)
+
+
+def _sse_frames(event: dict) -> List[str]:
+    """The SSE frames for one provider event, as the client receives them.
+
+    Every provider's error text funnels here: secrets are masked (exception
+    text can embed a request URL) before the client, and a classified failure
+    (W09: credits_exhausted) gets its structured error_detail frame right
+    before the error frame."""
+    event_type = event.get("type", "unknown")
+    event_data = event.get("data", "")
+    frames = []
+    if event_type == "error":
+        event_data = redact(event_data)
+        detail_frame = _error_detail_frame(event)
+        if detail_frame:
+            frames.append(detail_frame)
+    if event_type == "image_task":
+        print(f"[SSE] Converting image_task event to SSE format: {event_data}")
+    frames.append(f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n")
+    return frames
+
+
 @app.post("/chat/stream")
 async def chat_stream_post(request: Request):
     """POST version of streaming chat for larger payloads.
@@ -2637,70 +2673,16 @@ async def chat_stream_post(request: Request):
     """
     try:
         body = await request.json()
-        messages = body.get("messages", [])
-        provider = body.get("provider") or _config.DEFAULT_PROVIDER
-        model = body.get("model")
-        try:
-            operator = _checked_operator(body.get("operator"))
-        except InvalidOperatorName as e:
-            return JSONResponse(status_code=400, content={"error": f"Invalid operator: {e}"})
-        cu_session_id = body.get("session_id")  # CU session ID for reconnection/queuing
-        cu_device_id = body.get("device_id", "blackbox")  # CU target device on Tailscale mesh
-        # M3: originating device (Android app self-reports its tailnet IPv4). Absent for
-        # Portal/MCP → None → operator's primary-device fallback. Request-scoped so it
-        # threads into every tool executor built during this turn.
-        _set_origin_device_id(body.get("origin_device_id"))
-        # M1: optional per-turn location object {lat, lon, city, state} sent by
-        # the Android app alongside the prompt. Absent (Portal/MCP/cron) -> None
-        # -> perfect no-op. Untrusted input: normalize() rejects anything junk.
-        turn_location = None
-        try:
-            turn_location = user_location.normalize(body.get("location"))
-        except Exception:
-            turn_location = None
-        _stash_turn_location(operator, turn_location)
-
-        if not messages:
-            return JSONResponse(status_code=400, content={"error": "messages required"})
-
-        # The media auto-route every chat path shares (media_auto_route): an
-        # audio/video turn moves to Google BEFORE the context build, so the
-        # window guard and the default model follow the provider that runs. A
-        # computer-use turn drives a desktop session and is never re-routed.
-        if provider != "computer-use":
-            provider, media_switched = media_auto_route(messages, provider)
-            if media_switched:
-                model = None  # the requested id belongs to the original provider
-
-        # Default models with thinking support
-        guard = None  # non-custom providers use context_builder's provider window table
-        if provider == "custom":
-            # Resolve the server BEFORE build_streaming_context (order matters:
-            # its context window sizes the window guard). Empty/Auto model ->
-            # the server's first discovered model, alias-qualified; unresolved
-            # server / no discovered models stay as-is — stream_custom_with_reasoning
-            # emits the clean error event. The guard budgets from the FINAL
-            # dispatched bare model (per-model model_context override on
-            # multi-model llama-swap hosts), falling back to context_tokens.
-            _srv, _bare = custom_servers.resolve_model(model or "")
-            if _srv is not None and (not model or _bare.strip().lower() == "auto"):
-                _discovered = _srv.get("last_models") or []
-                if _discovered:
-                    _bare = _discovered[0]
-                    model = custom_servers.qualify(_srv.get("alias", ""), _bare)
-            guard = custom_servers.window_guard_tokens(_srv, _bare)
-        else:
-            # Empty/"Auto" -> the provider's configured *_MODEL_DEFAULT (the same
-            # resolver /chat, cron and SMS use); a retired Claude id -> its
-            # successor. An unknown provider falls through to Gemini below.
-            model = _config.resolve_default_model(provider, model)
+        req = _resolve_stream_request(body)
+        if isinstance(req, JSONResponse):
+            return req
 
         async def generate_sse():
             # Context build off the event loop with keepalives (rank 45; see
             # _streaming_context_off_loop).
             ctx = None
             try:
-                async for item in _streaming_context_off_loop(messages, operator, provider, guard):
+                async for item in _streaming_context_off_loop(req.messages, req.operator, req.provider, req.guard):
                     if item is None:
                         yield SSE_KEEPALIVE_FRAME
                         continue
@@ -2710,73 +2692,31 @@ async def chat_stream_post(request: Request):
                     yield frame
                 return
             context_messages, provenance, telemetry = ctx
-            telemetry["model"] = model
+            telemetry["model"] = req.model
 
             # M1: location rides along inside the user prompt block. Applied
             # after context building so retrieval/tool-injection queries stay
             # byte-identical; only what the model reads changes.
-            context_messages = user_location.apply_location_to_messages(context_messages, turn_location)
+            context_messages = user_location.apply_location_to_messages(context_messages, req.location)
 
-            yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
+            yield f"event: stream_start\ndata: {json.dumps({'provider': req.provider, 'model': req.model, 'provenance': provenance})}\n\n"
 
             # The Signal (Task 1.3): burst the honest retrieval telemetry as
             # UI-only `system_activity` SSE frames, immediately after stream_start
-            # and before the provider's first token. `telemetry` is captured from
-            # the enclosing route scope (model already recorded there). These are
-            # PRESENTATION-ONLY — serialized straight to the wire, never added to
-            # the prompt/context/messages or any snapshot. Honest degradation: a
+            # and before the provider's first token. These are PRESENTATION-ONLY
+            # — serialized straight to the wire, never added to the
+            # prompt/context/messages or any snapshot. Honest degradation: a
             # non-retrieval / empty-corpus turn yields [] and nothing is emitted.
             for _sa in build_retrieval_activity(telemetry):
                 yield f"event: {_sa['type']}\ndata: {json.dumps(_sa['data'])}\n\n"
 
-            if provider == "openai":
-                stream = stream_openai_with_reasoning(context_messages, model, operator=operator)
-            elif provider == "anthropic":
-                stream = stream_anthropic_with_thinking(context_messages, model, operator=operator)
-            elif provider == "xai":
-                stream = stream_xai_with_reasoning(context_messages, model, operator=operator)
-            elif provider == "custom":
-                stream = stream_custom_with_reasoning(context_messages, model, operator=operator)
-            elif provider == "computer-use":
-                backend = resolve_backend(model)
-                if backend == "google":
-                    stream = stream_gemini_computer_use(context_messages, model, operator=operator,
-                                                         session_id=cu_session_id, device_id=cu_device_id)
-                elif backend == "openai":
-                    stream = stream_openai_computer_use(context_messages, model, operator=operator,
-                                                         session_id=cu_session_id, device_id=cu_device_id)
-                else:
-                    stream = stream_computer_use(context_messages, model, operator=operator,
-                                                  session_id=cu_session_id, device_id=cu_device_id)
-            else:
-                stream = stream_gemini_with_thinking(context_messages, model, operator=operator)
-
-            async for event in _stream_with_keepalive(stream):
+            async for event in _stream_with_keepalive(_open_provider_stream(req, context_messages)):
                 if event is None:
                     # M7: provider prefill keepalive — inert SSE comment frame.
                     yield SSE_KEEPALIVE_FRAME
                     continue
-                event_type = event.get("type", "unknown")
-                event_data = event.get("data", "")
-                if event_type == "error":
-                    # Every provider's error text funnels here: mask secrets
-                    # (exception text can embed a request URL) before the client.
-                    event_data = redact(event_data)
-                    # W09: a classified failure (credits_exhausted) also gets its
-                    # structured error_detail frame, right before the error frame.
-                    detail_frame = _error_detail_frame(event)
-                    if detail_frame:
-                        yield detail_frame
-
-                # Debug logging for image_task events
-                if event_type == "image_task":
-                    print(f"[SSE] Converting image_task event to SSE format: {event_data}")
-
-                if not isinstance(event_data, str):
-                    event_data = json.dumps(event_data)
-                else:
-                    event_data = json.dumps(event_data)
-                yield f"event: {event_type}\ndata: {event_data}\n\n"
+                for frame in _sse_frames(event):
+                    yield frame
 
             yield f"event: stream_end\ndata: {json.dumps({'status': 'complete'})}\n\n"
 
@@ -2837,7 +2777,6 @@ async def chat_save(request: Request):
 
         # Get operator state
         s = get_state(operator)
-        utc_now = now_utc_iso()
 
         # Track queued media tasks to return to frontend
         media_tasks = []
@@ -2882,95 +2821,37 @@ async def chat_save(request: Request):
         except Exception:
             turn_location = None
 
-        # Add to conversation log (this is what perform_mint reads from)
-        if user_message:
-            s.add_conversation_turn({"role": "user", "utc": utc_now, "text": user_message})
-        s.add_conversation_turn({"role": "assistant", "utc": utc_now, "text": assistant_response_unwrapped, "snap_text": snap_text})
-
-        # Update counters
-        total_tokens = tokens.get("prompt", 0) + tokens.get("completion", 0)
-        s.conv_turns_since += 1
-        s.conv_tokens_since += total_tokens
-        s.total_turns += 1
-        s.total_tokens += total_tokens
-
-        # Update context metadata for snapshot
-        s.last_context_meta["model"] = model
-        # M1: the snapshot's LOCATION gauge value, threaded exactly like `model`
-        # (perform_mint reads it out of last_context_meta into `gauges`). Set
+        # The persist + auto-mint tail every chat path shares (audit rank 74):
+        # the turn into the conversation log perform_mint reads, the counters,
+        # the model / usage / provenance metadata, the mint gate, the checkpoint
+        # cadence. The LOCATION gauge (perform_mint reads it into `gauges`) is set
         # UNCONDITIONALLY — "" for a locationless turn, so a phone turn's fix can
-        # never bleed into the next Portal turn's snapshot, and no gauge line is
-        # rendered at all.
-        s.last_context_meta["location"] = user_location.format_location_gauge(turn_location)
-        s.last_context_meta["usage_last"] = {
-            "prompt_tokens": tokens.get("prompt", 0),
-            "completion_tokens": tokens.get("completion", 0),
-            "total_tokens": total_tokens
-        }
-
-        # Add provenance (fossil retrieval info) to context metadata
-        # perform_mint reads recent_ids and relevant_ids from last_context_meta
-        if provenance:
-            s.last_context_meta["gm_excerpt"] = True  # Streaming always includes system prompt
-            s.last_context_meta["recent_ids"] = provenance.get("recent", [])
-            # Combine keyword and checkpoint as "relevant" for the snapshot
-            relevant = provenance.get("keyword", []) + provenance.get("checkpoint", [])
-            s.last_context_meta["relevant_ids"] = relevant
-            print(f"[CHAT/SAVE] Provenance - Recent: {provenance.get('recent', [])}, Relevant: {relevant}")
-
-        # Check and trigger auto-mint
-        minted = False
-        snap_id = None
-        dims = None  # Task 1.4: embedding dimension of the minted snapshot (for the mint telemetry line)
-        if AUTO_ENABLE:
-            now_ms = int(time.time() * 1000)
-            should_mint, reason = False, None
-            d = drift_state_for(s)
-            if d == "red" and ON_RED == "auto": should_mint, reason = True, "DRIFT_RED"
-            elif d == "yellow" and ON_YELLOW == "auto": should_mint, reason = True, "DRIFT_YELLOW"
-            elif s.conv_tokens_since >= TOKENS_THRESHOLD: should_mint, reason = True, "TOKENS"
-            elif s.conv_turns_since >= TURNS_THRESHOLD: should_mint, reason = True, "TURNS"
-
-            if should_mint and (now_ms - s.last_mint_ms >= DEBOUNCE_MS):
-                result = await run_blocking(perform_mint, operator, reason or "AUTO")
-                s.last_mint_ms = int(time.time() * 1000)
-                minted = True
-                snap_id = result.get("snap_id")
-                dims = result.get("dims")  # None when no vector was generated (fresh box / soft failure)
-                print(f"[CHAT/SAVE] Auto-mint triggered for {operator}: {reason} -> {snap_id}")
-
-        # Check and trigger auto-checkpoint (same logic as regular /chat endpoint)
-        checkpoint_triggered = False
-        if should_create_checkpoint(operator):
-            print(f"[CHAT/SAVE] Creating checkpoint task for {operator} at turn {s.total_turns}")
-            checkpoint_triggered = True
-            # Create checkpoint task (runs in background)
-            checkpoint_task = create_task(
-                TaskType.CHECKPOINT,
-                operator=operator,
-                result_data={"manual": False}
-            )
-            print(f"[CHAT/SAVE] Checkpoint task created: {checkpoint_task.task_id}")
-
-        save_operator_state()
+        # never bleed into the next Portal turn's snapshot.
+        turn = await persist_turn_and_maybe_mint(
+            s, operator, user_message, assistant_response_unwrapped, gate=_mint_gate(),
+            snap_text=snap_text, prompt_tokens=tokens.get("prompt", 0),
+            completion_tokens=tokens.get("completion", 0), model=model,
+            location_gauge=user_location.format_location_gauge(turn_location),
+            provenance=provenance, tag="[CHAT/SAVE]",
+        )
 
         response = {
             "success": True,
             "operator": operator,
             "total_turns": s.total_turns,
             "conv_turns_since": s.conv_turns_since,
-            "minted": minted,
-            "snap_id": snap_id,
+            "minted": turn.minted,
+            "snap_id": turn.snap_id,
             "media_tasks": media_tasks,  # List of queued image/video/music generation tasks
             "modified_response": assistant_response if (media_tasks or has_artifacts) else None,  # Response with loading placeholders or artifact download buttons
             "artifacts": artifacts_meta,  # Structured artifacts[] for native clients (Phase 6a); [] when none
-            "checkpoint_triggered": checkpoint_triggered
+            "checkpoint_triggered": turn.checkpoint_triggered
         }
         # Task 1.4: the embedding dimension of the just-minted snapshot, so the
         # frontend's mint telemetry line can show "Nd". Present only when a
         # vector was actually generated (omitted on a vector-less / no-mint turn).
-        if dims is not None:
-            response["dims"] = dims
+        if turn.dims is not None:
+            response["dims"] = turn.dims
         return response
 
     except Exception as e:

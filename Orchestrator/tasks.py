@@ -49,6 +49,7 @@ from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator import tool_outcomes
+from Orchestrator.turn_persistence import MintGate, persist_turn_and_maybe_mint
 from Orchestrator import provider_billing
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.secret_redaction import redact, response_error
@@ -2606,12 +2607,9 @@ def process_chat_task(task: Task):
             s.last_context_meta["usage_last"] = {"prompt_tokens": usage.get("prompt_tokens", 0),
                                                "completion_tokens": usage.get("completion_tokens", 0),
                                                "total_tokens": total_tok}
-        utc_now = now_utc_iso()
 
         user_message_content = next((m.get("content") for m in inp.messages if m.get("role") == "user"), None)
-        if user_message_content:
-            log_text = user_text if user_text else "[media content]"
-            s.add_conversation_turn({"role": "user", "utc": utc_now, "text": log_text})
+        log_text = (user_text if user_text else "[media content]") if user_message_content else ""
 
         # snap_text is the searchable snapshot body for this assistant turn.
         # Post-cutover the snapshot IS the actual response (no perspective-only
@@ -2636,41 +2634,19 @@ def process_chat_task(task: Task):
             snap_text = clean
         if reasoning and reasoning.strip():
             snap_text = snap_text + "\n\n[REASONING]\n" + reasoning.strip()
-        s.add_conversation_turn({"role": "assistant", "utc": utc_now, "text": ui_reply, "snap_text": snap_text})
-        s.conv_turns_since  += 1
-        s.conv_tokens_since += total_tok
-        s.context_used      += total_tok
-
-        s.total_turns += 1
-        s.total_tokens += total_tok
 
         update_task(task.task_id, progress=90)
 
-        if AUTO_ENABLE:
-            now_ms = int(time.time() * 1000)
-            d = drift_state_for(s)
-            should, reason = False, None
-            if d == "red" and ON_RED == "auto": should, reason = True, "DRIFT_RED"
-            elif d == "yellow" and ON_YELLOW == "auto": should, reason = True, "DRIFT_YELLOW"
-            elif s.conv_tokens_since >= TOKENS_THRESHOLD: should, reason = True, "TOKENS"
-            elif s.conv_turns_since  >= TURNS_THRESHOLD:  should, reason = True, "TURNS"
-            if should and (now_ms - s.last_mint_ms >= DEBOUNCE_MS):
-                _ = perform_mint(active_operator, reason or "AUTO")
-                s.last_mint_ms = int(time.time() * 1000)
-
-        checkpoint_triggered = False
-        if should_create_checkpoint(active_operator):
-            print(f"[CHECKPOINT] Creating checkpoint task for {active_operator} at turn {s.total_turns}")
-            checkpoint_triggered = True
-            # Create checkpoint task (runs in background)
-            checkpoint_task = create_task(
-                TaskType.CHECKPOINT,
-                operator=active_operator,
-                result_data={"manual": False}
-            )
-            print(f"[CHECKPOINT] Checkpoint task created: {checkpoint_task.task_id}")
-
-        save_operator_state()
+        # The persist + auto-mint tail every chat path shares (audit rank 74).
+        # The snapshot metadata (provenance, model, usage) was set above, so the
+        # helper only records the turn, counts it (context_used included) and
+        # mints inline: this is a worker thread, not the event loop.
+        checkpoint_triggered = asyncio.run(persist_turn_and_maybe_mint(
+            s, active_operator, log_text, ui_reply, gate=_mint_gate(), snap_text=snap_text,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0), total_tokens=total_tok,
+            record_usage=False, count_context=True, offload=False, tag="[CHECKPOINT]",
+        )).checkpoint_triggered
 
         result_data = {
             "ui_reply": ui_reply, "reply": reply_alias, "text": reply_alias,
@@ -2762,6 +2738,17 @@ _KW_ENTITY_RX = re.compile(
     r"|[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9]+"  # file.ext
     r"|\b[A-Z]{2,}\b"                          # ALLCAPS
 )
+
+
+def _mint_gate() -> MintGate:
+    """This module's auto-mint knobs and hooks, read per call (tests stub them here)."""
+    return MintGate(
+        auto_enable=AUTO_ENABLE, on_red=ON_RED, on_yellow=ON_YELLOW,
+        tokens_threshold=TOKENS_THRESHOLD, turns_threshold=TURNS_THRESHOLD,
+        debounce_ms=DEBOUNCE_MS, perform_mint=perform_mint,
+        should_create_checkpoint=should_create_checkpoint, create_task=create_task,
+        save_operator_state=save_operator_state, drift_state_for=drift_state_for,
+    )
 
 
 def _to_kebab(token: str) -> str:
