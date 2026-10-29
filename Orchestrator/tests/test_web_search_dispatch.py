@@ -28,6 +28,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 MIGRATED_FILES = [
     "Orchestrator/routes/chat_routes.py",
+    "Orchestrator/routes/chat/context.py",
+    "Orchestrator/routes/chat/cu.py",
+    "Orchestrator/routes/chat/media.py",
+    "Orchestrator/routes/chat/nonstream.py",
+    "Orchestrator/routes/chat/providers.py",
+    "Orchestrator/routes/chat/save.py",
+    "Orchestrator/routes/chat/stream.py",
     "Orchestrator/providers/tool_dispatch.py",
     "Orchestrator/routes/gemini_live_routes.py",
     "Orchestrator/routes/realtime_routes.py",

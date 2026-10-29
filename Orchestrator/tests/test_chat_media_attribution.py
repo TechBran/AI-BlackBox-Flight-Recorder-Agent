@@ -33,6 +33,8 @@ from Orchestrator import media, models
 from Orchestrator.models import Task, TaskDatabase, TaskStatus, TaskType
 
 _ROUTES = Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py"
+# The chat routes' parts (audit rank 74); chat_routes.py is their namespace.
+_ROUTE_PARTS = sorted((Path(__file__).resolve().parents[1] / "routes" / "chat").glob("*.py"))
 _TOOL_DISPATCH = Path(__file__).resolve().parents[1] / "providers" / "tool_dispatch.py"
 _CU_DRIVER = Path(__file__).resolve().parents[1] / "browser" / "driver_anthropic.py"
 OP = "op-media-a"
@@ -228,14 +230,16 @@ def test_every_tool_loop_create_task_passes_the_session_operator(path, minimum):
     assert bad == [], f"{path.name}: create_task without operator=operator at {bad}"
 
 
-@pytest.mark.parametrize("path", [_ROUTES, _TOOL_DISPATCH, _CU_DRIVER])
+@pytest.mark.parametrize("path", [_ROUTES, *_ROUTE_PARTS, _TOOL_DISPATCH, _CU_DRIVER],
+                         ids=lambda p: p.name)
 def test_no_create_task_hardcodes_an_operator(path):
     bad = [(fn, line, arg.value) for fn, line, arg in _create_task_sites(path)
            if isinstance(arg, ast.Constant)]
     assert bad == [], f"{path.name}: literal operator at {bad}"
 
 
-@pytest.mark.parametrize("path", [_ROUTES, _TOOL_DISPATCH, _CU_DRIVER])
+@pytest.mark.parametrize("path", [_ROUTES, *_ROUTE_PARTS, _TOOL_DISPATCH, _CU_DRIVER],
+                         ids=lambda p: p.name)
 def test_no_media_options_carry_a_hardcoded_operator(path):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     bad = []

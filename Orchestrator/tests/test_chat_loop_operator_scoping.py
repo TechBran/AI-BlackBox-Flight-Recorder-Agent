@@ -40,6 +40,8 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _CHAT_ROUTES = _REPO / "Orchestrator" / "routes" / "chat_routes.py"
+# The chat routes' parts (audit rank 74); chat_routes.py is their namespace.
+_CHAT_PARTS = sorted((_REPO / "Orchestrator" / "routes" / "chat").glob("*.py"))
 _TOOL_DISPATCH = _REPO / "Orchestrator" / "providers" / "tool_dispatch.py"
 _CU_DRIVER = _REPO / "Orchestrator" / "browser" / "driver_anthropic.py"
 
@@ -182,9 +184,10 @@ def _hybrid_retrieve_call_sites(path: Path):
 
 @pytest.mark.parametrize("path,expected_count", [
     (_CHAT_ROUTES, 0),   # the provider loops dispatch through tool_dispatch
+    *[(part, 0) for part in _CHAT_PARTS],
     (_TOOL_DISPATCH, 1),  # _search_snapshots, shared by every chat loop
     (_CU_DRIVER, 1),     # run_anthropic_cu_loop
-])
+], ids=lambda v: getattr(v, "name", str(v)))
 def test_every_hybrid_retrieval_site_passes_operator(path, expected_count):
     """Every tool-loop hybrid_retrieve site passes operator=<variable>.
 
@@ -222,9 +225,9 @@ def test_no_hardcoded_operator_defaults_in_retrieval_route_signatures():
     "system", or reference a config constant — any other plain string-literal
     default fails.
     """
-    tree = ast.parse(_CHAT_ROUTES.read_text(encoding="utf-8"))
     offenders = []
-    for node in ast.walk(tree):
+    for node in (n for path in (_CHAT_ROUTES, *_CHAT_PARTS)
+                 for n in ast.walk(ast.parse(path.read_text(encoding="utf-8")))):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         a = node.args

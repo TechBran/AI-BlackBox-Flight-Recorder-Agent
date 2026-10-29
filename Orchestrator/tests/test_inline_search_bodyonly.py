@@ -33,6 +33,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 INLINE_SEARCH_FILES = [
     "Orchestrator/routes/chat_routes.py",
+    "Orchestrator/routes/chat/context.py",
+    "Orchestrator/routes/chat/cu.py",
+    "Orchestrator/routes/chat/media.py",
+    "Orchestrator/routes/chat/nonstream.py",
+    "Orchestrator/routes/chat/providers.py",
+    "Orchestrator/routes/chat/save.py",
+    "Orchestrator/routes/chat/stream.py",
     "Orchestrator/providers/tool_dispatch.py",
     "Orchestrator/browser/driver_anthropic.py",
     "Orchestrator/routes/grok_live_routes.py",

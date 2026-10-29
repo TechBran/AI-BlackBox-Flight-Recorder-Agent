@@ -377,7 +377,8 @@ async def test_loop_drives_session_bound_executor(patched_loop, monkeypatch):
 def test_chat_routes_dispatch_wires_openai():
     import inspect
     from Orchestrator.routes import chat_routes
-    src = inspect.getsource(chat_routes)
+    # The chat routes are the chat_routes namespace and its parts (audit rank 74).
+    src = "".join(inspect.getsource(m) for m in (chat_routes, *chat_routes._PARTS))
     assert "stream_openai_computer_use" in src
     assert 'backend == "openai"' in src
     assert "wired in CU plan task 13" not in src, "Task-13 TODO comments must be gone"

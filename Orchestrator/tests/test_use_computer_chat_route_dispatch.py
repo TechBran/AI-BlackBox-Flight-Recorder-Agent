@@ -48,8 +48,10 @@ from Orchestrator.toolvault import registry
 from Orchestrator.toolvault.context import ToolContext
 
 _REPO = Path(__file__).resolve().parents[2]
-_CHAT_ROUTES = _REPO / "Orchestrator" / "routes" / "chat_routes.py"
 _TOOL_DISPATCH = _REPO / "Orchestrator" / "providers" / "tool_dispatch.py"
+# The chat routes: the chat_routes namespace and its parts (audit rank 74).
+_CHAT_ROUTE_FILES = [_REPO / "Orchestrator" / "routes" / "chat_routes.py",
+                     *sorted((_REPO / "Orchestrator" / "routes" / "chat").glob("*.py"))]
 
 # The same live-shaped CU catalog T2 uses: anthropic opus + sonnet and one gemini
 # CU model — deliberately no gpt/openai member, so "available classes" is a
@@ -157,14 +159,14 @@ def test_matcher_detects_membership_form_and_is_name_agnostic():
 
 
 def test_no_inline_use_computer_branch_bypasses_the_shared_dispatcher():
-    """Pinned count = 0 in both files.
+    """Pinned count = 0 in the chat-route modules and the dispatcher.
 
     Every provider loop hands use_computer to dispatch_tool, which routes it by
     table membership (no ``== "use_computer"`` branch at all). An inline branch
     reappearing in chat_routes.py, or an if-branch in the dispatcher, would be a
     second path that can drift from the executor (the T3 bug); if one is added
     on purpose it must pass the property test below first."""
-    for path in (_CHAT_ROUTES, _TOOL_DISPATCH):
+    for path in (*_CHAT_ROUTE_FILES, _TOOL_DISPATCH):
         branches = _use_computer_branches(path)
         assert branches == [], (
             f"{path.name}: inline use_computer branch(es) at lines "
@@ -177,7 +179,7 @@ def test_every_use_computer_branch_routes_through_executor():
     create_task directly."""
     offenders_no_execute = []
     offenders_create_task = []
-    for path in (_CHAT_ROUTES, _TOOL_DISPATCH):
+    for path in (*_CHAT_ROUTE_FILES, _TOOL_DISPATCH):
         for b in _use_computer_branches(path):
             calls = _branch_body_calls(b)
             if not any(_calls_execute_use_computer(c) for c in calls):

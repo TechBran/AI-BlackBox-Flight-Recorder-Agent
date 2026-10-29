@@ -289,9 +289,9 @@ def test_signal_builder_absent_from_prompt_and_snapshot_builders():
 def test_signal_builder_present_on_the_sse_emit_path():
     """Positive control: the SSE emit path DOES reference the builder, so the
     guard above is meaningful (the symbol exists and lives where it should)."""
-    src = _read_source(("routes", "chat_routes.py"))
-    assert src is not None, "chat_routes.py not found"
-    assert "build_retrieval_activity" in src, (
-        "chat_routes.py no longer references build_retrieval_activity — the SSE "
+    src = _read_source(("routes", "chat", "stream.py"))
+    assert src is not None, "routes/chat/stream.py (the /chat/stream route) not found"
+    assert "build_retrieval_activity(" in src, (
+        "the /chat/stream route no longer calls build_retrieval_activity — the SSE "
         "emit path is where the Signal is supposed to be rendered"
     )

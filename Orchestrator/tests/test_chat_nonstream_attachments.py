@@ -31,11 +31,13 @@ from Orchestrator.utils import paths
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 PDF = b"%PDF-1.4\n% test document\n%%EOF\n"
 
-_CHAT_ROUTES = Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py"
-# Since audit rank 74 the chat_routes functions below are thin wrappers; the
-# loops themselves live in these adapter modules (every function is checked).
+# Since audit rank 74 the chat-path functions below are thin wrappers in the
+# chat routes' providers part; the loops themselves live in the adapter modules,
+# and the rest of the chat routes in the other parts (every function checked).
+_CHAT_ROUTES = Path(__file__).resolve().parents[1] / "routes" / "chat" / "providers.py"
 _ADAPTERS = [Path(__file__).resolve().parents[1] / "providers" / name for name in (
     "openai_compat.py", "anthropic_messages.py", "gemini_generate.py", "tool_dispatch.py")]
+_ADAPTERS += sorted((Path(__file__).resolve().parents[1] / "routes" / "chat").glob("*.py"))
 
 # The chat-path provider loops: the five non-stream call_* functions and the
 # five streaming chat generators.

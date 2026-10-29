@@ -216,7 +216,8 @@ def test_no_scattered_cu_model_literals():
             f"{mod.__name__} must not embed model-id literals; "
             "use Orchestrator.config *_MODEL_DEFAULT")
 
-    src = inspect.getsource(chat_routes)
+    # The chat routes are the chat_routes namespace and its parts (audit rank 74).
+    src = "".join(inspect.getsource(m) for m in (chat_routes, *chat_routes._PARTS))
     assert 'model = "claude-opus-4-6"' not in src, "chat_routes must use CU_MODEL_DEFAULT"
     # Formatting-robust scan scoped to the CU (opus) family: the two
     # `model = "claude-sonnet-4-5"` literals remaining in chat_routes are the
@@ -270,7 +271,8 @@ def test_chat_routes_no_gemini_string_sniffing():
     resolve_backend — no `\"gemini\" in <anything>` sniffing anywhere."""
     import inspect
     from Orchestrator.routes import chat_routes
-    src = inspect.getsource(chat_routes)
+    # The chat routes are the chat_routes namespace and its parts (audit rank 74).
+    src = "".join(inspect.getsource(m) for m in (chat_routes, *chat_routes._PARTS))
     assert not re.search(r'["\']gemini["\'] in', src), (
         "chat_routes must route CU via Orchestrator.browser.dispatch.resolve_backend, "
         "not string-sniff model ids (includes /chat/cu-status and /chat/cu-stop)")
