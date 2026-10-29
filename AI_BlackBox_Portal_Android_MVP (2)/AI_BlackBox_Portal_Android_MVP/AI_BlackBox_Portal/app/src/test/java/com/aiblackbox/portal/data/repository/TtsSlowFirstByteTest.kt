@@ -14,7 +14,7 @@ import org.junit.Test
  * Task 7.9 — D10 slow-first-byte affordance for on-box (Qwen) TTS.
  *
  * Locks the two things the settings preview ([SettingsViewModel.previewVoice])
- * and the chat speak path ([NativeMainActivity] onSpeakWithId) BOTH depend on,
+ * and the chat speak path ([com.aiblackbox.portal.ui.chat.ChatSpeech.speakForMessage]) BOTH depend on,
  * so the surfaces can't drift:
  *   1. the shared sentinel + threshold constants, and
  *   2. the watchdog state transition — flips ONLY after the threshold elapses

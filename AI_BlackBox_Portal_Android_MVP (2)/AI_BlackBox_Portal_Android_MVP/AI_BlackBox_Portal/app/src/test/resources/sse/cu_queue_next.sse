@@ -1,0 +1,21 @@
+event: stream_start
+data: {"provider": "computer-use", "model": "claude-opus-5-5", "provenance": null}
+
+event: content
+data: "First task done."
+
+event: cu_queue_next
+data: {"prompt": "now check email", "remaining": 0}
+
+event: content
+data: "Inbox has 3 messages."
+
+event: cu_stopped
+data: {"reason": "user"}
+
+event: done
+data: {"content": "Inbox has 3 messages."}
+
+event: stream_end
+data: {"status": "complete"}
+

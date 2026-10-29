@@ -58,10 +58,12 @@ class OperatorGateWiringTest {
 
     @Test fun `the overlay neither prompts nor opens a realtime session without an operator`() {
         val src = source("$root/overlay/OverlayService.kt")
-        for (name in listOf("sendPromptToAI", "connectRealtime")) {
-            val body = functionBody(src, name)
-            assertTrue("$name: $body", "operatorBlocks()" in body)
-        }
+        val prompt = functionBody(src, "sendPromptToAI")
+        assertTrue("sendPromptToAI: $prompt", "operatorBlocks()" in prompt)
+        // The realtime session lives in OverlayRealtimeSession (rank 76); it asks the service.
+        val connect = functionBody(source("$root/overlay/OverlayRealtimeSession.kt"), "connectRealtime")
+        assertTrue("connectRealtime: $connect", "host.operatorBlocks()" in connect)
+        assertTrue("the session's host is the service's gate", "this@OverlayService.operatorBlocks()" in src)
         assertTrue("OverlayService gate uses the shared rule", "OperatorResolver.sendBlockedReason(" in functionBody(src, "operatorBlocks"))
     }
 

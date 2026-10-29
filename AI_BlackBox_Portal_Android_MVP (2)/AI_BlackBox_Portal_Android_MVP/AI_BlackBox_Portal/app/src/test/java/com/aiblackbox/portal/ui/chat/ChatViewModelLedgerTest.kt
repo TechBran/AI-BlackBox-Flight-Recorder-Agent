@@ -147,7 +147,9 @@ class ChatViewModelLedgerTest {
         for (field in listOf("currentOperator", "currentProvider", "currentModel")) {
             assertFalse("sendViaSSE reads $field after capturing the turn", Regex("\\b$field\\b").containsMatchIn(afterCapture))
         }
-        assertFalse("processSSEEvent must use the turn's provider", Regex("\\bcurrentProvider\\b").containsMatchIn(functionBody(vm, "processSSEEvent")))
+        // The event handler (the pure SseTurnReducer since rank 76) gets the turn's provider.
+        assertTrue("events are folded with the turn's provider", "applySseEvent(acc, event, turn.provider)" in body)
+        assertFalse("applySseEvent must use the turn's provider", Regex("\\bcurrentProvider\\b").containsMatchIn(functionBody(vm, "applySseEvent")))
         assertFalse("saveConversation must use the turn's operator", Regex("\\bcurrentOperator\\b").containsMatchIn(functionBody(vm, "saveConversation")))
         assertTrue("the finalize goes through ledgerResponseFor", "ledgerResponseFor(" in body)
     }
@@ -173,7 +175,8 @@ class ChatViewModelLedgerTest {
 
     @Test fun `every operator picker asks the chat first`() {
         assertTrue("the gate reads the running turn", "operatorSwitchBlockedReason(streamJob?.isActive == true)" in functionBody(vm, "operatorSwitchBlocked"))
-        val main = source("src/main/java/com/aiblackbox/portal/NativeMainActivity.kt")
+        // The app's composition (out of NativeMainActivity, rank 76) holds the top bar and the sheet.
+        val main = source("src/main/java/com/aiblackbox/portal/navigation/BlackBoxApp.kt")
         assertTrue("the top-bar pick", "if (!chatViewModel.operatorSwitchBlocked()) scope.launch { store.setOperator(it) }" in main)
         assertTrue("the top-bar add", Regex("onAddOperator = \\{ name ->\\s+if \\(!chatViewModel.operatorSwitchBlocked\\(\\)\\)").containsMatchIn(main))
         assertTrue("the Settings sheet", "canSwitchOperator = { !chatViewModel.operatorSwitchBlocked() }" in main)

@@ -97,7 +97,7 @@ class ZellijWebSocketClient(
         fun onError(throwable: Throwable)
     }
 
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+    private val httpClient: OkHttpClient = HttpClients.base.newBuilder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // long-lived WS
         .pingInterval(30, TimeUnit.SECONDS)

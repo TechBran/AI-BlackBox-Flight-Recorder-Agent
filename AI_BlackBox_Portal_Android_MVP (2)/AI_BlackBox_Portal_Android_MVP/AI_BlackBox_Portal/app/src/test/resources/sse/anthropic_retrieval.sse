@@ -1,0 +1,32 @@
+event: stream_start
+data: {"provider": "anthropic", "model": "claude-opus-5-5", "provenance": {"recent": ["SNAP-20261029-0001", "SNAP-20261029-0002"], "keyword": ["SNAP-20261001-0100"], "semantic": ["SNAP-20260901-0042"], "checkpoint": []}}
+
+event: system_activity
+data: {"stage": "resolve_model", "label": "brain \u00b7 claude-opus-5-5 \u00b7 200k window", "detail": {"provider": "anthropic", "model": "claude-opus-5-5"}, "seq": 0}
+
+event: system_activity
+data: {"stage": "embed", "label": "embed \u00b7 gemini-embedding-001 \u00b7 3072d", "detail": {"model": "gemini-embedding-001", "dims": 3072}, "seq": 1}
+
+event: system_activity
+data: {"stage": "search", "label": "search \u00b7 4 snapshots", "detail": {"hits": 4}, "seq": 2}
+
+: keepalive
+
+event: content_start
+data: ""
+
+event: content
+data: "Hello"
+
+event: content
+data: " \u2014 world.\nLine two with \"quotes\" and \\ backslash."
+
+event: usage
+data: {"prompt_tokens": 35646, "completion_tokens": 12}
+
+event: done
+data: {"content": "Hello \u2014 world.\nLine two with \"quotes\" and \\ backslash.", "reasoning": ""}
+
+event: stream_end
+data: {"status": "complete"}
+

@@ -60,7 +60,6 @@ import com.aiblackbox.portal.ui.theme.Neutral100
 import com.aiblackbox.portal.ui.theme.Neutral200
 import com.aiblackbox.portal.ui.theme.Neutral500
 import com.aiblackbox.portal.ui.theme.SolidGreen
-import com.aiblackbox.portal.util.Constants
 
 @Composable
 fun SmsInboxScreen(
@@ -77,6 +76,7 @@ fun SmsInboxScreen(
     val selectedContactName by viewModel.selectedContactName.collectAsStateWithLifecycle()
     val smsProvider by viewModel.smsProvider.collectAsStateWithLifecycle()
     val smsModel by viewModel.smsModel.collectAsStateWithLifecycle()
+    val smsModelOptions by viewModel.smsModelOptions.collectAsStateWithLifecycle()
     val lines by viewModel.lines.collectAsStateWithLifecycle()
     val selectedFromNumber by viewModel.selectedFromNumber.collectAsStateWithLifecycle()
     val drafts by viewModel.draftTexts.collectAsStateWithLifecycle()
@@ -84,6 +84,8 @@ fun SmsInboxScreen(
     // The view model reads the operator from the store at every request and reloads on a
     // switch (A14-ui-misc-07), so only the origin is handed over here.
     LaunchedEffect(origin) { viewModel.initialize(origin) }
+    // The reply-model dropdown follows the provider's live catalog (rank 76).
+    LaunchedEffect(origin, smsProvider) { viewModel.loadSmsModels(smsProvider) }
     // Poll only while the screen is RESUMED (A14-ui-misc-09): not with the app in the
     // background or the screen off, where each poll cost data and battery and fetching
     // the open thread marked texts read that nobody had seen.
@@ -124,6 +126,7 @@ fun SmsInboxScreen(
                 connected = connected,
                 smsProvider = smsProvider,
                 smsModel = smsModel,
+                smsModels = smsModelOptions,
                 onProviderModelChange = { provider, model -> viewModel.saveSmsPreferences(provider, model) },
                 onRefresh = { viewModel.loadThreads() },
                 onSelectThread = { thread -> viewModel.loadMessages(thread.phoneNumber) }
@@ -146,6 +149,7 @@ private fun SmsThreadListView(
     connected: Boolean,
     smsProvider: String,
     smsModel: String,
+    smsModels: List<Pair<String, String>>,
     onProviderModelChange: (String, String) -> Unit,
     onRefresh: () -> Unit,
     onSelectThread: (SmsThread) -> Unit
@@ -197,6 +201,7 @@ private fun SmsThreadListView(
             SmsModelSelector(
                 smsProvider = smsProvider,
                 smsModel = smsModel,
+                models = smsModels,
                 providers = smsProviders,
                 onProviderModelChange = onProviderModelChange
             )
@@ -567,6 +572,8 @@ private fun SmsFromNumberSelector(
 private fun SmsModelSelector(
     smsProvider: String,
     smsModel: String,
+    // The provider's live catalog rows (SmsViewModel.smsModelOptions, Auto first).
+    models: List<Pair<String, String>>,
     providers: List<Pair<String, String>>,
     onProviderModelChange: (String, String) -> Unit
 ) {
@@ -575,8 +582,7 @@ private fun SmsModelSelector(
     val feedback = rememberPressFeedback()
 
     val providerDisplay = providers.find { it.first == smsProvider }?.second ?: smsProvider
-    val models = Constants.MODEL_CONFIG[smsProvider] ?: emptyList()
-    // A stored id this static list cannot name is shown as itself, not as Auto.
+    // A stored id the list cannot name is shown as itself, not as Auto.
     val modelDisplay = models.find { it.first == smsModel }?.second ?: smsModel.ifBlank { "Auto" }
 
     Column(
@@ -633,10 +639,8 @@ private fun SmsModelSelector(
                             onClick = {
                                 feedback()
                                 showProviderMenu = false
-                                // When provider changes, pick the first model for that provider
-                                val newModels = Constants.MODEL_CONFIG[id] ?: emptyList()
-                                val firstModel = newModels.firstOrNull()?.first ?: ""
-                                onProviderModelChange(id, firstModel)
+                                // A new provider starts on Auto; its live list loads next.
+                                onProviderModelChange(id, "")
                             }
                         )
                     }

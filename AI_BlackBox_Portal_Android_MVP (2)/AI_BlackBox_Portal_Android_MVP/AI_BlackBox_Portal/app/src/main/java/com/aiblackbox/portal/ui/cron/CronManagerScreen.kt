@@ -714,6 +714,9 @@ private fun EditJobDialog(
     val modelsForProvider by viewModel.modelsForProvider.collectAsState()
     // Fetch the model list whenever the provider changes (also fires on open).
     LaunchedEffect(provider) { viewModel.selectProvider(provider) }
+    // A stored id the provider's fresh live catalog no longer lists becomes its
+    // same-family successor, else Auto, in the editor; saving the job writes it (rank 76).
+    LaunchedEffect(modelsForProvider) { model = viewModel.reconciledModel(provider, model) }
 
     // Fix 4: when creating a NEW job, seed the operator pick from the box default
     // once it loads (the editing job already carries its own operator). Only fills

@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.ui.chat
 
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.repository.ModelCatalogs
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -22,6 +23,8 @@ class ChatViewModelLiveModelIdsTest {
     private lateinit var api: BlackBoxApi
 
     @Before fun setUp() {
+        // The catalog is shared per box (ModelCatalogs); a reused port is the same box.
+        ModelCatalogs.clear()
         server = MockWebServer(); server.start()
         api = BlackBoxApi(server.url("").toString().trimEnd('/'))
     }

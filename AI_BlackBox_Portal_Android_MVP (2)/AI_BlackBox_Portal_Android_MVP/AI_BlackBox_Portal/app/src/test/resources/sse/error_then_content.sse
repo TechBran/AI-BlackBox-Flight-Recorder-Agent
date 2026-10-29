@@ -1,0 +1,18 @@
+event: stream_start
+data: {"provider": "openai", "model": "gpt-5.5", "provenance": null}
+
+event: content
+data: "Partial answer"
+
+event: error
+data: "upstream hiccup, retrying"
+
+event: content
+data: " and the rest."
+
+event: done
+data: {"content": "Partial answer and the rest."}
+
+event: stream_end
+data: {"status": "complete"}
+

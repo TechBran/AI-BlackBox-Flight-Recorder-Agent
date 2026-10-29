@@ -1,0 +1,79 @@
+{
+  "fixture": "robotics_mission",
+  "provider": "robotics",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: robotics_mission",
+      "reasoning": null,
+      "model": "",
+      "provider": "robotics",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "\n`[move]` {\"x\":1.5,\"y\":0} → ok \n\n**Robot Error:** bumper pressedMission ended.",
+      "reasoning": null,
+      "model": "gemini-robotics-er-1.5-preview",
+      "provider": "robotics",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "stopped",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "",
+    "sessionId": "cu-sess-1",
+    "deviceId": "blackbox",
+    "screenshotUrl": "{BOX}/ui/uploads/cu_step1.png?t={T}"
+  },
+  "er": {
+    "status": "stopped",
+    "missionActive": false,
+    "reasoning": "The cup is on the left table.",
+    "camera": "front",
+    "cameraFrame": "data:image/jpeg;base64,AAAA"
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: robotics_mission",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "robotics",
+    "model": null,
+    "session_id": null,
+    "device_id": null,
+    "camera": "yolo_oakd"
+  },
+  "save": {
+    "operator": "golden-op",
+    "user_message": "turn: robotics_mission",
+    "assistant_response": "\n`[move]` {\"x\":1.5,\"y\":0} → ok \n\n**Robot Error:** bumper pressedMission ended.",
+    "reasoning": null,
+    "model": "gemini-robotics-er-1.5-preview",
+    "tokens": null,
+    "provenance": null
+  },
+  "taskStatusPolls": []
+}

@@ -57,11 +57,11 @@ class TaskPollTest {
 
     // ── Through the real repository + HTTP client ──
 
-    @Test fun `TaskRepository pollTask rides out a 503 from the box`() = runTest {
+    @Test fun `TaskPoller rides out a 503 from the box`() = runTest {
         server.enqueue(MockResponse.Builder().code(503).body("""{"detail":"warming up"}""").build())
         server.enqueue(MockResponse.Builder().body(statusJson("completed")).build())
 
-        val seen = TaskRepository(api).pollTask("t1", intervalMs = 10).toList()
+        val seen = TaskPoller(api).poll("t1", intervalMs = 10).toList()
 
         assertEquals(listOf("completed"), seen.map { it.status })
         assertEquals(2, server.requestCount)
@@ -71,7 +71,7 @@ class TaskPollTest {
         server.enqueue(MockResponse.Builder().code(404).body("""{"detail":"Task not found"}""").build())
 
         try {
-            TaskRepository(api).pollTask("t1", intervalMs = 10).toList()
+            TaskPoller(api).poll("t1", intervalMs = 10).toList()
             fail("expected the 404 to end the poll")
         } catch (e: ApiHttpException) {
             assertEquals(404, e.code)

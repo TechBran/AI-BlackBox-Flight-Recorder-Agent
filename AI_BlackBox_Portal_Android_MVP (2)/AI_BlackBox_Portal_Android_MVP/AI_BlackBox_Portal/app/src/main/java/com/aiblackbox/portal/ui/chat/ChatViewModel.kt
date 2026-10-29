@@ -15,7 +15,6 @@ import com.aiblackbox.portal.data.local.LiteRtEngine
 import com.aiblackbox.portal.data.local.LlmEvent
 import com.aiblackbox.portal.data.local.EngineSource
 import com.aiblackbox.portal.data.local.LocalEngineHolder
-import com.aiblackbox.portal.data.local.engineConfigKey
 import com.aiblackbox.portal.data.local.engineSourceFor
 import com.aiblackbox.portal.data.local.pinWarmEngine
 import com.aiblackbox.portal.data.local.LocalLlm
@@ -34,6 +33,9 @@ import com.aiblackbox.portal.data.local.TurnClient
 import com.aiblackbox.portal.data.local.VisionLlm
 import com.aiblackbox.portal.data.local.formatCloudToolMatches
 import com.aiblackbox.portal.data.local.toResultJsonString
+import com.aiblackbox.portal.data.model.ModelCatalog
+import com.aiblackbox.portal.data.repository.ModelCatalogRepository
+import com.aiblackbox.portal.data.repository.ModelCatalogs
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
@@ -49,6 +51,7 @@ import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.ToolSchema
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.repository.ChatRepository
+import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.ChatHistoryStore
@@ -58,9 +61,6 @@ import com.aiblackbox.portal.data.store.OperatorResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -212,15 +212,7 @@ private class SseTurn(
     val model: String,
     val userMessageId: String,
     val assistantMessageId: String,
-) {
-    // cu_queued: the box queued this prompt behind a running computer-use task, whose
-    // stream carries the reply (cu_queue_next), so this turn has no reply of its own.
-    var queued = false
-
-    // cu_queue_next: this stream now also carries the next queued prompt's reply,
-    // appended after a separator, so "done" must not replace the accumulated content.
-    var queueAppend = false
-}
+)
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -236,28 +228,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         com.aiblackbox.portal.data.local.AutonomyStore.fromContext(appContext)
     }
 
-    // Warm-loop guard: a disk-persisted "warm in-flight" flag set BEFORE every
-    // on-device engine warm and cleared on its success / graceful failure. A
-    // SIGKILL mid-warm (device OOM) runs no cleanup, so the flag survives still-set
-    // into the next process start -- the AUTO-warm in [preloadLocalEngine] reads it
-    // and SKIPS, turning a crash/restart/auto-warm loop into a single failure
-    // (a deliberate send is the manual retry). See [WarmInflightStore].
-    private val warmInflightStore by lazy {
-        com.aiblackbox.portal.data.local.WarmInflightStore.fromContext(appContext)
-    }
-
-    // Auto-warm-on-open SETTING (user preference, persisted): when DISABLED the
-    // [preloadLocalEngine] auto path skips the warm and the model loads lazily on the
-    // first send. Default TRUE (instant first send). Distinct from the warm-loop
-    // GUARD above, which is an automatic OOM-crash safety, not a user choice.
-    // See [LocalWarmPrefs].
-    private val localWarmPrefs by lazy {
-        com.aiblackbox.portal.data.local.LocalWarmPrefs.fromContext(appContext)
-    }
-
     private var api: BlackBoxApi? = null
     private var repository: ChatRepository? = null
     private var taskRepository: TaskRepository? = null
+    private var taskPoller: TaskPoller? = null
     private var historyLoaded = false
 
     // ── On-device (local) provider gating (Task 1.6) ──
@@ -265,69 +239,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // disk-present, sha-verified model and fires a best-effort re-attest on open.
     private var providerPicker: ProviderPickerViewModel? = null
 
-    // ── On-device (local) engine seam (Task 2.4) ──
-    // The on-device generation engine, injected as a lazy provider so tests can
-    // supply a FakeLocalLlm. NULL until an installed on-device model is found —
-    // then it is lazily wired (Task 2.6a) to the SINGLETON [localEngine]
-    // (initialize() is ~10s, so the engine is built once and reused across turns).
-    // With no model installed it stays null and sendViaLocalEngine() falls back to
-    // the 1.6 placeholder. Settable so a host/builder (or a test) can wire a fake.
-    // @Volatile (A04-chat-viewmodel-09): the engine fields are written by the wiring
-    // (which may run on an IO thread for the preload) and read on Main.
+    // ── On-device (local) engine (Task 2.4 seam, W1 warm, W5 model switch) ──
+    // The engine's wiring, its one-owner load (pinWarmEngine, rank 63), the
+    // warm-while-open preload, the deferred re-warm and the settings apply live in
+    // LocalEngineCoordinator (rank 76); this view model runs the turns and calls in.
+    private val engines = LocalEngineCoordinator(
+        appContext = appContext,
+        scope = viewModelScope,
+        api = { api },
+        isLocalProvider = { ChatProvider.fromId(currentProvider).isLocal },
+        turnInFlight = { isLocalTurnInFlight() },
+    )
+
+    // The on-device generation engine, injected as a lazy provider so a host or a
+    // test can wire a FakeLocalLlm; null until an installed model is wired.
     @VisibleForTesting
-    @Volatile
-    var localLlmProvider: (() -> LocalLlm)? = null
-
-    // The concrete on-device engine (Task 2.6a). Wired by [localProviderOrWire] —
-    // borrowed from [LocalEngineHolder], or built for the active bundle and then loaded
-    // through [pinWarmEngine], which pins it in the holder (the engine's one owner,
-    // audit rank 63). Reused across turns. Until that load, a freshly built engine is
-    // an unloaded wrapper this VM may drop or close.
-    @Volatile
-    private var localEngine: LiteRtEngine? = null
-
-    // The installed bundle file the [localEngine] runs, and its delegate. Resolved
-    // from [LocalModelManager.installedModels] when the engine is wired.
-    @Volatile
-    private var localEngineModelFile: java.io.File? = null
-    @Volatile
-    private var localEngineDelegate: String = "gpu"
-
-    // True once [localEngine] is the engine pinned in [LocalEngineHolder] (borrowed, or
-    // loaded by this VM through [pinWarmEngine]); the holder owns it, so onCleared /
-    // invalidateLocalEngine must not close it. False only for a built-but-not-loaded
-    // wrapper, which holds no native engine.
-    @Volatile
-    private var localEngineFromHolder: Boolean = false
-
-    // Single-flight engine wiring (A04-chat-viewmodel-09): the preload (IO) and a send
-    // (Main) both wire the engine; the second waits and reuses the first's result
-    // instead of building a second engine.
-    private val engineWiringMutex = Mutex()
-
-    // The in-flight preload warm, joined before a re-warm (see [reWarmLocalEngine]).
-    private var localWarmJob: Job? = null
-
-    // A settings apply that arrived mid-turn also releases the holder's engine when the
-    // deferred re-warm runs (A04-chat-viewmodel-08), so the new window is not lost.
-    @Volatile
-    private var pendingHolderClose: Boolean = false
-
-    // The slug of the active on-device model the user picked in the Model Manager
-    // (Task W5), persisted under "model_local". [localProviderOrWire] prefers the
-    // INSTALLED bundle whose slug matches this, so picking a different installed
-    // model among several actually changes which one is warmed/used. Null/blank ->
-    // fall back to the alphabetically-first installed bundle (the prior behavior).
-    @Volatile
-    private var currentLocalModelSlug: String = ""
-
-    // I1 (W5 review): a model-selection change that arrives WHILE a local turn is
-    // streaming must NOT close the live native engine mid-generation (close() is
-    // not serialized against generate() -> native teardown race). When that
-    // happens we set this flag and defer the invalidate+re-warm until the turn
-    // completes ([processPendingLocalReWarm]).
-    @Volatile
-    private var pendingLocalReWarm: Boolean = false
+    var localLlmProvider: (() -> LocalLlm)?
+        get() = engines.llmProvider
+        set(value) { engines.llmProvider = value }
 
     // The persona / system-prompt cache (Task 2.3) feeding the on-device turn.
     // Built lazily off the application context the first time a local turn runs
@@ -390,11 +319,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _streamCancelled = MutableStateFlow(false)
     val streamCancelled: StateFlow<Boolean> = _streamCancelled.asStateFlow()
 
-    // Per-turn Signal tracking (reset in [sendViaSSE], read across the many
-    // processSSEEvent calls of one turn). Never persisted.
-    private var signalLastTool: String = ""       // last tool_start name, for the "· ok" echo
-    private var signalGenerating: Boolean = false // one-shot latch for the "generating ·" line
-    private var signalModelLabel: String = "model" // real model id (from stream_start)
+    // The Signal's per-turn tracking (last tool, the "generating ·" latch, the real model
+    // id) lives in the turn's SseTurnState (SseTurnReducer). Never persisted.
     // Computer-use turns keep The Signal DARK (match web, which destroys the line for
     // provider === 'computer-use'): the CU tool indicator / todo panel / Live View
     // carry the activity narrative. Set per turn; all non-null pushes go through
@@ -427,9 +353,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _operatorNotice = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val operatorNotice: SharedFlow<String> = _operatorNotice.asSharedFlow()
 
+    // The box tasks: the TaskPanel's discovery, the pill polls and the media-placeholder
+    // resolver, all through the one TaskPoller (rank 76). Finished media lands in the
+    // messages through resolveMediaTaskInMessage / removeMediaTaskFromMessage.
+    private val tasks = TaskDiscovery(
+        scope = viewModelScope,
+        listTasks = { taskRepository?.listTasks() },
+        poller = { taskPoller },
+        onMediaResolved = { id, type, url -> resolveMediaTaskInMessage(id, type, url) },
+        onMediaDropped = { id -> removeMediaTaskFromMessage(id) },
+    )
+
     // Media task IDs for polling (image/video/music generation)
-    private val _pendingMediaTasks = MutableStateFlow<List<String>>(emptyList())
-    val pendingMediaTasks: StateFlow<List<String>> = _pendingMediaTasks.asStateFlow()
+    val pendingMediaTasks: StateFlow<List<String>> = tasks.pendingMediaTasks
 
     // Auto-TTS: emits text to speak when response completes and auto-TTS is on
     private val _autoTtsEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
@@ -437,12 +373,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     var autoTtsEnabled: Boolean = false
 
     // Active tasks being polled (for TaskPanel display)
-    private val _activeTasks = MutableStateFlow<List<TaskStatus>>(emptyList())
-    val activeTasks: StateFlow<List<TaskStatus>> = _activeTasks.asStateFlow()
+    val activeTasks: StateFlow<List<TaskStatus>> = tasks.activeTasks
 
     // Task completion events (for notifications)
-    private val _taskCompletedEvent = MutableSharedFlow<TaskStatus>(extraBufferCapacity = 5)
-    val taskCompletedEvent: SharedFlow<TaskStatus> = _taskCompletedEvent.asSharedFlow()
+    val taskCompletedEvent: SharedFlow<TaskStatus> = tasks.taskCompletedEvent
 
     // ── Agent prompt forwarding ──
     // When provider is an agent type, prompts are forwarded here instead of SSE
@@ -477,17 +411,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── On-device (local) engine readiness (Task W1) ──
     // Mirrors the warm-while-app-open preload so the provider pill can show
-    // "loading…/ready". IDLE until a warm starts (we only warm when the local
-    // provider is the active one — see [preloadLocalEngine]); the lazy load in
-    // [runLocalEngineTurn] remains the fallback if the user sends before READY.
-    private val _localEngineState = MutableStateFlow(LocalEngineState.IDLE)
-    val localEngineState: StateFlow<LocalEngineState> = _localEngineState.asStateFlow()
-
-    // True while a [preloadLocalEngine] warm is in flight, so a duplicate trigger
-    // (e.g. re-selecting the local provider) does not launch a second concurrent
-    // warm. Paired with the model path so a DIFFERENT model can still re-warm.
-    @Volatile
-    private var warmingModelPath: String? = null
+    // "loading…/ready" (LocalEngineCoordinator.state).
+    val localEngineState: StateFlow<LocalEngineState> = engines.state
 
     // ── CU model backends (id → "anthropic" | "google" | "openai") ──
     // Populated only when fetching /models/computer-use (CU production pass
@@ -632,8 +557,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // selection changes while the local provider is the active one.
             launch {
                 store.getString("model_local").collect { slug ->
-                    val previous = currentLocalModelSlug
-                    currentLocalModelSlug = slug
+                    val previous = engines.currentModelSlug
+                    engines.currentModelSlug = slug
                     // Thin shim over the PURE [localReWarmAction] decision (M1
                     // first-emission no-op + I1 mid-stream defer), so the branching
                     // is unit-tested without the ViewModel.
@@ -645,10 +570,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             turnInFlight = isLocalTurnInFlight(),
                         )
                     ) {
-                        LocalReWarmAction.NOW -> reWarmLocalEngine()
+                        LocalReWarmAction.NOW -> engines.reWarm()
                         // I1: tearing down now would close() the native runtime
                         // mid-generation -> apply at turn completion instead.
-                        LocalReWarmAction.DEFER -> pendingLocalReWarm = true
+                        LocalReWarmAction.DEFER -> engines.pendingReWarm = true
                         LocalReWarmAction.NONE -> Unit
                     }
                 }
@@ -672,98 +597,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Track which tasks are being actively polled by the resolver (prevent duplicates) */
-    private val _resolverPolling = mutableSetOf<String>()
-
     /**
-     * Scan all messages for unresolved mediaTasks and resolve them.
-     * Handles both prior session placeholders and current session tasks.
-     *
-     * For completed tasks: resolves immediately (replaces placeholder with media).
-     * For pending tasks: starts its OWN polling loop (3s interval, self-contained).
-     * For failed/missing tasks: removes the stale placeholder.
-     *
-     * This is the single source of truth for media task resolution — it does NOT
-     * delegate to startTaskPolling() which has a separate, unreliable code path.
+     * Resolve the media placeholders on screen (prior sessions' and this turn's): the
+     * single source of truth for media task resolution, in [TaskDiscovery].
      */
-    private fun resolveUnresolvedMediaTasks() {
-        val repo = taskRepository ?: return
-        val messages = _messages.value
-        val unresolvedTasks = mutableListOf<Pair<String, String?>>() // (rawId, taskType)
-
-        for (msg in messages) {
-            for (entry in msg.mediaTasks) {
-                val colonIdx = entry.indexOf(':')
-                val taskType = if (colonIdx > 0) entry.substring(0, colonIdx) else null
-                val rawId = if (colonIdx > 0) entry.substring(colonIdx + 1) else entry
-                // Skip if already being polled by this resolver
-                if (rawId !in _resolverPolling) {
-                    unresolvedTasks.add(rawId to taskType)
-                }
-            }
-        }
-
-        if (unresolvedTasks.isEmpty()) return
-        Log.d(TAG, "Found ${unresolvedTasks.size} unresolved media tasks — resolving")
-
-        for ((taskId, taskType) in unresolvedTasks) {
-            _resolverPolling.add(taskId)
-
-            viewModelScope.launch {
-                try {
-                    // Poll until completed, failed, or not found (max ~25 min for videos)
-                    var attempts = 0
-                    val maxAttempts = 500  // 500 * 3s = 25 minutes max
-                    while (attempts < maxAttempts) {
-                        try {
-                            val status = repo.getTaskStatus(taskId)
-
-                            when {
-                                status.status.equals("completed", true) && status.resultUrl != null -> {
-                                    resolveMediaTaskInMessage(taskId, taskType, status.resultUrl!!)
-                                    Log.d(TAG, "Resolved media task $taskId → ${status.resultUrl}")
-                                    _resolverPolling.remove(taskId)
-                                    return@launch
-                                }
-                                status.status.equals("failed", true)
-                                    || status.status.equals("cancelled", true) -> {
-                                    // 'cancelled' is terminal like failed (G2-T8):
-                                    // stop polling and drop the placeholder, or a
-                                    // cancelled media task polls for the full 25 min.
-                                    removeMediaTaskFromMessage(taskId)
-                                    Log.w(TAG, "Media task $taskId ${status.status} — removed placeholder")
-                                    _resolverPolling.remove(taskId)
-                                    return@launch
-                                }
-                                else -> {
-                                    // Still pending/processing — wait and retry
-                                    if (attempts % 10 == 0) {
-                                        Log.d(TAG, "Media task $taskId: ${status.status} (attempt $attempts)")
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            // Task not found on server — remove stale placeholder
-                            removeMediaTaskFromMessage(taskId)
-                            Log.w(TAG, "Media task $taskId not found — removed: ${e.message}")
-                            _resolverPolling.remove(taskId)
-                            return@launch
-                        }
-
-                        attempts++
-                        delay(3000)  // Poll every 3 seconds
-                    }
-
-                    // Timed out after max attempts
-                    Log.w(TAG, "Media task $taskId timed out after $maxAttempts attempts")
-                    _resolverPolling.remove(taskId)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Resolver failed for $taskId: ${e.message}")
-                    _resolverPolling.remove(taskId)
-                }
-            }
-        }
-    }
+    private fun resolveUnresolvedMediaTasks() = tasks.resolveUnresolvedMediaTasks(_messages.value)
 
     /**
      * Save the conversation on screen under [operator]. Both are read NOW, not when the
@@ -798,7 +636,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (!job.isActive) return
         _streamCancelled.value = true
         job.cancelAndJoin()
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _chatState.value = ChatState.IDLE
         _signalLabel.value = null
         stopBackgroundService()
@@ -814,6 +652,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             api = BlackBoxApi(origin)
             repository = ChatRepository(api!!)
             taskRepository = TaskRepository(api!!)
+            taskPoller = TaskPoller(api!!)
             Log.d(TAG, "Initialized for $origin")
             startHealthLoop()
             startTaskDiscoveryLoop()
@@ -847,7 +686,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             // Task W1: app-open warm. If the persisted/active provider is already
             // LOCAL, the provider collector may have fired in init BEFORE the api
-            // was ready (so localProviderOrWire() returned null → IDLE). Now the api
+            // was ready (so engines.providerOrWire() returned null → IDLE). Now the api
             // is wired, kick the warm again; it no-ops for non-local providers and
             // is idempotent when already WARMING/READY.
             preloadLocalEngine()
@@ -868,23 +707,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // Cancel the picker's own CoroutineScope (separate from viewModelScope,
         // which the framework cancels automatically) so it doesn't leak.
         providerPicker?.dispose()
-        // Release the on-device engine's native runtime (Task 2.6a). Safe even if
-        // never loaded; close() is idempotent. Guarded so a native-layer throw on
-        // teardown can't crash the VM disposal.
-        //
-        // R2-C: close ONLY a VM-OWNED engine. When [localEngineFromHolder] the
-        // engine is the PROCESS-held warm engine owned by [LocalModelService];
-        // closing it here would tear down the native runtime the service is
-        // keeping resident (and break the next turn / the model-as-a-tool path).
-        // The service releases it on its own stop/destroy via the holder.
-        if (!localEngineFromHolder) {
-            runCatching { localEngine?.close() }
-        }
-        localEngine = null
-        // Every loaded engine is pinned in the holder (audit rank 63). With the service
-        // not running nothing else keeps it, so release it here as the VM-owned engine
-        // used to be; a running generation keeps it alive until it ends.
-        if (!LocalModelService.isRunning()) runCatching { LocalEngineHolder.clearAndClose() }
+        // Release the on-device engine (only one this view model owns; the service's
+        // process-held engine stays — LocalEngineCoordinator.release).
+        engines.release()
         super.onCleared()
     }
 
@@ -897,87 +722,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Poll /tasks/list every 2s to discover and update tasks — matches Portal TaskManager. */
-    private fun startTaskDiscoveryLoop() {
-        viewModelScope.launch {
-            while (true) {
-                try {
-                    val response = api?.get("/tasks/list") ?: run { delay(2_000); continue }
-                    val obj = json.parseToJsonElement(response).jsonObject
-                    val tasksArr = obj["tasks"]?.jsonArray ?: run { delay(2_000); continue }
-                    val serverTasks = tasksArr.mapNotNull { el ->
-                        try {
-                            val t = el.jsonObject
-                            val status = t["status"]?.jsonPrimitive?.content ?: ""
-                            TaskStatus(
-                                taskId = t["task_id"]?.jsonPrimitive?.content ?: return@mapNotNull null,
-                                taskType = t["task_type"]?.jsonPrimitive?.content,
-                                status = status,
-                                progress = t["progress"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
-                                operator = t["operator"]?.jsonPrimitive?.content,
-                                resultUrl = t["result_url"]?.jsonPrimitive?.content,
-                                // G3-T13 (M3.3): this MANUAL /tasks/list builder is the SOLE
-                                // feed for panel tasks. startTaskPolling (called at :755) EARLY-
-                                // RETURNS for them — the task was just added to _activeTasks at
-                                // :754, so its guard is already true — so the /tasks/status
-                                // auto-parse poll never runs for a panel task and never sets
-                                // these fields. Thread them HERE or they never surface.
-                                // /tasks/list carries progress_text AND device_id top-level.
-                                progressText = t["progress_text"]?.jsonPrimitive?.contentOrNull,
-                                // CU reasoning narration (accumulating, multi-line). Same
-                                // rationale as progressText: /tasks/list is the SOLE panel
-                                // feed, so thread it HERE or the reasoning window stays empty.
-                                reasoningText = t["reasoning_text"]?.jsonPrimitive?.contentOrNull,
-                                deviceId = t["device_id"]?.jsonPrimitive?.contentOrNull,
-                                // M2 multi-desktop: the CU session this task drives — routes
-                                // the pill's Live button to the agent's OWN desktop. Same
-                                // sole-feed rationale as the fields above: thread it HERE.
-                                sessionId = t["session_id"]?.jsonPrimitive?.contentOrNull
-                            )
-                        } catch (_: Exception) { null }
-                    }
-
-                    val existingIds = _activeTasks.value.map { it.taskId }.toSet()
-
-                    // Update progress on existing active tasks
-                    val activeServerTasks = serverTasks.filter { it.status in listOf("pending", "processing") }
-                    if (_activeTasks.value.isNotEmpty()) {
-                        _activeTasks.value = _activeTasks.value.map { existing ->
-                            activeServerTasks.find { it.taskId == existing.taskId } ?: existing
-                        }
-                    }
-
-                    // Add newly discovered tasks
-                    val newTasks = activeServerTasks.filter { it.taskId !in existingIds }
-                    if (newTasks.isNotEmpty()) {
-                        _activeTasks.value = _activeTasks.value + newTasks
-                        // startTaskPolling early-returns here BY DESIGN — the task was just
-                        // added to _activeTasks on the line above, so its guard
-                        // (`if (_activeTasks.value.any { it.taskId == taskId }) return`) is
-                        // already true; the /tasks/status poll never runs and this discovery
-                        // loop is the SOLE panel feed. Do NOT reorder this after the add, or
-                        // drop that guard, without accepting a per-2s label flicker
-                        // (e.g. "CLI Agent" <-> "Claude Code") from the poll object then ALSO
-                        // writing _activeTasks with a differently-resolved TaskStatus. (G3-T13)
-                        newTasks.forEach { startTaskPolling(it.taskId, it.taskType) }
-                        Log.d(TAG, "Discovered ${newTasks.size} new active tasks")
-                    }
-
-                    // Remove completed/failed tasks that server no longer reports as active
-                    val serverActiveIds = activeServerTasks.map { it.taskId }.toSet()
-                    _activeTasks.value = _activeTasks.value.filter { task ->
-                        task.taskId in serverActiveIds ||
-                        task.status.equals("completed", true) ||
-                        task.status.equals("failed", true) ||
-                        task.status.equals("cancelled", true)   // terminal — show briefly (G2-T8)
-                    }
-                } catch (_: Exception) {
-                    // Silent — task discovery is best-effort
-                }
-                delay(2_000)
-            }
-        }
-    }
+    /** The 2 s /tasks/list discovery that feeds the TaskPanel ([TaskDiscovery]). */
+    private fun startTaskDiscoveryLoop() = tasks.startDiscoveryLoop()
 
     fun onInputChange(value: TextFieldValue) {
         _inputText.value = value
@@ -1131,7 +877,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // Resolve the provider: an already-wired one (test fake or a
             // previously-wired production engine) is returned as-is; otherwise wire
             // the production LiteRtEngine from an INSTALLED model (suspend disk read).
-            val provider = localProviderOrWire()
+            val provider = engines.providerOrWire()
             if (provider == null) {
                 // No installed model (or api not ready) → 1.6 placeholder, unchanged.
                 sendViaLocalPlaceholder(text, clearInput)
@@ -1213,7 +959,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // A SEND is the deliberate (manual-retry) warm, so it is NOT blocked by
                 // the crash-loop flag; the one process warm still brackets the load
                 // with it (an OOM-kill here leaves it set for the next auto-warm).
-                loadWiredLocalEngine()
+                engines.loadWired()
                 val persona = withContext(Dispatchers.IO) { cache.get(op) }
                 // 3. The SAME sink sendViaSSE uses — append each delta to the
                 //    in-flight assistant message (identical rendering). Runs on the
@@ -1409,7 +1155,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             persistHistory()
             // I1 (W5): the turn is done -> apply any model switch that arrived
             // mid-stream now that no native generation is in flight.
-            processPendingLocalReWarm()
+            engines.processPendingReWarm()
         }
     }
 
@@ -1439,7 +1185,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun lookAtScreen(userPrompt: String) {
         streamJob?.cancel()
         streamJob = viewModelScope.launch {
-            val provider = localProviderOrWire()
+            val provider = engines.providerOrWire()
             if (provider == null) {
                 // No installed model → reuse the placeholder path with a vision-flavored ask.
                 sendViaLocalPlaceholder(userPrompt)
@@ -1496,7 +1242,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             // Load through the one process warm (send/vision = a
                             // deliberate warm, not gated by the crash-loop flag), then
                             // take the engine it settled on.
-                            loadWiredLocalEngine()
+                            engines.loadWired()
                             val llm = provider()
                             check(llm is VisionLlm) { "the on-device engine changed during the load" }
                             val persona = withContext(Dispatchers.IO) { cache?.get(op) ?: "" }
@@ -1535,7 +1281,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             persistHistory()
             // I1 (W5): the turn is done -> apply any model switch that arrived
             // mid-stream now that no native generation is in flight.
-            processPendingLocalReWarm()
+            engines.processPendingReWarm()
         }
     }
 
@@ -1584,176 +1330,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolve the on-device [localLlmProvider] (Task 2.6a), lazily wiring the
-     * SINGLETON production [LiteRtEngine] the first time an INSTALLED model is
-     * present.
-     *
-     *  - If [localLlmProvider] is already set (a test fake, or a previously-wired
-     *    engine) it is returned unchanged — the test seam is never disturbed.
-     *  - Otherwise this reads the installed bundles via [LocalModelManager]
-     *    ([installedModels] is device-scoped + runs on IO), picks the first
-     *    attested/installed bundle, builds the engine singleton ([LiteRtEngine.fromInstalled],
-     *    delegate "cpu"), records its model file + delegate for [load], sets
-     *    [localLlmProvider] to return that singleton, and returns it.
-     *  - If NO model is installed (or the api is not ready) it returns null and
-     *    [localLlmProvider] stays null — the caller falls back to the placeholder.
-     *
-     * The engine is built ONCE (its ~10s initialize() happens in [load], also
-     * once) and reused across turns. Suspends only for the disk read.
-     */
-    private suspend fun localProviderOrWire(): (() -> LocalLlm)? = engineWiringMutex.withLock {
-        // Single-flight (A04-chat-viewmodel-09): a second caller waits here and gets the
-        // first caller's wiring instead of building a second engine.
-        localLlmProvider ?: wireLocalProvider()
-    }
-
-    /**
-     * Load the wired production engine through the ONE process warm
-     * ([pinWarmEngine]: serialized with the service and control_phone warms, bracketed
-     * by the warm marker and the crash-loop flag, pinned in [LocalEngineHolder]) and
-     * adopt the engine it settles on — this one, or the one another warmer already
-     * pinned for the same bundle. A no-op for a test fake (no model file).
-     *
-     * A STOP or an operator switch during the 10-75 s cold load still keeps the loaded
-     * engine while this view model lives (the next send reuses it instead of loading
-     * again); the cancellation then ends this turn here.
-     */
-    private suspend fun loadWiredLocalEngine() {
-        val engine = localEngine ?: return
-        val modelFile = localEngineModelFile ?: return
-        val pinned = pinWarmEngine(
-            appContext, engine, modelFile.absolutePath, localEngineDelegate,
-            keepIfCancelled = { viewModelScope.isActive },
-        )
-        localEngine = pinned
-        localEngineFromHolder = true
-        currentCoroutineContext().ensureActive()
-    }
-
-    private suspend fun wireLocalProvider(): (() -> LocalLlm)? {
-        val client = api ?: return null
-
-        // Device-scoped model discovery (deviceId is irrelevant to installedModels()
-        // — it only matters for attest/setAutonomy — so a stable constant is fine
-        // here; the picker/Model-Manager own the real attest flow).
-        val manager = LocalModelManager.fromContext(appContext, LocalModelApi(client), deviceId = "android-device")
-        val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
-        // Task W5: honor the user's ACTIVE on-device model selection (persisted under
-        // "model_local" -> [currentLocalModelSlug]). Pick the installed bundle whose
-        // slug matches it; if unset or no longer installed (e.g. just deleted), fall
-        // back to installedModels()'s alphabetically-first entry (gemma-4-e2b, the
-        // LIGHTER model) -- a safe RAM default and the prior behavior.
-        val bundle = installed.firstOrNull { it.slug == currentLocalModelSlug }
-            ?: installed.firstOrNull()
-            ?: return null // no model -> placeholder path
-
-        val delegate = "gpu" // Edge Gallery parity: GPU ~10x faster; load() falls back to CPU on GPU-init failure
-        val targetPath = bundle.file.absolutePath
-
-        // M3: SERIALIZE with the foreground-service warm. The service is the PRIMARY
-        // warmer ([preloadLocalEngine] kicks it via LocalModelService.start). If it is
-        // cold-loading THIS bundle, WAIT for it to pin the engine in the holder rather
-        // than building a SECOND engine concurrently — two parallel 3.66GB GPU loads
-        // OOM the device ("the model could not finish" / crash on launch). We give the
-        // async service a brief head start to publish its [LocalEngineHolder.warmingPath]
-        // marker, then keep waiting only while it is actively warming this exact bundle,
-        // capped by a grace window. If it never claims the warm (service not running /
-        // refused) we fall straight through to the unchanged USE_HOLDER/BUILD_OWN
-        // decision below — the graceful fallback is preserved.
-        run {
-            val start = android.os.SystemClock.elapsedRealtime()
-            while (LocalEngineHolder.getOrNull() == null &&
-                android.os.SystemClock.elapsedRealtime() - start < SERVICE_WARM_GRACE_MS) {
-                val serviceWarmingThis = LocalEngineHolder.warmingPath == targetPath
-                val withinHeadStart =
-                    android.os.SystemClock.elapsedRealtime() - start < SERVICE_WARM_HEADSTART_MS
-                if (!serviceWarmingThis && !withinHeadStart) break
-                delay(SERVICE_WARM_POLL_MS)
-            }
-        }
-
-        // The settings this bundle's engine is built with (Task W2): maxTokens (falling
-        // back to the engine default when the descriptor leaves it null) + sampler trio.
-        val cfg = bundle.config
-        val maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS
-        val sampler = SamplerSettings(topK = cfg.topK, topP = cfg.topP, temperature = cfg.temperature)
-
-        // R2-C: PREFER the warm, PROCESS-resident engine pinned by
-        // [LocalModelService] when it matches the active bundle -- it is already
-        // loaded (no ~10-75s cold load) and survives VM/process recycles. The pure
-        // [engineSourceFor] is the decision: USE_HOLDER iff the holder is non-empty
-        // AND built for THIS bundle path; otherwise BUILD_OWN (the pre-R2-C path,
-        // also taken when the service never started -- the graceful fallback).
-        val held = LocalEngineHolder.getOrNull()
-        // A held engine built before a settings apply is not borrowed: it would answer
-        // with the old context window or sampler.
-        val heldConfigMatches =
-            held?.configKey == engineConfigKey(targetPath, maxTokens, sampler, cfg.supportImage)
-        if (engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath, heldConfigMatches) == EngineSource.USE_HOLDER) {
-            // Borrow the service-owned warm engine. We do NOT own it, so onCleared /
-            // invalidateLocalEngine must not close() it (localEngineFromHolder = true).
-            val warm = held!!
-            localEngine = warm
-            localEngineModelFile = bundle.file
-            localEngineDelegate = delegate
-            localEngineFromHolder = true
-            // Reads the field so a later re-pin (loadWiredLocalEngine) is picked up.
-            val provider: () -> LocalLlm = { localEngine ?: warm }
-            localLlmProvider = provider
-            return provider
-        }
-
-        // BUILD_OWN: no warm engine to borrow (service not running / different
-        // model). Build the VM-owned engine for the installed bundle (default CPU
-        // delegate), threading the PER-MODEL config (Task W2): maxTokens (fallback
-        // to the engine default when the descriptor leaves it null) + sampler trio.
-        // This is exactly the pre-R2-C path -- the guaranteed fallback.
-        val engine = LiteRtEngine.fromInstalled(
-            appContext,
-            bundle.file,
-            delegate = delegate,
-            maxTokens = maxTokens,
-            sampler = sampler,
-            // Task W4: thread the per-model vision capability so the engine sets a
-            // visionBackend + allows generateWithImage ONLY for image-capable bundles
-            // (text-only models keep the working CPU text path untouched).
-            supportImage = cfg.supportImage,
-        )
-        localEngine = engine
-        localEngineModelFile = bundle.file
-        localEngineDelegate = delegate
-        localEngineFromHolder = false
-        // Reads the field: loadWiredLocalEngine may adopt the engine another warmer
-        // pinned for this bundle instead of loading this one.
-        val provider: () -> LocalLlm = { localEngine ?: engine }
-        localLlmProvider = provider
-        return provider
-    }
-
-    /**
-     * Drop the cached on-device engine wiring (Task W5) so the next
-     * [localProviderOrWire] / [preloadLocalEngine] rebuilds it -- used when the
-     * ACTIVE local model selection changes, so a different installed bundle is
-     * actually loaded instead of the previously-wired one. Closes the old native
-     * engine (idempotent, guarded) and clears the warm marker so a re-warm runs.
-     */
-    private fun invalidateLocalEngine() {
-        // R2-C: close ONLY a VM-OWNED engine; never the service-owned warm engine
-        // borrowed from [LocalEngineHolder] (the service owns its lifecycle). We
-        // just drop our reference + re-wire; if the active model changed, the
-        // service's own re-warm (or the BUILD_OWN fallback) handles the new bundle.
-        if (!localEngineFromHolder) {
-            runCatching { localEngine?.close() }
-        }
-        localEngine = null
-        localEngineModelFile = null
-        localEngineFromHolder = false
-        localLlmProvider = null
-        warmingModelPath = null
-        _localEngineState.value = LocalEngineState.IDLE
-    }
-
-    /**
      * I1 (W5 review): true while an on-device turn is actively running, so a
      * model-selection change defers its engine teardown until the turn finishes
      * rather than close()-ing the native runtime mid-generation. STREAMING and
@@ -1764,280 +1340,36 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _chatState.value == ChatState.STREAMING || _chatState.value == ChatState.THINKING
 
     /**
-     * I1 (W5 review): apply a model-selection change that arrived mid-turn. Called
-     * at every local-turn settle point -- normal turn completion
-     * ([runLocalEngineTurn]) AND, per the final-pass review, on STOP
-     * ([cancelStream]) and CLEAR ([clearHistory]), since those cancel the stream
-     * and so skip the completion path. A no-op unless [pendingLocalReWarm] was set
-     * (the consume decision is the pure [consumePendingReWarm]). Now that no
-     * generation is in flight, it is safe to close() the old engine and re-warm
-     * the newly-selected bundle.
+     * Task W1 — warm the on-device engine while the app is open, so the first send is
+     * instant ([LocalEngineCoordinator.preload]: gated on the local provider and the
+     * auto-warm setting, idempotent, never blocks Main, never crashes).
      */
-    private fun processPendingLocalReWarm() {
-        // Consume the pending flag exactly once (pure decision, unit-tested).
-        if (!consumePendingReWarm(pendingLocalReWarm)) return
-        pendingLocalReWarm = false
-        val closeHolder = pendingHolderClose
-        pendingHolderClose = false
-        if (!ChatProvider.fromId(currentProvider).isLocal) {
-            // No re-warm for a cloud provider, but a stale-config engine must still go.
-            if (closeHolder) {
-                invalidateLocalEngine()
-                LocalEngineHolder.clearAndClose()
-            }
-            return
-        }
-        reWarmLocalEngine(closeHolder)
-    }
+    fun preloadLocalEngine() = engines.preload()
+
+    /** The persisted AUTO-WARM-on-open setting (default true), for the settings screen. */
+    fun autoWarmEnabled(): Boolean = engines.autoWarmEnabled()
+
+    /** Persist the AUTO-WARM-on-open setting from the settings screen Switch. */
+    fun setAutoWarmEnabled(enabled: Boolean) = engines.setAutoWarmEnabled(enabled)
 
     /**
-     * Drop the current engine wiring and warm again (a model switch or a settings
-     * apply). A preload warm still loading the OLD engine is joined first
-     * (cancelAndJoin waits for its native load to return): building and loading the
-     * new engine while the old load runs is the double-GPU-load OOM. [closeHolder] also
-     * releases the holder's engine, whose window/sampler is now stale.
+     * The ACTIVE on-device model's persisted config (maxTokens + sampler trio), to
+     * pre-fill the settings screen ([LocalEngineCoordinator.currentModelConfig]).
      */
-    private fun reWarmLocalEngine(closeHolder: Boolean = false) {
-        val prior = localWarmJob
-        viewModelScope.launch {
-            prior?.cancelAndJoin()
-            invalidateLocalEngine()
-            if (closeHolder) LocalEngineHolder.clearAndClose()
-            preloadLocalEngine()
-        }
-    }
+    suspend fun currentLocalModelConfig(): com.aiblackbox.portal.data.local.ModelConfig =
+        engines.currentModelConfig()
 
     /**
-     * Task W1 — warm the on-device engine WHILE the app/chat is open, so the first
-     * send is instant instead of paying the ~10-75s cold model load on the first
-     * turn (matching Edge Gallery's "initialize once, keep warm" pattern).
-     *
-     * Gated + idempotent:
-     *  - Only warms when the LOCAL provider is the ACTIVE/selected one — we do NOT
-     *    pull a multi-GB model into RAM for a cloud-only session. DESIGN NOTE: an
-     *    always-warm-on-open variant (for a future "another model calls the local
-     *    engine as a tool" path) is a one-line change — drop the [currentProvider]
-     *    `isLocal` gate below.
-     *  - Resolves the production engine via [localProviderOrWire] (the SAME wiring
-     *    the send path uses) on [Dispatchers.IO]; with no installed model it stays
-     *    [LocalEngineState.IDLE] and does nothing.
-     *  - Guards against duplicate/concurrent warms ([shouldStartWarm] + the
-     *    [warmingModelPath] in-flight marker): a repeat trigger while WARMING, or
-     *    while already READY for the same model, returns WITHOUT launching a second
-     *    `load()` (which would just await the in-flight Mutex anyway) — no redundant
-     *    coroutine, no state churn.
-     *  - NEVER blocks Main and NEVER crashes: a load fault sets
-     *    [LocalEngineState.ERROR] (the lazy fallback in [runLocalEngineTurn] still
-     *    works — `load()` is idempotent — so the user can still send and the next
-     *    trigger re-warms).
-     *
-     * Safe to call before [initialize] (no api → [localProviderOrWire] returns null
-     * → IDLE) and to call repeatedly (the guards make repeats cheap no-ops).
-     */
-    fun preloadLocalEngine() {
-        // Provider gate: only warm for the active local provider (see DESIGN NOTE).
-        if (!ChatProvider.fromId(currentProvider).isLocal) return
-        // Auto-warm SETTING gate (user preference): if the user opted OUT of
-        // auto-warm-on-open, do NOT warm here -- leave the engine IDLE so the model
-        // loads LAZILY on the first send (runLocalEngineTurn's load() is idempotent).
-        // This is a user choice, checked BEFORE the OOM-crash guard; the send path
-        // never consults it, so a deliberate send always warms.
-        if (!localWarmPrefs.autoWarmEnabled()) {
-            _localEngineState.value = LocalEngineState.IDLE
-            Log.i(TAG, "skipping auto-warm: disabled by user setting; will warm lazily on first send")
-            return
-        }
-        // Warm-loop guard (defense-in-depth): if the PREVIOUS warm is still marked
-        // in-flight, the process was SIGKILLed mid-load (device OOM) and never ran
-        // its success/failure cleanup. Auto-warming again would just OOM and crash
-        // again -- an unbounded crash/restart loop. SKIP the auto-warm, RE-ARM the
-        // flag (so a deliberate send can retry), and leave the engine IDLE (the UI
-        // pill shows no spinner; a user send lazily warms). The send path does NOT
-        // consult this flag, so the manual retry is always available.
-        if (!com.aiblackbox.portal.data.local.WarmInflightStore.shouldAutoWarm(warmInflightStore.isInflight())) {
-            warmInflightStore.setInflight(false)
-            _localEngineState.value = LocalEngineState.IDLE
-            Log.w(TAG, "skipping auto-warm: prior warm did not complete (likely OOM-killed); send to retry")
-            return
-        }
-        // R2-C: the FOREGROUND SERVICE is now the PRIMARY warmer -- it pins the
-        // engine in the PROCESS-level [LocalEngineHolder] so it loads ONCE and
-        // survives VM/process recycles. Best-effort + idempotent (a second start
-        // while a warm is in flight is ignored; LiteRtEngine.load() is itself
-        // Mutex-idempotent). NEVER throws into us (LocalModelService.start swallows
-        // a platform refusal), so the VM-side warm below stays the graceful
-        // fallback: if the service no-ops, [localProviderOrWire] BUILDs its own
-        // engine and this same coroutine load()s it, exactly as before R2-C.
-        LocalModelService.start(appContext)
-        // Cheap pre-launch guard: a warm is already in flight → nothing to do.
-        if (!shouldStartWarm(_localEngineState.value)) return
-
-        localWarmJob = viewModelScope.launch {
-            // Resolve (and lazily wire) the production engine off the main thread.
-            val provider = withContext(Dispatchers.IO) { localProviderOrWire() }
-            if (provider == null) {
-                // No installed model (or api not ready) → nothing to warm.
-                _localEngineState.value = LocalEngineState.IDLE
-                return@launch
-            }
-            val engine = localEngine
-            val modelFile = localEngineModelFile
-            // A FakeLocalLlm (tests) / fake-wired provider has no model file — there
-            // is nothing to preload; reflect READY iff it reports already loaded.
-            if (engine == null || modelFile == null) {
-                _localEngineState.value =
-                    if (provider().isLoaded) LocalEngineState.READY else LocalEngineState.IDLE
-                return@launch
-            }
-            val targetPath = modelFile.absolutePath
-            // Idempotency (model now known): already READY+loaded for this exact model
-            // → keep the in-flight marker pinned and skip the redundant warm.
-            if (_localEngineState.value == LocalEngineState.READY &&
-                warmingModelPath == targetPath && engine.isLoaded) {
-                return@launch
-            }
-            // Concurrency: another warm for this model is already mid-flight.
-            if (warmingModelPath == targetPath && _localEngineState.value == LocalEngineState.WARMING) {
-                return@launch
-            }
-            warmingModelPath = targetPath
-            _localEngineState.value =
-                localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_STARTED)
-            try {
-                // The one process warm: serialized with the service and control_phone
-                // warms (instant when this bundle is already pinned), with the
-                // crash-loop flag on disk for the whole load — an OOM-SIGKILL leaves it
-                // set, so the next launch's preloadLocalEngine SKIPS the auto-warm.
-                loadWiredLocalEngine()
-                _localEngineState.value =
-                    localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_SUCCEEDED)
-                Log.d(TAG, "on-device engine warmed (READY) for $targetPath")
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // Cancellation (VM cleared / new warm) is NOT a fault — clear the
-                // in-flight marker so a re-trigger can warm again, then unwind.
-                if (warmingModelPath == targetPath) warmingModelPath = null
-                throw e
-            } catch (e: Exception) {
-                // GRACEFUL (caught) failure: the next trigger retries the warm.
-                _localEngineState.value =
-                    localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_FAILED)
-                // Clear the in-flight marker so the next trigger retries the warm.
-                if (warmingModelPath == targetPath) warmingModelPath = null
-                Log.w(TAG, "on-device engine warm failed (lazy fallback still works): ${e.message}")
-            }
-        }
-    }
-
-    /**
-     * The persisted AUTO-WARM-on-open setting (default true). Read by the on-device
-     * model settings screen to pre-fill its auto-warm Switch. A thin passthrough to
-     * [LocalWarmPrefs] -- the single store the [preloadLocalEngine] auto path reads.
-     */
-    fun autoWarmEnabled(): Boolean = localWarmPrefs.autoWarmEnabled()
-
-    /**
-     * Persist the AUTO-WARM-on-open setting from the settings screen Switch. When
-     * false the [preloadLocalEngine] auto path skips the warm and the model loads
-     * lazily on the first send. Thin passthrough to [LocalWarmPrefs].
-     */
-    fun setAutoWarmEnabled(enabled: Boolean) = localWarmPrefs.setAutoWarmEnabled(enabled)
-
-    /**
-     * The ACTIVE on-device model's persisted [ModelConfig] (maxTokens + sampler
-     * trio), used by the settings screen to PRE-FILL its window slider + sampler
-     * fields with the user's current per-model choice. Reads the sidecar for
-     * [currentLocalModelSlug] (falling back to the first installed model, matching
-     * [localProviderOrWire]'s selection) off the main thread. Returns an all-null
-     * [ModelConfig] (engine defaults) when no model is installed or the api is not
-     * ready, so callers can resolve each axis to its DEFAULT_* constant.
-     */
-    suspend fun currentLocalModelConfig(): com.aiblackbox.portal.data.local.ModelConfig {
-        val client = api ?: return com.aiblackbox.portal.data.local.ModelConfig()
-        return withContext(Dispatchers.IO) {
-            val manager = LocalModelManager.fromContext(
-                appContext, LocalModelApi(client), deviceId = "android-device",
-            )
-            val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
-            val bundle = installed.firstOrNull { it.slug == currentLocalModelSlug }
-                ?: installed.firstOrNull()
-            bundle?.config ?: com.aiblackbox.portal.data.local.ModelConfig()
-        }
-    }
-
-    /**
-     * Apply a USER-changed on-device context window + sampler, then RE-WARM the
-     * engine so the new values take effect (on-device settings apply layer; the
-     * settings SCREEN is a later task -- this is the headless helper it calls).
-     *
-     * The on-device engine's `maxNumTokens`/`samplerConfig` are FIXED at the native
-     * `initialize()`, so a live edit requires three steps, run off the main thread on
-     * [Dispatchers.IO] (disk write + native teardown):
-     *
-     *  1. PERSIST via [LocalModelManager.updateModelConfig] for the ACTIVE
-     *     [currentLocalModelSlug] -- rewrites the `<slug>.json` sidecar so the next
-     *     warm reads the new config (no-op + early-return if no model is installed,
-     *     or the slug has no sidecar).
-     *  2. DROP the stale-window engine: [invalidateLocalEngine] clears the VM
-     *     wiring (closing a VM-OWNED engine; never the borrowed holder one), AND
-     *     [LocalEngineHolder.clearAndClose] releases the PROCESS-held warm engine if
-     *     the service pinned one -- otherwise the service-owned engine, still
-     *     initialized at the OLD window, would be re-borrowed and the change lost.
-     *  3. RE-WARM via [preloadLocalEngine], which (via [LocalModelService.start] +
-     *     [localProviderOrWire]) rebuilds + loads the engine at the NEW config and
-     *     flips [localEngineState] to [LocalEngineState.WARMING] -> READY, so the UI
-     *     can show a "reloading on-device model" state through the existing pill.
-     *
-     * Provider-gated like the warm path: a no-op when the active provider is not the
-     * local one (we never pull a multi-GB model into RAM for a cloud-only session).
-     * Pass null for any axis to leave it unchanged (see [mergedConfig]).
-     *
-     * @param maxTokens new context window, or null to keep the current value.
-     * @param topK / topP / temperature sampler overrides, null to keep current.
+     * Apply a USER-changed on-device context window + sampler and re-warm the engine
+     * ([LocalEngineCoordinator.applySettings]; deferred to the turn's settle point while
+     * an on-device reply is generating). Pass null for any axis to leave it unchanged.
      */
     fun applyLocalModelSettings(
         maxTokens: Int?,
         topK: Int?,
         topP: Float?,
         temperature: Float?,
-    ) {
-        // Provider gate: only re-warm for the active local provider (mirrors
-        // [preloadLocalEngine]); a cloud-only session has no engine to reconfigure.
-        if (!ChatProvider.fromId(currentProvider).isLocal) return
-        val slug = currentLocalModelSlug
-        if (slug.isBlank()) {
-            Log.w(TAG, "applyLocalModelSettings: no active on-device model slug; nothing to persist")
-            return
-        }
-        val client = api ?: return
-        val sampler = SamplerSettings(topK = topK, topP = topP, temperature = temperature)
-        viewModelScope.launch {
-            // (1) Persist the new config off the main thread (disk write).
-            val persisted = withContext(Dispatchers.IO) {
-                val manager = LocalModelManager.fromContext(
-                    appContext, LocalModelApi(client), deviceId = "android-device",
-                )
-                runCatching { manager.updateModelConfig(slug, maxTokens, sampler) }
-                    .getOrDefault(false)
-            }
-            if (!persisted) {
-                // Slug not installed / unreadable sidecar -> nothing to re-warm.
-                Log.w(TAG, "applyLocalModelSettings: no sidecar updated for '$slug'; skipping re-warm")
-                return@launch
-            }
-            // (2) + (3) Drop BOTH the VM wiring AND the process-held warm engine so the
-            // stale-window engine is not reused, then re-warm at the NEW config (the
-            // pill shows WARMING -> READY). While an on-device reply is still
-            // generating, closing the engine under it is the mid-generation teardown
-            // the I1 design forbids (A04-chat-viewmodel-08): defer both to the turn's
-            // settle point, exactly like a mid-turn model switch.
-            if (isLocalTurnInFlight()) {
-                pendingHolderClose = true
-                pendingLocalReWarm = true
-                return@launch
-            }
-            reWarmLocalEngine(closeHolder = true)
-        }
-    }
+    ) = engines.applySettings(maxTokens, topK, topP, temperature)
 
     /**
      * Persist a completed on-device turn through the offline-resilient snapshot
@@ -2204,10 +1536,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // from content_start → "generating · <model>" (non-retrieval turns). A brief
         // blank before the first backend frame is exactly how web already behaves.
         _signalLabel.value = null
-        signalLastTool = ""
-        signalGenerating = false
-        signalModelLabel = turn.model.ifBlank { turn.provider }.ifBlank { "model" }
-        // Computer-use turns keep The Signal dark for the whole turn (match web).
+        // Computer-use turns keep The Signal dark for the whole turn (match web); the
+        // turn's own Signal state (last tool, the generating latch, the model label)
+        // lives in its SseTurnState (SseTurnReducer.start).
         signalSuppressed = signalSuppressedForProvider(turn.provider)
 
         val history = buildApiHistory()
@@ -2222,15 +1553,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         streamJob = viewModelScope.launch {
-            val content = StringBuilder()
-            val reasoning = StringBuilder()
-            // SSE "error" events accumulate here, NOT in content — see the "error"
-            // case in processSSEEvent and the failure branch in the finalize below.
-            val errors = StringBuilder()
-            var tokenCount: TokenCount? = null
-            var streamModel: String? = null
-            var provenance: Provenance? = null
-            val mediaTasks = mutableListOf<String>()
+            // Everything the stream accumulates (content, reasoning, the SSE "error" text
+            // kept apart from content, media tasks, model, tokens, provenance, the CU
+            // queue flags, the Signal's turn state), folded event by event through the
+            // pure SseTurnReducer (applySseEvent). See the failure branch below.
+            var acc = SseTurnReducer.start(turn.provider, turn.model)
 
             // CU params (only when provider is computer-use)
             val cuSessionId = if (isCuProvider) _cuSessionId.value else null
@@ -2272,25 +1599,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 flow.collect { event ->
-                    processSSEEvent(
-                        event, turn, content, reasoning, mediaTasks, errors
-                    ) { model, tokens, prov ->
-                        if (model != null) streamModel = model
-                        if (tokens != null) tokenCount = tokens
-                        if (prov != null) provenance = prov
-                    }
+                    acc = applySseEvent(acc, event, turn.provider)
 
                     // Update the streaming assistant message — the user still sees
                     // error-event text as it arrives (rendered after real content).
                     // Addressed by id: a late event can never rewrite another message.
                     updateLastMessage(
                         messageId = turn.assistantMessageId,
-                        content = combineContentAndErrors(content.toString(), errors.toString()),
-                        reasoning = reasoning.toString().ifBlank { null },
+                        content = combineContentAndErrors(acc.content, acc.errors),
+                        reasoning = acc.reasoning.ifBlank { null },
                         isStreaming = true,
                         isThinking = _chatState.value == ChatState.THINKING,
-                        model = streamModel,
-                        mediaTasks = mediaTasks.toList()
+                        model = acc.model,
+                        mediaTasks = acc.mediaTasks
                     )
                 }
 
@@ -2300,12 +1621,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // must NOT be minted into the ledger via saveConversation, and the
                 // user turn gets the retry affordance. Real-content-also-arrived
                 // keeps the previous behavior (protects mid-stream transient errors).
-                val realContent = content.toString()
-                val errorText = errors.toString()
+                val realContent = acc.content
+                val errorText = acc.errors
                 val display = combineContentAndErrors(realContent, errorText)
                 val failedOutcome = streamOutcomeIsFailure(realContent, errorText)
 
-                if (turn.queued) {
+                if (acc.queued) {
                     // cu_queued (A04-chat-viewmodel-15): the reply streams into the
                     // running task's turn, so drop this empty bubble and save nothing.
                     // The task is still running; its CU status is left as it is.
@@ -2329,13 +1650,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 updateLastMessage(
                     messageId = turn.assistantMessageId,
                     content = display,
-                    reasoning = reasoning.toString().ifBlank { null },
+                    reasoning = acc.reasoning.ifBlank { null },
                     isStreaming = false,
                     isThinking = false,
-                    model = streamModel,
-                    tokens = tokenCount,
-                    provenance = provenance,
-                    mediaTasks = mediaTasks.toList()
+                    model = acc.model,
+                    tokens = acc.tokens,
+                    provenance = acc.provenance,
+                    mediaTasks = acc.mediaTasks
                 )
 
                 // Resolve media tasks — uses the robust resolver that handles
@@ -2361,7 +1682,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // nothing for an empty completion (A04-chat-viewmodel-15).
                     // provenance is forwarded so backend auto-mint records context lineage.
                     ledgerResponseFor(turn.provider, realContent)?.let { response ->
-                        saveConversation(turn, text, response, reasoning.toString(), streamModel, tokenCount, provenance)
+                        saveConversation(turn, text, response, acc.reasoning, acc.model, acc.tokens, acc.provenance)
                     }
 
                     // Persist to local storage
@@ -2369,8 +1690,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     // Auto-TTS: speak the response if enabled
                     // Matches Portal window.triggerAutoTTS() called after full response
-                    if (autoTtsEnabled && content.isNotBlank()) {
-                        _autoTtsEvent.tryEmit(content.toString())
+                    if (autoTtsEnabled && realContent.isNotBlank()) {
+                        _autoTtsEvent.tryEmit(realContent)
                     }
                 }
 
@@ -2382,7 +1703,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 stopBackgroundService()
                 updateLastMessage(
                     messageId = turn.assistantMessageId,
-                    content = combineContentAndErrors(content.toString(), errors.toString())
+                    content = combineContentAndErrors(acc.content, acc.errors)
                         .ifBlank { "Error: ${e.message}" },
                     isStreaming = false,
                     isThinking = false
@@ -2396,7 +1717,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _messages.value = markSendFailedOnUserTurn(
                         _messages.value,
                         userMsgId,
-                        usableContentArrived = content.isNotBlank(),
+                        usableContentArrived = acc.content.isNotBlank(),
                     )
                     // Persist so the error bubble + retry affordance survive a reload.
                     persistTurnHistory(turn)
@@ -2406,405 +1727,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // Process SSE Event — aligned with Portal's 30+ event type handler
+    // Apply one SSE event — the pure SseTurnReducer decides, this writes the flows
     // =========================================================================
-    private fun processSSEEvent(
-        event: SSEEvent,
-        turn: SseTurn,
-        content: StringBuilder,
-        reasoning: StringBuilder,
-        mediaTasks: MutableList<String>,
-        errors: StringBuilder,
-        onMeta: (model: String?, tokens: TokenCount?, provenance: Provenance?) -> Unit
-    ) {
-        when (event.event) {
-            // ── Stream lifecycle ──
-            "stream_start" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val model = obj["model"]?.jsonPrimitive?.content
-                    // The Signal: remember the REAL model id for the "generating ·" line
-                    // (presentation-only; never touches content/reasoning or the save payload).
-                    if (!model.isNullOrBlank()) signalModelLabel = model
-                    // Provenance is embedded in stream_start.data.provenance — backend
-                    // does NOT send a standalone "provenance" SSE event for /chat/stream
-                    // (the dead branch below is a defensive fallback for WS-bridged paths).
-                    val parsedProv = extractProvenanceFromStreamStart(event.data)
-                    onMeta(model, null, parsedProv)
-                    if (parsedProv != null) {
-                        Log.d(TAG, "stream_start provenance: " +
-                              "recent=${parsedProv.recent.size} " +
-                              "keyword=${parsedProv.keyword.size} " +
-                              "semantic=${parsedProv.semantic.size} " +
-                              "checkpoint=${parsedProv.checkpoint.size}")
-                    }
-                } catch (_: Exception) {}
-            }
-            "content_start" -> {
-                // Transition from thinking to content (Portal uses this as marker)
-                if (_chatState.value == ChatState.THINKING) {
-                    _chatState.value = ChatState.STREAMING
-                }
-                signalOnGenerating()
-            }
-            "content" -> {
-                signalOnGenerating() // first answer bytes → narrate generation (once)
-                content.append(event.data)
-                if (_chatState.value == ChatState.THINKING) {
-                    _chatState.value = ChatState.STREAMING
-                }
-            }
-            "stream_end" -> {
-                _chatState.value = ChatState.IDLE
-                _signalLabel.value = null // dissolve The Signal (ephemeral)
-            }
-            "done" -> {
-                // "done" carries the full accumulated response as fallback.
-                // Gemini: {"thinking": "...", "content": "..."}
-                // Anthropic/OpenAI: {"reasoning": "...", "content": "..."}
-                // If streaming missed content, this ensures we have the full response.
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val doneContent = obj["content"]?.jsonPrimitive?.content
-                    val doneThinking = obj["thinking"]?.jsonPrimitive?.content
-                        ?: obj["reasoning"]?.jsonPrimitive?.content
-                    // Use done content if our streaming buffer is empty or shorter —
-                    // except after cu_queue_next, when the buffer holds two replies.
-                    if (!turn.queueAppend && !doneContent.isNullOrBlank() && doneContent.length > content.length) {
-                        content.clear()
-                        content.append(doneContent)
-                    }
-                    if (!doneThinking.isNullOrBlank() && doneThinking.length > reasoning.length) {
-                        reasoning.clear()
-                        reasoning.append(doneThinking)
-                    }
-                } catch (_: Exception) {
-                    // done data might be a plain string — ignore parse failure
-                }
-                _chatState.value = ChatState.IDLE
-                _signalLabel.value = null // dissolve The Signal (ephemeral)
-                // Clear ER mission state when stream completes
-                if (turn.provider == "robotics") {
-                    _erMissionActive.value = false
-                }
-            }
-
-            // ── Thinking/reasoning ──
-            "thinking_start" -> {
-                _chatState.value = ChatState.THINKING
-            }
-            "thinking" -> {
-                reasoning.append(event.data)
-                if (_chatState.value != ChatState.THINKING) {
-                    _chatState.value = ChatState.THINKING
-                }
-            }
-            "thinking_end" -> {
-                // Thinking phase complete — content will follow
-                // State transitions to STREAMING on next content event
-            }
-
-            // ── Usage & metadata ──
-            "usage" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val prompt = obj["prompt_tokens"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                    val completion = obj["completion_tokens"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                    onMeta(null, TokenCount(prompt, completion), null)
-                } catch (_: Exception) {}
-            }
-            "provenance" -> {
-                val parsed = parseProvenance(event.data)
-                if (parsed != null) {
-                    onMeta(null, null, parsed)
-                    Log.d(TAG, "provenance: recent=${parsed.recent.size} " +
-                          "keyword=${parsed.keyword.size} semantic=${parsed.semantic.size} " +
-                          "checkpoint=${parsed.checkpoint.size}")
-                } else {
-                    Log.w(TAG, "provenance event unparseable: ${event.data.take(200)}")
-                }
-            }
-
-            // ── Media generation tasks ──
-            "image_task", "video_task", "music_task" -> {
-                // Backend returns task_id for async generation
-                // Prefix with type so placeholder knows which animation to show
-                val typePrefix = when (event.event) {
-                    "image_task" -> "image:"
-                    "video_task" -> "video:"
-                    "music_task" -> "music:"
-                    else -> ""
-                }
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val taskId = obj["task_id"]?.jsonPrimitive?.content
-                    if (taskId != null) {
-                        mediaTasks.add("$typePrefix$taskId")
-                        Log.d(TAG, "${event.event}: $taskId")
-                    }
-                } catch (_: Exception) {
-                    // task_id might be sent as plain string
-                    if (event.data.isNotBlank()) {
-                        mediaTasks.add("$typePrefix${event.data.trim()}")
-                    }
-                }
-            }
-
-            // ── Computer Use events — matches Portal chat-send.js ──
-            "cu_screenshot" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val url = obj["url"]?.jsonPrimitive?.content
-                    if (url != null) {
-                        val baseUrl = api?.getBaseUrl() ?: ""
-                        val fullUrl = if (url.startsWith("http")) url else "$baseUrl$url"
-                        _cuScreenshotUrl.value = "$fullUrl?t=${System.currentTimeMillis()}"
-                    }
-                    val step = obj["step"]?.jsonPrimitive?.content?.toIntOrNull()
-                    if (step != null) _cuStep.value = step
-                } catch (_: Exception) {}
-                _cuStatus.value = "running"
-                Log.d(TAG, "CU screenshot update")
-            }
-            "cu_action" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val action = obj["action"]?.jsonPrimitive?.content ?: ""
-                    val step = obj["step"]?.jsonPrimitive?.content?.toIntOrNull()
-                    _cuActionLabel.value = action
-                    if (step != null) _cuStep.value = step
-                    // Append action summary to content for chat history
-                    content.append("\n`[$action]` ")
-                } catch (_: Exception) {}
-                _cuStatus.value = "running"
-            }
-            "cu_bash_output" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val cmd = obj["command"]?.jsonPrimitive?.content ?: ""
-                    val output = obj["output"]?.jsonPrimitive?.content ?: ""
-                    content.append("\n```\n$ $cmd\n$output\n```\n")
-                } catch (_: Exception) {}
-            }
-            "cu_file_edit" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val cmd = obj["command"]?.jsonPrimitive?.content ?: "edit"
-                    val path = obj["path"]?.jsonPrimitive?.content ?: ""
-                    content.append("\n`[$cmd $path]` ")
-                } catch (_: Exception) {}
-            }
-            "cu_step" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    _cuStep.value = obj["step"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                    _cuStepTotal.value = obj["total"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                } catch (_: Exception) {}
-                _cuStatus.value = "running"
-            }
-            "cu_session" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val sessionId = obj["session_id"]?.jsonPrimitive?.content
-                    if (sessionId != null) _cuSessionId.value = sessionId
-                    val deviceId = obj["device_id"]?.jsonPrimitive?.content
-                    if (deviceId != null) _cuDeviceId.value = deviceId
-                } catch (_: Exception) {}
-            }
-            "cu_stopped", "cu_task_stopped" -> {
-                _cuStatus.value = "stopped"
-            }
-            // ── CU prompt queue — matches Portal chat-send.js ──
-            "cu_queued" -> {
-                // The box queued this prompt behind the running task; that task's
-                // stream carries the reply (cu_queue_next), so this turn ends empty
-                // and the finalize drops its placeholder instead of saving it.
-                turn.queued = true
-                val position = runCatching {
-                    json.parseToJsonElement(event.data).jsonObject["position"]?.jsonPrimitive?.content
-                }.getOrNull()
-                _cuActionLabel.value = if (position.isNullOrBlank()) "Prompt queued" else "Prompt queued (#$position)"
-            }
-            "cu_queue_next" -> {
-                // The running task picked up the next queued prompt: its reply
-                // streams into THIS bubble after a separator.
-                turn.queueAppend = true
-                val prompt = runCatching {
-                    json.parseToJsonElement(event.data).jsonObject["prompt"]?.jsonPrimitive?.content
-                }.getOrNull().orEmpty()
-                content.append(cuQueueSeparator(prompt))
-                _chatState.value = ChatState.STREAMING
-                _cuStatus.value = "running"
-            }
-
-            // ── Robotics ER events — matches Portal chat-send.js ──
-            "er_frame" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val image = obj["image"]?.jsonPrimitive?.content
-                    val camera = obj["camera"]?.jsonPrimitive?.content
-                    if (image != null) _erCameraFrame.value = image
-                    if (camera != null) _erCamera.value = camera
-                } catch (_: Exception) {}
-                _erStatus.value = "connected"
-                Log.d(TAG, "ER camera frame received")
-            }
-            "er_reasoning" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val text = obj["text"]?.jsonPrimitive?.content ?: ""
-                    _erReasoning.value = text
-                    Log.d(TAG, "ER reasoning: ${text.take(80)}...")
-                } catch (_: Exception) {}
-                _erStatus.value = "connected"
-            }
-            "er_action" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val tool = obj["tool"]?.jsonPrimitive?.content ?: ""
-                    val args = obj["args"]?.toString() ?: ""
-                    val status = obj["status"]?.jsonPrimitive?.content ?: "executing"
-                    content.append("\n`[$tool]` $args → $status ")
-                } catch (_: Exception) {}
-                _erStatus.value = "connected"
-            }
-            "er_status" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val state = obj["state"]?.jsonPrimitive?.content ?: "idle"
-                    _erStatus.value = state
-                } catch (_: Exception) {}
-            }
-            "er_error" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val error = obj["error"]?.jsonPrimitive?.content ?: "Unknown robot error"
-                    content.append("\n\n**Robot Error:** $error")
-                    _erStatus.value = "offline"
-                } catch (_: Exception) {}
-            }
-            "er_mission_start" -> {
-                _erMissionActive.value = true
-                _erStatus.value = "mission_active"
-                Log.d(TAG, "ER mission started")
-            }
-            "er_stopped" -> {
-                _erMissionActive.value = false
-                _erStatus.value = "stopped"
-                Log.d(TAG, "ER mission stopped")
-            }
-            "er_timeout" -> {
-                _erMissionActive.value = false
-                _erStatus.value = "timeout"
-                Log.d(TAG, "ER mission timed out")
-            }
-            "er_queued" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val pos = obj["position"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1
-                    Log.d(TAG, "ER prompt queued at position $pos")
-                } catch (_: Exception) {}
-            }
-            "er_prompt_injected" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val injText = obj["text"]?.jsonPrimitive?.content ?: ""
-                    Log.d(TAG, "ER prompt injected: ${injText.take(80)}")
-                } catch (_: Exception) {}
-            }
-            "er_nav_status" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val goalStatus = obj["goal_status"]?.jsonPrimitive?.content ?: ""
-                    Log.d(TAG, "ER nav: $goalStatus")
-                    _erStatus.value = "navigating"
-                } catch (_: Exception) {}
-            }
-            "er_session" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val sessionId = obj["session_id"]?.jsonPrimitive?.content
-                    Log.d(TAG, "ER session: $sessionId")
-                } catch (_: Exception) {}
-            }
-
-            // ── Keep-alive ──
-            "heartbeat" -> {
-                // Ignore — just prevents connection timeout
-            }
-
-            // ── Error ──
-            "error" -> {
-                // Accumulated SEPARATELY from real content: the bubble still renders
-                // content+errors (combineContentAndErrors), but an error-only stream
-                // must finalize as a FAILURE — never stomped to IDLE, never minted
-                // into the ledger via saveConversation, and it must not defeat the
-                // usableContentArrived check that drives the retry affordance.
-                if (errors.isNotEmpty()) errors.append("\n\n")
-                errors.append(event.data)
-                _chatState.value = ChatState.ERROR
-            }
-
-            // ── "The Signal" — presentation-only telemetry HUD (Phase 2) ──
-            // These three branches drive the morphing red line ONLY. HARD RULE:
-            // they must NEVER append to content/reasoning, feed the /chat/save
-            // payload, or reach the ledger — this telemetry is display-only and
-            // is held solely in the transient _signalLabel flow.
-            "system_activity" -> {
-                // data = { stage, label, detail, seq } (JSON OBJECT — see
-                // Orchestrator/telemetry_events.py). SSEClient.decodeJsonData returns
-                // objects verbatim; we parse and render ONLY the label. pushSignal
-                // no-ops on computer-use turns (kept dark, matching web).
-                parseSignalLabel(event.data)?.let { pushSignal(it) }
-            }
-            "tool_start" -> {
-                // data = the tool name (a JSON-encoded string → decodeJsonData already
-                // stripped the outer quotes). Remember it for the "· ok" echo.
-                // Web-parity tolerance: if the payload ever becomes an OBJECT
-                // ({name}/{tool} — the planned structured tool events), read the
-                // name field instead of splashing raw JSON onto the HUD.
-                val raw = event.data.trim()
-                val toolName = if (raw.startsWith("{")) {
-                    try {
-                        val obj = org.json.JSONObject(raw)
-                        obj.optString("name").ifBlank { obj.optString("tool") }
-                    } catch (_: Exception) { "" }
-                } else raw
-                if (toolName.isNotBlank()) {
-                    signalLastTool = toolName
-                    pushSignal("tool · $toolName")
-                }
-            }
-            "tool_result" -> {
-                // Echo the last tool name as done; else fall back to a trimmed blurb.
-                if (signalLastTool.isNotBlank()) {
-                    pushSignal("tool · $signalLastTool · ok")
-                } else {
-                    val d = event.data.trim()
-                    if (d.isNotBlank()) {
-                        pushSignal("tool · " + (if (d.length > 40) d.substring(0, 40) else d))
-                    }
-                }
-            }
-
-            // ── Unknown events — log but don't crash ──
-            else -> {
-                Log.d(TAG, "Unhandled SSE event: ${event.event}")
-            }
-        }
-    }
-
     /**
-     * Push the "generating · <model>" line onto The Signal exactly once per turn
-     * (on content_start or the first content byte). Presentation-only: the model
-     * label is the real id captured from stream_start; this never touches content,
-     * reasoning, or any persisted/saved payload.
+     * Fold [event] into [turnState] through [SseTurnReducer] (the Portal-aligned handler
+     * for the 30+ event types, pure since rank 76) and write the UI state it returns.
      */
-    private fun signalOnGenerating() {
-        if (!signalGenerating) {
-            signalGenerating = true
-            pushSignal("generating · $signalModelLabel")
+    private fun applySseEvent(turnState: SseTurnState, event: SSEEvent, provider: String): SseTurnState {
+        val step = SseTurnReducer.reduce(
+            turnState, event, _chatState.value, provider, api?.getBaseUrl() ?: "", System.currentTimeMillis(),
+        )
+        step.chatState?.let { _chatState.value = it }
+        when (val s = step.signal) {
+            SignalUpdate.Unchanged -> Unit
+            is SignalUpdate.Show -> _signalLabel.value = s.label
+            SignalUpdate.Clear -> _signalLabel.value = null
         }
+        step.cu.let { cu ->
+            cu.screenshotUrl?.let { _cuScreenshotUrl.value = it }
+            cu.step?.let { _cuStep.value = it }
+            cu.stepTotal?.let { _cuStepTotal.value = it }
+            cu.status?.let { _cuStatus.value = it }
+            cu.actionLabel?.let { _cuActionLabel.value = it }
+            cu.sessionId?.let { _cuSessionId.value = it }
+            cu.deviceId?.let { _cuDeviceId.value = it }
+        }
+        step.er.let { er ->
+            er.cameraFrame?.let { _erCameraFrame.value = it }
+            er.camera?.let { _erCamera.value = it }
+            er.reasoning?.let { _erReasoning.value = it }
+            er.status?.let { _erStatus.value = it }
+            er.missionActive?.let { _erMissionActive.value = it }
+        }
+        return step.turn
     }
 
     /**
@@ -2948,7 +1903,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // dropped when the turn is cancelled. The normal turn-completion path
         // (runLocalEngineTurn) is SKIPPED on cancel, so apply it here. Guarded
         // no-op when nothing is pending.
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _messages.value = emptyList()
         _chatState.value = ChatState.IDLE
         viewModelScope.launch { historyStore.clear(currentOperator) }
@@ -2971,7 +1926,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun clearLocalConversation() {
         streamJob?.cancel()
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _chatState.value = ChatState.IDLE
         val op = currentOperator
         viewModelScope.launch {
@@ -2990,7 +1945,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // I1 (final-pass review): see clearHistory -- a mid-turn model switch
         // (localReWarmAction -> DEFER) is applied at turn completion, which a
         // STOP skips; apply the pending re-warm here. Guarded no-op otherwise.
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _chatState.value = ChatState.IDLE
         updateLastMessage(
             content = _messages.value.lastOrNull()?.content ?: "",
@@ -3081,10 +2036,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Remove a completed media task from pending list */
-    fun completeMediaTask(taskId: String) {
-        _pendingMediaTasks.value = _pendingMediaTasks.value - taskId
-        _activeTasks.value = _activeTasks.value.filter { it.taskId != taskId }
-    }
+    fun completeMediaTask(taskId: String) = tasks.completeMediaTask(taskId)
 
     /**
      * G3-T13 (M3.3): STOP a single active task from the TaskPanel. Fires the REAL
@@ -3105,133 +2057,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Replace a media task placeholder with actual media content in the message.
-     * Finds the message containing this taskId, adds the result URL to images/content,
-     * and removes the task from mediaTasks so the placeholder disappears.
+     * Replace a media task placeholder with its media at [url] (absolute: the poller
+     * resolves it against the box) — [TaskDiscovery.resolveMediaEntry] — and save.
      */
-    private fun resolveMediaTaskInMessage(taskId: String, taskType: String?, resultUrl: String) {
-        val current = _messages.value.toMutableList()
-        // The task entry in mediaTasks is prefixed with type: "image:taskId"
-        val prefixedEntries = listOf("image:$taskId", "video:$taskId", "music:$taskId", taskId)
-
-        for (i in current.indices) {
-            val msg = current[i]
-            val matchingEntry = msg.mediaTasks.firstOrNull { entry ->
-                prefixedEntries.any { prefix -> entry == prefix || entry.endsWith(taskId) }
-            }
-            if (matchingEntry != null) {
-                // Determine media type from the prefix or taskType
-                val isImage = matchingEntry.startsWith("image:") ||
-                    taskType?.contains("image", true) == true ||
-                    resultUrl.matches(Regex(".*\\.(png|jpg|jpeg|webp|gif)$", RegexOption.IGNORE_CASE))
-                val isAudio = matchingEntry.startsWith("music:") ||
-                    taskType?.contains("music", true) == true ||
-                    resultUrl.matches(Regex(".*\\.(wav|mp3|m4a|ogg|flac)$", RegexOption.IGNORE_CASE))
-
-                // Build full URL if relative
-                val fullUrl = if (resultUrl.startsWith("http")) resultUrl
-                    else "${api?.getBaseUrl() ?: ""}$resultUrl"
-
-                val updatedMsg = if (isImage) {
-                    // Add to images list — ChatBubble renders these with AsyncImage
-                    msg.copy(
-                        images = msg.images + fullUrl,
-                        mediaTasks = msg.mediaTasks.filter { it != matchingEntry }
-                    )
-                } else {
-                    // Video/audio — append URL to content so inline media extractor renders it
-                    val urlLine = "\n$fullUrl\n"
-                    msg.copy(
-                        content = msg.content + urlLine,
-                        mediaTasks = msg.mediaTasks.filter { it != matchingEntry }
-                    )
-                }
-                current[i] = updatedMsg
-                _messages.value = current
-                persistHistory()
-                Log.d(TAG, "Resolved media task $taskId → $fullUrl (${if (isImage) "image" else "media"})")
-                return
-            }
+    private fun resolveMediaTaskInMessage(taskId: String, taskType: String?, url: String) {
+        val updated = TaskDiscovery.resolveMediaEntry(_messages.value, taskId, taskType, url)
+        if (updated == null) {
+            Log.w(TAG, "No message found for task $taskId — result URL: $url")
+            return
         }
-        Log.w(TAG, "No message found for task $taskId — result URL: $resultUrl")
+        _messages.value = updated
+        persistHistory()
+        Log.d(TAG, "Resolved media task $taskId → $url")
     }
 
     /** Remove a failed task's placeholder from the message. */
     private fun removeMediaTaskFromMessage(taskId: String) {
-        val current = _messages.value.toMutableList()
-        for (i in current.indices) {
-            val msg = current[i]
-            val matchingEntry = msg.mediaTasks.firstOrNull { it.endsWith(taskId) || it == taskId }
-            if (matchingEntry != null) {
-                current[i] = msg.copy(
-                    mediaTasks = msg.mediaTasks.filter { it != matchingEntry }
-                )
-                _messages.value = current
-                return
-            }
-        }
+        TaskDiscovery.dropMediaEntry(_messages.value, taskId)?.let { _messages.value = it }
     }
 
     /**
      * Start polling a task. Called when media tasks arrive from SSE or generation screens.
      * Matches Portal's TaskManager 3-second polling loop.
      */
-    fun startTaskPolling(taskId: String, taskType: String? = null) {
-        val repo = taskRepository ?: return
-        // Skip if already tracking this task
-        if (_activeTasks.value.any { it.taskId == taskId }) return
-        // Add to pending
-        if (taskId !in _pendingMediaTasks.value) {
-            _pendingMediaTasks.value = _pendingMediaTasks.value + taskId
-        }
-        // Add initial status to active tasks
-        val initial = TaskStatus(
-            taskId = taskId,
-            taskType = taskType,
-            status = "pending"
-        )
-        _activeTasks.value = _activeTasks.value + initial
-
-        // Start polling flow
-        viewModelScope.launch {
-            try {
-                repo.pollTask(taskId, intervalMs = 1500).collect { status ->
-                    // Update active tasks list
-                    _activeTasks.value = _activeTasks.value.map {
-                        if (it.taskId == taskId) status else it
-                    }
-
-                    val isDone = status.status.equals("completed", true)
-                    val isFailed = status.status.equals("failed", true)
-                    // 'cancelled' is terminal (G2-T8): must end the poll and clean
-                    // up the placeholder, or the flow collects forever.
-                    val isCancelled = status.status.equals("cancelled", true)
-                    if (isDone || isFailed || isCancelled) {
-                        // Emit completion event for notifications — but NOT for a
-                        // cancel: it is operator-initiated, so a push notification
-                        // about the thing they just stopped is noise (and the
-                        // consumer would render any non-completed status as
-                        // "Failed"). Matches the backend suppress. G2-T8.
-                        if (!isCancelled) _taskCompletedEvent.tryEmit(status)
-
-                        // Replace placeholder with actual media in the message
-                        if (isDone && status.resultUrl != null) {
-                            resolveMediaTaskInMessage(taskId, taskType, status.resultUrl!!)
-                        } else {
-                            // Failed or cancelled — just remove the placeholder
-                            removeMediaTaskFromMessage(taskId)
-                        }
-
-                        delay(2000)
-                        completeMediaTask(taskId)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Task polling failed for $taskId: ${e.message}")
-                completeMediaTask(taskId)
-            }
-        }
-    }
+    fun startTaskPolling(taskId: String, taskType: String? = null) = tasks.startTaskPolling(taskId, taskType)
 
     /** Set the TTS audio URL on a specific message by ID, triggering the inline player */
     fun setMessageTtsAudioUrl(messageId: String, audioUrl: String) {
@@ -3300,21 +2149,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // Dynamic model fetching — matches Portal fetchAvailableModels()
+    // Model catalog — the shared ModelCatalogRepository (rank 76)
     // =========================================================================
 
-    // In-memory cache for fetched model lists (5min TTL — same as web sessionStorage).
-    // Survives provider-switching within a session but NOT app restart (intentional —
-    // restart implies operator may have switched API keys).
-    private val modelsCache = mutableMapOf<String, Pair<Long, List<Pair<String, String>>>>()
-    private val MODELS_CACHE_TTL_MS = 5 * 60 * 1_000L
-
-    // CU backends map cached alongside modelsCache (same key + lifetime).
-    // Caching choice: a parallel map (vs widening modelsCache's value type)
-    // keeps the existing 4-provider cache code path byte-identical; the raw
-    // JSON isn't retained so the map can't be re-derived on a cache hit.
-    private val cuBackendsCache = mutableMapOf<String, Map<String, String>>()
-
+    /**
+     * Hydrate the composer's model list for [provider] from the shared catalog
+     * (ModelCatalogs: one copy for chat, Settings, cron, SMS and CU, a 5-minute TTL and a
+     * last-good copy on disk). The known copy is published at once, so a switch never
+     * shows the previous provider's models while the fetch runs (it used to); with none
+     * known the list is empty and the composer shows Constants' Auto seed. Custom is
+     * never cached: its list is empty until the box answers, and stays empty when the
+     * registry is (Portal parity, 4240459).
+     *
+     * A fresh live catalog also replaces the stored picks it no longer lists
+     * (BlackBoxStore.reconcileModelIds: same-family successor, else Auto).
+     */
     private fun fetchLiveModels(provider: String) {
         val currentApi = api ?: return
         val apiProvider = mapProviderForApi(provider)
@@ -3332,132 +2181,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _liveModels.value = emptyList()
             return
         }
-
-        // Custom never touches the 5-min cache — read OR write: servers are
-        // added/removed in the wizard and models load/unload between switches,
-        // so the roster+status must stay live (mirrors the Portal's skipCache
-        // and CronViewModel.selectProvider, bypass-all-caches rule).
-        val skipCache = apiProvider == "custom"
-
-        // Cache hit — instant population, no network
-        val cached = modelsCache[apiProvider]
-        val now = System.currentTimeMillis()
-        if (!skipCache && cached != null && now - cached.first < MODELS_CACHE_TTL_MS) {
-            _liveModels.value = cached.second
-            if (apiProvider == "computer-use") {
-                _cuModelBackends.value = cuBackendsCache[apiProvider] ?: emptyMap()
-            }
-            Log.d(TAG, "Models cache hit for $provider (age ${(now - cached.first) / 1000}s)")
-            return
-        }
-
-        if (skipCache) {
-            // Empty-catalog staleness fix (Portal parity, commit 4240459):
-            // _liveModels still holds the PREVIOUS provider's list here, and —
-            // unlike the other providers, where keeping it during the fetch is
-            // the intended fallback — those ids are meaningless as custom
-            // models. Clear eagerly so the pill falls back to Constants' Auto
-            // entry until the live roster arrives, and STAYS clear if the
-            // registry is empty or the box is unreachable (before this fix an
-            // empty/dead registry kept the previous provider's models
-            // selectable as "custom" models forever).
-            _liveModels.value = emptyList()
-            _customModelStatus.value = emptyMap()
-        }
+        val catalogs = ModelCatalogs.forApi(currentApi)
+        publishCatalog(apiProvider, catalogs.cached(apiProvider))
 
         viewModelScope.launch {
-            try {
-                val response = currentApi.get("/models/$apiProvider")
-                // Stale-response guard (CronViewModel's providerForCurrentList
-                // is the in-repo precedent): a late-arriving 200 from a previous
-                // provider's in-flight fetch must not clobber the list a newer
-                // switch owns — and with custom never cache-hitting, every
-                // visit-then-leave of custom opens that window. Both
-                // currentProvider writes (store.provider collector) and this
-                // coroutine run on Main, so the check is race-free.
-                if (provider != currentProvider) return@launch // stale response; a newer switch owns the UI
-                val obj = json.parseToJsonElement(response).jsonObject
-                val modelsArr = obj["models"]?.jsonArray ?: return@launch
-                val models = modelsArr.mapNotNull { el ->
-                    try {
-                        val m = el.jsonObject
-                        val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                        val name = m["name"]?.jsonPrimitive?.content ?: id
-                        id to name
-                    } catch (_: Exception) { null }
-                }
-                if (apiProvider == "custom") {
-                    // Custom hydrates UNCONDITIONALLY on a 200 (Portal parity,
-                    // 4240459): an EMPTY models list is real state (all servers
-                    // removed in the wizard) and must clear the roster. Zero
-                    // models → no Auto entry either (nothing for the backend to
-                    // resolve "" to); the Composer then shows Constants' seed.
-                    val statuses = modelsArr.mapNotNull { el ->
-                        try {
-                            val m = el.jsonObject
-                            val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                            // Tolerant: absent OR null status → not in the map
-                            // (contentOrNull turns JsonNull into null).
-                            val status = m["status"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                            id to status
-                        } catch (_: Exception) { null }
-                    }.toMap()
-                    val withAuto = if (models.isEmpty()) emptyList() else {
-                        // Auto ("") resolves server-side to the registry default —
-                        // label it with the default model's name when known
-                        // (mirrors CronViewModel.selectProvider + the CU branch).
-                        val defaultId = obj["default_id"]?.jsonPrimitive?.contentOrNull
-                        val defaultName = models.firstOrNull { it.first == defaultId }?.second
-                        listOf("" to (defaultName?.let { "Auto - $it" } ?: "Auto - Latest")) + models
-                    }
-                    // Adjacent writes, no suspension point between them — same
-                    // atomic-w.r.t.-composition rationale as the CU branch below.
-                    _liveModels.value = withAuto
-                    _customModelStatus.value = statuses
-                    // Never cached — roster/status must stay live (see skipCache).
-                    Log.d(TAG, "Fetched ${models.size} live custom models (${statuses.count { it.value == "loaded" }} loaded)")
-                } else if (models.isNotEmpty()) {
-                    if (apiProvider == "computer-use") {
-                        // CU: backend partition map + default-aware Auto label
-                        // (mirrors Portal buildHydratedModels, state-management.js)
-                        val backends = modelsArr.mapNotNull { el ->
-                            try {
-                                val m = el.jsonObject
-                                val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                                val backend = m["backend"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                                id to backend
-                            } catch (_: Exception) { null }
-                        }.toMap().toMutableMap()
-                        val defaultId = obj["default_id"]?.jsonPrimitive?.content
-                        val defaultName = models.firstOrNull { it.first == defaultId }?.second
-                        // Auto ("") resolves server-side to the default model →
-                        // it lives in the default model's backend group.
-                        backends[""] = defaultId?.let { backends[it] } ?: "anthropic"
-                        val autoLabel = if (defaultName != null) "Auto - $defaultName" else "Auto - Latest"
-                        val withAuto = listOf("" to autoLabel) + models
-                        // The two writes below have no suspension point between
-                        // them and run on the main thread, so composition never
-                        // observes the new list paired with a stale backends map
-                        // (the writes are atomic w.r.t. composition).
-                        _liveModels.value = withAuto
-                        _cuModelBackends.value = backends
-                        modelsCache[apiProvider] = System.currentTimeMillis() to withAuto
-                        cuBackendsCache[apiProvider] = backends
-                    } else {
-                        // Prepend "Auto" option
-                        val withAuto = listOf("" to "Auto - Latest") + models
-                        _liveModels.value = withAuto
-                        modelsCache[apiProvider] = System.currentTimeMillis() to withAuto
-                    }
-                    Log.d(TAG, "Fetched ${models.size} live models for $provider (source=${obj["source"]?.jsonPrimitive?.content ?: "?"})")
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Model fetch failed for $provider, using defaults: ${e.message}")
-                // Keep whatever's in liveModels (could be from Constants fallback).
-                // For custom that is the EMPTY list published eagerly above —
-                // never a stale roster; the Composer shows Constants' Auto seed.
-            }
+            val catalog = catalogs.refresh(apiProvider) ?: return@launch // keep what is shown
+            // Stale-response guard: a late answer for a provider the user already left
+            // must not overwrite the list a newer switch owns. Both this and the
+            // store.provider collector run on Main, so the check is race-free.
+            if (provider != currentProvider) return@launch
+            publishCatalog(apiProvider, catalog)
+            if (catalog.isAuthoritative) store.reconcileModelIds(provider, catalog.ids)
+            Log.d(TAG, "Models for $provider: ${catalog.models.size} (source=${catalog.source ?: "?"})")
         }
+    }
+
+    /**
+     * The composer's list, CU backends and custom load statuses from [catalog] (null =
+     * none known), in adjacent writes with no suspension point between them, so
+     * composition never sees the new list beside a stale backends map.
+     */
+    private fun publishCatalog(apiProvider: String, catalog: ModelCatalog?) {
+        _liveModels.value = catalog?.options().orEmpty()
+        if (apiProvider == ModelCatalog.COMPUTER_USE) _cuModelBackends.value = catalog?.backends().orEmpty()
+        if (apiProvider == ModelCatalog.CUSTOM) _customModelStatus.value = catalog?.statuses().orEmpty()
     }
 
     // =========================================================================
@@ -3737,49 +2484,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             else -> "stopped"
         }
 
-        /** Map provider IDs to the backend's expected provider key.
-         *  Note: Android uses "gemini" as provider key but backend uses "google".
-         *  T3 (2026-05-18) added xai mapping — previously a gap that left
-         *  the xai dropdown stuck on the malformed Constants.MODEL_CONFIG
-         *  fallback (which had IDs like "grok-4.1-fast" that don't exist
-         *  in the xAI API). Pure (companion) so the mapping is unit-testable
-         *  without the ViewModel — the same unknown→null trap would otherwise
-         *  silently no-op a new provider's hydration (it did for custom). */
+        /** The box's catalog key for an app provider id (gemini is "google" there); null for
+         *  providers with no /models endpoint. One mapping for every picker:
+         *  ModelCatalogRepository.apiProviderFor. Kept here for the chat's callers and tests. */
         @VisibleForTesting
-        internal fun mapProviderForApi(provider: String): String? = when (provider) {
-            "gemini" -> "google"
-            "anthropic" -> "anthropic"
-            "openai" -> "openai"
-            "xai" -> "xai"
-            // CU production pass 2026-06: the backend exposes GET /models/computer-use
-            // (merged live Anthropic/Google/OpenAI CU catalogs with `backend` field).
-            "computer-use" -> "computer-use"
-            // Task 7.1: user-registered OpenAI-compatible servers — the backend
-            // exposes GET /models/custom (registry roster + `status` field).
-            "custom" -> "custom"
-            else -> null // Voice/agent providers don't have model endpoints
-        }
+        internal fun mapProviderForApi(provider: String): String? =
+            ModelCatalogRepository.apiProviderFor(provider)
 
         /**
-         * W22: the ids on [provider]'s LIVE model list — the same GET /models/{apiProvider}
-         * the pill's dropdown hydrates from — for the provider-switch restore
-         * (BlackBoxStore.setProviderAndModel). The composer pill and the Settings sheet both
-         * pass this. Null when the list is not known (no api yet, no model endpoint for the
-         * provider, request or parse failure), so the switch stays on Auto.
+         * W22: the ids on [provider]'s LIVE model list — the same shared catalog the pill's
+         * dropdown hydrates from (ModelCatalogs, GET /models/{apiProvider}) — for the
+         * provider-switch restore (BlackBoxStore.setProviderAndModel). The composer pill and
+         * the Settings sheet both pass this. Null when the list is not known (no api yet, no
+         * model endpoint for the provider, request or parse failure), so the switch stays on
+         * Auto; never the disk copy, which may predate a model the box dropped.
          */
         internal suspend fun fetchLiveModelIds(api: BlackBoxApi?, provider: String): List<String>? {
             val apiProvider = mapProviderForApi(provider) ?: return null
             val currentApi = api ?: return null
-            return try {
-                val models = Json.parseToJsonElement(currentApi.get("/models/$apiProvider"))
-                    .jsonObject["models"]?.jsonArray ?: return null
-                models.mapNotNull { (it as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.d(TAG, "Live model ids unavailable for $provider: ${e.message}")
-                null
-            }
+            return ModelCatalogs.forApi(currentApi).liveIds(apiProvider)
         }
 
         /**
@@ -3855,7 +2578,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * ViewModel and without org.json (which is unmocked in local JVM tests).
          * Returns null on a blank/missing label or unparseable data.
          */
-        @VisibleForTesting
         internal fun parseSignalLabel(data: String): String? = try {
             signalJson.parseToJsonElement(data).jsonObject["label"]
                 ?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
@@ -3880,7 +2602,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * indicator / todo panel / Live View) — mirroring web, which destroys the
          * Signal line for provider === 'computer-use'. Pure for unit tests.
          */
-        @VisibleForTesting
         internal fun signalSuppressedForProvider(provider: String): Boolean =
             provider == "computer-use"
 
@@ -4176,15 +2897,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Provider tag for on-device turns (logging / save traceability). */
         const val LOCAL_PROVIDER_ID = "local"
-
-        // M3 serialization ([localProviderOrWire] waits for the foreground service's
-        // SINGLE warm rather than racing it with a 2nd concurrent engine build — the
-        // double-warm that OOM'd the device on launch). HEADSTART covers the async gap
-        // between LocalModelService.start() and the service publishing its warming
-        // marker; GRACE caps the wait for a slow GPU cold load; POLL is the check tick.
-        private const val SERVICE_WARM_HEADSTART_MS = 2_500L
-        private const val SERVICE_WARM_GRACE_MS = 90_000L
-        private const val SERVICE_WARM_POLL_MS = 200L
 
         /**
          * Friendly text appended to the (possibly partial) reply when the on-device

@@ -8,7 +8,7 @@ import com.aiblackbox.portal.data.model.TaskResponse
 import com.aiblackbox.portal.data.model.TaskStatus
 import com.aiblackbox.portal.data.repository.LOST_CONNECTION_MESSAGE
 import com.aiblackbox.portal.data.repository.TaskPollOutcome
-import com.aiblackbox.portal.data.repository.TaskRepository
+import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.repository.ImageCatalogProvider
 import com.aiblackbox.portal.data.repository.ImageCatalogRepository
 import com.aiblackbox.portal.data.repository.awaitTaskOutcome
@@ -68,7 +68,7 @@ fun mediaUrlsFor(status: TaskStatus?, origin: String): List<String> {
 class GenerationViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
     private var api: BlackBoxApi? = null
-    private var taskRepo: TaskRepository? = null
+    private var poller: TaskPoller? = null
     private var imageCatalogRepo: ImageCatalogRepository? = null
 
     private val _state = MutableStateFlow(GenState.IDLE)
@@ -117,7 +117,7 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
         if (origin.isBlank() || api != null) return
         this.origin = origin
         api = BlackBoxApi(origin)
-        taskRepo = TaskRepository(api!!)
+        poller = TaskPoller(api!!)
         imageCatalogRepo = ImageCatalogRepository(api!!)
         loadImageCatalog()
     }
@@ -308,15 +308,17 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
      * Poll [taskId] to its end. A dropped connection no longer escapes this launch
      * (A11-settings-generation-01 — it killed the process): the shared poller retries
      * transient failures and ends every poll as an outcome, mapped by [genResultFor].
+     * The result URL comes back absolute: the box stores `/ui/uploads/...`, which the
+     * image loader and the players cannot open on their own.
      */
     private fun pollTask(taskId: String) {
-        val repo = taskRepo ?: return
+        val p = poller ?: return
         pollJob?.cancel()
         polledTaskId = taskId
         _state.value = GenState.POLLING
         _error.value = null
         pollJob = viewModelScope.launch {
-            val result = pollToResult(repo.pollTask(taskId)) { status -> _taskStatus.value = status }
+            val result = pollToResult(p.poll(taskId), p::absolute) { status -> _taskStatus.value = status }
             if (result.state == GenState.COMPLETED) {
                 // Absolute, and every image of a multi-image result (A11-settings-generation-03).
                 val urls = mediaUrlsFor(_taskStatus.value, origin)
@@ -355,11 +357,12 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
         /** Collect [poll] to its end (statuses to [onStatus]) and map it — the poller's pure core. */
         internal suspend fun pollToResult(
             poll: Flow<TaskStatus>,
+            absolutize: (String?) -> String? = { it },
             onStatus: (TaskStatus) -> Unit = {},
-        ): GenResult = genResultFor(awaitTaskOutcome(poll, onStatus))
+        ): GenResult = genResultFor(awaitTaskOutcome(poll, absolutize, onStatus))
 
         internal fun genResultFor(outcome: TaskPollOutcome): GenResult = when (outcome) {
-            is TaskPollOutcome.Completed -> GenResult(GenState.COMPLETED, outcome.status.resultUrl, null)
+            is TaskPollOutcome.Completed -> GenResult(GenState.COMPLETED, outcome.resultUrl, null)
             is TaskPollOutcome.Failed -> GenResult(GenState.FAILED, null, outcome.message)
             TaskPollOutcome.Cancelled -> GenResult(GenState.CANCELLED, null, null)
             // Only the connection was lost; the task keeps running on the box and its

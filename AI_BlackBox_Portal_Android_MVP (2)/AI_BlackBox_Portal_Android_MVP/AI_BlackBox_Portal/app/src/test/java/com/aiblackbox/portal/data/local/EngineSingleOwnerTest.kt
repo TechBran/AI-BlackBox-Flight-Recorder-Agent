@@ -268,12 +268,16 @@ class EngineSingleOwnerTest {
     // ── wiring: every load goes through the one warm ─────────────────────────
 
     @Test fun `the chat keeps a cancelled load, matches config and refuses stale borrows`() {
+        // The chat's engine side is LocalEngineCoordinator (out of ChatViewModel, rank 76),
+        // built on the view model's own scope.
         val vm = source("$root/ui/chat/ChatViewModel.kt")
-        val load = vm.substring(vm.indexOf("private suspend fun loadWiredLocalEngine("))
+        assertTrue("scope = viewModelScope," in vm.substringAfter("LocalEngineCoordinator(").substringBefore(")\n"))
+        val chatEngine = source("$root/ui/chat/LocalEngineCoordinator.kt")
+        val load = chatEngine.substring(chatEngine.indexOf("suspend fun loadWired("))
         val body = load.substring(0, load.indexOf("\n    }\n"))
-        assertTrue("a STOP keeps the engine while the VM lives", "keepIfCancelled = { viewModelScope.isActive }" in body)
+        assertTrue("a STOP keeps the engine while the VM lives", "keepIfCancelled = { scope.isActive }" in body)
         assertTrue("and still ends the turn", "ensureActive()" in body)
-        assertTrue("the borrow checks the held engine's settings", "engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath, heldConfigMatches)" in vm)
+        assertTrue("the borrow checks the held engine's settings", "engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath, heldConfigMatches)" in chatEngine)
         val warm = source("$root/data/local/EngineWarm.kt")
         assertTrue("the process warm reuses only a same-config engine", "sameConfig = { held, wanted -> held.configKey == wanted.configKey }" in warm)
     }
@@ -295,29 +299,37 @@ class EngineSingleOwnerTest {
 
     @Test fun `the service, the control_phone wake and the chat all load through pinWarmEngine`() {
         val vm = source("$root/ui/chat/ChatViewModel.kt")
+        // The chat's engine side moved out of the view model (rank 76).
+        val chatEngine = source("$root/ui/chat/LocalEngineCoordinator.kt")
         val service = source("$root/LocalModelService.kt")
         val wake = source("$root/data/local/EngineWarm.kt")
         // Code only: KDoc and comments may still describe engine.load(...).
         fun code(src: String) = src.lines()
             .filterNot { it.trimStart().startsWith("*") || it.trimStart().startsWith("/*") }
             .joinToString("\n") { it.substringBefore("//") }
-        for ((label, src) in listOf("ChatViewModel" to vm, "LocalModelService" to service)) {
+        for ((label, src) in listOf("ChatViewModel" to vm, "LocalEngineCoordinator" to chatEngine, "LocalModelService" to service)) {
             assertFalse("$label must not load an engine itself", Regex("\\b\\w*[eE]ngine\\w*\\.load\\(").containsMatchIn(code(src)))
+        }
+        for ((label, src) in listOf("LocalEngineCoordinator" to chatEngine, "LocalModelService" to service)) {
             assertTrue("$label loads through the one warm", "pinWarmEngine(" in src)
         }
+        assertTrue("the chat loads through its coordinator", "engines.loadWired()" in vm)
         val ensure = wake.substring(wake.indexOf("suspend fun ensureWarmEngine("))
         assertTrue("the control_phone wake loads through the one warm", "pinWarmEngine(" in ensure.substring(0, ensure.indexOf("\n}\n")))
         assertFalse("the wake no longer builds and loads on its own", "engine.load(" in wake)
     }
 
     @Test fun `the chat's engine wiring is single-flight and a re-warm waits for the old warm`() {
-        val vm = source("$root/ui/chat/ChatViewModel.kt")
-        val wire = vm.substring(vm.indexOf("private suspend fun localProviderOrWire("))
+        val engines = source("$root/ui/chat/LocalEngineCoordinator.kt")
+        val wire = engines.substring(engines.indexOf("suspend fun providerOrWire("))
         assertTrue("wiring runs under one mutex", "engineWiringMutex.withLock" in wire.substring(0, 400))
-        val rewarm = vm.substring(vm.indexOf("private fun reWarmLocalEngine("))
+        val rewarm = engines.substring(engines.indexOf("fun reWarm("))
         assertTrue("a re-warm joins the previous warm first", "cancelAndJoin()" in rewarm.substring(0, 1200))
-        val apply = vm.substring(vm.indexOf("fun applyLocalModelSettings("))
-        assertTrue("applying settings mid-turn defers the teardown", "isLocalTurnInFlight()" in apply.substring(0, apply.indexOf("\n    }\n")))
+        val apply = engines.substring(engines.indexOf("fun applySettings("))
+        assertTrue("applying settings mid-turn defers the teardown", "turnInFlight()" in apply.substring(0, apply.indexOf("\n    }\n")))
+        // ...and "mid-turn" is the chat's own STREAMING/THINKING state.
+        val vm = source("$root/ui/chat/ChatViewModel.kt")
+        assertTrue("turnInFlight = { isLocalTurnInFlight() }" in vm)
     }
 
     @Test fun `close takes the load lock and generations lease the native engine`() {

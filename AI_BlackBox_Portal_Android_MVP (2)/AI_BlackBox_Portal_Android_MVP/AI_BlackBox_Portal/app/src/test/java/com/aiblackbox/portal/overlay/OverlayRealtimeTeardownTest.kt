@@ -13,8 +13,8 @@ import java.io.File
  * session now runs the same teardown the user's disconnect runs. Also: a reply shorter
  * than the pre-buffer threshold never ended pre-buffering, so it never played.
  *
- * OverlayService is a Service and cannot be stood up on the plain JVM; this pins the
- * wiring in its source.
+ * The session lives in OverlayRealtimeSession (out of OverlayService, rank 76); this pins
+ * the wiring in its source, and OverlayRealtimeSessionTest drives it over a real socket.
  */
 class OverlayRealtimeTeardownTest {
 
@@ -22,14 +22,14 @@ class OverlayRealtimeTeardownTest {
         var dir: File? = File(".").absoluteFile
         var found: String? = null
         while (dir != null && found == null) {
-            for (rel in listOf("src/main/java/com/aiblackbox/portal/overlay/OverlayService.kt",
-                "app/src/main/java/com/aiblackbox/portal/overlay/OverlayService.kt")) {
+            for (rel in listOf("src/main/java/com/aiblackbox/portal/overlay/OverlayRealtimeSession.kt",
+                "app/src/main/java/com/aiblackbox/portal/overlay/OverlayRealtimeSession.kt")) {
                 val f = File(dir, rel)
                 if (f.isFile) found = f.readText().replace("\r\n", "\n")
             }
             dir = dir.parentFile
         }
-        found ?: run { fail("OverlayService.kt not found"); "" }
+        found ?: run { fail("OverlayRealtimeSession.kt not found"); "" }
     }
 
     private fun body(signature: String, length: Int = 1600): String {
@@ -44,7 +44,7 @@ class OverlayRealtimeTeardownTest {
             assertTrue("$callback runs the full teardown", "teardownRealtimeSession(" in cb)
             assertTrue("$callback ignores a socket that is no longer the session's", "webSocket !== realtimeWebSocket" in cb)
         }
-        assertTrue("the user's disconnect uses the same teardown", "teardownRealtimeSession(" in body("private fun disconnectRealtime()", 300))
+        assertTrue("the user's disconnect uses the same teardown", "teardownRealtimeSession(" in body("fun disconnectRealtime()", 300))
     }
 
     @Test fun `the teardown stops the mic, the screen share and the audio track`() {

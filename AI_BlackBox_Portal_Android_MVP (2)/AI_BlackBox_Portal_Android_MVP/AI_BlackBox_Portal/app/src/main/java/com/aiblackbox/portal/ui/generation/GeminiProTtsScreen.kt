@@ -62,7 +62,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.repository.LOST_CONNECTION_MESSAGE
 import com.aiblackbox.portal.data.repository.TaskPollOutcome
-import com.aiblackbox.portal.data.repository.TaskRepository
+import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import com.aiblackbox.portal.ui.components.AudioPlayerBar
@@ -132,15 +132,12 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
     private val _audioUrl = MutableStateFlow<String?>(null)
     val audioUrl: StateFlow<String?> = _audioUrl.asStateFlow()
 
-    private var originBase = ""
-
     // The running submit + poll, so reset() stops it instead of letting a late
     // result land on the cleared screen.
     private var genJob: Job? = null
 
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
-        originBase = origin
         api = BlackBoxApi(origin)
     }
 
@@ -203,18 +200,11 @@ class GeminiProTtsViewModel(application: Application) : AndroidViewModel(applica
 
                 // Poll until complete — the shared poller (A11-settings-generation-01/-02):
                 // a network blip is retried, and 'cancelled' ends the wait instead of
-                // polling every second forever.
-                val outcome = TaskRepository(api).awaitTask(taskId, intervalMs = 1000)
+                // polling every second forever. Its result URL is already absolute.
+                val outcome = TaskPoller(api).await(taskId, intervalMs = 1000)
                 _status.value = when (outcome) {
                     is TaskPollOutcome.Completed -> {
-                        val resultUrl = outcome.status.resultUrl
-                        if (resultUrl != null) {
-                            _audioUrl.value = if (resultUrl.startsWith("http")) {
-                                resultUrl
-                            } else {
-                                "$originBase$resultUrl"
-                            }
-                        }
+                        outcome.resultUrl?.let { _audioUrl.value = it }
                         "Audio ready"
                     }
                     is TaskPollOutcome.Failed -> "Error: ${outcome.message}"

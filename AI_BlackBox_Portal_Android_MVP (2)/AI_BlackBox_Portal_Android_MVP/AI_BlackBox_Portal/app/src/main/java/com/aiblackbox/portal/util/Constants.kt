@@ -58,53 +58,31 @@ object Constants {
     const val CLIENT_HEADER = "X-BlackBox-Client"
     const val CLIENT_ID = "native-android/1.0"
 
+    /** The cold-start seed of a provider whose catalog the box serves: Auto alone. */
+    val AUTO_ONLY: List<Pair<String, String>> = listOf("" to "Auto - Latest")
+
     /**
-     * Model options per provider.
-     * Each entry is provider-id -> list of (modelId, displayName).
-     * Empty modelId ("") means "Auto - Latest" (server picks best).
+     * Model options per provider: provider-id -> list of (modelId, displayName). An empty
+     * modelId ("") is "Auto - Latest": the box picks its configured default.
+     *
+     * COLD-START PLACEHOLDER ONLY for the providers the box serves a catalog for (gemini,
+     * openai, anthropic, xai, computer-use, custom). Every picker of theirs (the composer
+     * pill, the Settings sheet, the cron editor, the SMS reply picker, the CU screen)
+     * hydrates from GET /models/{provider} through data.repository.ModelCatalogRepository,
+     * which also keeps the last catalog the box served on disk, so these Auto-only seeds
+     * show only on a phone that has never reached its box (audit A01-activities-root-10,
+     * rank 76). The hand-kept id lists they replace went stale (retired Claude ids 404'd
+     * until they were hand-patched, 2026-10-07) and drifted from the Portal's.
+     *
+     * The other providers have no /models endpoint and keep their lists here: the agents'
+     * CLI aliases, the voice providers' offline fallbacks (hydrated by the voice screen),
+     * and robotics' one model.
      */
     val MODEL_CONFIG: Map<String, List<Pair<String, String>>> = mapOf(
-        "gemini" to listOf(
-            "" to "Auto - Latest",
-            "gemini-3.1-pro-preview-customtools" to "Gemini 3.1 Pro Custom Tools",
-            "gemini-3.1-pro-preview" to "Gemini 3.1 Pro",
-            "gemini-2.5-pro" to "Gemini 2.5 Pro",
-            "gemini-2.5-flash" to "Gemini 2.5 Flash",
-            "gemini-2.5-flash-lite" to "Gemini 2.5 Flash-Lite"
-        ),
-        "openai" to listOf(
-            "" to "Auto - Latest",
-            "gpt-5.1" to "GPT-5.1",
-            "gpt-5" to "GPT-5",
-            "gpt-5-mini" to "GPT-5 Mini",
-            "o3" to "o3 (Reasoning)",
-            "o4-mini" to "o4-mini (Reasoning)",
-            "gpt-4o" to "GPT-4o"
-        ),
-        // SettingsSheet + the SMS model picker read this list directly, so every
-        // id must be on the live /models/anthropic list (2026-10-17). Retired and
-        // dropped ids migrate to the newest of their family (ModelSelection), which
-        // is why each family's newest is offered here by name.
-        "anthropic" to listOf(
-            "" to "Auto - Latest",
-            "claude-opus-5-5" to "Claude Opus 5.5",
-            "claude-sonnet-5-5" to "Claude Sonnet 5.5",
-            "claude-haiku-5-5" to "Claude Haiku 5.5",
-            "claude-opus-4-8" to "Claude Opus 4.8",
-            "claude-opus-4-7" to "Claude Opus 4.7 (1M ctx, adaptive thinking)",
-            "claude-opus-4-6" to "Claude Opus 4.6",
-            "claude-sonnet-4-6" to "Claude Sonnet 4.6"
-        ),
-        // T3 (2026-05-18): xai entries were MALFORMED — "grok-4", "grok-4.1-fast",
-        // "grok-3-mini" don't exist in the xAI API and would silently fail at
-        // chat-completion time. Refreshed to real API IDs matching current 2026
-        // catalog. These are OFFLINE-BOOTSTRAP fallbacks only — ChatViewModel's
-        // fetchLiveModels() hydrates the dropdown from /models/xai on init.
-        "xai" to listOf(
-            "" to "Auto - Latest",
-            "grok-4.3" to "Grok 4.3",
-            "grok-4.20-multi-agent-0309" to "Grok 4.20 Multi-Agent"
-        ),
+        "gemini" to AUTO_ONLY,
+        "openai" to AUTO_ONLY,
+        "anthropic" to AUTO_ONLY,
+        "xai" to AUTO_ONLY,
         "agents" to listOf(
             "sonnet" to "Sonnet",
             "opus" to "Opus",
@@ -136,27 +114,8 @@ object Constants {
             "grok-voice-latest" to "Grok Voice (latest alias)",
             "grok-voice-think-fast-1.0" to "Grok Voice Think Fast 1.0 (pinned)"
         ),
-        // Offline fallback only — replaced by GET /models/computer-use hydration
-        // (ChatViewModel.fetchLiveModels, CU production pass 2026-06). Mirrors the
-        // Portal's fallback in Portal/modules/state-management.js. No backend field
-        // is possible in this Pair structure — offline backend partitioning relies
-        // on CuScreen.cuModelsForBackend's id-substring heuristic.
-        "computer-use" to listOf(
-            "" to "Auto - Latest",
-            "claude-opus-4-6" to "Claude Opus 4.6",
-            "gemini-2.5-computer-use-preview-10-2025" to "Gemini CU Preview",
-            "gpt-5.5" to "GPT-5.5 (Computer Use)"
-        ),
-        // Custom (Local) — user-registered OpenAI-compatible servers (Task 7.1).
-        // Auto-only OFFLINE seed: the real roster lives ONLY in the box's server
-        // registry — GET /models/custom hydrates the Composer pill live on every
-        // switch (never cached; see ChatViewModel.fetchLiveModels). This entry
-        // exists so SettingsSheet's Constants-only Model section still renders
-        // (showing Auto) instead of hiding entirely; hydrating THAT sheet from
-        // liveModels is a future rework.
-        "custom" to listOf(
-            "" to "Auto - Latest"
-        ),
+        "computer-use" to AUTO_ONLY,
+        "custom" to AUTO_ONLY,
         "robotics" to listOf(
             "gemini-robotics-er-1.5-preview" to "Gemini Robotics-ER 1.5"
         )

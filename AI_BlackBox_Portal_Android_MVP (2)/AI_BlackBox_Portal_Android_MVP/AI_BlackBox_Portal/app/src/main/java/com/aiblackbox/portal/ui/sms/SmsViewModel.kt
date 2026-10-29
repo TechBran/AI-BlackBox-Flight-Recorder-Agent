@@ -4,8 +4,12 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.model.ModelCatalog
+import com.aiblackbox.portal.data.repository.ModelCatalogRepository
+import com.aiblackbox.portal.data.repository.ModelCatalogs
 import kotlinx.coroutines.CancellationException
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.store.ModelSelection
 import com.aiblackbox.portal.data.store.OperatorGeneration
 import com.aiblackbox.portal.data.store.OperatorUnresolvedException
 import kotlinx.coroutines.Job
@@ -28,6 +32,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
+import com.aiblackbox.portal.util.Constants
 
 data class SmsThread(
     val phoneNumber: String,
@@ -107,6 +112,15 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     // "" = Auto: the box's own default model for the provider (never a pinned id).
     private val _smsModel = MutableStateFlow(SmsPreference.DEFAULT.model)
     val smsModel: StateFlow<String> = _smsModel.asStateFlow()
+
+    // The reply-model dropdown's rows for [smsProvider], from the catalog the chat
+    // composer, Settings and cron share (ModelCatalogs, rank 76); see [loadSmsModels].
+    private val _smsModelOptions = MutableStateFlow(Constants.AUTO_ONLY)
+    val smsModelOptions: StateFlow<List<Pair<String, String>>> = _smsModelOptions.asStateFlow()
+
+    // The operator generation whose saved preference [_smsModel] holds; null until the
+    // box answered, so the DEFAULT placeholder is never "reconciled" onto the box.
+    private var preferenceTag: Int? = null
 
     // Our sendable lines (enabled gateways' enabled ports with a phone number)
     private val _lines = MutableStateFlow<List<SmsLine>>(emptyList())
@@ -355,8 +369,45 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                 if (!generation.isCurrent(tag)) return@launch
                 _smsProvider.value = pref.provider
                 _smsModel.value = pref.model
+                preferenceTag = tag
+                loadSmsModels(pref.provider)
             } catch (_: Exception) {}
         }
+    }
+
+    /**
+     * Hydrate [smsModelOptions] for [provider]: the shared catalog's known copy at once,
+     * then the box's. The picker used to read the hand-kept Constants.MODEL_CONFIG, which
+     * went stale. A fresh live catalog that no longer lists the saved reply model replaces
+     * it on the box ([reconcileSavedModel]): an id that 404s would fail every SMS reply.
+     */
+    fun loadSmsModels(provider: String) {
+        val api = api ?: return
+        val apiProvider = ModelCatalogRepository.apiProviderFor(provider)
+        if (apiProvider == null) {
+            _smsModelOptions.value = Constants.MODEL_CONFIG[provider].orEmpty()
+            return
+        }
+        val catalogs = ModelCatalogs.forApi(api)
+        _smsModelOptions.value = catalogs.cached(apiProvider)?.options()?.ifEmpty { null } ?: Constants.AUTO_ONLY
+        viewModelScope.launch {
+            val catalog = catalogs.refresh(apiProvider) ?: return@launch
+            if (_smsProvider.value != provider) return@launch
+            catalog.options().takeIf { it.isNotEmpty() }?.let { _smsModelOptions.value = it }
+            reconcileSavedModel(provider, catalog)
+        }
+    }
+
+    /**
+     * Save the same-family successor (or Auto) for a saved reply model [catalog] no longer
+     * lists (ModelSelection.replacementFor) — only for the preference the box returned for
+     * the current operator, and only against an authoritative live catalog.
+     */
+    private fun reconcileSavedModel(provider: String, catalog: ModelCatalog) {
+        val tag = preferenceTag ?: return
+        if (!generation.isCurrent(tag) || !catalog.isAuthoritative || _smsProvider.value != provider) return
+        val replacement = ModelSelection.replacementFor(_smsModel.value, catalog.ids) ?: return
+        saveSmsPreferences(provider, replacement)
     }
 
     /** [model] "" = Auto (the provider switch in the screen always lands there). */

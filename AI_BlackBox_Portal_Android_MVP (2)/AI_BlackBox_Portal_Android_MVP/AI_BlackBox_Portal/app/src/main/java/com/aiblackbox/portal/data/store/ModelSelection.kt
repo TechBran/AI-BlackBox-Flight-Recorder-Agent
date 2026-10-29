@@ -27,8 +27,12 @@ import com.aiblackbox.portal.util.Constants
  * wrote a Gemma slug into the global key, sent to the cloud provider. Both provider switches
  * (pill, sheet) now go through [setProviderAndModel], and every model picker (pill, sheet,
  * the CU + robotics screens) through [selectModel], via BlackBoxStore, so they cannot drift.
- * Still outside it: the CU + robotics route auto-set in NativeMainActivity, which writes
- * the provider and a model from that screen's own Constants list directly.
+ * Opening the CU screen switches through [setProviderAndModel] too. Still outside it: the
+ * robotics route auto-set in NativeMainActivity, which writes robotics' one model id from
+ * Constants directly (robotics has no live catalog).
+ *
+ * A pick the provider's live catalog no longer lists is replaced by [reconcileWithCatalog]
+ * (same-family successor, else Auto) once a fresh live catalog arrives (rank 76).
  */
 object ModelSelection {
 
@@ -219,6 +223,54 @@ object ModelSelection {
                 prefs[BlackBoxStore.KEY_MODEL] = model
             }
         }
+    }
+
+    /**
+     * What a stored [id] becomes when [liveIds], an authoritative live catalog
+     * (ModelCatalog.isAuthoritative), does not list it (audit A01-activities-root-10): its
+     * [RETIRED_MODEL_IDS] entry, or for any other Claude id its family's newest
+     * ([FAMILY_SUCCESSORS]), when the catalog lists that one; otherwise Auto (""). Null when
+     * [id] is Auto or listed, and stays.
+     */
+    fun replacementFor(id: String, liveIds: Collection<String>): String? {
+        if (id.isBlank() || id in liveIds) return null
+        val successor = RETIRED_MODEL_IDS[id]
+            ?: if (id.startsWith("claude-")) {
+                FAMILY_SUCCESSORS.entries.firstOrNull { (family, _) -> family in id }?.value
+            } else null
+        return successor?.takeIf { it in liveIds } ?: ""
+    }
+
+    /**
+     * Replace the stored picks [provider]'s live catalog no longer lists ([replacementFor]):
+     * `model_<provider>`, and the global `model` key while [provider] is the active one
+     * (an id of another provider left there is replaced too: it can only 404). Called
+     * with an authoritative catalog only, and in one edit, so a pick that lands meanwhile
+     * is a listed id and stays. Returns how many values changed.
+     */
+    suspend fun reconcileWithCatalog(
+        dataStore: DataStore<Preferences>,
+        provider: String,
+        liveIds: Collection<String>,
+    ): Int {
+        if (ChatProvider.fromId(provider).isLocal || liveIds.isEmpty()) return 0
+        var changed = 0
+        dataStore.edit { prefs ->
+            val perProvider = providerModelKey(provider)
+            replacementFor(prefs[perProvider].orEmpty(), liveIds)?.let {
+                prefs[perProvider] = it
+                changed++
+            }
+            val active = prefs[BlackBoxStore.KEY_PROVIDER] ?: Constants.DEFAULT_PROVIDER
+            if (active == provider) {
+                replacementFor(prefs[BlackBoxStore.KEY_MODEL].orEmpty(), liveIds)?.let {
+                    prefs[BlackBoxStore.KEY_MODEL] = it
+                    changed++
+                }
+            }
+        }
+        if (changed > 0) Log.i("BlackBoxStore", "replaced $changed $provider model id(s) its live catalog no longer lists")
+        return changed
     }
 }
 
