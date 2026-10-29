@@ -14,6 +14,10 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.testclient import TestClient
 
+# At import (collection) time, like test_static_guard: the shared app cannot
+# take middleware once another test has started it.
+import Orchestrator.app  # noqa: F401 — registers every route and middleware
+from Orchestrator.checkpoint import app as shared_app
 from Orchestrator.utils.portal_csp import PortalCSPMiddleware, portal_csp
 
 
@@ -105,7 +109,4 @@ def test_uploaded_media_is_served_as_itself(client):
 
 
 def test_the_shared_app_installs_the_policy():
-    import Orchestrator.app  # noqa: F401 — registers every route and middleware
-    from Orchestrator.checkpoint import app
-
-    assert any(m.cls is PortalCSPMiddleware for m in app.user_middleware)
+    assert any(m.cls is PortalCSPMiddleware for m in shared_app.user_middleware)
