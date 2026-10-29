@@ -792,7 +792,7 @@ class OverlayService : Service() {
         // Handle keyboard show/hide for input
         promptInput?.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) {
-                windows.updatePanelForKeyboard(true)
+                windows.updatePanelForKeyboard()
             }
         }
     }

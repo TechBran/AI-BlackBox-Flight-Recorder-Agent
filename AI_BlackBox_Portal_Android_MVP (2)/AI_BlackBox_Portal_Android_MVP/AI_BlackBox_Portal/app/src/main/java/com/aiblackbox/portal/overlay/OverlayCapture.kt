@@ -69,16 +69,8 @@ internal class OverlayCapture(
     private var recordingDisplay: VirtualDisplay? = null
     private var mediaRecorder: MediaRecorder? = null
 
-    // Legacy variables - kept for compatibility but transitioning away
-    private var virtualDisplay: VirtualDisplay? = null
-    private var imageReader: ImageReader? = null
-
     var isRecording = false
         private set
-
-    // Track current VirtualDisplay mode to avoid conflicts
-    private enum class DisplayMode { NONE, SCREENSHOT, RECORDING }
-    private var currentDisplayMode = DisplayMode.NONE
 
     // Track when recording stopped to add delay before screenshot
     private var lastRecordingStopTime: Long = 0L
@@ -460,7 +452,7 @@ internal class OverlayCapture(
                 if (image != null) {
                     Log.d(TAG, "Captured image from persistent display on attempt $attempt: ${image.width}x${image.height}")
 
-                    // Convert image to file (same logic as attemptImageCapture)
+                    // Convert image to file
                     val planes = image.planes
                     val buffer = planes[0].buffer
                     val pixelStride = planes[0].pixelStride
@@ -767,17 +759,6 @@ internal class OverlayCapture(
         // The persistent display ensures the token remains valid for both screenshots AND recording.
         Log.d(TAG, "Starting recording while keeping persistent screenshot display alive")
 
-        // Release any legacy displays, just in case.
-        if (virtualDisplay != null) {
-            Log.d(TAG, "Releasing legacy VirtualDisplay before recording")
-            virtualDisplay?.release()
-            virtualDisplay = null
-            imageReader?.close()
-            imageReader = null
-        }
-        currentDisplayMode = DisplayMode.NONE
-
-
         // Small delay to ensure clean state.
         val delayMs = 300L
         Log.d(TAG, "Waiting ${delayMs}ms before creating recording VirtualDisplay...")
@@ -838,7 +819,6 @@ internal class OverlayCapture(
                 mediaProjectionInvalidated = true
                 mediaRecorder?.release()
                 mediaRecorder = null
-                currentDisplayMode = DisplayMode.NONE
                 host.updateStatus("Ready")
 
                 // Android 14+ FIX: Request a NEW MediaProjection for recording mode
@@ -865,12 +845,10 @@ internal class OverlayCapture(
                 host.showToast("Recording failed - display error")
                 mediaRecorder?.release()
                 mediaRecorder = null
-                currentDisplayMode = DisplayMode.NONE
                 host.updateStatus("Ready")
                 return
             }
 
-            currentDisplayMode = DisplayMode.RECORDING
             Log.d(TAG, "Recording VirtualDisplay created (separate from screenshot display)")
 
             mediaRecorder?.start()
@@ -888,8 +866,6 @@ internal class OverlayCapture(
             host.updateStatus("Recording failed")
             mediaRecorder?.release()
             mediaRecorder = null
-            virtualDisplay?.release()
-            virtualDisplay = null
         }
     }
 
@@ -921,7 +897,6 @@ internal class OverlayCapture(
             recordingDisplay?.release()
             recordingDisplay = null
             isRecording = false
-            currentDisplayMode = DisplayMode.NONE
             lastRecordingStopTime = System.currentTimeMillis()
 
             // Persistent screenshot display remains active - no need to re-establish!

@@ -144,17 +144,13 @@ internal class OverlayWindows(
         }
     }
 
-    fun updatePanelForKeyboard(showKeyboard: Boolean) {
+    /** The prompt took focus: (re)apply the panel's keyboard-capable flags. */
+    fun updatePanelForKeyboard() {
         val expandedPanel = panel ?: return
         try {
             val params = expandedPanel.layoutParams as WindowManager.LayoutParams
-            if (showKeyboard) {
-                params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                               WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-            } else {
-                params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                               WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-            }
+            params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                           WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
             windowManager().updateViewLayout(expandedPanel, params)
         } catch (e: Exception) {
             Log.e(TAG, "Error updating panel for keyboard", e)

@@ -124,7 +124,7 @@ class OverlayWindowsTest {
         assertEquals(-40, params.x)
         assertEquals(160, params.y)
 
-        windows.updatePanelForKeyboard(true)
+        windows.updatePanelForKeyboard()
         assertEquals(keyboardFlags, (panel.layoutParams as WindowManager.LayoutParams).flags and keyboardFlags)
 
         windows.removeAll()
