@@ -63,7 +63,12 @@ def test_an_outbound_asterisk_call_is_tracked(monkeypatch):
     class _Connected:
         is_connected = True
 
+    class _Running:
+        is_running = True
+
+    from Orchestrator.asterisk import audio_ipc
     monkeypatch.setattr(ari, "get_ari_client", lambda: _Connected())
+    monkeypatch.setattr(audio_ipc, "get_ipc_client", lambda: _Running())
     monkeypatch.setattr(ar, "_handle_outbound_call", _forever)
     monkeypatch.setattr(ar, "PHONE_SESSIONS", {})
 

@@ -10,6 +10,12 @@ The child is started isolated (python -I) on the AudioSocket address from
 Orchestrator.asterisk.config, and counts as running only after it says READY:
 a flag set at spawn time reported a child that had already died (audit W14).
 
+The child is supervised: when it dies, the calls it carried end at once and it
+is restarted with exponential backoff; after MAX_RESTARTS failures in a row
+the supervisor gives up with a loud error. Before, nothing respawned it and
+every later call timed out at wait_for_channel until a service restart
+(O11-telephony-asterisk-cellular-10).
+
 IPC Protocol (matches audio_subprocess.py):
   [type: 1 byte] [length: 4 bytes LE uint32] [payload]
 
@@ -28,6 +34,7 @@ import os
 import socket
 import struct
 import sys
+import time
 from typing import Optional, Callable, Awaitable, Dict, Tuple
 
 # IPC message types
@@ -48,6 +55,14 @@ SUBPROCESS_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "au
 # How long the child may take to import numpy/scipy, bind and say READY.
 READY_TIMEOUT_S = 20.0
 
+# Supervision: restart delays double from the first to the cap; a child that
+# stayed up STABLE_AFTER_S resets the count, and MAX_RESTARTS failures in a row
+# (failed starts, or deaths sooner than that) make the supervisor give up.
+RESTART_BACKOFF_INITIAL_S = 1.0
+RESTART_BACKOFF_MAX_S = 30.0
+STABLE_AFTER_S = 60.0
+MAX_RESTARTS = 6
+
 # ---------------------------------------------------------------------------
 # Singleton
 # ---------------------------------------------------------------------------
@@ -63,9 +78,10 @@ async def init_ipc_client() -> Optional["AudioIPCClient"]:
     """Initialize and start the singleton IPC client.
 
     Returns the client even when its child is not running, so the caller can
-    say why (``last_error``); call paths check ``is_running``."""
+    say why (``last_error``); its supervisor keeps trying, and call paths
+    check ``is_running``."""
     global _ipc_client
-    if _ipc_client and _ipc_client.is_running:
+    if _ipc_client and (_ipc_client.is_running or _ipc_client.supervising):
         return _ipc_client
     client = AudioIPCClient()
     await client.start()
@@ -86,11 +102,30 @@ class AudioIPCClient:
       - get_channel_rate (always 8000 — subprocess handles conversion)
     """
 
-    def __init__(self, host: Optional[str] = None, port: Optional[int] = None):
+    def __init__(
+        self,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        max_restarts: int = MAX_RESTARTS,
+        backoff_initial_s: float = RESTART_BACKOFF_INITIAL_S,
+        backoff_max_s: float = RESTART_BACKOFF_MAX_S,
+    ):
         from Orchestrator.asterisk import config as asterisk_config
         # The address the provisioned dialplan's AudioSocket() dials.
         self.host = host or asterisk_config.ASTERISK_AUDIOSOCKET_HOST
         self.port = int(asterisk_config.ASTERISK_AUDIOSOCKET_PORT if port is None else port)
+
+        # Supervision state (status() reports it in GET /asterisk/status)
+        self.max_restarts = max_restarts
+        self.backoff_initial_s = backoff_initial_s
+        self.backoff_max_s = backoff_max_s
+        self.restarts = 0
+        self.gave_up = False
+        self._stopping = False
+        self._supervisor_task: Optional[asyncio.Task] = None
+        self._ready_at = 0.0
+        # Set when the current child's IPC ends (it died or closed the socket).
+        self._died: asyncio.Event = asyncio.Event()
 
         self._process: Optional[asyncio.subprocess.Process] = None
         self._reader: Optional[asyncio.StreamReader] = None
@@ -114,6 +149,8 @@ class AudioIPCClient:
         # Per-channel callbacks
         self._audio_handlers: Dict[str, Callable[[str, bytes], Awaitable[None]]] = {}
         self._hangup_handlers: Dict[str, Callable[[str], Awaitable[None]]] = {}
+        # Hangup callbacks run as tasks; held here until they end.
+        self._handler_tasks: set = set()
 
     # ------------------------------------------------------------------
     # Properties
@@ -122,7 +159,7 @@ class AudioIPCClient:
     @property
     def is_running(self) -> bool:
         """True from the child's READY until it, or its IPC socket, goes away."""
-        return self._running
+        return self._running and not self._died.is_set()
 
     @property
     def address(self) -> Optional[Tuple[str, int]]:
@@ -136,6 +173,22 @@ class AudioIPCClient:
     @property
     def active_channels(self) -> set:
         return self._active_channels.copy()
+
+    @property
+    def supervising(self) -> bool:
+        """True while the supervisor watches the child or retries a start."""
+        return bool(self._supervisor_task and not self._supervisor_task.done())
+
+    def status(self) -> dict:
+        """The audio subprocess as GET /asterisk/status reports it."""
+        return {
+            "running": self.is_running,
+            "pid": self.pid if self.is_running else None,
+            "address": f"{self._address[0]}:{self._address[1]}" if self._address and self.is_running else None,
+            "restarts": self.restarts,
+            "gave_up": self.gave_up,
+            "last_error": self.last_error,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -156,7 +209,86 @@ class AudioIPCClient:
                 str(child_fd), self.host, str(self.port)]
 
     async def start(self) -> bool:
-        """Spawn the audio subprocess, wire up IPC and wait for its READY.
+        """Start the audio subprocess and supervise it from then on.
+
+        True only once the child listens on its AudioSocket address. On
+        False, ``last_error`` says why; the supervisor keeps retrying with
+        backoff either way, until shutdown() or it gives up."""
+        self._stopping = False
+        self.gave_up = False
+        started = await self._spawn()
+        if not self._stopping:
+            self._supervisor_task = asyncio.create_task(
+                self._supervise(up=started), name="asterisk-audio-supervisor")
+        return started
+
+    async def _supervise(self, up: bool) -> None:
+        """Restart the child when it dies, with exponential backoff.
+        ``up``: the last start reached READY (that child may die any time)."""
+        failures = 0 if up else 1
+        delay = self.backoff_initial_s
+        try:
+            while not self._stopping:
+                if up:
+                    await self._died.wait()
+                    if self._stopping:
+                        return
+                    up = False
+                    lived = time.monotonic() - self._ready_at
+                    await self._wait_exit(timeout=5.0)  # keep its last lines
+                    await self._stop_child()
+                    code = self._process.returncode if self._process else None
+                    self._end_calls()
+                    self.last_error = f"exited with code {code} after {lived:.0f}s"
+                    tail = " | ".join(self._output_tail)
+                    print(f"[IPC] Audio subprocess died ({self.last_error})"
+                          + (f"; last output: {tail}" if tail else ""))
+                    if lived >= STABLE_AFTER_S:
+                        failures, delay = 0, self.backoff_initial_s
+                    failures += 1
+                if failures >= self.max_restarts:
+                    self.gave_up = True
+                    print(f"[IPC] ERROR: the audio subprocess failed {failures} times in a row;"
+                          f" giving up. Asterisk calls are refused until blackbox.service"
+                          f" restarts. Last error: {self.last_error}")
+                    return
+                print(f"[IPC] Restarting the audio subprocess in {delay:g}s"
+                      f" (failure {failures} of {self.max_restarts})")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self.backoff_max_s)
+                if self._stopping:
+                    return
+                up = await self._spawn()
+                if up:
+                    self.restarts += 1
+                else:
+                    failures += 1
+        except asyncio.CancelledError:
+            pass
+
+    def _end_calls(self) -> None:
+        """The child died: end the calls it carried and fail their waiters."""
+        lost = list(self._active_channels)
+        self._active_channels.clear()
+        for event in self._connect_events.values():
+            event.set()  # wait_for_channel sees the channel is not open: False
+        self._connect_events.clear()
+        for channel_id in lost:
+            handler = self._hangup_handlers.get(channel_id)
+            if handler:
+                self._spawn_handler(handler(channel_id))
+        if lost:
+            print(f"[IPC] Ended {len(lost)} call(s) the audio subprocess carried")
+
+    def _spawn_handler(self, coro) -> None:
+        """Run a per-channel callback as its own task, held until it ends
+        (the loop keeps only weak references to tasks)."""
+        task = asyncio.ensure_future(coro)
+        self._handler_tasks.add(task)
+        task.add_done_callback(self._handler_tasks.discard)
+
+    async def _spawn(self) -> bool:
+        """Spawn one audio subprocess, wire up IPC and wait for its READY.
 
         True only once the child listens on its AudioSocket address. On
         False, ``last_error`` says why and no child is left running."""
@@ -180,6 +312,7 @@ class AudioIPCClient:
             self._reader = reader
             self._writer = writer
             self._ready = asyncio.get_running_loop().create_future()
+            self._died = asyncio.Event()
 
             # Start listener for messages from subprocess
             self._listener_task = asyncio.create_task(self._ipc_listener())
@@ -206,6 +339,7 @@ class AudioIPCClient:
             host, _, port = bound.rpartition(":")
             self._address = (host, int(port))
             self._running = True
+            self._ready_at = time.monotonic()
             print(f"[IPC] Audio subprocess ready (pid {self._process.pid}), "
                   f"AudioSocket listening on {bound}")
             return True
@@ -278,7 +412,16 @@ class AudioIPCClient:
         self._log_task = None
 
     async def shutdown(self):
-        """Gracefully stop subprocess."""
+        """Stop supervising, then stop the subprocess."""
+        self._stopping = True
+        task = self._supervisor_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._supervisor_task = None
         await self._stop_child()
 
         # Cleanup state
@@ -383,7 +526,7 @@ class AudioIPCClient:
 
     async def _ipc_listener(self):
         """Receive messages from subprocess."""
-        reader = self._reader
+        reader, ready, died = self._reader, self._ready, self._died
         try:
             while True:
                 # Read 5-byte header
@@ -398,7 +541,7 @@ class AudioIPCClient:
                     audio = payload[36:]
                     handler = self._audio_handlers.get(uuid_str)
                     if handler:
-                        asyncio.create_task(handler(uuid_str, audio))
+                        self._spawn_handler(handler(uuid_str, audio))
 
                 elif msg_type == MSG_CHANNEL_OPEN:
                     uuid_str = (
@@ -421,12 +564,12 @@ class AudioIPCClient:
                     print(f"[IPC] Channel closed: {uuid_str}")
                     handler = self._hangup_handlers.get(uuid_str)
                     if handler:
-                        asyncio.create_task(handler(uuid_str))
+                        self._spawn_handler(handler(uuid_str))
                     self.unregister_channel(uuid_str)
 
                 elif msg_type == MSG_READY:
-                    if self._ready and not self._ready.done():
-                        self._ready.set_result(payload.decode("ascii", errors="replace"))
+                    if ready and not ready.done():
+                        ready.set_result(payload.decode("ascii", errors="replace"))
 
         except asyncio.IncompleteReadError:
             print("[IPC] Subprocess disconnected")
@@ -436,8 +579,9 @@ class AudioIPCClient:
             print(f"[IPC] Listener error: {e}")
         finally:
             self._running = False
-            if self._ready and not self._ready.done():
-                self._ready.set_exception(ConnectionError("audio subprocess closed IPC"))
+            died.set()  # wakes the supervisor
+            if ready and not ready.done():
+                ready.set_exception(ConnectionError("audio subprocess closed IPC"))
 
     # ------------------------------------------------------------------
     # Log forwarder (subprocess stdout → our log)

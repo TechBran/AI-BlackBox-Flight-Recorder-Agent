@@ -129,6 +129,16 @@ def _normalize_phone(number: str) -> str:
     return number
 
 
+def _audio_down_reason(ipc_client) -> str:
+    """Why calls cannot be carried right now, or "" when the audio subprocess
+    is running. A dead child used to let a call answer, run the IVR and time
+    out at wait_for_channel (O11-telephony-asterisk-cellular-10)."""
+    if ipc_client is not None and ipc_client.is_running:
+        return ""
+    detail = getattr(ipc_client, "last_error", "") if ipc_client is not None else "it was never started"
+    return f"the audio subprocess is not running ({detail or 'see the [IPC] log lines'})"
+
+
 # Active call tracking per session (for cleanup)
 _active_bridges: Dict[str, PhoneAIBridge] = {}
 
@@ -143,9 +153,14 @@ async def asterisk_outbound_call(call_request: AsteriskCallRequest):
     from Orchestrator.asterisk.client import get_ari_client
     from Orchestrator.asterisk.config import TG200_PHONE_NUMBER, TG200_TRUNK_NAME
 
+    from Orchestrator.asterisk.audio_ipc import get_ipc_client
+
     client = get_ari_client()
     if not client or not client.is_connected:
         return {"error": "Asterisk ARI not connected"}
+    audio_down = _audio_down_reason(get_ipc_client())
+    if audio_down:
+        return {"error": f"Cannot place the call: {audio_down}"}
 
     to_number = _normalize_phone(call_request.to)
     ai_backend = BACKEND_MAP.get(call_request.backend, AIBackend.OPENAI_REALTIME)
@@ -192,7 +207,10 @@ async def _handle_outbound_call(session: PhoneSession, to_number: str, trunk: st
 
     client = get_ari_client()
     ipc_client = get_ipc_client()
-    if not client or not ipc_client:
+    audio_down = _audio_down_reason(ipc_client)
+    if not client or audio_down:
+        print(f"[ASTERISK-ROUTE] Outbound call {session.session_id} not placed: "
+              f"{audio_down or 'Asterisk ARI not connected'}")
         session.status = PhoneStatus.FAILED
         return
 
@@ -327,7 +345,16 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
 
     client = get_ari_client()
     ipc_client = get_ipc_client()
-    if not client or not ipc_client:
+    if not client:
+        return
+    audio_down = _audio_down_reason(ipc_client)
+    if audio_down:
+        # Refuse at once rather than answer, run the IVR and time out.
+        print(f"[ASTERISK-ROUTE] Refusing inbound call on {channel_id}: {audio_down}")
+        try:
+            await client.hangup_channel(channel_id)
+        except Exception:
+            pass
         return
 
     bridge = None
@@ -524,6 +551,9 @@ async def asterisk_status():
     ipc_client = get_ipc_client()
     if ipc_client and ipc_client.is_running:
         status["audiosocket_running"] = True
+    if ipc_client is not None:
+        # pid, bound address, restarts, gave_up, last_error
+        status["audio_subprocess"] = ipc_client.status()
 
     # List active Asterisk phone sessions
     for sid, session in PHONE_SESSIONS.items():

@@ -263,6 +263,8 @@ def test_test_call_reuses_outbound_path(client):
                return_value=_fake_gateway()), \
          patch("Orchestrator.asterisk.client.get_ari_client",
                return_value=fake_client), \
+         patch("Orchestrator.asterisk.audio_ipc.get_ipc_client",
+               return_value=MagicMock(is_running=True)), \
          patch("Orchestrator.routes.asterisk_routes._handle_outbound_call",
                new=AsyncMock()) as m_handle:
         resp = client.post(f"/asterisk/gateways/{GW_ID}/test-call",
@@ -273,6 +275,25 @@ def test_test_call_reuses_outbound_path(client):
     assert "session_id" in body
     # The outbound handler is invoked with the gateway's trunk name.
     assert m_handle.await_count == 1 or m_handle.call_count == 1
+
+
+def test_test_call_refused_while_the_audio_subprocess_is_down(client):
+    """A call nobody could hear is refused up front, with the reason."""
+    fake_client = MagicMock()
+    fake_client.is_connected = True
+    dead = MagicMock(is_running=False, last_error="exited with code 1 before it listened")
+    with patch("Orchestrator.asterisk.gateway_manager.get_gateway",
+               return_value=_fake_gateway()), \
+         patch("Orchestrator.asterisk.client.get_ari_client",
+               return_value=fake_client), \
+         patch("Orchestrator.asterisk.audio_ipc.get_ipc_client", return_value=dead), \
+         patch("Orchestrator.routes.asterisk_routes._handle_outbound_call",
+               new=AsyncMock()) as m_handle:
+        resp = client.post(f"/asterisk/gateways/{GW_ID}/test-call",
+                           json={"to": "5551234567"})
+    assert resp.status_code == 200
+    assert "audio subprocess is not running" in resp.json()["error"]
+    assert m_handle.call_count == 0
 
 
 def test_test_call_ari_not_connected(client):
