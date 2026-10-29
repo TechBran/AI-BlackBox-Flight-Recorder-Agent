@@ -1662,9 +1662,9 @@ export function attachGeneratedAudioPlayer(bubbleElement, audioURL, filenamePref
 }
 
 /**
- * Speak thinking/reasoning content. Also on window: the reasoning panels'
- * "Listen to reasoning" buttons (chat-send.js) call it from an inline onclick,
- * where an ES-module export is not in scope (audit P01-chat-core-web-05).
+ * Speak thinking/reasoning content: the reasoning panels' "Listen to
+ * reasoning" buttons (chat-send.js's delegated bubble controls) call it. Also
+ * on window, for callers outside the module graph (audit P01-chat-core-web-05).
  * @param {HTMLElement} btn - Button element
  */
 export async function speakThinkingContent(btn) {

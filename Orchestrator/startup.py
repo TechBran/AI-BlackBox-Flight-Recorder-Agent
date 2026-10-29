@@ -1117,6 +1117,11 @@ class StaticCacheMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(StaticCacheMiddleware)
 
+# The Portal's Content-Security-Policy (no inline script, no eval) and inert
+# /ui/uploads/ responses — utils/portal_csp.py (audit rank 75).
+from Orchestrator.utils.portal_csp import PortalCSPMiddleware
+app.add_middleware(PortalCSPMiddleware)
+
 # Portal/ is served through a guard: web assets only in the code tree, and
 # never runtime data, server-side source, key/config material, dot-files,
 # Portal/artifacts/ or (unless [debug] serve_dev_pages) Portal/dev/ — see

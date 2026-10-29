@@ -14,7 +14,7 @@ import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
 import { addBubble, appendBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
 import { updateHintsVisibility } from './help-hints.js';
-import { speakToBubble, setLastAssistantText } from './tts-stt.js';
+import { speakToBubble, setLastAssistantText, speakThinkingContent } from './tts-stt.js';
 import { handleFileUpload, handleSessionFileUpload, getAttachedFiles, clearAttachedFiles, renderPreviews } from './file-upload.js';
 import { openVideoExtensionModal } from './generation-modals.js';
 import { notifyNewMessage, notifyTaskComplete, showNotification } from './notifications.js';
@@ -155,20 +155,20 @@ export function createStreamingThinkingBubble() {
     const panel = document.createElement("div");
     panel.className = "streaming-thinking-panel reasoning-active floating collapsed";
     panel.innerHTML = `
-        <div class="reasoning-header" onclick="toggleThinkingPanel(this)">
+        <div class="reasoning-header" data-bubble-action="thinking-toggle">
             <span class="reasoning-icon">\uD83E\uDDE0</span>
             <span class="reasoning-label">Reasoning</span>
             <span class="reasoning-stats">
                 <span class="thinking-word-count">0</span> <span class="stats-label">words</span>
             </span>
             <div class="reasoning-actions">
-                <button class="reasoning-btn tts-btn" title="Listen to reasoning" onclick="event.stopPropagation(); speakThinkingContent(this);">
+                <button class="reasoning-btn tts-btn" title="Listen to reasoning" data-bubble-action="thinking-speak">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
                         <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
                     </svg>
                 </button>
-                <button class="reasoning-btn toggle-btn" onclick="event.stopPropagation(); toggleThinkingPanel(this.closest('.reasoning-header'));">
+                <button class="reasoning-btn toggle-btn" data-bubble-action="thinking-toggle">
                     <span class="reasoning-toggle">\u25B6</span>
                 </button>
             </div>
@@ -225,7 +225,49 @@ export function createStreamingThinkingBubble() {
     return bubble;
 }
 
-// Make toggleThinkingPanel available globally for onclick
+// =============================================================================
+// Bubble panel controls
+// =============================================================================
+
+/**
+ * The bubbles' panel headers and buttons, routed by ONE delegated listener:
+ * each control carries a data-bubble-action instead of an inline onclick
+ * string, so the Portal's Content-Security-Policy can forbid inline script
+ * (audit rank 75). Delegation also covers bubbles rebuilt from HTML strings
+ * (restored history, re-rendered panels) without re-attaching listeners. Only
+ * the innermost control acts, so a header's buttons never toggle the header.
+ * @param {MouseEvent} e - A click anywhere in the page
+ */
+function onBubbleControlClick(e) {
+    const control = e.target && e.target.closest && e.target.closest('[data-bubble-action]');
+    if (!control) return;
+    switch (control.dataset.bubbleAction) {
+        case 'thinking-toggle':
+            window.toggleThinkingPanel(control.closest('.reasoning-header'));
+            break;
+        case 'thinking-speak':
+            speakThinkingContent(control);
+            break;
+        case 'cu-panel-toggle':
+            window.toggleCUPanel(control);
+            break;
+        case 'cu-live-view-toggle':
+            window.toggleCULiveView(control);
+            break;
+        case 'cu-bg-view':
+            window.__openCUBrowserView();
+            break;
+        case 'cu-bg-reconnect':
+            window.__reconnectCU();
+            break;
+    }
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('click', onBubbleControlClick);
+}
+
+// Toggle a reasoning panel open/closed (also callable from the page)
 window.toggleThinkingPanel = function(header) {
     const panel = header.closest('.streaming-thinking-panel');
     if (panel) {
@@ -269,7 +311,7 @@ function _ensureCUPanel(bubble) {
     panel = document.createElement('div');
     panel.className = 'cu-activity-panel';
     panel.innerHTML = `
-        <div class="cu-activity-header" onclick="window.toggleCUPanel(this)">
+        <div class="cu-activity-header" data-bubble-action="cu-panel-toggle">
             <span class="cu-live-dot pulse"></span>
             <span class="cu-activity-label">Computer Use</span>
             <span class="cu-step-counter"></span>
@@ -425,7 +467,7 @@ function _ensureCULiveView(bubble) {
     panel = document.createElement('div');
     panel.className = 'cu-live-view-panel'; // Start expanded (no 'collapsed')
     panel.innerHTML = `
-        <div class="cu-live-view-header" onclick="window.toggleCULiveView(this)">
+        <div class="cu-live-view-header" data-bubble-action="cu-live-view-toggle">
             <span class="cu-live-dot pulse"></span>
             <span class="cu-live-view-label">Live View</span>
             <span class="cu-live-view-step">Step 0</span>
@@ -528,20 +570,20 @@ export function createBubbleWithThinking(content, thinking, cuLog) {
 
     bubble.innerHTML = `
         <div class="streaming-thinking-panel reasoning-complete collapsed">
-            <div class="reasoning-header" onclick="toggleThinkingPanel(this)">
+            <div class="reasoning-header" data-bubble-action="thinking-toggle">
                 <span class="reasoning-icon">\u2713</span>
                 <span class="reasoning-label">Response Complete</span>
                 <span class="reasoning-stats">
                     <span class="thinking-word-count">${wordCount}</span> <span class="stats-label">words</span>
                 </span>
                 <div class="reasoning-actions">
-                    <button class="reasoning-btn tts-btn" title="Listen to reasoning" onclick="event.stopPropagation(); speakThinkingContent(this);">
+                    <button class="reasoning-btn tts-btn" title="Listen to reasoning" data-bubble-action="thinking-speak">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
                             <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
                         </svg>
                     </button>
-                    <button class="reasoning-btn toggle-btn" onclick="event.stopPropagation(); toggleThinkingPanel(this.closest('.reasoning-header'));">
+                    <button class="reasoning-btn toggle-btn" data-bubble-action="thinking-toggle">
                         <span class="reasoning-toggle">\u25B6</span>
                     </button>
                 </div>
@@ -597,7 +639,7 @@ export function createBubbleWithThinking(content, thinking, cuLog) {
         cuPanel.className = 'cu-activity-panel collapsed';
         const lastStep = cuLog.filter(e => e.step).map(e => e.step).pop() || 0;
         cuPanel.innerHTML = `
-            <div class="cu-activity-header" onclick="window.toggleCUPanel(this)">
+            <div class="cu-activity-header" data-bubble-action="cu-panel-toggle">
                 <span class="cu-live-dot">\u2713</span>
                 <span class="cu-activity-label">Computer Use Complete</span>
                 <span class="cu-step-counter">${lastStep ? 'Step ' + escapeHtml(lastStep) : ''}</span>
@@ -3091,8 +3133,8 @@ function _showCUBackgroundBanner(status) {
         <span class="cu-bg-dot"></span>
         <span class="cu-bg-label">Computer Use running in background</span>
         <span class="cu-bg-step">Step ${escapeHtml(status.step)}/${escapeHtml(status.total)}</span>
-        <button class="cu-bg-view" onclick="window.__openCUBrowserView()">Live Browser</button>
-        <button class="cu-bg-reconnect" onclick="window.__reconnectCU()">Reconnect</button>
+        <button class="cu-bg-view" data-bubble-action="cu-bg-view">Live Browser</button>
+        <button class="cu-bg-reconnect" data-bubble-action="cu-bg-reconnect">Reconnect</button>
     `;
     document.body.appendChild(banner);
 }

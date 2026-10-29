@@ -77,7 +77,7 @@
     <!-- Claude Code Agent Banner (shown when agents provider selected) -->
     <div id="claudeCodeBanner" class="claude-code-banner hide collapsed">
       <!-- Collapsed View: Minimal blue line with key info + status metrics -->
-      <div class="claude-banner-collapsed" id="claudeBannerCollapsed" onclick="if(window.expandAgentBanner)window.expandAgentBanner(event);else{var b=document.getElementById('claudeCodeBanner');if(b)b.classList.remove('collapsed');}">
+      <div class="claude-banner-collapsed" id="claudeBannerCollapsed">
         <span class="banner-status-compact" id="claudeStatusCompact">Ready</span>
         <span class="banner-title-compact">CLI Agent</span>
         <!-- Inline Status Metrics (shown when session active) -->
@@ -99,7 +99,7 @@
         <div class="claude-banner-row claude-banner-title-row">
           <span class="claude-banner-title">CLI Agent</span>
           <span class="claude-banner-hint">Interactive AI coding agent with file access</span>
-          <span class="banner-collapse-btn" id="bannerCollapseBtn" onclick="event.stopPropagation();if(window.collapseAgentBanner)window.collapseAgentBanner(event);else{var b=document.getElementById('claudeCodeBanner');if(b)b.classList.add('collapsed');}">▲</span>
+          <span class="banner-collapse-btn" id="bannerCollapseBtn">▲</span>
         </div>
         <!-- Row 2: Model selector + Actions -->
         <div class="claude-banner-row claude-banner-controls-row">
@@ -129,7 +129,7 @@
     <!-- Gemini CLI Agent Banner (shown when gemini-agents provider selected) -->
     <div id="geminiCodeBanner" class="gemini-code-banner hide collapsed">
       <!-- Collapsed View: Minimal line with key info -->
-      <div class="gemini-banner-collapsed" id="geminiBannerCollapsed" onclick="if(window.expandGeminiBanner)window.expandGeminiBanner(event);else{var b=document.getElementById('geminiCodeBanner');if(b)b.classList.remove('collapsed');}">
+      <div class="gemini-banner-collapsed" id="geminiBannerCollapsed">
         <span class="banner-status-compact" id="geminiStatusCompact">Ready</span>
         <span class="banner-title-compact">Gemini CLI</span>
         <span class="yolo-indicator yolo-on" id="geminiYoloIndicatorCompact">YOLO</span>
@@ -142,7 +142,7 @@
         <div class="gemini-banner-row gemini-banner-title-row">
           <span class="gemini-banner-title">Gemini CLI Agent</span>
           <span class="gemini-banner-hint">Interactive AI coding agent with MCP tools</span>
-          <span class="banner-collapse-btn" id="geminiBannerCollapseBtn" onclick="event.stopPropagation();if(window.collapseGeminiBanner)window.collapseGeminiBanner(event);else{var b=document.getElementById('geminiCodeBanner');if(b)b.classList.add('collapsed');}">▲</span>
+          <span class="banner-collapse-btn" id="geminiBannerCollapseBtn">▲</span>
         </div>
         <!-- Row 2: YOLO toggle + Actions -->
         <div class="gemini-banner-row gemini-banner-controls-row">
