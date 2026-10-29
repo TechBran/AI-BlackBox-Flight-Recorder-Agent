@@ -1119,20 +1119,22 @@ app.add_middleware(StaticCacheMiddleware)
 
 # The Portal's Content-Security-Policy (no inline script, no eval) and inert
 # /ui/uploads/ responses — utils/portal_csp.py (audit rank 75).
-from Orchestrator.utils.portal_csp import PortalCSPMiddleware
+from Orchestrator.utils.portal_csp import PortalCSPMiddleware, harden_upload_headers
 app.add_middleware(PortalCSPMiddleware)
 
 # Portal/ is served through a guard: web assets only in the code tree, and
 # never runtime data, server-side source, key/config material, dot-files,
 # Portal/artifacts/ or (unless [debug] serve_dev_pages) Portal/dev/ — see
 # utils/static_guard.py (audit rank 24). Its symlink check assumes no untrusted
-# local user can write in the served tree, hence drop_world_write.
+# local user can write in the served tree, hence drop_world_write. A file that
+# resolves into uploads/ is made inert by the file actually served, however
+# the URL spells its path (media_headers).
 drop_world_write(portal_dir(), portal_dir() / "uploads")
 app.mount(
     "/ui",
     GuardedStaticFiles(directory=str(portal_dir()), html=True,
                        refused_dirs=portal_refused_dirs(DEBUG_SERVE_DEV_PAGES),
-                       media_dirs=PORTAL_MEDIA_DIRS),
+                       media_dirs=PORTAL_MEDIA_DIRS, media_headers=harden_upload_headers),
     name="ui",
 )
 

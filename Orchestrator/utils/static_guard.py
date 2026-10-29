@@ -28,6 +28,12 @@ __pycache__/, node_modules/ and the mount's `refused_dirs` (Portal/artifacts/
 has its own /artifacts/{id} route, Portal/dev/ is only served behind [debug]).
 Refused paths get the same bare 404 as a missing file.
 
+MEDIA HEADERS: `media_headers`, when given, is called with the headers of
+every response whose file resolves into a media dir (the /ui mount passes
+portal_csp.harden_upload_headers, which makes uploads inert as script and as
+documents). It goes by the file actually opened, so neither the URL's
+spelling nor a symlink into uploads/ escapes it.
+
 SYMLINKS: the check runs on the requested path AND on the resolved real path,
 so a served-looking name that symlinks to a refused file (or out of the root)
 is refused too. That is a check-then-open, so it holds only while no
@@ -41,7 +47,7 @@ import logging
 import os
 import posixpath
 import stat
-from typing import FrozenSet, Iterable, Optional, Tuple
+from typing import Callable, FrozenSet, Iterable, Optional, Tuple
 
 from starlette.exceptions import HTTPException
 from starlette.staticfiles import StaticFiles
@@ -114,11 +120,13 @@ class GuardedStaticFiles(StaticFiles):
         refused_dirs: Iterable[str] = (),
         media_dirs: Iterable[str] = (),
         allowed_suffixes: Optional[Iterable[str]] = WEB_ASSET_SUFFIXES,
+        media_headers: Optional[Callable] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.refused_dirs = tuple(d.strip("/").lower() for d in refused_dirs)
         self.media_dirs = tuple(d.strip("/") for d in media_dirs)
+        self.media_headers = media_headers
         self.allowed_suffixes = (None if allowed_suffixes is None
                                  else frozenset(s.lower() for s in allowed_suffixes))
 
@@ -150,19 +158,37 @@ class GuardedStaticFiles(StaticFiles):
             raise HTTPException(status_code=404)
         return await super().get_response(path, scope)
 
+    def _real_rel(self, full_path) -> Optional[str]:
+        """`full_path` after symlinks, relative to the mount root it lies in;
+        None when it lies in none (follow_symlink=True escaped the root)."""
+        real = os.path.realpath(full_path)
+        for directory in self.all_directories:
+            root = os.path.realpath(directory)
+            if os.path.commonpath([real, root]) == root:
+                return os.path.relpath(real, root)
+        return None
+
     def lookup_path(self, path):
         full_path, stat_result = super().lookup_path(path)
         if stat_result is None:
             return full_path, stat_result
         is_file = stat.S_ISREG(stat_result.st_mode)
-        real = os.path.realpath(full_path)
-        for directory in self.all_directories:
-            root = os.path.realpath(directory)
-            if os.path.commonpath([real, root]) == root:
-                rel = os.path.relpath(real, root)
-                break
-        else:
-            rel = os.path.basename(real)  # follow_symlink=True escaped the root
+        rel = self._real_rel(full_path)
+        if rel is None:
+            rel = os.path.basename(os.path.realpath(full_path))
         if self.is_refused(path, is_file=is_file) or self.is_refused(rel, is_file=is_file):
             return "", None
         return full_path, stat_result
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if self.media_headers is not None and self._in_media_dir(full_path):
+            self.media_headers(response.headers)
+        return response
+
+    def _in_media_dir(self, full_path) -> bool:
+        rel = self._real_rel(full_path)
+        if rel is None:
+            return False
+        first = rel.replace(os.sep, "/").split("/")[0].lower()
+        return first in (d.lower() for d in self.media_dirs)

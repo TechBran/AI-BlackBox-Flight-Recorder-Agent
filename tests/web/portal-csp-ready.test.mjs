@@ -1,7 +1,8 @@
 // The Portal runs under its Content-Security-Policy (audit rank 75,
-// Orchestrator/utils/portal_csp.py): script-src 'self', so no inline <script>,
-// no inline on*= handler (static or built into an HTML string), no
-// javascript: URL and no eval anywhere under /ui. The bubbles' panel controls
+// Orchestrator/utils/portal_csp.py): script-src <host>/ui/, so no inline
+// <script>, no inline on*= handler (static or built into an HTML string), no
+// javascript: URL, no eval anywhere under /ui, and no script from outside the
+// Portal tree (/app-proxy/, /cu/, ... are not script sources). The bubbles' panel controls
 // and the agent banners' collapse used inline onclick strings; they are now
 // one delegated listener and init-time bindings.
 //
@@ -55,6 +56,38 @@ test("no script under /ui builds an inline handler, a javascript: URL or evals",
         if (/setAttribute\(\s*["']on[a-z]+["']/i.test(code)) offenders.push(`${rel}: setAttribute('on…')`);
         if (/["'`]\s*javascript:/i.test(code)) offenders.push(`${rel}: javascript: URL`);
         if (/(^|[^.\w])eval\s*\(|\bnew\s+Function\s*\(/.test(code)) offenders.push(`${rel}: eval / new Function`);
+    }
+    assert.deepEqual(offenders, []);
+});
+
+// Portal/cu-view/ is the /cu/view/{session} page's own code (it imports
+// /cu/novnc/), framed by the Portal, never loaded as a Portal script.
+const LOADED_OUTSIDE_THE_POLICY = /^cu-view\//;
+
+test("every script a page under /ui loads comes from the /ui/ tree", () => {
+    const offenders = [];
+    for (const file of walk(PORTAL, [".html"])) {
+        const rel = relative(PORTAL, file);
+        if (NOT_UNDER_THE_POLICY.has(rel)) continue;
+        const html = readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+        for (const tag of html.matchAll(/<script\b[^>]*\ssrc\s*=\s*["']([^"']+)["']/gi)) {
+            const src = tag[1];
+            // index.html is served at "/" too, where a relative src would leave /ui/.
+            const relativeOk = rel !== "index.html" && !/^([a-z][a-z0-9+.-]*:|\/)/i.test(src);
+            if (!src.startsWith("/ui/") && !relativeOk) offenders.push(`${rel}: ${src}`);
+        }
+    }
+    for (const file of walk(PORTAL, [".js", ".mjs"])) {
+        const rel = relative(PORTAL, file);
+        if (LOADED_OUTSIDE_THE_POLICY.test(rel)) continue;
+        const code = stripComments(readFileSync(file, "utf8"));
+        const loads = /(?:\bfrom|\bimport\s*\(|addModule\s*\(|\bWorker\s*\(|importScripts\s*\()\s*["'`]([^"'`]+)["'`]/g;
+        for (const m of code.matchAll(loads)) {
+            const spec = m[1];
+            if (/^([a-z][a-z0-9+.-]*:|\/)/i.test(spec) && !spec.startsWith("/ui/")) {
+                offenders.push(`${rel}: ${spec}`);
+            }
+        }
     }
     assert.deepEqual(offenders, []);
 });
