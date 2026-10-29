@@ -10,6 +10,7 @@ import { $, toast, toastError, createPoller } from './core-utils.js';
 import { getOperator, OPERATOR_REQUIRED_MESSAGE, clearHistory } from './state-management.js';
 import { openSnapshotById } from './timeline-browser.js';
 import { taskTypeMeta, isAgentTaskType, canShowLiveView, truncateText } from './task-ui.js';
+import { confirmInline } from '../onboarding/inline-confirm.js';
 
 // =============================================================================
 // State
@@ -1261,9 +1262,14 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
         }
     });
 
-    // Cancel stuck tasks
+    // Cancel stuck tasks: a two-tap confirm on the button itself, never
+    // window.confirm (the Android WebView has no dialog host, so confirm()
+    // returned false there unseen and the button did nothing).
     safeSetOnClick("btnCancelTasks", async () => {
-        if (!window.confirm("Cancel every pending and running task, for every operator?\n\nLong renders (video, music) and running CLI agents stop too.")) return;
+        if (!confirmInline($("btnCancelTasks"), {
+            prompt: "Tap again to cancel all tasks",
+            detail: "Cancel every pending and running task, for every operator? Long renders (video, music) and running CLI agents stop too.",
+        })) return;
         try {
             const r = await fetch("/tasks/cancel-all", { method: "POST" });
             const j = await r.json();
