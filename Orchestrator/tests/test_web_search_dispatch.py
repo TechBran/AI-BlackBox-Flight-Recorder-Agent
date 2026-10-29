@@ -39,6 +39,7 @@ MIGRATED_FILES = [
     "Orchestrator/routes/gemini_live_routes.py",
     "Orchestrator/routes/realtime_routes.py",
     "Orchestrator/routes/grok_live_routes.py",
+    "Orchestrator/voice/tools.py",  # the tool ladder the three voice routes share
     "Orchestrator/browser/driver_anthropic.py",
 ]
 

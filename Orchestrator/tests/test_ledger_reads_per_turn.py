@@ -252,6 +252,7 @@ _NO_VOLUME_TEXT = [
     "Orchestrator/routes/gemini_live_routes.py",
     "Orchestrator/routes/grok_live_routes.py",
     "Orchestrator/routes/realtime_routes.py",
+    "Orchestrator/voice/tools.py",
     "Orchestrator/browser/driver_anthropic.py",
     "ToolVault/tools/search_snapshots/executor.py",
     "ToolVault/tools/list_recent_snapshots/executor.py",

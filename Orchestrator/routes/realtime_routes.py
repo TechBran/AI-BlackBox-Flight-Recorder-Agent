@@ -17,15 +17,10 @@ Features:
 """
 
 # Standard library imports
-import asyncio
 import base64
 import json
-import os
 import time
 from typing import Optional, Dict, Any
-
-# HTTP client for saving sessions
-import aiohttp
 
 # External library imports
 try:
@@ -35,8 +30,7 @@ except ImportError:
     WEBSOCKETS_AVAILABLE = False
     print("[REALTIME] websockets library not installed - run: pip install websockets")
 
-from fastapi import WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketState
+from fastapi import WebSocket
 
 # Local imports
 from Orchestrator.checkpoint import app
@@ -53,57 +47,34 @@ from Orchestrator.config import (
     OPENAI_REALTIME_NOISE_REDUCTION_TYPES,
     OPENAI_REALTIME_TRANSCRIPTION_DELAYS,
     REALTIME_CONTEXT_MAX_CHARS,
-    REALTIME_SNAPSHOT_CHARS_EACH,
     STT_OPENAI_STREAM,
-    VOL_PATH,
 )
-from Orchestrator.models import RealtimeSession, REALTIME_SESSIONS, TaskType
-from Orchestrator.volume import now_utc_iso, read_text_safe
-from Orchestrator.fossils import (
-    hybrid_retrieve,
-    format_snapshot_for_delivery,
-    get_recent_fossils_for_operator,
-    get_recent_checkpoints_for_operator
-)
+from Orchestrator.models import RealtimeSession, REALTIME_SESSIONS
+from Orchestrator.volume import now_utc_iso
 from Orchestrator.context_builder import build_fossil_context
-from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.utils.async_helpers import run_blocking
-from Orchestrator.tasks import create_task
-from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
 from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
-from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
+from Orchestrator.routes.voice_prompts import build_voice_instructions
 from Orchestrator.routes.voice_translate import (
     resolve_translate_params,
     build_translate_instructions,
 )
 from Orchestrator.routes.voice_ws_shared import (
     adopt_upstream,
-    claim_session,
-    close_upstream,
-    dispatch_voice_tool,
-    end_portal_session,
-    reset_for_connect,
-    retire_upstream,
-    conversation_releaser,
+    safe_send,
     save_voice_transcript,
     send_openai_style_tool_error,
-    spawn_reconnect,
-    superseded,
 )
+from Orchestrator.voice import tools as voice_tools
+from Orchestrator.voice.bridge import LiveVoiceBridge, VoiceAdapter
+from Orchestrator.voice.transcript import save_session_transcript
 
+LOG_PREFIX = "[REALTIME]"
 
-async def _safe_ws_send(websocket, data: dict) -> bool:
-    """Send JSON to WebSocket, return False if connection is dead."""
-    try:
-        if websocket and hasattr(websocket, 'application_state') and websocket.application_state == WebSocketState.CONNECTED:
-            await websocket.send_json(data)
-            return True
-    except Exception:
-        pass
-    return False
+_safe_ws_send = safe_send
 
 # =============================================================================
 # Tool Definitions — read FRESH at session-configure time (P1b)
@@ -126,60 +97,16 @@ async def save_session_to_blackbox(session: RealtimeSession):
     session.conversation ONLY once the transcript is saved or durably in the
     retry spool, which the live-session reaper drains.
     """
-    if not session.conversation:
-        print(f"[REALTIME] No conversation to save for session {session.session_id}")
-        return
-
-    if not session.operator:
-        print(f"[REALTIME] No operator set, cannot save session {session.session_id}")
-        return
-
-    # Sort conversation by timestamp to ensure correct order
-    sorted_conversation = sorted(
-        session.conversation,
-        key=lambda x: x.get("timestamp", "")
-    )
-
-    # Format conversation as readable transcript
-    transcript_lines = []
-    for msg in sorted_conversation:
-        role = "User" if msg["role"] == "user" else "AI"
-        transcript_lines.append(f"[{role}]: {msg['content']}")
-
-    transcript = "\n\n".join(transcript_lines)
-
-    session_summary = f"""=== OpenAI Realtime Voice Session ===
-Session ID: {session.session_id}
-Timestamp: {now_utc_iso()}
-Messages: {len(session.conversation)}
-
---- Transcript ---
-{transcript}
---- End Session ---"""
-
-    print(f"[REALTIME] Saving session {session.session_id} with {len(session.conversation)} messages to BlackBox")
-
-    # Drops exactly the turns in this transcript, once they are safe (spooled
-    # or saved): a turn that lands while the save runs stays for the next one.
-    release = conversation_releaser(session)
-    saved = await save_voice_transcript(
-        operator=session.operator,
+    await save_session_transcript(
+        session,
+        title="OpenAI Realtime Voice Session",
+        fields=[("Timestamp", now_utc_iso())],
+        ai_label="AI",
         user_message=f"[Voice Session Transcript] OpenAI Realtime voice session {session.session_id}",
-        session_summary=session_summary,
         model_label="openai-realtime-voice",
-        log_prefix="[REALTIME]",
-        session_id=session.session_id,
-        on_safe=release,
+        log_prefix=LOG_PREFIX,
+        persist=save_voice_transcript,
     )
-
-    # Clear ONLY once the transcript is safe: saved, or in the retry spool
-    # (previously cleared unconditionally, permanently losing the transcript
-    # after a failed save; rank 51 write-ahead spool).
-    if saved:
-        release()
-    else:
-        print(f"[REALTIME] Save FAILED and the retry spool is unavailable — keeping "
-              f"{len(session.conversation)} turns in memory for the next save attempt")
 
 
 # =============================================================================
@@ -222,38 +149,8 @@ def build_context_for_operator(operator: str, user_text: str = "") -> tuple[str,
 # =============================================================================
 
 async def execute_search_snapshots(session: RealtimeSession, arguments: Dict) -> str:
-    """
-    Execute the search_snapshots tool.
-
-    Uses hybrid retrieval (keyword + semantic) to find relevant snapshots.
-    Returns formatted results for the model.
-    """
-    query = arguments.get("query", "")
-    k = min(arguments.get("k", 3), 5)  # Cap at 5 results
-
-    if not query:
-        return "Error: No search query provided."
-
-    try:
-        # Use hybrid retrieval for best results. It embeds, reranks and reads
-        # the ledger, so it runs off the event loop every voice session shares
-        # (its vol_txt argument is unused: no 58 MB volume read for it here).
-        results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=session.operator)
-
-        if not results:
-            return f"No snapshots found matching: {query}"
-
-        # Format results
-        output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
-        for i, snap_text in enumerate(results, 1):
-            # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-            output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
-
-        return "\n\n".join(output_parts)
-
-    except Exception as e:
-        print(f"[REALTIME] Search error: {e}")
-        return f"Search failed: {str(e)}"
+    """The search_snapshots tool (Orchestrator/voice/tools.py)."""
+    return await voice_tools.execute_search_snapshots(session, arguments, log_prefix=LOG_PREFIX)
 
 # =============================================================================
 # OpenAI Realtime API Connection
@@ -450,127 +347,11 @@ async def configure_openai_session(
     # Stash provenance on the session so the WS endpoint can emit it to
     # the client right after configuration.
     session.provenance = provenance
-    is_system_operator = (operator == "system")
-
-    # If custom_role is provided, use it as the primary system instruction
-    # This allows REST endpoint models to set up the WebSocket model's persona before the call
-    if custom_role:
-        # Custom role provided - use it with essential context appended
-        system_instructions = f"""{custom_role}
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses.
-
-ESSENTIAL TOOLS:
-You have access to search_snapshots and list_recent_snapshots for memory/context.
-You can also generate images, videos, music, and send SMS or make phone calls.
-You have search_contacts and save_contact for the contact book.
-You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
-Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
-
-{CU_CONTROL_BLOCK}
-
-VOICE INTERACTION:
-This is a real-time voice conversation. Be concise and natural. The person on the phone cannot see text - speak clearly."""
-
-    else:
-        # Default system prompt construction
-        # Different identity section for system vs named operators
-        if is_system_operator:
-            identity_section = """OPERATOR IDENTITY:
-This is an OUTBOUND CALL or system-initiated session. You may be calling someone on behalf of a user.
-- Do NOT address the person as "system" - just speak naturally and conversationally
-- Check recent snapshots IMMEDIATELY for task context (who to call, what to say, order details, etc.)
-- You have access to ALL snapshots across all operators for context handoff
-- Focus on completing the task that was set up before this call was initiated"""
-            memory_section = """MEMORY ACCESS — YOUR MOST IMPORTANT CAPABILITY:
-The BlackBox contains 1,600+ snapshots — your complete memory of every conversation, decision, and preference.
-Search snapshots FIRST and OFTEN. Since this is a system session, you can see ALL operators' snapshots for context handoff.
-Don't guess at history — the answers are in the snapshots. Call search_snapshots proactively."""
-            context_section = f"CONTEXT:\n{context if context else 'No recent context loaded yet. Use list_recent_snapshots immediately!'}"
-        else:
-            identity_section = f"""OPERATOR IDENTITY:
-You are currently speaking with: {operator}
-Always address them by their name ({operator}) when appropriate. This is their personal AI session."""
-            memory_section = f"""MEMORY ACCESS — YOUR MOST IMPORTANT CAPABILITY:
-The BlackBox contains 1,600+ snapshots — your complete memory of {operator}'s history.
-Search snapshots FIRST and OFTEN — before answering questions about past work, before guessing at context, before starting any task.
-Everything about {operator}'s projects, preferences, past decisions, and recent activity lives in the snapshots.
-Don't guess or hallucinate history — call search_snapshots proactively."""
-            context_section = f"OPERATOR-SPECIFIC CONTEXT:\n{context if context else f'No recent context available for {operator} yet. This may be their first session or a fresh start.'}"
-
-        voice_persona = get_persona(operator, "voice") + "\n\n" + VOICE_DELIVERY_NOTE
-
-        system_instructions = f"""{voice_persona}
-
-IDENTITY:
-You are the voice interface for the AI Black Box Flight Recorder, connected to an immutable snapshot ledger and a multimodal toolchain. The operator's memory lives in the snapshots — treat it as your external long-term memory.
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses.
-
-{identity_section}
-
-{memory_section}
-
-{context_section}
-
-MEDIA PIPELINES - CRITICAL:
-You have tools to generate and find media. Here's how to use the different pipelines:
-
-1. IMAGE-TO-VIDEO (animate an existing image):
-   - First find the image URL using list_media or search_media
-   - Call generate_video with the image_url parameter:
-     generate_video(prompt="description of motion", image_url="/ui/uploads/image.png")
-   - The image_url parameter triggers image-to-video mode - DO NOT just put the URL in the prompt
-
-2. VIDEO EXTENSION (extend an existing video):
-   - Find the video URL using list_media or search_media
-   - Call generate_video with the video_url parameter:
-     generate_video(prompt="continuation description", video_url="/ui/uploads/video.mp4", resolution="720p")
-   - Must use 720p resolution for extensions
-
-3. IMAGE-TO-IMAGE (use reference images):
-   - Find image URLs using list_media or search_media
-   - Call a per-provider image tool with the reference_images parameter:
-     gemini_image(prompt="new image description", reference_images=["/ui/uploads/ref1.png", "/ui/uploads/ref2.png"])
-   - Can include up to 10 reference images
-
-4. TEXT-TO-VIDEO/IMAGE (from scratch):
-   - Just use generate_video(prompt="...") or gemini_image(prompt="...") without URL parameters
-
-FINDING MEDIA:
-- Use list_media(media_type="image") to see available images
-- Use list_media(media_type="video") to see available videos
-- Use search_media(query="sunset") to find specific media by description
-
-DISPLAYING MEDIA IN CHAT:
-To show the user any media file directly in chat, output the full URL on its own line.
-The frontend automatically renders media URLs as embedded players/images:
-  /ui/uploads/sunset-mountains_abc123.png  (renders as image)
-  /ui/uploads/racing-car_def456.mp4  (renders as video player)
-  /ui/uploads/epic-music_ghi789.wav  (renders as audio player)
-Use this to show the user which media you found with list_media or get_media BEFORE taking action on it.
-This lets the user verify you have the right file before you extend a video or modify an image.
-
-{CU_CONTROL_BLOCK}
-
-CONTACT BOOK:
-You have search_contacts and save_contact for the contact book.
-Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
-
-SCHEDULED TASKS (CRON JOBS):
-You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
-
-SESSION START - CRITICAL:
-IMMEDIATELY use list_recent_snapshots(count=3) at the START of EVERY session to catch up on recent context.
-This is essential because:
-- You may be continuing work started by another model or agent
-- The snapshots contain the most recent conversations, decisions, and context
-- {"For this outbound call: CHECK SNAPSHOTS for who you're calling, what task to complete, order details, etc." if is_system_operator else "For outbound calls: task details, order info, names, addresses may be in the snapshots"}
-- Context handoff between models happens through snapshots - USE THEM!
-
-Do this BEFORE responding to the user - check what happened recently so you're caught up."""
+    # One builder for the three voice providers (voice_prompts); a custom_role
+    # (outbound call) replaces the default persona prompt.
+    system_instructions = build_voice_instructions(
+        "openai", operator, context, custom_role,
+        persona=lambda: get_persona(operator, "voice") + "\n\n" + VOICE_DELIVERY_NOTE)
 
     # Build turn_detection payload based on vad_type.
     # - server_vad (default): existing shape + optional idle_timeout_ms
@@ -795,47 +576,12 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
             })
 
     elif event_type == "response.function_call_arguments.done":
-        # Execute tool call
-        call_id = event.get("call_id", "")
-        name = event.get("name", "")
-        arguments_str = event.get("arguments", "{}")
-
-        try:
-            arguments = json.loads(arguments_str)
-        except json.JSONDecodeError as parse_err:
-            # P1b: malformed arguments must NOT execute with {} — that masks
-            # the real cause (e.g. search_snapshots "No search query provided").
-            # Return a parse error so the model can retry with valid JSON.
-            print(f"[REALTIME] Malformed tool arguments for {name}: {parse_err}")
-            await send_openai_style_tool_error(
-                session.openai_ws, session.portal_ws, event,
-                ValueError(f"Malformed tool-call arguments JSON: {parse_err}. "
-                           f"Raw arguments: {arguments_str[:200]}"),
-            )
-            return
-
-        print(f"[REALTIME] Tool call: {name} with args: {arguments}")
-
-        # Notify Portal that tool is being called
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "tool_call",
-                "data": {"name": name, "arguments": arguments}
-            })
-
-        # Run the tool OFF this listener so it keeps draining provider events
-        # while the tool works: inline, a long tool held the socket unread
-        # (audit O08-stt-realtime-02). The answer goes back on the socket the
-        # call came from, never on a reconnected one that has no such call id.
-        upstream = session.openai_ws
-        dispatch_voice_tool(
-            session,
-            lambda: _execute_openai_tool(session, name, arguments),
-            lambda result: _deliver_openai_tool_result(session, upstream, call_id, name, result),
-            lambda exc: _fail_openai_tool(session, upstream, event, exc),
-            label=f"[REALTIME] {name} (call_id={call_id})",
-            call_id=call_id,
-        )
+        # The OpenAI-style function call (shared with xAI): malformed arguments
+        # are answered with a parse error, never run with {}; the call runs OFF
+        # this listener and is answered on the socket it came from.
+        await voice_tools.dispatch_openai_style_call(
+            session, event, ws_attr="openai_ws", log_prefix=LOG_PREFIX,
+            execute=lambda name, arguments: _execute_openai_tool(session, name, arguments))
 
     elif event_type == "response.done":
         # Response complete
@@ -917,647 +663,225 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
 
 
 async def _execute_openai_tool(session: RealtimeSession, name: str, arguments: Dict) -> str:
-    """Run ONE tool call of the session and return its result text.
+    """Run ONE tool call of the session and return its result text (the shared
+    voice tool ladder, Orchestrator/voice/tools.py)."""
+    return await voice_tools.execute_voice_tool(session, name, arguments, log_prefix=LOG_PREFIX,
+                                                created_by="openai-realtime")
 
-    Runs as a task tracked on the session (voice_ws_shared.dispatch_voice_tool),
-    never inside the listener, which used to sit on a tool for its whole run.
-    """
-    if name == "search_snapshots":
-        result = await execute_search_snapshots(session, arguments)
-    elif name in ("get_recent_snapshots", "list_recent_snapshots"):
-        # list_recent_snapshots is the declared ToolVault name; legacy
-        # get_recent_snapshots is kept as a dispatch alias for list_recent_snapshots
-        # so this specialized handler (system-sees-all scoping for
-        # outbound-call context handoff) serves both instead of falling
-        # to the catch-all.
-        count = min(arguments.get("count", 3), 5)
-        operator = session.operator or "system"
 
-        # System operator sees ALL snapshots (for outbound calls/context handoff)
-        # Regular operators only see their own snapshots (no context bleed)
-        see_all = (operator == "system")
+# =============================================================================
+# The OpenAI adapter of the shared voice bridge (Orchestrator/voice/bridge.py)
+# =============================================================================
 
-        print(f"[REALTIME] Getting {count} recent snapshots for {operator} (see_all={see_all})")
-        try:
-            from Orchestrator.fossils import load_snapshot_index, read_volume_bytes
-            # The index parse and the whole-volume read block: off the event loop.
-            index = await run_blocking(load_snapshot_index)
+# 20 ms of PCM16 silence at 24 kHz (480 samples = 960 bytes).
+_SILENCE_20MS_B64 = base64.b64encode(b'\x00' * 960).decode('ascii')
 
-            if index:
-                # Sort all snapshots by ID (date + sequence)
-                def snapshot_sort_key(snap_id: str) -> tuple:
-                    try:
-                        parts = snap_id.split('-')
-                        date_part = int(parts[1]) if len(parts) > 1 else 0
-                        seq_part = int(parts[2]) if len(parts) > 2 else 0
-                        return (date_part, seq_part)
-                    except (ValueError, IndexError):
-                        return (0, 0)
 
-                # Filter by operator unless system (which sees all)
-                if see_all:
-                    matching = list(index.items())
-                else:
-                    matching = [(sid, meta) for sid, meta in index.items()
-                               if meta.get("operator") == operator]
+def _query_bool(value: Optional[str]) -> Optional[bool]:
+    return value.lower() == "true" if value is not None else None
 
-                matching.sort(key=lambda x: snapshot_sort_key(x[0]), reverse=True)
 
-                # Get the most recent N
-                recent = matching[:count]
+class OpenAIRealtimeAdapter(VoiceAdapter):
+    """OpenAI Realtime's half of the shared LiveVoiceBridge: the GA
+    session.update, the realtime events, the model bound at the WS URL, and
+    translate sessions that rebind the translate model on reconnect."""
 
-                if not recent:
-                    result = f"No recent snapshots found for operator '{operator}'."
-                else:
-                    vol_bytes = await run_blocking(read_volume_bytes, VOL_PATH)
-                    scope_desc = "all operators" if see_all else f"operator: {operator}"
-                    result_parts = [f"Found {len(recent)} recent snapshot(s) ({scope_desc}):\n"]
+    name = "OpenAI"
+    log_prefix = LOG_PREFIX
+    ws_attr = "openai_ws"
+    key_name = "OPENAI_API_KEY"
+    connecting_status = "Connecting to OpenAI..."
+    connect_failed = "Failed to connect to OpenAI Realtime API"
 
-                    for snap_id, meta in recent:
-                        start = meta.get("byte_start", 0)
-                        end = meta.get("byte_end", start + 5000)
-                        snap_bytes = vol_bytes[start:end]
-                        snap_text = snap_bytes.decode('utf-8', errors='replace')
-                        operator_name = meta.get("operator", "unknown")
+    def sessions(self):
+        return REALTIME_SESSIONS
 
-                        # WI-10 (M7): deliver recent snapshots WHOLE — no delivery truncation
-                        result_parts.append(f"--- {snap_id} (operator: {operator_name}) ---\n{snap_text}")
+    def new_session(self, session_id):
+        return RealtimeSession(session_id=session_id, created_at=now_utc_iso())
 
-                    result = "\n\n".join(result_parts)
-                    print(f"[REALTIME] Retrieved {len(recent)} recent snapshots")
-            else:
-                result = "No snapshots found in index."
-        except Exception as e:
-            print(f"[REALTIME] Error getting recent snapshots: {e}")
-            result = f"Error retrieving recent snapshots: {str(e)}"
-    elif name == "web_fetch":
-        url = arguments.get("url", "")
-        max_chars = arguments.get("max_chars", 80000)
-        print(f"[REALTIME] Executing web fetch: {url}")
-        # Off the event loop: a fetch can take its whole time budget.
-        result = await run_blocking(perform_web_fetch, url, max_chars)
-        print(f"[REALTIME] Web fetch result length: {len(result)} chars")
-    elif name in IMAGE_TOOL_PROVIDERS:
-        provider = IMAGE_TOOL_PROVIDERS[name]
-        prompt = arguments.get("prompt", "")
-        aspect_ratio = arguments.get("aspectRatio", "16:9")
-        resolution = arguments.get("resolution", "1K")
-        num_images = arguments.get("numberOfImages", 1)
-        reference_images = arguments.get("reference_images", [])  # For image-to-image
+    def websockets_available(self):
+        return WEBSOCKETS_AVAILABLE
 
-        mode = "image-to-image" if reference_images else "text-to-image"
-        print(f"[REALTIME] Executing image generation ({mode}): {prompt[:100]}... ({num_images} @ {resolution})")
+    def api_key(self):
+        return OPENAI_API_KEY
 
-        # Create image generation task
-        image_options = {
-            "aspectRatio": aspect_ratio,
-            "resolution": resolution,
-            "numberOfImages": num_images,
-            "provider": provider,
-        }
-        if arguments.get("size"):  # openai gpt-image / local z-image size
-            image_options["size"] = arguments["size"]
-        if reference_images:
-            image_options["reference_images"] = reference_images
-
-        task = create_task(
-            TaskType.IMAGE_GENERATION,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data={"options": image_options}
-        )
-
-        img_count = num_images
-        ref_desc = f" (using {len(reference_images)} reference image{'s' if len(reference_images) > 1 else ''})" if reference_images else ""
-        result = f"Image generation started ({mode}){ref_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {img_count} image{'s' if img_count > 1 else ''} at {resolution}."
-
-        # Notify Portal about image task
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "image_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images}
-            })
-
-        print(f"[REALTIME] Image generation task created: {task.task_id}")
-    elif name == "generate_video":
-        prompt = arguments.get("prompt", "")
-        aspect_ratio = arguments.get("aspectRatio", "16:9")
-        duration = arguments.get("duration", 8)
-        resolution = arguments.get("resolution", "720p")
-        negative_prompt = arguments.get("negativePrompt", "")
-        image_url = arguments.get("image_url")  # For image-to-video
-        video_url = arguments.get("video_url")  # For video extension
-
-        mode = "text-to-video"
-        if image_url:
-            mode = "image-to-video"
-        elif video_url:
-            mode = "video-extension"
-
-        print(f"[REALTIME] Executing video generation ({mode}): {prompt[:100]}... ({duration}s @ {resolution})")
-
-        # Create video generation task
-        video_options = {
-            "aspectRatio": aspect_ratio,
-            "duration": duration,
-            "resolution": resolution,
-        }
-        if negative_prompt:
-            video_options["negativePrompt"] = negative_prompt
-        if image_url:
-            video_options["image_url"] = image_url
-        if video_url:
-            video_options["video_url"] = video_url
-
-        task = create_task(
-            TaskType.VIDEO_GENERATION,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data={"options": video_options}
-        )
-
-        mode_desc = f" (animating image: {image_url})" if image_url else (f" (extending video: {video_url})" if video_url else "")
-        result = f"Video generation started ({mode}){mode_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution}. Takes 5-20 minutes."
-
-        # Notify Portal about video task
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "video_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration, "resolution": resolution}
-            })
-
-        print(f"[REALTIME] Video generation task created: {task.task_id}")
-    elif name == "lyria_music":
-        prompt = arguments.get("prompt", "")
-        negative_prompt = arguments.get("negativePrompt", "")
-        sample_count = arguments.get("sampleCount", 1)
-        print(f"[REALTIME] Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
-
-        # Create music generation task
-        music_options = {
-            "prompt": prompt,
-            "operator": session.operator or "system",
-        }
-        if negative_prompt:
-            music_options["negative_prompt"] = negative_prompt
-        if sample_count and sample_count > 1:
-            music_options["sample_count"] = sample_count
-
-        task = create_task(
-            TaskType.LYRIA_MUSIC,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data=music_options
-        )
-
-        variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
-        result = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
-
-        # Notify Portal about music task
-        print(f"[REALTIME] Sending music_task event to portal, portal_ws={session.portal_ws is not None}")
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "music_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}
-            })
-            print(f"[REALTIME] ✓ music_task event sent successfully: task_id={task.task_id}")
+    def url_params(self, websocket):
+        q = websocket.query_params
+        url = {key: q.get(key) for key in (
+            "operator", "voice", "model", "mode", "target_language", "vad_type",
+            "vad_eagerness", "agent", "noise_reduction", "transcription_delay")}
+        idle = q.get("idle_timeout_ms")
+        if idle and idle.strip().isdigit():
+            url["idle_timeout_ms"] = int(idle.strip())
         else:
-            print(f"[REALTIME] ✗ WARNING: No portal_ws connection for music_task!")
+            url["idle_timeout_ms"] = None
+            if idle:
+                print(f"{LOG_PREFIX} WARNING: idle_timeout_ms {idle!r} not a positive integer; ignoring")
+        url["interrupt_response"] = _query_bool(q.get("interrupt_response"))
+        url["create_response"] = _query_bool(q.get("create_response"))
+        return url
 
-        print(f"[REALTIME] Music generation task created: {task.task_id}")
-    elif name == "get_media":
-        from Orchestrator.routes.chat_routes import execute_get_media
-        url = arguments.get("url")
-        task_id_param = arguments.get("task_id")
-        print(f"[REALTIME] Executing get_media: url={url}, task_id={task_id_param}")
-        media_result = await run_blocking(execute_get_media, url=url, task_id=task_id_param)
-        result = json.dumps(media_result, indent=2)
-    elif name == "list_media":
-        from Orchestrator.routes.chat_routes import execute_list_media
-        media_type = arguments.get("media_type")
-        limit = arguments.get("limit", 20)
-        print(f"[REALTIME] Executing list_media: type={media_type}, limit={limit}")
-        list_result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
-        result = json.dumps(list_result, indent=2)
-    elif name == "search_media":
-        from Orchestrator.routes.chat_routes import execute_search_media
-        query = arguments.get("query", "")
-        media_type = arguments.get("media_type")
-        limit = arguments.get("limit", 10)
-        print(f"[REALTIME] Executing search_media: query='{query}', type={media_type}")
-        search_result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
-        result = json.dumps(search_result, indent=2)
-    elif name == "send_sms":
-        # Send SMS using unified tool executor
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = arguments.get("phone_number", "")
-        message = arguments.get("message", "")
-        print(f"[REALTIME] Executing send_sms to {phone_number}: {message[:50]}...")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
-        result = tool_result.rich_result()
-        print(f"[REALTIME] SMS result: {result}")
-    elif name == "make_phone_call":
-        # Initiate outbound phone call through the unified tool executor: the
-        # box's call route (Asterisk/TG200 or Twilio), an E.164 number, and a
-        # 200 {"error": ...} counted as a failure (Orchestrator.telephony).
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = arguments.get("phone_number", "")
-        print(f"[REALTIME] Executing make_phone_call to {phone_number}")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("make_phone_call", {
-            "phone_number": phone_number,
-            "greeting": arguments.get("greeting", ""),
-            "role": arguments.get("role", ""),
-            "backend": arguments.get("backend", "openai_realtime"),
-        })
-        result = tool_result.rich_result()
-        print(f"[REALTIME] Call result: {result}")
-    elif name == "make_voice_call":
-        # Call with pre-generated TTS message (no delay on connect)
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = arguments.get("phone_number", "")
-        message = arguments.get("message", "")
-        voice = arguments.get("voice", "onyx")
-        print(f"[REALTIME] Executing make_voice_call to {phone_number}: {message[:50]}...")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("make_voice_call", {
-            "phone_number": phone_number,
-            "message": message,
-            "voice": voice
-        })
-        result = tool_result.rich_result()
-        print(f"[REALTIME] Voice call result: {result}")
-    elif name == "search_contacts":
-        from Orchestrator.contacts import search_contacts
-        query = arguments.get("query", "")
-        operator = session.operator or "system"
-        print(f"[REALTIME] Executing search_contacts: query='{query}', operator={operator}")
-        contacts = search_contacts(query, operator)
-        if contacts:
-            result = json.dumps(contacts, indent=2)
-        else:
-            result = f"No contacts found matching '{query}'."
-        print(f"[REALTIME] search_contacts result: {len(contacts)} contacts found")
-    elif name == "save_contact":
-        from Orchestrator.contacts import upsert_contact
-        operator = session.operator or "system"
-        contact_name = arguments.get("name", "")
-        notes = arguments.get("notes", "")
-        tags = arguments.get("tags", [])
-        phone = arguments.get("phone")
-        email = arguments.get("email")
-        relationship = arguments.get("relationship")
-        print(f"[REALTIME] Executing save_contact: name='{contact_name}', operator={operator}")
-        saved = upsert_contact(
-            name=contact_name, notes=notes, tags=tags,
-            operator=operator, created_by="openai-realtime",
-            phone=phone, email=email, relationship=relationship
+    async def parse_connect(self, session, websocket, data, url):
+        # Voice-agent preset (P4): ?agent=<id> or "agent" in the JSON connect
+        # message. Precedence: explicit params > preset fields > defaults. An
+        # unknown preset is a loud client warning; the session goes on without.
+        agent_id = data.get("agent", url["agent"])
+        preset = resolve_preset(agent_id, provider="realtime") if agent_id else None
+        if agent_id and preset is None:
+            await safe_send(websocket, {
+                "type": "warning",
+                "data": f"Voice agent preset {agent_id!r} not found for provider 'realtime' — continuing without preset"
+            })
+        merged = merge_connect_params({
+            "model": data.get("model", url["model"]),
+            "voice": data.get("voice", url["voice"]),
+            "greeting": data.get("greeting", ""),
+            "instructions": data.get("role", ""),
+        }, preset)
+        operator = data.get("operator", url["operator"] or "")
+        # The model goes to connect_to_openai (URL query); the VAD, timeout and
+        # response fields to configure_openai_session (session.update).
+        model = merged["model"]
+        mode = data.get("mode", url["mode"])
+        target_language = data.get("target_language", url["target_language"])
+        is_translate, _ = resolve_translate_params(mode, target_language, log_prefix=LOG_PREFIX)
+        if is_translate:
+            # Translate sessions ALWAYS bind the dedicated translate model —
+            # the backend override beats any client model pick.
+            model = OPENAI_REALTIME_TRANSLATE_MODEL
+        # Persisted for the reconnect path (P6a).
+        session.mode = mode if is_translate else ""
+        session.target_language = target_language or "" if is_translate else ""
+        session.operator = operator
+        return {
+            "operator": operator,
+            "voice": merged["voice"] or "ash",          # route default unchanged
+            "greeting": merged["greeting"] or "",
+            "role": merged["instructions"] or "",       # preset instructions ride the custom_role branch
+            "model": model,
+            "tool_group_override": merged["tool_group_override"],
+            "vad_type": data.get("vad_type", url["vad_type"]),
+            "vad_eagerness": data.get("vad_eagerness", url["vad_eagerness"]),
+            "idle_timeout_ms": data.get("idle_timeout_ms", url["idle_timeout_ms"]),
+            "interrupt_response": data.get("interrupt_response", url["interrupt_response"]),
+            "create_response": data.get("create_response", url["create_response"]),
+            "noise_reduction": data.get("noise_reduction", url["noise_reduction"]),
+            "transcription_delay": data.get("transcription_delay", url["transcription_delay"]),
+            "mode": mode,
+            "target_language": target_language,
+        }
+
+    async def dial(self, session, params):
+        # The model is bound at the upstream WS URL (audit C3).
+        return await connect_to_openai(session, model=params["model"])
+
+    async def configure(self, session, params):
+        await configure_openai_session(
+            session,
+            params["operator"],
+            params["voice"],
+            custom_role=params["role"],
+            tool_group_override=params["tool_group_override"],
+            vad_type=params["vad_type"],
+            vad_eagerness=params["vad_eagerness"],
+            idle_timeout_ms=params["idle_timeout_ms"],
+            interrupt_response=params["interrupt_response"],
+            create_response=params["create_response"],
+            noise_reduction=params["noise_reduction"],
+            transcription_delay=params["transcription_delay"],
+            mode=params["mode"],
+            target_language=params["target_language"],
         )
-        result = f"Contact saved: {json.dumps(saved, indent=2)}"
-        print(f"[REALTIME] save_contact result: saved '{contact_name}'")
-    elif name == "create_cron_job":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("create_cron_job", arguments)
-        result = cron_result.rich_result()
-        print(f"[REALTIME] create_cron_job result: {result}")
-    elif name == "edit_cron_job":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("edit_cron_job", arguments)
-        result = cron_result.rich_result()
-        print(f"[REALTIME] edit_cron_job result: {result}")
-    elif name == "search_cron_jobs":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("search_cron_jobs", arguments)
-        result = cron_result.rich_result()
-        print(f"[REALTIME] search_cron_jobs result: {result}")
-    elif name in ("use_computer", "list_devices", "control_android_device"):
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        tool_result = await executor.execute(name, arguments)
-        result = tool_result.result
-        print(f"[REALTIME] {name}: {result[:100]}")
-    elif name == "get_current_time":
-        from datetime import datetime
-        now = datetime.now()
-        result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-        print(f"[REALTIME] get_current_time: {result}")
-    else:
-        # Catch-all: route ANY other tool (incl. the per-provider web search
-        # tools and dynamically-injected ToolVault tools) through
-        # BlackBoxToolExecutor instead of reporting "Unknown tool".
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        tool_result = await executor.execute(name, arguments)
-        result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
-        if not result:
-            result = f"Tool '{name}' executed successfully (no output)."
-        print(f"[REALTIME] {name} (catch-all): {result[:100]}")
+        print(f"{LOG_PREFIX} Voice selected: {params['voice']}; "
+              f"model={params['model'] or OPENAI_REALTIME_MODEL}; "
+              f"vad_type={params['vad_type'] or 'server_vad'}")
 
-    return result
-
-
-async def _deliver_openai_tool_result(session: RealtimeSession, upstream, call_id: str,
-                                      name: str, result: str) -> None:
-    """Answer the model with a tool result, on the upstream the call came from."""
-    if upstream is not None and session.openai_ws is upstream:
-        tool_response = {
+    async def inject_greeting(self, session, greeting):
+        prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
+        await session.openai_ws.send(json.dumps({
             "type": "conversation.item.create",
             "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": result
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}]
             }
-        }
-        print(f"[REALTIME] Sending tool response for {name}, call_id: {call_id}")
-        await upstream.send(json.dumps(tool_response))
-        # Request response with tool result
-        await upstream.send(json.dumps({
-            "type": "response.create"
         }))
-        print(f"[REALTIME] Requested response.create after tool result")
-    else:
-        print(f"[REALTIME] Dropping the {name} result (call_id: {call_id}): the upstream "
-              f"it was called on is gone")
+        await session.openai_ws.send(json.dumps({"type": "response.create"}))
 
-    # Notify Portal
-    if session.portal_ws:
-        await _safe_ws_send(session.portal_ws, {
-            "type": "tool_result",
-            "data": {"name": name, "result_length": len(result)}
-        })
+    def connected_data(self, session, session_id, params):
+        return {
+            "session_id": session_id,
+            "operator": params["operator"],
+            "model": params["model"] or OPENAI_REALTIME_MODEL
+        }
 
+    async def handle_client(self, session, data):
+        await handle_portal_message(session, data)
 
-async def _fail_openai_tool(session: RealtimeSession, upstream, event: Dict,
-                            exc: BaseException) -> None:
-    """Answer the model with an error payload in place of a result."""
-    live = upstream if (upstream is not None and session.openai_ws is upstream) else None
-    await send_openai_style_tool_error(live, session.portal_ws, event, exc)
+    async def handle_event(self, session, event):
+        await handle_openai_message(session, event)
 
-# =============================================================================
-# WebSocket Bridge Tasks
-# =============================================================================
+    async def answer_failed_event(self, session, event, exc):
+        # A function call whose handling raised is answered with an error
+        # payload + response.create, so the model recovers instead of waiting.
+        await send_openai_style_tool_error(session.openai_ws, session.portal_ws, event, exc)
 
-async def openai_reconnect(session: RealtimeSession):
-    """
-    Reconnect to OpenAI Realtime API transparently.
-    Uses exponential backoff, re-configures session on success.
-    """
-    if session.is_reconnecting:
-        print(f"[REALTIME] Already reconnecting, skipping")
-        return
+    def on_frame(self, session):
+        if session.reconnect_count:
+            # Proven-healthy: a real server frame arrived on this socket.
+            session.reconnect_count = 0
 
-    # The attach this reconnect works for. A client re-attach resets
-    # intentional_disconnect, so after every await the generation is what says
-    # whether the session is still ours to re-dial (O09-live-voice-providers-01).
-    generation = session.generation
+    def keepalive_frame(self, session):
+        return {"type": "input_audio_buffer.append", "audio": _SILENCE_20MS_B64}
 
-    if session.reconnect_count >= session.max_reconnects:
-        print(f"[REALTIME] Max reconnects ({session.max_reconnects}) reached, giving up")
-        session.status = "disconnected"
-        await _safe_ws_send(session.portal_ws, {
-            "type": "disconnected",
-            "data": "Connection lost after multiple reconnection attempts"
-        })
-        dead = session.openai_ws
-        await save_session_to_blackbox(session)
-        if superseded(session, generation):
-            return  # a re-attach during the save owns the session now
-        # P1b: null the closed-but-non-None socket so the keepalive loop's
-        # `if not session.openai_ws: break` fires once, instead of spinning on
-        # the dead socket and re-triggering openai_reconnect every stale cycle
-        # (each re-hitting this give-up branch → a redundant BlackBox save).
-        if dead is not None:
-            await close_upstream(session, "openai_ws", dead)
-        return
-
-    session.is_reconnecting = True
-    session.reconnect_count += 1
-    attempt = session.reconnect_count
-
-    # Exponential backoff: 0.5s, 1s, 2s, 4s, 5s max (fast recovery for voice calls)
-    delay = min(0.5 * (2 ** (attempt - 1)), 5)
-    print(f"[REALTIME] Reconnecting (attempt {attempt}/{session.max_reconnects}) in {delay}s...")
-
-    # Notify Portal
-    await _safe_ws_send(session.portal_ws, {
-        "type": "reconnecting",
-        "data": {"attempt": attempt, "max": session.max_reconnects, "delay": delay}
-    })
-
-    await asyncio.sleep(delay)
-
-    # P1b (terminal guard): this coroutine runs DETACHED and just slept, so the
-    # WS endpoint may have torn the session down during the backoff. Re-check
-    # here — otherwise a Portal drop mid-reconnect would re-dial + respawn a
-    # listener + flip status back to "connected", resurrecting a clientless
-    # session the reaper can never evict. A newer attach that took the session
-    # over during the backoff owns its reconnect state: leave it alone.
-    if superseded(session, generation):
-        print(f"[REALTIME] Session re-attached during backoff — abandoning reconnect")
-        return
-    if session.intentional_disconnect:
-        print(f"[REALTIME] Session closed during backoff — abandoning reconnect")
-        session.is_reconnecting = False
-        return
-
-    try:
-        # P1b: cancel the old listener FIRST — it is bound to the OLD ws
-        # object; left running it would observe our close() below and emit a
-        # spurious "disconnected" to the client mid-recovery.
-        if session.listener_task and not session.listener_task.done():
-            session.listener_task.cancel()
-
-        # Close old connection
-        old = session.openai_ws
-        if old is not None:
-            await close_upstream(session, "openai_ws", old)
-
-        # Reconnect — translate sessions must rebind the translate model and
-        # must NOT degrade into a full persona/tool session (P6a).
-        if await connect_to_openai(
+    async def redial(self, session):
+        # Translate sessions must rebind the translate model and must NOT
+        # degrade into a full persona/tool session (P6a).
+        return await connect_to_openai(
             session,
             model=OPENAI_REALTIME_TRANSLATE_MODEL if session.mode == "translate" else None,
-        ):
-            dialed = session.openai_ws
-            # P1b (terminal guard): teardown may have run during the dial. If so,
-            # close the socket we just opened and bail — do NOT respawn a
-            # listener onto a session that is being torn down.
-            if session.intentional_disconnect or superseded(session, generation):
-                if dialed is not None:
-                    await close_upstream(session, "openai_ws", dialed)
-                if not superseded(session, generation):
-                    session.is_reconnecting = False
-                return
+        )
 
-            # Reconfigure session
-            await configure_openai_session(
-                session,
-                session.operator,
-                mode=session.mode or None,
-                target_language=session.target_language or None,
-            )
+    async def reconfigure(self, session):
+        await configure_openai_session(
+            session,
+            session.operator,
+            mode=session.mode or None,
+            target_language=session.target_language or None,
+        )
+        return True
 
-            # Re-emit provenance after reconfigure so client UI stays in sync with the
-            # newly-rebuilt system context (see Task 3 code review).
-            if session.provenance:
-                await _safe_ws_send(session.portal_ws, {
-                    "type": "provenance",
-                    "data": session.provenance
-                })
+    async def save(self, session):
+        await save_session_to_blackbox(session)
 
-            # P1b (terminal guard): final check at the point of no return.
-            # configure + provenance each await, so teardown could have completed
-            # during them — re-check before we respawn a listener and flip status
-            # to "connected". This is the last guard; past it the session is live
-            # again, so a hole here would still resurrect a reaper-immune session.
-            # Only the socket THIS reconnect dialed is closed: by now
-            # session.openai_ws may be a newer attach's upstream.
-            if session.intentional_disconnect or superseded(session, generation):
-                if dialed is not None:
-                    await close_upstream(session, "openai_ws", dialed)
-                if not superseded(session, generation):
-                    session.is_reconnecting = False
-                return
+    def reconnect(self, session):
+        return openai_reconnect(session)
 
-            # P1b: respawn the listener on the NEW upstream ws. Without this
-            # the previous openai_listener's `async for` (bound to the OLD closed
-            # socket) has already exited, so NOTHING reads the new connection —
-            # the session is a permanently mute one-way pipe still reporting
-            # "reconnected" (same defect class as the Gemini P1a fix; the phone
-            # bridge always had its own respawn loop).
-            session.listener_task = asyncio.create_task(openai_listener(session))
-            # The keepalive loop ends when the socket it fed closes (and a
-            # failed keepalive send is what started some reconnects): a
-            # reconnected session needs a live one again. ConnectionClosed from
-            # the listener and the keepalive is the only liveness signal now.
-            if session.keepalive_task is None or session.keepalive_task.done():
-                session.keepalive_task = asyncio.create_task(openai_keepalive_loop(session))
+    def listener(self, session):
+        return openai_listener(session)
 
-            # Reset state. NOTE: reconnect_count is reset in openai_listener on
-            # the first real server frame (proven-healthy), NOT here on dial —
-            # connect_to_openai returns True at the WS handshake, before any
-            # server event, so a handshake that succeeds then immediately drops
-            # would otherwise reset the counter every cycle and make
-            # max_reconnects unreachable (infinite mute-reconnect loop). Matches
-            # the Gemini setupComplete-reset semantics.
-            session.is_reconnecting = False
-            session.last_ai_message_time = time.time()
-            session.status = "connected"
+    def keepalive(self, session):
+        return openai_keepalive_loop(session)
 
-            print(f"[REALTIME] Reconnected successfully on attempt {attempt}")
 
-            await _safe_ws_send(session.portal_ws, {
-                "type": "reconnected",
-                "data": {"attempt": attempt}
-            })
-        else:
-            if superseded(session, generation):
-                print(f"[REALTIME] Session re-attached during the dial — abandoning reconnect")
-                return
-            print(f"[REALTIME] Reconnect attempt {attempt} failed")
-            session.is_reconnecting = False
-            spawn_reconnect(session, openai_reconnect(session))
+REALTIME_BRIDGE = LiveVoiceBridge(OpenAIRealtimeAdapter())
 
-    except Exception as e:
-        print(f"[REALTIME] Reconnect error: {e}")
-        if superseded(session, generation):
-            return
-        session.is_reconnecting = False
-        spawn_reconnect(session, openai_reconnect(session))
+
+async def openai_reconnect(session: RealtimeSession):
+    """Reconnect to the OpenAI Realtime API transparently (backoff, reconfigure)."""
+    await REALTIME_BRIDGE.reconnect(session)
 
 
 async def openai_keepalive_loop(session: RealtimeSession):
-    """
-    Send periodic keepalive silence to prevent OpenAI idle timeout.
-
-    Liveness is the transport's job, not this loop's: connect_to_openai runs
-    websockets' ping/pong (ping_interval=20, ping_timeout=30), so a dead socket
-    surfaces as ConnectionClosed in openai_listener within ~50 s, and a failed
-    send here reconnects too. OpenAI sends nothing while the user is quiet (and
-    nothing while a tool runs), so the old 60 s no-message timer reconnected on
-    ordinary pauses and cancelled long tools mid-call, dialing a NEW realtime
-    session that knows none of the conversation (audit
-    O09-live-voice-providers-02, O08-stt-realtime-02).
-    """
-    keepalive_interval = 15  # seconds
-
-    print(f"[REALTIME] Keepalive loop started (interval={keepalive_interval}s)")
-
-    try:
-        while True:
-            await asyncio.sleep(keepalive_interval)
-
-            if not session.openai_ws or session.intentional_disconnect:
-                break
-
-            # Send keepalive: 20ms of silence as PCM16@24kHz
-            try:
-                if session.openai_ws:
-                    # 20ms at 24kHz = 480 samples, PCM16 = 960 bytes of zeros
-                    silence_bytes = b'\x00' * 960
-                    silence_b64 = base64.b64encode(silence_bytes).decode('ascii')
-                    await session.openai_ws.send(json.dumps({
-                        "type": "input_audio_buffer.append",
-                        "audio": silence_b64
-                    }))
-            except websockets.exceptions.ConnectionClosed:
-                print(f"[REALTIME] Keepalive failed - connection closed")
-                if not session.is_reconnecting and not session.intentional_disconnect:
-                    spawn_reconnect(session, openai_reconnect(session))
-                break
-            except Exception as e:
-                print(f"[REALTIME] Keepalive error: {e}")
-
-    except asyncio.CancelledError:
-        pass
-    finally:
-        print(f"[REALTIME] Keepalive loop stopped")
+    """Keepalive silence so OpenAI's idle timeout never ends a quiet session
+    (OpenAI sends nothing while the user is quiet or a tool runs)."""
+    await REALTIME_BRIDGE.keepalive_loop(session)
 
 
 async def openai_listener(session: RealtimeSession):
-    """
-    Background task that listens for messages from OpenAI and forwards to Portal.
-    """
-    try:
-        async for message in session.openai_ws:
-            try:
-                event = json.loads(message)
-                if session.reconnect_count:
-                    # Proven-healthy: a real server frame arrived on this socket.
-                    session.reconnect_count = 0
-                await handle_openai_message(session, event)
-            except json.JSONDecodeError:
-                print(f"[REALTIME] Invalid JSON from OpenAI: {message[:100]}")
-            except Exception as e:
-                print(f"[REALTIME] Error handling OpenAI message: {e}")
-                # P1b: never dangle a tool call — if this event was a function
-                # call, answer it with an error payload + response.create so
-                # the model recovers instead of waiting forever (dead air).
-                await send_openai_style_tool_error(
-                    session.openai_ws, session.portal_ws, event, e)
-    except websockets.exceptions.ConnectionClosed as e:
-        print(f"[REALTIME] OpenAI connection closed: {e}")
-        if not session.intentional_disconnect and not session.is_reconnecting:
-            print(f"[REALTIME] Unexpected disconnect - triggering reconnect")
-            spawn_reconnect(session, openai_reconnect(session))
-        else:
-            session.status = "disconnected"
-            await _safe_ws_send(session.portal_ws, {
-                "type": "disconnected",
-                "data": "OpenAI connection closed"
-            })
-    except Exception as e:
-        print(f"[REALTIME] OpenAI listener error: {e}")
-        session.status = "error"
+    """Read OpenAI's frames and forward them to the client."""
+    await REALTIME_BRIDGE.listener(session)
+
 
 # =============================================================================
 # WebSocket Endpoint
@@ -1568,271 +892,15 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
     """
     WebSocket endpoint for the OpenAI Realtime API bridge.
 
-    Bridges Portal <-> Orchestrator <-> OpenAI Realtime API.
-
-    Message flow:
+    Bridges Portal <-> Orchestrator <-> OpenAI Realtime API through the shared
+    LiveVoiceBridge (Orchestrator/voice/bridge.py):
     1. Portal connects, sends 'connect' with operator
     2. Orchestrator connects to OpenAI Realtime API
     3. Orchestrator configures session with tools and context
     4. Bidirectional message passing begins
     5. Tool calls are executed locally and results sent to OpenAI
     """
-    print(f"[REALTIME] WebSocket connection request for session: {session_id}")
-    await websocket.accept()
-    print(f"[REALTIME] WebSocket accepted for session: {session_id}")
-
-    # Android URL-query path (audit M4 + I1): Android passes config via query
-    # string instead of a JSON connect message. We use websocket.query_params.get()
-    # INSIDE the handler (NOT FastAPI Query() signature injection on a WebSocket
-    # route — that pattern is unverified in this codebase). These values become
-    # defaults for the connect handler; if the web client also sends a JSON
-    # connect message, those values win (last write wins — interactive UI).
-    url_operator = websocket.query_params.get("operator")
-    url_voice = websocket.query_params.get("voice")
-    url_model = websocket.query_params.get("model")
-    # P6a translation mode — same precedence as every other param
-    # (JSON connect message wins, URL query fills missing).
-    url_mode = websocket.query_params.get("mode")
-    url_target_language = websocket.query_params.get("target_language")
-    url_vad_type = websocket.query_params.get("vad_type")
-    url_vad_eagerness = websocket.query_params.get("vad_eagerness")
-    url_agent = websocket.query_params.get("agent")
-    _idle_str = websocket.query_params.get("idle_timeout_ms")
-    if _idle_str and _idle_str.strip().isdigit():
-        url_idle_timeout_ms: Optional[int] = int(_idle_str.strip())
-    else:
-        url_idle_timeout_ms = None
-        if _idle_str:
-            print(f"[REALTIME] WARNING: idle_timeout_ms {_idle_str!r} not a positive integer; ignoring")
-    _interrupt_str = websocket.query_params.get("interrupt_response")
-    url_interrupt_response: Optional[bool] = (
-        _interrupt_str.lower() == "true" if _interrupt_str is not None else None
-    )
-    _create_str = websocket.query_params.get("create_response")
-    url_create_response: Optional[bool] = (
-        _create_str.lower() == "true" if _create_str is not None else None
-    )
-    url_noise_reduction = websocket.query_params.get("noise_reduction")
-    url_transcription_delay = websocket.query_params.get("transcription_delay")
-
-    # Check dependencies
-    if not WEBSOCKETS_AVAILABLE:
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": "Server missing 'websockets' library. Install with: pip install websockets"
-        })
-        await websocket.close()
-        return
-
-    if not OPENAI_API_KEY:
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": "OPENAI_API_KEY not configured on server"
-        })
-        await websocket.close()
-        return
-
-    # Create or get session
-    session = REALTIME_SESSIONS.get(session_id)
-    if not session:
-        session = RealtimeSession(
-            session_id=session_id,
-            created_at=now_utc_iso()
-        )
-        REALTIME_SESSIONS[session_id] = session
-
-    session.portal_ws = websocket
-    session.last_activity = now_utc_iso()
-    # This handler's attach: a later re-attach of the same session id bumps it,
-    # and from then on the session is that handler's (see _end_portal_session).
-    generation = claim_session(session)
-
-    openai_task = None
-    keepalive_task = None
-
-    try:
-        while True:
-            # Receive with timeout — detect suspended/dead Android clients
-            try:
-                raw = await asyncio.wait_for(
-                    websocket.receive_text(),
-                    timeout=120.0
-                )
-            except asyncio.TimeoutError:
-                print(f"[REALTIME] Client idle timeout (120s): {session_id}")
-                await _safe_ws_send(websocket, {"type": "error", "data": "Idle timeout"})
-                break
-
-            # Per-message error isolation — bad JSON doesn't kill session
-            try:
-                data = json.loads(raw)
-            except (json.JSONDecodeError, TypeError) as e:
-                print(f"[REALTIME] Bad message from client: {e}")
-                continue
-
-            msg_type = data.get("type", "")
-
-            if msg_type == "connect":
-                # Initial connection - establish OpenAI WebSocket.
-                # Merge rule: JSON connect message wins over Android URL-query
-                # fallbacks (web is interactive — last write wins).
-                # Voice-agent preset (P4): ?agent=<id> or "agent" in the JSON
-                # connect message. Precedence: explicit params > preset fields
-                # > defaults. Unknown/mismatched preset -> loud client warning,
-                # session continues without it (fresh-box degradation).
-                agent_id = data.get("agent", url_agent)
-                preset = resolve_preset(agent_id, provider="realtime") if agent_id else None
-                if agent_id and preset is None:
-                    await _safe_ws_send(websocket, {
-                        "type": "warning",
-                        "data": f"Voice agent preset {agent_id!r} not found for provider 'realtime' — continuing without preset"
-                    })
-                merged = merge_connect_params({
-                    "model": data.get("model", url_model),
-                    "voice": data.get("voice", url_voice),
-                    "greeting": data.get("greeting", ""),
-                    "instructions": data.get("role", ""),
-                }, preset)
-                operator = data.get("operator", url_operator or "")
-                voice = merged["voice"] or "ash"          # route default unchanged
-                greeting = merged["greeting"] or ""
-                role = merged["instructions"] or ""       # preset instructions ride the custom_role branch
-                tool_group_override = merged["tool_group_override"]
-                # T2 new fields — model goes to connect_to_openai (URL query),
-                # vad/timeout/response fields go to configure_openai_session (session.update).
-                model = merged["model"]
-                vad_type = data.get("vad_type", url_vad_type)
-                vad_eagerness = data.get("vad_eagerness", url_vad_eagerness)
-                idle_timeout_ms = data.get("idle_timeout_ms", url_idle_timeout_ms)
-                interrupt_response = data.get("interrupt_response", url_interrupt_response)
-                create_response = data.get("create_response", url_create_response)
-                noise_reduction = data.get("noise_reduction", url_noise_reduction)
-                transcription_delay = data.get("transcription_delay", url_transcription_delay)
-                mode = data.get("mode", url_mode)
-                target_language = data.get("target_language", url_target_language)
-                is_translate, _ = resolve_translate_params(
-                    mode, target_language, log_prefix="[REALTIME]")
-                if is_translate:
-                    # Translate sessions ALWAYS bind the dedicated translate
-                    # model — backend override beats any client model pick.
-                    model = OPENAI_REALTIME_TRANSLATE_MODEL
-                # Persist for reconnect (P6a — see reconnect path below)
-                session.mode = mode if is_translate else ""
-                session.target_language = target_language or "" if is_translate else ""
-                session.operator = operator
-
-                await _safe_ws_send(websocket, {
-                    "type": "status",
-                    "data": "Connecting to OpenAI..."
-                })
-
-                # A re-attach (or a second connect on this socket) starts clean:
-                # retire whatever the previous connect left live, then drop the
-                # previous handler's teardown flags (O09-live-voice-providers-01).
-                await retire_upstream(session, "openai_ws")
-                reset_for_connect(session)
-
-                # Connect to OpenAI (model bound at upstream WS URL — audit C3)
-                if await connect_to_openai(session, model=model):
-                    # Configure session with tools, context, voice + VAD/turn settings
-                    await configure_openai_session(
-                        session,
-                        operator,
-                        voice,
-                        custom_role=role,
-                        tool_group_override=tool_group_override,
-                        vad_type=vad_type,
-                        vad_eagerness=vad_eagerness,
-                        idle_timeout_ms=idle_timeout_ms,
-                        interrupt_response=interrupt_response,
-                        create_response=create_response,
-                        noise_reduction=noise_reduction,
-                        transcription_delay=transcription_delay,
-                        mode=mode,
-                        target_language=target_language,
-                    )
-                    print(f"[REALTIME] Voice selected: {voice}; model={model or OPENAI_REALTIME_MODEL}; vad_type={vad_type or 'server_vad'}")
-
-                    # Emit provenance to the client once per session start so
-                    # the Android/Portal UI can show which snapshots were used
-                    # to seed the system message. Task 10 wires the parser.
-                    if session.provenance:
-                        await _safe_ws_send(websocket, {
-                            "type": "provenance",
-                            "data": session.provenance
-                        })
-
-                    # Start OpenAI listener task and keepalive. The listener task
-                    # lives on the SESSION (session.listener_task): openai_reconnect
-                    # respawns it, so this local would go stale after the first
-                    # reconnect and leak the live task at teardown.
-                    openai_task = asyncio.create_task(openai_listener(session))
-                    session.listener_task = openai_task
-                    keepalive_task = asyncio.create_task(openai_keepalive_loop(session))
-                    session.keepalive_task = keepalive_task
-
-                    # If greeting provided (outbound call), inject it so the AI speaks first
-                    if greeting:
-                        print(f"[REALTIME] Injecting outbound greeting: {greeting[:80]}...")
-                        try:
-                            prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
-                            await session.openai_ws.send(json.dumps({
-                                "type": "conversation.item.create",
-                                "item": {
-                                    "type": "message",
-                                    "role": "user",
-                                    "content": [{"type": "input_text", "text": prompt}]
-                                }
-                            }))
-                            await session.openai_ws.send(json.dumps({"type": "response.create"}))
-                        except Exception as e:
-                            print(f"[REALTIME] Greeting injection failed: {e}")
-
-                    await _safe_ws_send(websocket, {
-                        "type": "connected",
-                        "data": {
-                            "session_id": session_id,
-                            "operator": operator,
-                            "model": model or OPENAI_REALTIME_MODEL
-                        }
-                    })
-                else:
-                    await _safe_ws_send(websocket, {
-                        "type": "error",
-                        "data": "Failed to connect to OpenAI Realtime API"
-                    })
-
-            elif msg_type == "disconnect":
-                # Graceful disconnect
-                if not superseded(session, generation):
-                    session.intentional_disconnect = True
-                break
-
-            elif msg_type == "ping":
-                # Keep-alive
-                await _safe_ws_send(websocket, {"type": "pong"})
-
-            else:
-                # Isolate handler errors — don't kill session on one bad forward
-                try:
-                    await handle_portal_message(session, data)
-                except Exception as handler_err:
-                    print(f"[REALTIME] Handler error (non-fatal): {handler_err}")
-
-    except WebSocketDisconnect:
-        print(f"[REALTIME] Portal WebSocket disconnected: {session_id}")
-        if session.portal_ws is websocket:
-            session.portal_ws = None
-
-    except Exception as e:
-        print(f"[REALTIME] WebSocket error: {e}")
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": str(e)
-        })
-
-    finally:
-        await _end_portal_session(session, websocket, generation, keepalive_task)
+    await REALTIME_BRIDGE.serve(websocket, session_id)
 
 
 async def _end_portal_session(session: RealtimeSession, websocket, generation: int,
@@ -1844,8 +912,7 @@ async def _end_portal_session(session: RealtimeSession, websocket, generation: i
     save that outlasted the re-attach used to leave the re-attached session
     deaf and reapable (O09-live-voice-providers-01).
     """
-    await end_portal_session(session, generation, keepalive_task, ws_attr="openai_ws",
-                             save=save_session_to_blackbox, log_prefix="[REALTIME]")
+    await REALTIME_BRIDGE.end_portal_session(session, websocket, generation, keepalive_task)
 
 # =============================================================================
 # HTTP Endpoints

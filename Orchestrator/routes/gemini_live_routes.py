@@ -22,7 +22,7 @@ import asyncio
 import json
 import base64
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
 # External library imports
 try:
@@ -39,8 +39,7 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
     print("[GEMINI-LIVE] aiohttp library not installed - run: pip install aiohttp")
 
-from fastapi import WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketState
+from fastapi import WebSocket
 
 # Local imports
 from Orchestrator.checkpoint import app
@@ -60,29 +59,18 @@ from Orchestrator.config import (
     GEMINI_LIVE_OUTPUT_SAMPLE_RATE,
     GEMINI_LIVE_DEFAULT_VOICE,
     REALTIME_CONTEXT_MAX_CHARS,
-    REALTIME_SNAPSHOT_CHARS_EACH,
-    VOL_PATH,
     orchestrator_url,
 )
-from Orchestrator.models import GeminiLiveSession, GEMINI_LIVE_SESSIONS, TaskType
-from Orchestrator.volume import now_utc_iso, read_text_safe
-from Orchestrator.fossils import (
-    hybrid_retrieve,
-    format_snapshot_for_delivery,
-    get_recent_fossils_for_operator,
-    get_recent_checkpoints_for_operator
-)
+from Orchestrator.models import GeminiLiveSession, GEMINI_LIVE_SESSIONS
+from Orchestrator.volume import now_utc_iso
 from Orchestrator.context_builder import build_fossil_context
-from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.secret_redaction import redact
 from Orchestrator.utils.async_helpers import run_blocking
-from Orchestrator.tasks import create_task
-from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_gemini_live_tools
 from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
-from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
+from Orchestrator.routes.voice_prompts import build_voice_instructions
 from Orchestrator.routes.voice_translate import (
     resolve_translate_params,
     build_translate_instructions,
@@ -90,47 +78,25 @@ from Orchestrator.routes.voice_translate import (
 from Orchestrator.routes.voice_ws_shared import (
     adopt_upstream,
     cancel_voice_tools,
-    claim_session,
-    close_upstream,
-    dispatch_voice_tool,
-    end_portal_session,
-    reset_for_connect,
-    retire_upstream,
-    conversation_releaser,
+    close_portal_ws,
+    safe_send,
     save_voice_transcript,
     send_gemini_tool_error,
     spawn_reconnect,
     superseded,
 )
+from Orchestrator.voice import tools as voice_tools
+from Orchestrator.voice.bridge import LiveVoiceBridge, VoiceAdapter
+from Orchestrator.voice.transcript import save_session_transcript
 
+LOG_PREFIX = "[GEMINI-LIVE]"
 
-async def _safe_ws_send(websocket, data: dict) -> bool:
-    """Send JSON to WebSocket, return False if connection is dead."""
-    try:
-        if websocket and hasattr(websocket, 'application_state') and websocket.application_state == WebSocketState.CONNECTED:
-            await websocket.send_json(data)
-            return True
-    except Exception:
-        pass
-    return False
+_safe_ws_send = safe_send
 
 
 async def _close_portal_ws(session, reason: str = "gemini terminal disconnect"):
-    """Terminal disconnect: actually CLOSE the client WS.
-
-    Before P1.7 the portal WS stayed open answering pings while the Gemini
-    side was permanently dead, so Portal/Android showed "Connected — listening"
-    forever (silence layer 2 of the 2026-07-11 outage). Closing it kicks the
-    endpoint's receive loop into its finally-block cleanup. Safe on the phone
-    bridge's PhoneWebSocketAdapter too (any failure is swallowed).
-    """
-    ws = session.portal_ws
-    if ws is None:
-        return
-    try:
-        await ws.close(code=1011, reason=reason[:120])
-    except Exception:
-        pass
+    """Terminal disconnect: close the client WS (voice_ws_shared.close_portal_ws)."""
+    await close_portal_ws(session, reason)
 
 
 # =============================================================================
@@ -173,38 +139,8 @@ def build_context_for_operator(operator: str, user_text: str = "") -> tuple[str,
 # =============================================================================
 
 async def execute_search_snapshots(session: GeminiLiveSession, arguments: Dict) -> str:
-    """
-    Execute the search_snapshots tool.
-
-    Uses hybrid retrieval (keyword + semantic) to find relevant snapshots.
-    Returns formatted results for the model.
-    """
-    query = arguments.get("query", "")
-    k = min(arguments.get("k", 3), 5)  # Cap at 5 results
-
-    if not query:
-        return "Error: No search query provided."
-
-    try:
-        # Use hybrid retrieval for best results. It embeds, reranks and reads
-        # the ledger, so it runs off the event loop every voice session shares
-        # (its vol_txt argument is unused: no 58 MB volume read for it here).
-        results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=session.operator)
-
-        if not results:
-            return f"No snapshots found matching: {query}"
-
-        # Format results
-        output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
-        for i, snap_text in enumerate(results, 1):
-            # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-            output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
-
-        return "\n\n".join(output_parts)
-
-    except Exception as e:
-        print(f"[GEMINI-LIVE] Search error: {e}")
-        return f"Search failed: {str(e)}"
+    """The search_snapshots tool (Orchestrator/voice/tools.py)."""
+    return await voice_tools.execute_search_snapshots(session, arguments, log_prefix=LOG_PREFIX)
 
 # =============================================================================
 # Gemini Live API Connection
@@ -440,145 +376,11 @@ async def configure_gemini_session(
     # Stash provenance on the session so the cleanup/save path and the
     # client-facing WS emission below can reference it.
     session.provenance = provenance
-    is_system_operator = (operator == "system")
-
-    # If custom_role is provided, use it as the primary system instruction
-    if custom_role:
-        system_instructions = f"""{custom_role}
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses.
-
-ESSENTIAL TOOLS:
-You have access to search_snapshots and list_recent_snapshots for memory/context.
-You can also generate images, videos, music, and send SMS or make phone calls.
-You have search_contacts and save_contact for the contact book.
-You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
-Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
-
-{CU_CONTROL_BLOCK}
-
-VOICE INTERACTION:
-This is a real-time voice conversation. Be concise and natural. The person on the phone cannot see text - speak clearly."""
-
-    else:
-        # Default system prompt construction
-        # Different identity section for system vs named operators
-        if is_system_operator:
-            identity_section = """OPERATOR IDENTITY:
-This is an OUTBOUND CALL or system-initiated session. You may be calling someone on behalf of a user.
-- Do NOT address the person as "system" - just speak naturally and conversationally
-- Check recent snapshots IMMEDIATELY for task context (who to call, what to say, order details, etc.)
-- You have access to ALL snapshots across all operators for context handoff
-- Focus on completing the task that was set up before this call was initiated"""
-            memory_section = """MEMORY ACCESS — YOUR MOST IMPORTANT CAPABILITY:
-The BlackBox contains 1,600+ snapshots — your complete memory of every conversation, decision, and preference.
-Search snapshots FIRST and OFTEN. Since this is a system session, you can see ALL operators' snapshots for context handoff.
-Don't guess at history — the answers are in the snapshots. Call search_snapshots proactively."""
-            context_section = f"CONTEXT:\n{context if context else 'No recent context loaded yet. Use list_recent_snapshots immediately!'}"
-        else:
-            identity_section = f"""OPERATOR IDENTITY:
-You are currently speaking with: {operator}
-Always address them by their name ({operator}) when appropriate. This is their personal AI session."""
-            memory_section = f"""MEMORY ACCESS — YOUR MOST IMPORTANT CAPABILITY:
-The BlackBox contains 1,600+ snapshots — your complete memory of {operator}'s history.
-Search snapshots FIRST and OFTEN — before answering questions about past work, before guessing at context, before starting any task.
-Everything about {operator}'s projects, preferences, past decisions, and recent activity lives in the snapshots.
-Don't guess or hallucinate history — call search_snapshots proactively."""
-            context_section = f"OPERATOR-SPECIFIC CONTEXT:\n{context if context else f'No recent context available for {operator} yet. This may be their first session or a fresh start.'}"
-
-        voice_persona = get_persona(operator, "voice") + "\n\n" + VOICE_DELIVERY_NOTE
-
-        system_instructions = f"""{voice_persona}
-
-IDENTITY:
-You are the voice interface for the AI Black Box Flight Recorder, connected to an immutable snapshot ledger and a multimodal toolchain. The operator's memory lives in the snapshots — treat it as your external long-term memory.
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses.
-
-{identity_section}
-
-{memory_section}
-
-{context_section}
-
-MEDIA PIPELINES - CRITICAL:
-You have tools to generate and find media. Here's how to use the different pipelines:
-
-1. IMAGE-TO-VIDEO (animate an existing image):
-   - First find the image URL using list_media or search_media
-   - Call generate_video with the image_url parameter:
-     generate_video(prompt="description of motion", image_url="/ui/uploads/image.png")
-   - The image_url parameter triggers image-to-video mode - DO NOT just put the URL in the prompt
-
-2. VIDEO EXTENSION (extend an existing video):
-   - Find the video URL using list_media or search_media
-   - Call generate_video with the video_url parameter:
-     generate_video(prompt="continuation description", video_url="/ui/uploads/video.mp4", resolution="720p")
-   - Must use 720p resolution for extensions
-
-3. IMAGE-TO-IMAGE (use reference images):
-   - Find image URLs using list_media or search_media
-   - Call a per-provider image tool with the reference_images parameter:
-     gemini_image(prompt="new image description", reference_images=["/ui/uploads/ref1.png", "/ui/uploads/ref2.png"])
-   - Can include up to 10 reference images
-
-4. TEXT-TO-VIDEO/IMAGE (from scratch):
-   - Just use generate_video(prompt="...") or gemini_image(prompt="...") without URL parameters
-
-FINDING MEDIA:
-- Use list_media(media_type="image") to see available images
-- Use list_media(media_type="video") to see available videos
-- Use search_media(query="sunset") to find specific media by description
-
-DISPLAYING MEDIA IN CHAT:
-To show the user any media file directly in chat, output the full URL on its own line.
-The frontend automatically renders media URLs as embedded players/images:
-  /ui/uploads/sunset-mountains_abc123.png  (renders as image)
-  /ui/uploads/racing-car_def456.mp4  (renders as video player)
-  /ui/uploads/epic-music_ghi789.wav  (renders as audio player)
-Use this to show the user which media you found with list_media or get_media BEFORE taking action on it.
-This lets the user verify you have the right file before you extend a video or modify an image.
-
-COMMUNICATION TOOLS:
-You can reach out to people via phone or text:
-
-1. SEND SMS (text message):
-   - send_sms(phone_number="+15551234567", message="Hello!")
-   - Use when asked to "text someone" or "send a message"
-   - Messages are limited to 1600 characters
-
-2. MAKE PHONE CALL (interactive AI call):
-   - make_phone_call(phone_number="+15551234567", greeting="Hello, I'm calling from BlackBox")
-   - Initiates a call where the AI assistant talks to the recipient
-   - Use when asked to "call someone" or "call them back"
-
-3. MAKE VOICE CALL (one-way message delivery):
-   - make_voice_call(phone_number="+15551234567", message="Your message here", voice="onyx")
-   - Calls and delivers a pre-recorded TTS message
-   - Use when asked to leave a voice message
-
-Phone numbers can be in E.164 format (+15551234567) or 10-digit US format (5551234567).
-
-{CU_CONTROL_BLOCK}
-
-CONTACT BOOK:
-You have search_contacts and save_contact for the contact book.
-Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
-
-SCHEDULED TASKS (CRON JOBS):
-You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
-
-SESSION START - CRITICAL:
-IMMEDIATELY use list_recent_snapshots(count=3) at the START of EVERY session to catch up on recent context.
-This is essential because:
-- You may be continuing work started by another model or agent
-- The snapshots contain the most recent conversations, decisions, and context
-- {"For this outbound call: CHECK SNAPSHOTS for who you're calling, what task to complete, order details, etc." if is_system_operator else "For outbound calls: task details, order info, names, addresses may be in the snapshots"}
-- Context handoff between models happens through snapshots - USE THEM!
-
-Do this BEFORE responding to the user - check what happened recently so you're caught up."""
+    # One builder for the three voice providers (voice_prompts); a custom_role
+    # (outbound call) replaces the default persona prompt.
+    system_instructions = build_voice_instructions(
+        "gemini", operator, context, custom_role,
+        persona=lambda: get_persona(operator, "voice") + "\n\n" + VOICE_DELIVERY_NOTE)
 
     # Build BidiGenerateContentSetup message
     setup_config = {
@@ -793,61 +595,16 @@ async def save_session_to_blackbox(session: GeminiLiveSession):
     including a turn whose turnComplete never arrived (_flush_open_turn).
     """
     _flush_open_turn(session)
-    if not session.conversation:
-        print(f"[GEMINI-LIVE] No conversation to save for session {session.session_id}")
-        return
-
-    if not session.operator:
-        print(f"[GEMINI-LIVE] No operator set, cannot save session {session.session_id}")
-        return
-
-    # Sort conversation by timestamp to ensure correct order
-    # (Whisper transcription may complete after AI response due to race condition)
-    sorted_conversation = sorted(
-        session.conversation,
-        key=lambda x: x.get("timestamp", "")
-    )
-
-    # Format conversation as readable transcript
-    transcript_lines = []
-    for msg in sorted_conversation:
-        role = "User" if msg["role"] == "user" else "AI"
-        transcript_lines.append(f"[{role}]: {msg['content']}")
-
-    transcript = "\n\n".join(transcript_lines)
-
-    session_summary = f"""=== Gemini Live Voice Session ===
-Session ID: {session.session_id}
-Voice: {session.voice}
-Timestamp: {now_utc_iso()}
-Messages: {len(session.conversation)}
-
---- Transcript ---
-{transcript}
---- End Session ---"""
-
-    print(f"[GEMINI-LIVE] Saving session {session.session_id} with {len(session.conversation)} messages to BlackBox")
-
-    # Drops exactly the turns in this transcript, once they are safe (spooled
-    # or saved): a turn that lands while the save runs stays for the next one.
-    release = conversation_releaser(session)
-    saved = await save_voice_transcript(
-        operator=session.operator,
+    await save_session_transcript(
+        session,
+        title="Gemini Live Voice Session",
+        fields=[("Voice", session.voice), ("Timestamp", now_utc_iso())],
+        ai_label="AI",
         user_message=f"[Voice Session Transcript] Gemini Live voice session {session.session_id}",
-        session_summary=session_summary,
         model_label="gemini-live-voice",
-        log_prefix="[GEMINI-LIVE]",
-        session_id=session.session_id,
-        on_safe=release,
+        log_prefix=LOG_PREFIX,
+        persist=save_voice_transcript,
     )
-
-    # Clear ONLY once the transcript is safe: saved, or in the retry spool
-    # (P1b cross-route contract; rank 51 write-ahead spool).
-    if saved:
-        release()
-    else:
-        print(f"[GEMINI-LIVE] Save FAILED and the retry spool is unavailable — keeping "
-              f"{len(session.conversation)} turns in memory for the next save attempt")
 
 
 async def handle_portal_message(session: GeminiLiveSession, data: Dict):
@@ -1173,50 +930,13 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
 
     # Check for toolCall
     if "toolCall" in event:
-        tool_call = event["toolCall"]
-        function_calls = tool_call.get("functionCalls", [])
-
-        # Mark that this response involved a tool call
-        # The portal will use this to potentially discard the previous response
-        session.pending_tool_call = True
-        print(f"[GEMINI-LIVE] Tool call detected")
-
-        # P1b: reset per-event answered-id tracking. The listener-level error
-        # responder uses this to answer ONLY dangling ids after a mid-loop crash.
-        session.answered_tool_call_ids = set()
-        upstream = session.gemini_ws
-
-        for fc in function_calls:
-            call_id = fc.get("id", "")
-            name = fc.get("name", "")
-            args = fc.get("args", {})
-
-            print(f"[GEMINI-LIVE] Tool call: {name} with args: {args}")
-
-            # Notify Portal that tool is being called
-            if session.portal_ws:
-                await _safe_ws_send(session.portal_ws, {
-                    "type": "tool_call",
-                    "data": {"name": name, "arguments": args}
-                })
-
-            # Run the tool OFF this listener so it keeps draining frames while
-            # the tool works: inline, a long tool held the socket unread
-            # (audit O09-live-voice-providers-05). The answer goes back on the
-            # socket the call came from. A dispatched id counts as answered for
-            # the listener-level error responder: its task always answers it,
-            # with the result or an error.
-            session.answered_tool_call_ids.add(call_id)
-            dispatch_voice_tool(
-                session,
-                lambda name=name, args=args: _execute_gemini_tool(session, name, args),
-                lambda result, call_id=call_id, name=name: _deliver_gemini_tool_result(
-                    session, upstream, call_id, name, result),
-                lambda exc, fc=fc: _fail_gemini_tool(session, upstream, fc, exc),
-                label=f"[GEMINI-LIVE] {name} (id={call_id})",
-                call_id=call_id,
-            )
-
+        # Each call runs OFF this listener so it keeps draining frames while the
+        # tool works: inline, a long tool held the socket unread (audit
+        # O09-live-voice-providers-05). The answer goes back on the socket the
+        # call came from.
+        await voice_tools.dispatch_gemini_calls(
+            session, event, log_prefix=LOG_PREFIX,
+            execute=lambda name, args: _execute_gemini_tool(session, name, args))
         return
 
     # Check for toolCallCancellation
@@ -1285,381 +1005,10 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
 
 
 async def _execute_gemini_tool(session: GeminiLiveSession, name: str, args: Dict) -> str:
-    """Run ONE tool call of the session and return its result text.
-
-    Runs as a task tracked on the session (voice_ws_shared.dispatch_voice_tool),
-    never inside gemini_listener, which used to sit on a tool for its whole run.
-    """
-    if name == "search_snapshots":
-        result = await execute_search_snapshots(session, args)
-    elif name == "web_fetch":
-        url = args.get("url", "")
-        max_chars = args.get("max_chars", 80000)
-        print(f"[GEMINI-LIVE] Executing web fetch: {url}")
-        # Off the event loop: a fetch can take its whole time budget.
-        result = await run_blocking(perform_web_fetch, url, max_chars)
-        print(f"[GEMINI-LIVE] Web fetch result length: {len(result)} chars")
-    elif name in IMAGE_TOOL_PROVIDERS:
-        provider = IMAGE_TOOL_PROVIDERS[name]
-        prompt = args.get("prompt", "")
-        aspect_ratio = args.get("aspectRatio", "16:9")
-        resolution = args.get("resolution", "1K")
-        num_images = args.get("numberOfImages", 1)
-        reference_images = args.get("reference_images", [])  # For image-to-image
-
-        mode = "image-to-image" if reference_images else "text-to-image"
-        print(f"[GEMINI-LIVE] Executing image generation ({mode}): {prompt[:100]}... ({num_images} @ {resolution})")
-
-        # Create image generation task
-        image_options = {
-            "aspectRatio": aspect_ratio,
-            "resolution": resolution,
-            "numberOfImages": num_images,
-            "provider": provider,
-        }
-        if args.get("size"):  # openai gpt-image / local z-image size
-            image_options["size"] = args["size"]
-        if reference_images:
-            image_options["reference_images"] = reference_images
-
-        task = create_task(
-            TaskType.IMAGE_GENERATION,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data={"options": image_options}
-        )
-
-        img_count = num_images
-        ref_desc = f" (using {len(reference_images)} reference image{'s' if len(reference_images) > 1 else ''})" if reference_images else ""
-        result = f"Image generation started ({mode}){ref_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {img_count} image{'s' if img_count > 1 else ''} at {resolution}."
-
-        # Notify Portal about image task
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "image_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images}
-            })
-
-        print(f"[GEMINI-LIVE] Image generation task created: {task.task_id}")
-    elif name == "generate_video":
-        prompt = args.get("prompt", "")
-        aspect_ratio = args.get("aspectRatio", "16:9")
-        duration = args.get("duration", 8)
-        resolution = args.get("resolution", "720p")
-        negative_prompt = args.get("negativePrompt", "")
-        image_url = args.get("image_url")  # For image-to-video
-        video_url = args.get("video_url")  # For video extension
-
-        mode = "text-to-video"
-        if image_url:
-            mode = "image-to-video"
-        elif video_url:
-            mode = "video-extension"
-
-        print(f"[GEMINI-LIVE] Executing video generation ({mode}): {prompt[:100]}... ({duration}s @ {resolution})")
-
-        # Create video generation task
-        video_options = {
-            "aspectRatio": aspect_ratio,
-            "duration": duration,
-            "resolution": resolution,
-        }
-        if negative_prompt:
-            video_options["negativePrompt"] = negative_prompt
-        if image_url:
-            video_options["image_url"] = image_url
-        if video_url:
-            video_options["video_url"] = video_url
-
-        task = create_task(
-            TaskType.VIDEO_GENERATION,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data={"options": video_options}
-        )
-
-        mode_desc = f" (animating image: {image_url})" if image_url else (f" (extending video: {video_url})" if video_url else "")
-        result = f"Video generation started ({mode}){mode_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution}. Takes 5-20 minutes."
-
-        # Notify Portal about video task
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "video_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration, "resolution": resolution}
-            })
-
-        print(f"[GEMINI-LIVE] Video generation task created: {task.task_id}")
-    elif name == "lyria_music":
-        prompt = args.get("prompt", "")
-        negative_prompt = args.get("negativePrompt", "")
-        sample_count = args.get("sampleCount", 1)
-        print(f"[GEMINI-LIVE] Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
-
-        # Create music generation task
-        music_options = {
-            "prompt": prompt,
-            "operator": session.operator or "system",
-        }
-        if negative_prompt:
-            music_options["negative_prompt"] = negative_prompt
-        if sample_count and sample_count > 1:
-            music_options["sample_count"] = sample_count
-
-        task = create_task(
-            TaskType.LYRIA_MUSIC,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data=music_options
-        )
-
-        variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
-        result = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
-
-        # Notify Portal about music task
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "music_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}
-            })
-
-        print(f"[GEMINI-LIVE] Music generation task created: {task.task_id}")
-    elif name == "get_media":
-        from Orchestrator.routes.chat_routes import execute_get_media
-        url = args.get("url")
-        task_id_param = args.get("task_id")
-        print(f"[GEMINI-LIVE] Executing get_media: url={url}, task_id={task_id_param}")
-        media_result = await run_blocking(execute_get_media, url=url, task_id=task_id_param)
-        result = json.dumps(media_result, indent=2)
-    elif name == "list_media":
-        from Orchestrator.routes.chat_routes import execute_list_media
-        media_type = args.get("media_type")
-        limit = args.get("limit", 20)
-        print(f"[GEMINI-LIVE] Executing list_media: type={media_type}, limit={limit}")
-        list_result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
-        result = json.dumps(list_result, indent=2)
-    elif name == "search_media":
-        from Orchestrator.routes.chat_routes import execute_search_media
-        query = args.get("query", "")
-        media_type = args.get("media_type")
-        limit = args.get("limit", 10)
-        print(f"[GEMINI-LIVE] Executing search_media: query='{query}', type={media_type}")
-        search_result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
-        result = json.dumps(search_result, indent=2)
-    elif name == "send_sms":
-        # Send SMS using unified tool executor
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = args.get("phone_number", "")
-        message = args.get("message", "")
-        print(f"[GEMINI-LIVE] Executing send_sms to {phone_number}: {message[:50]}...")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
-        result = tool_result.rich_result()
-        print(f"[GEMINI-LIVE] SMS result: {result}")
-    elif name == "make_phone_call":
-        # Initiate outbound phone call through the unified tool executor: the
-        # box's call route (Asterisk/TG200 or Twilio), an E.164 number, and a
-        # 200 {"error": ...} counted as a failure (Orchestrator.telephony).
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = args.get("phone_number", "")
-        print(f"[GEMINI-LIVE] Executing make_phone_call to {phone_number}")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("make_phone_call", {
-            "phone_number": phone_number,
-            "greeting": args.get("greeting", ""),
-            "role": args.get("role", ""),
-            "backend": args.get("backend", "openai_realtime"),
-        })
-        result = tool_result.rich_result()
-        print(f"[GEMINI-LIVE] Call result: {result}")
-    elif name == "make_voice_call":
-        # Call with pre-generated TTS message
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = args.get("phone_number", "")
-        message = args.get("message", "")
-        voice = args.get("voice", "onyx")
-        print(f"[GEMINI-LIVE] Executing make_voice_call to {phone_number}: {message[:50]}...")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("make_voice_call", {
-            "phone_number": phone_number,
-            "message": message,
-            "voice": voice
-        })
-        result = tool_result.rich_result()
-        print(f"[GEMINI-LIVE] Voice call result: {result}")
-    elif name in ("get_recent_snapshots", "list_recent_snapshots"):
-        # list_recent_snapshots is the declared ToolVault name; legacy
-        # spelling kept as an alias for the specialized handler.
-        count = min(args.get("count", 3), 5)
-        operator = session.operator or "system"
-
-        # System operator sees ALL snapshots (for outbound calls/context handoff)
-        # Regular operators only see their own snapshots (no context bleed)
-        see_all = (operator == "system")
-
-        print(f"[GEMINI-LIVE] Getting {count} recent snapshots for {operator} (see_all={see_all})")
-        try:
-            from Orchestrator.fossils import load_snapshot_index, read_volume_bytes
-            # The index parse and the whole-volume read block: off the event loop.
-            index = await run_blocking(load_snapshot_index)
-
-            if index:
-                # Sort all snapshots by ID (date + sequence)
-                def snapshot_sort_key(snap_id: str) -> tuple:
-                    try:
-                        parts = snap_id.split('-')
-                        date_part = int(parts[1]) if len(parts) > 1 else 0
-                        seq_part = int(parts[2]) if len(parts) > 2 else 0
-                        return (date_part, seq_part)
-                    except (ValueError, IndexError):
-                        return (0, 0)
-
-                # Filter by operator unless system (which sees all)
-                if see_all:
-                    matching = list(index.items())
-                else:
-                    matching = [(sid, meta) for sid, meta in index.items()
-                               if meta.get("operator") == operator]
-
-                matching.sort(key=lambda x: snapshot_sort_key(x[0]), reverse=True)
-
-                # Get the most recent N
-                recent = matching[:count]
-
-                if not recent:
-                    result = f"No recent snapshots found for operator '{operator}'."
-                else:
-                    vol_bytes = await run_blocking(read_volume_bytes, VOL_PATH)
-                    scope_desc = "all operators" if see_all else f"operator: {operator}"
-                    result_parts = [f"Found {len(recent)} recent snapshot(s) ({scope_desc}):\n"]
-
-                    for snap_id, meta in recent:
-                        start = meta.get("byte_start", 0)
-                        end = meta.get("byte_end", start + 5000)
-                        snap_bytes = vol_bytes[start:end]
-                        snap_text = snap_bytes.decode('utf-8', errors='replace')
-                        operator_name = meta.get("operator", "unknown")
-
-                        # WI-10 (M7): deliver recent snapshots WHOLE — no delivery truncation
-                        result_parts.append(f"--- {snap_id} (operator: {operator_name}) ---\n{snap_text}")
-
-                    result = "\n\n".join(result_parts)
-                    print(f"[GEMINI-LIVE] Retrieved {len(recent)} recent snapshots")
-            else:
-                result = "No snapshots found in index."
-        except Exception as e:
-            print(f"[GEMINI-LIVE] Error getting recent snapshots: {e}")
-            result = f"Error retrieving recent snapshots: {str(e)}"
-    elif name == "search_contacts":
-        from Orchestrator.contacts import search_contacts
-        query = args.get("query", "")
-        operator = session.operator or "system"
-        print(f"[GEMINI-LIVE] Executing search_contacts: query='{query}', operator={operator}")
-        contacts = search_contacts(query, operator)
-        if contacts:
-            result = json.dumps(contacts, indent=2)
-        else:
-            result = f"No contacts found matching '{query}'."
-        print(f"[GEMINI-LIVE] search_contacts result: {len(contacts)} contacts found")
-    elif name == "save_contact":
-        from Orchestrator.contacts import upsert_contact
-        operator = session.operator or "system"
-        contact_name = args.get("name", "")
-        notes = args.get("notes", "")
-        tags = args.get("tags", [])
-        phone = args.get("phone")
-        email = args.get("email")
-        relationship = args.get("relationship")
-        print(f"[GEMINI-LIVE] Executing save_contact: name='{contact_name}', operator={operator}")
-        saved = upsert_contact(
-            name=contact_name, notes=notes, tags=tags,
-            operator=operator, created_by="gemini-live",
-            phone=phone, email=email, relationship=relationship
-        )
-        result = f"Contact saved: {json.dumps(saved, indent=2)}"
-        print(f"[GEMINI-LIVE] save_contact result: saved '{contact_name}'")
-    elif name == "create_cron_job":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("create_cron_job", args)
-        result = cron_result.rich_result()
-        print(f"[GEMINI-LIVE] create_cron_job result: {result}")
-    elif name == "edit_cron_job":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("edit_cron_job", args)
-        result = cron_result.rich_result()
-        print(f"[GEMINI-LIVE] edit_cron_job result: {result}")
-    elif name == "search_cron_jobs":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("search_cron_jobs", args)
-        result = cron_result.rich_result()
-        print(f"[GEMINI-LIVE] search_cron_jobs result: {result}")
-    elif name in ("use_computer", "list_devices", "control_android_device"):
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        tool_result = await executor.execute(name, args)
-        result = tool_result.result
-        print(f"[GEMINI-LIVE] {name}: {result[:100]}")
-    elif name == "get_current_time":
-        from datetime import datetime
-        now = datetime.now()
-        result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-        print(f"[GEMINI-LIVE] get_current_time: {result}")
-    else:
-        # Catch-all: route ANY other tool (incl. the per-provider web
-        # search tools and dynamically-injected ToolVault tools) through
-        # BlackBoxToolExecutor instead of reporting "Unknown tool".
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        tool_result = await executor.execute(name, args)
-        result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
-        if not result:
-            result = f"Tool '{name}' executed successfully (no output)."
-        print(f"[GEMINI-LIVE] {name} (catch-all): {result[:100]}")
-
-    return result
-
-
-async def _deliver_gemini_tool_result(session: GeminiLiveSession, upstream, call_id: str,
-                                      name: str, result: str) -> None:
-    """Answer the model with a tool result, on the upstream the call came from."""
-    # Send result back to Gemini using BidiGenerateContentToolResponse
-    if upstream is not None and session.gemini_ws is upstream:
-        tool_response = {
-            "toolResponse": {
-                "functionResponses": [{
-                    "id": call_id,
-                    "name": name,
-                    "response": {"result": result}
-                }]
-            }
-        }
-        await upstream.send(json.dumps(tool_response))
-        print(f"[GEMINI-LIVE] Sent tool response for {name}: {len(result)} chars")
-    else:
-        print(f"[GEMINI-LIVE] Dropping the {name} result (id: {call_id}): the upstream "
-              f"it was called on is gone")
-
-    # Notify Portal
-    if session.portal_ws:
-        await _safe_ws_send(session.portal_ws, {
-            "type": "tool_result",
-            "data": {"name": name, "result_length": len(result)}
-        })
-
-
-async def _fail_gemini_tool(session: GeminiLiveSession, upstream, fc: Dict,
-                            exc: BaseException) -> None:
-    """Answer the model with an error functionResponse in place of a result."""
-    live = upstream if (upstream is not None and session.gemini_ws is upstream) else None
-    await send_gemini_tool_error(live, session.portal_ws,
-                                 {"toolCall": {"functionCalls": [fc]}}, exc)
+    """Run ONE tool call of the session and return its result text (the shared
+    voice tool ladder, Orchestrator/voice/tools.py)."""
+    return await voice_tools.execute_voice_tool(session, name, args, log_prefix=LOG_PREFIX,
+                                                created_by="gemini-live")
 
 # =============================================================================
 # Reconnection and Keepalive
@@ -1688,290 +1037,208 @@ def _goaway_delay_seconds(goaway: dict) -> float:
     return max(0.0, seconds - GOAWAY_RECONNECT_MARGIN_SEC)
 
 
-async def gemini_reconnect(session: GeminiLiveSession):
-    """
-    Reconnect to Gemini Live API transparently.
-    Uses session resumption handle if available, exponential backoff.
-    """
-    if session.is_reconnecting:
-        print(f"[GEMINI-LIVE] Already reconnecting, skipping")
-        return
+# 20 ms of PCM16 silence at the 16 kHz input rate (320 samples = 640 bytes).
+_SILENCE_20MS_B64 = base64.b64encode(b'\x00' * 640).decode('ascii')
 
-    # The attach this reconnect works for. A client re-attach resets
-    # intentional_disconnect, so after every await the generation is what says
-    # whether the session is still ours to re-dial (O09-live-voice-providers-01).
-    generation = session.generation
 
-    if session.reconnect_count >= session.max_reconnects:
-        print(f"[GEMINI-LIVE] Max reconnects ({session.max_reconnects}) reached, giving up")
-        session.status = "disconnected"
-        await _safe_ws_send(session.portal_ws, {
-            "type": "disconnected",
-            "data": "Connection lost after multiple reconnection attempts"
-        })
-        # Save conversation before giving up
-        dead = session.gemini_ws
-        await save_session_to_blackbox(session)
-        if superseded(session, generation):
-            return  # a re-attach during the save owns the session now
-        # P1.5-fix: null the closed-but-non-None socket so the keepalive loop's
-        # `if not session.gemini_ws: break` fires once, instead of sending on the
-        # dead socket and triggering a redundant give-up (double BlackBox save).
-        if dead is not None:
-            await close_upstream(session, "gemini_ws", dead)
-        # Terminal (P1.7): close the client WS — a dead session must not sit
-        # there answering pings as if connected.
-        await _close_portal_ws(session, reason="max reconnects reached")
-        return
+class GeminiLiveAdapter(VoiceAdapter):
+    """Gemini Live's half of the shared LiveVoiceBridge: BidiGenerateContent
+    setup, realtime_input / clientContent frames, serverContent / toolCall
+    events, session resumption on reconnect."""
 
-    session.is_reconnecting = True
-    session.reconnect_count += 1
-    attempt = session.reconnect_count
+    name = "Gemini"
+    log_prefix = LOG_PREFIX
+    ws_attr = "gemini_ws"
+    key_name = "GOOGLE_API_KEY"
+    connecting_status = "Connecting to Gemini Live..."
+    connect_failed = "Failed to connect to Gemini Live API"
+    forward_close_frames = True
+    quiet_reconnecting_close = True
+    terminal_close = True
 
-    # Exponential backoff: 0.5s, 1s, 2s, 4s, 5s max (fast recovery for voice calls)
-    delay = min(0.5 * (2 ** (attempt - 1)), 5)
-    print(f"[GEMINI-LIVE] Reconnecting (attempt {attempt}/{session.max_reconnects}) in {delay}s...")
+    def sessions(self):
+        return GEMINI_LIVE_SESSIONS
 
-    # Notify Portal
-    await _safe_ws_send(session.portal_ws, {
-        "type": "reconnecting",
-        "data": {"attempt": attempt, "max": session.max_reconnects, "delay": delay}
-    })
+    def new_session(self, session_id):
+        return GeminiLiveSession(session_id=session_id, created_at=now_utc_iso())
 
-    await asyncio.sleep(delay)
+    def websockets_available(self):
+        return WEBSOCKETS_AVAILABLE
 
-    # P1.5-fix: the session may have been torn down during the backoff sleep.
-    # This coroutine runs DETACHED, so the caller-side intentional_disconnect
-    # guards don't cover it — re-check here, and bail as well when a newer
-    # attach took the session over (its reconnect state is not ours to reset).
-    if superseded(session, generation):
-        print(f"[GEMINI-LIVE] Session re-attached during backoff — abandoning reconnect")
-        return
-    if session.intentional_disconnect:
-        print(f"[GEMINI-LIVE] Session closed during backoff — abandoning reconnect")
-        session.is_reconnecting = False
-        return
+    def api_key(self):
+        return GOOGLE_API_KEY
 
-    try:
-        # Close old connection. The reply it was carrying will never get its
-        # turnComplete there: keep what was transcribed of it.
-        _flush_open_turn(session)
-        old = session.gemini_ws
-        if old is not None:
-            await close_upstream(session, "gemini_ws", old)
+    def url_params(self, websocket):
+        # Field naming: vad_sensitivity_start / vad_sensitivity_end across all
+        # sides (JSON message, URL query, Python kwarg, Android client).
+        q = websocket.query_params
+        return {key: q.get(key) for key in (
+            "operator", "voice", "model", "vad_sensitivity_start", "vad_sensitivity_end",
+            "thinking_level", "affective", "proactive", "mode", "target_language", "agent")}
 
-        # Reconnect. connect_to_gemini installs the new socket only while this
-        # attach is current (a re-attach during the dial keeps its own).
-        if await connect_to_gemini(session):
-            dialed = session.gemini_ws
-            # P1.5-fix: teardown may have run during the dial. If so, close the
-            # socket we just opened and bail — do NOT respawn a listener onto a
-            # session that's being torn down.
-            if session.intentional_disconnect or superseded(session, generation):
-                if dialed is not None:
-                    await close_upstream(session, "gemini_ws", dialed)
-                if not superseded(session, generation):
-                    session.is_reconnecting = False
-                return
-
-            # Reconfigure — configure_gemini_session falls back to the session-
-            # persisted model/VAD/thinking/custom_role/phone_mode (P1.4), so
-            # this bare call no longer reverts the session to defaults.
-            await configure_gemini_session(
-                session,
-                session.operator,
-                session.voice,
-                mode=session.mode or None,
-                target_language=session.target_language or None,
-            )
-
-            # Re-emit provenance after reconfigure so client UI stays in sync with the
-            # newly-rebuilt system context (see Task 3 code review).
-            if session.provenance:
-                await _safe_ws_send(session.portal_ws, {
-                    "type": "provenance",
-                    "data": session.provenance
-                })
-
-            # P1.5-fix: final terminal check at the point of no return. configure
-            # + provenance above each await, so teardown could have completed
-            # during them — re-check before we respawn a listener and flip status
-            # to "connected". This is the last guard; past it the session is live
-            # again, so leaving a hole here would still resurrect a torn-down,
-            # reaper-immune session (just via a narrower window). Only the
-            # socket THIS reconnect dialed is closed: by now session.gemini_ws
-            # may be a newer attach's upstream.
-            if session.intentional_disconnect or superseded(session, generation):
-                if dialed is not None:
-                    await close_upstream(session, "gemini_ws", dialed)
-                if not superseded(session, generation):
-                    session.is_reconnecting = False
-                return
-
-            # CRITICAL (recon finding #1): respawn the listener. The previous
-            # gemini_listener's `async for` was bound to the OLD closed socket
-            # and has already exited — without a new task NOTHING ever reads
-            # from the new connection (setupComplete, audio, tool calls pile
-            # up unread) while the client is told "reconnected". Pattern
-            # ported from phone/bridge.py:_gemini_listener_with_reconnect.
-            if session.listener_task and not session.listener_task.done():
-                session.listener_task.cancel()
-            session.listener_task = asyncio.create_task(gemini_listener(session))
-            # The keepalive loop ends when the socket it fed closes (and a
-            # failed keepalive send is what started some reconnects): a
-            # reconnected session needs a live one again. ConnectionClosed from
-            # the listener and the keepalive is the only liveness signal now.
-            if session.keepalive_task is None or session.keepalive_task.done():
-                session.keepalive_task = asyncio.create_task(gemini_keepalive_loop(session))
-
-            # NOTE: reconnect_count is NOT reset here — see setupComplete in
-            # handle_gemini_message (consecutive-failure semantics).
-            session.is_reconnecting = False
-            session.last_ai_message_time = time.time()
-            session.status = "connected"
-
-            print(f"[GEMINI-LIVE] Reconnected successfully on attempt {attempt}")
-
-            # Notify Portal
-            await _safe_ws_send(session.portal_ws, {
-                "type": "reconnected",
-                "data": {"attempt": attempt}
+    async def parse_connect(self, session, websocket, data, url):
+        # Voice-agent preset (P4) — precedence: explicit > preset > defaults.
+        agent_id = data.get("agent", url["agent"])
+        preset = resolve_preset(agent_id, provider="gemini-live") if agent_id else None
+        if agent_id and preset is None:
+            await safe_send(websocket, {
+                "type": "warning",
+                "data": f"Voice agent preset {agent_id!r} not found for provider 'gemini-live' — continuing without preset"
             })
-        else:
-            if superseded(session, generation):
-                print(f"[GEMINI-LIVE] Session re-attached during the dial — abandoning reconnect")
-                return
-            print(f"[GEMINI-LIVE] Reconnect attempt {attempt} failed")
-            session.is_reconnecting = False
-            # Try again
-            spawn_reconnect(session, gemini_reconnect(session))
+        merged = merge_connect_params({
+            "model": data.get("model", url["model"]),
+            "voice": data.get("voice", url["voice"]),
+            "greeting": data.get("greeting", ""),
+            "instructions": data.get("role", ""),
+        }, preset)
+        operator = data.get("operator", url["operator"] or "")
+        model = merged["model"]
+        mode = data.get("mode", url["mode"])
+        target_language = data.get("target_language", url["target_language"])
+        is_translate, _ = resolve_translate_params(mode, target_language, log_prefix=LOG_PREFIX)
+        # Persisted for the reconnect path (P6a).
+        session.mode = mode if is_translate else ""
+        session.target_language = target_language or "" if is_translate else ""
+        session.operator = operator
 
-    except Exception as e:
-        print(f"[GEMINI-LIVE] Reconnect error: {e}")
-        if superseded(session, generation):
-            return
-        session.is_reconnecting = False
-        spawn_reconnect(session, gemini_reconnect(session))
+        # P6 — affective dialog + proactive audio. Requested on a model that
+        # rejects the fields (e.g. 3.1): a clear client error, no connect.
+        affective, proactive, affective_error = resolve_affective_flags(
+            model, data.get("affective", url["affective"]), data.get("proactive", url["proactive"]))
+        if affective_error:
+            await safe_send(websocket, {"type": "error", "data": affective_error})
+            return None
+        # Persisted BEFORE connect_to_gemini: the flags select the v1alpha
+        # endpoint there, and the reconnect path re-reads them.
+        session.affective_dialog = affective
+        session.proactive_audio = proactive
+
+        return {
+            "operator": operator,
+            "voice": merged["voice"] or GEMINI_LIVE_DEFAULT_VOICE,
+            "greeting": merged["greeting"] or "",
+            "role": merged["instructions"] or "",
+            "model": model,
+            "tool_group_override": merged["tool_group_override"],
+            # Validated against the allowlists by configure_gemini_session.
+            "vad_sensitivity_start": data.get("vad_sensitivity_start", url["vad_sensitivity_start"]),
+            "vad_sensitivity_end": data.get("vad_sensitivity_end", url["vad_sensitivity_end"]),
+            "thinking_level": data.get("thinking_level", url["thinking_level"]),
+            "mode": mode,
+            "target_language": target_language,
+        }
+
+    async def dial(self, session, params):
+        return await connect_to_gemini(session)
+
+    async def configure(self, session, params):
+        # A role (outbound call) becomes the custom system context.
+        await configure_gemini_session(
+            session,
+            params["operator"],
+            params["voice"],
+            custom_role=params["role"],
+            model=params["model"],
+            vad_sensitivity_start=params["vad_sensitivity_start"],
+            vad_sensitivity_end=params["vad_sensitivity_end"],
+            thinking_level=params["thinking_level"],
+            mode=params["mode"],
+            target_language=params["target_language"],
+            tool_group_override=params["tool_group_override"],
+        )
+
+    async def inject_greeting(self, session, greeting):
+        prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
+        await session.gemini_ws.send(json.dumps({
+            "clientContent": {
+                "turns": [{"role": "user", "parts": [{"text": prompt}]}],
+                "turnComplete": True
+            }
+        }))
+
+    def connected_data(self, session, session_id, params):
+        return {
+            "session_id": session_id,
+            "operator": params["operator"],
+            "model": GEMINI_LIVE_TRANSLATE_MODEL if session.mode == "translate" else (params["model"] or GEMINI_LIVE_MODEL),
+            "voice": params["voice"],
+            "affective_dialog": session.affective_dialog,
+            "proactive_audio": session.proactive_audio
+        }
+
+    async def handle_client(self, session, data):
+        await handle_portal_message(session, data)
+
+    async def handle_event(self, session, event):
+        await handle_gemini_message(session, event)
+
+    async def answer_failed_event(self, session, event, exc):
+        # Answer every functionCall id this event carried that the dispatch
+        # loop did not already answer.
+        await send_gemini_tool_error(session.gemini_ws, session.portal_ws, event, exc,
+                                     getattr(session, "answered_tool_call_ids", None))
+
+    def keepalive_frame(self, session):
+        return {
+            "realtime_input": {
+                "audio": {
+                    "mimeType": f"audio/pcm;rate={GEMINI_LIVE_INPUT_SAMPLE_RATE}",
+                    "data": _SILENCE_20MS_B64
+                }
+            }
+        }
+
+    def flush(self, session):
+        _flush_open_turn(session)
+
+    async def redial(self, session):
+        # The session-persisted affective flags pick the same endpoint version.
+        return await connect_to_gemini(session)
+
+    async def reconfigure(self, session):
+        # configure_gemini_session falls back to the session-persisted
+        # model/VAD/thinking/custom_role/phone_mode (P1.4), and the stored
+        # resumption handle resumes the conversation.
+        await configure_gemini_session(
+            session,
+            session.operator,
+            session.voice,
+            mode=session.mode or None,
+            target_language=session.target_language or None,
+        )
+        return True
+
+    async def save(self, session):
+        await save_session_to_blackbox(session)
+
+    def reconnect(self, session):
+        return gemini_reconnect(session)
+
+    def listener(self, session):
+        return gemini_listener(session)
+
+    def keepalive(self, session):
+        return gemini_keepalive_loop(session)
+
+
+GEMINI_LIVE_BRIDGE = LiveVoiceBridge(GeminiLiveAdapter())
+
+
+async def gemini_reconnect(session: GeminiLiveSession):
+    """Reconnect to Gemini Live transparently (resumption handle, backoff)."""
+    await GEMINI_LIVE_BRIDGE.reconnect(session)
 
 
 async def gemini_keepalive_loop(session: GeminiLiveSession):
-    """
-    Send periodic keepalive silence to prevent Gemini idle timeout.
+    """Keepalive silence so Gemini's idle timeout never ends a quiet session."""
+    await GEMINI_LIVE_BRIDGE.keepalive_loop(session)
 
-    Liveness is the transport's job, not this loop's: connect_to_gemini runs
-    websockets' ping/pong (ping_interval=20, ping_timeout=30), so a dead socket
-    surfaces as ConnectionClosed in gemini_listener within ~50 s, and a failed
-    send here reconnects too. A silent upstream is not a dead one: Gemini sends
-    nothing while the user is quiet, and the old 60 s no-message timer forced a
-    full reconnect (context rebuild, dropped audio) on ordinary pauses, two in
-    one 3-minute session (audit O09-live-voice-providers-02).
-    """
-    keepalive_interval = 15  # seconds
-
-    print(f"[GEMINI-LIVE] Keepalive loop started (interval={keepalive_interval}s)")
-
-    try:
-        while True:
-            await asyncio.sleep(keepalive_interval)
-
-            # Check if session is still active
-            if not session.gemini_ws or session.intentional_disconnect:
-                break
-
-            # Send keepalive: 20ms of silence as PCM16@16kHz
-            try:
-                if session.gemini_ws:
-                    # 20ms at 16kHz = 320 samples, PCM16 = 640 bytes of zeros
-                    silence_bytes = b'\x00' * 640
-                    silence_b64 = base64.b64encode(silence_bytes).decode('ascii')
-                    await session.gemini_ws.send(json.dumps({
-                        "realtime_input": {
-                            "audio": {
-                                "mimeType": f"audio/pcm;rate={GEMINI_LIVE_INPUT_SAMPLE_RATE}",
-                                "data": silence_b64
-                            }
-                        }
-                    }))
-            except websockets.exceptions.ConnectionClosed:
-                print(f"[GEMINI-LIVE] Keepalive failed - connection closed")
-                if (not session.is_reconnecting and not session.intentional_disconnect
-                        and not session.external_reconnect):
-                    spawn_reconnect(session, gemini_reconnect(session))
-                break
-            except Exception as e:
-                print(f"[GEMINI-LIVE] Keepalive error: {e}")
-
-    except asyncio.CancelledError:
-        pass
-    finally:
-        print(f"[GEMINI-LIVE] Keepalive loop stopped")
-
-# =============================================================================
-# WebSocket Bridge Tasks
-# =============================================================================
 
 async def gemini_listener(session: GeminiLiveSession):
-    """
-    Background task that listens for messages from Gemini and forwards to Portal.
-    """
-    try:
-        async for message in session.gemini_ws:
-            try:
-                event = json.loads(message)
-                await handle_gemini_message(session, event)
-            except json.JSONDecodeError:
-                print(f"[GEMINI-LIVE] Invalid JSON from Gemini: {message[:100]}")
-            except Exception as e:
-                print(f"[GEMINI-LIVE] Error handling Gemini message: {e}")
-                # P1b: never dangle a functionCall — answer every id this event
-                # carried that the dispatch loop did not already answer.
-                await send_gemini_tool_error(
-                    session.gemini_ws, session.portal_ws, event, e,
-                    getattr(session, "answered_tool_call_ids", None))
-    except websockets.exceptions.ConnectionClosed as e:
-        rcvd = getattr(e, "rcvd", None)
-        close_code = getattr(rcvd, "code", None)
-        close_reason = getattr(rcvd, "reason", "") or ""
-        print(f"[GEMINI-LIVE] Gemini connection closed: code={close_code} reason={close_reason!r}")
-        if not session.intentional_disconnect and not session.is_reconnecting:
-            # Forward the close to the client (P1.7). Setup rejections (e.g.
-            # the 1007 invalid-tool-schema that killed every session Jun 26 →
-            # Jul 11) arrive ONLY as WS close frames — swallowing them was
-            # silence layer 1. `data` stays a string (existing client
-            # contract); code/reason ride as additive top-level fields.
-            await _safe_ws_send(session.portal_ws, {
-                "type": "error",
-                "data": f"Gemini connection closed (code={close_code}): {close_reason or 'no reason given'}",
-                "code": close_code,
-                "reason": close_reason,
-            })
-            if session.external_reconnect:
-                # The owner's loop (phone bridge) re-dials when this listener
-                # returns; a second dialer here raced it for session.gemini_ws.
-                print(f"[GEMINI-LIVE] Unexpected disconnect - reconnect left to the session owner")
-            else:
-                print(f"[GEMINI-LIVE] Unexpected disconnect - triggering reconnect")
-                spawn_reconnect(session, gemini_reconnect(session))
-        elif session.intentional_disconnect:
-            session.status = "disconnected"
-            await _safe_ws_send(session.portal_ws, {
-                "type": "disconnected",
-                "data": "Gemini connection closed"
-            })
-        # else: mid-reconnect close of the OLD socket — gemini_reconnect owns
-        # status + client notifications. The old code sent a contradictory
-        # "disconnected" here and started the reaper grace clock mid-recovery
-        # (recon finding #8).
-    except Exception as e:
-        print(f"[GEMINI-LIVE] Gemini listener error: {e}")
-        session.status = "error"
-        # Terminal: nothing re-triggers a reconnect from this path — tell the
-        # client and CLOSE instead of leaving a zombie WS answering pings.
-        await _safe_ws_send(session.portal_ws, {
-            "type": "error",
-            "data": f"Gemini listener error: {e}",
-        })
-        await _close_portal_ws(session, reason="gemini listener error")
+    """Read Gemini's frames and forward them to the client (also the phone
+    bridge's listener, through its PhoneWebSocketAdapter)."""
+    await GEMINI_LIVE_BRIDGE.listener(session)
+
 
 # =============================================================================
 # WebSocket Endpoint
@@ -1982,271 +1249,15 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
     """
     WebSocket endpoint for Gemini Live API bridge.
 
-    Bridges Portal <-> Orchestrator <-> Gemini Live API.
-
-    Message flow:
+    Bridges Portal <-> Orchestrator <-> Gemini Live API through the shared
+    LiveVoiceBridge (Orchestrator/voice/bridge.py):
     1. Portal connects, sends 'connect' with operator and voice
     2. Orchestrator connects to Gemini Live API
     3. Orchestrator configures session with tools and context
     4. Bidirectional message passing begins
     5. Tool calls are executed locally and results sent to Gemini
     """
-    print(f"[GEMINI-LIVE] WebSocket connection request for session: {session_id}")
-    await websocket.accept()
-    print(f"[GEMINI-LIVE] WebSocket accepted for session: {session_id}")
-
-    # Android URL-query path (audit M4 + I1): Android passes config via query
-    # string instead of a JSON connect message. We use websocket.query_params.get()
-    # INSIDE the handler (NOT FastAPI Query() signature injection on a WebSocket
-    # route — that pattern is unverified in this codebase). These values become
-    # defaults for the connect handler; if the web client also sends a JSON
-    # connect message, those values win (JSON wins, URL fills missing — mirrors
-    # T2 precedence at realtime_routes.py:1377-1391).
-    #
-    # Field naming: vad_sensitivity_start / vad_sensitivity_end across all sides
-    # (JSON message, URL query, Python kwarg, Android client T11) for
-    # consistency with the function signature.
-    url_operator = websocket.query_params.get("operator")
-    url_voice = websocket.query_params.get("voice")
-    url_model = websocket.query_params.get("model")
-    url_vad_sensitivity_start = websocket.query_params.get("vad_sensitivity_start")
-    url_vad_sensitivity_end = websocket.query_params.get("vad_sensitivity_end")
-    url_thinking_level = websocket.query_params.get("thinking_level")
-    url_affective = websocket.query_params.get("affective")
-    url_proactive = websocket.query_params.get("proactive")
-    # P6a translation mode — same precedence as every other param
-    # (JSON connect message wins, URL query fills missing).
-    url_mode = websocket.query_params.get("mode")
-    url_target_language = websocket.query_params.get("target_language")
-    url_agent = websocket.query_params.get("agent")
-
-    # Check dependencies
-    if not WEBSOCKETS_AVAILABLE:
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": "Server missing 'websockets' library. Install with: pip install websockets"
-        })
-        await websocket.close()
-        return
-
-    if not GOOGLE_API_KEY:
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": "GOOGLE_API_KEY not configured on server"
-        })
-        await websocket.close()
-        return
-
-    # Create or get session
-    session = GEMINI_LIVE_SESSIONS.get(session_id)
-    if not session:
-        session = GeminiLiveSession(
-            session_id=session_id,
-            created_at=now_utc_iso()
-        )
-        GEMINI_LIVE_SESSIONS[session_id] = session
-
-    session.portal_ws = websocket
-    session.last_activity = now_utc_iso()
-    # This handler's attach: a later re-attach of the same session id bumps it,
-    # and from then on the session is that handler's (see _end_portal_session).
-    generation = claim_session(session)
-
-    keepalive_task = None
-
-    try:
-        while True:
-            # Receive with timeout — detect suspended/dead Android clients
-            try:
-                raw = await asyncio.wait_for(
-                    websocket.receive_text(),
-                    timeout=120.0
-                )
-            except asyncio.TimeoutError:
-                print(f"[GEMINI-LIVE] Client idle timeout (120s): {session_id}")
-                await _safe_ws_send(websocket, {"type": "error", "data": "Idle timeout"})
-                break
-
-            # Per-message error isolation
-            try:
-                data = json.loads(raw)
-            except (json.JSONDecodeError, TypeError) as e:
-                print(f"[GEMINI-LIVE] Bad message from client: {e}")
-                continue
-
-            msg_type = data.get("type", "")
-
-            if msg_type == "connect":
-                # Initial connection - establish Gemini WebSocket.
-                # Merge rule: JSON connect message wins over Android URL-query
-                # fallbacks (web is interactive — JSON wins, URL fills missing).
-                # Mirrors T2 precedence at realtime_routes.py:1377-1391.
-                # Voice-agent preset (P4) — precedence: explicit > preset > defaults.
-                agent_id = data.get("agent", url_agent)
-                preset = resolve_preset(agent_id, provider="gemini-live") if agent_id else None
-                if agent_id and preset is None:
-                    await _safe_ws_send(websocket, {
-                        "type": "warning",
-                        "data": f"Voice agent preset {agent_id!r} not found for provider 'gemini-live' — continuing without preset"
-                    })
-                merged = merge_connect_params({
-                    "model": data.get("model", url_model),
-                    "voice": data.get("voice", url_voice),
-                    "greeting": data.get("greeting", ""),
-                    "instructions": data.get("role", ""),
-                }, preset)
-                operator = data.get("operator", url_operator or "")
-                voice = merged["voice"] or GEMINI_LIVE_DEFAULT_VOICE
-                greeting = merged["greeting"] or ""
-                role = merged["instructions"] or ""
-                model = merged["model"]
-                tool_group_override = merged["tool_group_override"]
-                # T3 new fields — passed through to configure_gemini_session,
-                # which validates against allowlists and emits payload extensions.
-                vad_sensitivity_start = data.get("vad_sensitivity_start", url_vad_sensitivity_start)
-                vad_sensitivity_end = data.get("vad_sensitivity_end", url_vad_sensitivity_end)
-                thinking_level = data.get("thinking_level", url_thinking_level)
-                mode = data.get("mode", url_mode)
-                target_language = data.get("target_language", url_target_language)
-                is_translate, _ = resolve_translate_params(
-                    mode, target_language, log_prefix="[GEMINI-LIVE]")
-                # Persist for reconnect (P6a — see gemini_reconnect path)
-                session.mode = mode if is_translate else ""
-                session.target_language = target_language or "" if is_translate else ""
-                session.operator = operator
-
-                # P6 — affective dialog + proactive audio flags. JSON connect wins,
-                # URL query fills missing (same precedence as model/vad/thinking).
-                affective_raw = data.get("affective", url_affective)
-                proactive_raw = data.get("proactive", url_proactive)
-                affective, proactive, affective_error = resolve_affective_flags(
-                    model, affective_raw, proactive_raw
-                )
-                if affective_error:
-                    # Clear client error: requested on a model that rejects the
-                    # fields (e.g. 3.1). Do NOT proceed to connect.
-                    await _safe_ws_send(websocket, {"type": "error", "data": affective_error})
-                    continue
-                # Persist BEFORE connect_to_gemini — the flags select the v1alpha
-                # endpoint there, and the P1a reconnect path re-reads them so a
-                # reconnected session reconfigures identically.
-                session.affective_dialog = affective
-                session.proactive_audio = proactive
-
-                await _safe_ws_send(websocket, {
-                    "type": "status",
-                    "data": "Connecting to Gemini Live..."
-                })
-
-                # A re-attach (or a second connect on this socket) starts clean:
-                # retire whatever the previous connect left live, then drop the
-                # previous handler's teardown flags. Without the reset the
-                # keepalive died on its first tick, every upstream close read as
-                # deliberate, goAway was ignored and the reconnect budget carried
-                # over (O09-live-voice-providers-01).
-                await retire_upstream(session, "gemini_ws")
-                _flush_open_turn(session)  # the retired upstream's reply ends here
-                reset_for_connect(session)
-
-                # Connect to Gemini
-                if await connect_to_gemini(session):
-                    # Configure session with tools, context, voice + model/VAD/thinking
-                    # If role provided (outbound call), use it as custom context
-                    await configure_gemini_session(
-                        session,
-                        operator,
-                        voice,
-                        custom_role=role,
-                        model=model,
-                        vad_sensitivity_start=vad_sensitivity_start,
-                        vad_sensitivity_end=vad_sensitivity_end,
-                        thinking_level=thinking_level,
-                        mode=mode,
-                        target_language=target_language,
-                        tool_group_override=tool_group_override,
-                    )
-
-                    # Emit provenance to the client once per session start so
-                    # the Android/Portal UI can show which snapshots were used
-                    # to seed the system message. Task 10 wires the parser.
-                    if session.provenance:
-                        await _safe_ws_send(websocket, {
-                            "type": "provenance",
-                            "data": session.provenance
-                        })
-
-                    # If greeting provided (outbound call), inject it as initial turn
-                    # so the model speaks first when the callee answers
-                    if greeting:
-                        print(f"[GEMINI-LIVE] Injecting outbound greeting: {greeting[:80]}...")
-                        try:
-                            prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
-                            await session.gemini_ws.send(json.dumps({
-                                "clientContent": {
-                                    "turns": [{"role": "user", "parts": [{"text": prompt}]}],
-                                    "turnComplete": True
-                                }
-                            }))
-                        except Exception as e:
-                            print(f"[GEMINI-LIVE] Greeting injection failed: {e}")
-
-                    # Start Gemini listener task and keepalive. The listener
-                    # task lives on the SESSION (session.listener_task): the
-                    # reconnect path respawns it, so a local variable here
-                    # would go stale after the first reconnect and leak the
-                    # live task at teardown.
-                    session.listener_task = asyncio.create_task(gemini_listener(session))
-                    keepalive_task = asyncio.create_task(gemini_keepalive_loop(session))
-                    session.keepalive_task = keepalive_task
-
-                    await _safe_ws_send(websocket, {
-                        "type": "connected",
-                        "data": {
-                            "session_id": session_id,
-                            "operator": operator,
-                            "model": GEMINI_LIVE_TRANSLATE_MODEL if session.mode == "translate" else (model or GEMINI_LIVE_MODEL),
-                            "voice": voice,
-                            "affective_dialog": session.affective_dialog,
-                            "proactive_audio": session.proactive_audio
-                        }
-                    })
-                else:
-                    await _safe_ws_send(websocket, {
-                        "type": "error",
-                        "data": "Failed to connect to Gemini Live API"
-                    })
-
-            elif msg_type == "disconnect":
-                # Graceful disconnect
-                if not superseded(session, generation):
-                    session.intentional_disconnect = True
-                break
-
-            elif msg_type == "ping":
-                # Keep-alive
-                await _safe_ws_send(websocket, {"type": "pong"})
-
-            else:
-                # Isolate handler errors
-                try:
-                    await handle_portal_message(session, data)
-                except Exception as handler_err:
-                    print(f"[GEMINI-LIVE] Handler error (non-fatal): {handler_err}")
-
-    except WebSocketDisconnect:
-        print(f"[GEMINI-LIVE] Portal WebSocket disconnected: {session_id}")
-        if session.portal_ws is websocket:
-            session.portal_ws = None  # Clear portal ws but keep model connection for grace period
-
-    except Exception as e:
-        print(f"[GEMINI-LIVE] WebSocket error: {e}")
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": str(e)
-        })
-
-    finally:
-        await _end_portal_session(session, websocket, generation, keepalive_task)
+    await GEMINI_LIVE_BRIDGE.serve(websocket, session_id)
 
 
 async def _end_portal_session(session: GeminiLiveSession, websocket, generation: int,
@@ -2260,9 +1271,7 @@ async def _end_portal_session(session: GeminiLiveSession, websocket, generation:
     whose transcript save outlasted the re-attach left it deaf and reapable
     (O09-live-voice-providers-01).
     """
-    await end_portal_session(session, generation, keepalive_task, ws_attr="gemini_ws",
-                             save=save_session_to_blackbox, log_prefix="[GEMINI-LIVE]",
-                             flush=_flush_open_turn)
+    await GEMINI_LIVE_BRIDGE.end_portal_session(session, websocket, generation, keepalive_task)
 
 # =============================================================================
 # HTTP Endpoints

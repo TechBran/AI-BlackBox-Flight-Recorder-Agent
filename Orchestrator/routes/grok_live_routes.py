@@ -21,12 +21,8 @@ Features:
 import asyncio
 import base64
 import json
-import os
 import time
-from typing import Optional, Dict, Any
-
-# HTTP client for saving sessions
-import aiohttp
+from typing import Optional, Dict
 
 # External library imports
 try:
@@ -36,8 +32,7 @@ except ImportError:
     WEBSOCKETS_AVAILABLE = False
     print("[GROK-LIVE] websockets library not installed - run: pip install websockets")
 
-from fastapi import WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketState
+from fastapi import WebSocket
 
 # Local imports
 from Orchestrator.checkpoint import app
@@ -54,53 +49,30 @@ from Orchestrator.config import (
     GROK_LIVE_INPUT_SAMPLE_RATE,
     GROK_LIVE_OUTPUT_SAMPLE_RATE,
     REALTIME_CONTEXT_MAX_CHARS,
-    REALTIME_SNAPSHOT_CHARS_EACH,
-    VOL_PATH,
 )
-from Orchestrator.models import GrokLiveSession, GROK_LIVE_SESSIONS, TaskType
-from Orchestrator.volume import now_utc_iso, read_text_safe
-from Orchestrator.fossils import (
-    hybrid_retrieve,
-    format_snapshot_for_delivery,
-    get_recent_fossils_for_operator,
-    get_recent_checkpoints_for_operator
-)
+from Orchestrator.models import GrokLiveSession, GROK_LIVE_SESSIONS
+from Orchestrator.volume import now_utc_iso
 from Orchestrator.context_builder import build_fossil_context
-from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.utils.async_helpers import run_blocking
-from Orchestrator.tasks import create_task
-from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
 from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
-from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
+from Orchestrator.routes.voice_prompts import build_voice_instructions
 from Orchestrator.routes.voice_ws_shared import (
     adopt_upstream,
-    claim_session,
-    close_upstream,
-    dispatch_voice_tool,
-    end_portal_session,
-    reset_for_connect,
-    retire_upstream,
-    conversation_releaser,
+    safe_send,
     save_voice_transcript,
     send_openai_style_tool_error,
-    spawn_reconnect,
-    superseded,
     voice_debug_enabled,
 )
+from Orchestrator.voice import tools as voice_tools
+from Orchestrator.voice.bridge import LiveVoiceBridge, VoiceAdapter
+from Orchestrator.voice.transcript import save_session_transcript
 
+LOG_PREFIX = "[GROK-LIVE]"
 
-async def _safe_ws_send(websocket, data: dict) -> bool:
-    """Send JSON to WebSocket, return False if connection is dead."""
-    try:
-        if websocket and hasattr(websocket, 'application_state') and websocket.application_state == WebSocketState.CONNECTED:
-            await websocket.send_json(data)
-            return True
-    except Exception:
-        pass
-    return False
+_safe_ws_send = safe_send
 
 # =============================================================================
 # Tool Definitions — read FRESH at session-configure time (P1b)
@@ -116,63 +88,20 @@ async def _safe_ws_send(websocket, data: dict) -> bool:
 async def save_grok_session_to_blackbox(session: 'GrokLiveSession'):
     """
     Save the Grok Voice session conversation to BlackBox.
-    Called on disconnect/cleanup to ensure all messages are captured.
+    Called on disconnect/cleanup to ensure all messages are captured. The
+    conversation is cleared only once the transcript is safe (P1b: it used to
+    be cleared even after a failed save).
     """
-    if not session.conversation:
-        print(f"[GROK-LIVE] No conversation to save for session {session.session_id}")
-        return
-
-    if not session.operator:
-        print(f"[GROK-LIVE] No operator set, cannot save session {session.session_id}")
-        return
-
-    # Sort conversation by timestamp to ensure correct order
-    sorted_conversation = sorted(
-        session.conversation,
-        key=lambda x: x.get("timestamp", "")
-    )
-
-    # Format conversation as readable transcript
-    transcript_lines = []
-    for msg in sorted_conversation:
-        role = "User" if msg["role"] == "user" else "AI (Grok)"
-        transcript_lines.append(f"[{role}]: {msg['content']}")
-
-    transcript = "\n\n".join(transcript_lines)
-
-    session_summary = f"""=== Grok Voice Agent Session ===
-Session ID: {session.session_id}
-Timestamp: {now_utc_iso()}
-Voice: {session.voice}
-Messages: {len(session.conversation)}
-
---- Transcript ---
-{transcript}
---- End Session ---"""
-
-    print(f"[GROK-LIVE] Saving session {session.session_id} with {len(session.conversation)} messages to BlackBox")
-
-    # Drops exactly the turns in this transcript, once they are safe (spooled
-    # or saved): a turn that lands while the save runs stays for the next one.
-    release = conversation_releaser(session)
-    saved = await save_voice_transcript(
-        operator=session.operator,
+    await save_session_transcript(
+        session,
+        title="Grok Voice Agent Session",
+        fields=[("Timestamp", now_utc_iso()), ("Voice", session.voice)],
+        ai_label="AI (Grok)",
         user_message=f"[Grok Voice Session Transcript] Grok voice session {session.session_id}",
-        session_summary=session_summary,
         model_label="grok-live-voice",
-        log_prefix="[GROK-LIVE]",
-        session_id=session.session_id,
-        on_safe=release,
+        log_prefix=LOG_PREFIX,
+        persist=save_voice_transcript,
     )
-
-    # P1b BUGFIX: previously cleared UNCONDITIONALLY — a failed save
-    # permanently lost the transcript. Clear only once it is safe: saved, or
-    # in the retry spool (rank 51 write-ahead spool).
-    if saved:
-        release()
-    else:
-        print(f"[GROK-LIVE] Save FAILED and the retry spool is unavailable — keeping "
-              f"{len(session.conversation)} turns in memory for the next save attempt")
 
 
 # =============================================================================
@@ -215,38 +144,8 @@ def build_context_for_operator(operator: str, user_text: str = "") -> tuple[str,
 # =============================================================================
 
 async def execute_grok_search_snapshots(session: 'GrokLiveSession', arguments: Dict) -> str:
-    """
-    Execute the search_snapshots tool.
-
-    Uses hybrid retrieval (keyword + semantic) to find relevant snapshots.
-    Returns formatted results for the model.
-    """
-    query = arguments.get("query", "")
-    k = min(arguments.get("k", 3), 5)  # Cap at 5 results
-
-    if not query:
-        return "Error: No search query provided."
-
-    try:
-        # Use hybrid retrieval for best results. It embeds, reranks and reads
-        # the ledger, so it runs off the event loop every voice session shares
-        # (its vol_txt argument is unused: no 58 MB volume read for it here).
-        results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=session.operator)
-
-        if not results:
-            return f"No snapshots found matching: {query}"
-
-        # Format results
-        output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
-        for i, snap_text in enumerate(results, 1):
-            # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-            output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
-
-        return "\n\n".join(output_parts)
-
-    except Exception as e:
-        print(f"[GROK-LIVE] Search error: {e}")
-        return f"Search failed: {str(e)}"
+    """The search_snapshots tool (Orchestrator/voice/tools.py)."""
+    return await voice_tools.execute_search_snapshots(session, arguments, log_prefix=LOG_PREFIX)
 
 # =============================================================================
 # xAI Grok Voice Agent API Connection
@@ -444,130 +343,11 @@ async def configure_grok_session(session: 'GrokLiveSession', operator: str, voic
     # Stash provenance on the session so the WS endpoint can emit it to
     # the client right after configuration.
     session.provenance = provenance
-    is_system_operator = (operator == "system")
-
-    # If custom_role is provided, use it as the primary system instruction
-    if custom_role:
-        system_instructions = f"""{custom_role}
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses.
-
-ESSENTIAL TOOLS:
-You have access to search_snapshots and list_recent_snapshots for memory/context.
-You can also generate images, videos, music, and send SMS or make phone calls.
-You have search_contacts and save_contact for the contact book.
-You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
-Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
-
-{CU_CONTROL_BLOCK}
-
-VOICE INTERACTION:
-This is a real-time voice conversation. Be concise and natural. The person on the phone cannot see text - speak clearly.
-You're Grok - be witty, direct, and occasionally irreverent when appropriate."""
-
-    else:
-        # Default system prompt construction
-        # Different identity section for system vs named operators
-        if is_system_operator:
-            identity_section = """OPERATOR IDENTITY:
-This is an OUTBOUND CALL or system-initiated session. You may be calling someone on behalf of a user.
-- Do NOT address the person as "system" - just speak naturally and conversationally
-- Check recent snapshots IMMEDIATELY for task context (who to call, what to say, order details, etc.)
-- You have access to ALL snapshots across all operators for context handoff
-- Focus on completing the task that was set up before this call was initiated"""
-            memory_section = """MEMORY ACCESS — YOUR MOST IMPORTANT CAPABILITY:
-The BlackBox contains 1,600+ snapshots — your complete memory of every conversation, decision, and preference.
-Search snapshots FIRST and OFTEN. Since this is a system session, you can see ALL operators' snapshots for context handoff.
-Don't guess at history — the answers are in the snapshots. Call search_snapshots proactively."""
-        else:
-            identity_section = f"""OPERATOR IDENTITY:
-You are currently speaking with: {operator}
-Always address them by their name ({operator}) when appropriate. This is their personal AI session."""
-            memory_section = f"""MEMORY ACCESS — YOUR MOST IMPORTANT CAPABILITY:
-The BlackBox contains 1,600+ snapshots — your complete memory of {operator}'s history.
-Search snapshots FIRST and OFTEN — before answering questions about past work, before guessing at context, before starting any task.
-Everything about {operator}'s projects, preferences, past decisions, and recent activity lives in the snapshots.
-Don't guess or hallucinate history — call search_snapshots proactively."""
-
-        voice_persona = get_persona(operator, "voice") + "\n\n" + VOICE_DELIVERY_NOTE
-
-        system_instructions = f"""{voice_persona}
-
-IDENTITY:
-You are Grok, the voice interface for the AI Black Box Flight Recorder, connected to an immutable snapshot ledger and a multimodal toolchain. The operator's memory lives in the snapshots — treat it as your external long-term memory.
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses.
-
-{identity_section}
-
-{memory_section}
-
-TOOL USAGE RULES:
-CRITICAL: When you need to use a tool, you MUST invoke the actual function call.
-DO NOT just say you're going to use it - ACTUALLY CALL IT using the function calling mechanism.
-For example, when asked to generate an image, video, or music, invoke the function - don't just say "I'm calling it now".
-
-MEDIA PIPELINES - CRITICAL:
-You have tools to generate and find media. Here's how to use the different pipelines:
-
-1. IMAGE-TO-VIDEO (animate an existing image):
-   - First find the image URL using list_media or search_media
-   - Call generate_video with the image_url parameter:
-     generate_video(prompt="description of motion", image_url="/ui/uploads/image.png")
-   - The image_url parameter triggers image-to-video mode - DO NOT just put the URL in the prompt
-
-2. VIDEO EXTENSION (extend an existing video):
-   - Find the video URL using list_media or search_media
-   - Call generate_video with the video_url parameter:
-     generate_video(prompt="continuation description", video_url="/ui/uploads/video.mp4", resolution="720p")
-   - Must use 720p resolution for extensions
-
-3. IMAGE-TO-IMAGE (use reference images):
-   - Find image URLs using list_media or search_media
-   - Call a per-provider image tool with the reference_images parameter:
-     gemini_image(prompt="new image description", reference_images=["/ui/uploads/ref1.png", "/ui/uploads/ref2.png"])
-   - Can include up to 10 reference images
-
-4. TEXT-TO-VIDEO/IMAGE (from scratch):
-   - Just use generate_video(prompt="...") or gemini_image(prompt="...") without URL parameters
-
-FINDING MEDIA:
-- Use list_media(media_type="image") to see available images
-- Use list_media(media_type="video") to see available videos
-- Use search_media(query="sunset") to find specific media by description
-
-DISPLAYING MEDIA IN CHAT:
-To show the user any media file directly in chat, output the full URL on its own line.
-The frontend automatically renders media URLs as embedded players/images:
-  /ui/uploads/sunset-mountains_abc123.png  (renders as image)
-  /ui/uploads/racing-car_def456.mp4  (renders as video player)
-  /ui/uploads/epic-music_ghi789.wav  (renders as audio player)
-Use this to show the user which media you found with list_media or get_media BEFORE taking action on it.
-This lets the user verify you have the right file before you extend a video or modify an image.
-
-{CU_CONTROL_BLOCK}
-
-CONTACT BOOK:
-You have search_contacts and save_contact for the contact book.
-Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
-
-SCHEDULED TASKS (CRON JOBS):
-You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
-
-{"CONTEXT:" if is_system_operator else "OPERATOR-SPECIFIC CONTEXT:"}
-{context if context else ("No recent context loaded yet. Use list_recent_snapshots immediately!" if is_system_operator else f"No recent context available for {operator} yet. This may be their first session or a fresh start.")}
-
-SESSION START - CRITICAL:
-IMMEDIATELY use list_recent_snapshots(count=3) at the START of EVERY session to catch up on recent context.
-This is essential because:
-- You may be continuing work started by another model or agent
-- The snapshots contain the most recent conversations, decisions, and context
-- {"For this outbound call: CHECK SNAPSHOTS for who you're calling, what task to complete, order details, etc." if is_system_operator else "For outbound calls: task details, order info, names, addresses may be in the snapshots"}
-- Context handoff between models happens through snapshots - USE THEM!
-
-Do this BEFORE responding to the user - check what happened recently so you're caught up."""
+    # One builder for the three voice providers (voice_prompts); a custom_role
+    # (outbound call) replaces the default persona prompt.
+    system_instructions = build_voice_instructions(
+        "grok", operator, context, custom_role,
+        persona=lambda: get_persona(operator, "voice") + "\n\n" + VOICE_DELIVERY_NOTE)
 
     # P1b: read tools FRESH (not at import) so /toolvault/reload reaches voice.
     # P4: a voice-agent preset can swap the tool group at configure time.
@@ -775,51 +555,13 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
             })
 
     elif event_type == "response.function_call_arguments.done":
-        # Execute tool call
-        call_id = event.get("call_id", "")
-        name = event.get("name", "")
-        arguments_str = event.get("arguments", "{}")
-
-        print(f"[GROK-LIVE] ===== FUNCTION CALL DETECTED =====")
-        print(f"[GROK-LIVE] Call ID: {call_id}")
-        print(f"[GROK-LIVE] Function name: {name}")
-        print(f"[GROK-LIVE] Arguments string: {arguments_str}")
-
-        try:
-            arguments = json.loads(arguments_str)
-        except json.JSONDecodeError as parse_err:
-            # P1b: malformed arguments must NOT execute with {} — return a
-            # parse error to the model so it can retry with valid JSON.
-            print(f"[GROK-LIVE] Malformed tool arguments for {name}: {parse_err}")
-            await send_openai_style_tool_error(
-                session.grok_ws, session.portal_ws, event,
-                ValueError(f"Malformed tool-call arguments JSON: {parse_err}. "
-                           f"Raw arguments: {arguments_str[:200]}"),
-            )
-            return
-
-        print(f"[GROK-LIVE] Tool call: {name} with args: {arguments}")
-
-        # Notify Portal that tool is being called
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "tool_call",
-                "data": {"name": name, "arguments": arguments}
-            })
-
-        # Run the tool OFF this listener so it keeps draining provider events
-        # while the tool works: inline, a long tool held the socket unread
-        # (audit O08-stt-realtime-02). The answer goes back on the socket the
-        # call came from, never on a reconnected one that has no such call id.
-        upstream = session.grok_ws
-        dispatch_voice_tool(
-            session,
-            lambda: _execute_grok_tool(session, name, arguments),
-            lambda result: _deliver_grok_tool_result(session, upstream, call_id, name, result),
-            lambda exc: _fail_grok_tool(session, upstream, event, exc),
-            label=f"[GROK-LIVE] {name} (call_id={call_id})",
-            call_id=call_id,
-        )
+        # The OpenAI-style function call (shared with OpenAI Realtime): it runs
+        # OFF this listener and is answered on the socket it came from.
+        print(f"[GROK-LIVE] Function call: {event.get('name', '')} "
+              f"(call_id={event.get('call_id', '')}) arguments={event.get('arguments', '{}')}")
+        await voice_tools.dispatch_openai_style_call(
+            session, event, ws_attr="grok_ws", log_prefix=LOG_PREFIX,
+            execute=lambda name, arguments: _execute_grok_tool(session, name, arguments))
 
     elif event_type == "response.done":
         # Response complete
@@ -923,653 +665,185 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
 
 
 async def _execute_grok_tool(session: 'GrokLiveSession', name: str, arguments: Dict) -> str:
-    """Run ONE tool call of the session and return its result text.
+    """Run ONE tool call of the session and return its result text (the shared
+    voice tool ladder, Orchestrator/voice/tools.py)."""
+    return await voice_tools.execute_voice_tool(session, name, arguments, log_prefix=LOG_PREFIX,
+                                                created_by="grok-live")
 
-    Runs as a task tracked on the session (voice_ws_shared.dispatch_voice_tool),
-    never inside the listener, which used to sit on a tool for its whole run.
-    """
-    if name == "search_snapshots":
-        result = await execute_grok_search_snapshots(session, arguments)
-    elif name == "web_fetch":
-        url = arguments.get("url", "")
-        max_chars = arguments.get("max_chars", 80000)
-        print(f"[GROK-LIVE] Executing web fetch: {url}")
-        # Off the event loop: a fetch can take its whole time budget.
-        result = await run_blocking(perform_web_fetch, url, max_chars)
-        print(f"[GROK-LIVE] Web fetch result length: {len(result)} chars")
-    elif name in IMAGE_TOOL_PROVIDERS:
-        provider = IMAGE_TOOL_PROVIDERS[name]
-        prompt = arguments.get("prompt", "")
-        aspect_ratio = arguments.get("aspectRatio", "16:9")
-        resolution = arguments.get("resolution", "1K")
-        num_images = arguments.get("numberOfImages", 1)
-        reference_images = arguments.get("reference_images", [])  # For image-to-image
 
-        mode = "image-to-image" if reference_images else "text-to-image"
-        print(f"[GROK-LIVE] Executing image generation ({mode}): {prompt[:100]}... ({num_images} @ {resolution})")
+# =============================================================================
+# The Grok adapter of the shared voice bridge (Orchestrator/voice/bridge.py)
+# =============================================================================
 
-        # Create image generation task
-        image_options = {
-            "aspectRatio": aspect_ratio,
-            "resolution": resolution,
-            "numberOfImages": num_images,
-            "provider": provider,
-        }
-        if arguments.get("size"):  # openai gpt-image / local z-image size
-            image_options["size"] = arguments["size"]
-        if reference_images:
-            image_options["reference_images"] = reference_images
+# 20 ms of PCM16 silence at the 16 kHz input rate (320 samples = 640 bytes).
+_SILENCE_20MS_B64 = base64.b64encode(b'\x00' * 640).decode('ascii')
 
-        task = create_task(
-            TaskType.IMAGE_GENERATION,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data={"options": image_options}
-        )
 
-        img_count = num_images
-        ref_desc = f" (using {len(reference_images)} reference image{'s' if len(reference_images) > 1 else ''})" if reference_images else ""
-        result = f"Image generation started ({mode}){ref_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {img_count} image{'s' if img_count > 1 else ''} at {resolution}."
+class GrokLiveAdapter(VoiceAdapter):
+    """xAI Grok's half of the shared LiveVoiceBridge: session.update, the
+    OpenAI-style realtime events, conversation resumption on reconnect and the
+    SIP call attach (call_id sessions)."""
 
-        # Notify Portal about image task
-        print(f"[GROK-LIVE] Sending image_task event to portal...")
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "image_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images}
+    name = "Grok"
+    log_prefix = LOG_PREFIX
+    ws_attr = "grok_ws"
+    key_name = "XAI_API_KEY"
+    connecting_status = "Connecting to Grok..."
+    connect_failed = "Failed to connect to Grok Voice Agent API"
+
+    def sessions(self):
+        return GROK_LIVE_SESSIONS
+
+    def new_session(self, session_id):
+        return GrokLiveSession(session_id=session_id, created_at=now_utc_iso())
+
+    def websockets_available(self):
+        return WEBSOCKETS_AVAILABLE
+
+    def api_key(self):
+        return XAI_API_KEY
+
+    def url_params(self, websocket):
+        q = websocket.query_params
+        return {key: q.get(key) for key in ("agent", "model", "language_hint", "reasoning_effort")}
+
+    async def parse_connect(self, session, websocket, data, url):
+        # Voice-agent preset (P4) — precedence: explicit > preset > defaults.
+        # Client model/voice/greeting/role plus the Grok-specific
+        # language_hint/keyterms feed the merge as the explicit inputs (model
+        # keeps its JSON-wins-over-URL fallback: Android sends it in the query),
+        # so an explicit value still wins over a preset-supplied one.
+        # reasoning_effort/replace_map are not preset fields.
+        agent_id = data.get("agent", url["agent"])
+        preset = resolve_preset(agent_id, provider="grok-live") if agent_id else None
+        if agent_id and preset is None:
+            await safe_send(websocket, {
+                "type": "warning",
+                "data": f"Voice agent preset {agent_id!r} not found for provider 'grok-live' — continuing without preset"
             })
-            print(f"[GROK-LIVE] ✓ image_task event sent successfully")
-        else:
-            print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
-
-        print(f"[GROK-LIVE] Image generation task created: {task.task_id}")
-    elif name == "generate_video":
-        prompt = arguments.get("prompt", "")
-        aspect_ratio = arguments.get("aspectRatio", "16:9")
-        duration = arguments.get("duration", 8)
-        resolution = arguments.get("resolution", "720p")
-        negative_prompt = arguments.get("negativePrompt", "")
-        image_url = arguments.get("image_url")  # For image-to-video
-        video_url = arguments.get("video_url")  # For video extension
-
-        mode = "text-to-video"
-        if image_url:
-            mode = "image-to-video"
-        elif video_url:
-            mode = "video-extension"
-
-        print(f"[GROK-LIVE] Executing video generation ({mode}): {prompt[:100]}... ({duration}s @ {resolution})")
-
-        # Create video generation task
-        video_options = {
-            "aspectRatio": aspect_ratio,
-            "duration": duration,
-            "resolution": resolution,
+        merged = merge_connect_params({
+            "model": data.get("model", url["model"]),
+            "voice": data.get("voice"),
+            "greeting": data.get("greeting", ""),
+            "instructions": data.get("role", ""),
+            "language": data.get("language_hint", url["language_hint"]),
+            "keyterms": data.get("keyterms") if isinstance(data.get("keyterms"), list) else None,
+        }, preset)
+        operator = data.get("operator", "")
+        session.operator = operator
+        return {
+            "operator": operator,
+            "voice": merged["voice"] or GROK_LIVE_DEFAULT_VOICE,
+            "greeting": merged["greeting"] or "",
+            "role": merged["instructions"] or "",
+            "model": merged["model"],
+            "tool_group_override": merged["tool_group_override"],
+            "reasoning_effort": data.get("reasoning_effort", url["reasoning_effort"]),
+            "replace_map": data.get("replace") if isinstance(data.get("replace"), dict) else None,
+            "keyterms": merged["keyterms"],
+            "language_hint": merged["language"],
         }
-        if negative_prompt:
-            video_options["negativePrompt"] = negative_prompt
-        if image_url:
-            video_options["image_url"] = image_url
-        if video_url:
-            video_options["video_url"] = video_url
 
-        task = create_task(
-            TaskType.VIDEO_GENERATION,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data={"options": video_options}
-        )
+    async def dial(self, session, params):
+        return await connect_to_grok(session, model=params["model"])
 
-        mode_desc = f" (animating image: {image_url})" if image_url else (f" (extending video: {video_url})" if video_url else "")
-        result = f"Video generation started ({mode}){mode_desc}: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution}. Takes 5-20 minutes."
+    async def configure(self, session, params):
+        await configure_grok_session(session, params["operator"], params["voice"],
+                                     custom_role=params["role"],
+                                     reasoning_effort=params["reasoning_effort"],
+                                     replace_map=params["replace_map"],
+                                     keyterms=params["keyterms"],
+                                     language_hint=params["language_hint"],
+                                     tool_group_override=params["tool_group_override"])
+        print(f"{LOG_PREFIX} Voice selected: {params['voice']}")
 
-        # Notify Portal about video task
-        print(f"[GROK-LIVE] Sending video_task event to portal...")
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "video_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration, "resolution": resolution}
-            })
-            print(f"[GROK-LIVE] ✓ video_task event sent successfully")
-        else:
-            print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
-
-        print(f"[GROK-LIVE] Video generation task created: {task.task_id}")
-    elif name == "lyria_music":
-        prompt = arguments.get("prompt", "")
-        negative_prompt = arguments.get("negativePrompt", "")
-        sample_count = arguments.get("sampleCount", 1)
-        print(f"[GROK-LIVE] Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
-
-        # Create music generation task
-        music_options = {
-            "prompt": prompt,
-            "operator": session.operator or "system",
-        }
-        if negative_prompt:
-            music_options["negative_prompt"] = negative_prompt
-        if sample_count and sample_count > 1:
-            music_options["sample_count"] = sample_count
-
-        task = create_task(
-            TaskType.LYRIA_MUSIC,
-            operator=session.operator or "system",
-            prompt=prompt,
-            result_data=music_options
-        )
-
-        variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
-        result = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
-
-        # Notify Portal about music task
-        print(f"[GROK-LIVE] Sending music_task event to portal...")
-        if session.portal_ws:
-            await _safe_ws_send(session.portal_ws, {
-                "type": "music_task",
-                "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}
-            })
-            print(f"[GROK-LIVE] ✓ music_task event sent successfully")
-        else:
-            print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
-
-        print(f"[GROK-LIVE] Music generation task created: {task.task_id}")
-    elif name == "get_media":
-        from Orchestrator.routes.chat_routes import execute_get_media
-        url = arguments.get("url")
-        task_id_param = arguments.get("task_id")
-        print(f"[GROK-LIVE] Executing get_media: url={url}, task_id={task_id_param}")
-        media_result = await run_blocking(execute_get_media, url=url, task_id=task_id_param)
-        result = json.dumps(media_result, indent=2)
-    elif name == "list_media":
-        from Orchestrator.routes.chat_routes import execute_list_media
-        media_type = arguments.get("media_type")
-        limit = arguments.get("limit", 20)
-        print(f"[GROK-LIVE] Executing list_media: type={media_type}, limit={limit}")
-        list_result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
-        result = json.dumps(list_result, indent=2)
-    elif name == "search_media":
-        from Orchestrator.routes.chat_routes import execute_search_media
-        query = arguments.get("query", "")
-        media_type = arguments.get("media_type")
-        limit = arguments.get("limit", 10)
-        print(f"[GROK-LIVE] Executing search_media: query='{query}', type={media_type}")
-        search_result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
-        result = json.dumps(search_result, indent=2)
-    elif name == "send_sms":
-        # Send SMS using unified tool executor
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = arguments.get("phone_number", "")
-        message = arguments.get("message", "")
-        print(f"[GROK-LIVE] Executing send_sms to {phone_number}: {message[:50]}...")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
-        result = tool_result.rich_result()
-        print(f"[GROK-LIVE] SMS result: {result}")
-    elif name == "make_phone_call":
-        # Initiate outbound phone call through the unified tool executor: the
-        # box's call route (Asterisk/TG200 or Twilio), an E.164 number, and a
-        # 200 {"error": ...} counted as a failure (Orchestrator.telephony).
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = arguments.get("phone_number", "")
-        print(f"[GROK-LIVE] Executing make_phone_call to {phone_number}")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("make_phone_call", {
-            "phone_number": phone_number,
-            "greeting": arguments.get("greeting", ""),
-            "role": arguments.get("role", ""),
-            "backend": arguments.get("backend", "openai_realtime"),
-        })
-        result = tool_result.rich_result()
-        print(f"[GROK-LIVE] Call result: {result}")
-    elif name == "make_voice_call":
-        # Call with pre-generated TTS message
-        from Orchestrator.tools import BlackBoxToolExecutor
-        phone_number = arguments.get("phone_number", "")
-        message = arguments.get("message", "")
-        voice = arguments.get("voice", "onyx")
-        print(f"[GROK-LIVE] Executing make_voice_call to {phone_number}: {message[:50]}...")
-        executor = BlackBoxToolExecutor(operator=session.operator or "system")
-        tool_result = await executor.execute("make_voice_call", {
-            "phone_number": phone_number,
-            "message": message,
-            "voice": voice
-        })
-        result = tool_result.rich_result()
-        print(f"[GROK-LIVE] Voice call result: {result}")
-    elif name in ("get_recent_snapshots", "list_recent_snapshots"):
-        # list_recent_snapshots is the declared ToolVault name; legacy
-        # get_recent_snapshots is kept as a dispatch alias for list_recent_snapshots
-        # so this specialized handler (system-sees-all scoping for
-        # outbound-call context handoff) serves both instead of falling
-        # to the catch-all.
-        count = min(arguments.get("count", 3), 5)
-        operator = session.operator or "system"
-
-        # System operator sees ALL snapshots (for outbound calls/context handoff)
-        # Regular operators only see their own snapshots (no context bleed)
-        see_all = (operator == "system")
-
-        print(f"[GROK-LIVE] Getting {count} recent snapshots for {operator} (see_all={see_all})")
-        try:
-            from Orchestrator.fossils import load_snapshot_index, read_volume_bytes
-            # The index parse and the whole-volume read block: off the event loop.
-            index = await run_blocking(load_snapshot_index)
-
-            if index:
-                # Sort all snapshots by ID (date + sequence)
-                def snapshot_sort_key(snap_id: str) -> tuple:
-                    try:
-                        parts = snap_id.split('-')
-                        date_part = int(parts[1]) if len(parts) > 1 else 0
-                        seq_part = int(parts[2]) if len(parts) > 2 else 0
-                        return (date_part, seq_part)
-                    except (ValueError, IndexError):
-                        return (0, 0)
-
-                # Filter by operator unless system (which sees all)
-                if see_all:
-                    matching = list(index.items())
-                else:
-                    matching = [(sid, meta) for sid, meta in index.items()
-                               if meta.get("operator") == operator]
-
-                matching.sort(key=lambda x: snapshot_sort_key(x[0]), reverse=True)
-
-                # Get the most recent N
-                recent = matching[:count]
-
-                if not recent:
-                    result = f"No recent snapshots found for operator '{operator}'."
-                else:
-                    vol_bytes = await run_blocking(read_volume_bytes, VOL_PATH)
-                    scope_desc = "all operators" if see_all else f"operator: {operator}"
-                    result_parts = [f"Found {len(recent)} recent snapshot(s) ({scope_desc}):\n"]
-
-                    for snap_id, meta in recent:
-                        start = meta.get("byte_start", 0)
-                        end = meta.get("byte_end", start + 5000)
-                        snap_bytes = vol_bytes[start:end]
-                        snap_text = snap_bytes.decode('utf-8', errors='replace')
-                        operator_name = meta.get("operator", "unknown")
-
-                        # WI-10 (M7): deliver recent snapshots WHOLE — no delivery truncation
-                        result_parts.append(f"--- {snap_id} (operator: {operator_name}) ---\n{snap_text}")
-
-                    result = "\n\n".join(result_parts)
-                    print(f"[GROK-LIVE] Retrieved {len(recent)} recent snapshots")
-            else:
-                result = "No snapshots found in index."
-        except Exception as e:
-            print(f"[GROK-LIVE] Error getting recent snapshots: {e}")
-            result = f"Error retrieving recent snapshots: {str(e)}"
-    elif name == "search_contacts":
-        from Orchestrator.contacts import search_contacts
-        query = arguments.get("query", "")
-        operator = session.operator or "system"
-        print(f"[GROK-LIVE] Executing search_contacts: query='{query}', operator={operator}")
-        contacts = search_contacts(query, operator)
-        if contacts:
-            result = json.dumps(contacts, indent=2)
-        else:
-            result = f"No contacts found matching '{query}'."
-        print(f"[GROK-LIVE] search_contacts result: {len(contacts)} contacts found")
-    elif name == "save_contact":
-        from Orchestrator.contacts import upsert_contact
-        operator = session.operator or "system"
-        contact_name = arguments.get("name", "")
-        notes = arguments.get("notes", "")
-        tags = arguments.get("tags", [])
-        phone = arguments.get("phone")
-        email = arguments.get("email")
-        relationship = arguments.get("relationship")
-        print(f"[GROK-LIVE] Executing save_contact: name='{contact_name}', operator={operator}")
-        saved = upsert_contact(
-            name=contact_name, notes=notes, tags=tags,
-            operator=operator, created_by="grok-live",
-            phone=phone, email=email, relationship=relationship
-        )
-        result = f"Contact saved: {json.dumps(saved, indent=2)}"
-        print(f"[GROK-LIVE] save_contact result: saved '{contact_name}'")
-    elif name == "create_cron_job":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("create_cron_job", arguments)
-        result = cron_result.rich_result()
-        print(f"[GROK-LIVE] create_cron_job result: {result}")
-    elif name == "edit_cron_job":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("edit_cron_job", arguments)
-        result = cron_result.rich_result()
-        print(f"[GROK-LIVE] edit_cron_job result: {result}")
-    elif name == "search_cron_jobs":
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        cron_result = await executor.execute("search_cron_jobs", arguments)
-        result = cron_result.rich_result()
-        print(f"[GROK-LIVE] search_cron_jobs result: {result}")
-    elif name in ("use_computer", "list_devices", "control_android_device"):
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        tool_result = await executor.execute(name, arguments)
-        result = tool_result.result
-        print(f"[GROK-LIVE] {name}: {result[:100]}")
-    elif name == "get_current_time":
-        from datetime import datetime
-        now = datetime.now()
-        result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-        print(f"[GROK-LIVE] get_current_time: {result}")
-    else:
-        # Catch-all: route ANY other tool (incl. the per-provider web
-        # search tools and dynamically-injected ToolVault tools) through
-        # BlackBoxToolExecutor instead of reporting "Unknown tool".
-        from Orchestrator.tools import BlackBoxToolExecutor
-        operator = session.operator or "system"
-        executor = BlackBoxToolExecutor(operator=operator)
-        tool_result = await executor.execute(name, arguments)
-        result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
-        if not result:
-            result = f"Tool '{name}' executed successfully (no output)."
-        print(f"[GROK-LIVE] {name} (catch-all): {result[:100]}")
-
-    return result
-
-
-async def _deliver_grok_tool_result(session: 'GrokLiveSession', upstream, call_id: str,
-                                    name: str, result: str) -> None:
-    """Answer the model with a tool result, on the upstream the call came from."""
-    if upstream is not None and session.grok_ws is upstream:
-        tool_response = {
+    async def inject_greeting(self, session, greeting):
+        prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
+        await session.grok_ws.send(json.dumps({
             "type": "conversation.item.create",
             "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": result
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}]
             }
-        }
-        print(f"[GROK-LIVE] Sending tool response for {name}, call_id: {call_id}")
-        await upstream.send(json.dumps(tool_response))
-        # Request response with tool result
-        await upstream.send(json.dumps({
-            "type": "response.create"
         }))
-        print(f"[GROK-LIVE] Requested response.create after tool result")
-    else:
-        print(f"[GROK-LIVE] Dropping the {name} result (call_id: {call_id}): the upstream "
-              f"it was called on is gone")
+        await session.grok_ws.send(json.dumps({"type": "response.create"}))
 
-    # Notify Portal
-    if session.portal_ws:
-        await _safe_ws_send(session.portal_ws, {
-            "type": "tool_result",
-            "data": {"name": name, "result_length": len(result)}
-        })
+    def connected_data(self, session, session_id, params):
+        return {
+            "session_id": session_id,
+            "operator": params["operator"],
+            "model": session.model,
+            "voice": params["voice"]
+        }
+
+    async def handle_client(self, session, data):
+        await handle_grok_portal_message(session, data)
+
+    async def handle_event(self, session, event):
+        await handle_grok_message(session, event)
+
+    async def answer_failed_event(self, session, event, exc):
+        await send_openai_style_tool_error(session.grok_ws, session.portal_ws, event, exc)
+
+    def on_frame(self, session):
+        if session.reconnect_count:
+            # Proven-healthy: a real server frame arrived on this socket.
+            session.reconnect_count = 0
+
+    def keepalive_frame(self, session):
+        # SKIPPED for SIP-attached calls (session.call_id set): the call's
+        # audio flows xAI-side and injected buffer silence could corrupt it.
+        # The socket's ping/pong still detects a dead connection.
+        if session.call_id:
+            return None
+        return {"type": "input_audio_buffer.append", "audio": _SILENCE_20MS_B64}
+
+    async def redial(self, session):
+        # Resume the server-side conversation when there is an id (xAI replays
+        # cached turns; no full context rebuild). A call_id session rejoins its
+        # call (connect_to_grok's call-attach precedence).
+        return await connect_to_grok(session, model=session.model or None,
+                                     conversation_id=session.conversation_id)
+
+    async def reconfigure(self, session):
+        if session.conversation_id:
+            print(f"{LOG_PREFIX} Resumed conversation {session.conversation_id} — session rebuild skipped")
+            return False
+        # No resumption id: a full reconfigure (rebuilds the context).
+        await configure_grok_session(session, session.operator, session.voice)
+        return True
+
+    async def save(self, session):
+        await save_grok_session_to_blackbox(session)
+
+    def reconnect(self, session):
+        return grok_reconnect(session)
+
+    def listener(self, session):
+        return grok_listener(session)
+
+    def keepalive(self, session):
+        return grok_keepalive_loop(session)
 
 
-async def _fail_grok_tool(session: 'GrokLiveSession', upstream, event: Dict,
-                          exc: BaseException) -> None:
-    """Answer the model with an error payload in place of a result."""
-    live = upstream if (upstream is not None and session.grok_ws is upstream) else None
-    await send_openai_style_tool_error(live, session.portal_ws, event, exc)
+GROK_LIVE_BRIDGE = LiveVoiceBridge(GrokLiveAdapter())
 
-# =============================================================================
-# WebSocket Bridge Tasks
-# =============================================================================
 
 async def grok_reconnect(session: 'GrokLiveSession'):
-    """
-    Reconnect to xAI Grok Voice Agent API transparently.
-    Uses exponential backoff, re-configures session on success.
-    """
-    if session.is_reconnecting:
-        print(f"[GROK-LIVE] Already reconnecting, skipping")
-        return
-
-    # The attach this reconnect works for. A client re-attach resets
-    # intentional_disconnect, so after every await the generation is what says
-    # whether the session is still ours to re-dial (O09-live-voice-providers-01).
-    generation = session.generation
-
-    if session.reconnect_count >= session.max_reconnects:
-        print(f"[GROK-LIVE] Max reconnects ({session.max_reconnects}) reached, giving up")
-        session.status = "disconnected"
-        await _safe_ws_send(session.portal_ws, {
-            "type": "disconnected",
-            "data": "Connection lost after multiple reconnection attempts"
-        })
-        dead = session.grok_ws
-        await save_grok_session_to_blackbox(session)
-        if superseded(session, generation):
-            return  # a re-attach during the save owns the session now
-        # P1b: null the closed-but-non-None socket so the keepalive loop's
-        # `if not session.grok_ws: break` fires once, instead of spinning on the
-        # dead socket and re-triggering grok_reconnect every stale cycle (each
-        # re-hitting this give-up branch → a redundant BlackBox save).
-        if dead is not None:
-            await close_upstream(session, "grok_ws", dead)
-        return
-
-    session.is_reconnecting = True
-    session.reconnect_count += 1
-    attempt = session.reconnect_count
-
-    # Exponential backoff: 0.5s, 1s, 2s, 4s, 5s max (fast recovery for voice calls)
-    delay = min(0.5 * (2 ** (attempt - 1)), 5)
-    print(f"[GROK-LIVE] Reconnecting (attempt {attempt}/{session.max_reconnects}) in {delay}s...")
-
-    # Notify Portal
-    await _safe_ws_send(session.portal_ws, {
-        "type": "reconnecting",
-        "data": {"attempt": attempt, "max": session.max_reconnects, "delay": delay}
-    })
-
-    await asyncio.sleep(delay)
-
-    # P1b (terminal guard): this coroutine runs DETACHED and just slept, so the
-    # WS endpoint may have torn the session down during the backoff. Re-check
-    # here — otherwise a Portal drop mid-reconnect would re-dial + respawn a
-    # listener + flip status back to "connected", resurrecting a clientless
-    # session the reaper can never evict. A newer attach that took the session
-    # over during the backoff owns its reconnect state: leave it alone.
-    if superseded(session, generation):
-        print(f"[GROK-LIVE] Session re-attached during backoff — abandoning reconnect")
-        return
-    if session.intentional_disconnect:
-        print(f"[GROK-LIVE] Session closed during backoff — abandoning reconnect")
-        session.is_reconnecting = False
-        return
-
-    try:
-        # P1b: cancel the old listener FIRST — it is bound to the OLD ws
-        # object; left running it would observe our close() below and emit a
-        # spurious "disconnected" to the client mid-recovery.
-        if session.listener_task and not session.listener_task.done():
-            session.listener_task.cancel()
-
-        # Close old connection
-        old = session.grok_ws
-        if old is not None:
-            await close_upstream(session, "grok_ws", old)
-
-        # Reconnect — resume the server-side conversation when we have an id
-        # (xAI replays cached turns; avoids a full context rebuild).
-        resume_id = session.conversation_id
-        if await connect_to_grok(session, model=session.model or None,
-                                 conversation_id=resume_id):
-            dialed = session.grok_ws
-            # P1b (terminal guard): teardown may have run during the dial. If so,
-            # close the socket we just opened and bail — do NOT respawn a
-            # listener onto a session that is being torn down.
-            if session.intentional_disconnect or superseded(session, generation):
-                if dialed is not None:
-                    await close_upstream(session, "grok_ws", dialed)
-                if not superseded(session, generation):
-                    session.is_reconnecting = False
-                return
-
-            if resume_id:
-                print(f"[GROK-LIVE] Resumed conversation {resume_id} — session rebuild skipped")
-            else:
-                # No resumption id — full reconfigure (rebuilds context)
-                await configure_grok_session(session, session.operator, session.voice)
-
-                # Re-emit provenance after reconfigure so client UI stays in sync
-                # with the newly-rebuilt system context (see Task 3 code review).
-                if session.provenance:
-                    await _safe_ws_send(session.portal_ws, {
-                        "type": "provenance",
-                        "data": session.provenance
-                    })
-
-            # P1b (terminal guard): final check at the point of no return.
-            # configure + provenance each await, so teardown could have completed
-            # during them — re-check before we respawn a listener and flip status
-            # to "connected". This is the last guard; past it the session is live
-            # again, so a hole here would still resurrect a reaper-immune session.
-            # Only the socket THIS reconnect dialed is closed: by now
-            # session.grok_ws may be a newer attach's upstream.
-            if session.intentional_disconnect or superseded(session, generation):
-                if dialed is not None:
-                    await close_upstream(session, "grok_ws", dialed)
-                if not superseded(session, generation):
-                    session.is_reconnecting = False
-                return
-
-            # P1b: respawn the listener on the NEW upstream ws. Without this the
-            # previous grok_listener's `async for` (bound to the OLD closed
-            # socket) has already exited, so NOTHING reads the new connection —
-            # the session is a permanently mute one-way pipe still reporting
-            # "reconnected" (parity with the OpenAI/Gemini fixes; the phone
-            # bridge always had its own respawn loop).
-            session.listener_task = asyncio.create_task(grok_listener(session))
-            # The keepalive loop ends when the socket it fed closes (and a
-            # failed keepalive send is what started some reconnects): a
-            # reconnected session needs a live one again. ConnectionClosed from
-            # the listener and the keepalive is the only liveness signal now.
-            if session.keepalive_task is None or session.keepalive_task.done():
-                session.keepalive_task = asyncio.create_task(grok_keepalive_loop(session))
-
-            # Reset state. NOTE: reconnect_count is reset in grok_listener on the
-            # first real server frame (proven-healthy), NOT here on dial —
-            # connect_to_grok returns True at the WS handshake, before any server
-            # event, so a handshake that succeeds then immediately drops would
-            # otherwise reset the counter every cycle and make max_reconnects
-            # unreachable (infinite mute-reconnect loop). Matches Gemini/OpenAI.
-            session.is_reconnecting = False
-            session.last_ai_message_time = time.time()
-            session.status = "connected"
-
-            print(f"[GROK-LIVE] Reconnected successfully on attempt {attempt}")
-
-            await _safe_ws_send(session.portal_ws, {
-                "type": "reconnected",
-                "data": {"attempt": attempt}
-            })
-        else:
-            if superseded(session, generation):
-                print(f"[GROK-LIVE] Session re-attached during the dial — abandoning reconnect")
-                return
-            print(f"[GROK-LIVE] Reconnect attempt {attempt} failed")
-            session.is_reconnecting = False
-            spawn_reconnect(session, grok_reconnect(session))
-
-    except Exception as e:
-        print(f"[GROK-LIVE] Reconnect error: {e}")
-        if superseded(session, generation):
-            return
-        session.is_reconnecting = False
-        spawn_reconnect(session, grok_reconnect(session))
+    """Reconnect to the xAI Voice Agent API transparently (resumption, backoff)."""
+    await GROK_LIVE_BRIDGE.reconnect(session)
 
 
 async def grok_keepalive_loop(session: 'GrokLiveSession'):
-    """
-    Send periodic keepalive silence to prevent Grok idle timeout.
-
-    Liveness is the transport's job, not this loop's: connect_to_grok runs
-    websockets' ping/pong (ping_interval=20, ping_timeout=30), so a dead socket
-    surfaces as ConnectionClosed in grok_listener within ~50 s, and a failed
-    send here reconnects too. Grok sends nothing while the user is quiet, so
-    the old 60 s no-message timer reconnected on ordinary pauses (audit
-    O09-live-voice-providers-02).
-    """
-    keepalive_interval = 15  # seconds
-
-    print(f"[GROK-LIVE] Keepalive loop started (interval={keepalive_interval}s)")
-
-    try:
-        while True:
-            await asyncio.sleep(keepalive_interval)
-
-            if not session.grok_ws or session.intentional_disconnect:
-                break
-
-            # Send keepalive: 20ms of PCM16 silence at the declared input
-            # rate (16kHz post-P2.15 — byte count below matches).
-            # SKIPPED for SIP-attached calls (session.call_id set): the call's
-            # audio flows xAI-side and injected buffer silence could corrupt it
-            # (uncertain per xAI docs — live-validated in P5.8). The socket's
-            # ping/pong still detects a dead connection.
-            try:
-                if session.grok_ws and not session.call_id:
-                    # 20ms at 16kHz (input rate) = 320 samples, PCM16 = 640 bytes of zeros
-                    silence_bytes = b'\x00' * 640
-                    silence_b64 = base64.b64encode(silence_bytes).decode('ascii')
-                    await session.grok_ws.send(json.dumps({
-                        "type": "input_audio_buffer.append",
-                        "audio": silence_b64
-                    }))
-            except websockets.exceptions.ConnectionClosed:
-                print(f"[GROK-LIVE] Keepalive failed - connection closed")
-                if not session.is_reconnecting and not session.intentional_disconnect:
-                    spawn_reconnect(session, grok_reconnect(session))
-                break
-            except Exception as e:
-                print(f"[GROK-LIVE] Keepalive error: {e}")
-
-    except asyncio.CancelledError:
-        pass
-    finally:
-        print(f"[GROK-LIVE] Keepalive loop stopped")
+    """Keepalive silence so xAI's idle timeout never ends a quiet session."""
+    await GROK_LIVE_BRIDGE.keepalive_loop(session)
 
 
 async def grok_listener(session: 'GrokLiveSession'):
-    """
-    Background task that listens for messages from Grok and forwards to Portal.
-    """
-    try:
-        async for message in session.grok_ws:
-            try:
-                event = json.loads(message)
-                if session.reconnect_count:
-                    # Proven-healthy: a real server frame arrived on this socket.
-                    session.reconnect_count = 0
-                await handle_grok_message(session, event)
-            except json.JSONDecodeError:
-                print(f"[GROK-LIVE] Invalid JSON from Grok: {message[:100]}")
-            except Exception as e:
-                print(f"[GROK-LIVE] Error handling Grok message: {e}")
-                # P1b: never dangle a tool call — answer function-call events
-                # with an error payload so Grok recovers instead of stalling.
-                await send_openai_style_tool_error(
-                    session.grok_ws, session.portal_ws, event, e)
-    except websockets.exceptions.ConnectionClosed as e:
-        print(f"[GROK-LIVE] Grok connection closed: {e}")
-        if not session.intentional_disconnect and not session.is_reconnecting:
-            print(f"[GROK-LIVE] Unexpected disconnect - triggering reconnect")
-            spawn_reconnect(session, grok_reconnect(session))
-        else:
-            session.status = "disconnected"
-            await _safe_ws_send(session.portal_ws, {
-                "type": "disconnected",
-                "data": "Grok connection closed"
-            })
-    except Exception as e:
-        print(f"[GROK-LIVE] Grok listener error: {e}")
-        session.status = "error"
+    """Read Grok's frames and forward them to the client."""
+    await GROK_LIVE_BRIDGE.listener(session)
+
 
 # =============================================================================
 # WebSocket Endpoint
@@ -1580,215 +854,15 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
     """
     WebSocket endpoint for xAI Grok Voice Agent API bridge.
 
-    Bridges Portal <-> Orchestrator <-> xAI Grok Voice API.
-
-    Message flow:
+    Bridges Portal <-> Orchestrator <-> xAI Grok Voice API through the shared
+    LiveVoiceBridge (Orchestrator/voice/bridge.py):
     1. Portal connects, sends 'connect' with operator and voice
     2. Orchestrator connects to Grok Voice Agent API
     3. Orchestrator configures session with tools and context
     4. Bidirectional message passing begins
     5. Tool calls are executed locally and results sent to Grok
     """
-    print(f"[GROK-LIVE] WebSocket connection request for session: {session_id}")
-    await websocket.accept()
-    print(f"[GROK-LIVE] WebSocket accepted for session: {session_id}")
-
-    # P4: Grok route reads only the preset id from the URL (other Grok URL
-    # params are Phase 3 scope).
-    url_agent = websocket.query_params.get("agent")
-
-    # Check dependencies
-    if not WEBSOCKETS_AVAILABLE:
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": "Server missing 'websockets' library. Install with: pip install websockets"
-        })
-        await websocket.close()
-        return
-
-    if not XAI_API_KEY:
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": "XAI_API_KEY not configured on server"
-        })
-        await websocket.close()
-        return
-
-    # Create or get session
-    session = GROK_LIVE_SESSIONS.get(session_id)
-    if not session:
-        session = GrokLiveSession(
-            session_id=session_id,
-            created_at=now_utc_iso()
-        )
-        GROK_LIVE_SESSIONS[session_id] = session
-
-    session.portal_ws = websocket
-    session.last_activity = now_utc_iso()
-    # This handler's attach: a later re-attach of the same session id bumps it,
-    # and from then on the session is that handler's (see _end_portal_session).
-    generation = claim_session(session)
-
-    grok_task = None
-    keepalive_task = None
-
-    try:
-        while True:
-            # Receive with timeout — detect suspended/dead Android clients
-            try:
-                raw = await asyncio.wait_for(
-                    websocket.receive_text(),
-                    timeout=120.0
-                )
-            except asyncio.TimeoutError:
-                print(f"[GROK-LIVE] Client idle timeout (120s): {session_id}")
-                await _safe_ws_send(websocket, {"type": "error", "data": "Idle timeout"})
-                break
-
-            # Per-message error isolation
-            try:
-                data = json.loads(raw)
-            except (json.JSONDecodeError, TypeError) as e:
-                print(f"[GROK-LIVE] Bad message from client: {e}")
-                continue
-
-            msg_type = data.get("type", "")
-
-            if msg_type == "connect":
-                # Initial connection - establish Grok WebSocket
-                # Voice-agent preset (P4) — precedence: explicit > preset > defaults.
-                # Client model/voice/greeting/role plus the Grok-specific
-                # language_hint/keyterms feed the merge as the explicit inputs
-                # (model keeps its JSON-wins-over-URL fallback — Android sends it
-                # via query param), so an explicit value still wins over a
-                # preset-supplied one. reasoning_effort/replace_map are not preset
-                # fields — derived as before.
-                agent_id = data.get("agent", url_agent)
-                preset = resolve_preset(agent_id, provider="grok-live") if agent_id else None
-                if agent_id and preset is None:
-                    await _safe_ws_send(websocket, {
-                        "type": "warning",
-                        "data": f"Voice agent preset {agent_id!r} not found for provider 'grok-live' — continuing without preset"
-                    })
-                merged = merge_connect_params({
-                    "model": data.get("model", websocket.query_params.get("model")),
-                    "voice": data.get("voice"),
-                    "greeting": data.get("greeting", ""),
-                    "instructions": data.get("role", ""),
-                    "language": data.get("language_hint", websocket.query_params.get("language_hint")),
-                    "keyterms": data.get("keyterms") if isinstance(data.get("keyterms"), list) else None,
-                }, preset)
-                operator = data.get("operator", "")
-                voice = merged["voice"] or GROK_LIVE_DEFAULT_VOICE
-                greeting = merged["greeting"] or ""
-                role = merged["instructions"] or ""
-                model = merged["model"]
-                tool_group_override = merged["tool_group_override"]
-                reasoning_effort = data.get("reasoning_effort", websocket.query_params.get("reasoning_effort"))
-                replace_map = data.get("replace") if isinstance(data.get("replace"), dict) else None
-                session.operator = operator
-
-                await _safe_ws_send(websocket, {
-                    "type": "status",
-                    "data": "Connecting to Grok..."
-                })
-
-                # A re-attach (or a second connect on this socket) starts clean:
-                # retire whatever the previous connect left live, then drop the
-                # previous handler's teardown flags (O09-live-voice-providers-01).
-                await retire_upstream(session, "grok_ws")
-                reset_for_connect(session)
-
-                # Connect to Grok
-                if await connect_to_grok(session, model=model):
-                    # Configure session with tools, context, and voice
-                    await configure_grok_session(session, operator, voice, custom_role=role,
-                                                 reasoning_effort=reasoning_effort, replace_map=replace_map,
-                                                 keyterms=merged["keyterms"], language_hint=merged["language"],
-                                                 tool_group_override=tool_group_override)
-                    print(f"[GROK-LIVE] Voice selected: {voice}")
-
-                    # Emit provenance to the client once per session start so
-                    # the Android/Portal UI can show which snapshots were used
-                    # to seed the system message. Task 10 wires the parser.
-                    if session.provenance:
-                        await _safe_ws_send(websocket, {
-                            "type": "provenance",
-                            "data": session.provenance
-                        })
-
-                    # Start Grok listener task and keepalive. The listener task
-                    # lives on the SESSION (session.listener_task): grok_reconnect
-                    # respawns it, so this local would go stale after the first
-                    # reconnect and leak the live task at teardown.
-                    grok_task = asyncio.create_task(grok_listener(session))
-                    session.listener_task = grok_task
-                    keepalive_task = asyncio.create_task(grok_keepalive_loop(session))
-                    session.keepalive_task = keepalive_task
-
-                    # If greeting provided (outbound call), inject it so the AI speaks first
-                    if greeting:
-                        print(f"[GROK-LIVE] Injecting outbound greeting: {greeting[:80]}...")
-                        try:
-                            prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
-                            await session.grok_ws.send(json.dumps({
-                                "type": "conversation.item.create",
-                                "item": {
-                                    "type": "message",
-                                    "role": "user",
-                                    "content": [{"type": "input_text", "text": prompt}]
-                                }
-                            }))
-                            await session.grok_ws.send(json.dumps({"type": "response.create"}))
-                        except Exception as e:
-                            print(f"[GROK-LIVE] Greeting injection failed: {e}")
-
-                    await _safe_ws_send(websocket, {
-                        "type": "connected",
-                        "data": {
-                            "session_id": session_id,
-                            "operator": operator,
-                            "model": session.model,
-                            "voice": voice
-                        }
-                    })
-                else:
-                    await _safe_ws_send(websocket, {
-                        "type": "error",
-                        "data": "Failed to connect to Grok Voice Agent API"
-                    })
-
-            elif msg_type == "disconnect":
-                # Graceful disconnect
-                if not superseded(session, generation):
-                    session.intentional_disconnect = True
-                break
-
-            elif msg_type == "ping":
-                # Keep-alive
-                await _safe_ws_send(websocket, {"type": "pong"})
-
-            else:
-                # Isolate handler errors
-                try:
-                    await handle_grok_portal_message(session, data)
-                except Exception as handler_err:
-                    print(f"[GROK-LIVE] Handler error (non-fatal): {handler_err}")
-
-    except WebSocketDisconnect:
-        print(f"[GROK-LIVE] Portal WebSocket disconnected: {session_id}")
-        if session.portal_ws is websocket:
-            session.portal_ws = None
-
-    except Exception as e:
-        print(f"[GROK-LIVE] WebSocket error: {e}")
-        await _safe_ws_send(websocket, {
-            "type": "error",
-            "data": str(e)
-        })
-
-    finally:
-        await _end_portal_session(session, websocket, generation, keepalive_task)
+    await GROK_LIVE_BRIDGE.serve(websocket, session_id)
 
 
 async def _end_portal_session(session: 'GrokLiveSession', websocket, generation: int,
@@ -1800,8 +874,7 @@ async def _end_portal_session(session: 'GrokLiveSession', websocket, generation:
     save that outlasted the re-attach used to leave the re-attached session
     deaf and reapable (O09-live-voice-providers-01).
     """
-    await end_portal_session(session, generation, keepalive_task, ws_attr="grok_ws",
-                             save=save_grok_session_to_blackbox, log_prefix="[GROK-LIVE]")
+    await GROK_LIVE_BRIDGE.end_portal_session(session, websocket, generation, keepalive_task)
 
 # =============================================================================
 # HTTP Endpoints

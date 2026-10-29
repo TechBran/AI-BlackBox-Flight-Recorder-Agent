@@ -364,11 +364,11 @@ def tool_error_text(name: str, exc: BaseException) -> str:
     )
 
 
-async def _safe_portal_send(websocket, data: dict) -> bool:
+async def safe_send(websocket, data: dict) -> bool:
     """Best-effort JSON send to the client WS; never raises.
 
-    Local copy of the routes' _safe_ws_send — importing it from a route module
-    here would create an import cycle (routes import this module).
+    False when there is no client, it is not connected, or the send failed.
+    The one copy every voice route and the shared bridge send through.
     """
     try:
         if websocket and hasattr(websocket, "application_state") \
@@ -378,6 +378,25 @@ async def _safe_portal_send(websocket, data: dict) -> bool:
     except Exception:
         pass
     return False
+
+
+async def close_portal_ws(session, reason: str) -> None:
+    """Terminal disconnect: actually CLOSE the session's client WS.
+
+    Before P1.7 the client WS stayed open answering pings while the upstream
+    was permanently dead, so Portal/Android showed "Connected — listening"
+    forever (silence layer 2 of the 2026-07-11 outage), and the reaper never
+    evicted the session (it only reaps sessions without a client). Closing it
+    kicks the endpoint's receive loop into its teardown. Safe on the phone
+    bridge's PhoneWebSocketAdapter too (any failure is swallowed).
+    """
+    ws = getattr(session, "portal_ws", None)
+    if ws is None:
+        return
+    try:
+        await ws.close(code=1011, reason=reason[:120])
+    except Exception:
+        pass
 
 
 async def send_openai_style_tool_error(upstream_ws, portal_ws,
@@ -414,7 +433,7 @@ async def send_openai_style_tool_error(upstream_ws, portal_ws,
             print(f"[VOICE-SHARED] Could not deliver tool error for '{name}' "
                   f"(call_id={call_id}): {send_err}")
 
-    await _safe_portal_send(portal_ws, {
+    await safe_send(portal_ws, {
         "type": "tool_result",
         "data": {"name": name, "result_length": len(result), "error": True},
     })
@@ -459,7 +478,7 @@ async def send_gemini_tool_error(gemini_ws, portal_ws, event: Dict,
                   f"({len(responses)} call(s)): {send_err}")
 
     for fc in pending:
-        await _safe_portal_send(portal_ws, {
+        await safe_send(portal_ws, {
             "type": "tool_result",
             "data": {"name": fc.get("name", ""), "result_length": 0, "error": True},
         })

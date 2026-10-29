@@ -5,7 +5,8 @@ These are the AI-facing SEARCH surfaces that build results inline (not via the
 ToolVault executor / context_builder): the chat-provider tool loops (anthropic,
 gemini, openai, xai, custom + the two non-stream call_* paths) and the
 Anthropic CU driver, which share one branch in providers/tool_dispatch.py
-since audit rank 74, and the 3 voice-agent routes. Each appends
+since audit rank 74, and the voice tool ladder the three voice-agent routes
+share (Orchestrator/voice/tools.py). Each appends
 `--- Result {i} ---\\n{snap_text}` — M15.4 wraps every such site in
 `format_snapshot_for_delivery(...)` so the model sees content, not the
 ~1,000-char bookkeeping envelope.
@@ -13,12 +14,12 @@ since audit rank 74, and the 3 voice-agent routes. Each appends
 The structural test is an AST gate (mirrors M1's operator-scoping gate): it
 walks each source file, finds every `--- Result {i} ---` f-string, asserts the
 formatted value is `format_snapshot_for_delivery(snap_text)` (never a bare
-`snap_text`), and PINS the site count at 4 so a new unformatted site — or a
+`snap_text`), and PINS the site count at 2 so a new unformatted site — or a
 removed one — fails loudly.
 
 Deliberately NOT matched (different surfaces, correctly full-envelope):
-  * `--- {snap_id} (operator: …) ---` browse handlers (grok/gemini/realtime) —
-    get-by-id / list-recent, not semantic search (like get_snapshot).
+  * the `--- {snap_id} (operator: …) ---` list-recent handler of the voice
+    tool ladder — get-by-id / list-recent, not semantic search (like get_snapshot).
   * `=== CHECKPOINT #{i} ===` context block (chat_routes) — already body-only
     via M15.2.
 """
@@ -42,11 +43,9 @@ INLINE_SEARCH_FILES = [
     "Orchestrator/routes/chat/stream.py",
     "Orchestrator/providers/tool_dispatch.py",
     "Orchestrator/browser/driver_anthropic.py",
-    "Orchestrator/routes/grok_live_routes.py",
-    "Orchestrator/routes/gemini_live_routes.py",
-    "Orchestrator/routes/realtime_routes.py",
+    "Orchestrator/voice/tools.py",
 ]
-EXPECTED_RESULT_SITES = 4  # 1 shared chat-loop + CU-driver branch + 3 voice routes
+EXPECTED_RESULT_SITES = 2  # 1 shared chat-loop + CU-driver branch + 1 shared voice tool ladder
 
 
 def _result_fstrings(tree):
@@ -103,21 +102,18 @@ def test_every_inline_result_site_is_body_only_and_count_pinned():
 def test_browse_and_checkpoint_sites_are_left_full_envelope():
     """Guard the intentional NON-targets: the get-by-id browse handlers and the
     checkpoint context block must NOT be wrapped by this change."""
-    for rel in ("Orchestrator/routes/grok_live_routes.py",
-                "Orchestrator/routes/gemini_live_routes.py",
-                "Orchestrator/routes/realtime_routes.py"):
-        src = (ROOT / rel).read_text()
-        # browse handler keeps the raw snap_text (full envelope, like get_snapshot)
-        assert "(operator: {operator_name}) ---\\n{snap_text}\")" in src
+    src = (ROOT / "Orchestrator/voice/tools.py").read_text()
+    # browse handler keeps the raw snap_text (full envelope, like get_snapshot)
+    assert "(operator: {operator_name}) ---\\n{snap_text}\")" in src
 
 
 # ── behavior test: the grok voice search handler returns body-only ───────────
 
 def test_grok_search_handler_returns_body_only(monkeypatch):
     import Orchestrator.routes.grok_live_routes as glr
+    import Orchestrator.voice.tools as voice_tools
 
-    monkeypatch.setattr(glr, "read_text_safe", lambda p: "")
-    monkeypatch.setattr(glr, "hybrid_retrieve",
+    monkeypatch.setattr(voice_tools, "hybrid_retrieve",
                         lambda vol, q, k=3, operator="": [FULL_SNAPSHOT])
 
     session = types.SimpleNamespace(operator="Anna")

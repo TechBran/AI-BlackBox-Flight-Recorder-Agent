@@ -7,6 +7,9 @@ ROUTES = [
     REPO / "Orchestrator/routes/realtime_routes.py",
     REPO / "Orchestrator/routes/grok_live_routes.py",
     REPO / "Orchestrator/routes/gemini_live_routes.py",
+    # The prompt builder and the tool ladder the three routes share.
+    REPO / "Orchestrator/routes/voice_prompts.py",
+    REPO / "Orchestrator/voice/tools.py",
 ]
 
 

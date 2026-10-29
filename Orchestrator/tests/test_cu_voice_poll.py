@@ -18,12 +18,12 @@ Three things guarded here:
      surface accepts (plain string params — no enum / nested object).
 
   2. PROMPTS — the COMPUTER CONTROL guidance is a SINGLE shared constant
-     (``Orchestrator.routes.voice_prompts.CU_CONTROL_BLOCK``) interpolated into
-     all SIX voice ``system_instructions`` branches (a ``custom_role`` branch +
-     a default branch, in each of the three routes). Because there is one copy,
-     drift is structurally impossible and there is no per-branch content guard
-     to keep in sync. The invariant is now: exactly six branches, each
-     interpolating the constant; plus a content check on the constant itself.
+     (``Orchestrator.routes.voice_prompts.CU_CONTROL_BLOCK``) that lands in all
+     SIX voice system-instruction branches (a ``custom_role`` branch + a
+     default branch, for each of the three providers). The branches are built
+     by ONE function, ``voice_prompts.build_voice_instructions``, which every
+     route calls. The invariant is now: no route carries its own prompt, every
+     branch carries the constant; plus a content check on the constant itself.
 
   3. RENDER — every one of the six branches actually EVALUATES without raising.
      This is the guard the earlier AST-only test could not provide: a plain
@@ -143,8 +143,11 @@ def test_cu_control_block_teaches_every_piece():
 
 
 # ---------------------------------------------------------------------------
-# 2b. Structural guard: exactly six branches, each interpolating the constant
+# 2b. Structural guard: one prompt builder, the constant in all six branches
 # ---------------------------------------------------------------------------
+# The three routes used to carry their own two system_instructions f-strings
+# each; they now all call voice_prompts.build_voice_instructions (audit
+# O09-live-voice-providers-14), so the guard moves to that one builder.
 
 def _system_instruction_joinedstrs(path):
     """Every ``system_instructions = f"..."`` assignment's JoinedStr node in a file."""
@@ -158,27 +161,31 @@ def _system_instruction_joinedstrs(path):
     return out
 
 
-def _interpolates(joinedstr, name):
-    """True iff the f-string contains a ``{name}`` replacement field (a bare Name)."""
-    for v in joinedstr.values:
-        if isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name) and v.value.id == name:
-            return True
-    return False
+def _calls(path, func_name):
+    tree = ast.parse(path.read_text())
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name) and n.func.id == func_name]
 
 
-def test_exactly_six_system_instruction_branches():
-    total = sum(len(_system_instruction_joinedstrs(ROUTES / fn)) for fn in VOICE_ROUTE_FILES)
-    assert total == 6, f"expected 6 system_instructions branches across voice routes, found {total}"
-
-
-def test_all_six_branches_interpolate_the_cu_control_constant():
+def test_every_route_builds_its_prompt_with_the_shared_builder():
     for fn in VOICE_ROUTE_FILES:
-        nodes = _system_instruction_joinedstrs(ROUTES / fn)
-        assert len(nodes) == 2, f"{fn}: expected 2 system_instructions branches, got {len(nodes)}"
-        for i, js in enumerate(nodes):
-            assert _interpolates(js, CONSTANT_NAME), (
-                f"{fn} branch #{i} does not interpolate {{{CONSTANT_NAME}}} — "
-                f"the COMPUTER CONTROL guidance would be absent from that branch")
+        assert _system_instruction_joinedstrs(ROUTES / fn) == [], (
+            f"{fn} carries its own system_instructions f-string again; build the prompt "
+            f"with voice_prompts.build_voice_instructions")
+        assert len(_calls(ROUTES / fn, "build_voice_instructions")) == 1, (
+            f"{fn}: expected one build_voice_instructions call")
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini", "grok"])
+@pytest.mark.parametrize("operator,custom_role", [
+    ("op", ""), ("system", ""), ("op", "You are calling the dentist office."),
+])
+def test_all_six_branches_carry_the_cu_control_constant(provider, operator, custom_role):
+    from Orchestrator.routes.voice_prompts import build_voice_instructions
+    text = build_voice_instructions(provider, operator, "", custom_role, persona=lambda: "P")
+    assert CU_CONTROL_BLOCK in text, (
+        f"{provider} ({'custom role' if custom_role else operator}) prompt lacks the "
+        f"{CONSTANT_NAME} guidance")
 
 
 # ---------------------------------------------------------------------------

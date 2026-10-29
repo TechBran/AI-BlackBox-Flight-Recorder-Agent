@@ -87,8 +87,9 @@ def test_voice_search_runs_off_the_loop(monkeypatch, mod, fn, session_cls):
         time.sleep(BLOCK)
         return [SNAP]
 
-    monkeypatch.setattr(mod, "hybrid_retrieve", slow_retrieve)
-    monkeypatch.setattr(mod, "read_text_safe", _slow("x" * 64))  # the old dead read
+    # The three routes share one search implementation (Orchestrator/voice/tools.py).
+    import Orchestrator.voice.tools as voice_tools
+    monkeypatch.setattr(voice_tools, "hybrid_retrieve", slow_retrieve)
     session = session_cls(session_id="t-search", operator="system")
     out, gap = asyncio.run(_max_gap_during(getattr(mod, fn)(session, {"query": "ledger"})))
     assert "hello from the ledger" in out

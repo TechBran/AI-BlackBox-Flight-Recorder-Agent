@@ -21,6 +21,7 @@ import pytest
 import Orchestrator.routes.gemini_live_routes as gm
 import Orchestrator.routes.grok_live_routes as gk
 import Orchestrator.routes.realtime_routes as rt
+import Orchestrator.voice.tools as voice_tools  # the three routes' one tool ladder
 import Orchestrator.web_tools as web_tools
 from Orchestrator.models import GeminiLiveSession, GrokLiveSession, RealtimeSession
 from Orchestrator.tests.voice_ws_fakes import FakeUpstreamWS
@@ -58,7 +59,7 @@ def _openai_style_event():
 
 def test_realtime_web_fetch_runs_off_the_event_loop(monkeypatch):
     rec = _Recorder()
-    monkeypatch.setattr(rt, "perform_web_fetch", rec)
+    monkeypatch.setattr(voice_tools, "perform_web_fetch", rec)
     session = RealtimeSession(session_id="t-wf-rt", operator="system")
     session.openai_ws = FakeUpstreamWS()
     loop = _run_and_get_loop_thread(lambda: rt.handle_openai_message(session, _openai_style_event()),
@@ -69,7 +70,7 @@ def test_realtime_web_fetch_runs_off_the_event_loop(monkeypatch):
 
 def test_grok_live_web_fetch_runs_off_the_event_loop(monkeypatch):
     rec = _Recorder()
-    monkeypatch.setattr(gk, "perform_web_fetch", rec)
+    monkeypatch.setattr(voice_tools, "perform_web_fetch", rec)
     session = GrokLiveSession(session_id="t-wf-gk", operator="system")
     session.grok_ws = FakeUpstreamWS()
     loop = _run_and_get_loop_thread(lambda: gk.handle_grok_message(session, _openai_style_event()),
@@ -80,7 +81,7 @@ def test_grok_live_web_fetch_runs_off_the_event_loop(monkeypatch):
 
 def test_gemini_live_web_fetch_runs_off_the_event_loop(monkeypatch):
     rec = _Recorder()
-    monkeypatch.setattr(gm, "perform_web_fetch", rec)
+    monkeypatch.setattr(voice_tools, "perform_web_fetch", rec)
     session = GeminiLiveSession(session_id="t-wf-gm", operator="system")
     session.gemini_ws = FakeUpstreamWS()
     event = {"toolCall": {"functionCalls": [
