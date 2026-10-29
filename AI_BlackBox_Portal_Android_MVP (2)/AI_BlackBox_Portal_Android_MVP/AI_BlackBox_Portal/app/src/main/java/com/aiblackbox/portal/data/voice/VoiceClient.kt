@@ -558,9 +558,23 @@ class VoiceClient(
 
                 "error" -> {
                     val msg = obj["message"]?.jsonPrimitive?.content ?: data
-                    _events.emit(VoiceEvent.Error(msg))
-                    _state.value = VoiceState.ERROR
-                    android.util.Log.e("VoiceClient", "Server error: $msg")
+                    // "recoverable": true = the backend lost its upstream and is
+                    // reconnecting (an upstream close, forwarded with its code so a
+                    // setup rejection is visible). A status, not the end of the
+                    // session: ERROR stopped the mic and AI playback and left the
+                    // message on screen after "reconnected". A give-up still ends
+                    // with "disconnected"; any other error is terminal.
+                    val recoverable = try {
+                        obj["recoverable"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
+                    } catch (_: Exception) { false }
+                    if (recoverable) {
+                        _events.emit(VoiceEvent.Status(msg))
+                        android.util.Log.w("VoiceClient", "Server error, reconnecting: $msg")
+                    } else {
+                        _events.emit(VoiceEvent.Error(msg))
+                        _state.value = VoiceState.ERROR
+                        android.util.Log.e("VoiceClient", "Server error: $msg")
+                    }
                 }
 
                 else -> android.util.Log.w(

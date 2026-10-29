@@ -595,12 +595,16 @@ class LiveVoiceBridge:
                 # 1007 invalid tool schema that killed every Gemini session for
                 # two weeks) arrive ONLY as close frames. `data` stays a string
                 # (the client contract); code/reason ride as additive fields.
+                # recoverable: a reconnect always follows (here or by the
+                # session owner), so a client shows this without ending the
+                # session; a give-up still ends with "disconnected".
                 await safe_send(session.portal_ws, {
                     "type": "error",
                     "data": f"{a.name} connection closed (code={close_code}): "
                             f"{close_reason or 'no reason given'}",
                     "code": close_code,
                     "reason": close_reason,
+                    "recoverable": True,
                 })
                 if getattr(session, "external_reconnect", False):
                     # The session's owner (the phone bridge) re-dials when this

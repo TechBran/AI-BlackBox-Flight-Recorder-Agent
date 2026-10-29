@@ -100,6 +100,43 @@ class VoiceClientParseTest {
     }
 
     @Test
+    fun `a recoverable error is a status - the session stays up through the server reconnect`() = runTest {
+        // The backend forwards an upstream close as an error marked recoverable,
+        // then reconnects. ERROR here used to stop the mic and AI playback and
+        // leave the message on screen after "reconnected".
+        startConnected()
+        serverSends(
+            """{"type":"error","data":"Grok connection closed (code=1011): internal error",""" +
+                """"code":1011,"reason":"internal error","recoverable":true}"""
+        )
+        assertEquals(VoiceState.CONNECTED, voice.state.value)
+        assertFalse(events.any { it is VoiceEvent.Error })
+        assertEquals(
+            "Grok connection closed (code=1011): internal error",
+            events.filterIsInstance<VoiceEvent.Status>().single().message
+        )
+
+        serverSends("""{"type":"reconnecting","data":{"attempt":1,"max":5}}""")
+        assertEquals(VoiceState.RECONNECTING, voice.state.value)
+        serverSends("""{"type":"reconnected","data":{"attempt":1}}""")
+        assertEquals(VoiceState.CONNECTED, voice.state.value)
+        assertEquals(0, fake.closeCount)
+    }
+
+    @Test
+    fun `an error that is not recoverable still ends the session`() = runTest {
+        startConnected()
+        serverSends("""{"type":"error","data":"Grok listener error: decoder exploded"}""")
+        assertEquals(VoiceState.ERROR, voice.state.value)
+        assertEquals(
+            "Grok listener error: decoder exploded",
+            events.filterIsInstance<VoiceEvent.Error>().single().message
+        )
+        serverSends("""{"type":"error","data":"bad flag","recoverable":"yes"}""")
+        assertEquals(2, events.filterIsInstance<VoiceEvent.Error>().size)
+    }
+
+    @Test
     fun `unknown message types are inert - no state change no events no crash`() = runTest {
         startConnected()
         val eventsBefore = events.size

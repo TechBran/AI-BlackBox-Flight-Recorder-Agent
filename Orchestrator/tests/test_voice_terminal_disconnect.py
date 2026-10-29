@@ -38,11 +38,15 @@ def test_giving_up_closes_the_client_socket(provider):
 def test_an_unexpected_close_is_forwarded_with_its_code(provider):
     out = asyncio.run(harness.scenario_reconnect(provider))
     errors = [f for f in out["client"] if f["type"] == "error"]
+    # recoverable: a reconnect follows, so a client must not treat this error
+    # as the end of the session (Android's VoiceClient used to flip to ERROR,
+    # stop the mic and keep the message on screen after the reconnect).
     assert errors == [{
         "type": "error",
         "data": f"{NAME[provider]} connection closed (code=1011): internal error",
         "code": 1011,
         "reason": "internal error",
+        "recoverable": True,
     }]
     kinds = [f["type"] for f in out["client"]]
     assert kinds.index("error") < kinds.index("reconnecting") < kinds.index("reconnected")
@@ -80,6 +84,7 @@ def test_a_listener_error_tells_the_client_and_closes(provider):
 
     session = asyncio.run(run())
     assert session.status == "error"
+    # Terminal: no "recoverable", so every client ends the session.
     assert session.portal_ws.frames("error") == [
         {"type": "error", "data": f"{NAME[provider]} listener error: decoder exploded"}]
     assert session.portal_ws.closed == [(1011, f"{provider} listener error")]

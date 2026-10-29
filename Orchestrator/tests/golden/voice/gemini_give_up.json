@@ -51,6 +51,7 @@
    "code": 1011,
    "data": "Gemini connection closed (code=1011): gone",
    "reason": "gone",
+   "recoverable": true,
    "type": "error"
   },
   {

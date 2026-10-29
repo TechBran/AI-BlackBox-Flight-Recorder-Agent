@@ -34,6 +34,7 @@
    "code": 1011,
    "data": "Grok connection closed (code=1011): internal error",
    "reason": "internal error",
+   "recoverable": true,
    "type": "error"
   },
   {

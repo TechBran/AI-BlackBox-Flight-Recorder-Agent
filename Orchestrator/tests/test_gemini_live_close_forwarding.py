@@ -34,6 +34,7 @@ async def test_close_code_and_reason_forwarded_as_error(monkeypatch):
     assert errors[0]["code"] == 1007
     assert "1007" in errors[0]["data"]          # data stays a string (client contract)
     assert "missing field" in errors[0]["reason"]
+    assert errors[0]["recoverable"] is True     # a reconnect follows: not the end
     reconnect.assert_awaited_once()             # close still triggers reconnect
 
 
