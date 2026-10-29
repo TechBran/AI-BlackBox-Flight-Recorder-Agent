@@ -396,7 +396,8 @@ def scenario_specs() -> List[Dict[str, Any]]:
                     [_error(400, "Unsupported value: reasoning_effort default with tools"),
                      _round(text=["Retried fine."])])
             if provider == "anthropic":
-                add("max_tokens", [_round(text=["A long answer that"], stop="max_tokens")])
+                # (not "max_tokens": the repo ignores **/*token*.json)
+                add("truncated", [_round(text=["A long answer that"], stop="max_tokens")])
                 refusal = _round(text=["Sure, the first"], stop="refusal")
                 refusal["stop_details"] = {"type": "refusal", "category": "cyber",
                                            "explanation": "Declined by a classifier."}
