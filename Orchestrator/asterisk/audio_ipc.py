@@ -3,9 +3,12 @@
 audio_ipc.py - Main-process side of the audio subprocess IPC.
 
 Spawns the audio subprocess and communicates via a Unix socketpair
-using a binary framing protocol. Provides the same interface as
-AsteriskAudioBridge so voice_bridge.py and asterisk_routes.py can
-use it with minimal changes.
+using a binary framing protocol. voice_bridge.py and asterisk_routes.py
+use its per-channel interface.
+
+The child is started isolated (python -I) on the AudioSocket address from
+Orchestrator.asterisk.config, and counts as running only after it says READY:
+a flag set at spawn time reported a child that had already died (audit W14).
 
 IPC Protocol (matches audio_subprocess.py):
   [type: 1 byte] [length: 4 bytes LE uint32] [payload]
@@ -16,14 +19,16 @@ IPC Protocol (matches audio_subprocess.py):
   0x04 = CHANNEL_CLOSE  subprocess→main   uuid string (36B)
   0x05 = CLEAR_BUFFER   main→subprocess   uuid string (36B)
   0x06 = SHUTDOWN        main→subprocess   empty payload
+  0x07 = READY           subprocess→main   "host:port" once AudioSocket listens
 """
 
 import asyncio
+import collections
 import os
 import socket
 import struct
 import sys
-from typing import Optional, Callable, Awaitable, Dict
+from typing import Optional, Callable, Awaitable, Dict, Tuple
 
 # IPC message types
 MSG_PHONE_AUDIO = 0x01
@@ -32,10 +37,16 @@ MSG_CHANNEL_OPEN = 0x03
 MSG_CHANNEL_CLOSE = 0x04
 MSG_CLEAR_BUFFER = 0x05
 MSG_SHUTDOWN = 0x06
+MSG_READY = 0x07
 
 # IPC header: 1 byte type + 4 bytes LE uint32 length
 IPC_HEADER_SIZE = 5
 IPC_HEADER_FMT = "<BI"
+
+SUBPROCESS_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_subprocess.py")
+
+# How long the child may take to import numpy/scipy, bind and say READY.
+READY_TIMEOUT_S = 20.0
 
 # ---------------------------------------------------------------------------
 # Singleton
@@ -49,16 +60,17 @@ def get_ipc_client() -> Optional["AudioIPCClient"]:
 
 
 async def init_ipc_client() -> Optional["AudioIPCClient"]:
-    """Initialize and start the singleton IPC client."""
+    """Initialize and start the singleton IPC client.
+
+    Returns the client even when its child is not running, so the caller can
+    say why (``last_error``); call paths check ``is_running``."""
     global _ipc_client
     if _ipc_client and _ipc_client.is_running:
         return _ipc_client
     client = AudioIPCClient()
-    started = await client.start()
-    if started:
-        _ipc_client = client
-        return client
-    return None
+    await client.start()
+    _ipc_client = client
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +78,7 @@ async def init_ipc_client() -> Optional["AudioIPCClient"]:
 # ---------------------------------------------------------------------------
 class AudioIPCClient:
     """
-    Spawns the audio subprocess and provides the same channel interface
-    as AsteriskAudioBridge:
+    Spawns the audio subprocess and provides its channel interface:
       - expect_channel / wait_for_channel
       - register_channel / unregister_channel
       - send_ai_audio (24kHz PCM16 → subprocess handles resampling + pacing)
@@ -75,11 +86,22 @@ class AudioIPCClient:
       - get_channel_rate (always 8000 — subprocess handles conversion)
     """
 
-    def __init__(self):
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None):
+        from Orchestrator.asterisk import config as asterisk_config
+        # The address the provisioned dialplan's AudioSocket() dials.
+        self.host = host or asterisk_config.ASTERISK_AUDIOSOCKET_HOST
+        self.port = int(asterisk_config.ASTERISK_AUDIOSOCKET_PORT if port is None else port)
+
         self._process: Optional[asyncio.subprocess.Process] = None
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._running = False
+        # Resolved with the bound "host:port" by READY; failed if IPC ends first.
+        self._ready: Optional[asyncio.Future] = None
+        self._address: Optional[Tuple[str, int]] = None
+        self.last_error = ""
+        # The child's last log lines, quoted when it fails to start.
+        self._output_tail: collections.deque = collections.deque(maxlen=20)
 
         self._listener_task: Optional[asyncio.Task] = None
         self._log_task: Optional[asyncio.Task] = None
@@ -99,7 +121,17 @@ class AudioIPCClient:
 
     @property
     def is_running(self) -> bool:
+        """True from the child's READY until it, or its IPC socket, goes away."""
         return self._running
+
+    @property
+    def address(self) -> Optional[Tuple[str, int]]:
+        """(host, port) the child's AudioSocket server listens on, once READY."""
+        return self._address
+
+    @property
+    def pid(self) -> Optional[int]:
+        return self._process.pid if self._process else None
 
     @property
     def active_channels(self) -> set:
@@ -109,56 +141,103 @@ class AudioIPCClient:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _python() -> str:
+        """The venv's python (the child needs numpy and scipy)."""
+        venv_python = os.path.join(os.path.dirname(__file__), "..", "venv", "bin", "python3")
+        return venv_python if os.path.exists(venv_python) else sys.executable
+
+    def _argv(self, child_fd: int) -> list:
+        """The child's command line. -I keeps this directory off its sys.path
+        (and ignores PYTHON* variables), so no module here can shadow the
+        stdlib for numpy and scipy; -u sends its log lines as they happen.
+        The script path stays in argv: the unit's ExecStartPre matches it."""
+        return [self._python(), "-I", "-u", SUBPROCESS_SCRIPT,
+                str(child_fd), self.host, str(self.port)]
+
     async def start(self) -> bool:
-        """Spawn the audio subprocess and wire up IPC."""
+        """Spawn the audio subprocess, wire up IPC and wait for its READY.
+
+        True only once the child listens on its AudioSocket address. On
+        False, ``last_error`` says why and no child is left running."""
+        self.last_error = ""
+        self._address = None
+        self._output_tail.clear()
         try:
             parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-
-            # Path to subprocess script
-            sub_script = os.path.join(os.path.dirname(__file__), "audio_subprocess.py")
-
-            # Find the venv python
-            venv_python = os.path.join(
-                os.path.dirname(__file__), "..", "venv", "bin", "python3"
-            )
-            if not os.path.exists(venv_python):
-                venv_python = sys.executable
-
-            # Spawn subprocess, passing child socket fd
-            self._process = await asyncio.create_subprocess_exec(
-                venv_python,
-                sub_script,
-                str(child_sock.fileno()),
-                pass_fds=(child_sock.fileno(),),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            child_sock.close()  # Parent doesn't need the child end
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    *self._argv(child_sock.fileno()),
+                    pass_fds=(child_sock.fileno(),),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            finally:
+                child_sock.close()  # Parent doesn't need the child end
 
             # Wrap our socket end as asyncio streams
             reader, writer = await asyncio.open_connection(sock=parent_sock)
             self._reader = reader
             self._writer = writer
-            self._running = True
+            self._ready = asyncio.get_running_loop().create_future()
 
             # Start listener for messages from subprocess
             self._listener_task = asyncio.create_task(self._ipc_listener())
             # Forward subprocess stdout to our logging
             self._log_task = asyncio.create_task(self._log_forwarder())
-
-            print("[IPC] Audio subprocess started, PID:", self._process.pid)
-            return True
-
         except Exception as e:
+            self.last_error = f"could not spawn it: {e}"
             print(f"[IPC] Failed to start audio subprocess: {e}")
+            await self._stop_child()
             return False
 
-    async def shutdown(self):
-        """Gracefully stop subprocess."""
-        self._running = False
+        try:
+            bound = await asyncio.wait_for(asyncio.shield(self._ready), timeout=READY_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self._ready.cancel()
+            self.last_error = f"no READY within {READY_TIMEOUT_S:.0f}s"
+        except ConnectionError:
+            # IPC ended before READY: the child died (an import or bind
+            # failure). Let the forwarder pass on its last lines first.
+            await self._wait_exit(timeout=5.0)
+            code = self._process.returncode if self._process else None
+            self.last_error = f"exited with code {code} before it listened"
+        else:
+            host, _, port = bound.rpartition(":")
+            self._address = (host, int(port))
+            self._running = True
+            print(f"[IPC] Audio subprocess ready (pid {self._process.pid}), "
+                  f"AudioSocket listening on {bound}")
+            return True
 
-        # Send SHUTDOWN message
-        if self._writer:
+        tail = " | ".join(self._output_tail)
+        if tail:
+            self.last_error += f"; last output: {tail}"
+        if "address already in use" in tail.lower():
+            self.last_error += (f" (port {self.port} is in use, often by an orphaned"
+                                f" audio_subprocess.py of an earlier run)")
+        print(f"[IPC] Audio subprocess failed to start: {self.last_error}")
+        await self._stop_child()
+        return False
+
+    async def _wait_exit(self, timeout: float) -> None:
+        """Wait for the child to exit and its output to be forwarded."""
+        if self._process:
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return
+        if self._log_task:
+            try:
+                await asyncio.wait_for(asyncio.shield(self._log_task), timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+
+    async def _stop_child(self) -> None:
+        """Stop the child (SHUTDOWN, then SIGTERM, then SIGKILL) and its tasks."""
+        self._running = False
+        process = self._process
+        if self._writer and process and process.returncode is None:
             try:
                 header = struct.pack(IPC_HEADER_FMT, MSG_SHUTDOWN, 0)
                 self._writer.write(header)
@@ -166,15 +245,15 @@ class AudioIPCClient:
             except Exception:
                 pass
 
-        # Terminate subprocess
-        if self._process:
+        if process and process.returncode is None:
             try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except (asyncio.TimeoutError, ProcessLookupError):
                 try:
-                    self._process.kill()
-                except ProcessLookupError:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except (asyncio.TimeoutError, ProcessLookupError):
                     pass
 
         # Cancel background tasks
@@ -193,22 +272,26 @@ class AudioIPCClient:
                 await self._writer.wait_closed()
             except Exception:
                 pass
+        self._reader = None
+        self._writer = None
+        self._listener_task = None
+        self._log_task = None
+
+    async def shutdown(self):
+        """Gracefully stop subprocess."""
+        await self._stop_child()
 
         # Cleanup state
         self._active_channels.clear()
         self._connect_events.clear()
         self._audio_handlers.clear()
         self._hangup_handlers.clear()
-        self._reader = None
-        self._writer = None
         self._process = None
-        self._listener_task = None
-        self._log_task = None
 
         print("[IPC] Audio subprocess stopped")
 
     # ------------------------------------------------------------------
-    # Per-channel registration (same interface as AsteriskAudioBridge)
+    # Per-channel registration
     # ------------------------------------------------------------------
 
     def register_channel(
@@ -235,7 +318,7 @@ class AudioIPCClient:
         return 8000
 
     # ------------------------------------------------------------------
-    # Connection waiting (same interface as AsteriskAudioBridge)
+    # Connection waiting
     # ------------------------------------------------------------------
 
     def expect_channel(self, channel_id: str) -> asyncio.Event:
@@ -251,16 +334,21 @@ class AudioIPCClient:
 
     async def wait_for_channel(self, channel_id: str, timeout: float = 15.0) -> bool:
         """Wait for a specific channel to open in the subprocess."""
+        # The open may already have arrived: callers await an ARI request
+        # (continue_in_dialplan) between expect_channel and this wait.
+        if channel_id in self._active_channels:
+            self._connect_events.pop(channel_id, None)
+            return True
         event = self._connect_events.get(channel_id)
         if not event:
             event = self.expect_channel(channel_id)
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
-            return True
         except asyncio.TimeoutError:
             print(f"[IPC] Timeout waiting for channel: {channel_id}")
             self._connect_events.pop(channel_id, None)
             return False
+        return channel_id in self._active_channels
 
     # ------------------------------------------------------------------
     # Sending to subprocess
@@ -295,13 +383,14 @@ class AudioIPCClient:
 
     async def _ipc_listener(self):
         """Receive messages from subprocess."""
+        reader = self._reader
         try:
-            while self._running:
+            while True:
                 # Read 5-byte header
-                header = await self._reader.readexactly(IPC_HEADER_SIZE)
+                header = await reader.readexactly(IPC_HEADER_SIZE)
                 msg_type = header[0]
                 length = int.from_bytes(header[1:5], "little")
-                payload = await self._reader.readexactly(length) if length > 0 else b""
+                payload = await reader.readexactly(length) if length > 0 else b""
 
                 if msg_type == MSG_PHONE_AUDIO:
                     # Phone audio from subprocess: uuid(36) + 8kHz PCM16
@@ -335,6 +424,10 @@ class AudioIPCClient:
                         asyncio.create_task(handler(uuid_str))
                     self.unregister_channel(uuid_str)
 
+                elif msg_type == MSG_READY:
+                    if self._ready and not self._ready.done():
+                        self._ready.set_result(payload.decode("ascii", errors="replace"))
+
         except asyncio.IncompleteReadError:
             print("[IPC] Subprocess disconnected")
         except asyncio.CancelledError:
@@ -343,19 +436,25 @@ class AudioIPCClient:
             print(f"[IPC] Listener error: {e}")
         finally:
             self._running = False
+            if self._ready and not self._ready.done():
+                self._ready.set_exception(ConnectionError("audio subprocess closed IPC"))
 
     # ------------------------------------------------------------------
     # Log forwarder (subprocess stdout → our log)
     # ------------------------------------------------------------------
 
     async def _log_forwarder(self):
-        """Forward subprocess stdout to our log."""
+        """Forward subprocess stdout to our log, to EOF: the lines a dying
+        child prints last (a traceback) are the ones that say why."""
+        process = self._process
         try:
-            while self._running and self._process and self._process.stdout:
-                line = await self._process.stdout.readline()
+            while process and process.stdout:
+                line = await process.stdout.readline()
                 if not line:
                     break
-                print(f"[AUDIO-SUB] {line.decode(errors='replace').rstrip()}")
+                text = line.decode(errors='replace').rstrip()
+                self._output_tail.append(text)
+                print(f"[AUDIO-SUB] {text}")
         except asyncio.CancelledError:
             pass
         except Exception:

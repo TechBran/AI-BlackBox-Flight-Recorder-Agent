@@ -3,7 +3,8 @@
 audio_subprocess.py — Dedicated AudioSocket I/O Process
 
 Runs with its own clean asyncio event loop. Handles:
-1. AudioSocket TCP server (port 9092) — Asterisk connects here
+1. AudioSocket TCP server on the host/port the parent passes (from
+   ASTERISK_AUDIOSOCKET_HOST/PORT, the address the provisioned dialplan dials)
 2. 20ms frame pacing for AI→phone audio (proven perfect in TTS test)
 3. Resampling 24kHz→8kHz via scipy resample_poly
 4. IPC with main BlackBox process via unix socket
@@ -12,7 +13,12 @@ This subprocess has NOTHING else running — just audio I/O.
 The clean event loop guarantees precise 20ms frame timing that the
 loaded main process cannot maintain.
 
-Usage: python3 audio_subprocess.py <ipc_fd>
+Usage: python3 -I -u audio_subprocess.py <ipc_fd> <host> <port>
+
+The parent (audio_ipc.py) runs it with -I, so this directory is not put first
+on sys.path: nothing here may shadow the stdlib for numpy and scipy (audit
+W14). It sends READY with the bound address once it listens; the parent
+reports the AudioSocket server started only then.
 """
 
 import asyncio
@@ -37,6 +43,7 @@ MSG_CHANNEL_OPEN = 0x03   # subprocess→main: uuid(36)
 MSG_CHANNEL_CLOSE = 0x04  # subprocess→main: uuid(36)
 MSG_CLEAR_BUFFER = 0x05   # main→subprocess: uuid(36)
 MSG_SHUTDOWN = 0x06       # main→subprocess: clean exit
+MSG_READY = 0x07          # subprocess→main: "host:port" once AudioSocket listens
 
 # IPC header: [type:1][length:4 LE uint32]
 IPC_HEADER_SIZE = 5
@@ -50,8 +57,6 @@ AS_TYPE_HANGUP = 0x00
 AS_TYPE_UUID = 0x01
 AS_TYPE_AUDIO = 0x10
 AS_FRAME_BYTES = 320      # 20ms at 8kHz, 16-bit mono (160 samples × 2 bytes)
-
-AUDIOSOCKET_PORT = 9092
 
 # Pre-buffer threshold before starting drain playback
 # Reduced from 50 (1000ms) to 5 (100ms) for interactive voice latency.
@@ -205,8 +210,10 @@ class AudioSubprocess:
     - Per-channel OutputChannel instances for paced audio output
     """
 
-    def __init__(self, ipc_fd: int):
+    def __init__(self, ipc_fd: int, host: str, port: int):
         self._ipc_fd = ipc_fd
+        self._host = host
+        self._port = port
         self._ipc_sock: socket.socket | None = None
         self._ipc_reader: asyncio.StreamReader | None = None
         self._ipc_writer: asyncio.StreamWriter | None = None
@@ -215,8 +222,9 @@ class AudioSubprocess:
         self._shutdown = False
         self._server: asyncio.Server | None = None
 
-    async def run(self) -> None:
-        """Main entry point — set up IPC, AudioSocket server, and run forever."""
+    async def run(self) -> int:
+        """Main entry point — set up IPC, AudioSocket server, and run forever.
+        Returns the exit code (2 when the AudioSocket address cannot be bound)."""
         loop = asyncio.get_event_loop()
 
         # --- Set up IPC socket as asyncio streams ---
@@ -243,13 +251,20 @@ class AudioSubprocess:
             loop.add_signal_handler(sig, self._signal_handler)
 
         # --- Start AudioSocket TCP server ---
-        self._server = await asyncio.start_server(
-            self._handle_audiosocket,
-            "127.0.0.1",
-            AUDIOSOCKET_PORT,
-        )
+        try:
+            self._server = await asyncio.start_server(
+                self._handle_audiosocket,
+                self._host,
+                self._port,
+            )
+        except OSError as e:
+            # Most often an orphaned child of an earlier run still holds the port.
+            print(f"[AudioSubprocess] Cannot listen on {self._host}:{self._port}: {e}")
+            return 2
         addr = self._server.sockets[0].getsockname()
         print(f"[AudioSubprocess] AudioSocket server listening on {addr[0]}:{addr[1]}")
+        # Liveness: the parent reports the server started only on this message.
+        self._send_ipc(MSG_READY, f"{addr[0]}:{addr[1]}".encode("ascii"))
 
         # --- Start IPC listener ---
         ipc_task = asyncio.ensure_future(self._ipc_listener())
@@ -297,6 +312,7 @@ class AudioSubprocess:
                 pass
 
         print("[AudioSubprocess] Exited cleanly.")
+        return 0
 
     def _signal_handler(self) -> None:
         """Handle SIGTERM/SIGINT for graceful shutdown."""
@@ -494,14 +510,13 @@ class AudioSubprocess:
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: audio_subprocess.py <ipc_fd>")
+    if len(sys.argv) != 4:
+        print("Usage: audio_subprocess.py <ipc_fd> <host> <port>")
         sys.exit(1)
 
-    ipc_fd = int(sys.argv[1])
-    sub = AudioSubprocess(ipc_fd)
+    sub = AudioSubprocess(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]))
 
     try:
-        asyncio.run(sub.run())
+        sys.exit(asyncio.run(sub.run()))
     except KeyboardInterrupt:
         pass

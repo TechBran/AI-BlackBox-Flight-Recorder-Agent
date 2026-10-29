@@ -911,12 +911,18 @@ async def startup_asterisk():
         from Orchestrator.asterisk.audio_ipc import init_ipc_client
         from Orchestrator.asterisk.client import init_ari_client
 
-        # Start audio subprocess (runs AudioSocket server in its own process)
+        # Start audio subprocess (runs AudioSocket server in its own process).
+        # Reported started only once the child said READY from its socket: the
+        # old flag logged "started" for a child that had already died (W14).
         ipc_client = await init_ipc_client()
-        if ipc_client:
-            logger.info("Audio subprocess started (AudioSocket on port 9092)")
+        if ipc_client and ipc_client.is_running:
+            host, port = ipc_client.address
+            logger.info("Audio subprocess ready (pid %s, AudioSocket on %s:%s)",
+                        ipc_client.pid, host, port)
         else:
-            logger.warning("Audio subprocess failed to start")
+            logger.error("Audio subprocess is not running: %s. Asterisk calls are "
+                         "refused until it is",
+                         getattr(ipc_client, "last_error", "") or "it could not be started")
 
         # Connect to ARI
         ari_client = await init_ari_client()

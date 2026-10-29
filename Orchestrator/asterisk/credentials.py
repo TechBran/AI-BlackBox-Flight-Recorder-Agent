@@ -1,5 +1,10 @@
 """Secrets-at-rest helper for telephony gateway credentials.
 
+Named credentials, never secrets: as Orchestrator/asterisk/secrets.py it
+shadowed the stdlib module for the AudioSocket child, which runs as a script
+from this directory, so numpy.random's `from secrets import token_hex` failed
+and the child died at every start (audit W14).
+
 Gateway configs store credentials (HTTP/API passwords, AMI secrets) that must
 not sit in plaintext on disk. This module provides a small, reusable Fernet
 (AES-128-CBC + HMAC) wrapper with three properties tuned for live production:

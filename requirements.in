@@ -108,7 +108,7 @@ pyserial>=3.5,<4                # cellular modem AT-command channel (Orchestrato
 
 # === Crypto ===
 # Uncapped on purpose: cryptography ships a new major several times a year and
-# security fixes land only on the newest. Only Fernet is used (asterisk/secrets.py).
+# security fixes land only on the newest. Only Fernet is used (asterisk/credentials.py).
 cryptography>=50.0.0            # CVE-2026-26007, -34073, -39892 + the bundled-OpenSSL advisory (48.0.1)
 
 # === Web search ===

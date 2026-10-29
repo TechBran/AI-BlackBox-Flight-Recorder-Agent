@@ -1,5 +1,5 @@
 import json
-from Orchestrator.asterisk import gateway_manager as gm, secrets
+from Orchestrator.asterisk import gateway_manager as gm, credentials
 
 
 def _sample():

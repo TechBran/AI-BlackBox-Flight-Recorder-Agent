@@ -27,7 +27,7 @@ from Orchestrator.asterisk.config import (
     TG200_SIP_PORT,
     TG200_HTTP_PORT,
 )
-from Orchestrator.asterisk import secrets
+from Orchestrator.asterisk import credentials
 from Orchestrator import config as _root_config
 
 
@@ -283,7 +283,7 @@ def save_gateways(gateways: List[dict]):
     """Save gateway configs to disk with credentials encrypted at rest.
 
     Produces a deep copy of the list and encrypts each record's
-    ``http.password`` and ``ami.secret`` via ``secrets.encrypt`` (idempotent —
+    ``http.password`` and ``ami.secret`` via ``credentials.encrypt`` (idempotent —
     values already prefixed ``enc:`` are left unchanged). The caller's list /
     dicts are NEVER mutated, so callers may keep holding plaintext in memory.
     """
@@ -291,9 +291,9 @@ def save_gateways(gateways: List[dict]):
         encrypted = copy.deepcopy(gateways)
         for gw in encrypted:
             if isinstance(gw.get("http"), dict):
-                gw["http"]["password"] = secrets.encrypt(gw["http"].get("password", ""))
+                gw["http"]["password"] = credentials.encrypt(gw["http"].get("password", ""))
             if isinstance(gw.get("ami"), dict):
-                gw["ami"]["secret"] = secrets.encrypt(gw["ami"].get("secret", ""))
+                gw["ami"]["secret"] = credentials.encrypt(gw["ami"].get("secret", ""))
         with open(GATEWAYS_FILE, "w") as f:
             json.dump(encrypted, f, indent=2)
     except OSError as e:
@@ -304,7 +304,7 @@ def get_gateway_decrypted(gateway_id: str) -> Optional[dict]:
     """Get a single gateway by ID with credentials decrypted.
 
     Returns a deep copy where ``http.password`` and ``ami.secret`` are run
-    through ``secrets.decrypt`` (passthrough-safe for legacy plaintext). Runtime
+    through ``credentials.decrypt`` (passthrough-safe for legacy plaintext). Runtime
     credential consumers MUST use this rather than the raw on-disk record.
     Returns None if not found.
     """
@@ -312,9 +312,9 @@ def get_gateway_decrypted(gateway_id: str) -> Optional[dict]:
         if gw["id"] == gateway_id:
             dec = copy.deepcopy(gw)
             if isinstance(dec.get("http"), dict):
-                dec["http"]["password"] = secrets.decrypt(dec["http"].get("password", ""))
+                dec["http"]["password"] = credentials.decrypt(dec["http"].get("password", ""))
             if isinstance(dec.get("ami"), dict):
-                dec["ami"]["secret"] = secrets.decrypt(dec["ami"].get("secret", ""))
+                dec["ami"]["secret"] = credentials.decrypt(dec["ami"].get("secret", ""))
             return dec
     return None
 
@@ -323,16 +323,16 @@ def redact_gateway(gw: dict) -> dict:
     """Return a deep copy safe to expose over the API.
 
     Drops ``http.password`` / ``ami.secret`` and replaces them with boolean
-    ``http.has_password`` / ``ami.has_secret`` (via ``secrets.mask``). Secrets
+    ``http.has_password`` / ``ami.has_secret`` (via ``credentials.mask``). Secrets
     are never sent to clients.
     """
     red = copy.deepcopy(gw)
     if isinstance(red.get("http"), dict):
         pw = red["http"].pop("password", None)
-        red["http"]["has_password"] = secrets.mask(pw)
+        red["http"]["has_password"] = credentials.mask(pw)
     if isinstance(red.get("ami"), dict):
         sec = red["ami"].pop("secret", None)
-        red["ami"]["has_secret"] = secrets.mask(sec)
+        red["ami"]["has_secret"] = credentials.mask(sec)
     return red
 
 
