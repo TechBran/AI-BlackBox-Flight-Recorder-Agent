@@ -1,5 +1,6 @@
 package com.aiblackbox.portal
 
+import com.aiblackbox.portal.data.api.HttpClients
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -71,7 +72,7 @@ internal object PortalWebGuard {
      * Downloads. An off-box hop fails the call with an IOException before it is sent.
      */
     fun pairedOnlyDownloadClient(pairedOrigin: String?): OkHttpClient =
-        OkHttpClient.Builder()
+        HttpClients.base.newBuilder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .addNetworkInterceptor { chain ->

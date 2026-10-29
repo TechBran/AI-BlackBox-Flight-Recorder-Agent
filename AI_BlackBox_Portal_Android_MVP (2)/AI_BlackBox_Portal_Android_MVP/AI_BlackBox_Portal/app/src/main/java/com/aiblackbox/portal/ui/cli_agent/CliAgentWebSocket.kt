@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.ui.cli_agent
 
 import android.util.Log
+import com.aiblackbox.portal.data.api.HttpClients
 import com.aiblackbox.portal.data.model.CliAgentErrorFrame
 import com.aiblackbox.portal.data.model.CliAgentKillFrame
 import com.aiblackbox.portal.data.model.CliAgentPasteFrame
@@ -64,7 +65,7 @@ class CliAgentWebSocket(
     }
 
     // OkHttp client — match WebSocketClient.kt's proven config.
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    private val client: OkHttpClient = HttpClients.base.newBuilder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // Critical: no read timeout for long-lived WS
         .pingInterval(30, TimeUnit.SECONDS)

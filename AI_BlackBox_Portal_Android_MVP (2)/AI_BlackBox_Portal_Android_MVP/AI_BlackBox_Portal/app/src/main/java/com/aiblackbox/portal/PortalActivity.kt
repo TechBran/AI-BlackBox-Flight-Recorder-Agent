@@ -49,6 +49,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.aiblackbox.portal.data.api.HttpClients
 import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.FoldingFeatureMonitor
@@ -59,7 +60,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONObject
@@ -763,7 +763,7 @@ class PortalActivity : AppCompatActivity() {
                     .post(multipartBody)
                     .build()
 
-                val client = okhttp3.OkHttpClient.Builder()
+                val client = HttpClients.base.newBuilder()
                     .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                     .writeTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
                     .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -1679,7 +1679,7 @@ class PortalActivity : AppCompatActivity() {
                     throw IOException("Origin URL is not set.")
                 }
 
-                val client = OkHttpClient.Builder()
+                val client = HttpClients.base.newBuilder()
                     .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                     .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
                     .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)

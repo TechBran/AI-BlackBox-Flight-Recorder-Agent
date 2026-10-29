@@ -58,13 +58,13 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.PairingActivity
 import com.aiblackbox.portal.R
+import com.aiblackbox.portal.data.api.HttpClients
 import com.aiblackbox.portal.data.remote.RemoteSessionBus
 import com.aiblackbox.portal.data.store.OperatorPrompt
 import com.aiblackbox.portal.data.store.OperatorResolver
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -332,7 +332,7 @@ class OverlayService : Service() {
 
     // OkHttp client for WebSocket (reuse existing if possible)
     private val realtimeHttpClient by lazy {
-        OkHttpClient.Builder()
+        HttpClients.base.newBuilder()
             .readTimeout(0, TimeUnit.MILLISECONDS)  // No timeout for WebSocket
             .connectTimeout(30, TimeUnit.SECONDS)
             .build()
@@ -901,7 +901,7 @@ class OverlayService : Service() {
 
         coroutineScope.launch {
             try {
-                val client = OkHttpClient.Builder()
+                val client = HttpClients.base.newBuilder()
                     .connectTimeout(10, TimeUnit.SECONDS)
                     .readTimeout(10, TimeUnit.SECONDS)
                     .build()
@@ -1504,7 +1504,7 @@ class OverlayService : Service() {
 
         coroutineScope.launch {
             try {
-                val client = OkHttpClient.Builder()
+                val client = HttpClients.base.newBuilder()
                     .connectTimeout(30, TimeUnit.SECONDS)
                     .writeTimeout(60, TimeUnit.SECONDS)
                     .readTimeout(60, TimeUnit.SECONDS)
@@ -2755,7 +2755,7 @@ class OverlayService : Service() {
             return null
         }
 
-        val client = OkHttpClient.Builder()
+        val client = HttpClients.base.newBuilder()
             .connectTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(120, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
@@ -3005,7 +3005,7 @@ class OverlayService : Service() {
     private suspend fun uploadFile(file: File, mimeType: String): String? {
         if (serverUrl.isEmpty()) return null
 
-        val client = OkHttpClient.Builder()
+        val client = HttpClients.base.newBuilder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
@@ -3868,7 +3868,7 @@ class OverlayService : Service() {
             writeWavFileWithSampleRate(audioFile, audioData, sampleRate)
             Log.d(TAG, "Realtime WAV saved: ${audioFile.absolutePath}, size=${audioFile.length()}")
 
-            val client = OkHttpClient.Builder()
+            val client = HttpClients.base.newBuilder()
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .writeTimeout(60, TimeUnit.SECONDS)
                 .readTimeout(60, TimeUnit.SECONDS)
@@ -4317,7 +4317,7 @@ $transcript
 
         coroutineScope.launch {
             try {
-                val client = OkHttpClient.Builder()
+                val client = HttpClients.base.newBuilder()
                     .connectTimeout(30, TimeUnit.SECONDS)
                     .readTimeout(30, TimeUnit.SECONDS)
                     .build()

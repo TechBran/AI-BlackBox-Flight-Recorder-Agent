@@ -36,7 +36,13 @@ private const val TAG = "BlackBoxApi"
  */
 class ApiHttpException(message: String, val code: Int = 0) : IOException(message)
 
-class BlackBoxApi(private val baseUrl: String) {
+/**
+ * The box's HTTP API. [base] is the client every variant below derives from with
+ * newBuilder(): the process-wide [HttpClients.base] by default, so the ~27 places that
+ * build a BlackBoxApi share one connection pool and dispatcher (audit A10-data-remote-06)
+ * and only the timeouts differ.
+ */
+class BlackBoxApi(private val baseUrl: String, base: OkHttpClient = HttpClients.base) {
 
     val json: Json = Json {
         ignoreUnknownKeys = true
@@ -44,7 +50,7 @@ class BlackBoxApi(private val baseUrl: String) {
         encodeDefaults = true
     }
 
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    private val client: OkHttpClient = base.newBuilder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
@@ -81,7 +87,7 @@ class BlackBoxApi(private val baseUrl: String) {
      * Scoped HERE, not on [client]: plain request/response calls keep their tight
      * 120s read timeout — only SSE calls get the long-TTFB window.
      */
-    val streamClient: OkHttpClient = OkHttpClient.Builder()
+    val streamClient: OkHttpClient = base.newBuilder()
         .connectTimeout(STREAM_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(STREAM_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .writeTimeout(STREAM_WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -97,7 +103,7 @@ class BlackBoxApi(private val baseUrl: String) {
      * STOPGAP: the robust fix is the async TTS task-queue (submit -> poll), which makes
      * this a short request regardless of clip length.
      */
-    private val ttsClient: OkHttpClient = OkHttpClient.Builder()
+    private val ttsClient: OkHttpClient = base.newBuilder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
