@@ -3,7 +3,6 @@ package com.aiblackbox.portal.overlay
 import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
-import android.Manifest
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
@@ -12,27 +11,18 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
-import android.media.AudioFormat
-import android.media.AudioRecord
 import android.media.ImageReader
 import android.media.MediaPlayer
-import android.media.MediaRecorder
 import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Base64
-import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -54,7 +44,6 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.PairingActivity
 import com.aiblackbox.portal.R
 import com.aiblackbox.portal.data.api.BlackBoxApi
@@ -70,19 +59,12 @@ import okhttp3.MultipartBody
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
 import android.provider.MediaStore
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 class OverlayService : Service() {
 
@@ -102,11 +84,6 @@ class OverlayService : Service() {
         const val ACTION_STOP = "com.aiblackbox.portal.STOP_OVERLAY"
         const val ACTION_REFRESH_PROJECTION = "com.aiblackbox.portal.REFRESH_MEDIA_PROJECTION"
 
-        // Audio recording constants
-        private const val SAMPLE_RATE = 16000
-        private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
-        private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-
         private var instance: OverlayService? = null
 
         fun isRunning(): Boolean = instance != null
@@ -125,7 +102,7 @@ class OverlayService : Service() {
             if (svc == null) {
                 callback(null)
             } else {
-                svc.captureFramePngBytes(callback)
+                svc.capture.captureFramePngBytes(callback)
             }
         }
     }
@@ -145,33 +122,7 @@ class OverlayService : Service() {
     private lateinit var expandedPanel: View
     private var bubbleGlow: View? = null
     private var bubbleGlowAnimator: AnimatorSet? = null
-    private var mediaProjection: MediaProjection? = null
-
-    // Persistent screenshot infrastructure (created once, NEVER released until service stops)
-    // This keeps MediaProjection alive on Android 14+
-    private var persistentScreenshotDisplay: VirtualDisplay? = null
-    private var persistentImageReader: ImageReader? = null
-
-    // Recording infrastructure (separate from screenshots, created/released per session)
-    private var recordingDisplay: VirtualDisplay? = null
-    private var mediaRecorder: MediaRecorder? = null
-
-    // Legacy variables - kept for compatibility but transitioning away
-    private var virtualDisplay: VirtualDisplay? = null
-    private var imageReader: ImageReader? = null
-
-    private var isRecording = false
     private var isExpanded = false
-
-    // Track current VirtualDisplay mode to avoid conflicts
-    private enum class DisplayMode { NONE, SCREENSHOT, RECORDING }
-    private var currentDisplayMode = DisplayMode.NONE
-
-    // Track when recording stopped to add delay before screenshot
-    private var lastRecordingStopTime: Long = 0L
-
-    // Track if MediaProjection has been invalidated (Android 14+ releases token after recording)
-    private var mediaProjectionInvalidated = false
 
     private var serverUrl: String = ""
     // The operator handed over by the starting screen ("" if it had none) until the box's
@@ -182,9 +133,9 @@ class OverlayService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private var screenWidth = 0
-    private var screenHeight = 0
-    private var screenDensity = 0
+    // The MediaProjection, its persistent display, screenshots, frames and recording:
+    // OverlayCapture (rank 76). What it shows or attaches comes back through CaptureHost.
+    private val capture = OverlayCapture(this, handler, { windowManager }, CaptureHost())
 
     // TTS via BlackBox
     private var autoTtsEnabled = true
@@ -228,7 +179,7 @@ class OverlayService : Service() {
     private var recordingStartTime: Long = 0L
     private val recordingTimerRunnable = object : Runnable {
         override fun run() {
-            if (isRecording) {
+            if (capture.isRecording) {
                 val elapsed = System.currentTimeMillis() - recordingStartTime
                 recordingTimer?.text = formatRecordingTime(elapsed)
                 // Pulse the recording indicator
@@ -297,7 +248,7 @@ class OverlayService : Service() {
         // (M5.4) Size the capture from the CURRENT WINDOW METRICS (API 30+), not the deprecated
         // defaultDisplay.getMetrics — so a tablet / unfolded Fold / multi-window captures at its
         // true resolution instead of a phone-narrow metric.
-        refreshScreenMetrics()
+        capture.refreshScreenMetrics()
 
         createNotificationChannel()
 
@@ -446,7 +397,7 @@ class OverlayService : Service() {
             }
         }
         override fun openCamera() {
-            handler.post { takeScreenshot() }
+            handler.post { capture.takeScreenshot() }
         }
         override fun openPortal() {
             handler.post {
@@ -542,60 +493,7 @@ class OverlayService : Service() {
 
         // Initialize MediaProjection after foreground started
         if (pendingResultCode == Activity.RESULT_OK && pendingResultData != null) {
-            try {
-                val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjection = projectionManager.getMediaProjection(pendingResultCode, pendingResultData!!)
-
-                mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-                    override fun onStop() {
-                        Log.w(TAG, "MediaProjection.Callback onStop() triggered.")
-                        // This can be triggered by the SecurityException or if the user revokes permission.
-                        // Don't cause a refresh loop. Just mark as invalid. The user will be prompted
-                        // to refresh on their next action (e.g., taking a screenshot).
-                        mediaProjectionInvalidated = true
-                        handler.post {
-                            persistentScreenshotDisplay?.release()
-                            persistentScreenshotDisplay = null
-                            showToast("Screen capture session has ended.")
-                        }
-                    }
-
-                    // (M5.4) Android 14+: the captured content resolution changed (fold/unfold,
-                    // rotate, multi-window resize). Invalidate the stale-sized capture + refresh
-                    // the cached dims so no coordinate is derived from a stale resolution.
-                    override fun onCapturedContentResize(width: Int, height: Int) {
-                        onCapturedContentResized(width, height)
-                    }
-                }, handler)
-
-
-                Log.d(TAG, "MediaProjection obtained successfully on Android API ${Build.VERSION.SDK_INT}")
-
-                // Android 14+ FIX: Don't create ANY display on startup
-                // Use numeric check (API 34+) instead of constant to ensure compatibility
-                val isAndroid14Plus = Build.VERSION.SDK_INT >= 34
-                Log.d(TAG, "Is Android 14+ (API 34+)? $isAndroid14Plus")
-
-                if (isAndroid14Plus) {
-                    Log.d(TAG, "Android 14+: MediaProjection ready. Display will be created on first screenshot or record.")
-                    Log.d(TAG, "Skipping persistent display creation to preserve MediaProjection token for user's choice")
-                } else {
-                    // Older Android: Can have multiple displays, so create persistent display immediately
-                    handler.postDelayed({
-                        Log.d(TAG, "Starting persistent screenshot display setup (screen: ${screenWidth}x${screenHeight}@${screenDensity})")
-                        setupPersistentScreenshotDisplay { success ->
-                            if (success) {
-                                Log.d(TAG, "STARTUP: Persistent screenshot display created successfully - MediaProjection anchored!")
-                            } else {
-                                Log.e(TAG, "STARTUP: Persistent screenshot display setup FAILED - may need permission refresh on first use")
-                            }
-                        }
-                    }, 1000)  // 1 second delay to ensure screen dimensions and MediaProjection are ready
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to get MediaProjection", e)
-                showToast("Screen capture unavailable: ${e.message}")
-            }
+            capture.start(pendingResultCode, pendingResultData!!)
         } else {
             Log.w(TAG, "No MediaProjection data - screenshot/recording will be unavailable")
         }
@@ -650,19 +548,13 @@ class OverlayService : Service() {
         }
 
         // Cleanup resources
-        stopRecording()
+        capture.stopRecording()
 
         // Cleanup realtime mode resources (mic, share, playback, socket)
         realtime.shutdown()
 
-        // Cleanup persistent screenshot display (only now, at service destruction)
-        persistentScreenshotDisplay?.release()
-        persistentScreenshotDisplay = null
-        persistentImageReader?.close()
-        persistentImageReader = null
-
-        mediaProjection?.stop()
-        mediaProjection = null
+        // Cleanup the persistent screenshot display and the projection (only now)
+        capture.release()
 
         // Cleanup TTS player
         handler.removeCallbacks(seekBarUpdateRunnable)
@@ -679,152 +571,6 @@ class OverlayService : Service() {
         attachedRecording?.delete()
 
         Log.d(TAG, "OverlayService destroyed")
-    }
-
-    /**
-     * (M5.4) Refresh the cached capture dimensions from the CURRENT WINDOW METRICS.
-     *
-     * On API 30+ uses [WindowManager.getCurrentWindowMetrics] `.bounds` — the correct extent on a
-     * tablet / unfolded Fold / multi-window / rotated screen — instead of the deprecated
-     * `defaultDisplay.getMetrics`. Pre-30 keeps the legacy `defaultDisplay.getMetrics` path (so
-     * older devices are unchanged). Density comes from `resources.displayMetrics` (WindowMetrics
-     * exposes no density pre-34). Called on create AND whenever [MediaProjection.Callback.onCapturedContentResize]
-     * reports a resolution change, so the VirtualDisplay/ImageReader are never sized to stale dims
-     * (which would misplace every coordinate). Never throws.
-     */
-    private fun refreshScreenMetrics() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val bounds = windowManager.currentWindowMetrics.bounds
-                screenWidth = bounds.width()
-                screenHeight = bounds.height()
-            } else {
-                val metrics = DisplayMetrics()
-                @Suppress("DEPRECATION")
-                windowManager.defaultDisplay.getMetrics(metrics)
-                screenWidth = metrics.widthPixels
-                screenHeight = metrics.heightPixels
-            }
-            screenDensity = resources.displayMetrics.densityDpi
-        } catch (e: Exception) {
-            Log.w(TAG, "refreshScreenMetrics failed (${e.javaClass.simpleName}); keeping ${screenWidth}x${screenHeight}")
-        }
-    }
-
-    /**
-     * (M5.4) Android 14+ `onCapturedContentResize` handler: the captured content changed
-     * resolution (fold/unfold, rotation, multi-window resize). INVALIDATE the cached capture:
-     * update the dims from the new (w,h) AND release the persistent screenshot display + reader so
-     * the NEXT capture rebuilds an ImageReader/VirtualDisplay at the new size — never leaving a
-     * screenshot (and the coordinates derived from it) at a stale resolution. The cloud loop
-     * re-observes each step (M2) and, on a fold, the FoldingFeatureMonitor posture-change flag
-     * additionally tells it to re-observe before its next coordinate action. Runs on [handler].
-     */
-    private fun onCapturedContentResized(width: Int, height: Int) {
-        handler.post {
-            Log.d(TAG, "onCapturedContentResize: ${screenWidth}x${screenHeight} -> ${width}x${height}; invalidating capture")
-            screenWidth = width
-            screenHeight = height
-            // Density can change with the display; re-read it too.
-            runCatching { screenDensity = resources.displayMetrics.densityDpi }
-            // Drop the stale-sized persistent display + reader; next capture recreates at new dims.
-            runCatching { persistentScreenshotDisplay?.release() }
-            persistentScreenshotDisplay = null
-            runCatching { persistentImageReader?.close() }
-            persistentImageReader = null
-        }
-    }
-
-    /**
-     * Creates a persistent VirtualDisplay for screenshots that stays alive for the service lifetime.
-     * This is the key to keeping MediaProjection valid on Android 14+.
-     * By never releasing this VirtualDisplay, subsequent createVirtualDisplay() calls (for recording) succeed.
-     *
-     * @param onComplete Optional callback invoked when setup completes (success or final failure).
-     *                   Boolean parameter is true if setup succeeded.
-     */
-    private fun setupPersistentScreenshotDisplay(onComplete: ((Boolean) -> Unit)? = null) {
-        setupPersistentScreenshotDisplayWithRetries(attempt = 1, maxAttempts = 3, onComplete = onComplete)
-    }
-
-    /**
-     * Try to set up persistent display with retries.
-     * On Android 14+, sometimes the MediaProjection isn't immediately ready to create VirtualDisplays.
-     */
-    private fun setupPersistentScreenshotDisplayWithRetries(attempt: Int, maxAttempts: Int, onComplete: ((Boolean) -> Unit)? = null) {
-        if (mediaProjection == null) {
-            Log.w(TAG, "Cannot setup persistent display - no MediaProjection")
-            onComplete?.invoke(false)
-            return
-        }
-
-        if (persistentScreenshotDisplay != null) {
-            Log.d(TAG, "Persistent screenshot display already exists")
-            onComplete?.invoke(true)
-            return
-        }
-
-        Log.d(TAG, "Setting up persistent screenshot display ${screenWidth}x${screenHeight} (attempt $attempt/$maxAttempts)")
-
-        try {
-            // Clean up any previous failed attempts
-            persistentImageReader?.close()
-            persistentImageReader = null
-
-            persistentImageReader = ImageReader.newInstance(
-                screenWidth, screenHeight,
-                PixelFormat.RGBA_8888, 5  // Buffer for multiple captures
-            )
-
-            persistentScreenshotDisplay = mediaProjection?.createVirtualDisplay(
-                "PersistentScreenshot",
-                screenWidth, screenHeight, screenDensity,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                persistentImageReader?.surface, null, handler
-            )
-
-            if (persistentScreenshotDisplay != null) {
-                Log.d(TAG, "SUCCESS: Persistent screenshot display created on attempt $attempt - MediaProjection anchored!")
-                mediaProjectionInvalidated = false  // Reset invalidation flag - we have a working display
-                onComplete?.invoke(true)
-            } else {
-                Log.w(TAG, "Failed to create persistent screenshot display (returned null) - attempt $attempt")
-                handlePersistentDisplaySetupFailure(attempt, maxAttempts, null, onComplete)
-            }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException creating persistent display on attempt $attempt - MediaProjection may not be ready yet", e)
-            handlePersistentDisplaySetupFailure(attempt, maxAttempts, e, onComplete)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error setting up persistent screenshot display on attempt $attempt", e)
-            handlePersistentDisplaySetupFailure(attempt, maxAttempts, e, onComplete)
-        }
-    }
-
-    /**
-     * Handle failure of persistent display setup - retry with exponential backoff or give up
-     */
-    private fun handlePersistentDisplaySetupFailure(attempt: Int, maxAttempts: Int, error: Exception?, onComplete: ((Boolean) -> Unit)? = null) {
-        if (attempt < maxAttempts) {
-            // Retry with exponential backoff: 500ms, 1000ms, 2000ms
-            val delayMs = 500L * (1 shl (attempt - 1))
-            Log.d(TAG, "Will retry persistent display setup in ${delayMs}ms (attempt ${attempt + 1}/$maxAttempts)")
-            handler.postDelayed({
-                setupPersistentScreenshotDisplayWithRetries(attempt + 1, maxAttempts, onComplete)
-            }, delayMs)
-        } else {
-            // All retries exhausted
-            Log.e(TAG, "FAILED: Could not create persistent display after $maxAttempts attempts")
-            // Only mark as invalidated if we got a SecurityException (actual permission issue)
-            if (error is SecurityException && Build.VERSION.SDK_INT >= 34) {
-                Log.e(TAG, "SecurityException on final attempt - MediaProjection token may be invalid")
-                mediaProjectionInvalidated = true
-            } else {
-                // Other errors (null return, etc.) - don't mark as invalidated yet
-                // The MediaProjection might still be valid, just had trouble creating the display
-                Log.w(TAG, "Persistent display setup failed but MediaProjection may still be valid - will try on-demand")
-            }
-            onComplete?.invoke(false)
-        }
     }
 
     private fun fetchOperators() {
@@ -1142,14 +888,14 @@ class OverlayService : Service() {
             animateButtonClick(it)
             Log.d(TAG, "Screenshot button clicked")
             showToast("Taking screenshot...")
-            takeScreenshot()
+            capture.takeScreenshot()
         }
 
         // Record button container - toggles recording
         expandedPanel.findViewById<View>(R.id.btnRecordContainer)?.setOnClickListener {
             animateButtonClick(it)
             Log.d(TAG, "Record button clicked")
-            toggleRecording()
+            capture.toggleRecording()
         }
 
         // NOTE: Mic button listener is set in setupRealtimeControls() for realtime mode
@@ -1550,346 +1296,7 @@ class OverlayService : Service() {
         }
     }
 
-    // ==================== Screenshot & Recording ====================
-
-    private fun takeScreenshot() {
-        Log.d(TAG, "takeScreenshot called, mediaProjection=${mediaProjection != null}, invalidated=$mediaProjectionInvalidated, persistentDisplay=${persistentScreenshotDisplay != null}")
-
-        if (mediaProjection == null || mediaProjectionInvalidated) {
-            Log.e(TAG, "MediaProjection is not valid. Requesting refresh.")
-            requestMediaProjectionRefresh()
-            return
-        }
-
-        // If persistent display is alive, MediaProjection is valid
-        if (persistentScreenshotDisplay != null) {
-            mediaProjectionInvalidated = false
-            Log.d(TAG, "Persistent display active - proceeding with screenshot")
-            proceedWithScreenshot()
-            return
-        }
-
-
-        // Persistent display doesn't exist but MediaProjection might still be valid
-        // Try to set up persistent display with callback
-        Log.d(TAG, "Persistent display not ready, setting up now before screenshot...")
-        updateStatus("Preparing capture...")
-
-        setupPersistentScreenshotDisplay { success ->
-            if (success) {
-                Log.d(TAG, "Persistent display setup successful via callback, proceeding with screenshot")
-                mediaProjectionInvalidated = false
-                proceedWithScreenshot()
-            } else {
-                // MediaProjection is definitely invalid
-                Log.e(TAG, "Cannot screenshot - MediaProjection invalidated during persistent display setup")
-                requestMediaProjectionRefresh()
-            }
-        }
-    }
-
-    /**
-     * Proceed with taking screenshot after validation checks pass
-     */
-    private fun proceedWithScreenshot() {
-        Log.d(TAG, "Taking screenshot... screen=${screenWidth}x${screenHeight}@${screenDensity}")
-        updateStatus("Capturing...")
-        showToast("Capturing screenshot...")
-
-        // Hide overlay temporarily
-        val wasExpanded = isExpanded
-        overlayView.visibility = View.GONE
-        expandedPanel.visibility = View.GONE
-
-        // Calculate delay - need extra time after recording stopped (Android 14+ requirement)
-        val timeSinceRecordingStop = System.currentTimeMillis() - lastRecordingStopTime
-        val minDelayAfterRecording = if (Build.VERSION.SDK_INT >= 34) 800L else 500L
-        val extraDelay = if (lastRecordingStopTime > 0 && timeSinceRecordingStop < minDelayAfterRecording) {
-            val needed = minDelayAfterRecording - timeSinceRecordingStop
-            Log.d(TAG, "Recently stopped recording, adding ${needed}ms delay before screenshot")
-            needed
-        } else {
-            0L
-        }
-
-        // Small delay to let views hide + extra delay if needed after recording
-        handler.postDelayed({
-            captureScreen { file ->
-                handler.post {
-                    // Restore overlay state
-                    if (wasExpanded) {
-                        expandedPanel.visibility = View.VISIBLE
-                    } else {
-                        overlayView.visibility = View.VISIBLE
-                    }
-
-                    if (file != null) {
-                        attachedScreenshots.add(file)
-                        updateAttachmentCount()
-                        showToast("Screenshot added (${attachedScreenshots.size})")
-                        updateStatus("Ready")
-                    } else {
-                        showToast("Screenshot failed")
-                        updateStatus("Capture failed")
-                    }
-                }
-            }
-        }, 200 + extraDelay)
-    }
-
-    private fun captureScreen(callback: (File?) -> Unit) {
-        Log.d(TAG, "captureScreen starting... persistentDisplay=${persistentScreenshotDisplay != null}")
-        try {
-            // PRIORITY: Use persistent screenshot display if available (Android 14+ fix)
-            if (persistentScreenshotDisplay != null && persistentImageReader != null) {
-                Log.d(TAG, "Using persistent screenshot display - no VirtualDisplay recreation needed")
-                attemptImageCaptureFromPersistent(callback, attempt = 1, maxAttempts = 3)
-                return
-            }
-
-            // FALLBACK: Setup persistent display if not yet created - USE CALLBACK to wait for all retries
-            if (mediaProjection != null && persistentScreenshotDisplay == null && !mediaProjectionInvalidated) {
-                Log.d(TAG, "Persistent display not ready, setting up now with callback...")
-                setupPersistentScreenshotDisplay { success ->
-                    // This callback is invoked after all retries complete
-                    if (success && persistentScreenshotDisplay != null && persistentImageReader != null) {
-                        Log.d(TAG, "Persistent display setup succeeded, capturing from persistent")
-                        attemptImageCaptureFromPersistent(callback, attempt = 1, maxAttempts = 3)
-                    } else {
-                        Log.e(TAG, "Cannot capture - persistent display setup failed, requesting refresh.")
-                        requestMediaProjectionRefresh()
-                        callback(null)
-                    }
-                }
-                return
-            }
-
-            // If we've reached here, the projection is invalid.
-            Log.e(TAG, "Cannot capture - MediaProjection is invalid or null.")
-            requestMediaProjectionRefresh()
-            callback(null)
-
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in captureScreen", e)
-            callback(null)
-        }
-    }
-
-    /**
-     * Capture image from the persistent ImageReader - no VirtualDisplay creation needed.
-     * This is the fast path that keeps MediaProjection alive.
-     */
-    private fun attemptImageCaptureFromPersistent(callback: (File?) -> Unit, attempt: Int, maxAttempts: Int) {
-        val reader = persistentImageReader
-        if (reader == null) {
-            Log.e(TAG, "Persistent ImageReader is null")
-            callback(null)
-            return
-        }
-
-        val delays = listOf(100L, 200L, 400L)
-        val delay = delays.getOrElse(attempt - 1) { 400L }
-
-        handler.postDelayed({
-            // (M4) A fold/rotate at a capture boundary fires onCapturedContentResized(), which
-            // closes + nulls persistentImageReader between this block being scheduled and run — our
-            // captured `reader` would then be CLOSED and acquireLatestImage() would throw
-            // IllegalStateException. Detect the swap up front and return a clean null (the next
-            // capture rebuilds the reader at the new size). MediaProjection stays valid; benign.
-            if (persistentImageReader !== reader) {
-                Log.d(TAG, "attemptImageCaptureFromPersistent: reader reset mid-capture (fold/rotate) -> null")
-                callback(null)
-                return@postDelayed
-            }
-            try {
-                val image = reader.acquireLatestImage()
-                if (image != null) {
-                    Log.d(TAG, "Captured image from persistent display on attempt $attempt: ${image.width}x${image.height}")
-
-                    // Convert image to file (same logic as attemptImageCapture)
-                    val planes = image.planes
-                    val buffer = planes[0].buffer
-                    val pixelStride = planes[0].pixelStride
-                    val rowStride = planes[0].rowStride
-                    val rowPadding = rowStride - pixelStride * screenWidth
-
-                    val bitmap = Bitmap.createBitmap(
-                        screenWidth + rowPadding / pixelStride,
-                        screenHeight,
-                        Bitmap.Config.ARGB_8888
-                    )
-                    bitmap.copyPixelsFromBuffer(buffer)
-                    image.close()
-
-                    // Crop to actual screen size
-                    val croppedBitmap = Bitmap.createBitmap(
-                        bitmap, 0, 0, screenWidth, screenHeight
-                    )
-                    bitmap.recycle()
-
-                    // Save to file
-                    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-                    val file = File(cacheDir, "screenshot_$timestamp.png")
-                    FileOutputStream(file).use { out ->
-                        croppedBitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-                    }
-                    croppedBitmap.recycle()
-
-                    Log.d(TAG, "Screenshot saved from persistent display: ${file.absolutePath}, size=${file.length()}")
-                    callback(file)
-                } else if (attempt < maxAttempts) {
-                    Log.d(TAG, "No image on persistent attempt $attempt, retrying...")
-                    attemptImageCaptureFromPersistent(callback, attempt + 1, maxAttempts)
-                } else {
-                    Log.e(TAG, "Failed to capture from persistent display after $maxAttempts attempts")
-                    callback(null)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error capturing from persistent display", e)
-                if (attempt < maxAttempts) {
-                    attemptImageCaptureFromPersistent(callback, attempt + 1, maxAttempts)
-                } else {
-                    callback(null)
-                }
-            }
-        }, delay)
-    }
-
-    // ==================== Single-frame PNG capture (Task W4 — on-device vision) ====================
-
-    /**
-     * Capture ONE screen frame as PNG BYTES (in memory, never a file), for the
-     * on-device "look at my screen" vision path (Task W4.2). REUSES the existing
-     * MediaProjection + the persistent ImageReader that already power the
-     * screenshot/screen-share features — no new projection, no new consent flow
-     * (the projection consent is already granted when the overlay is running).
-     *
-     * Unlike [takeScreenshot] this does NOT write a file, add to
-     * [attachedScreenshots], or toast — the bytes are EPHEMERAL (handed to the
-     * model's prompt and dropped). It DOES hide the floating overlay briefly so the
-     * BlackBox bubble isn't in the captured frame, then restores it.
-     *
-     * Calls [callback] on the main thread with the PNG bytes, or null when capture
-     * is unavailable (no/invalid MediaProjection, or no frame after retries). Never
-     * throws.
-     */
-    private fun captureFramePngBytes(callback: (ByteArray?) -> Unit) {
-        if (mediaProjection == null || mediaProjectionInvalidated) {
-            Log.w(TAG, "captureFramePngBytes: no valid MediaProjection -> null")
-            requestMediaProjectionRefresh()
-            callback(null)
-            return
-        }
-
-        val proceed = {
-            // Hide overlay so the bubble/panel isn't in the frame.
-            val wasExpanded = isExpanded
-            overlayView.visibility = View.GONE
-            expandedPanel.visibility = View.GONE
-            handler.postDelayed({
-                attemptFramePngFromPersistent(attempt = 1, maxAttempts = 3) { bytes ->
-                    handler.post {
-                        if (wasExpanded) expandedPanel.visibility = View.VISIBLE
-                        else overlayView.visibility = View.VISIBLE
-                        callback(bytes)
-                    }
-                }
-            }, 200)
-        }
-
-        if (persistentScreenshotDisplay != null && persistentImageReader != null) {
-            mediaProjectionInvalidated = false
-            proceed()
-        } else {
-            setupPersistentScreenshotDisplay { success ->
-                if (success && persistentScreenshotDisplay != null && persistentImageReader != null) {
-                    mediaProjectionInvalidated = false
-                    proceed()
-                } else {
-                    Log.e(TAG, "captureFramePngBytes: persistent display setup failed -> null")
-                    requestMediaProjectionRefresh()
-                    callback(null)
-                }
-            }
-        }
-    }
-
-    /**
-     * Acquire one frame from the persistent ImageReader and compress it to PNG
-     * bytes (mirrors [attemptImageCaptureFromPersistent] but returns bytes, not a
-     * file). Retries with backoff up to [maxAttempts]; calls back null on failure.
-     */
-    private fun attemptFramePngFromPersistent(
-        attempt: Int,
-        maxAttempts: Int,
-        callback: (ByteArray?) -> Unit,
-    ) {
-        val reader = persistentImageReader
-        if (reader == null) {
-            callback(null)
-            return
-        }
-        val delays = listOf(100L, 200L, 400L)
-        val delay = delays.getOrElse(attempt - 1) { 400L }
-        handler.postDelayed({
-            // (M4) A fold/rotate at a capture boundary fires onCapturedContentResized(), which
-            // closes + nulls persistentImageReader between this block being scheduled and run —
-            // our captured `reader` would then be CLOSED and acquireLatestImage() would throw
-            // IllegalStateException (caught below, but churning retries). Detect the swap up front
-            // and return a clean null (the loop re-observes at the new size). MediaProjection stays
-            // valid; this is benign.
-            if (persistentImageReader !== reader) {
-                Log.d(TAG, "captureFramePngBytes: reader reset mid-capture (fold/rotate) -> null")
-                callback(null)
-                return@postDelayed
-            }
-            try {
-                val image = reader.acquireLatestImage()
-                if (image != null) {
-                    // Fix 3 (final-pass review): ALWAYS close the acquired Image, even
-                    // if copyPixelsFromBuffer / compress throws after acquire -- an
-                    // unclosed Image leaks an ImageReader buffer slot under repeated
-                    // faults and eventually starves the reader.
-                    val bytes = try {
-                        val planes = image.planes
-                        val buffer = planes[0].buffer
-                        val pixelStride = planes[0].pixelStride
-                        val rowStride = planes[0].rowStride
-                        val rowPadding = rowStride - pixelStride * screenWidth
-
-                        val bitmap = Bitmap.createBitmap(
-                            screenWidth + rowPadding / pixelStride,
-                            screenHeight,
-                            Bitmap.Config.ARGB_8888,
-                        )
-                        bitmap.copyPixelsFromBuffer(buffer)
-
-                        val cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
-                        bitmap.recycle()
-
-                        val baos = ByteArrayOutputStream()
-                        cropped.compress(Bitmap.CompressFormat.PNG, 100, baos)
-                        cropped.recycle()
-                        baos.toByteArray()
-                    } finally {
-                        image.close()
-                    }
-                    Log.d(TAG, "captureFramePngBytes: captured ${bytes.size} PNG bytes")
-                    callback(bytes)
-                } else if (attempt < maxAttempts) {
-                    attemptFramePngFromPersistent(attempt + 1, maxAttempts, callback)
-                } else {
-                    Log.e(TAG, "captureFramePngBytes: no frame after $maxAttempts attempts")
-                    callback(null)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "captureFramePngBytes: error acquiring frame", e)
-                if (attempt < maxAttempts) attemptFramePngFromPersistent(attempt + 1, maxAttempts, callback)
-                else callback(null)
-            }
-        }, delay)
-    }
+    // Screenshots, frames, recording and the projection refresh live in OverlayCapture.
 
     // ==================== Recording Stop Button ====================
 
@@ -1924,13 +1331,13 @@ class OverlayService : Service() {
         // Setup stop button click listener - stops recording
         stopBtn?.setOnClickListener {
             Log.d(TAG, "Recording stop button clicked")
-            stopRecording()
+            capture.stopRecording()
         }
 
         // Also allow clicking anywhere on the bar to stop
         recordingStopButton?.setOnClickListener {
             Log.d(TAG, "Recording stop bar clicked")
-            stopRecording()
+            capture.stopRecording()
         }
 
         // Make it draggable
@@ -2026,258 +1433,60 @@ class OverlayService : Service() {
         recordingStopButtonParams = null
     }
 
-    /**
-     * Request MediaProjection refresh by broadcasting to PortalActivity.
-     * This stops the overlay service and requests a new MediaProjection permission.
-     * Used on Android 14+ where MediaProjection becomes invalid after use.
-     * @param forRecording If true, the new MediaProjection will be used for recording (skip persistent display)
-     */
-    private fun requestMediaProjectionRefresh(forRecording: Boolean = false) {
-        Log.d(TAG, "Requesting MediaProjection refresh (forRecording=$forRecording)...")
-        showToast(if (forRecording) "Requesting recording permission..." else "Refreshing capture permission...")
-
-        // Broadcast to PortalActivity to restart the overlay with fresh permission
-        val intent = Intent(ACTION_REFRESH_PROJECTION)
-        intent.setPackage(packageName)
-        intent.putExtra(EXTRA_RECORDING_MODE, forRecording)  // Pass recording mode flag
-        sendBroadcast(intent)
-
-        // Stop this service - PortalActivity will restart it with new permission
-        handler.postDelayed({
-            stopSelf()
-        }, 500)
-    }
-
-    private fun toggleRecording() {
-        if (isRecording) {
-            stopRecording()
-        } else {
-            startRecording()
-        }
-    }
-
-    private fun startRecording() {
-        if (mediaProjection == null) {
-            showToast("Recording permission not granted")
-            return
-        }
-
-        // Android 14+ restriction: Can only call createVirtualDisplay() ONCE per MediaProjection
-        // If persistent screenshot display exists, we need to switch modes
-        if (persistentScreenshotDisplay != null && Build.VERSION.SDK_INT >= 34) {
-            Log.d(TAG, "Android 14+ detected: Switching from screenshot mode to recording mode")
-            showToast("Switching to recording mode...")
-
-            // Release screenshot display first
-            persistentScreenshotDisplay?.release()
-            persistentScreenshotDisplay = null
-            persistentImageReader?.close()
-            persistentImageReader = null
-
-            // Try to create recording display with existing MediaProjection
-            // If this fails (Android 14+ token exhausted), we'll request a new MediaProjection
-            proceedWithRecording()
-            return
-        }
-
-        // If MediaProjection is already known to be invalidated, request refresh
-        if (mediaProjectionInvalidated) {
-            Log.e(TAG, "MediaProjection is invalid. Requesting a new permission.")
-            requestMediaProjectionRefresh()
-            return
-        }
-
-        proceedWithRecording()
-    }
 
 
     /**
-     * Common path for starting recording once all checks pass
+     * What capture shows and attaches through the overlay: the status line, the bubble and
+     * panel it hides from the frame, the screenshot and recording attachments, the floating
+     * recording stop button, and the service stop a projection refresh needs.
      */
-    private fun proceedWithRecording() {
-        // KEEP persistent screenshot display alive - it keeps MediaProjection valid!
-        // MediaProjection CAN support multiple VirtualDisplays simultaneously.
-        // The persistent display ensures the token remains valid for both screenshots AND recording.
-        Log.d(TAG, "Starting recording while keeping persistent screenshot display alive")
-
-        // Release any legacy displays, just in case.
-        if (virtualDisplay != null) {
-            Log.d(TAG, "Releasing legacy VirtualDisplay before recording")
-            virtualDisplay?.release()
-            virtualDisplay = null
-            imageReader?.close()
-            imageReader = null
+    private inner class CaptureHost : OverlayCapture.Host {
+        override fun updateStatus(status: String) = this@OverlayService.updateStatus(status)
+        override fun showToast(message: String) = this@OverlayService.showToast(message)
+        override fun hideOverlayForCapture(): Boolean {
+            val wasExpanded = isExpanded
+            overlayView.visibility = View.GONE
+            expandedPanel.visibility = View.GONE
+            return wasExpanded
         }
-        currentDisplayMode = DisplayMode.NONE
-
-
-        // Small delay to ensure clean state.
-        val delayMs = 300L
-        Log.d(TAG, "Waiting ${delayMs}ms before creating recording VirtualDisplay...")
-        updateStatus("Preparing...")
-
-        handler.postDelayed({
-            startRecordingInternal()
-        }, delayMs)
-    }
-
-    private fun startRecordingInternal() {
-        if (mediaProjection == null) {
-            Log.w(TAG, "startRecordingInternal: mediaProjection is null, cannot record.")
-            showToast("Recording permission lost")
-            updateStatus("Ready")
-            // Because the projection is null, we should trigger a refresh.
-            requestMediaProjectionRefresh()
-            return
-        }
-
-        Log.d(TAG, "Starting screen recording...")
-        updateStatus("Recording...")
-
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val outputFile = File(cacheDir, "recording_$timestamp.mp4")
-
-        try {
-            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(this)
+        override fun restoreOverlayAfterCapture(wasExpanded: Boolean) {
+            if (wasExpanded) {
+                expandedPanel.visibility = View.VISIBLE
             } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
+                overlayView.visibility = View.VISIBLE
             }
-
-            mediaRecorder?.apply {
-                setVideoSource(MediaRecorder.VideoSource.SURFACE)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setOutputFile(outputFile.absolutePath)
-                setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-                setVideoSize(screenWidth, screenHeight)
-                setVideoFrameRate(30)
-                setVideoEncodingBitRate(5 * 1024 * 1024)
-                prepare()
-            }
-
-            try {
-                // Create recording display SEPARATE from persistent screenshot display
-                // Both can coexist - that's the key to keeping MediaProjection valid
-                recordingDisplay = mediaProjection?.createVirtualDisplay(
-                    "Recording",
-                    screenWidth, screenHeight, screenDensity,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    mediaRecorder?.surface, null, handler
-                )
-            } catch (se: SecurityException) {
-                // Android 14+ restriction: MediaProjection exhausted after first createVirtualDisplay
-                Log.e(TAG, "SecurityException creating recording VirtualDisplay - Android 14+ requires new MediaProjection", se)
-                mediaProjectionInvalidated = true
-                mediaRecorder?.release()
-                mediaRecorder = null
-                currentDisplayMode = DisplayMode.NONE
+        }
+        override fun onScreenshot(file: File?) {
+            if (file != null) {
+                attachedScreenshots.add(file)
+                updateAttachmentCount()
+                showToast("Screenshot added (${attachedScreenshots.size})")
                 updateStatus("Ready")
-
-                // Android 14+ FIX: Request a NEW MediaProjection for recording mode
-                // User will grant permission once, then recording works for all future attempts
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    handler.post {
-                        requestMediaProjectionRefresh(forRecording = true)  // Pass recording mode flag
-                    }
-                } else {
-                    // Older Android: Try to recover with screenshot display
-                    handler.post {
-                        showToast("Recording failed. Please restart overlay.")
-                        setupPersistentScreenshotDisplay { success ->
-                            if (success) Log.d(TAG, "Re-established screenshot display after recording failure.")
-                        }
-                    }
-                }
-                return
+            } else {
+                showToast("Screenshot failed")
+                updateStatus("Capture failed")
             }
-
-
-            if (recordingDisplay == null) {
-                Log.e(TAG, "Failed to create recording VirtualDisplay (was null)")
-                showToast("Recording failed - display error")
-                mediaRecorder?.release()
-                mediaRecorder = null
-                currentDisplayMode = DisplayMode.NONE
-                updateStatus("Ready")
-                return
-            }
-
-            currentDisplayMode = DisplayMode.RECORDING
-            Log.d(TAG, "Recording VirtualDisplay created (separate from screenshot display)")
-
-            mediaRecorder?.start()
-            isRecording = true
-
-            // Hide overlay UI and show floating stop button
+        }
+        override fun onRecordingStarted() {
             overlayView.visibility = View.GONE
             expandedPanel.visibility = View.GONE
             showRecordingStopButton()
-
-            showToast("Recording started - tap stop button when done")
-            Log.d(TAG, "Recording started: ${outputFile.absolutePath}")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error starting recording", e)
-            showToast("Recording failed: ${e.message}")
-            updateStatus("Recording failed")
-            mediaRecorder?.release()
-            mediaRecorder = null
-            virtualDisplay?.release()
-            virtualDisplay = null
         }
-    }
-
-    private fun stopRecording() {
-        if (!isRecording) return
-
-        Log.d(TAG, "Stopping recording...")
-        updateStatus("Saving recording...")
-
-        try {
-            mediaRecorder?.stop()
-            mediaRecorder?.release()
-
-            // Find the recording file
-            val recordings = cacheDir.listFiles { file ->
-                file.name.startsWith("recording_") && file.name.endsWith(".mp4")
-            }?.sortedByDescending { it.lastModified() }
-
-            val recordingFile = recordings?.firstOrNull()
-            if (recordingFile != null && recordingFile.exists()) {
-                // Clear old recording and set new one
-                attachedRecording?.delete()
-                attachedRecording = recordingFile
-                updateAttachmentCount()
-                showToast("Recording saved!")
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping recording", e)
-        } finally {
-            mediaRecorder = null
-            recordingDisplay?.release()
-            recordingDisplay = null
-            isRecording = false
-            currentDisplayMode = DisplayMode.NONE
-            lastRecordingStopTime = System.currentTimeMillis()
-
-            // Persistent screenshot display remains active - no need to re-establish!
-            // MediaProjection stays valid because we never released the persistent display.
-            Log.d(TAG, "Recording stopped. Persistent screenshot display remains active - MediaProjection still valid.")
-
+        override fun onRecordingSaved(file: File) {
+            attachedRecording?.delete()
+            attachedRecording = file
+            updateAttachmentCount()
             showToast("Recording saved!")
-            Log.d(TAG, "Recording stopped, mode reset to NONE.")
-            updateStatus("Ready")
-
+        }
+        override fun onRecordingStopped() {
             hideRecordingStopButton()
 
             overlayView.visibility = View.GONE
             expandedPanel.visibility = View.VISIBLE
             isExpanded = true
         }
+        override fun stopService() = stopSelf()
     }
-
 
     // ==================== Chat & Attachments ====================
 
@@ -2828,63 +2037,17 @@ class OverlayService : Service() {
         override fun showTranscriptEntry(speaker: String, text: String, count: Int) =
             this@OverlayService.showTranscriptEntry(speaker, text, count)
         override fun updateLiveResponse(text: String) = this@OverlayService.updateLiveResponse(text)
-        override fun screenCaptureAvailable(): Boolean = mediaProjection != null && !mediaProjectionInvalidated
+        override fun screenCaptureAvailable(): Boolean = capture.available()
         override fun ensureScreenFrames(onReady: (Boolean) -> Unit) {
-            if (persistentImageReader == null) {
-                setupPersistentScreenshotDisplay { success ->
+            if (!capture.hasPersistentReader()) {
+                capture.setupPersistentScreenshotDisplay { success ->
                     if (success) handler.post { onReady(true) } else onReady(false)
                 }
             } else {
                 onReady(true)
             }
         }
-        override fun latestScreenFrameJpegBase64(): String? = latestFrameJpegBase64()
-    }
-
-    /** The persistent display's newest frame as base64 JPEG (quality 70), or null when none is ready. */
-    private fun latestFrameJpegBase64(): String? {
-        val reader = persistentImageReader ?: return null
-        val image = reader.acquireLatestImage() ?: return null
-
-        try {
-            val planes = image.planes
-            val buffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * image.width
-
-            // Create bitmap
-            val bitmap = Bitmap.createBitmap(
-                image.width + rowPadding / pixelStride,
-                image.height,
-                Bitmap.Config.ARGB_8888
-            )
-            bitmap.copyPixelsFromBuffer(buffer)
-
-            // Crop to actual size if needed
-            val croppedBitmap = if (rowPadding > 0) {
-                Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
-            } else {
-                bitmap
-            }
-
-            // Compress to JPEG
-            val baos = ByteArrayOutputStream()
-            croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 70, baos)
-            val base64Frame = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-
-            // Cleanup
-            if (croppedBitmap != bitmap) {
-                croppedBitmap.recycle()
-            }
-            bitmap.recycle()
-            return base64Frame
-        } catch (e: Exception) {
-            Log.e(TAG, "Error capturing frame", e)
-            return null
-        } finally {
-            image.close()
-        }
+        override fun latestScreenFrameJpegBase64(): String? = capture.latestFrameJpegBase64()
     }
 
     private fun updateScreenShareUI(isActive: Boolean) {
