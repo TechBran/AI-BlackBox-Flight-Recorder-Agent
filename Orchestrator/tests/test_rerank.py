@@ -496,6 +496,68 @@ def test_score_cpu_model_cached(monkeypatch):
     assert fake.constructed == ["Qwen/Qwen3-Reranker-0.6B"]
 
 
+def _install_broken_sentence_transformers(monkeypatch):
+    """A sentence_transformers whose CrossEncoder import raises ImportError (a
+    box without torch); returns the list of import attempts."""
+    import sys
+    import types
+
+    attempts = []
+
+    class Broken(types.ModuleType):
+        def __getattr__(self, name):
+            if name.startswith("__"):    # the import machinery's own probes
+                raise AttributeError(name)
+            attempts.append(name)
+            raise ImportError("No module named 'torch'")
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", Broken("sentence_transformers"))
+    return attempts
+
+
+def test_cpu_load_failure_warns_once_and_is_not_retried(monkeypatch, caplog):
+    """A failed import/load used to return None silently and be retried by
+    every retrieve(). Now: one WARNING per model_id (exception class and
+    message), and later calls return None without importing again."""
+    import logging
+    attempts = _install_broken_sentence_transformers(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="Orchestrator.rerank"):
+        for _ in range(3):
+            assert rerank._load_cpu_model("Qwen/Qwen3-Reranker-0.6B") is None
+    assert attempts == ["CrossEncoder"], "no second import attempt"
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "Qwen/Qwen3-Reranker-0.6B" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert "ImportError" in warnings[0].getMessage()
+    assert "No module named 'torch'" in warnings[0].getMessage()
+
+    # Per model_id: another model still gets its one attempt (and its warning).
+    assert rerank._load_cpu_model("other/model") is None
+    assert attempts == ["CrossEncoder", "CrossEncoder"]
+
+
+def test_cpu_load_failure_through_score_never_raises(monkeypatch):
+    attempts = _install_broken_sentence_transformers(monkeypatch)
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu"):
+        for _ in range(3):
+            assert rerank.score("q", ["p1", "p2"]) is None
+    assert len(attempts) == 1
+
+
+def test_cpu_model_loads_once_and_reset_clears_a_failure(monkeypatch):
+    """A model that loads is the cached instance; reset_preflight (the M8
+    selector's provider switch, and test isolation) forgets a recorded failure
+    as well, like a restart."""
+    _install_broken_sentence_transformers(monkeypatch)
+    assert rerank._load_cpu_model("m") is None
+    rerank.reset_preflight()
+    fake = _install_fake_cross_encoder(monkeypatch)
+    first = rerank._load_cpu_model("m")
+    assert first is not None
+    assert rerank._load_cpu_model("m") is first
+    assert fake.constructed == ["m"]
+
+
 # ── one-time latency preflight (the PROBING providers: cpu / cloud / llm) ─────
 # The on-box batch providers (localstack/vllm) no longer probe at all — their
 # capability is evidence from real traffic (_EVIDENCE_PROVIDERS; contract pinned

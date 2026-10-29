@@ -100,6 +100,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -115,6 +116,8 @@ from Orchestrator.config import (
     OPENAI_URL,
     XAI_URL,
 )
+
+logger = logging.getLogger(__name__)
 
 # Where the installer's vllm-reranker.service listens (M13). Code fallback so
 # a fresh GPU box works with zero url/port config edits once the service is
@@ -622,6 +625,11 @@ _cpu_importable: "bool | None" = None
 # model switch (and every test) re-loads fresh.
 _cpu_model_lock = threading.Lock()
 _cpu_model_cache: dict = {}
+# model_id -> "<ExceptionClass>: <message>" of its failed import/load. Negative
+# cache: a box without torch/sentence-transformers would otherwise retry the
+# import on every retrieve(). Logged once at WARNING; cleared like the cache
+# above (reset_preflight, or a restart).
+_cpu_model_failed: dict = {}
 
 
 def _probe_localhost(base_url: str, timeout_s: float = 1.0) -> bool:
@@ -1027,18 +1035,28 @@ def _load_cpu_model(model_id: str):
     this function, NEVER at module top) so a fresh LOW box — which has no
     torch/sentence-transformers — stays import-clean; absent deps make the CPU
     provider inert, never raise. Double-checked-locked so concurrent retrieve()
-    calls from the FastAPI threadpool load the ~0.6B model only once."""
+    calls from the FastAPI threadpool load the ~0.6B model only once. A
+    failure is logged once per model_id and remembered (_cpu_model_failed), so
+    later calls return None without importing again."""
     model = _cpu_model_cache.get(model_id)
     if model is not None:
         return model
+    if model_id in _cpu_model_failed:
+        return None
     with _cpu_model_lock:
         model = _cpu_model_cache.get(model_id)
         if model is not None:
             return model
+        if model_id in _cpu_model_failed:
+            return None
         try:
             from sentence_transformers import CrossEncoder
             model = CrossEncoder(model_id)
-        except Exception:  # noqa: BLE001 - absent deps / load failure → inert
+        except Exception as exc:  # noqa: BLE001 - absent deps / load failure → inert
+            _cpu_model_failed[model_id] = f"{type(exc).__name__}: {exc}"
+            logger.warning("[RERANK] cpu: cannot load %s (%s); the CPU reranker stays "
+                           "off for it until a restart or a reranker change",
+                           model_id, _cpu_model_failed[model_id])
             return None
         _cpu_model_cache[model_id] = model
         return model
@@ -1794,7 +1812,8 @@ def preflight(settings: "dict | None" = None) -> dict:
 def reset_preflight() -> None:
     """Clear every cached judgement about the reranker — the probe cache
     (result + TTL deadline), the CAPABILITY EVIDENCE, the reachability + §5.2
-    co-run caches, the in-process CPU CrossEncoder cache (M5), AND the
+    co-run caches, the in-process CPU CrossEncoder cache (M5) and its record
+    of failed loads, AND the
     un-reranked fallthrough record. The M8 selector calls this on a provider
     change: the previous provider's evidence and failures say NOTHING about the
     new one, so the new selection starts at `unknown` and the next real search
@@ -1815,6 +1834,7 @@ def reset_preflight() -> None:
         _corun_cache = None
     with _cpu_model_lock:
         _cpu_model_cache.clear()
+        _cpu_model_failed.clear()
     with _fallthrough_lock:
         _fallthrough.update(count=0, reason=None, provider=None, model=None,
                             at=None)
