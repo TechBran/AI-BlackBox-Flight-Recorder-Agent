@@ -213,25 +213,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         com.aiblackbox.portal.data.local.AutonomyStore.fromContext(appContext)
     }
 
-    // Warm-loop guard: a disk-persisted "warm in-flight" flag set BEFORE every
-    // on-device engine warm and cleared on its success / graceful failure. A
-    // SIGKILL mid-warm (device OOM) runs no cleanup, so the flag survives still-set
-    // into the next process start -- the AUTO-warm in [preloadLocalEngine] reads it
-    // and SKIPS, turning a crash/restart/auto-warm loop into a single failure
-    // (a deliberate send is the manual retry). See [WarmInflightStore].
-    private val warmInflightStore by lazy {
-        com.aiblackbox.portal.data.local.WarmInflightStore.fromContext(appContext)
-    }
-
-    // Auto-warm-on-open SETTING (user preference, persisted): when DISABLED the
-    // [preloadLocalEngine] auto path skips the warm and the model loads lazily on the
-    // first send. Default TRUE (instant first send). Distinct from the warm-loop
-    // GUARD above, which is an automatic OOM-crash safety, not a user choice.
-    // See [LocalWarmPrefs].
-    private val localWarmPrefs by lazy {
-        com.aiblackbox.portal.data.local.LocalWarmPrefs.fromContext(appContext)
-    }
-
     private var api: BlackBoxApi? = null
     private var repository: ChatRepository? = null
     private var taskRepository: TaskRepository? = null
@@ -243,69 +224,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // disk-present, sha-verified model and fires a best-effort re-attest on open.
     private var providerPicker: ProviderPickerViewModel? = null
 
-    // ── On-device (local) engine seam (Task 2.4) ──
-    // The on-device generation engine, injected as a lazy provider so tests can
-    // supply a FakeLocalLlm. NULL until an installed on-device model is found —
-    // then it is lazily wired (Task 2.6a) to the SINGLETON [localEngine]
-    // (initialize() is ~10s, so the engine is built once and reused across turns).
-    // With no model installed it stays null and sendViaLocalEngine() falls back to
-    // the 1.6 placeholder. Settable so a host/builder (or a test) can wire a fake.
-    // @Volatile (A04-chat-viewmodel-09): the engine fields are written by the wiring
-    // (which may run on an IO thread for the preload) and read on Main.
+    // ── On-device (local) engine (Task 2.4 seam, W1 warm, W5 model switch) ──
+    // The engine's wiring, its one-owner load (pinWarmEngine, rank 63), the
+    // warm-while-open preload, the deferred re-warm and the settings apply live in
+    // LocalEngineCoordinator (rank 76); this view model runs the turns and calls in.
+    private val engines = LocalEngineCoordinator(
+        appContext = appContext,
+        scope = viewModelScope,
+        api = { api },
+        isLocalProvider = { ChatProvider.fromId(currentProvider).isLocal },
+        turnInFlight = { isLocalTurnInFlight() },
+    )
+
+    // The on-device generation engine, injected as a lazy provider so a host or a
+    // test can wire a FakeLocalLlm; null until an installed model is wired.
     @VisibleForTesting
-    @Volatile
-    var localLlmProvider: (() -> LocalLlm)? = null
-
-    // The concrete on-device engine (Task 2.6a). Wired by [localProviderOrWire] —
-    // borrowed from [LocalEngineHolder], or built for the active bundle and then loaded
-    // through [pinWarmEngine], which pins it in the holder (the engine's one owner,
-    // audit rank 63). Reused across turns. Until that load, a freshly built engine is
-    // an unloaded wrapper this VM may drop or close.
-    @Volatile
-    private var localEngine: LiteRtEngine? = null
-
-    // The installed bundle file the [localEngine] runs, and its delegate. Resolved
-    // from [LocalModelManager.installedModels] when the engine is wired.
-    @Volatile
-    private var localEngineModelFile: java.io.File? = null
-    @Volatile
-    private var localEngineDelegate: String = "gpu"
-
-    // True once [localEngine] is the engine pinned in [LocalEngineHolder] (borrowed, or
-    // loaded by this VM through [pinWarmEngine]); the holder owns it, so onCleared /
-    // invalidateLocalEngine must not close it. False only for a built-but-not-loaded
-    // wrapper, which holds no native engine.
-    @Volatile
-    private var localEngineFromHolder: Boolean = false
-
-    // Single-flight engine wiring (A04-chat-viewmodel-09): the preload (IO) and a send
-    // (Main) both wire the engine; the second waits and reuses the first's result
-    // instead of building a second engine.
-    private val engineWiringMutex = Mutex()
-
-    // The in-flight preload warm, joined before a re-warm (see [reWarmLocalEngine]).
-    private var localWarmJob: Job? = null
-
-    // A settings apply that arrived mid-turn also releases the holder's engine when the
-    // deferred re-warm runs (A04-chat-viewmodel-08), so the new window is not lost.
-    @Volatile
-    private var pendingHolderClose: Boolean = false
-
-    // The slug of the active on-device model the user picked in the Model Manager
-    // (Task W5), persisted under "model_local". [localProviderOrWire] prefers the
-    // INSTALLED bundle whose slug matches this, so picking a different installed
-    // model among several actually changes which one is warmed/used. Null/blank ->
-    // fall back to the alphabetically-first installed bundle (the prior behavior).
-    @Volatile
-    private var currentLocalModelSlug: String = ""
-
-    // I1 (W5 review): a model-selection change that arrives WHILE a local turn is
-    // streaming must NOT close the live native engine mid-generation (close() is
-    // not serialized against generate() -> native teardown race). When that
-    // happens we set this flag and defer the invalidate+re-warm until the turn
-    // completes ([processPendingLocalReWarm]).
-    @Volatile
-    private var pendingLocalReWarm: Boolean = false
+    var localLlmProvider: (() -> LocalLlm)?
+        get() = engines.llmProvider
+        set(value) { engines.llmProvider = value }
 
     // The persona / system-prompt cache (Task 2.3) feeding the on-device turn.
     // Built lazily off the application context the first time a local turn runs
@@ -444,17 +380,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── On-device (local) engine readiness (Task W1) ──
     // Mirrors the warm-while-app-open preload so the provider pill can show
-    // "loading…/ready". IDLE until a warm starts (we only warm when the local
-    // provider is the active one — see [preloadLocalEngine]); the lazy load in
-    // [runLocalEngineTurn] remains the fallback if the user sends before READY.
-    private val _localEngineState = MutableStateFlow(LocalEngineState.IDLE)
-    val localEngineState: StateFlow<LocalEngineState> = _localEngineState.asStateFlow()
-
-    // True while a [preloadLocalEngine] warm is in flight, so a duplicate trigger
-    // (e.g. re-selecting the local provider) does not launch a second concurrent
-    // warm. Paired with the model path so a DIFFERENT model can still re-warm.
-    @Volatile
-    private var warmingModelPath: String? = null
+    // "loading…/ready" (LocalEngineCoordinator.state).
+    val localEngineState: StateFlow<LocalEngineState> = engines.state
 
     // ── CU model backends (id → "anthropic" | "google" | "openai") ──
     // Populated only when fetching /models/computer-use (CU production pass
@@ -599,8 +526,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // selection changes while the local provider is the active one.
             launch {
                 store.getString("model_local").collect { slug ->
-                    val previous = currentLocalModelSlug
-                    currentLocalModelSlug = slug
+                    val previous = engines.currentModelSlug
+                    engines.currentModelSlug = slug
                     // Thin shim over the PURE [localReWarmAction] decision (M1
                     // first-emission no-op + I1 mid-stream defer), so the branching
                     // is unit-tested without the ViewModel.
@@ -612,10 +539,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             turnInFlight = isLocalTurnInFlight(),
                         )
                     ) {
-                        LocalReWarmAction.NOW -> reWarmLocalEngine()
+                        LocalReWarmAction.NOW -> engines.reWarm()
                         // I1: tearing down now would close() the native runtime
                         // mid-generation -> apply at turn completion instead.
-                        LocalReWarmAction.DEFER -> pendingLocalReWarm = true
+                        LocalReWarmAction.DEFER -> engines.pendingReWarm = true
                         LocalReWarmAction.NONE -> Unit
                     }
                 }
@@ -678,7 +605,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (!job.isActive) return
         _streamCancelled.value = true
         job.cancelAndJoin()
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _chatState.value = ChatState.IDLE
         _signalLabel.value = null
         stopBackgroundService()
@@ -728,7 +655,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             // Task W1: app-open warm. If the persisted/active provider is already
             // LOCAL, the provider collector may have fired in init BEFORE the api
-            // was ready (so localProviderOrWire() returned null → IDLE). Now the api
+            // was ready (so engines.providerOrWire() returned null → IDLE). Now the api
             // is wired, kick the warm again; it no-ops for non-local providers and
             // is idempotent when already WARMING/READY.
             preloadLocalEngine()
@@ -749,23 +676,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // Cancel the picker's own CoroutineScope (separate from viewModelScope,
         // which the framework cancels automatically) so it doesn't leak.
         providerPicker?.dispose()
-        // Release the on-device engine's native runtime (Task 2.6a). Safe even if
-        // never loaded; close() is idempotent. Guarded so a native-layer throw on
-        // teardown can't crash the VM disposal.
-        //
-        // R2-C: close ONLY a VM-OWNED engine. When [localEngineFromHolder] the
-        // engine is the PROCESS-held warm engine owned by [LocalModelService];
-        // closing it here would tear down the native runtime the service is
-        // keeping resident (and break the next turn / the model-as-a-tool path).
-        // The service releases it on its own stop/destroy via the holder.
-        if (!localEngineFromHolder) {
-            runCatching { localEngine?.close() }
-        }
-        localEngine = null
-        // Every loaded engine is pinned in the holder (audit rank 63). With the service
-        // not running nothing else keeps it, so release it here as the VM-owned engine
-        // used to be; a running generation keeps it alive until it ends.
-        if (!LocalModelService.isRunning()) runCatching { LocalEngineHolder.clearAndClose() }
+        // Release the on-device engine (only one this view model owns; the service's
+        // process-held engine stays — LocalEngineCoordinator.release).
+        engines.release()
         super.onCleared()
     }
 
@@ -933,7 +846,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // Resolve the provider: an already-wired one (test fake or a
             // previously-wired production engine) is returned as-is; otherwise wire
             // the production LiteRtEngine from an INSTALLED model (suspend disk read).
-            val provider = localProviderOrWire()
+            val provider = engines.providerOrWire()
             if (provider == null) {
                 // No installed model (or api not ready) → 1.6 placeholder, unchanged.
                 sendViaLocalPlaceholder(text, clearInput)
@@ -1015,7 +928,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // A SEND is the deliberate (manual-retry) warm, so it is NOT blocked by
                 // the crash-loop flag; the one process warm still brackets the load
                 // with it (an OOM-kill here leaves it set for the next auto-warm).
-                loadWiredLocalEngine()
+                engines.loadWired()
                 val persona = withContext(Dispatchers.IO) { cache.get(op) }
                 // 3. The SAME sink sendViaSSE uses — append each delta to the
                 //    in-flight assistant message (identical rendering). Runs on the
@@ -1211,7 +1124,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             persistHistory()
             // I1 (W5): the turn is done -> apply any model switch that arrived
             // mid-stream now that no native generation is in flight.
-            processPendingLocalReWarm()
+            engines.processPendingReWarm()
         }
     }
 
@@ -1241,7 +1154,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun lookAtScreen(userPrompt: String) {
         streamJob?.cancel()
         streamJob = viewModelScope.launch {
-            val provider = localProviderOrWire()
+            val provider = engines.providerOrWire()
             if (provider == null) {
                 // No installed model → reuse the placeholder path with a vision-flavored ask.
                 sendViaLocalPlaceholder(userPrompt)
@@ -1298,7 +1211,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             // Load through the one process warm (send/vision = a
                             // deliberate warm, not gated by the crash-loop flag), then
                             // take the engine it settled on.
-                            loadWiredLocalEngine()
+                            engines.loadWired()
                             val llm = provider()
                             check(llm is VisionLlm) { "the on-device engine changed during the load" }
                             val persona = withContext(Dispatchers.IO) { cache?.get(op) ?: "" }
@@ -1337,7 +1250,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             persistHistory()
             // I1 (W5): the turn is done -> apply any model switch that arrived
             // mid-stream now that no native generation is in flight.
-            processPendingLocalReWarm()
+            engines.processPendingReWarm()
         }
     }
 
@@ -1386,163 +1299,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolve the on-device [localLlmProvider] (Task 2.6a), lazily wiring the
-     * SINGLETON production [LiteRtEngine] the first time an INSTALLED model is
-     * present.
-     *
-     *  - If [localLlmProvider] is already set (a test fake, or a previously-wired
-     *    engine) it is returned unchanged — the test seam is never disturbed.
-     *  - Otherwise this reads the installed bundles via [LocalModelManager]
-     *    ([installedModels] is device-scoped + runs on IO), picks the first
-     *    attested/installed bundle, builds the engine singleton ([LiteRtEngine.fromInstalled],
-     *    delegate "cpu"), records its model file + delegate for [load], sets
-     *    [localLlmProvider] to return that singleton, and returns it.
-     *  - If NO model is installed (or the api is not ready) it returns null and
-     *    [localLlmProvider] stays null — the caller falls back to the placeholder.
-     *
-     * The engine is built ONCE (its ~10s initialize() happens in [load], also
-     * once) and reused across turns. Suspends only for the disk read.
-     */
-    private suspend fun localProviderOrWire(): (() -> LocalLlm)? = engineWiringMutex.withLock {
-        // Single-flight (A04-chat-viewmodel-09): a second caller waits here and gets the
-        // first caller's wiring instead of building a second engine.
-        localLlmProvider ?: wireLocalProvider()
-    }
-
-    /**
-     * Load the wired production engine through the ONE process warm
-     * ([pinWarmEngine]: serialized with the service and control_phone warms, bracketed
-     * by the warm marker and the crash-loop flag, pinned in [LocalEngineHolder]) and
-     * adopt the engine it settles on — this one, or the one another warmer already
-     * pinned for the same bundle. A no-op for a test fake (no model file).
-     */
-    private suspend fun loadWiredLocalEngine() {
-        val engine = localEngine ?: return
-        val modelFile = localEngineModelFile ?: return
-        val pinned = pinWarmEngine(appContext, engine, modelFile.absolutePath, localEngineDelegate)
-        localEngine = pinned
-        localEngineFromHolder = true
-    }
-
-    private suspend fun wireLocalProvider(): (() -> LocalLlm)? {
-        val client = api ?: return null
-
-        // Device-scoped model discovery (deviceId is irrelevant to installedModels()
-        // — it only matters for attest/setAutonomy — so a stable constant is fine
-        // here; the picker/Model-Manager own the real attest flow).
-        val manager = LocalModelManager.fromContext(appContext, LocalModelApi(client), deviceId = "android-device")
-        val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
-        // Task W5: honor the user's ACTIVE on-device model selection (persisted under
-        // "model_local" -> [currentLocalModelSlug]). Pick the installed bundle whose
-        // slug matches it; if unset or no longer installed (e.g. just deleted), fall
-        // back to installedModels()'s alphabetically-first entry (gemma-4-e2b, the
-        // LIGHTER model) -- a safe RAM default and the prior behavior.
-        val bundle = installed.firstOrNull { it.slug == currentLocalModelSlug }
-            ?: installed.firstOrNull()
-            ?: return null // no model -> placeholder path
-
-        val delegate = "gpu" // Edge Gallery parity: GPU ~10x faster; load() falls back to CPU on GPU-init failure
-        val targetPath = bundle.file.absolutePath
-
-        // M3: SERIALIZE with the foreground-service warm. The service is the PRIMARY
-        // warmer ([preloadLocalEngine] kicks it via LocalModelService.start). If it is
-        // cold-loading THIS bundle, WAIT for it to pin the engine in the holder rather
-        // than building a SECOND engine concurrently — two parallel 3.66GB GPU loads
-        // OOM the device ("the model could not finish" / crash on launch). We give the
-        // async service a brief head start to publish its [LocalEngineHolder.warmingPath]
-        // marker, then keep waiting only while it is actively warming this exact bundle,
-        // capped by a grace window. If it never claims the warm (service not running /
-        // refused) we fall straight through to the unchanged USE_HOLDER/BUILD_OWN
-        // decision below — the graceful fallback is preserved.
-        run {
-            val start = android.os.SystemClock.elapsedRealtime()
-            while (LocalEngineHolder.getOrNull() == null &&
-                android.os.SystemClock.elapsedRealtime() - start < SERVICE_WARM_GRACE_MS) {
-                val serviceWarmingThis = LocalEngineHolder.warmingPath == targetPath
-                val withinHeadStart =
-                    android.os.SystemClock.elapsedRealtime() - start < SERVICE_WARM_HEADSTART_MS
-                if (!serviceWarmingThis && !withinHeadStart) break
-                delay(SERVICE_WARM_POLL_MS)
-            }
-        }
-
-        // R2-C: PREFER the warm, PROCESS-resident engine pinned by
-        // [LocalModelService] when it matches the active bundle -- it is already
-        // loaded (no ~10-75s cold load) and survives VM/process recycles. The pure
-        // [engineSourceFor] is the decision: USE_HOLDER iff the holder is non-empty
-        // AND built for THIS bundle path; otherwise BUILD_OWN (the pre-R2-C path,
-        // also taken when the service never started -- the graceful fallback).
-        val held = LocalEngineHolder.getOrNull()
-        if (engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath) == EngineSource.USE_HOLDER) {
-            // Borrow the service-owned warm engine. We do NOT own it, so onCleared /
-            // invalidateLocalEngine must not close() it (localEngineFromHolder = true).
-            val warm = held!!
-            localEngine = warm
-            localEngineModelFile = bundle.file
-            localEngineDelegate = delegate
-            localEngineFromHolder = true
-            // Reads the field so a later re-pin (loadWiredLocalEngine) is picked up.
-            val provider: () -> LocalLlm = { localEngine ?: warm }
-            localLlmProvider = provider
-            return provider
-        }
-
-        // BUILD_OWN: no warm engine to borrow (service not running / different
-        // model). Build the VM-owned engine for the installed bundle (default CPU
-        // delegate), threading the PER-MODEL config (Task W2): maxTokens (fallback
-        // to the engine default when the descriptor leaves it null) + sampler trio.
-        // This is exactly the pre-R2-C path -- the guaranteed fallback.
-        val cfg = bundle.config
-        val engine = LiteRtEngine.fromInstalled(
-            appContext,
-            bundle.file,
-            delegate = delegate,
-            maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS,
-            sampler = SamplerSettings(
-                topK = cfg.topK,
-                topP = cfg.topP,
-                temperature = cfg.temperature,
-            ),
-            // Task W4: thread the per-model vision capability so the engine sets a
-            // visionBackend + allows generateWithImage ONLY for image-capable bundles
-            // (text-only models keep the working CPU text path untouched).
-            supportImage = cfg.supportImage,
-        )
-        localEngine = engine
-        localEngineModelFile = bundle.file
-        localEngineDelegate = delegate
-        localEngineFromHolder = false
-        // Reads the field: loadWiredLocalEngine may adopt the engine another warmer
-        // pinned for this bundle instead of loading this one.
-        val provider: () -> LocalLlm = { localEngine ?: engine }
-        localLlmProvider = provider
-        return provider
-    }
-
-    /**
-     * Drop the cached on-device engine wiring (Task W5) so the next
-     * [localProviderOrWire] / [preloadLocalEngine] rebuilds it -- used when the
-     * ACTIVE local model selection changes, so a different installed bundle is
-     * actually loaded instead of the previously-wired one. Closes the old native
-     * engine (idempotent, guarded) and clears the warm marker so a re-warm runs.
-     */
-    private fun invalidateLocalEngine() {
-        // R2-C: close ONLY a VM-OWNED engine; never the service-owned warm engine
-        // borrowed from [LocalEngineHolder] (the service owns its lifecycle). We
-        // just drop our reference + re-wire; if the active model changed, the
-        // service's own re-warm (or the BUILD_OWN fallback) handles the new bundle.
-        if (!localEngineFromHolder) {
-            runCatching { localEngine?.close() }
-        }
-        localEngine = null
-        localEngineModelFile = null
-        localEngineFromHolder = false
-        localLlmProvider = null
-        warmingModelPath = null
-        _localEngineState.value = LocalEngineState.IDLE
-    }
-
-    /**
      * I1 (W5 review): true while an on-device turn is actively running, so a
      * model-selection change defers its engine teardown until the turn finishes
      * rather than close()-ing the native runtime mid-generation. STREAMING and
@@ -1553,280 +1309,36 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _chatState.value == ChatState.STREAMING || _chatState.value == ChatState.THINKING
 
     /**
-     * I1 (W5 review): apply a model-selection change that arrived mid-turn. Called
-     * at every local-turn settle point -- normal turn completion
-     * ([runLocalEngineTurn]) AND, per the final-pass review, on STOP
-     * ([cancelStream]) and CLEAR ([clearHistory]), since those cancel the stream
-     * and so skip the completion path. A no-op unless [pendingLocalReWarm] was set
-     * (the consume decision is the pure [consumePendingReWarm]). Now that no
-     * generation is in flight, it is safe to close() the old engine and re-warm
-     * the newly-selected bundle.
+     * Task W1 — warm the on-device engine while the app is open, so the first send is
+     * instant ([LocalEngineCoordinator.preload]: gated on the local provider and the
+     * auto-warm setting, idempotent, never blocks Main, never crashes).
      */
-    private fun processPendingLocalReWarm() {
-        // Consume the pending flag exactly once (pure decision, unit-tested).
-        if (!consumePendingReWarm(pendingLocalReWarm)) return
-        pendingLocalReWarm = false
-        val closeHolder = pendingHolderClose
-        pendingHolderClose = false
-        if (!ChatProvider.fromId(currentProvider).isLocal) {
-            // No re-warm for a cloud provider, but a stale-config engine must still go.
-            if (closeHolder) {
-                invalidateLocalEngine()
-                LocalEngineHolder.clearAndClose()
-            }
-            return
-        }
-        reWarmLocalEngine(closeHolder)
-    }
+    fun preloadLocalEngine() = engines.preload()
+
+    /** The persisted AUTO-WARM-on-open setting (default true), for the settings screen. */
+    fun autoWarmEnabled(): Boolean = engines.autoWarmEnabled()
+
+    /** Persist the AUTO-WARM-on-open setting from the settings screen Switch. */
+    fun setAutoWarmEnabled(enabled: Boolean) = engines.setAutoWarmEnabled(enabled)
 
     /**
-     * Drop the current engine wiring and warm again (a model switch or a settings
-     * apply). A preload warm still loading the OLD engine is joined first
-     * (cancelAndJoin waits for its native load to return): building and loading the
-     * new engine while the old load runs is the double-GPU-load OOM. [closeHolder] also
-     * releases the holder's engine, whose window/sampler is now stale.
+     * The ACTIVE on-device model's persisted config (maxTokens + sampler trio), to
+     * pre-fill the settings screen ([LocalEngineCoordinator.currentModelConfig]).
      */
-    private fun reWarmLocalEngine(closeHolder: Boolean = false) {
-        val prior = localWarmJob
-        viewModelScope.launch {
-            prior?.cancelAndJoin()
-            invalidateLocalEngine()
-            if (closeHolder) LocalEngineHolder.clearAndClose()
-            preloadLocalEngine()
-        }
-    }
+    suspend fun currentLocalModelConfig(): com.aiblackbox.portal.data.local.ModelConfig =
+        engines.currentModelConfig()
 
     /**
-     * Task W1 — warm the on-device engine WHILE the app/chat is open, so the first
-     * send is instant instead of paying the ~10-75s cold model load on the first
-     * turn (matching Edge Gallery's "initialize once, keep warm" pattern).
-     *
-     * Gated + idempotent:
-     *  - Only warms when the LOCAL provider is the ACTIVE/selected one — we do NOT
-     *    pull a multi-GB model into RAM for a cloud-only session. DESIGN NOTE: an
-     *    always-warm-on-open variant (for a future "another model calls the local
-     *    engine as a tool" path) is a one-line change — drop the [currentProvider]
-     *    `isLocal` gate below.
-     *  - Resolves the production engine via [localProviderOrWire] (the SAME wiring
-     *    the send path uses) on [Dispatchers.IO]; with no installed model it stays
-     *    [LocalEngineState.IDLE] and does nothing.
-     *  - Guards against duplicate/concurrent warms ([shouldStartWarm] + the
-     *    [warmingModelPath] in-flight marker): a repeat trigger while WARMING, or
-     *    while already READY for the same model, returns WITHOUT launching a second
-     *    `load()` (which would just await the in-flight Mutex anyway) — no redundant
-     *    coroutine, no state churn.
-     *  - NEVER blocks Main and NEVER crashes: a load fault sets
-     *    [LocalEngineState.ERROR] (the lazy fallback in [runLocalEngineTurn] still
-     *    works — `load()` is idempotent — so the user can still send and the next
-     *    trigger re-warms).
-     *
-     * Safe to call before [initialize] (no api → [localProviderOrWire] returns null
-     * → IDLE) and to call repeatedly (the guards make repeats cheap no-ops).
-     */
-    fun preloadLocalEngine() {
-        // Provider gate: only warm for the active local provider (see DESIGN NOTE).
-        if (!ChatProvider.fromId(currentProvider).isLocal) return
-        // Auto-warm SETTING gate (user preference): if the user opted OUT of
-        // auto-warm-on-open, do NOT warm here -- leave the engine IDLE so the model
-        // loads LAZILY on the first send (runLocalEngineTurn's load() is idempotent).
-        // This is a user choice, checked BEFORE the OOM-crash guard; the send path
-        // never consults it, so a deliberate send always warms.
-        if (!localWarmPrefs.autoWarmEnabled()) {
-            _localEngineState.value = LocalEngineState.IDLE
-            Log.i(TAG, "skipping auto-warm: disabled by user setting; will warm lazily on first send")
-            return
-        }
-        // Warm-loop guard (defense-in-depth): if the PREVIOUS warm is still marked
-        // in-flight, the process was SIGKILLed mid-load (device OOM) and never ran
-        // its success/failure cleanup. Auto-warming again would just OOM and crash
-        // again -- an unbounded crash/restart loop. SKIP the auto-warm, RE-ARM the
-        // flag (so a deliberate send can retry), and leave the engine IDLE (the UI
-        // pill shows no spinner; a user send lazily warms). The send path does NOT
-        // consult this flag, so the manual retry is always available.
-        if (!com.aiblackbox.portal.data.local.WarmInflightStore.shouldAutoWarm(warmInflightStore.isInflight())) {
-            warmInflightStore.setInflight(false)
-            _localEngineState.value = LocalEngineState.IDLE
-            Log.w(TAG, "skipping auto-warm: prior warm did not complete (likely OOM-killed); send to retry")
-            return
-        }
-        // R2-C: the FOREGROUND SERVICE is now the PRIMARY warmer -- it pins the
-        // engine in the PROCESS-level [LocalEngineHolder] so it loads ONCE and
-        // survives VM/process recycles. Best-effort + idempotent (a second start
-        // while a warm is in flight is ignored; LiteRtEngine.load() is itself
-        // Mutex-idempotent). NEVER throws into us (LocalModelService.start swallows
-        // a platform refusal), so the VM-side warm below stays the graceful
-        // fallback: if the service no-ops, [localProviderOrWire] BUILDs its own
-        // engine and this same coroutine load()s it, exactly as before R2-C.
-        LocalModelService.start(appContext)
-        // Cheap pre-launch guard: a warm is already in flight → nothing to do.
-        if (!shouldStartWarm(_localEngineState.value)) return
-
-        localWarmJob = viewModelScope.launch {
-            // Resolve (and lazily wire) the production engine off the main thread.
-            val provider = withContext(Dispatchers.IO) { localProviderOrWire() }
-            if (provider == null) {
-                // No installed model (or api not ready) → nothing to warm.
-                _localEngineState.value = LocalEngineState.IDLE
-                return@launch
-            }
-            val engine = localEngine
-            val modelFile = localEngineModelFile
-            // A FakeLocalLlm (tests) / fake-wired provider has no model file — there
-            // is nothing to preload; reflect READY iff it reports already loaded.
-            if (engine == null || modelFile == null) {
-                _localEngineState.value =
-                    if (provider().isLoaded) LocalEngineState.READY else LocalEngineState.IDLE
-                return@launch
-            }
-            val targetPath = modelFile.absolutePath
-            // Idempotency (model now known): already READY+loaded for this exact model
-            // → keep the in-flight marker pinned and skip the redundant warm.
-            if (_localEngineState.value == LocalEngineState.READY &&
-                warmingModelPath == targetPath && engine.isLoaded) {
-                return@launch
-            }
-            // Concurrency: another warm for this model is already mid-flight.
-            if (warmingModelPath == targetPath && _localEngineState.value == LocalEngineState.WARMING) {
-                return@launch
-            }
-            warmingModelPath = targetPath
-            _localEngineState.value =
-                localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_STARTED)
-            try {
-                // The one process warm: serialized with the service and control_phone
-                // warms (instant when this bundle is already pinned), with the
-                // crash-loop flag on disk for the whole load — an OOM-SIGKILL leaves it
-                // set, so the next launch's preloadLocalEngine SKIPS the auto-warm.
-                loadWiredLocalEngine()
-                _localEngineState.value =
-                    localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_SUCCEEDED)
-                Log.d(TAG, "on-device engine warmed (READY) for $targetPath")
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // Cancellation (VM cleared / new warm) is NOT a fault — clear the
-                // in-flight marker so a re-trigger can warm again, then unwind.
-                if (warmingModelPath == targetPath) warmingModelPath = null
-                throw e
-            } catch (e: Exception) {
-                // GRACEFUL (caught) failure: the next trigger retries the warm.
-                _localEngineState.value =
-                    localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_FAILED)
-                // Clear the in-flight marker so the next trigger retries the warm.
-                if (warmingModelPath == targetPath) warmingModelPath = null
-                Log.w(TAG, "on-device engine warm failed (lazy fallback still works): ${e.message}")
-            }
-        }
-    }
-
-    /**
-     * The persisted AUTO-WARM-on-open setting (default true). Read by the on-device
-     * model settings screen to pre-fill its auto-warm Switch. A thin passthrough to
-     * [LocalWarmPrefs] -- the single store the [preloadLocalEngine] auto path reads.
-     */
-    fun autoWarmEnabled(): Boolean = localWarmPrefs.autoWarmEnabled()
-
-    /**
-     * Persist the AUTO-WARM-on-open setting from the settings screen Switch. When
-     * false the [preloadLocalEngine] auto path skips the warm and the model loads
-     * lazily on the first send. Thin passthrough to [LocalWarmPrefs].
-     */
-    fun setAutoWarmEnabled(enabled: Boolean) = localWarmPrefs.setAutoWarmEnabled(enabled)
-
-    /**
-     * The ACTIVE on-device model's persisted [ModelConfig] (maxTokens + sampler
-     * trio), used by the settings screen to PRE-FILL its window slider + sampler
-     * fields with the user's current per-model choice. Reads the sidecar for
-     * [currentLocalModelSlug] (falling back to the first installed model, matching
-     * [localProviderOrWire]'s selection) off the main thread. Returns an all-null
-     * [ModelConfig] (engine defaults) when no model is installed or the api is not
-     * ready, so callers can resolve each axis to its DEFAULT_* constant.
-     */
-    suspend fun currentLocalModelConfig(): com.aiblackbox.portal.data.local.ModelConfig {
-        val client = api ?: return com.aiblackbox.portal.data.local.ModelConfig()
-        return withContext(Dispatchers.IO) {
-            val manager = LocalModelManager.fromContext(
-                appContext, LocalModelApi(client), deviceId = "android-device",
-            )
-            val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
-            val bundle = installed.firstOrNull { it.slug == currentLocalModelSlug }
-                ?: installed.firstOrNull()
-            bundle?.config ?: com.aiblackbox.portal.data.local.ModelConfig()
-        }
-    }
-
-    /**
-     * Apply a USER-changed on-device context window + sampler, then RE-WARM the
-     * engine so the new values take effect (on-device settings apply layer; the
-     * settings SCREEN is a later task -- this is the headless helper it calls).
-     *
-     * The on-device engine's `maxNumTokens`/`samplerConfig` are FIXED at the native
-     * `initialize()`, so a live edit requires three steps, run off the main thread on
-     * [Dispatchers.IO] (disk write + native teardown):
-     *
-     *  1. PERSIST via [LocalModelManager.updateModelConfig] for the ACTIVE
-     *     [currentLocalModelSlug] -- rewrites the `<slug>.json` sidecar so the next
-     *     warm reads the new config (no-op + early-return if no model is installed,
-     *     or the slug has no sidecar).
-     *  2. DROP the stale-window engine: [invalidateLocalEngine] clears the VM
-     *     wiring (closing a VM-OWNED engine; never the borrowed holder one), AND
-     *     [LocalEngineHolder.clearAndClose] releases the PROCESS-held warm engine if
-     *     the service pinned one -- otherwise the service-owned engine, still
-     *     initialized at the OLD window, would be re-borrowed and the change lost.
-     *  3. RE-WARM via [preloadLocalEngine], which (via [LocalModelService.start] +
-     *     [localProviderOrWire]) rebuilds + loads the engine at the NEW config and
-     *     flips [localEngineState] to [LocalEngineState.WARMING] -> READY, so the UI
-     *     can show a "reloading on-device model" state through the existing pill.
-     *
-     * Provider-gated like the warm path: a no-op when the active provider is not the
-     * local one (we never pull a multi-GB model into RAM for a cloud-only session).
-     * Pass null for any axis to leave it unchanged (see [mergedConfig]).
-     *
-     * @param maxTokens new context window, or null to keep the current value.
-     * @param topK / topP / temperature sampler overrides, null to keep current.
+     * Apply a USER-changed on-device context window + sampler and re-warm the engine
+     * ([LocalEngineCoordinator.applySettings]; deferred to the turn's settle point while
+     * an on-device reply is generating). Pass null for any axis to leave it unchanged.
      */
     fun applyLocalModelSettings(
         maxTokens: Int?,
         topK: Int?,
         topP: Float?,
         temperature: Float?,
-    ) {
-        // Provider gate: only re-warm for the active local provider (mirrors
-        // [preloadLocalEngine]); a cloud-only session has no engine to reconfigure.
-        if (!ChatProvider.fromId(currentProvider).isLocal) return
-        val slug = currentLocalModelSlug
-        if (slug.isBlank()) {
-            Log.w(TAG, "applyLocalModelSettings: no active on-device model slug; nothing to persist")
-            return
-        }
-        val client = api ?: return
-        val sampler = SamplerSettings(topK = topK, topP = topP, temperature = temperature)
-        viewModelScope.launch {
-            // (1) Persist the new config off the main thread (disk write).
-            val persisted = withContext(Dispatchers.IO) {
-                val manager = LocalModelManager.fromContext(
-                    appContext, LocalModelApi(client), deviceId = "android-device",
-                )
-                runCatching { manager.updateModelConfig(slug, maxTokens, sampler) }
-                    .getOrDefault(false)
-            }
-            if (!persisted) {
-                // Slug not installed / unreadable sidecar -> nothing to re-warm.
-                Log.w(TAG, "applyLocalModelSettings: no sidecar updated for '$slug'; skipping re-warm")
-                return@launch
-            }
-            // (2) + (3) Drop BOTH the VM wiring AND the process-held warm engine so the
-            // stale-window engine is not reused, then re-warm at the NEW config (the
-            // pill shows WARMING -> READY). While an on-device reply is still
-            // generating, closing the engine under it is the mid-generation teardown
-            // the I1 design forbids (A04-chat-viewmodel-08): defer both to the turn's
-            // settle point, exactly like a mid-turn model switch.
-            if (isLocalTurnInFlight()) {
-                pendingHolderClose = true
-                pendingLocalReWarm = true
-                return@launch
-            }
-            reWarmLocalEngine(closeHolder = true)
-        }
-    }
+    ) = engines.applySettings(maxTokens, topK, topP, temperature)
 
     /**
      * Persist a completed on-device turn through the offline-resilient snapshot
@@ -2360,7 +1872,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // dropped when the turn is cancelled. The normal turn-completion path
         // (runLocalEngineTurn) is SKIPPED on cancel, so apply it here. Guarded
         // no-op when nothing is pending.
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _messages.value = emptyList()
         _chatState.value = ChatState.IDLE
         viewModelScope.launch { historyStore.clear(currentOperator) }
@@ -2383,7 +1895,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun clearLocalConversation() {
         streamJob?.cancel()
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _chatState.value = ChatState.IDLE
         val op = currentOperator
         viewModelScope.launch {
@@ -2402,7 +1914,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // I1 (final-pass review): see clearHistory -- a mid-turn model switch
         // (localReWarmAction -> DEFER) is applied at turn completion, which a
         // STOP skips; apply the pending re-warm here. Guarded no-op otherwise.
-        processPendingLocalReWarm()
+        engines.processPendingReWarm()
         _chatState.value = ChatState.IDLE
         updateLastMessage(
             content = _messages.value.lastOrNull()?.content ?: "",
@@ -3341,15 +2853,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Provider tag for on-device turns (logging / save traceability). */
         const val LOCAL_PROVIDER_ID = "local"
-
-        // M3 serialization ([localProviderOrWire] waits for the foreground service's
-        // SINGLE warm rather than racing it with a 2nd concurrent engine build — the
-        // double-warm that OOM'd the device on launch). HEADSTART covers the async gap
-        // between LocalModelService.start() and the service publishing its warming
-        // marker; GRACE caps the wait for a slow GPU cold load; POLL is the check tick.
-        private const val SERVICE_WARM_HEADSTART_MS = 2_500L
-        private const val SERVICE_WARM_GRACE_MS = 90_000L
-        private const val SERVICE_WARM_POLL_MS = 200L
 
         /**
          * Friendly text appended to the (possibly partial) reply when the on-device
