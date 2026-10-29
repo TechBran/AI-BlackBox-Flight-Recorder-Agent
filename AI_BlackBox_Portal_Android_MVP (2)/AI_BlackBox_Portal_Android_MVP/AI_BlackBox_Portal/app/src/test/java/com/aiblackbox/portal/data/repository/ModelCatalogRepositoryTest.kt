@@ -261,10 +261,10 @@ class ModelCatalogRepositoryTest {
     private class CountingStore : LastGoodCatalogStore {
         val saved = mutableMapOf<String, LastGoodCatalogStore.Saved>()
         var reads = 0
-        val writeThreads = mutableListOf<String>()
+        val writeThreads = mutableListOf<Thread>()
         override fun read(apiProvider: String): LastGoodCatalogStore.Saved? { reads++; return saved[apiProvider] }
         override fun write(apiProvider: String, body: String, fetchedAtMs: Long) {
-            writeThreads += Thread.currentThread().name
+            writeThreads += Thread.currentThread()
             saved[apiProvider] = LastGoodCatalogStore.Saved(body, fetchedAtMs)
         }
     }
@@ -293,10 +293,11 @@ class ModelCatalogRepositoryTest {
     @Test fun `the disk copy is written off the caller's thread`() {
         val store = CountingStore()
         val r = ModelCatalogRepository(FakeBox(mutableMapOf("anthropic" to anthropic)).fetch, store, now = { clock })
-        val caller = Thread.currentThread().name
+        // The thread itself, not its name: coroutine debug mode renames a thread while it runs one.
+        val caller = Thread.currentThread()
         kotlinx.coroutines.runBlocking { r.refresh("anthropic") }
         assertEquals(1, store.writeThreads.size)
-        assertTrue("written on ${store.writeThreads[0]}", store.writeThreads[0] != caller)
+        assertTrue("written on ${store.writeThreads[0].name}", store.writeThreads[0] !== caller)
     }
 
     @Test fun `a damaged last-good file is set aside and read as nothing`() {
