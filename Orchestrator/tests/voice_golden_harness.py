@@ -911,6 +911,53 @@ async def scenario_phone(provider: str) -> dict:
         patches.undo()
 
 
+# =============================================================================
+# System prompts: every branch of the instruction builder, per provider
+# =============================================================================
+
+async def scenario_prompts() -> dict:
+    """The system instructions each provider configures, for a named operator
+    and the system operator, with and without retrieved context, and for a
+    custom role (outbound calls)."""
+    from Orchestrator import models
+    patches, cap = Patches(), Capture()
+    out = {}
+    try:
+        install(patches, cap)
+        for provider in ("gemini", "openai", "grok"):
+            mod = _spec(provider).mod
+            for label, operator, context, role in (
+                ("named", OPERATOR, CONTEXT_BLOCK, ""),
+                ("named_empty", OPERATOR, "", ""),
+                ("system", "system", CONTEXT_BLOCK, ""),
+                ("system_empty", "system", "", ""),
+                ("custom_role", OPERATOR, CONTEXT_BLOCK, "You are calling the bakery."),
+            ):
+                patches.everywhere("build_fossil_context",
+                                   lambda user_text, op, log_prefix="", _c=context, **kw:
+                                   (_c, copy.deepcopy(PROVENANCE)))
+                upstream = ScriptedUpstream()
+                if provider == "gemini":
+                    session = models.GeminiLiveSession(session_id="golden-prompt", operator=operator)
+                    session.gemini_ws = upstream
+                    await mod.configure_gemini_session(session, operator, "Puck", custom_role=role)
+                    text = upstream.sent[0]["setup"]["systemInstruction"]["parts"][0]["text"]
+                elif provider == "grok":
+                    session = models.GrokLiveSession(session_id="golden-prompt", operator=operator)
+                    session.grok_ws = upstream
+                    await mod.configure_grok_session(session, operator, "Ara", custom_role=role)
+                    text = upstream.sent[0]["session"]["instructions"]
+                else:
+                    session = models.RealtimeSession(session_id="golden-prompt", operator=operator)
+                    session.openai_ws = upstream
+                    await mod.configure_openai_session(session, operator, "marin", custom_role=role)
+                    text = upstream.sent[0]["session"]["instructions"]
+                out[f"{provider}_{label}"] = text
+        return normalize(out)
+    finally:
+        patches.undo()
+
+
 SCENARIOS: Dict[str, Callable[[], Any]] = {}
 for _p in ("gemini", "openai", "grok"):
     SCENARIOS[f"{_p}_session"] = (lambda p=_p: scenario_session(p))
@@ -920,6 +967,7 @@ for _p in ("gemini", "openai", "grok"):
     SCENARIOS[f"{_p}_tools_system"] = (lambda p=_p: scenario_tools(p, system_operator=True))
 SCENARIOS["gemini_give_up"] = lambda: scenario_give_up("gemini")
 SCENARIOS["phone_grok"] = lambda: scenario_phone("grok")
+SCENARIOS["prompts"] = scenario_prompts
 
 
 def run(name: str) -> dict:
