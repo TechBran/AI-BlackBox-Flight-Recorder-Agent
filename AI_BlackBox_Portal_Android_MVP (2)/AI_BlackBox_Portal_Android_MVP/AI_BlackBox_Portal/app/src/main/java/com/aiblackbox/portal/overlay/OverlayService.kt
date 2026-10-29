@@ -63,6 +63,7 @@ import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.remote.RemoteSessionBus
 import com.aiblackbox.portal.data.store.OperatorPrompt
 import com.aiblackbox.portal.data.store.OperatorResolver
+import com.aiblackbox.portal.overlay.OverlayRealtimeSession.RealtimeModel
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -250,69 +251,19 @@ class OverlayService : Service() {
     private var attachmentPreviewContainer: LinearLayout? = null
 
     // =========================================================================
-    // REALTIME MODE - GPT Realtime & Gemini Live Integration
+    // REALTIME MODE - GPT Realtime, Gemini Live & Grok Live
     // =========================================================================
 
-    // Realtime model selection
-    enum class RealtimeModel { GPT_REALTIME, GEMINI_LIVE, GROK_LIVE }
-    private var currentRealtimeModel: RealtimeModel = RealtimeModel.GEMINI_LIVE
+    // The live voice session (socket, playback, mic loop, screen share, transcript):
+    // OverlayRealtimeSession (rank 76). The service shows what it reports (RealtimeHost).
+    private val realtime = OverlayRealtimeSession(this, handler, coroutineScope, RealtimeHost())
 
-    // Realtime connection state
-    private var realtimeWebSocket: WebSocket? = null
-    private var realtimeSessionId: String = ""
-    private var isRealtimeConnected = false
-    private var isRealtimeRecording = false  // Mic active for realtime streaming
-    private var isScreenSharing = false
-
-    // Screen share for realtime models (1 FPS frame capture) - supports both Gemini Live and GPT Realtime
-    private var screenShareJob: Job? = null
-    private val SCREEN_SHARE_INTERVAL_MS = 1000L  // 1 FPS
-
-    // Realtime audio streaming (separate from STT recording). The capture loop owns its AudioRecord
-    // outright (a local, released in its own finally); everything else holds only this mic session's
-    // stop signal — one per session, so stopping one can never stop (or be undone by) a newer one.
-    private var realtimeCaptureLive: AtomicBoolean? = null
-
-    // Audio playback for AI responses
-    private var audioTrack: android.media.AudioTrack? = null
-    private val audioTrackLock = Object()  // Lock for thread-safe AudioTrack access
-    private var isAISpeaking = false
-    private var isUserMuted = false  // User manually muted via button press
-
-    // Audio playback completion tracking (prevents feedback loop)
-    private var responseCompleteReceived = false  // Backend said response is done
-    private var aiStoppedSpeakingAt = 0L  // Timestamp when audio ACTUALLY finished playing
-    private val POST_SPEECH_DELAY_MS = 800L  // Delay after audio finishes before accepting mic input
-
-    // Sequential audio queue to prevent out-of-order playback
-    private val audioPlaybackQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
-    private var audioPlaybackJob: Job? = null
-
-    // Pre-buffering to prevent audio clipping (especially for Gemini Live)
-    private var isPreBuffering = false
-    private var preBufferBytesAccumulated = 0
-    private val PRE_BUFFER_THRESHOLD_BYTES = 12000  // ~250ms of 24kHz mono PCM16 audio
-
-    // Buffer for user audio to transcribe with Whisper
-    private val realtimeAudioBuffer = mutableListOf<ByteArray>()
-    private var realtimeAudioBufferLock = Object()
-    private val MAX_AUDIO_BUFFER_SIZE = 500  // Limit buffer to ~500 chunks (~15-30 seconds of audio)
-
-    // Voice options per model
-    private val geminiVoices = arrayOf("Charon", "Puck", "Kore", "Aoede", "Fenrir", "Orus")
-    private val gptVoices = arrayOf("ash", "alloy", "ballad", "coral", "echo", "sage", "shimmer", "verse")
-    private val grokVoices = arrayOf("Ara", "Rex", "Sal", "Eve", "Leo")
-
-    // Transcript management
-    data class TranscriptEntry(val speaker: String, val text: String, val timestamp: Long = System.currentTimeMillis())
-    private val transcriptEntries = mutableListOf<TranscriptEntry>()
-    private var currentAIResponse = StringBuilder()
+    // Transcript panel state (the entries themselves are the session's)
     private var isTranscriptExpanded = false
 
     // Realtime UI elements
     private var modelSpinner: Spinner? = null
     private var voiceSpinner: Spinner? = null
-    private var selectedVoice: String = "Charon"  // Default voice
     private var btnScreenShare: ImageButton? = null
     private var btnScreenShareContainer: View? = null
     private var btnCamera: ImageButton? = null
@@ -329,14 +280,6 @@ class OverlayService : Service() {
     private var screenShareLabel: TextView? = null
     private var micLabel: TextView? = null
     private var connectLabel: TextView? = null
-
-    // OkHttp client for WebSocket (reuse existing if possible)
-    private val realtimeHttpClient by lazy {
-        HttpClients.base.newBuilder()
-            .readTimeout(0, TimeUnit.MILLISECONDS)  // No timeout for WebSocket
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .build()
-    }
 
     // =========================================================================
     // END REALTIME MODE VARIABLES
@@ -468,21 +411,21 @@ class OverlayService : Service() {
     private inner class XrCommandHandler : OverlayBridge.CommandListener {
         override fun toggleConnect() {
             handler.post {
-                if (isRealtimeConnected) disconnectRealtime() else connectRealtime()
+                if (realtime.isRealtimeConnected) realtime.disconnectRealtime() else realtime.connectRealtime()
             }
         }
         override fun toggleMic() {
-            handler.post { toggleRealtimeAudio() }
+            handler.post { realtime.toggleRealtimeAudio() }
         }
         override fun toggleScreenShare() {
-            handler.post { toggleScreenSharing() }
+            handler.post { realtime.toggleScreenSharing() }
         }
         override fun toggleExpanded() {
             handler.post { this@OverlayService.toggleExpanded() }
         }
         override fun selectModel(model: String) {
             handler.post {
-                currentRealtimeModel = when (model) {
+                realtime.currentRealtimeModel = when (model) {
                     "GPT Realtime" -> RealtimeModel.GPT_REALTIME
                     "Grok Live" -> RealtimeModel.GROK_LIVE
                     else -> RealtimeModel.GEMINI_LIVE
@@ -492,7 +435,7 @@ class OverlayService : Service() {
         }
         override fun selectVoice(voice: String) {
             handler.post {
-                selectedVoice = voice
+                realtime.selectedVoice = voice
                 syncBridgeState()
             }
         }
@@ -709,15 +652,8 @@ class OverlayService : Service() {
         // Cleanup resources
         stopRecording()
 
-        // Cleanup realtime mode resources
-        stopRealtimeAudioStreaming()
-        stopScreenSharing()
-        releaseAudioTrack()
-        // NOTE: Session transcript is saved by the BACKEND when WebSocket closes
-        // (see gemini_live_routes.py save_session_to_blackbox); the overlay never saves it.
-        realtimeWebSocket?.close(1000, "Service destroyed")
-        realtimeWebSocket = null
-        isRealtimeConnected = false
+        // Cleanup realtime mode resources (mic, share, playback, socket)
+        realtime.shutdown()
 
         // Cleanup persistent screenshot display (only now, at service destruction)
         persistentScreenshotDisplay?.release()
@@ -1041,32 +977,32 @@ class OverlayService : Service() {
         if (!isXrDevice) return
         OverlayBridge.updateState { current ->
             current.copy(
-                isConnected = isRealtimeConnected,
-                isRecording = isRealtimeRecording,
-                isAISpeaking = isAISpeaking,
-                isScreenSharing = isScreenSharing,
+                isConnected = realtime.isRealtimeConnected,
+                isRecording = realtime.isRealtimeRecording,
+                isAISpeaking = realtime.isAISpeaking,
+                isScreenSharing = realtime.isScreenSharing,
                 isExpanded = isExpanded,
-                isUserMuted = isUserMuted,
+                isUserMuted = realtime.isUserMuted,
                 // Note: statusText TextView is null on XR (panel never inflated),
                 // so we preserve whatever was set via updateRealtimeStatus()
                 statusText = current.statusText,
-                currentModel = when (currentRealtimeModel) {
+                currentModel = when (realtime.currentRealtimeModel) {
                     RealtimeModel.GPT_REALTIME -> "GPT Realtime"
                     RealtimeModel.GROK_LIVE -> "Grok Live"
                     else -> "Gemini Live"
                 },
-                currentVoice = selectedVoice,
+                currentVoice = realtime.selectedVoice,
                 currentOperator = currentOperator,
-                voices = when (currentRealtimeModel) {
-                    RealtimeModel.GPT_REALTIME -> gptVoices.toList()
-                    RealtimeModel.GROK_LIVE -> grokVoices.toList()
-                    else -> geminiVoices.toList()
+                voices = when (realtime.currentRealtimeModel) {
+                    RealtimeModel.GPT_REALTIME -> realtime.gptVoices.toList()
+                    RealtimeModel.GROK_LIVE -> realtime.grokVoices.toList()
+                    else -> realtime.geminiVoices.toList()
                 },
                 operators = operatorsList,
-                transcriptEntries = transcriptEntries.map {
+                transcriptEntries = realtime.transcriptEntries.map {
                     OverlayBridge.TranscriptEntry(it.speaker, it.text, it.timestamp)
                 },
-                liveResponseText = currentAIResponse.toString()
+                liveResponseText = realtime.currentAIResponse.toString()
             )
         }
     }
@@ -1361,23 +1297,6 @@ class OverlayService : Service() {
                 imm.hideSoftInputFromWindow(it.windowToken, 0)
             }
         }
-    }
-
-    // Little-endian byte helpers for writeWavFileWithSampleRate's WAV header.
-    private fun intToByteArray(value: Int): ByteArray {
-        return byteArrayOf(
-            (value and 0xff).toByte(),
-            ((value shr 8) and 0xff).toByte(),
-            ((value shr 16) and 0xff).toByte(),
-            ((value shr 24) and 0xff).toByte()
-        )
-    }
-
-    private fun shortToByteArray(value: Short): ByteArray {
-        return byteArrayOf(
-            (value.toInt() and 0xff).toByte(),
-            ((value.toInt() shr 8) and 0xff).toByte()
-        )
     }
 
     // ==================== TTS via BlackBox ====================
@@ -2787,11 +2706,7 @@ class OverlayService : Service() {
     }
 
     private fun setupVoiceSpinner() {
-        val voices = when (currentRealtimeModel) {
-            RealtimeModel.GEMINI_LIVE -> geminiVoices
-            RealtimeModel.GPT_REALTIME -> gptVoices
-            RealtimeModel.GROK_LIVE -> grokVoices
-        }
+        val voices = realtime.voicesForModel()
 
         val adapter = ArrayAdapter(this, R.layout.spinner_item_dark, voices)
         adapter.setDropDownViewResource(R.layout.spinner_dropdown_dark)
@@ -2799,8 +2714,8 @@ class OverlayService : Service() {
 
         voiceSpinner?.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                selectedVoice = voices[position]
-                Log.d(TAG, "Voice selected: $selectedVoice")
+                realtime.selectedVoice = voices[position]
+                Log.d(TAG, "Voice selected: ${realtime.selectedVoice}")
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
@@ -2814,13 +2729,13 @@ class OverlayService : Service() {
             else -> RealtimeModel.GEMINI_LIVE
         }
 
-        if (newModel != currentRealtimeModel) {
+        if (newModel != realtime.currentRealtimeModel) {
             // Disconnect if connected
-            if (isRealtimeConnected) {
-                disconnectRealtime()
+            if (realtime.isRealtimeConnected) {
+                realtime.disconnectRealtime()
             }
 
-            currentRealtimeModel = newModel
+            realtime.currentRealtimeModel = newModel
             Log.d(TAG, "Realtime model selected: $newModel")
 
             // Every realtime model shows the screen share/camera buttons: Gemini Live and GPT
@@ -2845,31 +2760,31 @@ class OverlayService : Service() {
         // Connect button
         btnConnect?.setOnClickListener {
             animateButtonClick(it)
-            if (isRealtimeConnected) {
-                disconnectRealtime()
+            if (realtime.isRealtimeConnected) {
+                realtime.disconnectRealtime()
             } else {
-                connectRealtime()
+                realtime.connectRealtime()
             }
         }
 
         // Mic button - toggle realtime audio streaming
         expandedPanel.findViewById<ImageButton>(R.id.btnMic)?.setOnClickListener {
             animateButtonClick(it)
-            if (!isRealtimeConnected) {
+            if (!realtime.isRealtimeConnected) {
                 showToast("Connect first to use microphone")
                 return@setOnClickListener
             }
-            toggleRealtimeAudio()
+            realtime.toggleRealtimeAudio()
         }
 
         // Screen share button (works for both Gemini Live and GPT Realtime)
         btnScreenShare?.setOnClickListener {
             animateButtonClick(it)
-            if (!isRealtimeConnected) {
+            if (!realtime.isRealtimeConnected) {
                 showToast("Connect first")
                 return@setOnClickListener
             }
-            toggleScreenSharing()
+            realtime.toggleScreenSharing()
         }
 
         // Camera button (opens native camera)
@@ -2884,474 +2799,52 @@ class OverlayService : Service() {
         }
     }
 
-    private fun connectRealtime() {
-        if (serverUrl.isEmpty()) {
-            showToast("Server URL not set")
-            return
-        }
-        if (operatorBlocks()) return
-
-        realtimeSessionId = UUID.randomUUID().toString()
-
-        val endpoint = when (currentRealtimeModel) {
-            RealtimeModel.GPT_REALTIME -> "/ws/realtime/$realtimeSessionId"
-            RealtimeModel.GEMINI_LIVE -> "/ws/gemini-live/$realtimeSessionId"
-            RealtimeModel.GROK_LIVE -> "/ws/grok-live/$realtimeSessionId"
-        }
-
-        // Build WebSocket URL
-        val wsProtocol = if (serverUrl.startsWith("https")) "wss" else "ws"
-        val baseUrl = serverUrl.replace("https://", "").replace("http://", "")
-        val wsUrl = "$wsProtocol://$baseUrl$endpoint"
-
-        Log.d(TAG, "Connecting to realtime: $wsUrl")
-        updateRealtimeStatus("Connecting...")
-        if (isXrDevice) {
-            OverlayBridge.updateState { it.copy(isConnecting = true) }
-        } else {
-            progressBar?.visibility = View.VISIBLE
-        }
-
-        val request = Request.Builder().url(wsUrl).build()
-        realtimeWebSocket = realtimeHttpClient.newWebSocket(request, RealtimeWebSocketListener())
-    }
-
-    private fun disconnectRealtime() {
-        Log.d(TAG, "Disconnecting realtime session")
-
-        // Stop audio and screen sharing
-        stopRealtimeAudioStreaming()
-        stopScreenSharing()
-
-        // Release audio playback
-        releaseAudioTrack()
-
-        // Reset mic state
-        isUserMuted = false
-        isAISpeaking = false
-        updateBubbleGlow()  // Clear bubble glow on disconnect
-
-        // NOTE: Session transcript is saved by the BACKEND when WebSocket closes
-        // (see gemini_live_routes.py save_session_to_blackbox); the overlay never saves it.
-
-        // Close WebSocket
-        realtimeWebSocket?.close(1000, "User disconnected")
-        realtimeWebSocket = null
-
-        isRealtimeConnected = false
-        updateRealtimeUI()
-        updateRealtimeStatus("Disconnected")
-    }
-
-    private inner class RealtimeWebSocketListener : WebSocketListener() {
-        override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.d(TAG, "Realtime WebSocket opened")
-            handler.post {
-                isRealtimeConnected = true
-                updateRealtimeUI()
-                updateRealtimeStatus("Connected")
-                if (isXrDevice) {
-                    OverlayBridge.updateState { it.copy(isConnecting = false) }
-                } else {
-                    progressBar?.visibility = View.GONE
-                }
-
-                // Send connect message with selected voice
-                val connectMsg = JSONObject().apply {
-                    put("type", "connect")
-                    put("operator", currentOperator)
-                    put("voice", selectedVoice)
-                }
-                webSocket.send(connectMsg.toString())
-
-                // Reset audio state for new session
-                isAISpeaking = false
-                responseCompleteReceived = false
-                aiStoppedSpeakingAt = 0L  // Ensures no initial post-speech delay
-
-                // Initialize audio playback
-                initAudioPlayback()
-
-                // Auto-start microphone (continuous listening mode)
-                handler.postDelayed({
-                    if (isRealtimeConnected && !isRealtimeRecording) {
-                        startRealtimeAudioStreaming()
-                        Log.d(TAG, "Auto-started microphone for continuous listening")
-                    }
-                }, 500)  // Small delay to ensure connection is fully established
-            }
-        }
-
-        override fun onMessage(webSocket: WebSocket, text: String) {
-            try {
-                val msg = JSONObject(text)
-                handler.post { handleRealtimeMessage(msg) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error parsing realtime message", e)
-            }
-        }
-
-        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            Log.d(TAG, "Realtime WebSocket closing: $code - $reason")
-            handler.post {
-                isRealtimeConnected = false
-                updateRealtimeUI()
-                updateRealtimeStatus("Disconnected")
-            }
-        }
-
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.e(TAG, "Realtime WebSocket failed", t)
-            handler.post {
-                isRealtimeConnected = false
-                updateRealtimeUI()
-                updateRealtimeStatus("Connection failed")
-                progressBar?.visibility = View.GONE
-                showToast("Connection failed: ${t.message}")
-            }
-        }
-    }
-
-    private fun handleRealtimeMessage(msg: JSONObject) {
-        val type = msg.optString("type", "")
-        val data = msg.optString("data", "")
-
-        when (type) {
-            "connected" -> {
-                updateRealtimeStatus("Ready")
-                Log.d(TAG, "Realtime session ready")
-            }
-            "setup_complete" -> {
-                Log.d(TAG, "Realtime setup complete")
-            }
-            "audio_delta" -> {
-                // Mark AI as speaking on first audio chunk (mic streaming auto-mutes via inline check)
-                if (!isAISpeaking) {
-                    isAISpeaking = true
-                    responseCompleteReceived = false  // Reset for new response
-                    resetAudioDiagnostics()  // Reset counters and pre-buffering for new response
-                    Log.d(TAG, "AI started speaking - mic auto-muted")
-                    updateMicUI(isRealtimeRecording, aiSpeaking = true)
-                    updateBubbleGlow()  // Update bubble glow state (blue for AI speaking)
-                    updateRealtimeStatus("AI Speaking")
-
-                    // Transcribe user audio with Whisper - ONLY for Gemini Live
-                    // GPT Realtime already provides user_transcript via OpenAI's built-in Whisper
-                    if (currentRealtimeModel == RealtimeModel.GEMINI_LIVE) {
-                        transcribeRealtimeAudioBuffer()
-                    }
-                }
-
-                // Play audio response via AudioTrack
-                if (data.isNotEmpty()) {
-                    playAudioChunk(data)
-                }
-            }
-            "transcript_delta" -> {
-                // Live AI transcription
-                currentAIResponse.append(data)
-                updateLiveResponse(currentAIResponse.toString())
-            }
-            "user_transcript" -> {
-                // User's speech transcription
-                addTranscriptEntry("User", data)
-            }
-            "response_complete" -> {
-                // Finalize AI response
-                finalizeLiveResponse()
-
-                // Mark response as complete - mic will resume when audio ACTUALLY finishes playing
-                // (detected by audio playback job when queue is empty)
-                responseCompleteReceived = true
-                Log.d(TAG, "response_complete received - waiting for audio queue to empty")
-            }
-            "tool_call" -> {
-                Log.d(TAG, "Tool call: $data")
-            }
-            "tool_result" -> {
-                Log.d(TAG, "Tool result received")
-            }
-            "provenance" -> {
-                // Plan Task 10: backend emits {"type":"provenance","data":{recent,keyword,semantic,checkpoint}}
-                // Overlay has no per-turn bubble — log lineage so it appears in logcat for debugging.
-                val provData = msg.optJSONObject("data")
-                if (provData != null) {
-                    val recent = provData.optJSONArray("recent")?.length() ?: 0
-                    val keyword = provData.optJSONArray("keyword")?.length() ?: 0
-                    val semantic = provData.optJSONArray("semantic")?.length() ?: 0
-                    val checkpoint = provData.optJSONArray("checkpoint")?.length() ?: 0
-                    Log.d(TAG, "provenance: recent=$recent keyword=$keyword semantic=$semantic checkpoint=$checkpoint")
-                }
-            }
-            "error" -> {
-                showToast("Error: $data")
-                Log.e(TAG, "Realtime error: $data")
-            }
-        }
-    }
-
-    // Initialize AudioTrack for playing AI audio responses
-    private fun initAudioPlayback() {
-        try {
-            // Stop existing playback job
-            audioPlaybackJob?.cancel()
-            audioPlaybackJob = null
-            audioPlaybackQueue.clear()
-
-            // Release existing AudioTrack if any
-            synchronized(audioTrackLock) {
-                if (audioTrack != null) {
-                    try {
-                        audioTrack?.stop()
-                        audioTrack?.release()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error releasing old AudioTrack", e)
-                    }
-                    audioTrack = null
-                }
-            }
-
-            // Both Gemini Live and GPT Realtime output 24kHz PCM16 audio
-            val outputSampleRate = 24000
-            val channelConfig = AudioFormat.CHANNEL_OUT_MONO
-            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-
-            val minBufferSize = android.media.AudioTrack.getMinBufferSize(
-                outputSampleRate, channelConfig, audioFormat
-            )
-
-            if (minBufferSize == android.media.AudioTrack.ERROR ||
-                minBufferSize == android.media.AudioTrack.ERROR_BAD_VALUE) {
-                Log.e(TAG, "Invalid AudioTrack buffer size")
-                return
-            }
-
-            // Use larger buffer for smoother playback
-            val bufferSize = maxOf(minBufferSize * 4, 16384)
-
-            val track = android.media.AudioTrack.Builder()
-                .setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(outputSampleRate)
-                        .setChannelMask(channelConfig)
-                        .setEncoding(audioFormat)
-                        .build()
-                )
-                .setBufferSizeInBytes(bufferSize)
-                .setTransferMode(android.media.AudioTrack.MODE_STREAM)
-                .build()
-
-            if (track.state == android.media.AudioTrack.STATE_INITIALIZED) {
-                synchronized(audioTrackLock) {
-                    audioTrack = track
-                    track.play()
-                }
-                Log.d(TAG, "AudioTrack initialized: ${outputSampleRate}Hz, buffer=${bufferSize}")
-
-                // Start the single audio playback job that processes queue sequentially
-                startAudioPlaybackJob()
+    /**
+     * What the live voice session shows and reads through the overlay: the phone panel's
+     * views, or the XR bridge; and the screen frames it shares, from the persistent display.
+     */
+    private inner class RealtimeHost : OverlayRealtimeSession.Host {
+        override val serverUrl: String get() = this@OverlayService.serverUrl
+        override val operator: String get() = currentOperator
+        override fun operatorBlocks(): Boolean = this@OverlayService.operatorBlocks()
+        override fun showToast(message: String) = this@OverlayService.showToast(message)
+        override fun updateStatus(status: String) = updateRealtimeStatus(status)
+        override fun updateRealtimeUi() = updateRealtimeUI()
+        override fun updateMicUi(isActive: Boolean, userMuted: Boolean, aiSpeaking: Boolean) =
+            updateMicUI(isActive, userMuted, aiSpeaking)
+        override fun updateBubbleGlow() = this@OverlayService.updateBubbleGlow()
+        override fun updateScreenShareUi(isActive: Boolean) = updateScreenShareUI(isActive)
+        override fun syncBridgeState() = this@OverlayService.syncBridgeState()
+        override fun showConnecting(connecting: Boolean) {
+            if (isXrDevice) {
+                OverlayBridge.updateState { it.copy(isConnecting = connecting) }
             } else {
-                Log.e(TAG, "AudioTrack failed to initialize")
-                track.release()
+                progressBar?.visibility = if (connecting) View.VISIBLE else View.GONE
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize AudioTrack", e)
         }
-    }
-
-    // Single job that processes audio queue sequentially (prevents out-of-order playback)
-    private fun startAudioPlaybackJob() {
-        audioPlaybackJob?.cancel()
-        audioPlaybackJob = coroutineScope.launch(Dispatchers.IO) {
-            Log.d(TAG, "Audio playback job started")
-            while (isActive) {
-                try {
-                    // Wait during pre-buffering phase (let queue fill up for smoother playback)
-                    if (isPreBuffering) {
-                        delay(50)  // Check every 50ms if pre-buffering is complete
-                        continue
-                    }
-
-                    // Block until audio data is available (with 100ms timeout to check isActive)
-                    val audioBytes = audioPlaybackQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    if (audioBytes != null) {
-                        synchronized(audioTrackLock) {
-                            val track = audioTrack
-                            if (track != null &&
-                                track.state == android.media.AudioTrack.STATE_INITIALIZED &&
-                                track.playState != android.media.AudioTrack.PLAYSTATE_STOPPED) {
-                                track.write(audioBytes, 0, audioBytes.size)
-                            }
-                        }
-                    } else {
-                        // Queue is empty - check if response is complete (audio actually finished)
-                        if (responseCompleteReceived && isAISpeaking && audioPlaybackQueue.isEmpty()) {
-                            Log.d(TAG, "Audio playback ACTUALLY finished - queue empty after response_complete")
-                            isAISpeaking = false
-                            aiStoppedSpeakingAt = System.currentTimeMillis()
-                            responseCompleteReceived = false  // Reset for next response
-
-                            // Restart mic if user hasn't manually muted and mic isn't already running
-                            handler.post {
-                                updateRealtimeStatus("Connected")
-                                if (!isUserMuted && !isRealtimeRecording && isRealtimeConnected) {
-                                    Log.d(TAG, "Restarting mic after AI finished speaking")
-                                    startRealtimeAudioStreaming()  // This calls updateBubbleGlow()
-                                } else {
-                                    updateMicUI(isRealtimeRecording, userMuted = isUserMuted, aiSpeaking = false)
-                                    updateBubbleGlow()  // Update bubble glow when AI stops (and mic not restarting)
-                                }
-                            }
-                        }
-                    }
-                } catch (e: InterruptedException) {
-                    break
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error in audio playback job", e)
+        override fun hideProgress() {
+            progressBar?.visibility = View.GONE
+        }
+        override fun showTranscriptEntry(speaker: String, text: String, count: Int) =
+            this@OverlayService.showTranscriptEntry(speaker, text, count)
+        override fun updateLiveResponse(text: String) = this@OverlayService.updateLiveResponse(text)
+        override fun screenCaptureAvailable(): Boolean = mediaProjection != null && !mediaProjectionInvalidated
+        override fun ensureScreenFrames(onReady: (Boolean) -> Unit) {
+            if (persistentImageReader == null) {
+                setupPersistentScreenshotDisplay { success ->
+                    if (success) handler.post { onReady(true) } else onReady(false)
                 }
-            }
-            Log.d(TAG, "Audio playback job ended")
-        }
-    }
-
-    // Release AudioTrack resources
-    private fun releaseAudioTrack() {
-        // Stop playback job first
-        audioPlaybackJob?.cancel()
-        audioPlaybackJob = null
-        audioPlaybackQueue.clear()
-
-        synchronized(audioTrackLock) {
-            try {
-                audioTrack?.stop()
-                audioTrack?.release()
-                audioTrack = null
-                isAISpeaking = false
-                Log.d(TAG, "AudioTrack released")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error releasing AudioTrack", e)
+            } else {
+                onReady(true)
             }
         }
+        override fun latestScreenFrameJpegBase64(): String? = latestFrameJpegBase64()
     }
 
-    // Counter for audio chunks (diagnostic)
-    private var audioChunkCount = 0
-    private var totalAudioBytesReceived = 0L
-
-    // Queue audio chunk for sequential playback
-    private fun playAudioChunk(base64Data: String) {
-        try {
-            val audioBytes = Base64.decode(base64Data, Base64.DEFAULT)
-
-            // Diagnostic logging (every 10th chunk to avoid spam)
-            audioChunkCount++
-            totalAudioBytesReceived += audioBytes.size
-            if (audioChunkCount % 10 == 1) {
-                Log.d(TAG, "Audio chunk #$audioChunkCount: ${audioBytes.size} bytes, queue size: ${audioPlaybackQueue.size}, total received: ${totalAudioBytesReceived / 1024}KB, preBuffering: $isPreBuffering")
-            }
-
-            // Start pre-buffering on first chunk of new response (Gemini Live benefits most from this)
-            if (audioChunkCount == 1 && currentRealtimeModel == RealtimeModel.GEMINI_LIVE) {
-                isPreBuffering = true
-                preBufferBytesAccumulated = 0
-                Log.d(TAG, "Starting pre-buffer for Gemini Live audio")
-            }
-
-            // Track accumulated bytes during pre-buffering
-            if (isPreBuffering) {
-                preBufferBytesAccumulated += audioBytes.size
-                if (preBufferBytesAccumulated >= PRE_BUFFER_THRESHOLD_BYTES) {
-                    isPreBuffering = false
-                    Log.d(TAG, "Pre-buffer complete: ${preBufferBytesAccumulated} bytes accumulated, starting playback")
-                }
-            }
-
-            // Add to queue - the playback job will process it in order
-            audioPlaybackQueue.offer(audioBytes)
-            isAISpeaking = true
-        } catch (e: Exception) {
-            Log.e(TAG, "Error decoding audio chunk", e)
-        }
-    }
-
-    // Reset audio diagnostic counters (call when starting new response)
-    private fun resetAudioDiagnostics() {
-        audioChunkCount = 0
-        totalAudioBytesReceived = 0L
-        isPreBuffering = false
-        preBufferBytesAccumulated = 0
-    }
-
-    // Screen sharing for Gemini Live vision
-    private fun toggleScreenSharing() {
-        if (isScreenSharing) {
-            stopScreenSharing()
-        } else {
-            startScreenSharing()
-        }
-    }
-
-    private fun startScreenSharing() {
-        // Screen sharing is supported for both Gemini Live and GPT Realtime
-        // Grok Voice API only supports audio/text - no vision capability
-        if (currentRealtimeModel == RealtimeModel.GROK_LIVE) {
-            showToast("Screen sharing not available - Grok is audio/text only")
-            return
-        }
-
-        if (mediaProjection == null || mediaProjectionInvalidated) {
-            showToast("Screen capture not available")
-            return
-        }
-
-        // Ensure persistent display exists
-        if (persistentImageReader == null) {
-            setupPersistentScreenshotDisplay { success ->
-                if (success) {
-                    handler.post { startScreenShareCapture() }
-                } else {
-                    showToast("Failed to setup screen capture")
-                }
-            }
-        } else {
-            startScreenShareCapture()
-        }
-    }
-
-    private fun startScreenShareCapture() {
-        isScreenSharing = true
-        updateScreenShareUI(true)
-        syncBridgeState()
-
-        screenShareJob = coroutineScope.launch {
-            Log.d(TAG, "Starting screen share capture at 1 FPS")
-            while (isActive && isScreenSharing) {
-                captureAndSendFrame()
-                delay(SCREEN_SHARE_INTERVAL_MS)
-            }
-        }
-    }
-
-    private fun stopScreenSharing() {
-        isScreenSharing = false
-        screenShareJob?.cancel()
-        screenShareJob = null
-        updateScreenShareUI(false)
-        syncBridgeState()
-        Log.d(TAG, "Screen sharing stopped")
-    }
-
-    private fun captureAndSendFrame() {
-        if (!isRealtimeConnected || realtimeWebSocket == null) return
-
-        val reader = persistentImageReader ?: return
-        val image = reader.acquireLatestImage() ?: return
+    /** The persistent display's newest frame as base64 JPEG (quality 70), or null when none is ready. */
+    private fun latestFrameJpegBase64(): String? {
+        val reader = persistentImageReader ?: return null
+        val image = reader.acquireLatestImage() ?: return null
 
         try {
             val planes = image.planes
@@ -3380,21 +2873,15 @@ class OverlayService : Service() {
             croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 70, baos)
             val base64Frame = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
 
-            // Send video frame
-            val frameMsg = JSONObject().apply {
-                put("type", "video_frame")
-                put("data", base64Frame)
-            }
-            realtimeWebSocket?.send(frameMsg.toString())
-
             // Cleanup
             if (croppedBitmap != bitmap) {
                 croppedBitmap.recycle()
             }
             bitmap.recycle()
-
+            return base64Frame
         } catch (e: Exception) {
             Log.e(TAG, "Error capturing frame", e)
+            return null
         } finally {
             image.close()
         }
@@ -3470,7 +2957,7 @@ class OverlayService : Service() {
             }
 
             if (launched) {
-                if (isScreenSharing) {
+                if (realtime.isScreenSharing) {
                     showToast("Camera opened - AI can see your screen")
                 } else {
                     showToast("Tip: Enable screen share so AI can see the camera")
@@ -3480,317 +2967,6 @@ class OverlayService : Service() {
             Log.e(TAG, "Failed to open camera", e)
             showToast("Failed to open camera app")
         }
-    }
-
-    // Realtime audio streaming
-    private fun toggleRealtimeAudio() {
-        // This is user-initiated mute/unmute
-        if (isUserMuted) {
-            // User is currently muted, wants to unmute
-            isUserMuted = false
-            if (!isAISpeaking) {
-                startRealtimeAudioStreaming()
-                Log.d(TAG, "User unmuted microphone")
-            } else {
-                // AI is speaking, will auto-resume when AI finishes
-                updateMicUI(false, aiSpeaking = true)
-                Log.d(TAG, "User unmuted, will resume when AI finishes")
-            }
-        } else if (isRealtimeRecording) {
-            // User is listening, wants to mute
-            isUserMuted = true
-            stopRealtimeAudioStreaming()
-            updateMicUI(false, userMuted = true)
-            Log.d(TAG, "User muted microphone")
-        } else {
-            // Not recording, not muted - start recording
-            isUserMuted = false
-            startRealtimeAudioStreaming()
-            Log.d(TAG, "User started microphone")
-        }
-    }
-
-    // Transcribe buffered realtime audio with Whisper and add to transcript
-    private fun transcribeRealtimeAudioBuffer() {
-        // Get current sample rate for the active model
-        val sampleRate = when (currentRealtimeModel) {
-            RealtimeModel.GEMINI_LIVE -> 16000
-            RealtimeModel.GPT_REALTIME -> 24000
-            else -> 16000
-        }
-
-        // Copy and clear the buffer
-        val audioChunks: List<ByteArray>
-        synchronized(realtimeAudioBufferLock) {
-            if (realtimeAudioBuffer.isEmpty()) {
-                Log.d(TAG, "No audio to transcribe")
-                return
-            }
-            audioChunks = realtimeAudioBuffer.toList()
-            realtimeAudioBuffer.clear()
-        }
-
-        // Calculate total size and combine chunks
-        val totalSize = audioChunks.sumOf { it.size }
-        if (totalSize < 1000) {
-            Log.d(TAG, "Audio too short to transcribe: $totalSize bytes")
-            return
-        }
-
-        val combinedAudio = ByteArray(totalSize)
-        var offset = 0
-        for (chunk in audioChunks) {
-            System.arraycopy(chunk, 0, combinedAudio, offset, chunk.size)
-            offset += chunk.size
-        }
-
-        Log.d(TAG, "Transcribing ${combinedAudio.size} bytes of realtime audio at ${sampleRate}Hz")
-
-        // Transcribe in background
-        coroutineScope.launch {
-            try {
-                transcribeRealtimeWithWhisper(combinedAudio, sampleRate)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error transcribing realtime audio", e)
-            }
-        }
-    }
-
-    // Transcribe realtime audio and add result to transcript
-    private suspend fun transcribeRealtimeWithWhisper(audioData: ByteArray, sampleRate: Int) {
-        if (serverUrl.isEmpty()) {
-            Log.e(TAG, "No server URL for transcription")
-            return
-        }
-
-        try {
-            // Save audio to temp WAV file
-            val audioFile = File(cacheDir, "realtime_input_${System.currentTimeMillis()}.wav")
-            writeWavFileWithSampleRate(audioFile, audioData, sampleRate)
-            Log.d(TAG, "Realtime WAV saved: ${audioFile.absolutePath}, size=${audioFile.length()}")
-
-            val client = HttpClients.base.newBuilder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(60, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .build()
-
-            val requestBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart(
-                    "file",
-                    audioFile.name,
-                    audioFile.asRequestBody("audio/wav".toMediaType())
-                )
-                .build()
-
-            val request = Request.Builder()
-                .url("$serverUrl/stt")
-                .post(requestBody)
-                .build()
-
-            val response = client.newCall(request).execute()
-            Log.d(TAG, "Realtime STT response: ${response.code}")
-
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: "{}"
-                val json = JSONObject(body)
-                val text = json.optString("text", "").trim()
-
-                if (text.isNotEmpty()) {
-                    Log.d(TAG, "User transcription: $text")
-                    withContext(Dispatchers.Main) {
-                        addTranscriptEntry("User", text)
-                    }
-                } else {
-                    Log.d(TAG, "Empty transcription result")
-                }
-            } else {
-                Log.e(TAG, "STT failed: ${response.code}")
-            }
-
-            // Cleanup
-            audioFile.delete()
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in realtime transcription", e)
-        }
-    }
-
-    // Write WAV file with specific sample rate (for realtime audio)
-    private fun writeWavFileWithSampleRate(file: File, audioData: ByteArray, sampleRate: Int) {
-        val channels = 1
-        val bitsPerSample = 16
-        val byteRate = sampleRate * channels * bitsPerSample / 8
-        val blockAlign = channels * bitsPerSample / 8
-
-        FileOutputStream(file).use { fos ->
-            // RIFF header
-            fos.write("RIFF".toByteArray())
-            fos.write(intToByteArray(36 + audioData.size))
-            fos.write("WAVE".toByteArray())
-
-            // fmt chunk
-            fos.write("fmt ".toByteArray())
-            fos.write(intToByteArray(16))  // Chunk size
-            fos.write(shortToByteArray(1))  // Audio format (PCM)
-            fos.write(shortToByteArray(channels.toShort()))
-            fos.write(intToByteArray(sampleRate))
-            fos.write(intToByteArray(byteRate))
-            fos.write(shortToByteArray(blockAlign.toShort()))
-            fos.write(shortToByteArray(bitsPerSample.toShort()))
-
-            // data chunk
-            fos.write("data".toByteArray())
-            fos.write(intToByteArray(audioData.size))
-            fos.write(audioData)
-        }
-    }
-
-    @OptIn(DelicateCoroutinesApi::class)
-    private fun startRealtimeAudioStreaming() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED) {
-            showToast("Microphone permission required")
-            return
-        }
-
-        // End any previous capture loop (so its AudioRecord cannot leak) by SIGNAL only: the loop
-        // stops and releases its own AudioRecord in its own finally, on the thread that reads it,
-        // within one read. Stopping/releasing it from here, on main, raced that loop's in-flight
-        // read() — the native abort in AudioRecord::releaseBuffer (feedback_android_audiorecord_race).
-        realtimeCaptureLive?.set(false)
-        realtimeCaptureLive = null
-
-        // Sample rate depends on model
-        val sampleRate = when (currentRealtimeModel) {
-            RealtimeModel.GEMINI_LIVE -> 16000
-            RealtimeModel.GPT_REALTIME -> 24000
-            else -> 16000
-        }
-
-        val bufferSize = AudioRecord.getMinBufferSize(
-            sampleRate,
-            CHANNEL_CONFIG,
-            AUDIO_FORMAT
-        ) * 2
-
-        // Held HERE until the capture loop takes it, and released here (in the finally below) only
-        // if it never got that far — never read, so no read() can be in flight.
-        var notYetLooping: AudioRecord? = null
-        try {
-            val record = AudioRecord(
-                android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                sampleRate,
-                CHANNEL_CONFIG,
-                AUDIO_FORMAT,
-                bufferSize
-            )
-            notYetLooping = record
-
-            if (record.state != AudioRecord.STATE_INITIALIZED) {
-                showToast("Failed to initialize audio")
-                return
-            }
-
-            record.startRecording()
-            isRealtimeRecording = true
-            updateMicUI(true)
-            updateBubbleGlow()  // Update bubble glow state (red for listening)
-
-            // Clear the audio buffer for new recording session
-            synchronized(realtimeAudioBufferLock) {
-                realtimeAudioBuffer.clear()
-            }
-
-            val live = AtomicBoolean(true)
-            realtimeCaptureLive = live
-            // ATOMIC: onDestroy cancels coroutineScope, and a launch cancelled before it is
-            // dispatched never runs its body — whose finally is the only release of [record].
-            coroutineScope.launch(start = CoroutineStart.ATOMIC) {
-                val buffer = ShortArray(bufferSize / 2)
-                try {
-                    while (isActive && live.get()) {
-                        // The LOCAL record, never a field a re-entry could swap or null mid-read.
-                        val readCount = record.read(buffer, 0, buffer.size)
-                        // A stop that landed while this read was in flight ends the session HERE: its
-                        // audio_commit is already sent, so this chunk must not follow it.
-                        if (!live.get()) break
-                        if (readCount > 0) {
-                            // Auto-mute while AI is speaking AND for POST_SPEECH_DELAY_MS after (prevents feedback)
-                            val timeSinceAIStopped = System.currentTimeMillis() - aiStoppedSpeakingAt
-                            val inPostSpeechDelay = timeSinceAIStopped < POST_SPEECH_DELAY_MS
-                            if (isAISpeaking || inPostSpeechDelay) {
-                                // Don't send mic audio while AI is speaking or in post-speech delay
-                                continue
-                            }
-
-                            // Convert shorts to bytes (PCM16)
-                            val bytes = ByteArray(readCount * 2)
-                            for (i in 0 until readCount) {
-                                bytes[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
-                                bytes[i * 2 + 1] = (buffer[i].toInt() shr 8 and 0xFF).toByte()
-                            }
-
-                            // Buffer audio for Whisper transcription (with size limit)
-                            synchronized(realtimeAudioBufferLock) {
-                                if (realtimeAudioBuffer.size < MAX_AUDIO_BUFFER_SIZE) {
-                                    realtimeAudioBuffer.add(bytes.copyOf())
-                                } else if (realtimeAudioBuffer.size == MAX_AUDIO_BUFFER_SIZE) {
-                                    // Remove oldest chunk to make room (sliding window)
-                                    realtimeAudioBuffer.removeAt(0)
-                                    realtimeAudioBuffer.add(bytes.copyOf())
-                                }
-                            }
-
-                            val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
-
-                            // Send audio chunk to realtime API
-                            val audioMsg = JSONObject().apply {
-                                put("type", "audio_input")
-                                put("data", base64Audio)
-                            }
-                            realtimeWebSocket?.send(audioMsg.toString())
-                        }
-                    }
-                } finally {
-                    // Stopped and released HERE, on the SAME thread as read() — see the note at
-                    // the top of this function.
-                    try { record.stop() } catch (_: Exception) {}
-                    try { record.release() } catch (_: Exception) {}
-                }
-            }
-            notYetLooping = null
-
-            Log.d(TAG, "Realtime audio streaming started at ${sampleRate}Hz")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start audio streaming", e)
-            showToast("Failed to start microphone")
-        } finally {
-            notYetLooping?.let { r -> try { r.release() } catch (_: Exception) {} }
-        }
-    }
-
-    private fun stopRealtimeAudioStreaming() {
-        isRealtimeRecording = false
-        // Only SIGNAL the capture loop: it stops and releases the AudioRecord in its own finally, on
-        // the thread that reads it, within one read. Doing it here, on main, raced that loop's
-        // in-flight read() — the native abort in AudioRecord::releaseBuffer
-        // (feedback_android_audiorecord_race).
-        realtimeCaptureLive?.set(false)
-        realtimeCaptureLive = null
-
-        updateMicUI(false)
-        updateBubbleGlow()  // Update bubble glow state
-
-        // Send audio commit to trigger response
-        if (isRealtimeConnected) {
-            val commitMsg = JSONObject().put("type", "audio_commit")
-            realtimeWebSocket?.send(commitMsg.toString())
-        }
-
-        Log.d(TAG, "Realtime audio streaming stopped")
     }
 
     private fun updateMicUI(isActive: Boolean, userMuted: Boolean = false, aiSpeaking: Boolean = false) {
@@ -3845,14 +3021,14 @@ class OverlayService : Service() {
             bubbleGlowAnimator = null
 
             when {
-                isRealtimeRecording && !isAISpeaking -> {
+                realtime.isRealtimeRecording && !realtime.isAISpeaking -> {
                     // Listening state - red pulsing glow
                     glow.setBackgroundResource(R.drawable.bubble_glow_red)
                     glow.visibility = View.VISIBLE
                     startGlowPulseAnimation(glow)
                     Log.d(TAG, "Bubble glow: RED (listening)")
                 }
-                isAISpeaking -> {
+                realtime.isAISpeaking -> {
                     // AI speaking state - dark blue pulsing glow
                     glow.setBackgroundResource(R.drawable.bubble_glow_blue)
                     glow.visibility = View.VISIBLE
@@ -3896,11 +3072,8 @@ class OverlayService : Service() {
     }
 
     // Transcript management
-    private fun addTranscriptEntry(speaker: String, text: String) {
-        if (text.isBlank()) return
-
-        transcriptEntries.add(TranscriptEntry(speaker, text))
-
+    /** Show a transcript line the session added ([count] lines so far). */
+    private fun showTranscriptEntry(speaker: String, text: String, count: Int) {
         if (isXrDevice) { syncBridgeState(); return }
 
         handler.post {
@@ -3927,10 +3100,10 @@ class OverlayService : Service() {
             transcriptContainer?.addView(entryLayout)
 
             // Update count
-            transcriptCount?.text = "${transcriptEntries.size} messages"
+            transcriptCount?.text = "$count messages"
 
             // Show section if hidden
-            if (transcriptSection?.visibility == View.GONE && transcriptEntries.isNotEmpty()) {
+            if (transcriptSection?.visibility == View.GONE && count > 0) {
                 transcriptSection?.visibility = View.VISIBLE
             }
 
@@ -3950,15 +3123,6 @@ class OverlayService : Service() {
             liveResponseText?.text = text
             liveResponseText?.visibility = if (text.isNotEmpty()) View.VISIBLE else View.GONE
         }
-    }
-
-    private fun finalizeLiveResponse() {
-        val response = currentAIResponse.toString()
-        if (response.isNotBlank()) {
-            addTranscriptEntry("AI", response)
-        }
-        currentAIResponse.clear()
-        updateLiveResponse("")
     }
 
     private fun toggleTranscript() {
@@ -3995,18 +3159,18 @@ class OverlayService : Service() {
         handler.post {
             // Update connect button
             btnConnect?.setImageResource(
-                if (isRealtimeConnected) android.R.drawable.ic_media_pause
+                if (realtime.isRealtimeConnected) android.R.drawable.ic_media_pause
                 else android.R.drawable.ic_media_play
             )
-            connectLabel?.text = if (isRealtimeConnected) "End" else "Connect"
+            connectLabel?.text = if (realtime.isRealtimeConnected) "End" else "Connect"
 
             // Enable/disable controls based on connection state
-            btnScreenShare?.isEnabled = isRealtimeConnected
-            btnScreenShare?.alpha = if (isRealtimeConnected) 1.0f else 0.5f
+            btnScreenShare?.isEnabled = realtime.isRealtimeConnected
+            btnScreenShare?.alpha = if (realtime.isRealtimeConnected) 1.0f else 0.5f
 
             val btnMic = expandedPanel.findViewById<ImageButton>(R.id.btnMic)
-            btnMic?.isEnabled = isRealtimeConnected
-            btnMic?.alpha = if (isRealtimeConnected) 1.0f else 0.5f
+            btnMic?.isEnabled = realtime.isRealtimeConnected
+            btnMic?.alpha = if (realtime.isRealtimeConnected) 1.0f else 0.5f
         }
     }
 
