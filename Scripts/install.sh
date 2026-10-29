@@ -446,6 +446,9 @@ migrate_to_service_account() {  # <name> <previous user> <choice file> <root>
         service_move_state out "$prev_home" "$home" "$name"
     fi
     service_display_entry "$name" "$DESKTOP_USER" "$DESKTOP_HOME" add
+    if ! command -v xhost > /dev/null; then
+        echo "[install]   WARN: xhost is missing, so $name cannot use the desktop display (Computer Use) until it is installed: sudo apt install x11-xserver-utils" >&2
+    fi
     tmp="$(mktemp)"
     printf '# Written by Scripts/install.sh --service-user; --revert-service-user undoes it.\nSERVICE_USER=%s\nPREVIOUS_USER=%s\n' \
         "$name" "$previous" > "$tmp"

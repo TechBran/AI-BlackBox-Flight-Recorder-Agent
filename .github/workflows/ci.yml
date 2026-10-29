@@ -148,7 +148,17 @@ jobs:
             sudo apt-get install -y --no-install-recommends sudo
           fi
 
+      # The service-account suite sets and reads real ACLs in its sandbox.
+      - name: acl
+        run: |
+          if ! command -v setfacl > /dev/null || ! command -v getfacl > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends acl
+          fi
+
       - name: scripts/tests/run_all.sh
+        env:
+          ACL_TOOLS_REQUIRED: "1"
         run: bash scripts/tests/run_all.sh
 
   android:

@@ -123,6 +123,26 @@ def test_normalize_origin_keeps_other_repositories_apart(url):
         "https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git")
 
 
+def test_every_origin_the_code_sets_is_a_pinned_one():
+    """A fresh box clones (install.sh Step 0a, git_ops.lazy_init) or re-points
+    (update.sh's rename self-heal) its origin; each URL must be one the shipped
+    pin accepts, or the box would refuse its own updates."""
+    import re
+    from pathlib import Path
+    from Orchestrator.update import git_ops
+    repo = Path(__file__).resolve().parents[3]
+    pins = {verify.normalize_origin(line)
+            for line in (repo / "installer" / "update-origin").read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")}
+    assert pins, "installer/update-origin pins nothing"
+    assert verify.normalize_origin(git_ops.DEFAULT_REMOTE_URL) in pins
+    for script in ("Scripts/install.sh", "Scripts/update.sh"):
+        urls = re.findall(r"https://github\.com/TechBran/[^\s'\"]+", (repo / script).read_text())
+        assert urls, script
+        for url in urls:
+            assert verify.normalize_origin(url) in pins, f"{script}: {url}"
+
+
 def test_an_insteadof_rewrite_in_git_config_is_seen_through(box, trust):
     """The URL that matters is the one fetch uses: a planted url.*.insteadOf
     that rewrites the pinned origin to another one is refused."""

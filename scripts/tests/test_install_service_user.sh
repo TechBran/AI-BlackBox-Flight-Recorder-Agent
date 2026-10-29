@@ -121,6 +121,7 @@ case "$1" in
 esac
 exit 0
 STUB
+printf '#!/bin/sh\necho "xhost $*" >> "$LOG"\n' > "$BIN/xhost"   # present, never run here
 chmod +x "$BIN"/*
 export PATH="$BIN:$PATH"
 export ACTIVE_UNITS="blackbox.service zellij-web.service"
@@ -142,6 +143,25 @@ ln -s /etc/hostname "$ROOT/Portal/a-link"
 chmod 0750 "$DESK"
 chmod 0755 "$WORK/home" "$DESK/Desktop"
 ENTRIES=(.env .git Manifest MCP Orchestrator Portal Volumes credentials data)
+
+# Real ACLs need the acl tools and a filesystem that keeps them (CI installs
+# acl; ACL_TOOLS_REQUIRED=1 makes their absence a failure). Without them the
+# sandbox's directories are made traversable instead, so the move needs no
+# ACL, and only the ACL assertions are skipped.
+HAVE_ACL=0
+probe="$WORK/acl-probe"; mkdir "$probe"
+if command -v setfacl > /dev/null && command -v getfacl > /dev/null \
+        && setfacl -m "u:$SVCUID:x" "$probe" 2>/dev/null; then
+    HAVE_ACL=1
+fi
+rmdir "$probe"
+if [[ "$HAVE_ACL" -eq 0 ]]; then
+    [[ "${ACL_TOOLS_REQUIRED:-0}" == 1 ]] && fail "setfacl/getfacl or ACL support missing (ACL_TOOLS_REQUIRED=1)"
+    echo "NOTE: no ACL support here: the traverse-ACL assertions are skipped" >&2
+    chmod 0711 "$WORK"
+    chmod 0751 "$DESK"
+fi
+acl_check() { [[ "$HAVE_ACL" -eq 1 ]]; }
 
 snapshot() { find "$WORK" -path "$LOG" -prune -o -printf '%p %m %u %l\n' | sort; getfacl -Rpn "$WORK" 2>/dev/null; }
 
@@ -167,7 +187,7 @@ grep -q '^sudo ' "$LOG" && fail "1: the dry run ran sudo: $(grep '^sudo ' "$LOG"
 want() { grep -qF -- "$1" <<< "$OUT" || fail "1: the dry run does not list: $1"$'\n'"$OUT"; }
 want "would run: sudo useradd --system --user-group --create-home --home-dir $SVC_HOME --shell /usr/sbin/nologin --comment AI\\ BlackBox\\ service $SVC"
 want "would run: sudo chmod 0700 $SVC_HOME"
-want "would run: sudo setfacl -m u:$SVC:x $DESK"
+if acl_check; then want "would run: sudo setfacl -m u:$SVC:x $DESK"; fi
 want "would run: sudo systemctl stop blackbox.service"
 want "would run: sudo systemctl stop zellij-web.service"
 grep -qF "systemctl stop blackbox-mcp.service" <<< "$OUT" && fail "1: a unit that is not running is stopped"
@@ -210,8 +230,8 @@ grep -qxF "sudo systemctl stop blackbox.service" "$LOG" || fail "2: blackbox.ser
 [[ -f "$DESK/.blackbox/localstack/speaches-venv/bin/pip" && -d "$SVC_HOME/.blackbox/localstack" ]] \
     || fail "2: the old venv path no longer resolves"
 [[ "$(stat -c %a "$SVC_HOME")" == 700 ]] || fail "2: the service home is not 0700"
-getfacl -cpn "$DESK" | grep -qx "user:$SVCUID:--x" || fail "2: no traverse-only ACL on the desktop home: $(getfacl -cpn "$DESK")"
-getfacl -cpn "$DESK/Desktop" | grep -q "^user:$SVCUID:" && fail "2: an ACL on a directory others can already traverse"
+acl_check && { getfacl -cpn "$DESK" | grep -qx "user:$SVCUID:--x" || fail "2: no traverse-only ACL on the desktop home: $(getfacl -cpn "$DESK")"; }
+acl_check && { getfacl -cpn "$DESK/Desktop" | grep -q "^user:$SVCUID:" && fail "2: an ACL on a directory others can already traverse"; }
 grep -qx "SERVICE_USER=$SVC" "$CHOICE" && grep -qx "PREVIOUS_USER=$ME" "$CHOICE" || fail "2: the choice is not recorded: $(cat "$CHOICE" 2>&1)"
 grep -qx "Exec=xhost +SI:localuser:$SVC" "$DESK/.config/autostart/blackbox-service-display.desktop" \
     || fail "2: no display access entry for the desktop session"
@@ -261,10 +281,12 @@ OUT="$( (reset_flags; DRY_RUN=1; REVERT_SERVICE_USER=1; resolve_service_account 
 [[ "$RC" -eq 0 ]] || fail "4: the revert dry run failed ($RC): $OUT"
 [[ "$(snapshot)" == "$BEFORE" ]] || fail "4: the revert dry run changed the sandbox"
 grep -q '^sudo ' "$LOG" && fail "4: the revert dry run ran sudo"
-for line in "would run: sudo rm -f $DESK/.blackbox" "would run: sudo mv $SVC_HOME/.blackbox $DESK/.blackbox" \
-            "would run: sudo mv $SVC_HOME/.local/share/zellij $DESK/.local/share/zellij" \
-            "would run: sudo setfacl -x u:$SVCUID $DESK" "would run: sudo rm -f $CHOICE" \
-            "would run: sudo rm -f $DESK/.config/autostart/blackbox-service-display.desktop"; do
+REVERT_LINES=("would run: sudo rm -f $DESK/.blackbox" "would run: sudo mv $SVC_HOME/.blackbox $DESK/.blackbox"
+              "would run: sudo mv $SVC_HOME/.local/share/zellij $DESK/.local/share/zellij"
+              "would run: sudo rm -f $CHOICE"
+              "would run: sudo rm -f $DESK/.config/autostart/blackbox-service-display.desktop")
+if acl_check; then REVERT_LINES+=("would run: sudo setfacl -x u:$SVCUID $DESK"); fi
+for line in "${REVERT_LINES[@]}"; do
     grep -qF -- "$line" <<< "$OUT" || fail "4: the revert dry run does not list: $line"$'\n'"$OUT"
 done
 reset_flags; REVERT_SERVICE_USER=1; REAL_USER="$ME"; REAL_HOME="$DESK"
@@ -272,8 +294,8 @@ OUT="$(resolve_service_account "$CHOICE" "$ROOT" 1 2>&1)" || fail "4: the revert
 [[ "$REAL_USER" == "$ME" && "$REAL_HOME" == "$DESK" ]] || fail "4: after the revert REAL_USER is $REAL_USER"
 [[ -d "$DESK/.blackbox" && ! -L "$DESK/.blackbox" && ! -e "$SVC_HOME/.blackbox" ]] || fail "4: .blackbox did not come back"
 [[ -f "$DESK/.local/share/zellij/tokens.db" && -d "$DESK/agent-workspaces/t1" ]] || fail "4: the state did not come back"
-getfacl -cpn "$DESK" | grep -q "^user:$SVCUID:" && fail "4: the traverse ACL is still there"
-getfacl -cpn "$WORK" | grep -q "^user:$SVCUID:" && fail "4: an ancestor's traverse ACL is still there"
+acl_check && { getfacl -cpn "$DESK" | grep -q "^user:$SVCUID:" && fail "4: the traverse ACL is still there"; }
+acl_check && { getfacl -cpn "$WORK" | grep -q "^user:$SVCUID:" && fail "4: an ancestor's traverse ACL is still there"; }
 [[ ! -e "$CHOICE" ]] || fail "4: the recorded choice was not removed"
 [[ ! -e "$DESK/.config/autostart/blackbox-service-display.desktop" ]] || fail "4: the display entry was not removed"
 grep -qF "sudo userdel $SVC" <<< "$OUT" || fail "4: the revert does not say how to remove the account"
