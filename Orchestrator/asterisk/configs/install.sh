@@ -10,8 +10,9 @@
 # --rotate-ari-password, and /etc/asterisk/ari.conf is rendered from it so the
 # two cannot drift. pjsip.conf, extensions.conf and http.conf are per-box
 # (gitignored) and are copied from this directory when present, except on
-# --rotate-ari-password, which touches ari.conf only. A full install also
-# installs the IVR prompts (install_prompts.py); blackbox.service cannot.
+# --rotate-ari-password, which touches ari.conf only. The IVR prompts are not
+# installed here: blackbox.service writes them into the prompt dir that
+# Scripts/install.sh makes for it.
 # =============================================================================
 
 set -e
@@ -100,12 +101,6 @@ for f in $CONFS; do
         chmod 640 "$ASTERISK_DIR/$f"
     fi
 done
-
-# IVR prompts: the service cannot write Asterisk's sound dir (ProtectSystem=strict)
-if [ -z "$ROTATE" ]; then
-    python3 -I "$SCRIPT_DIR/install_prompts.py" \
-        || echo "  WARNING: IVR prompts not installed; callers will hear silence. Re-run: sudo python3 -I $SCRIPT_DIR/install_prompts.py"
-fi
 
 # Enable and start Asterisk
 echo "[4/5] Enabling Asterisk service..."

@@ -45,7 +45,7 @@ Orchestrator/asterisk/gateways.json
 # and the optional prompts ensure_all_prompts makes when TTS works. Ignored so
 # they are never committed and a pull can always replace them; to ship one,
 # drop its line here and `git add` it. The prompts the IVR falls back to are
-# tracked. configs/install_prompts.py installs both kinds.
+# tracked. ensure_all_prompts installs both kinds where Asterisk plays them.
 Orchestrator/asterisk/ivr_cache/operator_menu_*.wav
 Orchestrator/asterisk/ivr_cache/pin_prompt_*digit.wav
 !Orchestrator/asterisk/ivr_cache/pin_prompt_4digit.wav

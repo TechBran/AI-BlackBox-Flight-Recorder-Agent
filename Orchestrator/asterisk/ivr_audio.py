@@ -11,19 +11,23 @@ Files are saved to:
 
 Asterisk ARI plays prompts as: sound:custom/ivr/{name}  (no .wav extension)
 
-blackbox.service runs with ProtectSystem=strict, so the Asterisk sound dir is
-read-only to the service and to sudo inside it. The runtime can only cache
-prompts; configs/install_prompts.py (run as root by Scripts/install.sh and
-configs/install.sh) installs the cache. The call path therefore never makes
-or copies audio: it picks an installed prompt with resolve_prompt().
+Scripts/install.sh creates the prompt dir owned by the service user and lets
+blackbox.service write it (a ReadWritePaths hole in its Asterisk drop-in, as
+for /etc/asterisk/blackbox.d), so this module installs and generates prompts
+itself: no sudo, and no Asterisk reload (playback reads the file on demand).
+The sudo mkdir/cp/chmod and `asterisk -rx 'core reload'` it used to run are
+not granted to the service user, and failed silently on every box without a
+blanket sudo grant (audit O11-telephony-asterisk-cellular-05). On a box whose
+installer predates this, the dir is read-only to the service: the boot log
+says so and how to fix it, and calls use the installed prompts and their
+fallbacks. The call path never makes or copies audio: it picks an installed
+prompt with resolve_prompt().
 """
 
 import asyncio
 import hashlib
 import os
-import shlex
-import shutil
-import subprocess
+import tempfile
 import traceback
 import wave
 from typing import List, Optional
@@ -35,10 +39,12 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 # ---------------------------------------------------------------------------
 # Directories
 # ---------------------------------------------------------------------------
+# Must equal IVR_SOUND_DIR in Scripts/install.sh (test-pinned).
 ASTERISK_SOUND_DIR = "/usr/share/asterisk/sounds/en/custom/ivr"
 LOCAL_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ivr_cache")
-INSTALL_HINT = "sudo python3 -I " + shlex.quote(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "install_prompts.py"))
+INSTALL_HINT = ("re-run `sudo bash Scripts/install.sh` (it makes the prompt dir owned by"
+                " the service user and writable through blackbox.service's Asterisk"
+                " drop-in), then restart blackbox.service")
 
 # ---------------------------------------------------------------------------
 # TTS config
@@ -100,24 +106,41 @@ def is_installed(name: str) -> bool:
     return _usable(os.path.join(ASTERISK_SOUND_DIR, f"{name}.wav"))
 
 
-def _install(local_path: str, asterisk_path: str) -> bool:
-    """Copy a cached prompt into the Asterisk sound dir. Never raises.
+def prompt_dir_writable() -> bool:
+    """True when this process can install prompts into ASTERISK_SOUND_DIR.
 
-    Under blackbox.service the dir is read-only (EROFS, not PermissionError),
-    for sudo too, so this only works outside the service namespace. On such a
-    box install_prompts.py installs the cache as root.
+    access(2) also reports a read-only mount (EROFS), which is what
+    ProtectSystem=strict makes the dir without the installer's drop-in."""
+    return os.path.isdir(ASTERISK_SOUND_DIR) and os.access(ASTERISK_SOUND_DIR, os.W_OK)
+
+
+def _install(local_path: str, asterisk_path: str) -> bool:
+    """Install a cached prompt where Asterisk plays it. Never raises.
+
+    Written to a temp file in the dir and renamed over the target, so Asterisk
+    never reads a half-written prompt, at 0644 so it can read it. Fails (False)
+    when the dir is not writable (see INSTALL_HINT).
     """
+    tmp = None
     try:
-        os.makedirs(ASTERISK_SOUND_DIR, exist_ok=True)
-        shutil.copy2(local_path, asterisk_path)
-    except OSError:
-        try:
-            subprocess.run(['sudo', '-n', 'mkdir', '-p', ASTERISK_SOUND_DIR],
-                           capture_output=True, timeout=10)
-            subprocess.run(['sudo', '-n', 'cp', local_path, asterisk_path],
-                           capture_output=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        with open(local_path, "rb") as f:
+            data = f.read()
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(asterisk_path),
+                                   prefix=".prompt-", suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), 0o644)
+            f.write(data)
+        os.replace(tmp, asterisk_path)
+        tmp = None
+    except OSError as e:
+        print(f"[IVR-AUDIO] Could not install {os.path.basename(asterisk_path)}: {e}")
+        return False
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return _usable(asterisk_path)
 
 
@@ -154,7 +177,7 @@ async def generate_prompt(name: str, text: str, voice: str = TTS_VOICE) -> bool:
     """Make sure prompt ``name`` is installed, from the cache or via TTS.
 
     Returns True only when the prompt is installed where Asterisk plays it.
-    A prompt that could only be cached (read-only sound dir) returns False.
+    A prompt that could only be cached (a read-only sound dir) returns False.
     Never raises (except on cancellation). Not for the call path: TTS can
     take seconds; calls use resolve_prompt().
     """
@@ -209,7 +232,7 @@ def get_prompt_uri(name: str) -> str:
 
 
 # Tracked prompts (installed everywhere) that stand in for the optional ones,
-# which are only made at boot when TTS works and installed by install_prompts.py.
+# which are only made at boot (ensure_all_prompts) when TTS works.
 PROMPT_FALLBACKS = {
     "pin_locked": ("pin_failed",),
     "pin_unavailable": ("goodbye",),
@@ -331,9 +354,15 @@ async def ensure_all_prompts():
     """Install (or generate) every static IVR prompt that is missing.
 
     Called at startup. Never raises; on a box where the service cannot write
-    the Asterisk sound dir it says once how to install the prompts.
+    the Asterisk sound dir it says once, as an error, how to fix it.
     """
     os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
+    if not prompt_dir_writable():
+        print(
+            f"[IVR-AUDIO] ERROR: the IVR prompt dir {ASTERISK_SOUND_DIR} is not writable"
+            f" by this service, so missing prompts cannot be installed (callers hear a"
+            f" fallback prompt or silence). Fix: {INSTALL_HINT}"
+        )
 
     prompts = dict(STATIC_PROMPTS)
     try:
@@ -368,8 +397,7 @@ async def ensure_all_prompts():
     if not_installed:
         print(
             f"[IVR-AUDIO] {len(not_installed)} prompt(s) are cached but not installed in"
-            f" {ASTERISK_SOUND_DIR} (this service cannot write there); callers hear a"
-            f" fallback or silence instead. Fix: {INSTALL_HINT}"
+            f" {ASTERISK_SOUND_DIR}: {', '.join(not_installed)}. Fix: {INSTALL_HINT}"
         )
     if not_made:
         print(f"[IVR-AUDIO] Could not generate (TTS unavailable): {', '.join(not_made)};"
@@ -383,13 +411,4 @@ async def ensure_all_prompts():
             print(f"[IVR-AUDIO] Operator menu pre-generated: {menu_name}")
     except Exception as e:
         print(f"[IVR-AUDIO] Operator menu generation error: {e}")
-
-    # Reload Asterisk sounds index so newly generated WAVs are found by ARI
-    try:
-        subprocess.run(  # noqa: ASYNC221
-            ['sudo', 'asterisk', '-rx', 'core reload'],
-            capture_output=True, timeout=10,
-        )
-        print("[IVR-AUDIO] Asterisk sounds index reloaded")
-    except Exception as e:
-        print(f"[IVR-AUDIO] Asterisk reload warning: {e}")
+    # No Asterisk reload: playback finds a new file on demand.

@@ -1347,12 +1347,16 @@ echo "[install] Sudoers grant written for $REAL_USER (tailscale + service + upda
 # the runtime can't create that dir or write the configs unless we punch a narrow
 # hole here, ONCE, at install time (as root). This function:
 #   1. creates /etc/asterisk/blackbox.d, owned by the service user;
+#   1b. creates the IVR prompt dir Asterisk plays from, owned by the service
+#      user (the runtime installs and generates the prompts itself, without
+#      sudo; audit O11-telephony-asterisk-cellular-05);
 #   2. #includes blackbox.d/*.conf from pjsip.conf + extensions.conf (once);
-#   3. punches a ReadWritePaths hole for JUST that dir via a systemd drop-in;
+#   3. punches a ReadWritePaths hole for JUST those two dirs via a systemd drop-in;
 #   4. grants the service user a scoped NOPASSWD sudoers rule for the two
 #      `asterisk -rx ... reload` commands only.
 # The runtime NEVER writes sudoers / systemd config itself — only the trunk +
-# dialplan .conf files inside blackbox.d, then `sudo asterisk -rx ... reload`.
+# dialplan .conf files inside blackbox.d, then `sudo asterisk -rx ... reload`,
+# and the prompt WAVs.
 #
 # Idempotent: safe to re-run. Paths are overridable via env vars purely so the
 # bash test (scripts/tests/test_install_asterisk_block.sh) can redirect them
@@ -1363,6 +1367,8 @@ setup_asterisk_blackbox_include() {
     local SYSTEMD_DROPIN_DIR="${SYSTEMD_DROPIN_DIR:-/etc/systemd/system/blackbox.service.d}"
     local SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/blackbox-asterisk}"
     local SERVICE_USER="${SERVICE_USER:-$REAL_USER}"
+    # Must equal ASTERISK_SOUND_DIR in Orchestrator/asterisk/ivr_audio.py (test-pinned).
+    local IVR_SOUND_DIR="${IVR_SOUND_DIR:-/usr/share/asterisk/sounds/en/custom/ivr}"
     local INCLUDE_LINE='#include "blackbox.d/*.conf"'
 
     # ── 1. include dir, owned by the service user ──
@@ -1372,6 +1378,23 @@ setup_asterisk_blackbox_include() {
             || echo "[install] WARN: could not chown $BLACKBOX_D to $SERVICE_USER (continuing)"
     fi
     echo "[install] Asterisk include dir ready: $BLACKBOX_D (owner $SERVICE_USER)"
+
+    # ── 1b. IVR prompt dir, owned by the service user ──
+    # Asterisk plays the prompts as sound:custom/ivr/<name> from here. `en` is
+    # an alternatives symlink, so the drop-in names the resolved path. Only the
+    # dir is chowned, never -R: a re-run must not act on anything the service
+    # put inside it. Prompts already there stay root-owned and are replaced by
+    # rename. Asterisk (another user) reads the 0755 dir and 0644 prompts.
+    local IVR_SOUND_REAL=""
+    if mkdir -p "$IVR_SOUND_DIR" 2>/dev/null; then
+        IVR_SOUND_REAL="$(readlink -f "$IVR_SOUND_DIR")"
+        chown "$SERVICE_USER" "$IVR_SOUND_REAL" 2>/dev/null \
+            || echo "[install] WARN: could not chown $IVR_SOUND_REAL to $SERVICE_USER (continuing)"
+        chmod 0755 "$IVR_SOUND_REAL"
+        echo "[install] IVR prompt dir ready: $IVR_SOUND_REAL (owner $SERVICE_USER)"
+    else
+        echo "[install] WARN: could not create $IVR_SOUND_DIR (no Asterisk sounds package?); the IVR will be silent"
+    fi
 
     # ── 2. #include the dir from pjsip.conf + extensions.conf, once each ──
     local conf
@@ -1390,17 +1413,25 @@ setup_asterisk_blackbox_include() {
         fi
     done
 
-    # ── 3. systemd drop-in: ReadWritePaths hole for JUST the include dir ──
+    # ── 3. systemd drop-in: ReadWritePaths holes for JUST those two dirs ──
     # The drop-in content uses the LITERAL /etc path the live service needs; only
-    # WHERE the drop-in is written is overridable (for the test sandbox).
+    # WHERE the drop-in is written (and the prompt dir) is overridable (for the
+    # test sandbox). '-' on the prompt dir: a later removal of Asterisk's sounds
+    # must not stop the unit from starting.
     mkdir -p "$SYSTEMD_DROPIN_DIR"
-    cat > "$SYSTEMD_DROPIN_DIR/asterisk.conf" <<'DROPIN'
+    {
+        cat <<'DROPIN'
 # Asterisk telephony drop-in (T5.1). DO NOT EDIT — install.sh manages this file.
-# Punches a narrow hole through ProtectSystem=strict so the runtime can write
-# auto-generated trunk + dialplan configs into Asterisk's blackbox.d include dir.
+# Punches narrow holes through ProtectSystem=strict so the runtime can write
+# auto-generated trunk + dialplan configs into Asterisk's blackbox.d include dir,
+# and the IVR prompts into the dir Asterisk plays them from.
 [Service]
 ReadWritePaths=/etc/asterisk/blackbox.d
 DROPIN
+        if [[ -n "$IVR_SOUND_REAL" ]]; then
+            echo "ReadWritePaths=-$IVR_SOUND_REAL"
+        fi
+    } > "$SYSTEMD_DROPIN_DIR/asterisk.conf"
     echo "[install] Wrote systemd drop-in: $SYSTEMD_DROPIN_DIR/asterisk.conf"
 
     # ── 4. scoped NOPASSWD sudoers rule for the two reload commands only ──
@@ -1437,11 +1468,8 @@ SUDOERS
 if [[ -x /usr/sbin/asterisk ]]; then
     echo "[install] Asterisk detected — enabling blackbox.d include plumbing"
     sudo SKIP_VISUDO="${SKIP_VISUDO:-0}" bash -c "REAL_USER='$REAL_USER'; $(declare -f setup_asterisk_blackbox_include); setup_asterisk_blackbox_include"
-    # IVR prompts: ProtectSystem=strict keeps blackbox.service from writing
-    # Asterisk's sound dir, so they are installed here, as root, from the
-    # tracked cache (the script refuses symlinks and non-WAV files).
-    sudo python3 -I "$BLACKBOX_ROOT/Orchestrator/asterisk/configs/install_prompts.py" \
-        || echo "[install] WARN: IVR prompts not installed; inbound callers will hear silence until it succeeds"
+    # IVR prompts: the service installs them into the prompt dir made above
+    # when it next starts (Orchestrator/asterisk/ivr_audio.py ensure_all_prompts).
 else
     echo "[install] Asterisk not installed (/usr/sbin/asterisk absent) — skipping telephony include setup"
 fi

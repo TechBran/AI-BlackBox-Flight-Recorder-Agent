@@ -32,8 +32,12 @@ export SYSTEMD_DROPIN_DIR="$WORK/etc/systemd/system/blackbox.service.d"
 export SUDOERS_FILE="$WORK/etc/sudoers.d/blackbox-asterisk"
 export SERVICE_USER="$USER"          # a real user so chown best-effort succeeds/fails harmlessly
 export SKIP_VISUDO=1                  # never run visudo against anything in the test
+# On a real box `en` is an alternatives symlink to the installed prompt set.
+SOUNDS="$WORK/usr/share/asterisk/sounds"
+export IVR_SOUND_DIR="$SOUNDS/en/custom/ivr"
 
-mkdir -p "$ASTERISK_ETC" "$WORK/etc/sudoers.d"
+mkdir -p "$ASTERISK_ETC" "$WORK/etc/sudoers.d" "$SOUNDS/en_US_f_Allison"
+ln -s en_US_f_Allison "$SOUNDS/en"
 # Seed fake Asterisk configs (they exist on a real box).
 printf '[transport-udp]\ntype=transport\n' > "$ASTERISK_ETC/pjsip.conf"
 printf '[from-internal]\nexten => 100,1,Answer()\n'  > "$ASTERISK_ETC/extensions.conf"
@@ -61,6 +65,20 @@ grep -qF "$INCLUDE_LINE" "$ASTERISK_ETC/extensions.conf" \
 grep -qF 'ReadWritePaths=/etc/asterisk/blackbox.d' "$SYSTEMD_DROPIN_DIR/asterisk.conf" \
     || fail "ReadWritePaths line missing from drop-in"
 
+# Assert: the IVR prompt dir exists, is the service user's and readable by
+# Asterisk, and the drop-in opens its RESOLVED path (the runtime writes the
+# prompts itself; audit O11-telephony-asterisk-cellular-05).
+IVR_REAL="$(readlink -f "$SOUNDS/en_US_f_Allison")/custom/ivr"
+[[ -d "$IVR_REAL" ]] || fail "IVR prompt dir was not created"
+[[ "$(stat -c %U "$IVR_REAL")" == "$SERVICE_USER" ]] || fail "IVR prompt dir is not owned by the service user"
+[[ "$(stat -c %a "$IVR_REAL")" == "755" ]] || fail "IVR prompt dir is not 0755 (Asterisk reads it)"
+grep -qxF "ReadWritePaths=-$IVR_REAL" "$SYSTEMD_DROPIN_DIR/asterisk.conf" \
+    || fail "drop-in does not open the resolved IVR prompt dir"
+# A re-run must never act on what the service put inside the dir.
+grep -qE 'chown[[:space:]]+-[a-zA-Z]*R' "$FUNC_FILE" && fail "the function chowns recursively"
+# The prompts are the service's job now: no root-run prompt installer.
+grep -q 'install_prompts' "$INSTALL_SH" && fail "install.sh still runs a root prompt installer"
+
 # Assert: sudoers file written with the scoped NOPASSWD reload line
 [[ -f "$SUDOERS_FILE" ]] || fail "sudoers file not written"
 grep -qF 'NOPASSWD:' "$SUDOERS_FILE" || fail "NOPASSWD missing from sudoers file"
@@ -76,6 +94,17 @@ PJSIP_COUNT=$(grep -cF "$INCLUDE_LINE" "$ASTERISK_ETC/pjsip.conf")
 EXT_COUNT=$(grep -cF "$INCLUDE_LINE" "$ASTERISK_ETC/extensions.conf")
 [[ "$PJSIP_COUNT" -eq 1 ]] || fail "include duplicated in pjsip.conf (count=$PJSIP_COUNT)"
 [[ "$EXT_COUNT"   -eq 1 ]] || fail "include duplicated in extensions.conf (count=$EXT_COUNT)"
+RWP_COUNT=$(grep -c '^ReadWritePaths=' "$SYSTEMD_DROPIN_DIR/asterisk.conf")
+[[ "$RWP_COUNT" -eq 2 ]] || fail "drop-in ReadWritePaths lines duplicated or lost (count=$RWP_COUNT)"
+
+# ── No sounds package: the prompt dir cannot be made, the unit must still start ──
+rm -rf "$SOUNDS" "$SYSTEMD_DROPIN_DIR"
+mkdir -p "$SOUNDS"
+ln -s /nonexistent-prompt-set "$SOUNDS/en"
+setup_asterisk_blackbox_include >/dev/null 2>&1 || fail "function failed without a sounds package"
+grep -q -- '-/nonexistent' "$SYSTEMD_DROPIN_DIR/asterisk.conf" && fail "drop-in names a dir that is not there"
+grep -qF 'ReadWritePaths=/etc/asterisk/blackbox.d' "$SYSTEMD_DROPIN_DIR/asterisk.conf" \
+    || fail "blackbox.d hole lost when the prompt dir could not be made"
 
 echo "ALL TESTS PASSED"
 exit 0
