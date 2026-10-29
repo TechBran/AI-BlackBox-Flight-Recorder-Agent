@@ -145,6 +145,10 @@
             "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit to use origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
             "type": "string"
           },
+          "model": {
+            "description": "Optional model id for the chosen provider. Omit to use that provider's configured frontier model.",
+            "type": "string"
+          },
           "provider": {
             "description": "Optional frontier brain to drive the device. Omit to use the target device's configured default_provider, else the box default. 'gemini' (validated Android CU), 'claude'/'openai' (cloud vision models, DIY-on-Android), or 'gemma' (the on-device model \u2014 the legacy control_phone path). An explicit value overrides the per-device default.",
             "enum": [
@@ -157,6 +161,10 @@
           },
           "task": {
             "description": "The natural-language task to perform on the device, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
+            "type": "string"
+          },
+          "task_id": {
+            "description": "With action='stop' only: the one device-control task id to kill (as returned by a control_device run). Omit to stop ALL in-flight device control on the device.",
             "type": "string"
           }
         },
@@ -171,6 +179,10 @@
       "description": "Do a task on the user's OWN phone using the Gemma AI that runs ON the phone itself \u2014 the BlackBox wakes it over Tailscale. THIS is the tool for 'do X on my phone', 'use my phone to ...', 'have my phone open/show/check ...'. It drives the phone's on-device Gemma, which is DIFFERENT from control_device (where a cloud model drives the phone instead). Only SAFE actions run remotely. It BLOCKS while the phone wakes Gemma (a cold model load, up to ~75s) \u2014 you MUST actually call it and WAIT for its result before you reply.",
       "input_schema": {
         "properties": {
+          "device": {
+            "description": "Optional target device name (tailnet hostname or MagicDNS name). Omit to use the phone the request came from, else the operator's designated PRIMARY device.",
+            "type": "string"
+          },
           "task": {
             "description": "The natural-language task to run on the phone, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
             "type": "string"
@@ -1348,8 +1360,8 @@
       "input_schema": {
         "properties": {
           "count": {
-            "default": 3,
-            "description": "Number of recent snapshots to retrieve (default: 3, max: 5)",
+            "default": 5,
+            "description": "Number of recent snapshots to retrieve (default: 5, max: 10)",
             "type": "integer"
           },
           "operator": {
@@ -1817,12 +1829,12 @@
       "input_schema": {
         "properties": {
           "limit": {
-            "default": 10,
-            "description": "Maximum number of results (default: 10)",
+            "default": 5,
+            "description": "Maximum number of results (default: 5; the MCP server returns 10)",
             "type": "integer"
           },
           "operator": {
-            "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator.",
+            "description": "Optional operator to search. Chat, voice and remote MCP sessions always search their own operator; only the local (stdio) MCP client searches every operator on this box when this is omitted.",
             "type": "string"
           },
           "query": {
@@ -3066,7 +3078,7 @@
           "parameters": {
             "properties": {
               "count": {
-                "description": "Number of recent snapshots to retrieve (default: 3, max: 5)",
+                "description": "Number of recent snapshots to retrieve (default: 5, max: 10)",
                 "type": "integer"
               },
               "operator": {
@@ -3468,11 +3480,11 @@
           "parameters": {
             "properties": {
               "limit": {
-                "description": "Maximum number of results (default: 10)",
+                "description": "Maximum number of results (default: 5; the MCP server returns 10)",
                 "type": "integer"
               },
               "operator": {
-                "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator.",
+                "description": "Optional operator to search. Chat, voice and remote MCP sessions always search their own operator; only the local (stdio) MCP client searches every operator on this box when this is omitted.",
                 "type": "string"
               },
               "query": {
@@ -3887,6 +3899,10 @@
                 "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit to use origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
                 "type": "string"
               },
+              "model": {
+                "description": "Optional model id for the chosen provider. Omit to use that provider's configured frontier model.",
+                "type": "string"
+              },
               "provider": {
                 "description": "Optional frontier brain to drive the device. Omit to use the target device's configured default_provider, else the box default. 'gemini' (validated Android CU), 'claude'/'openai' (cloud vision models, DIY-on-Android), or 'gemma' (the on-device model \u2014 the legacy control_phone path). An explicit value overrides the per-device default.",
                 "enum": [
@@ -3899,6 +3915,10 @@
               },
               "task": {
                 "description": "The natural-language task to perform on the device, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
+                "type": "string"
+              },
+              "task_id": {
+                "description": "With action='stop' only: the one device-control task id to kill (as returned by a control_device run). Omit to stop ALL in-flight device control on the device.",
                 "type": "string"
               }
             },
@@ -3913,6 +3933,10 @@
           "name": "control_phone",
           "parameters": {
             "properties": {
+              "device": {
+                "description": "Optional target device name (tailnet hostname or MagicDNS name). Omit to use the phone the request came from, else the operator's designated PRIMARY device.",
+                "type": "string"
+              },
               "task": {
                 "description": "The natural-language task to run on the phone, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
                 "type": "string"
@@ -5071,7 +5095,7 @@
           "parameters": {
             "properties": {
               "count": {
-                "description": "Number of recent snapshots to retrieve (default: 3, max: 5)",
+                "description": "Number of recent snapshots to retrieve (default: 5, max: 10)",
                 "type": "integer"
               },
               "operator": {
@@ -5529,11 +5553,11 @@
           "parameters": {
             "properties": {
               "limit": {
-                "description": "Maximum number of results (default: 10)",
+                "description": "Maximum number of results (default: 5; the MCP server returns 10)",
                 "type": "integer"
               },
               "operator": {
-                "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator.",
+                "description": "Optional operator to search. Chat, voice and remote MCP sessions always search their own operator; only the local (stdio) MCP client searches every operator on this box when this is omitted.",
                 "type": "string"
               },
               "query": {
@@ -6038,8 +6062,7 @@
           }
         },
         "required": [
-          "message",
-          "operator"
+          "message"
         ],
         "type": "object"
       },
@@ -6082,6 +6105,10 @@
             "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit to use origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
             "type": "string"
           },
+          "model": {
+            "description": "Optional model id for the chosen provider. Omit to use that provider's configured frontier model.",
+            "type": "string"
+          },
           "provider": {
             "description": "Optional frontier brain to drive the device. Omit to use the target device's configured default_provider, else the box default. 'gemini' (validated Android CU), 'claude'/'openai' (cloud vision models, DIY-on-Android), or 'gemma' (the on-device model \u2014 the legacy control_phone path). An explicit value overrides the per-device default.",
             "enum": [
@@ -6094,6 +6121,10 @@
           },
           "task": {
             "description": "The natural-language task to perform on the device, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
+            "type": "string"
+          },
+          "task_id": {
+            "description": "With action='stop' only: the one device-control task id to kill (as returned by a control_device run). Omit to stop ALL in-flight device control on the device.",
             "type": "string"
           }
         },
@@ -6108,6 +6139,10 @@
       "description": "Do a task on the user's OWN phone using the Gemma AI that runs ON the phone itself \u2014 the BlackBox wakes it over Tailscale. THIS is the tool for 'do X on my phone', 'use my phone to ...', 'have my phone open/show/check ...'. It drives the phone's on-device Gemma, which is DIFFERENT from control_device (where a cloud model drives the phone instead). Only SAFE actions run remotely. It BLOCKS while the phone wakes Gemma (a cold model load, up to ~75s) \u2014 you MUST actually call it and WAIT for its result before you reply.",
       "inputSchema": {
         "properties": {
+          "device": {
+            "description": "Optional target device name (tailnet hostname or MagicDNS name). Omit to use the phone the request came from, else the operator's designated PRIMARY device.",
+            "type": "string"
+          },
           "task": {
             "description": "The natural-language task to run on the phone, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
             "type": "string"
@@ -6724,7 +6759,7 @@
       "inputSchema": {
         "properties": {
           "operator": {
-            "description": "Operator/user name",
+            "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name.",
             "type": "string"
           },
           "query": {
@@ -6733,8 +6768,7 @@
           }
         },
         "required": [
-          "query",
-          "operator"
+          "query"
         ],
         "type": "object"
       },
@@ -6806,17 +6840,10 @@
       "name": "get_media"
     },
     {
-      "description": "Check the status of a music generation task. Alias for get_task_status with music-specific context.",
+      "description": "Check whether music generation (Lyria) is available on this box: returns the music backend's status (lyria_available, model, ...). To follow one music task, call get_task_status with its task_id.",
       "inputSchema": {
-        "properties": {
-          "task_id": {
-            "description": "The task ID returned by lyria_music",
-            "type": "string"
-          }
-        },
-        "required": [
-          "task_id"
-        ],
+        "properties": {},
+        "required": [],
         "type": "object"
       },
       "name": "get_music_status"
@@ -7145,8 +7172,8 @@
       "inputSchema": {
         "properties": {
           "count": {
-            "default": 3,
-            "description": "Number of recent snapshots to retrieve (default: 3, max: 5)",
+            "default": 5,
+            "description": "Number of recent snapshots to retrieve (default: 5, max: 10)",
             "type": "integer"
           },
           "operator": {
@@ -7211,8 +7238,7 @@
           }
         },
         "required": [
-          "content",
-          "operator"
+          "content"
         ],
         "type": "object"
       },
@@ -7485,12 +7511,12 @@
       "inputSchema": {
         "properties": {
           "limit": {
-            "default": 10,
-            "description": "Maximum number of results (default: 10)",
+            "default": 5,
+            "description": "Maximum number of results (default: 5; the MCP server returns 10)",
             "type": "integer"
           },
           "operator": {
-            "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator.",
+            "description": "Optional operator to search. Chat, voice and remote MCP sessions always search their own operator; only the local (stdio) MCP client searches every operator on this box when this is omitted.",
             "type": "string"
           },
           "query": {
@@ -8751,8 +8777,8 @@
       "parameters": {
         "properties": {
           "count": {
-            "default": 3,
-            "description": "Number of recent snapshots to retrieve (default: 3, max: 5)",
+            "default": 5,
+            "description": "Number of recent snapshots to retrieve (default: 5, max: 10)",
             "type": "integer"
           },
           "operator": {
@@ -9180,12 +9206,12 @@
       "parameters": {
         "properties": {
           "limit": {
-            "default": 10,
-            "description": "Maximum number of results (default: 10)",
+            "default": 5,
+            "description": "Maximum number of results (default: 5; the MCP server returns 10)",
             "type": "integer"
           },
           "operator": {
-            "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator.",
+            "description": "Optional operator to search. Chat, voice and remote MCP sessions always search their own operator; only the local (stdio) MCP client searches every operator on this box when this is omitted.",
             "type": "string"
           },
           "query": {
@@ -9625,6 +9651,10 @@
               "description": "Optional target device name (tailnet hostname or MagicDNS name) \u2014 targets ANY device on the tailnet. Omit to use origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget \u2014 it must be an explicit target here.",
               "type": "string"
             },
+            "model": {
+              "description": "Optional model id for the chosen provider. Omit to use that provider's configured frontier model.",
+              "type": "string"
+            },
             "provider": {
               "description": "Optional frontier brain to drive the device. Omit to use the target device's configured default_provider, else the box default. 'gemini' (validated Android CU), 'claude'/'openai' (cloud vision models, DIY-on-Android), or 'gemma' (the on-device model \u2014 the legacy control_phone path). An explicit value overrides the per-device default.",
               "enum": [
@@ -9637,6 +9667,10 @@
             },
             "task": {
               "description": "The natural-language task to perform on the device, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
+              "type": "string"
+            },
+            "task_id": {
+              "description": "With action='stop' only: the one device-control task id to kill (as returned by a control_device run). Omit to stop ALL in-flight device control on the device.",
               "type": "string"
             }
           },
@@ -9654,6 +9688,10 @@
         "name": "control_phone",
         "parameters": {
           "properties": {
+            "device": {
+              "description": "Optional target device name (tailnet hostname or MagicDNS name). Omit to use the phone the request came from, else the operator's designated PRIMARY device.",
+              "type": "string"
+            },
             "task": {
               "description": "The natural-language task to run on the phone, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'.",
               "type": "string"
@@ -10966,8 +11004,8 @@
         "parameters": {
           "properties": {
             "count": {
-              "default": 3,
-              "description": "Number of recent snapshots to retrieve (default: 3, max: 5)",
+              "default": 5,
+              "description": "Number of recent snapshots to retrieve (default: 5, max: 10)",
               "type": "integer"
             },
             "operator": {
@@ -11489,12 +11527,12 @@
         "parameters": {
           "properties": {
             "limit": {
-              "default": 10,
-              "description": "Maximum number of results (default: 10)",
+              "default": 5,
+              "description": "Maximum number of results (default: 5; the MCP server returns 10)",
               "type": "integer"
             },
             "operator": {
-              "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator.",
+              "description": "Optional operator to search. Chat, voice and remote MCP sessions always search their own operator; only the local (stdio) MCP client searches every operator on this box when this is omitted.",
               "type": "string"
             },
             "query": {

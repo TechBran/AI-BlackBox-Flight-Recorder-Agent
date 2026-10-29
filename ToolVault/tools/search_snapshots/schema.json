@@ -22,12 +22,12 @@
       "operator": {
         "type": "string",
         "x-source": "operators",
-        "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator."
+        "description": "Optional operator to search. Chat, voice and remote MCP sessions always search their own operator; only the local (stdio) MCP client searches every operator on this box when this is omitted."
       },
       "limit": {
         "type": "integer",
-        "description": "Maximum number of results (default: 10)",
-        "default": 10
+        "description": "Maximum number of results (default: 5; the MCP server returns 10)",
+        "default": 5
       }
     },
     "required": [

@@ -29,10 +29,9 @@
       }
     },
     "required": [
-      "message",
-      "operator"
+      "message"
     ]
   },
   "returns": "Returns AI response enriched with relevant snapshots",
-  "example": "chat_with_context(message=\"...\", operator=\"...\")"
+  "example": "chat_with_context(message=\"...\")"
 }

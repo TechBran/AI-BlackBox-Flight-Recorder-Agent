@@ -48,5 +48,5 @@
       "tags"
     ]
   },
-  "example": "save_contact(name=\"...\", notes=\"...\", tags=\"...\")"
+  "example": "save_contact(name=\"...\", notes=\"...\", tags=[\"...\"])"
 }

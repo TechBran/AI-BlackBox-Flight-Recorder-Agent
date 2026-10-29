@@ -16,14 +16,13 @@
       "operator": {
         "type": "string",
         "x-source": "operators",
-        "description": "Operator/user name"
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
       }
     },
     "required": [
-      "query",
-      "operator"
+      "query"
     ]
   },
   "returns": "Requested data object",
-  "example": "get_context(query=\"...\", operator=\"...\")"
+  "example": "get_context(query=\"...\")"
 }

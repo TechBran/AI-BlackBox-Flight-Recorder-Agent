@@ -1,6 +1,6 @@
 {
   "name": "get_music_status",
-  "description": "Check the status of a music generation task. Alias for get_task_status with music-specific context.",
+  "description": "Check whether music generation (Lyria) is available on this box: returns the music backend's status (lyria_available, model, ...). To follow one music task, call get_task_status with its task_id.",
   "category": "mcp_internal",
   "groups": [
     "mcp"
@@ -8,16 +8,9 @@
   "tier": 3,
   "parameters": {
     "type": "object",
-    "properties": {
-      "task_id": {
-        "type": "string",
-        "description": "The task ID returned by lyria_music"
-      }
-    },
-    "required": [
-      "task_id"
-    ]
+    "properties": {},
+    "required": []
   },
-  "returns": "Requested data object",
-  "example": "get_music_status(task_id=\"...\")"
+  "returns": "The music backend's status object (lyria_available, model, ...)",
+  "example": "get_music_status()"
 }

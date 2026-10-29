@@ -20,6 +20,14 @@
         "enum": ["gemini", "claude", "openai", "gemma"],
         "description": "Optional frontier brain to drive the device. Omit to use the target device's configured default_provider, else the box default. 'gemini' (validated Android CU), 'claude'/'openai' (cloud vision models, DIY-on-Android), or 'gemma' (the on-device model — the legacy control_phone path). An explicit value overrides the per-device default."
       },
+      "model": {
+        "type": "string",
+        "description": "Optional model id for the chosen provider. Omit to use that provider's configured frontier model."
+      },
+      "task_id": {
+        "type": "string",
+        "description": "With action='stop' only: the one device-control task id to kill (as returned by a control_device run). Omit to stop ALL in-flight device control on the device."
+      },
       "action": {
         "type": "string",
         "enum": ["run", "stop"],

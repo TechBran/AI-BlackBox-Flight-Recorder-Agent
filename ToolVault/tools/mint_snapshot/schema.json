@@ -25,9 +25,8 @@
       }
     },
     "required": [
-      "content",
-      "operator"
+      "content"
     ]
   },
-  "example": "mint_snapshot(content=\"...\", operator=\"...\")"
+  "example": "mint_snapshot(content=\"...\")"
 }
