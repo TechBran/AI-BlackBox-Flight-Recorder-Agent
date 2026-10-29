@@ -17,16 +17,23 @@
 #      paths resolve, traverse-only ACLs, the choice and display entry written,
 #      REAL_USER/REAL_HOME switched and DESKTOP_USER kept;
 #   3. a later run with the choice recorded has nothing to do and says nothing;
+#      one that finds entries owned by someone else (root made one) re-owns
+#      them with the units left running when they already run as the account,
+#      and stops them first only while they still run as someone else;
 #   4. --revert-service-user (dry run, then for real) gives it all back and
 #      removes the ACLs, the display entry and the choice;
-#   5. refusals change nothing: an account in sudo, uid 0, a foreign primary
+#   5. refusals change nothing: an account in sudo, docker or input, one a
+#      sudoers file grants anything, uid 0, a login shell, a foreign primary
 #      group, the desktop user itself, a bad name, an enabled vLLM reranker, a
-#      different recorded account, a malformed choice file, a revert by someone
-#      else;
+#      different recorded account, a malformed choice file, a revert by
+#      someone else;
 #   6. with no choice the step is silent and leaves REAL_USER alone, and the
 #      units, the CLI-agent drop-in, the sudoers and the store render for the
 #      service account only when there is one (byte-identical otherwise);
-#   7. the desktop-session steps use DESKTOP_USER and nothing adds anyone to sudo.
+#   7. the desktop-session steps use DESKTOP_USER, nothing adds anyone to sudo,
+#      the service account never joins `input`, the status symlink is made as
+#      the checkout's owner, and a failure after units were stopped starts
+#      them again (the exit trap, set before Step 0s runs).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -39,7 +46,7 @@ trap 'chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 # ── the Step 0s block, functions and constants only ──────────────────────────
 STEP="$WORK/step0s.sh"
-awk '/^# ── Step 0s: /{on=1} on && /^resolve_service_account \/etc\/blackbox\/service-user/{exit} on' \
+awk '/^# ── Step 0s: /{on=1} on && /^trap _restart_stopped_units EXIT$/{exit} on' \
     "$INSTALL_SH" > "$STEP"
 grep -q '^migrate_to_service_account()' "$STEP" || fail "could not extract Step 0s from install.sh"
 # Only comments, assignments, function bodies and closing brackets at column 0
@@ -118,6 +125,7 @@ unit="${*: -1}"
 case "$1" in
     is-active) for u in ${ACTIVE_UNITS:-}; do [[ "$u" == "$unit" ]] && exit 0; done; exit 3 ;;
     is-enabled) for u in ${ENABLED_UNITS:-}; do [[ "$u" == "$unit" ]] && exit 0; done; exit 1 ;;
+    show) echo "${UNIT_USER:-}" ;;   # show -p User --value <unit>: who it runs as
 esac
 exit 0
 STUB
@@ -169,6 +177,13 @@ REAL_USER="$ME"; REAL_HOME="$DESK"
 # shellcheck source=/dev/null
 source "$STEP"
 SERVICE_HOME_BASE="$WORK/var/lib"
+# A sudoers tree of the sandbox's own: the BlackBox's file names the account
+# (re-rendered for it), another file grants a person's account everything.
+mkdir -p "$WORK/etc/sudoers.d"
+echo "Defaults env_reset" > "$WORK/etc/sudoers"
+echo "$SVC ALL=(root) NOPASSWD: /usr/bin/systemctl restart blackbox.service" > "$WORK/etc/sudoers.d/blackbox-system"
+echo "bbgranted ALL=(ALL:ALL) ALL" > "$WORK/etc/sudoers.d/90-bbgranted"
+SUDOERS_PATHS=("$WORK/etc/sudoers" "$WORK/etc/sudoers.d")
 reset_flags() { DRY_RUN=0; REQUESTED_SERVICE_USER=""; REVERT_SERVICE_USER=0; SVC_STOPPED_UNITS=(); }
 
 # Every Step 0s call runs the way install.sh runs it: a plain statement under
@@ -220,6 +235,14 @@ want "would run: sudo mv $DESK/.local/share/zellij $SVC_HOME/.local/share/zellij
 want "would run: sudo mv $DESK/.local/share/blackbox $SVC_HOME/.local/share/blackbox"
 want "would run: sudo mv $DESK/agent-workspaces $SVC_HOME/agent-workspaces"
 grep -qF "$DESK/.claude " <<< "$OUT" && fail "1: the desktop user's own CLI sign-ins are moved"
+# What the traverse ACL exposes is named (the desktop user's world-readable
+# sign-in file here), and what the display entry hands over.
+if acl_check; then
+    want "NOTE: $SVC can then open what below $DESK others may read"
+    want "[install]     $DESK/.claude/credentials"
+    grep -qF "$ROOT/" <<< "$(grep '^\[install\]     /' <<< "$OUT")" && fail "1: the checkout is listed as exposed"
+fi
+want "can see and"
 want "$CHOICE"
 want "blackbox-service-display.desktop"
 want "--revert-service-user"
@@ -230,6 +253,7 @@ reset_flags
 step0s "REQUESTED_SERVICE_USER=$SVC"
 [[ "$RC" -eq 0 ]] || fail "2: the move failed ($RC): $OUT"
 MOVED="$RESULT"
+MOVED_OUT="$OUT"
 [[ "$MOVED" == "@@ REAL_USER=$SVC REAL_HOME=$SVC_HOME DESKTOP_USER=$ME STOPPED="* ]] \
     || fail "2: after the move: $MOVED"
 step0s "REQUESTED_SERVICE_USER=$SVC"
@@ -256,6 +280,8 @@ acl_check && { getfacl -cpn "$DESK/Desktop" | grep -q "^user:$SVCUID:" && fail "
 grep -qx "SERVICE_USER=$SVC" "$CHOICE" && grep -qx "PREVIOUS_USER=$ME" "$CHOICE" || fail "2: the choice is not recorded: $(cat "$CHOICE" 2>&1)"
 grep -qx "Exec=xhost +SI:localuser:$SVC" "$DESK/.config/autostart/blackbox-service-display.desktop" \
     || fail "2: no display access entry for the desktop session"
+grep -qF "type into whatever desktop session is logged in" <<< "$MOVED_OUT" \
+    || fail "2: the move does not say what display access hands the account"
 
 # ── 3. later runs have nothing to do ─────────────────────────────────────────
 # (The stub could not chown: pretend it did by giving the account this uid.)
@@ -270,11 +296,40 @@ step0s
 grep -q '^sudo ' "$LOG" && fail "3: a later run ran sudo: $(cat "$LOG")"
 sed -i "s/^$SVC:x:$MYUID:$MYGID:/$SVC:x:$SVCUID:$SVCUID:/" "$FAKE_PASSWD"
 
+# 3b. Entries owned by someone else turn up after the move (install.sh's own
+# root steps used to make blackbox-status.sh): every later run, the one
+# Scripts/update.sh makes included, found the move "pending" and stopped the
+# BlackBox before apt, pip and the build. With the units already running as
+# the account, the entries are re-owned and nothing stops. (The stub cannot
+# chown, so here every entry still shows the test user's uid: all of them
+# count as someone else's.)
+: > "$LOG"
+reset_flags
+UNIT_USER="$SVC" step0s
+[[ "$RC" -eq 0 ]] || fail "3b: re-owning failed ($RC): $OUT"
+grep -qxF "sudo chown -hR $SVC:$SVC $ROOT/Volumes" "$LOG" || fail "3b: the foreign entries were not re-owned: $(cat "$LOG")"
+grep -q 'systemctl stop' "$LOG" && fail "3b: re-owning stopped the BlackBox: $(grep 'systemctl stop' "$LOG")"
+[[ "$RESULT" == *" STOPPED=" ]] || fail "3b: units recorded as stopped: $RESULT"
+grep -qE '^sudo (mv|ln|useradd|setfacl)' "$LOG" && fail "3b: re-owning did more than chown: $(cat "$LOG")"
+# 3c. ...but while the units still run as someone else (a half-done move),
+# they stop before files change hands under them.
+: > "$LOG"
+reset_flags
+UNIT_USER="$ME" step0s
+[[ "$RC" -eq 0 ]] || fail "3c: failed ($RC): $OUT"
+grep -qxF "sudo systemctl stop blackbox.service" "$LOG" || fail "3c: units running as $ME were not stopped first"
+[[ "$RESULT" == *"STOPPED=blackbox.service zellij-web.service" ]] || fail "3c: $RESULT"
+
 # ── 5. refusals change nothing ───────────────────────────────────────────────
 printf '%s\n' "bbsudo:x:4300:4300::$WORK/var/lib/bbsudo:/usr/sbin/nologin" \
               "bbroot:x:0:4301::$WORK/var/lib/bbroot:/usr/sbin/nologin" \
-              "bbgrp:x:4302:100::$WORK/var/lib/bbgrp:/usr/sbin/nologin" >> "$FAKE_PASSWD"
-printf '%s\n' "bbsudo:4300:bbsudo sudo" >> "$FAKE_GROUPS"
+              "bbgrp:x:4302:100::$WORK/var/lib/bbgrp:/usr/sbin/nologin" \
+              "bbdocker:x:4303:4303::$WORK/var/lib/bbdocker:/usr/sbin/nologin" \
+              "bbinput:x:4304:4304::$WORK/var/lib/bbinput:/bin/false" \
+              "bblogin:x:4305:4305::$WORK/var/lib/bblogin:/bin/bash" \
+              "bbgranted:x:4306:4306::$WORK/var/lib/bbgranted:/usr/sbin/nologin" >> "$FAKE_PASSWD"
+printf '%s\n' "bbsudo:4300:bbsudo sudo" "bbdocker:4303:bbdocker docker" \
+              "bbinput:4304:bbinput input" "bblogin:4305:bblogin" "bbgranted:4306:bbgranted" >> "$FAKE_GROUPS"
 refused() {  # <why> <message ERE> <assignments...>: must exit 1 and change nothing
     local why="$1" msg="$2" before
     shift 2
@@ -287,6 +342,11 @@ refused() {  # <why> <message ERE> <assignments...>: must exit 1 and change noth
 }
 refused "an account in sudo" "in the sudo group" 'REQUESTED_SERVICE_USER=bbsudo'
 refused "a uid-0 account" "has uid 0" 'REQUESTED_SERVICE_USER=bbroot'
+refused "an account in docker" "in the docker group" 'REQUESTED_SERVICE_USER=bbdocker'
+refused "an account in input" "in the input group" 'REQUESTED_SERVICE_USER=bbinput'
+refused "a login account" "login shell '/bin/bash'" 'REQUESTED_SERVICE_USER=bblogin'
+refused "an account with a sudo grant of its own" "granted sudo in $WORK/etc/sudoers.d/90-bbgranted" \
+    'REQUESTED_SERVICE_USER=bbgranted'
 FAKE_PRIMARY_GROUP=users refused "a foreign primary group" "primary group is users" 'REQUESTED_SERVICE_USER=bbgrp'
 refused "the desktop user" "must not be $ME" "REQUESTED_SERVICE_USER=$ME"
 refused "a bad name" "not a POSIX user name" 'REQUESTED_SERVICE_USER=Bad.Name'
@@ -369,6 +429,34 @@ grep -nE '^sudo -u "\$REAL_USER" (mkdir|cp|update-desktop-database) .*(autostart
     || fail "7: the GNOME and default-browser steps must run as DESKTOP_USER"
 grep -nE '(usermod|gpasswd|adduser)[^#]*\b(sudo|admin|wheel)\b' "$INSTALL_SH" | grep -v '^[0-9]*:[[:space:]]*#' \
     && fail "7: install.sh adds an account to an admin group (above)"
+# The service account never joins `input` (it reads every keyboard): only
+# the desktop user does, when the service runs as it.
+INPUT_AT="$(grep -n '^    sudo usermod -aG input "\$REAL_USER"$' "$INSTALL_SH" | cut -d: -f1)"
+[[ -n "$INPUT_AT" ]] || fail "7: the input-group step lost its anchor"
+sed -n "$((INPUT_AT - 1))p" "$INSTALL_SH" | grep -qxF 'if [[ "$REAL_USER" == "$DESKTOP_USER" ]]; then' \
+    || fail "7: install.sh adds the service account to 'input'"
+[[ "$(grep -cE 'usermod[^#]*\binput\b' "$INSTALL_SH")" -eq 1 ]] || fail "7: another step adds someone to 'input'"
+# Nothing in the checkout is made by root: the status symlink is the
+# checkout owner's (else every later run finds a foreign entry, 3b).
+grep -nE '^(ln|rm|cp|mv|mkdir|touch) [^#]*\$BLACKBOX_ROOT' "$INSTALL_SH" \
+    && fail "7: a top-level step writes into the checkout as root (above)"
+grep -qxF 'if sudo -u "$REAL_USER" ln -sf "Scripts/blackbox-status.sh" "$BLACKBOX_ROOT/blackbox-status.sh"; then' "$INSTALL_SH" \
+    || fail "7: the status symlink is not made as the checkout's owner"
+# The exit trap is set before Step 0s can stop anything, and it starts the
+# stopped units again on a failure (and only then).
+[[ "$(grep -n '^trap _restart_stopped_units EXIT$' "$INSTALL_SH" | cut -d: -f1)" -eq "$(( $(grep -n '^resolve_service_account /etc/blackbox/service-user' "$INSTALL_SH" | cut -d: -f1) - 1 ))" ]] \
+    || fail "7: 'trap _restart_stopped_units EXIT' must come right before Step 0s runs"
+: > "$LOG"
+( ACTIVE_UNITS=""; SVC_STOPPED_UNITS=(blackbox.service zellij-web.service)
+  trap _restart_stopped_units EXIT; exit 3 ) > "$WORK/trap.out" 2>&1
+TRAP_RC=$?
+[[ "$TRAP_RC" -eq 3 ]] || fail "7: the exit trap changed the exit status to $TRAP_RC"
+grep -qxF "systemctl start blackbox.service" "$LOG" && grep -qxF "systemctl start zellij-web.service" "$LOG" \
+    || fail "7: a failed run did not start the stopped units again: $(cat "$LOG")"
+grep -q -- "--revert-service-user" "$WORK/trap.out" || fail "7: the failed run does not say how to finish or undo"
+: > "$LOG"
+( ACTIVE_UNITS=""; SVC_STOPPED_UNITS=(blackbox.service); trap _restart_stopped_units EXIT; exit 0 ) > /dev/null 2>&1
+grep -q 'systemctl start' "$LOG" && fail "7: a successful run's trap started units (Step 7 does that)"
 # Every refusal comes before the first change (the account is the first one).
 MIGRATE="$(sed -n '/^migrate_to_service_account()[[:space:]]*{/,/^}/p' "$INSTALL_SH")"
 FIRST_CHANGE="$(grep -n '_svc_run' <<< "$MIGRATE" | head -n1 | cut -d: -f1)"

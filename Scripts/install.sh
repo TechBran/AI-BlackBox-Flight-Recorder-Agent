@@ -153,13 +153,17 @@ BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT_SED_ESC//|/\\|}"
 #
 # The migration, in order (each step printed; --dry-run prints them and stops):
 #   1. create NAME (useradd --system, nologin, own group, home /var/lib/NAME,
-#      0700) unless it exists; an existing one must not be root or in
-#      sudo/admin/wheel and must have its own primary group;
+#      0700) unless it exists; an existing one must not be root, must have no
+#      login shell, must not be in a group that is root or reads every keyboard
+#      (SERVICE_REFUSED_GROUPS) nor named in a sudoers file of its own, and must
+#      have its own primary group;
 #   2. give NAME traverse-only (x) ACLs on the directories above the checkout
 #      it could not otherwise pass (the checkout usually sits in the admin's
-#      0750 home): no read, no write, nothing else of that home;
-#   3. stop the BlackBox units that are running (Step 2c, Step 4 and Step 7
-#      start them again);
+#      0750 home). That lets NAME open, by path, what below them others may
+#      read already (the step lists some); it can list and write nothing there;
+#   3. stop the BlackBox units that are running, when files are about to change
+#      hands under them (Step 2c, Step 4 and Step 7 start them again, and so
+#      does an exit trap if this script fails before Step 7);
 #   4. chown the whole checkout to NAME, one top-level entry at a time. That is
 #      the runtime data (Volumes/, Manifest/, data/, credentials/,
 #      Portal/uploads/), the venvs (Orchestrator/venv, MCP/venv) and the code
@@ -171,10 +175,15 @@ BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT_SED_ESC//|/\\|}"
 #      working. The CLI agents' sign-ins (.claude, .gemini, .codex, .nvm) are the
 #      admin's own and stay: NAME signs in afresh (runbook);
 #   6. let NAME use the desktop's X display (Computer Use): an autostart entry
-#      in the desktop user's session runs `xhost +SI:localuser:NAME`;
+#      in the desktop user's session runs `xhost +SI:localuser:NAME`. With it
+#      (and the ydotool socket, Step 4f) NAME can see and type into whatever
+#      desktop session is logged in, the admin's included: the step says so,
+#      and the runbook says how to turn it off;
 #   7. record SERVICE_USER=NAME and PREVIOUS_USER in /etc/blackbox/service-user.
 # Every later run reads that file and repeats 1-7 idempotently (nothing to do =
-# nothing printed), so a half-finished migration finishes on the next run.
+# nothing printed), so a half-finished migration finishes on the next run. An
+# entry that a later run finds owned by someone else (root, say) is re-owned
+# with the units left running, as long as they already run as NAME.
 # `--revert-service-user` walks it back (checkout, state, ACLs, autostart, the
 # file), keeping the account and its home (the runbook says how to remove them).
 #
@@ -200,6 +209,13 @@ SERVICE_STATE=(
 # The units that run as the BlackBox account (stopped while files change hands).
 SERVICE_UNITS=(blackbox.service blackbox-mcp.service zellij-web.service blackbox-models.service)
 SVC_STOPPED_UNITS=()
+# Groups the service account may not be in: they are root in all but name
+# (sudo, admin, wheel, root, docker, lxd, libvirt, disk), read the password
+# hashes (shadow) or read every keyboard, the admin's sudo password included
+# (input).
+SERVICE_REFUSED_GROUPS=(sudo admin wheel root docker lxd libvirt disk shadow input)
+# Where a sudo grant naming the account itself would be (read as root).
+SUDOERS_PATHS=(/etc/sudoers /etc/sudoers.d)
 
 _svc_run() {  # <command...>: run it, or under --dry-run only print it
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -229,19 +245,38 @@ read_service_choice() {  # <file>
         || _svc_refuse "$1 is unreadable or malformed (want SERVICE_USER= and PREVIOUS_USER= lines); fix or remove it as root"
 }
 
+# The sudoers files with a line granting <name> itself something, the
+# BlackBox's own (blackbox-*, re-rendered for the service account) aside.
+# Unreadable files count as none.
+service_sudoers_grants() {  # <name>
+    local f
+    while IFS= read -r -d '' f; do
+        case "${f##*/}" in blackbox-*) continue ;; esac
+        if grep -qsE "^[[:space:]]*$1[[:space:],=]" "$f"; then printf '%s\n' "$f"; fi
+    done < <(find "${SUDOERS_PATHS[@]}" -maxdepth 1 -type f -print0 2>/dev/null || true)
+}
+
 # Refuses unless <name> may be the service account (it need not exist yet).
 check_service_account() {  # <name>
-    local name="$1" g
+    local name="$1" g shell grants
     [[ "$name" =~ ^[a-z_][a-z0-9_-]*$ ]] || _svc_refuse "service account '$name' is not a POSIX user name"
     [[ "$name" != root ]] || _svc_refuse "the service account cannot be root"
     [[ "$name" != "$DESKTOP_USER" ]] \
         || _svc_refuse "the service account must not be $DESKTOP_USER, the account running this script (to go back to it: --revert-service-user)"
     getent passwd "$name" > /dev/null || return 0
     [[ "$(id -u "$name")" != 0 ]] || _svc_refuse "$name has uid 0"
-    for g in sudo admin wheel; do
+    shell="$(getent passwd "$name" | cut -d: -f7)"
+    case "$shell" in
+        /usr/sbin/nologin|/sbin/nologin|/usr/bin/false|/bin/false) ;;
+        *) _svc_refuse "$name has the login shell '${shell:-none}': the service account must be a non-login account (a typo or a reused name would hand the checkout to a person's account); pick another name, or give it /usr/sbin/nologin first" ;;
+    esac
+    for g in "${SERVICE_REFUSED_GROUPS[@]}"; do
         [[ " $(id -nG "$name") " != *" $g "* ]] \
-            || _svc_refuse "$name is in the $g group: the point of the service account is that it cannot sudo"
+            || _svc_refuse "$name is in the $g group: the point of the service account is that it cannot become root or read the admin's keyboard (remove it: sudo gpasswd -d $name $g)"
     done
+    grants="$(service_sudoers_grants "$name")"
+    [[ -z "$grants" ]] \
+        || _svc_refuse "$name is granted sudo in ${grants//$'\n'/, }: the point of the service account is that it cannot sudo beyond the BlackBox's own bounded grants"
     [[ "$(id -gn "$name")" == "$name" ]] \
         || _svc_refuse "$name's primary group is $(id -gn "$name"), not its own; units and files are written as $name:$name"
     [[ "$(service_account_home "$name")" =~ $_root_ok_re ]] \
@@ -375,6 +410,9 @@ DESKTOP_EOF
     _svc_run sudo -u "$user" mkdir -p "$(dirname "$entry")"
     _svc_run sudo install -m 0644 -o "$user" -g "$user" "$tmp" "$entry"
     rm -f "$tmp"
+    echo "[install]   NOTE: with this entry and the ydotool socket (Computer Use on the real display), $name can see and"
+    echo "[install]   type into whatever desktop session is logged in, $user's included. Keep sudo work off that session,"
+    echo "[install]   or turn real-display Computer Use off: remove $entry and run xhost -SI:localuser:$name (runbook)."
 }
 
 service_stop_units() {
@@ -387,28 +425,70 @@ service_stop_units() {
     done
 }
 
-# True when moving the checkout and state to <user> has anything left to do: a
-# checkout entry <user> does not own, or a state entry still at <from home>
-# that is not yet at <to home> (where only the old `link` symlink may stand).
-service_move_pending() {  # <user> <root> <from home> <to home>
+# True when a running BlackBox unit runs as someone other than <user>.
+service_units_run_as_other() {  # <user>
+    local u
+    for u in "${SERVICE_UNITS[@]}"; do
+        systemctl is-active --quiet "$u" 2>/dev/null || continue
+        [[ "$(systemctl show -p User --value "$u" 2>/dev/null || true)" == "$1" ]] || return 0
+    done
+    return 1
+}
+
+# What moving the checkout and state to <user> still has to do, as flags:
+# SVC_CHOWN, a checkout entry <user> does not own; SVC_MOVE, a state entry
+# still at <from home> that is not yet at <to home> (where only the old `link`
+# symlink may stand); SVC_STOP, the units must stop first because state moves
+# or a running unit runs as someone else and would lose its files. So a later
+# run that only finds an entry root made in the checkout re-owns it without
+# taking the BlackBox down.
+service_move_plan() {  # <user> <root> <from home> <to home>
     local item rel src dst uid
+    SVC_CHOWN=0; SVC_MOVE=0; SVC_STOP=0
     uid="$(_svc_uid "$1")"
-    [[ -n "$uid" ]] || return 0
-    [[ -n "$(find "$2" -xdev ! -uid "$uid" -print -quit 2>/dev/null)" ]] && return 0
+    if [[ -z "$uid" || -n "$(find "$2" -xdev ! -uid "$uid" -print -quit 2>/dev/null)" ]]; then
+        SVC_CHOWN=1
+    fi
     for item in "${SERVICE_STATE[@]}"; do
         rel="${item%:*}"; src="$3/$rel"; dst="$4/$rel"
         [[ -e "$src" && ! -L "$src" ]] || continue
         if [[ ! -e "$dst" && ! -L "$dst" ]] || [[ -L "$dst" && "$(readlink "$dst")" == "$src" ]]; then
-            return 0
+            SVC_MOVE=1
         fi
     done
-    return 1
+    if [[ "$SVC_MOVE" -eq 1 ]] || { [[ "$SVC_CHOWN" -eq 1 ]] && service_units_run_as_other "$1"; }; then
+        SVC_STOP=1
+    fi
+}
+
+# The traverse ACL on <dir> lets the service account open, by path, every file
+# below it that others may read (through directories others may enter). Some
+# of them, for the step's log: at most 10, <skip> (the checkout) left out.
+service_readable_through() {  # <dir> <skip>
+    { find "$1" -xdev -mindepth 1 \( -path "$2" -o -type d ! -perm -o=x \) -prune \
+          -o -type f -perm -o=r -print 2>/dev/null || true; } | head -n 10
+}
+
+# Started again when this script fails after Step 0s stopped them (Step 7 does
+# it on success): otherwise a failed run, Scripts/update.sh's included, leaves
+# the BlackBox down while the rollback says the old code still runs.
+_restart_stopped_units() {
+    local rc=$? u
+    [[ "$rc" -ne 0 && ${#SVC_STOPPED_UNITS[@]} -gt 0 ]] || return 0
+    for u in "${SVC_STOPPED_UNITS[@]}"; do
+        if ! systemctl is-active --quiet "$u" 2>/dev/null; then
+            echo "[install] install.sh failed after stopping $u for the service-account step: starting it again" >&2
+            sudo systemctl start "$u" || echo "[install] WARN: $u did not start; check: journalctl -u $u -n 50" >&2
+        fi
+    done
+    echo "[install] Finish the service-account step by running install.sh again (or undo it: --revert-service-user)" >&2
+    return "$rc"
 }
 
 # Moves the BlackBox to <name> (steps 1-7 above); idempotent.
 migrate_to_service_account() {  # <name> <previous user> <choice file> <root>
     local name="$1" previous="$2" choice="$3" root="$4" home prev_home d tmp who
-    local -a acl_dirs=() reach=("$root")
+    local -a acl_dirs=() reach=("$root") readable=()
     check_service_account "$name"
     home="$(service_account_home "$name")"
     prev_home="$(service_account_home "$previous")"
@@ -441,12 +521,16 @@ migrate_to_service_account() {  # <name> <previous user> <choice file> <root>
     who="$(_svc_uid "$name")"
     for d in ${acl_dirs[@]+"${acl_dirs[@]}"}; do
         _svc_run sudo setfacl -m "u:${who:-$name}:x" "$d"
+        mapfile -t readable < <(service_readable_through "$d" "$root")
+        if [[ ${#readable[@]} -gt 0 ]]; then
+            echo "[install]   NOTE: $name can then open what below $d others may read, for example:"
+            printf '[install]     %s\n' "${readable[@]}"
+        fi
     done
-    if service_move_pending "$name" "$root" "$prev_home" "$home" || [[ "$DRY_RUN" -eq 1 ]]; then
-        service_stop_units
-        service_chown_checkout "$name" "$root"
-        service_move_state out "$prev_home" "$home" "$name"
-    fi
+    service_move_plan "$name" "$root" "$prev_home" "$home"
+    if [[ "$SVC_STOP" -eq 1 ]]; then service_stop_units; fi
+    if [[ "$SVC_CHOWN" -eq 1 ]]; then service_chown_checkout "$name" "$root"; fi
+    if [[ "$SVC_MOVE" -eq 1 ]]; then service_move_state out "$prev_home" "$home" "$name"; fi
     service_display_entry "$name" "$DESKTOP_USER" "$DESKTOP_HOME" add
     if ! command -v xhost > /dev/null; then
         echo "[install]   WARN: xhost is missing, so $name cannot use the desktop display (Computer Use) until it is installed: sudo apt install x11-xserver-utils" >&2
@@ -478,11 +562,10 @@ revert_service_account() {  # <name> <previous user> <choice file> <root>
     if [[ "$DRY_RUN" -eq 1 ]]; then
         echo "[install] Giving the BlackBox back to $previous from $name (dry run: nothing is changed):"
     fi
-    if service_move_pending "$previous" "$root" "$home" "$prev_home" || [[ "$DRY_RUN" -eq 1 ]]; then
-        service_stop_units
-        service_chown_checkout "$previous" "$root"
-        service_move_state back "$home" "$prev_home" "$previous"
-    fi
+    service_move_plan "$previous" "$root" "$home" "$prev_home"
+    if [[ "$SVC_STOP" -eq 1 ]]; then service_stop_units; fi
+    if [[ "$SVC_CHOWN" -eq 1 ]]; then service_chown_checkout "$previous" "$root"; fi
+    if [[ "$SVC_MOVE" -eq 1 ]]; then service_move_state back "$home" "$prev_home" "$previous"; fi
     # The traverse ACLs the move added (any entry for $name's uid above the
     # checkout or the old home).
     if [[ -z "$uid" ]]; then
@@ -538,6 +621,7 @@ resolve_service_account() {  # <choice file> <root> <heal 0|1>
     echo "[install] The BlackBox runs as the service account $REAL_USER (home $REAL_HOME; recorded in $choice)"
 }
 
+trap _restart_stopped_units EXIT
 resolve_service_account /etc/blackbox/service-user "$BLACKBOX_ROOT" "$(( PUBLISH_STORE_ONLY ? 0 : 1 ))"
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[install] Dry run complete: nothing was changed."
@@ -1847,11 +1931,16 @@ render_time_sync_dropin | sudo tee /etc/systemd/system/blackbox.service.d/time-s
 # $BLACKBOX_ROOT/blackbox-status.sh as untracked + collision-prone).
 # Now lives at Scripts/blackbox-status.sh in repo; install.sh just symlinks
 # so customers can still run `./blackbox-status.sh` from BLACKBOX_ROOT.
+# As REAL_USER, the checkout's owner: a root-owned entry in the checkout would
+# make every later run on a service-account box (Step 0s) find it foreign.
 if [[ -L "$BLACKBOX_ROOT/blackbox-status.sh" || -f "$BLACKBOX_ROOT/blackbox-status.sh" ]]; then
-    rm -f "$BLACKBOX_ROOT/blackbox-status.sh"
+    sudo -u "$REAL_USER" rm -f "$BLACKBOX_ROOT/blackbox-status.sh" || true
 fi
-ln -sf "Scripts/blackbox-status.sh" "$BLACKBOX_ROOT/blackbox-status.sh"
-echo "[install] Symlinked blackbox-status.sh → Scripts/blackbox-status.sh"
+if sudo -u "$REAL_USER" ln -sf "Scripts/blackbox-status.sh" "$BLACKBOX_ROOT/blackbox-status.sh"; then
+    echo "[install] Symlinked blackbox-status.sh → Scripts/blackbox-status.sh"
+else
+    echo "[install] WARN: $REAL_USER could not link $BLACKBOX_ROOT/blackbox-status.sh; run Scripts/blackbox-status.sh instead" >&2
+fi
 
 # ── Step 4e: sudoers grant for runtime BlackBox operations (T5) ──
 # Bounded NOPASSWD entries covering: Tailscale wizard actuator, service
@@ -2112,10 +2201,17 @@ build_ydotool
 # the systemd service runs ydotoold as root and hands ownership of the socket
 # to REAL_USER's uid:gid via --socket-own, so this group membership is mostly
 # defensive (helps if someone tries to run ydotool directly outside the service).
+# A dedicated service account (Step 0s) never joins it: `input` reads every
+# keyboard event device, the admin's sudo password included, and the socket is
+# all the service needs (2026-10 audit X04-security-clients-infra-12).
 USER_UID=$(id -u "$REAL_USER")
 USER_GID=$(id -g "$REAL_USER")
-sudo usermod -aG input "$REAL_USER"
-echo "[install] Added $REAL_USER to 'input' group (effective next login)"
+if [[ "$REAL_USER" == "$DESKTOP_USER" ]]; then
+    sudo usermod -aG input "$REAL_USER"
+    echo "[install] Added $REAL_USER to 'input' group (effective next login)"
+else
+    echo "[install] Not adding the service account $REAL_USER to 'input' (it would read every keyboard); ydotoold's socket is enough"
+fi
 
 # Install ydotoold systemd unit. Daemon owns /dev/uinput access (root needed),
 # but the socket gets chowned to REAL_USER so blackbox.service can talk to it
