@@ -1,0 +1,151 @@
+{
+ "scenario": {
+  "name": "custom-stream-stream_options_retry",
+  "provider": "custom",
+  "path": "stream",
+  "case": "stream_options_retry",
+  "model": "gbox::gmodel-a",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 400,
+    "body": "{\"error\": {\"message\": \"unknown field stream_options\", \"type\": \"server_error\"}}"
+   },
+   {
+    "status": 200,
+    "lines": [
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Old build ok.\"}, \"finish_reason\": null}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [], \"usage\": {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}}",
+     "",
+     "data: [DONE]",
+     ""
+    ]
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "sse": "event: stream_start\ndata: {\"provider\": \"custom\", \"model\": \"gbox::gmodel-a\", \"provenance\": {\"recent\": [\"SNAP-20261001-0001\"], \"keyword\": [\"SNAP-20261002-0002\"], \"semantic\": [], \"checkpoint\": []}}\n\nevent: system_activity\ndata: {\"stage\": \"embed\", \"label\": \"embed \\u00b7 golden-embed \\u00b7 8d\", \"detail\": {\"model\": \"golden-embed\", \"dims\": 8}, \"seq\": 0}\n\nevent: content\ndata: \"Old build ok.\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: done\ndata: {\"reasoning\": \"\", \"content\": \"Old build ok.\"}\n\nevent: stream_end\ndata: {\"status\": \"complete\"}\n\n",
+  "context_builds": [
+   {
+    "operator": "golden-op",
+    "provider": "custom",
+    "window_guard_tokens": 19660
+   }
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "http://gbox.golden.test:8080/v1/chat/completions",
+    "headers": {
+     "Content-Type": "application/json",
+     "Authorization": "Bearer test-custom-key"
+    },
+    "json": {
+     "model": "gmodel-a",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tools": [
+      {
+       "golden_tools_for": "custom",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "300"
+   },
+   {
+    "method": "POST",
+    "url": "http://gbox.golden.test:8080/v1/chat/completions",
+    "headers": {
+     "Content-Type": "application/json",
+     "Authorization": "Bearer test-custom-key"
+    },
+    "json": {
+     "model": "gmodel-a",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "stream": true,
+     "tools": [
+      {
+       "golden_tools_for": "custom",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "300"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "custom",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

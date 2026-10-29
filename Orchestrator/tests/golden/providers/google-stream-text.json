@@ -1,0 +1,115 @@
+{
+ "scenario": {
+  "name": "google-stream-text",
+  "provider": "google",
+  "path": "stream",
+  "case": "text",
+  "model": "gemini-3.1-pro-preview",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 200,
+    "lines": [
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"A short greeting.\", \"thought\": true}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"Hello \"}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"there.\"}]}, \"finishReason\": \"STOP\"}], \"usageMetadata\": {\"promptTokenCount\": 40, \"candidatesTokenCount\": 12, \"totalTokenCount\": 52}}",
+     ""
+    ]
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "sse": "event: stream_start\ndata: {\"provider\": \"google\", \"model\": \"gemini-3.1-pro-preview\", \"provenance\": {\"recent\": [\"SNAP-20261001-0001\"], \"keyword\": [\"SNAP-20261002-0002\"], \"semantic\": [], \"checkpoint\": []}}\n\nevent: system_activity\ndata: {\"stage\": \"embed\", \"label\": \"embed \\u00b7 golden-embed \\u00b7 8d\", \"detail\": {\"model\": \"golden-embed\", \"dims\": 8}, \"seq\": 0}\n\nevent: thinking\ndata: \"A short greeting.\"\n\nevent: content\ndata: \"Hello \"\n\nevent: content\ndata: \"there.\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12}\n\nevent: done\ndata: {\"thinking\": \"A short greeting.\", \"content\": \"Hello there.\"}\n\nevent: stream_end\ndata: {\"status\": \"complete\"}\n\n",
+  "context_builds": [
+   {
+    "operator": "golden-op",
+    "provider": "google",
+    "window_guard_tokens": null
+   }
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://gemini.golden.test/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse",
+    "headers": {
+     "x-goog-api-key": "test-google-key"
+    },
+    "json": {
+     "contents": [
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "What did we ship last week?"
+        }
+       ]
+      },
+      {
+       "role": "model",
+       "parts": [
+        {
+         "text": "The ember backdrop and the particle modes."
+        }
+       ]
+      },
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "Please answer briefly."
+        }
+       ]
+      }
+     ],
+     "generationConfig": {
+      "thinkingConfig": {
+       "thinkingLevel": "HIGH",
+       "includeThoughts": true
+      }
+     },
+     "tools": [
+      {
+       "golden_tools_for": "gemini",
+       "group": "chat"
+      }
+     ],
+     "system_instruction": {
+      "parts": [
+       {
+        "text": "GOLDEN SYSTEM PROMPT\nGOLDEN FOSSILS"
+       }
+      ]
+     }
+    },
+    "timeout": "300"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "gemini",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

@@ -1,0 +1,90 @@
+{
+ "scenario": {
+  "name": "custom-nonstream-exceed_context",
+  "provider": "custom",
+  "path": "nonstream",
+  "case": "exceed_context",
+  "model": "gbox::gmodel-a",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 400,
+    "body": "{\"error\": {\"code\": 400, \"message\": \"request (18079 tokens) exceeds the available context size (16384 tokens)\", \"type\": \"exceed_context_size_error\", \"n_prompt_tokens\": 18079, \"n_ctx\": 16384}}"
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "raised": {
+   "type": "HTTPException",
+   "status_code": 400,
+   "detail": "Model 'gmodel-a' on server 'gbox' has a 16,384-token context window (smaller than configured). I've learned this limit — please resend your message; the context will now fit. (To raise the window itself, increase -c for this model in the llama-swap config on the server box.)"
+  },
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "http://gbox.golden.test:8080/v1/chat/completions",
+    "headers": {
+     "Content-Type": "application/json",
+     "Authorization": "Bearer test-custom-key"
+    },
+    "json": {
+     "model": "gmodel-a",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "custom",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "200"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "custom",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

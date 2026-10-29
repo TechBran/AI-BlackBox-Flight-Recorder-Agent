@@ -1,0 +1,193 @@
+{
+ "scenario": {
+  "name": "xai-stream-attachments",
+  "provider": "xai",
+  "path": "stream",
+  "case": "attachments",
+  "model": "grok-3-mini",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Look at these attachments."
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "/ui/uploads/photo.png"
+      }
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/jpeg",
+       "data": "QkFTRTY0"
+      }
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "/ui/uploads/missing.png"
+      }
+     },
+     {
+      "type": "document_url",
+      "document_url": {
+       "url": "/ui/uploads/notes.txt"
+      }
+     },
+     {
+      "type": "document_url",
+      "document_url": {
+       "url": "/ui/uploads/report.pdf"
+      }
+     },
+     {
+      "type": "video_url",
+      "video_url": {
+       "url": "/ui/uploads/clip.mp4"
+      }
+     },
+     {
+      "type": "audio_url",
+      "audio_url": {
+       "url": "/ui/uploads/voice.mp3"
+      }
+     }
+    ]
+   }
+  ],
+  "upstream": [
+   {
+    "status": 200,
+    "lines": [
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"I see them.\"}, \"finish_reason\": null}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [], \"usage\": {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}}",
+     "",
+     "data: [DONE]",
+     ""
+    ]
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "sse": "event: stream_start\ndata: {\"provider\": \"xai\", \"model\": \"grok-3-mini\", \"provenance\": {\"recent\": [\"SNAP-20261001-0001\"], \"keyword\": [\"SNAP-20261002-0002\"], \"semantic\": [], \"checkpoint\": []}}\n\nevent: system_activity\ndata: {\"stage\": \"embed\", \"label\": \"embed \\u00b7 golden-embed \\u00b7 8d\", \"detail\": {\"model\": \"golden-embed\", \"dims\": 8}, \"seq\": 0}\n\nevent: content\ndata: \"I see them.\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: done\ndata: {\"reasoning\": \"\", \"content\": \"I see them.\"}\n\nevent: stream_end\ndata: {\"status\": \"complete\"}\n\n",
+  "context_builds": [
+   {
+    "operator": "golden-op",
+    "provider": "xai",
+    "window_guard_tokens": null
+   }
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://xai.golden.test/v1/chat/completions",
+    "headers": {
+     "Authorization": "Bearer test-xai-key",
+     "Content-Type": "application/json"
+    },
+    "json": {
+     "model": "grok-3-mini",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": [
+        {
+         "type": "text",
+         "text": "Look at these attachments."
+        },
+        {
+         "type": "image_url",
+         "image_url": {
+          "url": "data:image/png;base64,iVBORyBnb2xkZW4gcGhvdG8gYnl0ZXM="
+         }
+        },
+        {
+         "type": "image_url",
+         "image_url": {
+          "url": "data:image/jpeg;base64,QkFTRTY0"
+         }
+        },
+        {
+         "type": "text",
+         "text": "[Image could not be loaded]"
+        },
+        {
+         "type": "text",
+         "text": "[Document content: notes.txt]\n\nGolden notes: the launch is on Tuesday.\n"
+        },
+        {
+         "type": "text",
+         "text": "[Note: Document report.pdf attached but content extraction is not supported for this file type with this model]"
+        },
+        {
+         "type": "text",
+         "text": "[Note: Video file attached: /ui/uploads/clip.mp4. This model doesn't support direct video analysis.]"
+        },
+        {
+         "type": "text",
+         "text": "[Note: Audio file attached: /ui/uploads/voice.mp3. This model doesn't support audio input.]"
+        }
+       ]
+      }
+     ],
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tools": [
+      {
+       "golden_tools_for": "grok",
+       "group": "chat"
+      }
+     ],
+     "reasoning_effort": "low"
+    },
+    "timeout": "300"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "grok",
+    "prompt": "Look at these attachments.",
+    "group": "chat"
+   }
+  ]
+ }
+}

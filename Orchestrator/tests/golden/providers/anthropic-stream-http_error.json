@@ -1,0 +1,96 @@
+{
+ "scenario": {
+  "name": "anthropic-stream-http_error",
+  "provider": "anthropic",
+  "path": "stream",
+  "case": "http_error",
+  "model": "claude-opus-5-5",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 500,
+    "body": "{\"error\": {\"message\": \"upstream exploded\", \"type\": \"server_error\"}}"
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "sse": "event: stream_start\ndata: {\"provider\": \"anthropic\", \"model\": \"claude-opus-5-5\", \"provenance\": {\"recent\": [\"SNAP-20261001-0001\"], \"keyword\": [\"SNAP-20261002-0002\"], \"semantic\": [], \"checkpoint\": []}}\n\nevent: system_activity\ndata: {\"stage\": \"embed\", \"label\": \"embed \\u00b7 golden-embed \\u00b7 8d\", \"detail\": {\"model\": \"golden-embed\", \"dims\": 8}, \"seq\": 0}\n\nevent: error\ndata: \"Anthropic API error: {\\\"error\\\": {\\\"message\\\": \\\"upstream exploded\\\", \\\"type\\\": \\\"server_error\\\"}}\"\n\nevent: stream_end\ndata: {\"status\": \"complete\"}\n\n",
+  "context_builds": [
+   {
+    "operator": "golden-op",
+    "provider": "anthropic",
+    "window_guard_tokens": null
+   }
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://anthropic.golden.test/v1/messages",
+    "headers": {
+     "x-api-key": "test-anthropic-key",
+     "anthropic-version": "2023-06-01",
+     "content-type": "application/json"
+    },
+    "json": {
+     "model": "claude-opus-5-5",
+     "max_tokens": 64000,
+     "stream": true,
+     "messages": [
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "anthropic",
+       "group": "chat"
+      }
+     ],
+     "thinking": {
+      "type": "adaptive",
+      "display": "summarized"
+     },
+     "output_config": {
+      "effort": "xhigh"
+     },
+     "system": "GOLDEN SYSTEM PROMPT\n\nGOLDEN FOSSILS"
+    },
+    "timeout": "Timeout(connect=30, read=300, write=300, pool=300)"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "anthropic",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

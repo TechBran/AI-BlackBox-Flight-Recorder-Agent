@@ -1,0 +1,105 @@
+{
+ "scenario": {
+  "name": "google-nonstream-http_error",
+  "provider": "google",
+  "path": "nonstream",
+  "case": "http_error",
+  "model": "gemini-3.1-pro-preview",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 500,
+    "body": "{\"error\": {\"message\": \"upstream exploded\", \"type\": \"server_error\"}}"
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "raised": {
+   "type": "HTTPException",
+   "status_code": 500,
+   "detail": "Gemini API error: upstream exploded"
+  },
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://gemini.golden.test/v1beta/models/gemini-3.1-pro-preview:generateContent",
+    "headers": {
+     "x-goog-api-key": "test-google-key"
+    },
+    "json": {
+     "contents": [
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "What did we ship last week?"
+        }
+       ]
+      },
+      {
+       "role": "model",
+       "parts": [
+        {
+         "text": "The ember backdrop and the particle modes."
+        }
+       ]
+      },
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "Please answer briefly."
+        }
+       ]
+      }
+     ],
+     "generationConfig": {
+      "thinkingConfig": {
+       "thinkingLevel": "HIGH",
+       "includeThoughts": true
+      }
+     },
+     "tools": [
+      {
+       "golden_tools_for": "gemini",
+       "group": "chat"
+      }
+     ],
+     "system_instruction": {
+      "parts": [
+       {
+        "text": "GOLDEN SYSTEM PROMPT\nGOLDEN FOSSILS"
+       }
+      ]
+     }
+    },
+    "timeout": "200"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "gemini",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

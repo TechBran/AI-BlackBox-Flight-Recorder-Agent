@@ -1,0 +1,1164 @@
+{
+ "scenario": {
+  "name": "anthropic-stream-tools",
+  "provider": "anthropic",
+  "path": "stream",
+  "case": "tools",
+  "model": "claude-opus-5-5",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Do all the things."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 200,
+    "lines": [
+     "event: message_start",
+     "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_g0\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"claude-opus-5-5\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 120, \"output_tokens\": 1}}}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"thinking\", \"thinking\": \"\", \"signature\": \"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"thinking_delta\", \"thinking\": \"I will use every tool.\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"signature_delta\", \"signature\": \"sig-0\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 0}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 1, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 1, \"delta\": {\"type\": \"text_delta\", \"text\": \"Working \"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 1, \"delta\": {\"type\": \"text_delta\", \"text\": \"on it.\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 1}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 2, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_00\", \"name\": \"web_fetch\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 2, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"url\\\": \\\"https://example.\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 2, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"com/a\\\", \\\"max_chars\\\": 5000}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 2}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 3, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_01\", \"name\": \"gemini_image\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 3, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"a red fox in snow\\\", \\\"aspectRatio\\\": \\\"1:1\\\", \\\"numb\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 3, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"erOfImages\\\": 2, \\\"reference_images\\\": [\\\"/ui/uploads/ref.png\\\"]}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 3}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 4, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_02\", \"name\": \"openai_image\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 4, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"a lig\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 4, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"hthouse at dusk\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 4}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 5, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_03\", \"name\": \"generate_video\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 5, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"waves at dusk\\\", \\\"duration\\\":\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 5, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \" 6, \\\"image_url\\\": \\\"/ui/uploads/ref.png\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 5}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 6, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_04\", \"name\": \"generate_video\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 6, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"keep going\\\", \\\"vide\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 6, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"o_url\\\": \\\"/ui/uploads/clip.mp4\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 6}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 7, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_05\", \"name\": \"lyria_music\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 7, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"calm pian\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 7, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"o\\\", \\\"sampleCount\\\": 2}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 7}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 8, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_06\", \"name\": \"get_media\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 8, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"task_id\\\":\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 8, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \" \\\"task-old\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 8}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 9, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_07\", \"name\": \"list_media\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 9, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"media_type\\\": \\\"i\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 9, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"mage\\\", \\\"limit\\\": 5}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 9}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 10, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_08\", \"name\": \"search_media\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 10, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"query\\\"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 10, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \": \\\"fox\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 10}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 11, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_09\", \"name\": \"search_snapshots\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 11, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"query\\\": \\\"ember \"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 11, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"backdrop\\\", \\\"k\\\": 4}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 11}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 12, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_10\", \"name\": \"send_sms\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 12, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"phone_number\\\": \\\"+1555010\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 12, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"0\\\", \\\"message\\\": \\\"on my way\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 12}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 13, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_11\", \"name\": \"make_phone_call\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 13, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"phone_number\\\": \\\"+155501\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 13, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"01\\\", \\\"greeting\\\": \\\"hello\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 13}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 14, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_12\", \"name\": \"make_voice_call\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 14, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"phone_number\\\": \\\"+1555010\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 14, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"2\\\", \\\"message\\\": \\\"reminder\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 14}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 15, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_13\", \"name\": \"search_contacts\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 15, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"query\\\"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 15, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \": \\\"sam\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 15}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 16, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_14\", \"name\": \"save_contact\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 16, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"name\\\": \\\"Sam\\\", \\\"p\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 16, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"hone\\\": \\\"+15550103\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 16}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 17, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_15\", \"name\": \"create_cron_job\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 17, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"name\\\": \\\"daily\\\", \\\"schedule\\\": \\\"0\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 17, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \" 9 * * *\\\", \\\"prompt\\\": \\\"brief me\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 17}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 18, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_16\", \"name\": \"edit_cron_job\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 18, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"job_id\\\": \\\"job-1\\\", \\\"pr\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 18, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"ompt\\\": \\\"brief me later\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 18}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 19, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_17\", \"name\": \"search_cron_jobs\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 19, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"query\\\":\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 19, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \" \\\"daily\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 19}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 20, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_18\", \"name\": \"use_computer\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 20, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"o\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 20, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"pen the docs\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 20}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 21, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_19\", \"name\": \"list_devices\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 21, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 21, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 21}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 22, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_20\", \"name\": \"gmail_search\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 22, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"query\\\": \"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 22, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"\\\"invoice\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 22}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 23, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_21\", \"name\": \"get_task_status\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 23, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"task_id\\\"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 23, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \": \\\"task-x\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 23}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 24, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_22\", \"name\": \"extend_video\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 24, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"video_url\\\": \\\"/ui/uploads/c\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 24, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"lip.mp4\\\", \\\"prompt\\\": \\\"longer\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 24}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 25, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_23\", \"name\": \"claude_code_task\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 25, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 25, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"fix the bug\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 25}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 26, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_24\", \"name\": \"elevenlabs_music\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 26, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"prompt\\\": \\\"u\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 26, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"pbeat jingle\\\"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 26}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 27, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_25\", \"name\": \"roll_dice\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 27, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"side\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 27, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"s\\\": 6}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 27}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 28, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_call_26\", \"name\": \"quiet_tool\", \"input\": {}}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 28, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 28, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"}\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 28}",
+     "",
+     "event: message_delta",
+     "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"tool_use\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 30}}",
+     "",
+     "event: message_stop",
+     "data: {\"type\": \"message_stop\"}",
+     ""
+    ]
+   },
+   {
+    "status": 200,
+    "lines": [
+     "event: message_start",
+     "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_g1\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"claude-opus-5-5\", \"content\": [], \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 400, \"output_tokens\": 1}}}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"thinking\", \"thinking\": \"\", \"signature\": \"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"thinking_delta\", \"thinking\": \"Summarize the results.\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"signature_delta\", \"signature\": \"sig-1\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 0}",
+     "",
+     "event: content_block_start",
+     "data: {\"type\": \"content_block_start\", \"index\": 1, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 1, \"delta\": {\"type\": \"text_delta\", \"text\": \"All \"}}",
+     "",
+     "event: content_block_delta",
+     "data: {\"type\": \"content_block_delta\", \"index\": 1, \"delta\": {\"type\": \"text_delta\", \"text\": \"done.\"}}",
+     "",
+     "event: content_block_stop",
+     "data: {\"type\": \"content_block_stop\", \"index\": 1}",
+     "",
+     "event: message_delta",
+     "data: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 20}}",
+     "",
+     "event: message_stop",
+     "data: {\"type\": \"message_stop\"}",
+     ""
+    ]
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "sse": "event: stream_start\ndata: {\"provider\": \"anthropic\", \"model\": \"claude-opus-5-5\", \"provenance\": {\"recent\": [\"SNAP-20261001-0001\"], \"keyword\": [\"SNAP-20261002-0002\"], \"semantic\": [], \"checkpoint\": []}}\n\nevent: system_activity\ndata: {\"stage\": \"embed\", \"label\": \"embed \\u00b7 golden-embed \\u00b7 8d\", \"detail\": {\"model\": \"golden-embed\", \"dims\": 8}, \"seq\": 0}\n\nevent: thinking_start\ndata: \"\"\n\nevent: thinking\ndata: \"I will use every tool.\"\n\nevent: thinking_end\ndata: \"\"\n\nevent: content_start\ndata: \"\"\n\nevent: content\ndata: \"Working \"\n\nevent: content\ndata: \"on it.\"\n\nevent: tool_start\ndata: \"web_fetch\"\n\nevent: tool_start\ndata: \"gemini_image\"\n\nevent: tool_start\ndata: \"openai_image\"\n\nevent: tool_start\ndata: \"generate_video\"\n\nevent: tool_start\ndata: \"generate_video\"\n\nevent: tool_start\ndata: \"lyria_music\"\n\nevent: tool_start\ndata: \"get_media\"\n\nevent: tool_start\ndata: \"list_media\"\n\nevent: tool_start\ndata: \"search_media\"\n\nevent: tool_start\ndata: \"search_snapshots\"\n\nevent: tool_start\ndata: \"send_sms\"\n\nevent: tool_start\ndata: \"make_phone_call\"\n\nevent: tool_start\ndata: \"make_voice_call\"\n\nevent: tool_start\ndata: \"search_contacts\"\n\nevent: tool_start\ndata: \"save_contact\"\n\nevent: tool_start\ndata: \"create_cron_job\"\n\nevent: tool_start\ndata: \"edit_cron_job\"\n\nevent: tool_start\ndata: \"search_cron_jobs\"\n\nevent: tool_start\ndata: \"use_computer\"\n\nevent: tool_start\ndata: \"list_devices\"\n\nevent: tool_start\ndata: \"gmail_search\"\n\nevent: tool_start\ndata: \"get_task_status\"\n\nevent: tool_start\ndata: \"extend_video\"\n\nevent: tool_start\ndata: \"claude_code_task\"\n\nevent: tool_start\ndata: \"elevenlabs_music\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: tool_start\ndata: \"quiet_tool\"\n\nevent: usage\ndata: {\"prompt_tokens\": 0, \"completion_tokens\": 30}\n\nevent: tool_executing\ndata: \"Searching the web...\"\n\nevent: tool_result\ndata: \"Fetched content from: https://example.com/a\"\n\nevent: tool_result\ndata: \"Image generation task created: task-001\"\n\nevent: image_task\ndata: {\"task_id\": \"task-001\", \"prompt\": \"a red fox in snow\", \"count\": 2}\n\nevent: tool_result\ndata: \"Image generation task created: task-002\"\n\nevent: image_task\ndata: {\"task_id\": \"task-002\", \"prompt\": \"a lighthouse at dusk\", \"count\": 1}\n\nevent: tool_result\ndata: \"Video generation task created: task-003\"\n\nevent: video_task\ndata: {\"task_id\": \"task-003\", \"prompt\": \"waves at dusk\", \"duration\": 6, \"resolution\": \"720p\", \"mode\": \"image-to-video\", \"predicted_url\": \"/ui/uploads/waves-at-dusk_task-003.mp4\"}\n\nevent: tool_result\ndata: \"Video generation task created: task-004\"\n\nevent: video_task\ndata: {\"task_id\": \"task-004\", \"prompt\": \"keep going\", \"duration\": 8, \"resolution\": \"720p\", \"mode\": \"video-extension\", \"predicted_url\": \"/ui/uploads/keep-going_task-004.mp4\"}\n\nevent: tool_result\ndata: \"Music generation task created: task-005\"\n\nevent: music_task\ndata: {\"task_id\": \"task-005\", \"prompt\": \"calm piano\", \"sample_count\": 2}\n\nevent: tool_result\ndata: \"Retrieved media: task-old\"\n\nevent: tool_result\ndata: \"Listed 2 media files\"\n\nevent: tool_result\ndata: \"Found 1 matching media\"\n\nevent: tool_result\ndata: \"Snapshot search completed\"\n\nevent: tool_result\ndata: \"SMS: [send_sms] ok: {\\\"message\\\": \\\"on my way\\\", \\\"phone_number\\\": \\\"+15550100\\\"}\"\n\nevent: tool_result\ndata: \"Call: [make_phone_call] ok: {\\\"backend\\\": \\\"openai_realtime\\\", \\\"greeting\\\": \\\"hello\\\", \\\"phone_number\\\": \\\"+15550101\"\n\nevent: tool_result\ndata: \"Voice call: [make_voice_call] ok: {\\\"message\\\": \\\"reminder\\\", \\\"phone_number\\\": \\\"+15550102\\\", \\\"voice\\\": \\\"onyx\\\"}\"\n\nevent: tool_result\ndata: \"Contact search completed\"\n\nevent: tool_result\ndata: \"Contact: [save_contact] ok: {\\\"name\\\": \\\"Sam\\\", \\\"phone\\\": \\\"+15550103\\\"}\"\n\nevent: tool_result\ndata: \"Cron job: [create_cron_job] ok: {\\\"name\\\": \\\"daily\\\", \\\"prompt\\\": \\\"brief me\\\", \\\"schedule\\\": \\\"0 9 * * *\\\"}\"\n\nevent: tool_result\ndata: \"Cron job: [edit_cron_job] ok: {\\\"job_id\\\": \\\"job-1\\\", \\\"prompt\\\": \\\"brief me later\\\"}\"\n\nevent: tool_result\ndata: \"Cron jobs: [search_cron_jobs] ok: {\\\"query\\\": \\\"daily\\\"}\"\n\nevent: tool_result\ndata: \"Computer Use: [use_computer] ok: {\\\"prompt\\\": \\\"open the docs\\\"}\"\n\nevent: browser_task\ndata: {\"task_id\": \"exec-use_computer\", \"prompt\": \"open the docs\"}\n\nevent: tool_result\ndata: \"list_devices: [list_devices] ok: {}\"\n\nevent: tool_result\ndata: \"gmail_search: [gmail_search] ok: {\\\"query\\\": \\\"invoice\\\"}\"\n\nevent: tool_result\ndata: \"get_task_status: [get_task_status] ok: {\\\"task_id\\\": \\\"task-x\\\"}\"\n\nevent: tool_result\ndata: \"extend_video: [extend_video] ok: {\\\"prompt\\\": \\\"longer\\\", \\\"video_url\\\": \\\"/ui/uploads/clip.mp4\\\"}\"\n\nevent: cli_task\ndata: {\"task_id\": \"exec-claude_code_task\", \"tool\": \"claude_code_task\", \"prompt\": \"fix the bug\"}\n\nevent: tool_result\ndata: \"claude_code_task: [claude_code_task] ok: {\\\"prompt\\\": \\\"fix the bug\\\"}\"\n\nevent: music_task\ndata: {\"task_id\": \"exec-elevenlabs_music\", \"prompt\": \"upbeat jingle\"}\n\nevent: tool_result\ndata: \"elevenlabs_music: [elevenlabs_music] ok: {\\\"prompt\\\": \\\"upbeat jingle\\\"}\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: tool_result\ndata: \"quiet_tool: Tool 'quiet_tool' executed successfully (no output).\"\n\nevent: thinking_start\ndata: \"\"\n\nevent: thinking\ndata: \"Summarize the results.\"\n\nevent: thinking_end\ndata: \"\"\n\nevent: content_start\ndata: \"\"\n\nevent: content\ndata: \"All \"\n\nevent: content\ndata: \"done.\"\n\nevent: usage\ndata: {\"prompt_tokens\": 0, \"completion_tokens\": 20}\n\nevent: done\ndata: {\"thinking\": \"Summarize the results.\", \"content\": \"All done.\"}\n\nevent: stream_end\ndata: {\"status\": \"complete\"}\n\n",
+  "context_builds": [
+   {
+    "operator": "golden-op",
+    "provider": "anthropic",
+    "window_guard_tokens": null
+   }
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://anthropic.golden.test/v1/messages",
+    "headers": {
+     "x-api-key": "test-anthropic-key",
+     "anthropic-version": "2023-06-01",
+     "content-type": "application/json"
+    },
+    "json": {
+     "model": "claude-opus-5-5",
+     "max_tokens": 64000,
+     "stream": true,
+     "messages": [
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Do all the things."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "anthropic",
+       "group": "chat"
+      }
+     ],
+     "thinking": {
+      "type": "adaptive",
+      "display": "summarized"
+     },
+     "output_config": {
+      "effort": "xhigh"
+     },
+     "system": "GOLDEN SYSTEM PROMPT\n\nGOLDEN FOSSILS"
+    },
+    "timeout": "Timeout(connect=30, read=300, write=300, pool=300)"
+   },
+   {
+    "method": "POST",
+    "url": "https://anthropic.golden.test/v1/messages",
+    "headers": {
+     "x-api-key": "test-anthropic-key",
+     "anthropic-version": "2023-06-01",
+     "content-type": "application/json"
+    },
+    "json": {
+     "model": "claude-opus-5-5",
+     "max_tokens": 64000,
+     "stream": true,
+     "messages": [
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Do all the things."
+      },
+      {
+       "role": "assistant",
+       "content": [
+        {
+         "type": "thinking",
+         "thinking": "I will use every tool.",
+         "signature": "sig-0"
+        },
+        {
+         "type": "text",
+         "text": "Working on it."
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_00",
+         "name": "web_fetch",
+         "input": {
+          "url": "https://example.com/a",
+          "max_chars": 5000
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_01",
+         "name": "gemini_image",
+         "input": {
+          "prompt": "a red fox in snow",
+          "aspectRatio": "1:1",
+          "numberOfImages": 2,
+          "reference_images": [
+           "/ui/uploads/ref.png"
+          ]
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_02",
+         "name": "openai_image",
+         "input": {
+          "prompt": "a lighthouse at dusk"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_03",
+         "name": "generate_video",
+         "input": {
+          "prompt": "waves at dusk",
+          "duration": 6,
+          "image_url": "/ui/uploads/ref.png"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_04",
+         "name": "generate_video",
+         "input": {
+          "prompt": "keep going",
+          "video_url": "/ui/uploads/clip.mp4"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_05",
+         "name": "lyria_music",
+         "input": {
+          "prompt": "calm piano",
+          "sampleCount": 2
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_06",
+         "name": "get_media",
+         "input": {
+          "task_id": "task-old"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_07",
+         "name": "list_media",
+         "input": {
+          "media_type": "image",
+          "limit": 5
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_08",
+         "name": "search_media",
+         "input": {
+          "query": "fox"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_09",
+         "name": "search_snapshots",
+         "input": {
+          "query": "ember backdrop",
+          "k": 4
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_10",
+         "name": "send_sms",
+         "input": {
+          "phone_number": "+15550100",
+          "message": "on my way"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_11",
+         "name": "make_phone_call",
+         "input": {
+          "phone_number": "+15550101",
+          "greeting": "hello"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_12",
+         "name": "make_voice_call",
+         "input": {
+          "phone_number": "+15550102",
+          "message": "reminder"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_13",
+         "name": "search_contacts",
+         "input": {
+          "query": "sam"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_14",
+         "name": "save_contact",
+         "input": {
+          "name": "Sam",
+          "phone": "+15550103"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_15",
+         "name": "create_cron_job",
+         "input": {
+          "name": "daily",
+          "schedule": "0 9 * * *",
+          "prompt": "brief me"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_16",
+         "name": "edit_cron_job",
+         "input": {
+          "job_id": "job-1",
+          "prompt": "brief me later"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_17",
+         "name": "search_cron_jobs",
+         "input": {
+          "query": "daily"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_18",
+         "name": "use_computer",
+         "input": {
+          "prompt": "open the docs"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_19",
+         "name": "list_devices",
+         "input": {}
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_20",
+         "name": "gmail_search",
+         "input": {
+          "query": "invoice"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_21",
+         "name": "get_task_status",
+         "input": {
+          "task_id": "task-x"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_22",
+         "name": "extend_video",
+         "input": {
+          "video_url": "/ui/uploads/clip.mp4",
+          "prompt": "longer"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_23",
+         "name": "claude_code_task",
+         "input": {
+          "prompt": "fix the bug"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_24",
+         "name": "elevenlabs_music",
+         "input": {
+          "prompt": "upbeat jingle"
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_25",
+         "name": "roll_dice",
+         "input": {
+          "sides": 6
+         }
+        },
+        {
+         "type": "tool_use",
+         "id": "toolu_call_26",
+         "name": "quiet_tool",
+         "input": {}
+        }
+       ]
+      },
+      {
+       "role": "user",
+       "content": [
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_00",
+         "content": "PAGE TEXT OF https://example.com/a"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_01",
+         "content": "Image generation started for: a red fox in snow. Creating 2 images at 1K resolution (1:1 aspect ratio). Using 1 reference image(s) for style guidance. Images will be saved to: /ui/uploads/a-red-fox-in-snow_task-001_1.png, /ui/uploads/a-red-fox-in-snow_task-001_2.png. To use this image for video generation later, pass the URL to generate_video with image_url parameter."
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_02",
+         "content": "Image generation started for: a lighthouse at dusk. Creating 1 image at 1K resolution (16:9 aspect ratio). Image will be saved to: /ui/uploads/a-lighthouse-at-dusk_task-002.png. To use this image for video generation later, pass the URL to generate_video with image_url parameter."
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_03",
+         "content": "Image-to-video generation started. Animating image at /ui/uploads/ref.png with prompt: waves at dusk. Creating 6s video at 720p resolution (16:9 aspect ratio). Video generation takes 5-20 minutes. When complete, the video will be available at: /ui/uploads/waves-at-dusk_task-003.mp4"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_04",
+         "content": "Video EXTENSION started. Extending video at /ui/uploads/clip.mp4 with prompt: keep going. The new clip will continue from where the original ended. Video generation takes 5-20 minutes. When complete, the extended video will be available at: /ui/uploads/keep-going_task-004.mp4"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_05",
+         "content": "Music generation started for: calm piano (2 variations). 30-second track will be ready in 20-60 seconds."
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_06",
+         "content": "{\n  \"success\": true,\n  \"url\": \"/ui/uploads/task-old.png\",\n  \"type\": \"image\"\n}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_07",
+         "content": "{\n  \"success\": true,\n  \"count\": 2,\n  \"files\": [\n    {\n      \"url\": \"/ui/uploads/a.png\"\n    },\n    {\n      \"url\": \"/ui/uploads/b.png\"\n    }\n  ]\n}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_08",
+         "content": "{\n  \"success\": true,\n  \"count\": 1,\n  \"results\": [\n    {\n      \"url\": \"/ui/uploads/fox.png\"\n    }\n  ]\n}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_09",
+         "content": "Found 2 relevant snapshot(s) for: ember backdrop\n\n\n--- Result 1 ---\n[SNAP-20261001-0001 · 2026-10-01T10:00:00Z · operator: golden-op]\n## Raw Session Log\n2026-10-01T10:00:00Z operator=golden-op user: ember backdrop?\n2026-10-01T10:00:01Z operator=golden-op assistant: The ember backdrop shipped.\n=== END SNAPSHOT — SNAP-20261001-0001 ===\n\n\n--- Result 2 ---\n[SNAP-20261002-0002 · 2026-10-02T10:00:00Z · operator: golden-op]\n## Raw Session Log\n2026-10-02T10:00:00Z operator=golden-op user: particles?\n2026-10-02T10:00:01Z operator=golden-op assistant: Three particle modes.\n=== END SNAPSHOT — SNAP-20261002-0002 ===\n"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_10",
+         "content": "[send_sms] ok: {\"message\": \"on my way\", \"phone_number\": \"+15550100\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_11",
+         "content": "[make_phone_call] ok: {\"backend\": \"openai_realtime\", \"greeting\": \"hello\", \"phone_number\": \"+15550101\", \"role\": \"\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_12",
+         "content": "[make_voice_call] ok: {\"message\": \"reminder\", \"phone_number\": \"+15550102\", \"voice\": \"onyx\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_13",
+         "content": "[search_contacts] ok: {\"query\": \"sam\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_14",
+         "content": "[save_contact] ok: {\"name\": \"Sam\", \"phone\": \"+15550103\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_15",
+         "content": "[create_cron_job] ok: {\"name\": \"daily\", \"prompt\": \"brief me\", \"schedule\": \"0 9 * * *\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_16",
+         "content": "[edit_cron_job] ok: {\"job_id\": \"job-1\", \"prompt\": \"brief me later\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_17",
+         "content": "[search_cron_jobs] ok: {\"query\": \"daily\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_18",
+         "content": "[use_computer] ok: {\"prompt\": \"open the docs\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_19",
+         "content": "[list_devices] ok: {}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_20",
+         "content": "[gmail_search] ok: {\"query\": \"invoice\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_21",
+         "content": "[get_task_status] ok: {\"task_id\": \"task-x\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_22",
+         "content": "[extend_video] ok: {\"prompt\": \"longer\", \"video_url\": \"/ui/uploads/clip.mp4\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_23",
+         "content": "[claude_code_task] ok: {\"prompt\": \"fix the bug\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_24",
+         "content": "[elevenlabs_music] ok: {\"prompt\": \"upbeat jingle\"}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_25",
+         "content": "[roll_dice] ok: {\"sides\": 6}"
+        },
+        {
+         "type": "tool_result",
+         "tool_use_id": "toolu_call_26",
+         "content": "Tool 'quiet_tool' executed successfully (no output)."
+        }
+       ]
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "anthropic",
+       "group": "chat"
+      }
+     ],
+     "thinking": {
+      "type": "adaptive",
+      "display": "summarized"
+     },
+     "output_config": {
+      "effort": "xhigh"
+     },
+     "system": "GOLDEN SYSTEM PROMPT\n\nGOLDEN FOSSILS"
+    },
+    "timeout": "Timeout(connect=30, read=300, write=300, pool=300)"
+   }
+  ],
+  "tool_executor": [
+   {
+    "name": "send_sms",
+    "args": {
+     "phone_number": "+15550100",
+     "message": "on my way"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "make_phone_call",
+    "args": {
+     "phone_number": "+15550101",
+     "greeting": "hello",
+     "role": "",
+     "backend": "openai_realtime"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "make_voice_call",
+    "args": {
+     "phone_number": "+15550102",
+     "message": "reminder",
+     "voice": "onyx"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_contacts",
+    "args": {
+     "query": "sam"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "save_contact",
+    "args": {
+     "name": "Sam",
+     "phone": "+15550103"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "create_cron_job",
+    "args": {
+     "name": "daily",
+     "schedule": "0 9 * * *",
+     "prompt": "brief me"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "edit_cron_job",
+    "args": {
+     "job_id": "job-1",
+     "prompt": "brief me later"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_cron_jobs",
+    "args": {
+     "query": "daily"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "use_computer",
+    "args": {
+     "prompt": "open the docs"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "list_devices",
+    "args": {},
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "gmail_search",
+    "args": {
+     "query": "invoice"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "get_task_status",
+    "args": {
+     "task_id": "task-x"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "extend_video",
+    "args": {
+     "video_url": "/ui/uploads/clip.mp4",
+     "prompt": "longer"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "claude_code_task",
+    "args": {
+     "prompt": "fix the bug"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "elevenlabs_music",
+    "args": {
+     "prompt": "upbeat jingle"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "quiet_tool",
+    "args": {},
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   }
+  ],
+  "tasks": [
+   {
+    "task_id": "task-001",
+    "type": "IMAGE_GENERATION",
+    "operator": "golden-op",
+    "prompt": "a red fox in snow",
+    "result_data": {
+     "options": {
+      "aspectRatio": "1:1",
+      "resolution": "1K",
+      "numberOfImages": 2,
+      "provider": "gemini",
+      "referenceImages": [
+       {
+        "data": "iVBORyBnb2xkZW4gcmVmZXJlbmNl",
+        "mimeType": "image/png"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "task_id": "task-002",
+    "type": "IMAGE_GENERATION",
+    "operator": "golden-op",
+    "prompt": "a lighthouse at dusk",
+    "result_data": {
+     "options": {
+      "aspectRatio": "16:9",
+      "resolution": "1K",
+      "numberOfImages": 1,
+      "provider": "openai"
+     }
+    }
+   },
+   {
+    "task_id": "task-003",
+    "type": "VIDEO_GENERATION",
+    "operator": "golden-op",
+    "prompt": "waves at dusk",
+    "result_data": {
+     "options": {
+      "aspectRatio": "16:9",
+      "duration": 6,
+      "resolution": "720p",
+      "image_url": "/ui/uploads/ref.png"
+     }
+    }
+   },
+   {
+    "task_id": "task-004",
+    "type": "VIDEO_GENERATION",
+    "operator": "golden-op",
+    "prompt": "keep going",
+    "result_data": {
+     "url": "/ui/uploads/clip.mp4",
+     "prompt": "keep going"
+    }
+   },
+   {
+    "task_id": "task-005",
+    "type": "LYRIA_MUSIC",
+    "operator": "golden-op",
+    "prompt": "calm piano",
+    "result_data": {
+     "prompt": "calm piano",
+     "operator": "golden-op",
+     "sample_count": 2
+    }
+   }
+  ],
+  "helpers": [
+   {
+    "fn": "perform_web_fetch",
+    "url": "https://example.com/a",
+    "max_chars": 5000
+   },
+   {
+    "fn": "execute_get_media",
+    "url": "",
+    "task_id": "task-old"
+   },
+   {
+    "fn": "execute_list_media",
+    "media_type": "image",
+    "limit": 5
+   },
+   {
+    "fn": "execute_search_media",
+    "query": "fox",
+    "media_type": null,
+    "limit": 10
+   },
+   {
+    "fn": "hybrid_retrieve",
+    "vol_txt": "",
+    "query": "ember backdrop",
+    "k": 4,
+    "operator": "golden-op"
+   }
+  ],
+  "get_tools": [
+   {
+    "provider": "anthropic",
+    "prompt": "Do all the things.",
+    "group": "chat"
+   }
+  ]
+ }
+}

@@ -1,0 +1,204 @@
+{
+ "scenario": {
+  "name": "anthropic-nonstream-attachments",
+  "provider": "anthropic",
+  "path": "nonstream",
+  "case": "attachments",
+  "model": "claude-opus-5-5",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Look at these attachments."
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "/ui/uploads/photo.png"
+      }
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/jpeg",
+       "data": "QkFTRTY0"
+      }
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "/ui/uploads/missing.png"
+      }
+     },
+     {
+      "type": "document_url",
+      "document_url": {
+       "url": "/ui/uploads/notes.txt"
+      }
+     },
+     {
+      "type": "document_url",
+      "document_url": {
+       "url": "/ui/uploads/report.pdf"
+      }
+     },
+     {
+      "type": "video_url",
+      "video_url": {
+       "url": "/ui/uploads/clip.mp4"
+      }
+     },
+     {
+      "type": "audio_url",
+      "audio_url": {
+       "url": "/ui/uploads/voice.mp3"
+      }
+     }
+    ]
+   }
+  ],
+  "upstream": [
+   {
+    "status": 200,
+    "json": {
+     "id": "msg_g0",
+     "type": "message",
+     "role": "assistant",
+     "model": "claude-opus-5-5",
+     "content": [
+      {
+       "type": "text",
+       "text": "I see them."
+      }
+     ],
+     "stop_reason": "end_turn",
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 40,
+      "output_tokens": 12
+     }
+    }
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "result": [
+   "I see them.",
+   {
+    "prompt_tokens": 40,
+    "completion_tokens": 12,
+    "total_tokens": 52
+   },
+   "",
+   []
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://anthropic.golden.test/v1/messages",
+    "headers": {
+     "x-api-key": "test-anthropic-key",
+     "anthropic-version": "2023-06-01",
+     "content-type": "application/json"
+    },
+    "json": {
+     "model": "claude-opus-5-5",
+     "max_tokens": 16000,
+     "messages": [
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": [
+        {
+         "type": "text",
+         "text": "Look at these attachments."
+        },
+        {
+         "type": "image",
+         "source": {
+          "type": "base64",
+          "media_type": "image/png",
+          "data": "iVBORyBnb2xkZW4gcGhvdG8gYnl0ZXM="
+         }
+        },
+        {
+         "type": "image",
+         "source": {
+          "type": "base64",
+          "media_type": "image/jpeg",
+          "data": "QkFTRTY0"
+         }
+        },
+        {
+         "type": "text",
+         "text": "[Document content: notes.txt]\n\nGolden notes: the launch is on Tuesday.\n"
+        },
+        {
+         "type": "document",
+         "source": {
+          "type": "base64",
+          "media_type": "application/pdf",
+          "data": "JVBERi0xLjQgZ29sZGVuIHBkZg=="
+         }
+        },
+        {
+         "type": "text",
+         "text": "[Note: Video file attached: /ui/uploads/clip.mp4. Anthropic Claude models don't support direct video analysis. Please use Google Gemini for video analysis.]"
+        },
+        {
+         "type": "text",
+         "text": "[Note: Audio file attached: /ui/uploads/voice.mp3. This model doesn't support audio input.]"
+        }
+       ]
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "anthropic",
+       "group": "chat"
+      }
+     ],
+     "thinking": {
+      "type": "adaptive",
+      "display": "summarized"
+     },
+     "output_config": {
+      "effort": "xhigh"
+     },
+     "system": "GOLDEN SYSTEM PROMPT\n\nGOLDEN FOSSILS"
+    },
+    "timeout": "(30, 600)"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "anthropic",
+    "prompt": "Look at these attachments.",
+    "group": "chat"
+   }
+  ]
+ }
+}

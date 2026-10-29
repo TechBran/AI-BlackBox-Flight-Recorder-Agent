@@ -1,0 +1,947 @@
+{
+ "scenario": {
+  "name": "google-stream-tools",
+  "provider": "google",
+  "path": "stream",
+  "case": "tools",
+  "model": "gemini-3.1-pro-preview",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Do all the things."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 200,
+    "lines": [
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"I will use every tool.\", \"thought\": true}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"Working \"}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"on it.\"}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"web_fetch\", \"args\": {\"url\": \"https://example.com/a\", \"max_chars\": 5000}}, \"thoughtSignature\": \"gsig-0\"}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"gemini_image\", \"args\": {\"prompt\": \"a red fox in snow\", \"aspectRatio\": \"1:1\", \"numberOfImages\": 2, \"reference_images\": [\"/ui/uploads/ref.png\"]}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"openai_image\", \"args\": {\"prompt\": \"a lighthouse at dusk\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"generate_video\", \"args\": {\"prompt\": \"waves at dusk\", \"duration\": 6, \"image_url\": \"/ui/uploads/ref.png\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"generate_video\", \"args\": {\"prompt\": \"keep going\", \"video_url\": \"/ui/uploads/clip.mp4\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"lyria_music\", \"args\": {\"prompt\": \"calm piano\", \"sampleCount\": 2}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"get_media\", \"args\": {\"task_id\": \"task-old\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"list_media\", \"args\": {\"media_type\": \"image\", \"limit\": 5}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"search_media\", \"args\": {\"query\": \"fox\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"search_snapshots\", \"args\": {\"query\": \"ember backdrop\", \"k\": 4}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"send_sms\", \"args\": {\"phone_number\": \"+15550100\", \"message\": \"on my way\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"make_phone_call\", \"args\": {\"phone_number\": \"+15550101\", \"greeting\": \"hello\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"make_voice_call\", \"args\": {\"phone_number\": \"+15550102\", \"message\": \"reminder\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"search_contacts\", \"args\": {\"query\": \"sam\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"save_contact\", \"args\": {\"name\": \"Sam\", \"phone\": \"+15550103\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"create_cron_job\", \"args\": {\"name\": \"daily\", \"schedule\": \"0 9 * * *\", \"prompt\": \"brief me\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"edit_cron_job\", \"args\": {\"job_id\": \"job-1\", \"prompt\": \"brief me later\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"search_cron_jobs\", \"args\": {\"query\": \"daily\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"use_computer\", \"args\": {\"prompt\": \"open the docs\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"list_devices\", \"args\": {}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"gmail_search\", \"args\": {\"query\": \"invoice\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"get_task_status\", \"args\": {\"task_id\": \"task-x\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"extend_video\", \"args\": {\"video_url\": \"/ui/uploads/clip.mp4\", \"prompt\": \"longer\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"claude_code_task\", \"args\": {\"prompt\": \"fix the bug\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"elevenlabs_music\", \"args\": {\"prompt\": \"upbeat jingle\"}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"roll_dice\", \"args\": {\"sides\": 6}}}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"quiet_tool\", \"args\": {}}}]}, \"finishReason\": \"STOP\"}], \"usageMetadata\": {\"promptTokenCount\": 120, \"candidatesTokenCount\": 30, \"totalTokenCount\": 150}}",
+     ""
+    ]
+   },
+   {
+    "status": 200,
+    "lines": [
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"Summarize the results.\", \"thought\": true}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"All \"}]}}]}",
+     "",
+     "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"done.\"}]}, \"finishReason\": \"STOP\"}], \"usageMetadata\": {\"promptTokenCount\": 400, \"candidatesTokenCount\": 20, \"totalTokenCount\": 420}}",
+     ""
+    ]
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "sse": "event: stream_start\ndata: {\"provider\": \"google\", \"model\": \"gemini-3.1-pro-preview\", \"provenance\": {\"recent\": [\"SNAP-20261001-0001\"], \"keyword\": [\"SNAP-20261002-0002\"], \"semantic\": [], \"checkpoint\": []}}\n\nevent: system_activity\ndata: {\"stage\": \"embed\", \"label\": \"embed \\u00b7 golden-embed \\u00b7 8d\", \"detail\": {\"model\": \"golden-embed\", \"dims\": 8}, \"seq\": 0}\n\nevent: thinking\ndata: \"I will use every tool.\"\n\nevent: content\ndata: \"Working \"\n\nevent: content\ndata: \"on it.\"\n\nevent: tool_start\ndata: \"web_fetch\"\n\nevent: tool_start\ndata: \"gemini_image\"\n\nevent: tool_start\ndata: \"openai_image\"\n\nevent: tool_start\ndata: \"generate_video\"\n\nevent: tool_start\ndata: \"generate_video\"\n\nevent: tool_start\ndata: \"lyria_music\"\n\nevent: tool_start\ndata: \"get_media\"\n\nevent: tool_start\ndata: \"list_media\"\n\nevent: tool_start\ndata: \"search_media\"\n\nevent: tool_start\ndata: \"search_snapshots\"\n\nevent: tool_start\ndata: \"send_sms\"\n\nevent: tool_start\ndata: \"make_phone_call\"\n\nevent: tool_start\ndata: \"make_voice_call\"\n\nevent: tool_start\ndata: \"search_contacts\"\n\nevent: tool_start\ndata: \"save_contact\"\n\nevent: tool_start\ndata: \"create_cron_job\"\n\nevent: tool_start\ndata: \"edit_cron_job\"\n\nevent: tool_start\ndata: \"search_cron_jobs\"\n\nevent: tool_start\ndata: \"use_computer\"\n\nevent: tool_start\ndata: \"list_devices\"\n\nevent: tool_start\ndata: \"gmail_search\"\n\nevent: tool_start\ndata: \"get_task_status\"\n\nevent: tool_start\ndata: \"extend_video\"\n\nevent: tool_start\ndata: \"claude_code_task\"\n\nevent: tool_start\ndata: \"elevenlabs_music\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: tool_start\ndata: \"quiet_tool\"\n\nevent: usage\ndata: {\"prompt_tokens\": 120, \"completion_tokens\": 30}\n\nevent: tool_executing\ndata: \"Executing web tools...\"\n\nevent: tool_result\ndata: \"Fetched content from: https://example.com/a\"\n\nevent: tool_result\ndata: \"Image generation task created: task-001\"\n\nevent: image_task\ndata: {\"task_id\": \"task-001\", \"prompt\": \"a red fox in snow\", \"count\": 2}\n\nevent: tool_result\ndata: \"Image generation task created: task-002\"\n\nevent: image_task\ndata: {\"task_id\": \"task-002\", \"prompt\": \"a lighthouse at dusk\", \"count\": 1}\n\nevent: tool_result\ndata: \"Video generation task created: task-003\"\n\nevent: video_task\ndata: {\"task_id\": \"task-003\", \"prompt\": \"waves at dusk\", \"duration\": 6, \"resolution\": \"720p\", \"mode\": \"image-to-video\", \"predicted_url\": \"/ui/uploads/waves-at-dusk_task-003.mp4\"}\n\nevent: tool_result\ndata: \"Video generation task created: task-004\"\n\nevent: video_task\ndata: {\"task_id\": \"task-004\", \"prompt\": \"keep going\", \"duration\": 8, \"resolution\": \"720p\", \"mode\": \"video-extension\", \"predicted_url\": \"/ui/uploads/keep-going_task-004.mp4\"}\n\nevent: tool_result\ndata: \"Music generation task created: task-005\"\n\nevent: music_task\ndata: {\"task_id\": \"task-005\", \"prompt\": \"calm piano\", \"sample_count\": 2}\n\nevent: tool_result\ndata: \"Retrieved media: task-old\"\n\nevent: tool_result\ndata: \"Listed 2 media files\"\n\nevent: tool_result\ndata: \"Found 1 matching media\"\n\nevent: tool_result\ndata: \"Snapshot search completed\"\n\nevent: tool_result\ndata: \"SMS: [send_sms] ok: {\\\"message\\\": \\\"on my way\\\", \\\"phone_number\\\": \\\"+15550100\\\"}\"\n\nevent: tool_result\ndata: \"Call: [make_phone_call] ok: {\\\"backend\\\": \\\"openai_realtime\\\", \\\"greeting\\\": \\\"hello\\\", \\\"phone_number\\\": \\\"+15550101\"\n\nevent: tool_result\ndata: \"Voice call: [make_voice_call] ok: {\\\"message\\\": \\\"reminder\\\", \\\"phone_number\\\": \\\"+15550102\\\", \\\"voice\\\": \\\"onyx\\\"}\"\n\nevent: tool_result\ndata: \"Contact search completed\"\n\nevent: tool_result\ndata: \"Contact: [save_contact] ok: {\\\"name\\\": \\\"Sam\\\", \\\"phone\\\": \\\"+15550103\\\"}\"\n\nevent: tool_result\ndata: \"Cron job: [create_cron_job] ok: {\\\"name\\\": \\\"daily\\\", \\\"prompt\\\": \\\"brief me\\\", \\\"schedule\\\": \\\"0 9 * * *\\\"}\"\n\nevent: tool_result\ndata: \"Cron job: [edit_cron_job] ok: {\\\"job_id\\\": \\\"job-1\\\", \\\"prompt\\\": \\\"brief me later\\\"}\"\n\nevent: tool_result\ndata: \"Cron jobs: [search_cron_jobs] ok: {\\\"query\\\": \\\"daily\\\"}\"\n\nevent: tool_result\ndata: \"Computer Use: [use_computer] ok: {\\\"prompt\\\": \\\"open the docs\\\"}\"\n\nevent: browser_task\ndata: {\"task_id\": \"exec-use_computer\", \"prompt\": \"open the docs\"}\n\nevent: tool_result\ndata: \"list_devices: [list_devices] ok: {}\"\n\nevent: tool_result\ndata: \"gmail_search: [gmail_search] ok: {\\\"query\\\": \\\"invoice\\\"}\"\n\nevent: tool_result\ndata: \"get_task_status: [get_task_status] ok: {\\\"task_id\\\": \\\"task-x\\\"}\"\n\nevent: tool_result\ndata: \"extend_video: [extend_video] ok: {\\\"prompt\\\": \\\"longer\\\", \\\"video_url\\\": \\\"/ui/uploads/clip.mp4\\\"}\"\n\nevent: cli_task\ndata: {\"task_id\": \"exec-claude_code_task\", \"tool\": \"claude_code_task\", \"prompt\": \"fix the bug\"}\n\nevent: tool_result\ndata: \"claude_code_task: [claude_code_task] ok: {\\\"prompt\\\": \\\"fix the bug\\\"}\"\n\nevent: music_task\ndata: {\"task_id\": \"exec-elevenlabs_music\", \"prompt\": \"upbeat jingle\"}\n\nevent: tool_result\ndata: \"elevenlabs_music: [elevenlabs_music] ok: {\\\"prompt\\\": \\\"upbeat jingle\\\"}\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: tool_result\ndata: \"quiet_tool: Tool 'quiet_tool' executed successfully (no output).\"\n\nevent: heartbeat\ndata: \"\"\n\nevent: thinking\ndata: \"Summarize the results.\"\n\nevent: content\ndata: \"All \"\n\nevent: content\ndata: \"done.\"\n\nevent: usage\ndata: {\"prompt_tokens\": 400, \"completion_tokens\": 20}\n\nevent: done\ndata: {\"thinking\": \"I will use every tool.Summarize the results.\", \"content\": \"Working on it.All done.\"}\n\nevent: stream_end\ndata: {\"status\": \"complete\"}\n\n",
+  "context_builds": [
+   {
+    "operator": "golden-op",
+    "provider": "google",
+    "window_guard_tokens": null
+   }
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://gemini.golden.test/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse",
+    "headers": {
+     "x-goog-api-key": "test-google-key"
+    },
+    "json": {
+     "contents": [
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "What did we ship last week?"
+        }
+       ]
+      },
+      {
+       "role": "model",
+       "parts": [
+        {
+         "text": "The ember backdrop and the particle modes."
+        }
+       ]
+      },
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "Do all the things."
+        }
+       ]
+      }
+     ],
+     "generationConfig": {
+      "thinkingConfig": {
+       "thinkingLevel": "HIGH",
+       "includeThoughts": true
+      }
+     },
+     "tools": [
+      {
+       "golden_tools_for": "gemini",
+       "group": "chat"
+      }
+     ],
+     "system_instruction": {
+      "parts": [
+       {
+        "text": "GOLDEN SYSTEM PROMPT\nGOLDEN FOSSILS"
+       }
+      ]
+     }
+    },
+    "timeout": "300"
+   },
+   {
+    "method": "POST",
+    "url": "https://gemini.golden.test/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse",
+    "headers": {
+     "x-goog-api-key": "test-google-key"
+    },
+    "json": {
+     "contents": [
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "What did we ship last week?"
+        }
+       ]
+      },
+      {
+       "role": "model",
+       "parts": [
+        {
+         "text": "The ember backdrop and the particle modes."
+        }
+       ]
+      },
+      {
+       "role": "user",
+       "parts": [
+        {
+         "text": "Do all the things."
+        }
+       ]
+      },
+      {
+       "role": "model",
+       "parts": [
+        {
+         "text": "I will use every tool.",
+         "thought": true
+        },
+        {
+         "text": "Working "
+        },
+        {
+         "text": "on it."
+        },
+        {
+         "functionCall": {
+          "name": "web_fetch",
+          "args": {
+           "url": "https://example.com/a",
+           "max_chars": 5000
+          }
+         },
+         "thoughtSignature": "gsig-0"
+        },
+        {
+         "functionCall": {
+          "name": "gemini_image",
+          "args": {
+           "prompt": "a red fox in snow",
+           "aspectRatio": "1:1",
+           "numberOfImages": 2,
+           "reference_images": [
+            "/ui/uploads/ref.png"
+           ]
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "openai_image",
+          "args": {
+           "prompt": "a lighthouse at dusk"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "generate_video",
+          "args": {
+           "prompt": "waves at dusk",
+           "duration": 6,
+           "image_url": "/ui/uploads/ref.png"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "generate_video",
+          "args": {
+           "prompt": "keep going",
+           "video_url": "/ui/uploads/clip.mp4"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "lyria_music",
+          "args": {
+           "prompt": "calm piano",
+           "sampleCount": 2
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "get_media",
+          "args": {
+           "task_id": "task-old"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "list_media",
+          "args": {
+           "media_type": "image",
+           "limit": 5
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "search_media",
+          "args": {
+           "query": "fox"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "search_snapshots",
+          "args": {
+           "query": "ember backdrop",
+           "k": 4
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "send_sms",
+          "args": {
+           "phone_number": "+15550100",
+           "message": "on my way"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "make_phone_call",
+          "args": {
+           "phone_number": "+15550101",
+           "greeting": "hello"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "make_voice_call",
+          "args": {
+           "phone_number": "+15550102",
+           "message": "reminder"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "search_contacts",
+          "args": {
+           "query": "sam"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "save_contact",
+          "args": {
+           "name": "Sam",
+           "phone": "+15550103"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "create_cron_job",
+          "args": {
+           "name": "daily",
+           "schedule": "0 9 * * *",
+           "prompt": "brief me"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "edit_cron_job",
+          "args": {
+           "job_id": "job-1",
+           "prompt": "brief me later"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "search_cron_jobs",
+          "args": {
+           "query": "daily"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "use_computer",
+          "args": {
+           "prompt": "open the docs"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "list_devices",
+          "args": {}
+         }
+        },
+        {
+         "functionCall": {
+          "name": "gmail_search",
+          "args": {
+           "query": "invoice"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "get_task_status",
+          "args": {
+           "task_id": "task-x"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "extend_video",
+          "args": {
+           "video_url": "/ui/uploads/clip.mp4",
+           "prompt": "longer"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "claude_code_task",
+          "args": {
+           "prompt": "fix the bug"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "elevenlabs_music",
+          "args": {
+           "prompt": "upbeat jingle"
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "roll_dice",
+          "args": {
+           "sides": 6
+          }
+         }
+        },
+        {
+         "functionCall": {
+          "name": "quiet_tool",
+          "args": {}
+         }
+        }
+       ]
+      },
+      {
+       "role": "user",
+       "parts": [
+        {
+         "functionResponse": {
+          "name": "web_fetch",
+          "response": {
+           "result": "PAGE TEXT OF https://example.com/a"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "gemini_image",
+          "response": {
+           "result": "Image generation started for: a red fox in snow. Creating 2 images at 1K resolution (1:1 aspect ratio). Using 1 reference image(s) for style guidance. Images will be saved to: /ui/uploads/a-red-fox-in-snow_task-001_1.png, /ui/uploads/a-red-fox-in-snow_task-001_2.png. To use this image for video generation later, pass the URL to generate_video with image_url parameter."
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "openai_image",
+          "response": {
+           "result": "Image generation started for: a lighthouse at dusk. Creating 1 image at 1K resolution (16:9 aspect ratio). Image will be saved to: /ui/uploads/a-lighthouse-at-dusk_task-002.png. To use this image for video generation later, pass the URL to generate_video with image_url parameter."
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "generate_video",
+          "response": {
+           "result": "Image-to-video generation started. Animating image at /ui/uploads/ref.png with prompt: waves at dusk. Creating 6s video at 720p resolution (16:9 aspect ratio). Video generation takes 5-20 minutes. When complete, the video will be available at: /ui/uploads/waves-at-dusk_task-003.mp4"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "generate_video",
+          "response": {
+           "result": "Video EXTENSION started. Extending video at /ui/uploads/clip.mp4 with prompt: keep going. The new clip will continue from where the original ended. Video generation takes 5-20 minutes. When complete, the extended video will be available at: /ui/uploads/keep-going_task-004.mp4"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "lyria_music",
+          "response": {
+           "result": "Music generation started for: calm piano (2 variations). 30-second track will be ready in 20-60 seconds."
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "get_media",
+          "response": {
+           "result": "{\n  \"success\": true,\n  \"url\": \"/ui/uploads/task-old.png\",\n  \"type\": \"image\"\n}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "list_media",
+          "response": {
+           "result": "{\n  \"success\": true,\n  \"count\": 2,\n  \"files\": [\n    {\n      \"url\": \"/ui/uploads/a.png\"\n    },\n    {\n      \"url\": \"/ui/uploads/b.png\"\n    }\n  ]\n}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "search_media",
+          "response": {
+           "result": "{\n  \"success\": true,\n  \"count\": 1,\n  \"results\": [\n    {\n      \"url\": \"/ui/uploads/fox.png\"\n    }\n  ]\n}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "search_snapshots",
+          "response": {
+           "result": "Found 2 relevant snapshot(s) for: ember backdrop\n\n\n--- Result 1 ---\n[SNAP-20261001-0001 · 2026-10-01T10:00:00Z · operator: golden-op]\n## Raw Session Log\n2026-10-01T10:00:00Z operator=golden-op user: ember backdrop?\n2026-10-01T10:00:01Z operator=golden-op assistant: The ember backdrop shipped.\n=== END SNAPSHOT — SNAP-20261001-0001 ===\n\n\n--- Result 2 ---\n[SNAP-20261002-0002 · 2026-10-02T10:00:00Z · operator: golden-op]\n## Raw Session Log\n2026-10-02T10:00:00Z operator=golden-op user: particles?\n2026-10-02T10:00:01Z operator=golden-op assistant: Three particle modes.\n=== END SNAPSHOT — SNAP-20261002-0002 ===\n"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "send_sms",
+          "response": {
+           "result": "[send_sms] ok: {\"message\": \"on my way\", \"phone_number\": \"+15550100\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "make_phone_call",
+          "response": {
+           "result": "[make_phone_call] ok: {\"backend\": \"openai_realtime\", \"greeting\": \"hello\", \"phone_number\": \"+15550101\", \"role\": \"\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "make_voice_call",
+          "response": {
+           "result": "[make_voice_call] ok: {\"message\": \"reminder\", \"phone_number\": \"+15550102\", \"voice\": \"onyx\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "search_contacts",
+          "response": {
+           "result": "[search_contacts] ok: {\"query\": \"sam\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "save_contact",
+          "response": {
+           "result": "[save_contact] ok: {\"name\": \"Sam\", \"phone\": \"+15550103\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "create_cron_job",
+          "response": {
+           "result": "[create_cron_job] ok: {\"name\": \"daily\", \"prompt\": \"brief me\", \"schedule\": \"0 9 * * *\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "edit_cron_job",
+          "response": {
+           "result": "[edit_cron_job] ok: {\"job_id\": \"job-1\", \"prompt\": \"brief me later\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "search_cron_jobs",
+          "response": {
+           "result": "[search_cron_jobs] ok: {\"query\": \"daily\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "use_computer",
+          "response": {
+           "result": "[use_computer] ok: {\"prompt\": \"open the docs\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "list_devices",
+          "response": {
+           "result": "[list_devices] ok: {}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "gmail_search",
+          "response": {
+           "result": "[gmail_search] ok: {\"query\": \"invoice\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "get_task_status",
+          "response": {
+           "result": "[get_task_status] ok: {\"task_id\": \"task-x\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "extend_video",
+          "response": {
+           "result": "[extend_video] ok: {\"prompt\": \"longer\", \"video_url\": \"/ui/uploads/clip.mp4\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "claude_code_task",
+          "response": {
+           "result": "[claude_code_task] ok: {\"prompt\": \"fix the bug\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "elevenlabs_music",
+          "response": {
+           "result": "[elevenlabs_music] ok: {\"prompt\": \"upbeat jingle\"}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "roll_dice",
+          "response": {
+           "result": "[roll_dice] ok: {\"sides\": 6}"
+          }
+         }
+        },
+        {
+         "functionResponse": {
+          "name": "quiet_tool",
+          "response": {
+           "result": "Tool 'quiet_tool' executed successfully (no output)."
+          }
+         }
+        }
+       ]
+      }
+     ],
+     "generationConfig": {
+      "thinkingConfig": {
+       "thinkingLevel": "HIGH",
+       "includeThoughts": true
+      }
+     },
+     "tools": [
+      {
+       "golden_tools_for": "gemini",
+       "group": "chat"
+      }
+     ],
+     "system_instruction": {
+      "parts": [
+       {
+        "text": "GOLDEN SYSTEM PROMPT\nGOLDEN FOSSILS"
+       }
+      ]
+     }
+    },
+    "timeout": "300"
+   }
+  ],
+  "tool_executor": [
+   {
+    "name": "send_sms",
+    "args": {
+     "phone_number": "+15550100",
+     "message": "on my way"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "make_phone_call",
+    "args": {
+     "phone_number": "+15550101",
+     "greeting": "hello",
+     "role": "",
+     "backend": "openai_realtime"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "make_voice_call",
+    "args": {
+     "phone_number": "+15550102",
+     "message": "reminder",
+     "voice": "onyx"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_contacts",
+    "args": {
+     "query": "sam"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "save_contact",
+    "args": {
+     "name": "Sam",
+     "phone": "+15550103"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "create_cron_job",
+    "args": {
+     "name": "daily",
+     "schedule": "0 9 * * *",
+     "prompt": "brief me"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "edit_cron_job",
+    "args": {
+     "job_id": "job-1",
+     "prompt": "brief me later"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_cron_jobs",
+    "args": {
+     "query": "daily"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "use_computer",
+    "args": {
+     "prompt": "open the docs"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "list_devices",
+    "args": {},
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "gmail_search",
+    "args": {
+     "query": "invoice"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "get_task_status",
+    "args": {
+     "task_id": "task-x"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "extend_video",
+    "args": {
+     "video_url": "/ui/uploads/clip.mp4",
+     "prompt": "longer"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "claude_code_task",
+    "args": {
+     "prompt": "fix the bug"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "elevenlabs_music",
+    "args": {
+     "prompt": "upbeat jingle"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "quiet_tool",
+    "args": {},
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   }
+  ],
+  "tasks": [
+   {
+    "task_id": "task-001",
+    "type": "IMAGE_GENERATION",
+    "operator": "golden-op",
+    "prompt": "a red fox in snow",
+    "result_data": {
+     "options": {
+      "aspectRatio": "1:1",
+      "resolution": "1K",
+      "numberOfImages": 2,
+      "provider": "gemini",
+      "referenceImages": [
+       {
+        "data": "iVBORyBnb2xkZW4gcmVmZXJlbmNl",
+        "mimeType": "image/png"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "task_id": "task-002",
+    "type": "IMAGE_GENERATION",
+    "operator": "golden-op",
+    "prompt": "a lighthouse at dusk",
+    "result_data": {
+     "options": {
+      "aspectRatio": "16:9",
+      "resolution": "1K",
+      "numberOfImages": 1,
+      "provider": "openai"
+     }
+    }
+   },
+   {
+    "task_id": "task-003",
+    "type": "VIDEO_GENERATION",
+    "operator": "golden-op",
+    "prompt": "waves at dusk",
+    "result_data": {
+     "options": {
+      "aspectRatio": "16:9",
+      "duration": 6,
+      "resolution": "720p",
+      "image_url": "/ui/uploads/ref.png"
+     }
+    }
+   },
+   {
+    "task_id": "task-004",
+    "type": "VIDEO_GENERATION",
+    "operator": "golden-op",
+    "prompt": "keep going",
+    "result_data": {
+     "url": "/ui/uploads/clip.mp4",
+     "prompt": "keep going"
+    }
+   },
+   {
+    "task_id": "task-005",
+    "type": "LYRIA_MUSIC",
+    "operator": "golden-op",
+    "prompt": "calm piano",
+    "result_data": {
+     "prompt": "calm piano",
+     "operator": "golden-op",
+     "sample_count": 2
+    }
+   }
+  ],
+  "helpers": [
+   {
+    "fn": "perform_web_fetch",
+    "url": "https://example.com/a",
+    "max_chars": 5000
+   },
+   {
+    "fn": "execute_get_media",
+    "url": "",
+    "task_id": "task-old"
+   },
+   {
+    "fn": "execute_list_media",
+    "media_type": "image",
+    "limit": 5
+   },
+   {
+    "fn": "execute_search_media",
+    "query": "fox",
+    "media_type": null,
+    "limit": 10
+   },
+   {
+    "fn": "hybrid_retrieve",
+    "vol_txt": "",
+    "query": "ember backdrop",
+    "k": 4,
+    "operator": "golden-op"
+   }
+  ],
+  "get_tools": [
+   {
+    "provider": "gemini",
+    "prompt": "Do all the things.",
+    "group": "chat"
+   }
+  ]
+ }
+}

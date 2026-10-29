@@ -1,0 +1,90 @@
+{
+ "scenario": {
+  "name": "custom-nonstream-http_error",
+  "provider": "custom",
+  "path": "nonstream",
+  "case": "http_error",
+  "model": "gbox::gmodel-a",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 500,
+    "body": "{\"error\": {\"message\": \"upstream exploded\", \"type\": \"server_error\"}}"
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "raised": {
+   "type": "HTTPException",
+   "status_code": 500,
+   "detail": "Custom server 'gbox' API error: {\"error\": {\"message\": \"upstream exploded\", \"type\": \"server_error\"}}"
+  },
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "http://gbox.golden.test:8080/v1/chat/completions",
+    "headers": {
+     "Content-Type": "application/json",
+     "Authorization": "Bearer test-custom-key"
+    },
+    "json": {
+     "model": "gmodel-a",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "custom",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "200"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "custom",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

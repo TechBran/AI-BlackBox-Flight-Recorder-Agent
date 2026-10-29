@@ -1,0 +1,154 @@
+{
+ "scenario": {
+  "name": "openai-nonstream-reasoning_effort_retry",
+  "provider": "openai",
+  "path": "nonstream",
+  "case": "reasoning_effort_retry",
+  "model": "gpt-5.5",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 400,
+    "body": "{\"error\": {\"message\": \"Unsupported value: reasoning_effort default with tools\", \"type\": \"server_error\"}}"
+   },
+   {
+    "status": 200,
+    "json": {
+     "id": "chatcmpl-g",
+     "object": "chat.completion",
+     "choices": [
+      {
+       "index": 0,
+       "message": {
+        "role": "assistant",
+        "content": "Retried fine."
+       },
+       "finish_reason": "stop"
+      }
+     ],
+     "usage": {
+      "prompt_tokens": 40,
+      "completion_tokens": 12,
+      "total_tokens": 52
+     }
+    }
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "result": [
+   "Retried fine.",
+   {
+    "prompt_tokens": 40,
+    "completion_tokens": 12,
+    "total_tokens": 52
+   }
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://openai.golden.test/v1/chat/completions",
+    "headers": {
+     "Authorization": "Bearer test-openai-key"
+    },
+    "json": {
+     "model": "gpt-5.5",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "openai",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "200"
+   },
+   {
+    "method": "POST",
+    "url": "https://openai.golden.test/v1/chat/completions",
+    "headers": {
+     "Authorization": "Bearer test-openai-key"
+    },
+    "json": {
+     "model": "gpt-5.5",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "openai",
+       "group": "chat"
+      }
+     ],
+     "reasoning_effort": "none"
+    },
+    "timeout": "200"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "openai",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

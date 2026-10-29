@@ -1,0 +1,89 @@
+{
+ "scenario": {
+  "name": "xai-nonstream-billing",
+  "provider": "xai",
+  "path": "nonstream",
+  "case": "billing",
+  "model": "grok-3-mini",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 429,
+    "body": "{\"error\": {\"message\": \"Your team doesn't have any credits.\", \"type\": \"invalid_request\"}}"
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "raised": {
+   "type": "CreditsExhaustedError",
+   "status_code": 429,
+   "detail": "xAI account is out of credits - add credits or turn on auto-reload in the xAI console. (xAI said: Your team doesn't have any credits.)"
+  },
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://xai.golden.test/v1/chat/completions",
+    "headers": {
+     "Authorization": "Bearer test-xai-key"
+    },
+    "json": {
+     "model": "grok-3-mini",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "grok",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "200"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "grok",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

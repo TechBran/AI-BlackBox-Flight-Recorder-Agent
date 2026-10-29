@@ -1,0 +1,310 @@
+{
+ "scenario": {
+  "name": "xai-stream-tool_cap",
+  "provider": "xai",
+  "path": "stream",
+  "case": "tool_cap",
+  "model": "grok-3-mini",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 200,
+    "lines": [
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Again.\"}, \"finish_reason\": null}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_00\", \"type\": \"function\", \"function\": {\"name\": \"roll_dice\", \"arguments\": \"\"}}]}, \"finish_reason\": null}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"side\"}}]}, \"finish_reason\": null}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"s\\\": 6}\"}}]}, \"finish_reason\": null}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}]}",
+     "",
+     "data: {\"id\": \"chatcmpl-g\", \"choices\": [], \"usage\": {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}}",
+     "",
+     "data: [DONE]",
+     ""
+    ]
+   }
+  ],
+  "repeat_last": true,
+  "record_upstream": "count"
+ },
+ "observed": {
+  "sse": "event: stream_start\ndata: {\"provider\": \"xai\", \"model\": \"grok-3-mini\", \"provenance\": {\"recent\": [\"SNAP-20261001-0001\"], \"keyword\": [\"SNAP-20261002-0002\"], \"semantic\": [], \"checkpoint\": []}}\n\nevent: system_activity\ndata: {\"stage\": \"embed\", \"label\": \"embed \\u00b7 golden-embed \\u00b7 8d\", \"detail\": {\"model\": \"golden-embed\", \"dims\": 8}, \"seq\": 0}\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: content\ndata: \"Again.\"\n\nevent: tool_start\ndata: \"roll_dice\"\n\nevent: usage\ndata: {\"prompt_tokens\": 40, \"completion_tokens\": 12, \"total_tokens\": 52}\n\nevent: tool_executing\ndata: \"Executing tools...\"\n\nevent: tool_result\ndata: \"roll_dice: [roll_dice] ok: {\\\"sides\\\": 6}\"\n\nevent: done\ndata: {\"reasoning\": \"\", \"content\": \"Again.\"}\n\nevent: stream_end\ndata: {\"status\": \"complete\"}\n\n",
+  "context_builds": [
+   {
+    "operator": "golden-op",
+    "provider": "xai",
+    "window_guard_tokens": null
+   }
+  ],
+  "upstream": {
+   "count": 30
+  },
+  "tool_executor": [
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   }
+  ],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "grok",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

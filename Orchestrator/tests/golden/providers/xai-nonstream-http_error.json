@@ -1,0 +1,89 @@
+{
+ "scenario": {
+  "name": "xai-nonstream-http_error",
+  "provider": "xai",
+  "path": "nonstream",
+  "case": "http_error",
+  "model": "grok-3-mini",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Please answer briefly."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 500,
+    "body": "{\"error\": {\"message\": \"upstream exploded\", \"type\": \"server_error\"}}"
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "raised": {
+   "type": "HTTPException",
+   "status_code": 500,
+   "detail": "{\"error\": {\"message\": \"upstream exploded\", \"type\": \"server_error\"}}"
+  },
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://xai.golden.test/v1/chat/completions",
+    "headers": {
+     "Authorization": "Bearer test-xai-key"
+    },
+    "json": {
+     "model": "grok-3-mini",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Please answer briefly."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "grok",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "200"
+   }
+  ],
+  "tool_executor": [],
+  "tasks": [],
+  "helpers": [],
+  "get_tools": [
+   {
+    "provider": "grok",
+    "prompt": "Please answer briefly.",
+    "group": "chat"
+   }
+  ]
+ }
+}

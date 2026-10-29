@@ -1,0 +1,1012 @@
+{
+ "scenario": {
+  "name": "xai-nonstream-tools",
+  "provider": "xai",
+  "path": "nonstream",
+  "case": "tools",
+  "model": "grok-3-mini",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What did we ship last week?"
+   },
+   {
+    "role": "assistant",
+    "content": "The ember backdrop and the particle modes."
+   },
+   {
+    "role": "user",
+    "content": "Do all the things."
+   }
+  ],
+  "upstream": [
+   {
+    "status": 200,
+    "json": {
+     "id": "chatcmpl-g",
+     "object": "chat.completion",
+     "choices": [
+      {
+       "index": 0,
+       "message": {
+        "role": "assistant",
+        "content": "Working on it.",
+        "reasoning_content": "I will use every tool.",
+        "tool_calls": [
+         {
+          "id": "call_00",
+          "type": "function",
+          "function": {
+           "name": "web_fetch",
+           "arguments": "{\"url\": \"https://example.com/a\", \"max_chars\": 5000}"
+          }
+         },
+         {
+          "id": "call_01",
+          "type": "function",
+          "function": {
+           "name": "gemini_image",
+           "arguments": "{\"prompt\": \"a red fox in snow\", \"aspectRatio\": \"1:1\", \"numberOfImages\": 2, \"reference_images\": [\"/ui/uploads/ref.png\"]}"
+          }
+         },
+         {
+          "id": "call_02",
+          "type": "function",
+          "function": {
+           "name": "openai_image",
+           "arguments": "{\"prompt\": \"a lighthouse at dusk\"}"
+          }
+         },
+         {
+          "id": "call_03",
+          "type": "function",
+          "function": {
+           "name": "generate_video",
+           "arguments": "{\"prompt\": \"waves at dusk\", \"duration\": 6, \"image_url\": \"/ui/uploads/ref.png\"}"
+          }
+         },
+         {
+          "id": "call_04",
+          "type": "function",
+          "function": {
+           "name": "generate_video",
+           "arguments": "{\"prompt\": \"keep going\", \"video_url\": \"/ui/uploads/clip.mp4\"}"
+          }
+         },
+         {
+          "id": "call_05",
+          "type": "function",
+          "function": {
+           "name": "lyria_music",
+           "arguments": "{\"prompt\": \"calm piano\", \"sampleCount\": 2}"
+          }
+         },
+         {
+          "id": "call_06",
+          "type": "function",
+          "function": {
+           "name": "get_media",
+           "arguments": "{\"task_id\": \"task-old\"}"
+          }
+         },
+         {
+          "id": "call_07",
+          "type": "function",
+          "function": {
+           "name": "list_media",
+           "arguments": "{\"media_type\": \"image\", \"limit\": 5}"
+          }
+         },
+         {
+          "id": "call_08",
+          "type": "function",
+          "function": {
+           "name": "search_media",
+           "arguments": "{\"query\": \"fox\"}"
+          }
+         },
+         {
+          "id": "call_09",
+          "type": "function",
+          "function": {
+           "name": "search_snapshots",
+           "arguments": "{\"query\": \"ember backdrop\", \"k\": 4}"
+          }
+         },
+         {
+          "id": "call_10",
+          "type": "function",
+          "function": {
+           "name": "send_sms",
+           "arguments": "{\"phone_number\": \"+15550100\", \"message\": \"on my way\"}"
+          }
+         },
+         {
+          "id": "call_11",
+          "type": "function",
+          "function": {
+           "name": "make_phone_call",
+           "arguments": "{\"phone_number\": \"+15550101\", \"greeting\": \"hello\"}"
+          }
+         },
+         {
+          "id": "call_12",
+          "type": "function",
+          "function": {
+           "name": "make_voice_call",
+           "arguments": "{\"phone_number\": \"+15550102\", \"message\": \"reminder\"}"
+          }
+         },
+         {
+          "id": "call_13",
+          "type": "function",
+          "function": {
+           "name": "search_contacts",
+           "arguments": "{\"query\": \"sam\"}"
+          }
+         },
+         {
+          "id": "call_14",
+          "type": "function",
+          "function": {
+           "name": "save_contact",
+           "arguments": "{\"name\": \"Sam\", \"phone\": \"+15550103\"}"
+          }
+         },
+         {
+          "id": "call_15",
+          "type": "function",
+          "function": {
+           "name": "create_cron_job",
+           "arguments": "{\"name\": \"daily\", \"schedule\": \"0 9 * * *\", \"prompt\": \"brief me\"}"
+          }
+         },
+         {
+          "id": "call_16",
+          "type": "function",
+          "function": {
+           "name": "edit_cron_job",
+           "arguments": "{\"job_id\": \"job-1\", \"prompt\": \"brief me later\"}"
+          }
+         },
+         {
+          "id": "call_17",
+          "type": "function",
+          "function": {
+           "name": "search_cron_jobs",
+           "arguments": "{\"query\": \"daily\"}"
+          }
+         },
+         {
+          "id": "call_18",
+          "type": "function",
+          "function": {
+           "name": "use_computer",
+           "arguments": "{\"prompt\": \"open the docs\"}"
+          }
+         },
+         {
+          "id": "call_19",
+          "type": "function",
+          "function": {
+           "name": "list_devices",
+           "arguments": "{}"
+          }
+         },
+         {
+          "id": "call_20",
+          "type": "function",
+          "function": {
+           "name": "gmail_search",
+           "arguments": "{\"query\": \"invoice\"}"
+          }
+         },
+         {
+          "id": "call_21",
+          "type": "function",
+          "function": {
+           "name": "get_task_status",
+           "arguments": "{\"task_id\": \"task-x\"}"
+          }
+         },
+         {
+          "id": "call_22",
+          "type": "function",
+          "function": {
+           "name": "extend_video",
+           "arguments": "{\"video_url\": \"/ui/uploads/clip.mp4\", \"prompt\": \"longer\"}"
+          }
+         },
+         {
+          "id": "call_23",
+          "type": "function",
+          "function": {
+           "name": "claude_code_task",
+           "arguments": "{\"prompt\": \"fix the bug\"}"
+          }
+         },
+         {
+          "id": "call_24",
+          "type": "function",
+          "function": {
+           "name": "elevenlabs_music",
+           "arguments": "{\"prompt\": \"upbeat jingle\"}"
+          }
+         },
+         {
+          "id": "call_25",
+          "type": "function",
+          "function": {
+           "name": "roll_dice",
+           "arguments": "{\"sides\": 6}"
+          }
+         },
+         {
+          "id": "call_26",
+          "type": "function",
+          "function": {
+           "name": "quiet_tool",
+           "arguments": "{}"
+          }
+         }
+        ]
+       },
+       "finish_reason": "tool_calls"
+      }
+     ],
+     "usage": {
+      "prompt_tokens": 120,
+      "completion_tokens": 30,
+      "total_tokens": 150
+     }
+    }
+   },
+   {
+    "status": 200,
+    "json": {
+     "id": "chatcmpl-g",
+     "object": "chat.completion",
+     "choices": [
+      {
+       "index": 0,
+       "message": {
+        "role": "assistant",
+        "content": "All done.",
+        "reasoning_content": "Summarize the results."
+       },
+       "finish_reason": "stop"
+      }
+     ],
+     "usage": {
+      "prompt_tokens": 400,
+      "completion_tokens": 20,
+      "total_tokens": 420
+     }
+    }
+   }
+  ],
+  "repeat_last": false,
+  "record_upstream": "full"
+ },
+ "observed": {
+  "result": [
+   "All done.",
+   {
+    "prompt_tokens": 520,
+    "completion_tokens": 50,
+    "total_tokens": 570
+   },
+   "Summarize the results.",
+   [
+    {
+     "task_id": "exec-gemini_image",
+     "type": "image",
+     "prompt": "a red fox in snow"
+    },
+    {
+     "task_id": "exec-openai_image",
+     "type": "image",
+     "prompt": "a lighthouse at dusk"
+    },
+    {
+     "task_id": "exec-generate_video",
+     "type": "video",
+     "prompt": "waves at dusk"
+    },
+    {
+     "task_id": "exec-lyria_music",
+     "type": "music",
+     "prompt": "calm piano"
+    },
+    {
+     "task_id": "exec-extend_video",
+     "type": "video",
+     "prompt": "longer"
+    },
+    {
+     "task_id": "exec-elevenlabs_music",
+     "type": "music",
+     "prompt": "upbeat jingle"
+    }
+   ]
+  ],
+  "upstream": [
+   {
+    "method": "POST",
+    "url": "https://xai.golden.test/v1/chat/completions",
+    "headers": {
+     "Authorization": "Bearer test-xai-key"
+    },
+    "json": {
+     "model": "grok-3-mini",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Do all the things."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "grok",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "200"
+   },
+   {
+    "method": "POST",
+    "url": "https://xai.golden.test/v1/chat/completions",
+    "headers": {
+     "Authorization": "Bearer test-xai-key"
+    },
+    "json": {
+     "model": "grok-3-mini",
+     "messages": [
+      {
+       "role": "system",
+       "content": "GOLDEN SYSTEM PROMPT"
+      },
+      {
+       "role": "system",
+       "content": "GOLDEN FOSSILS"
+      },
+      {
+       "role": "user",
+       "content": "What did we ship last week?"
+      },
+      {
+       "role": "assistant",
+       "content": "The ember backdrop and the particle modes."
+      },
+      {
+       "role": "user",
+       "content": "Do all the things."
+      },
+      {
+       "role": "assistant",
+       "content": "Working on it.",
+       "reasoning_content": "I will use every tool.",
+       "tool_calls": [
+        {
+         "id": "call_00",
+         "type": "function",
+         "function": {
+          "name": "web_fetch",
+          "arguments": "{\"url\": \"https://example.com/a\", \"max_chars\": 5000}"
+         }
+        },
+        {
+         "id": "call_01",
+         "type": "function",
+         "function": {
+          "name": "gemini_image",
+          "arguments": "{\"prompt\": \"a red fox in snow\", \"aspectRatio\": \"1:1\", \"numberOfImages\": 2, \"reference_images\": [\"/ui/uploads/ref.png\"]}"
+         }
+        },
+        {
+         "id": "call_02",
+         "type": "function",
+         "function": {
+          "name": "openai_image",
+          "arguments": "{\"prompt\": \"a lighthouse at dusk\"}"
+         }
+        },
+        {
+         "id": "call_03",
+         "type": "function",
+         "function": {
+          "name": "generate_video",
+          "arguments": "{\"prompt\": \"waves at dusk\", \"duration\": 6, \"image_url\": \"/ui/uploads/ref.png\"}"
+         }
+        },
+        {
+         "id": "call_04",
+         "type": "function",
+         "function": {
+          "name": "generate_video",
+          "arguments": "{\"prompt\": \"keep going\", \"video_url\": \"/ui/uploads/clip.mp4\"}"
+         }
+        },
+        {
+         "id": "call_05",
+         "type": "function",
+         "function": {
+          "name": "lyria_music",
+          "arguments": "{\"prompt\": \"calm piano\", \"sampleCount\": 2}"
+         }
+        },
+        {
+         "id": "call_06",
+         "type": "function",
+         "function": {
+          "name": "get_media",
+          "arguments": "{\"task_id\": \"task-old\"}"
+         }
+        },
+        {
+         "id": "call_07",
+         "type": "function",
+         "function": {
+          "name": "list_media",
+          "arguments": "{\"media_type\": \"image\", \"limit\": 5}"
+         }
+        },
+        {
+         "id": "call_08",
+         "type": "function",
+         "function": {
+          "name": "search_media",
+          "arguments": "{\"query\": \"fox\"}"
+         }
+        },
+        {
+         "id": "call_09",
+         "type": "function",
+         "function": {
+          "name": "search_snapshots",
+          "arguments": "{\"query\": \"ember backdrop\", \"k\": 4}"
+         }
+        },
+        {
+         "id": "call_10",
+         "type": "function",
+         "function": {
+          "name": "send_sms",
+          "arguments": "{\"phone_number\": \"+15550100\", \"message\": \"on my way\"}"
+         }
+        },
+        {
+         "id": "call_11",
+         "type": "function",
+         "function": {
+          "name": "make_phone_call",
+          "arguments": "{\"phone_number\": \"+15550101\", \"greeting\": \"hello\"}"
+         }
+        },
+        {
+         "id": "call_12",
+         "type": "function",
+         "function": {
+          "name": "make_voice_call",
+          "arguments": "{\"phone_number\": \"+15550102\", \"message\": \"reminder\"}"
+         }
+        },
+        {
+         "id": "call_13",
+         "type": "function",
+         "function": {
+          "name": "search_contacts",
+          "arguments": "{\"query\": \"sam\"}"
+         }
+        },
+        {
+         "id": "call_14",
+         "type": "function",
+         "function": {
+          "name": "save_contact",
+          "arguments": "{\"name\": \"Sam\", \"phone\": \"+15550103\"}"
+         }
+        },
+        {
+         "id": "call_15",
+         "type": "function",
+         "function": {
+          "name": "create_cron_job",
+          "arguments": "{\"name\": \"daily\", \"schedule\": \"0 9 * * *\", \"prompt\": \"brief me\"}"
+         }
+        },
+        {
+         "id": "call_16",
+         "type": "function",
+         "function": {
+          "name": "edit_cron_job",
+          "arguments": "{\"job_id\": \"job-1\", \"prompt\": \"brief me later\"}"
+         }
+        },
+        {
+         "id": "call_17",
+         "type": "function",
+         "function": {
+          "name": "search_cron_jobs",
+          "arguments": "{\"query\": \"daily\"}"
+         }
+        },
+        {
+         "id": "call_18",
+         "type": "function",
+         "function": {
+          "name": "use_computer",
+          "arguments": "{\"prompt\": \"open the docs\"}"
+         }
+        },
+        {
+         "id": "call_19",
+         "type": "function",
+         "function": {
+          "name": "list_devices",
+          "arguments": "{}"
+         }
+        },
+        {
+         "id": "call_20",
+         "type": "function",
+         "function": {
+          "name": "gmail_search",
+          "arguments": "{\"query\": \"invoice\"}"
+         }
+        },
+        {
+         "id": "call_21",
+         "type": "function",
+         "function": {
+          "name": "get_task_status",
+          "arguments": "{\"task_id\": \"task-x\"}"
+         }
+        },
+        {
+         "id": "call_22",
+         "type": "function",
+         "function": {
+          "name": "extend_video",
+          "arguments": "{\"video_url\": \"/ui/uploads/clip.mp4\", \"prompt\": \"longer\"}"
+         }
+        },
+        {
+         "id": "call_23",
+         "type": "function",
+         "function": {
+          "name": "claude_code_task",
+          "arguments": "{\"prompt\": \"fix the bug\"}"
+         }
+        },
+        {
+         "id": "call_24",
+         "type": "function",
+         "function": {
+          "name": "elevenlabs_music",
+          "arguments": "{\"prompt\": \"upbeat jingle\"}"
+         }
+        },
+        {
+         "id": "call_25",
+         "type": "function",
+         "function": {
+          "name": "roll_dice",
+          "arguments": "{\"sides\": 6}"
+         }
+        },
+        {
+         "id": "call_26",
+         "type": "function",
+         "function": {
+          "name": "quiet_tool",
+          "arguments": "{}"
+         }
+        }
+       ]
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_00",
+       "content": "PAGE TEXT OF https://example.com/a"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_01",
+       "content": "[gemini_image] ok: {\"aspectRatio\": \"1:1\", \"numberOfImages\": 2, \"prompt\": \"a red fox in snow\", \"reference_images\": [\"/ui/uploads/ref.png\"]}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_02",
+       "content": "[openai_image] ok: {\"prompt\": \"a lighthouse at dusk\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_03",
+       "content": "[generate_video] ok: {\"duration\": 6, \"image_url\": \"/ui/uploads/ref.png\", \"prompt\": \"waves at dusk\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_04",
+       "content": "[generate_video] ok: {\"prompt\": \"keep going\", \"video_url\": \"/ui/uploads/clip.mp4\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_05",
+       "content": "[lyria_music] ok: {\"prompt\": \"calm piano\", \"sampleCount\": 2}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_06",
+       "content": "[get_media] ok: {\"task_id\": \"task-old\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_07",
+       "content": "[list_media] ok: {\"limit\": 5, \"media_type\": \"image\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_08",
+       "content": "[search_media] ok: {\"query\": \"fox\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_09",
+       "content": "[search_snapshots] ok: {\"k\": 4, \"query\": \"ember backdrop\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_10",
+       "content": "[send_sms] ok: {\"message\": \"on my way\", \"phone_number\": \"+15550100\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_11",
+       "content": "[make_phone_call] ok: {\"greeting\": \"hello\", \"phone_number\": \"+15550101\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_12",
+       "content": "[make_voice_call] ok: {\"message\": \"reminder\", \"phone_number\": \"+15550102\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_13",
+       "content": "[search_contacts] ok: {\"query\": \"sam\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_14",
+       "content": "[save_contact] ok: {\"name\": \"Sam\", \"phone\": \"+15550103\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_15",
+       "content": "[create_cron_job] ok: {\"name\": \"daily\", \"prompt\": \"brief me\", \"schedule\": \"0 9 * * *\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_16",
+       "content": "[edit_cron_job] ok: {\"job_id\": \"job-1\", \"prompt\": \"brief me later\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_17",
+       "content": "[search_cron_jobs] ok: {\"query\": \"daily\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_18",
+       "content": "[use_computer] ok: {\"prompt\": \"open the docs\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_19",
+       "content": "[list_devices] ok: {}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_20",
+       "content": "[gmail_search] ok: {\"query\": \"invoice\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_21",
+       "content": "[get_task_status] ok: {\"task_id\": \"task-x\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_22",
+       "content": "[extend_video] ok: {\"prompt\": \"longer\", \"video_url\": \"/ui/uploads/clip.mp4\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_23",
+       "content": "[claude_code_task] ok: {\"prompt\": \"fix the bug\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_24",
+       "content": "[elevenlabs_music] ok: {\"prompt\": \"upbeat jingle\"}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_25",
+       "content": "[roll_dice] ok: {\"sides\": 6}"
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_26",
+       "content": "Tool 'quiet_tool' executed successfully (no output)."
+      }
+     ],
+     "tools": [
+      {
+       "golden_tools_for": "grok",
+       "group": "chat"
+      }
+     ]
+    },
+    "timeout": "200"
+   }
+  ],
+  "tool_executor": [
+   {
+    "name": "gemini_image",
+    "args": {
+     "prompt": "a red fox in snow",
+     "aspectRatio": "1:1",
+     "numberOfImages": 2,
+     "reference_images": [
+      "/ui/uploads/ref.png"
+     ]
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "openai_image",
+    "args": {
+     "prompt": "a lighthouse at dusk"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "generate_video",
+    "args": {
+     "prompt": "waves at dusk",
+     "duration": 6,
+     "image_url": "/ui/uploads/ref.png"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "generate_video",
+    "args": {
+     "prompt": "keep going",
+     "video_url": "/ui/uploads/clip.mp4"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "lyria_music",
+    "args": {
+     "prompt": "calm piano",
+     "sampleCount": 2
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "get_media",
+    "args": {
+     "task_id": "task-old"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "list_media",
+    "args": {
+     "media_type": "image",
+     "limit": 5
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_media",
+    "args": {
+     "query": "fox"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_snapshots",
+    "args": {
+     "query": "ember backdrop",
+     "k": 4
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "send_sms",
+    "args": {
+     "phone_number": "+15550100",
+     "message": "on my way"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "make_phone_call",
+    "args": {
+     "phone_number": "+15550101",
+     "greeting": "hello"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "make_voice_call",
+    "args": {
+     "phone_number": "+15550102",
+     "message": "reminder"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_contacts",
+    "args": {
+     "query": "sam"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "save_contact",
+    "args": {
+     "name": "Sam",
+     "phone": "+15550103"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "create_cron_job",
+    "args": {
+     "name": "daily",
+     "schedule": "0 9 * * *",
+     "prompt": "brief me"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "edit_cron_job",
+    "args": {
+     "job_id": "job-1",
+     "prompt": "brief me later"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "search_cron_jobs",
+    "args": {
+     "query": "daily"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "use_computer",
+    "args": {
+     "prompt": "open the docs"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "list_devices",
+    "args": {},
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "gmail_search",
+    "args": {
+     "query": "invoice"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "get_task_status",
+    "args": {
+     "task_id": "task-x"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "extend_video",
+    "args": {
+     "video_url": "/ui/uploads/clip.mp4",
+     "prompt": "longer"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "claude_code_task",
+    "args": {
+     "prompt": "fix the bug"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "elevenlabs_music",
+    "args": {
+     "prompt": "upbeat jingle"
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "roll_dice",
+    "args": {
+     "sides": 6
+    },
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   },
+   {
+    "name": "quiet_tool",
+    "args": {},
+    "operator": "golden-op",
+    "origin_device_id": "100.64.0.42"
+   }
+  ],
+  "tasks": [],
+  "helpers": [
+   {
+    "fn": "perform_web_fetch",
+    "url": "https://example.com/a",
+    "max_chars": 5000
+   }
+  ],
+  "get_tools": [
+   {
+    "provider": "grok",
+    "prompt": "Do all the things.",
+    "group": "chat"
+   }
+  ]
+ }
+}
