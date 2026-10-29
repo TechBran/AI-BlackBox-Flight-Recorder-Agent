@@ -335,12 +335,18 @@ _NON_STREAM_LOOPS = ["call_openai", "call_anthropic", "call_gemini", "call_xai",
 @pytest.mark.parametrize("fn_name", _NON_STREAM_LOOPS)
 def test_non_stream_loops_read_the_now_live_contextvar(fn_name):
     """These already threaded the origin; until M4 nothing on this path ever set it.
-    Every loop builds each tool call's context with _tool_context, which reads it
-    per call (audit rank 74; the provider goldens replay it into every executor)."""
+    Every call_* hands its adapter the module's _tool_context (via _provider_env),
+    which reads the contextvar per tool call (audit rank 74; the provider goldens
+    replay the origin into every non-stream executor call)."""
     from Orchestrator.routes import chat_routes
     src = inspect.getsource(getattr(chat_routes, fn_name))
-    assert "_tool_context(operator," in src
+    assert "_provider_env(" in src
+    assert _tool_context_of(chat_routes._provider_env("k", "u")) is chat_routes._tool_context
     assert "origin_device_id=_ORIGIN_DEVICE_ID.get()" in inspect.getsource(chat_routes._tool_context)
+
+
+def _tool_context_of(env):
+    return env.tool_context
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════

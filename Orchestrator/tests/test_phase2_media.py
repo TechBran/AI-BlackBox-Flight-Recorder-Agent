@@ -361,14 +361,46 @@ def test_checkpoint_unpacks_five_tuple():
     assert "_, _, _ = call_gemini(" in src, "checkpoint must unpack 5-tuple gemini return"
 
 
-def test_call_openai_stays_two_tuple():
-    # call_openai is Phase-3 deferred: no reasoning, no media_tasks element.
-    import inspect
+def test_call_openai_stays_two_tuple(monkeypatch):
+    # call_openai is Phase-3 deferred: no reasoning, no media_tasks element,
+    # even after a round in which the model created media.
     import Orchestrator.routes.chat_routes as cr
+    from Orchestrator.toolvault.context import ToolResult
+    import Orchestrator.tools as tools_pkg
 
-    src = inspect.getsource(cr.call_openai)
-    assert "return text, total_usage\n" in src
-    assert "media_tasks" not in src
+    class _Executor:
+        def __init__(self, *a, **k):
+            pass
+
+        async def execute(self, name, args):
+            return ToolResult(success=True, result="image started", data={"task_id": "t-img"})
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    replies = iter([
+        _Resp({"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "gemini_image", "arguments": '{"prompt": "a fox"}'}}]},
+            "finish_reason": "tool_calls"}], "usage": {}}),
+        _Resp({"choices": [{"message": {"role": "assistant", "content": "done"},
+                            "finish_reason": "stop"}], "usage": {}}),
+    ])
+    monkeypatch.setattr(cr, "OPENAI_API_KEY", "test-openai", raising=False)
+    monkeypatch.setattr(cr, "_get_tools", lambda *a, **k: [])
+    monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+    monkeypatch.setattr(cr.requests, "post", lambda *a, **k: next(replies))
+
+    result = cr.call_openai([{"role": "user", "content": "draw"}], "gpt-test", operator="test-op")
+    assert len(result) == 2
+    assert result[0] == "done"
 
 
 def test_strip_html_also_strips_urls_so_keywords_are_clean():

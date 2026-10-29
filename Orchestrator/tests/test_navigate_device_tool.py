@@ -367,15 +367,36 @@ _PROVIDER_LOOPS = [
 ]
 
 
+# Each chat_routes provider function is a thin wrapper over its wire-format
+# adapter; the adapter loop is what dispatches (audit rank 74).
+_ADAPTER_OF = {
+    "stream_openai_with_reasoning": ("openai_compat", "stream"),
+    "stream_xai_with_reasoning": ("openai_compat", "stream"),
+    "stream_custom_with_reasoning": ("openai_compat", "stream"),
+    "call_openai": ("openai_compat", "call"),
+    "call_xai": ("openai_compat", "call"),
+    "call_custom": ("openai_compat", "call"),
+    "stream_anthropic_with_thinking": ("anthropic_messages", "stream"),
+    "call_anthropic": ("anthropic_messages", "call"),
+    "stream_gemini_with_thinking": ("gemini_generate", "stream"),
+    "call_gemini": ("gemini_generate", "call"),
+}
+
+
 @pytest.mark.parametrize("fn_name", _PROVIDER_LOOPS)
 def test_every_provider_loop_dispatches_through_the_shared_seam(fn_name):
+    import importlib
     import inspect
     from Orchestrator.routes import chat_routes
-    src = inspect.getsource(getattr(chat_routes, fn_name))
-    assert "dispatch_tool" in src and "_tool_context(operator," in src, (
-        f"{fn_name} no longer hands its tool calls to the shared dispatcher")
+    module, func = _ADAPTER_OF[fn_name]
+    wrapper = inspect.getsource(getattr(chat_routes, fn_name))
+    assert f"{module}.{func}(" in wrapper and "_provider_env(" in wrapper, (
+        f"{fn_name} no longer delegates to its adapter")
+    loop = inspect.getsource(getattr(importlib.import_module(f"Orchestrator.providers.{module}"), func))
+    assert "dispatch_tool" in loop and "env.tool_context(operator," in loop, (
+        f"{module}.{func} no longer hands its tool calls to the shared dispatcher")
     # navigate_device is never named anywhere: dispatch must be name-agnostic.
-    assert "navigate_device" not in src
+    assert "navigate_device" not in wrapper and "navigate_device" not in loop
 
 
 def _dispatch_unnamed(monkeypatch, loop):

@@ -332,14 +332,17 @@ def test_worker_no_reasoning_has_no_header(monkeypatch):
     assert final.result_data["reply"] == ANSWER
 
 
-def test_openai_not_migrated_still_two_tuple():
-    """call_openai must remain answer-only (Phase 3 deferred): no reasoning element."""
-    import inspect
-    import Orchestrator.routes.chat_routes as cr
+def test_openai_not_migrated_still_two_tuple(monkeypatch, _provider_keys):
+    """call_openai must remain answer-only (Phase 3 deferred): no reasoning
+    element, even when the response carries reasoning_content."""
+    cr = _provider_keys
+    monkeypatch.setattr(cr, "OPENAI_API_KEY", "test-openai", raising=False)
+    monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(_xai_payload()))
 
-    src = inspect.getsource(cr.call_openai)
-    assert "return text, total_usage, reasoning" not in src
-    assert "return text, total_usage" in src
+    result = cr.call_openai([{"role": "user", "content": "x"}], "gpt-test", operator="test-op")
+    assert len(result) == 2
+    text, usage = result
+    assert text == ANSWER and REASONING not in text
 
 
 def test_call_gemini_safety_block_returns_4tuple(monkeypatch, _provider_keys):

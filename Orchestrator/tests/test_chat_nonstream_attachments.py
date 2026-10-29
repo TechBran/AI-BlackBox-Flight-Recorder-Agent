@@ -32,6 +32,10 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 PDF = b"%PDF-1.4\n% test document\n%%EOF\n"
 
 _CHAT_ROUTES = Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py"
+# Since audit rank 74 the chat_routes functions below are thin wrappers; the
+# loops themselves live in these adapter modules (every function is checked).
+_ADAPTERS = [Path(__file__).resolve().parents[1] / "providers" / name for name in (
+    "openai_compat.py", "anthropic_messages.py", "gemini_generate.py", "tool_dispatch.py")]
 
 # The chat-path provider loops: the five non-stream call_* functions and the
 # five streaming chat generators.
@@ -194,13 +198,14 @@ def test_call_gemini_says_so_when_an_attachment_cannot_be_read(box, cr, monkeypa
 # Structural guard: the UnboundLocalError class                               #
 # --------------------------------------------------------------------------- #
 
-def _shadowed_module_names():
-    """{function: [module-level names it binds locally]} for the chat-path loops."""
-    table = symtable.symtable(_CHAT_ROUTES.read_text(encoding="utf-8"), str(_CHAT_ROUTES), "exec")
+def _shadowed_module_names(path=_CHAT_ROUTES, functions=_CHAT_PATH_FUNCTIONS):
+    """{function: [module-level names it binds locally]} for the chat-path loops
+    (``functions=None``: every function in the module)."""
+    table = symtable.symtable(path.read_text(encoding="utf-8"), str(path), "exec")
     module_names = {s.get_name() for s in table.get_symbols() if s.is_imported() or s.is_assigned()}
     found = {}
     for child in table.get_children():
-        if child.get_type() == "function" and child.get_name() in _CHAT_PATH_FUNCTIONS:
+        if child.get_type() == "function" and (functions is None or child.get_name() in functions):
             bad = sorted(s.get_name() for s in child.get_symbols()
                          if s.is_local() and not s.is_parameter() and s.get_name() in module_names)
             if bad:
@@ -216,3 +221,8 @@ def test_chat_path_functions_never_rebind_a_module_name():
     table = symtable.symtable(_CHAT_ROUTES.read_text(encoding="utf-8"), str(_CHAT_ROUTES), "exec")
     assert seen <= {c.get_name() for c in table.get_children()}, "a chat-path function was renamed"
     assert _shadowed_module_names() == {}
+
+
+@pytest.mark.parametrize("path", _ADAPTERS, ids=lambda p: p.name)
+def test_provider_adapter_functions_never_rebind_a_module_name(path):
+    assert _shadowed_module_names(path, None) == {}
