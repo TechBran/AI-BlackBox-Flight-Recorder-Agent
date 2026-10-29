@@ -253,7 +253,7 @@ SERVICE_HOME_BASE=/var/lib
 
 service_account_home() {  # <name>: its home, or the one it will be created with
     local home
-    home="$(getent passwd "$1" | cut -d: -f6)"
+    home="$(getent passwd "$1" | cut -d: -f6 || true)"  # no such account yet: ""
     printf '%s\n' "${home:-$SERVICE_HOME_BASE/$1}"
 }
 
@@ -279,7 +279,8 @@ service_traverse_dirs() {  # <name> <path>...
         if [[ -n "$uid" ]]; then
             [[ "$(stat -c %u "$d")" == "$uid" ]] && continue
             [[ " $(id -G "$name") " == *" $(stat -c %g "$d") "* ]] && continue
-            getfacl -cpn "$d" 2>/dev/null | grep -qE "^user:$uid:..x" && continue
+            # Read whole, not piped into grep -q (pipefail + SIGPIPE).
+            grep -qE "^user:$uid:..x" <<< "$(getfacl -cpn "$d" 2>/dev/null || true)" && continue
         fi
         printf '%s\n' "$d"
     done
@@ -302,7 +303,8 @@ service_chown_checkout() {  # <user> <root>
     shopt -u dotglob nullglob
     for entry in ${entries[@]+"${entries[@]}"}; do
         [[ -n "$(find "$entry" -xdev ${others[@]+"${others[@]}"} -print -quit 2>/dev/null)" ]] || continue
-        n="$(find "$entry" -xdev ${others[@]+"${others[@]}"} 2>/dev/null | wc -l)"
+        # (A count for the log: an unreadable corner must not abort the install.)
+        n="$( { find "$entry" -xdev ${others[@]+"${others[@]}"} 2>/dev/null || true; } | wc -l)"
         echo "[install]   ${entry#"$root"/}: $n entries to $to"
         _svc_run sudo chown -hR "$to:$to" "$entry"
     done
@@ -491,7 +493,9 @@ revert_service_account() {  # <name> <previous user> <choice file> <root>
     done < <(if [[ -n "$uid" ]]; then
                  for d in "$(dirname "$root")" "$prev_home"; do
                      while [[ "$d" != / ]]; do
-                         if getfacl -cpn "$d" 2>/dev/null | grep -qE "^user:$uid:"; then printf '%s\n' "$d"; fi
+                         if grep -qE "^user:$uid:" <<< "$(getfacl -cpn "$d" 2>/dev/null || true)"; then
+                             printf '%s\n' "$d"
+                         fi
                          d="$(dirname "$d")"
                      done
                  done | sort -u

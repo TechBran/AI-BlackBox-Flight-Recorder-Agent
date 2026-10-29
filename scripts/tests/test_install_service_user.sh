@@ -171,16 +171,34 @@ source "$STEP"
 SERVICE_HOME_BASE="$WORK/var/lib"
 reset_flags() { DRY_RUN=0; REQUESTED_SERVICE_USER=""; REVERT_SERVICE_USER=0; SVC_STOPPED_UNITS=(); }
 
+# Every Step 0s call runs the way install.sh runs it: a plain statement under
+# `set -euo pipefail` (a `( )` subshell keeps errexit, a `$( )` would drop it,
+# and so would a call used as a condition). OUT gets what it printed, RC its
+# exit status, RESULT the variables it left set.
+step0s() {  # [assignment...]
+    # shellcheck disable=SC2030,SC2031  # the subshell is the point
+    ( set -euo pipefail
+      for a in "$@"; do eval "$a"; done
+      resolve_service_account "${STEP_CHOICE:-$CHOICE}" "$ROOT" 1
+      echo "@@ REAL_USER=$REAL_USER REAL_HOME=$REAL_HOME DESKTOP_USER=$DESKTOP_USER STOPPED=${SVC_STOPPED_UNITS[*]:-}"
+    ) > "$WORK/step.out" 2>&1
+    RC=$?
+    OUT="$(grep -v '^@@ ' "$WORK/step.out" || true)"
+    RESULT="$(grep '^@@ ' "$WORK/step.out" || true)"
+}
+
 # ── 6a. no choice, no option: silent, REAL_USER untouched ─────────────────────
 reset_flags
-OUT="$(resolve_service_account "$CHOICE" "$ROOT" 1 2>&1)" || fail "6: the default path failed: $OUT"
+step0s
+[[ "$RC" -eq 0 ]] || fail "6: the default path failed ($RC): $OUT"
 [[ -z "$OUT" ]] || fail "6: the default path printed something: $OUT"
+[[ "$RESULT" == "@@ REAL_USER=$ME REAL_HOME=$DESK "* ]] || fail "6: the default path changed REAL_USER: $RESULT"
 [[ ! -s "$LOG" ]] || fail "6: the default path ran something: $(cat "$LOG")"
 
 # ── 1. --dry-run prints every change and makes none ──────────────────────────
 BEFORE="$(snapshot)"
-reset_flags; DRY_RUN=1; REQUESTED_SERVICE_USER="$SVC"
-OUT="$( (resolve_service_account "$CHOICE" "$ROOT" 1) 2>&1)"; RC=$?
+reset_flags
+step0s 'DRY_RUN=1' "REQUESTED_SERVICE_USER=$SVC"
 [[ "$RC" -eq 0 ]] || fail "1: the dry run failed ($RC): $OUT"
 [[ "$(snapshot)" == "$BEFORE" ]] || fail "1: the dry run changed the sandbox"
 grep -q '^sudo ' "$LOG" && fail "1: the dry run ran sudo: $(grep '^sudo ' "$LOG")"
@@ -208,11 +226,14 @@ want "--revert-service-user"
 
 # ── 2. the move ──────────────────────────────────────────────────────────────
 : > "$LOG"
-reset_flags; REQUESTED_SERVICE_USER="$SVC"
-OUT="$(resolve_service_account "$CHOICE" "$ROOT" 1 2>&1)" || fail "2: the move failed: $OUT"
-resolve_service_account "$CHOICE" "$ROOT" 1 > /dev/null 2>&1 || fail "2: a second call failed"
-[[ "$REAL_USER" == "$SVC" && "$REAL_HOME" == "$SVC_HOME" ]] || fail "2: REAL_USER/REAL_HOME are $REAL_USER/$REAL_HOME"
-[[ "$DESKTOP_USER" == "$ME" && "$DESKTOP_HOME" == "$DESK" ]] || fail "2: DESKTOP_USER/HOME changed"
+reset_flags
+step0s "REQUESTED_SERVICE_USER=$SVC"
+[[ "$RC" -eq 0 ]] || fail "2: the move failed ($RC): $OUT"
+MOVED="$RESULT"
+[[ "$MOVED" == "@@ REAL_USER=$SVC REAL_HOME=$SVC_HOME DESKTOP_USER=$ME STOPPED="* ]] \
+    || fail "2: after the move: $MOVED"
+step0s "REQUESTED_SERVICE_USER=$SVC"
+[[ "$RC" -eq 0 && "$RESULT" == "@@ REAL_USER=$SVC REAL_HOME=$SVC_HOME "* ]] || fail "2: a second call failed ($RC): $OUT"
 grep -qF "useradd --system --user-group --create-home --home-dir $SVC_HOME --shell /usr/sbin/nologin" "$LOG" \
     || fail "2: the account was not created as a nologin system account"
 grep -qE "sudo .*(usermod|gpasswd|adduser).*sudo" "$LOG" && fail "2: the service account was added to a sudo group"
@@ -221,7 +242,7 @@ for e in "${ENTRIES[@]}"; do
 done
 grep -qxF "sudo chown -h $SVC:$SVC $ROOT" "$LOG" || fail "2: the checkout root was not given to $SVC"
 grep -qxF "sudo systemctl stop blackbox.service" "$LOG" || fail "2: blackbox.service was not stopped first"
-[[ " ${SVC_STOPPED_UNITS[*]} " == *" zellij-web.service "* ]] || fail "2: the stopped units are not remembered for Step 7"
+[[ "$MOVED" == *"STOPPED=blackbox.service zellij-web.service" ]] || fail "2: the stopped units are not remembered for Step 7: $MOVED"
 [[ -f "$SVC_HOME/.local/share/zellij/tokens.db" && ! -e "$DESK/.local/share/zellij" ]] || fail "2: the zellij token store did not move"
 [[ -f "$SVC_HOME/.local/share/blackbox/zellij-master.token" ]] || fail "2: .local/share/blackbox did not move"
 [[ -d "$SVC_HOME/agent-workspaces/t1" ]] || fail "2: agent-workspaces did not move"
@@ -240,10 +261,12 @@ grep -qx "Exec=xhost +SI:localuser:$SVC" "$DESK/.config/autostart/blackbox-servi
 # (The stub could not chown: pretend it did by giving the account this uid.)
 sed -i "s/^$SVC:x:$SVCUID:$SVCUID:/$SVC:x:$MYUID:$MYGID:/" "$FAKE_PASSWD"
 : > "$LOG"
-reset_flags; REAL_USER="$ME"; REAL_HOME="$DESK"
-OUT="$(resolve_service_account "$CHOICE" "$ROOT" 1 2>&1)" || fail "3: a later run failed: $OUT"
+reset_flags
+step0s
+[[ "$RC" -eq 0 ]] || fail "3: a later run failed ($RC): $OUT"
 [[ "$OUT" == "[install] The BlackBox runs as the service account $SVC (home $SVC_HOME; recorded in $CHOICE)" ]] \
     || fail "3: a later run did something: $OUT"
+[[ "$RESULT" == "@@ REAL_USER=$SVC REAL_HOME=$SVC_HOME DESKTOP_USER=$ME STOPPED=" ]] || fail "3: $RESULT"
 grep -q '^sudo ' "$LOG" && fail "3: a later run ran sudo: $(cat "$LOG")"
 sed -i "s/^$SVC:x:$MYUID:$MYGID:/$SVC:x:$SVCUID:$SVCUID:/" "$FAKE_PASSWD"
 
@@ -252,14 +275,14 @@ printf '%s\n' "bbsudo:x:4300:4300::$WORK/var/lib/bbsudo:/usr/sbin/nologin" \
               "bbroot:x:0:4301::$WORK/var/lib/bbroot:/usr/sbin/nologin" \
               "bbgrp:x:4302:100::$WORK/var/lib/bbgrp:/usr/sbin/nologin" >> "$FAKE_PASSWD"
 printf '%s\n' "bbsudo:4300:bbsudo sudo" >> "$FAKE_GROUPS"
-refused() {  # <why> <message ERE> <assignments...>: resolve in a subshell, must exit 1, change nothing
-    local why="$1" msg="$2" out rc before
+refused() {  # <why> <message ERE> <assignments...>: must exit 1 and change nothing
+    local why="$1" msg="$2" before
     shift 2
     before="$(snapshot)"
-    out="$( (reset_flags; REAL_USER="$ME"; REAL_HOME="$DESK"; for a in "$@"; do eval "$a"; done
-             resolve_service_account "${REFUSE_CHOICE:-$WORK/none/service-user}" "$ROOT" 1) 2>&1)"; rc=$?
-    [[ "$rc" -eq 1 ]] || fail "5: $why was not refused (rc=$rc): $out"
-    grep -qE "$msg" <<< "$out" || fail "5: $why: the refusal does not say why: $out"
+    reset_flags
+    STEP_CHOICE="${REFUSE_CHOICE:-$WORK/none/service-user}" step0s "$@"
+    [[ "$RC" -eq 1 ]] || fail "5: $why was not refused (rc=$RC): $OUT"
+    grep -qE "$msg" <<< "$OUT" || fail "5: $why: the refusal does not say why: $OUT"
     [[ "$(snapshot)" == "$before" ]] || fail "5: refusing $why changed the sandbox"
 }
 refused "an account in sudo" "in the sudo group" 'REQUESTED_SERVICE_USER=bbsudo'
@@ -277,7 +300,8 @@ REFUSE_CHOICE="$CHOICE" refused "a revert by someone else" "run --revert-service
 # ── 4. --revert-service-user: dry run, then for real ─────────────────────────
 BEFORE="$(snapshot)"
 : > "$LOG"
-OUT="$( (reset_flags; DRY_RUN=1; REVERT_SERVICE_USER=1; resolve_service_account "$CHOICE" "$ROOT" 1) 2>&1)"; RC=$?
+reset_flags
+step0s 'DRY_RUN=1' 'REVERT_SERVICE_USER=1'
 [[ "$RC" -eq 0 ]] || fail "4: the revert dry run failed ($RC): $OUT"
 [[ "$(snapshot)" == "$BEFORE" ]] || fail "4: the revert dry run changed the sandbox"
 grep -q '^sudo ' "$LOG" && fail "4: the revert dry run ran sudo"
@@ -289,9 +313,10 @@ if acl_check; then REVERT_LINES+=("would run: sudo setfacl -x u:$SVCUID $DESK");
 for line in "${REVERT_LINES[@]}"; do
     grep -qF -- "$line" <<< "$OUT" || fail "4: the revert dry run does not list: $line"$'\n'"$OUT"
 done
-reset_flags; REVERT_SERVICE_USER=1; REAL_USER="$ME"; REAL_HOME="$DESK"
-OUT="$(resolve_service_account "$CHOICE" "$ROOT" 1 2>&1)" || fail "4: the revert failed: $OUT"
-[[ "$REAL_USER" == "$ME" && "$REAL_HOME" == "$DESK" ]] || fail "4: after the revert REAL_USER is $REAL_USER"
+reset_flags
+step0s 'REVERT_SERVICE_USER=1'
+[[ "$RC" -eq 0 ]] || fail "4: the revert failed ($RC): $OUT"
+[[ "$RESULT" == "@@ REAL_USER=$ME REAL_HOME=$DESK "* ]] || fail "4: after the revert: $RESULT"
 [[ -d "$DESK/.blackbox" && ! -L "$DESK/.blackbox" && ! -e "$SVC_HOME/.blackbox" ]] || fail "4: .blackbox did not come back"
 [[ -f "$DESK/.local/share/zellij/tokens.db" && -d "$DESK/agent-workspaces/t1" ]] || fail "4: the state did not come back"
 acl_check && { getfacl -cpn "$DESK" | grep -q "^user:$SVCUID:" && fail "4: the traverse ACL is still there"; }
@@ -299,7 +324,9 @@ acl_check && { getfacl -cpn "$WORK" | grep -q "^user:$SVCUID:" && fail "4: an an
 [[ ! -e "$CHOICE" ]] || fail "4: the recorded choice was not removed"
 [[ ! -e "$DESK/.config/autostart/blackbox-service-display.desktop" ]] || fail "4: the display entry was not removed"
 grep -qF "sudo userdel $SVC" <<< "$OUT" || fail "4: the revert does not say how to remove the account"
-OUT="$(reset_flags; REVERT_SERVICE_USER=1; resolve_service_account "$CHOICE" "$ROOT" 1 2>&1)" || fail "4: a second revert failed"
+reset_flags
+step0s 'REVERT_SERVICE_USER=1'
+[[ "$RC" -eq 0 ]] || fail "4: a second revert failed ($RC): $OUT"
 grep -q "nothing to revert" <<< "$OUT" || fail "4: a second revert is not a no-op: $OUT"
 
 # ── 6b. renders: unchanged without a service account, retargeted with one ───
