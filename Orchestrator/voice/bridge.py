@@ -71,12 +71,6 @@ class VoiceAdapter:
     connect_failed = ""
     #: Seconds between keepalive frames (an idle provider times the session out).
     keepalive_interval = 15
-    # Terminal behaviour (P1.7). Gemini forwards an unexpected upstream close
-    # to the client, says nothing when its OLD socket closes mid-reconnect, and
-    # closes the client WS when the session is dead for good.
-    forward_close_frames = False
-    quiet_reconnecting_close = False
-    terminal_close = False
 
     # --- session store ---
     def sessions(self) -> Dict[str, Any]:
@@ -483,9 +477,10 @@ class LiveVoiceBridge:
         # instead of failing on it and re-triggering this give-up (a second save).
         if dead is not None:
             await close_upstream(session, a.ws_attr, dead)
-        if a.terminal_close:
-            # A dead session must not sit there answering pings as if connected.
-            await close_portal_ws(session, reason="max reconnects reached")
+        # Terminal (P1.7): close the client WS. A dead session must not sit
+        # there answering pings as if connected, unreapable (the reaper only
+        # evicts sessions without a client).
+        await close_portal_ws(session, reason="max reconnects reached")
 
     # =========================================================================
     # Keepalive
@@ -561,18 +556,17 @@ class LiveVoiceBridge:
             close_reason = getattr(rcvd, "reason", "") or ""
             print(f"{p} {a.name} connection closed: code={close_code} reason={close_reason!r}")
             if not session.intentional_disconnect and not session.is_reconnecting:
-                if a.forward_close_frames:
-                    # Setup rejections (the 1007 invalid tool schema that killed
-                    # every Gemini session for two weeks) arrive ONLY as close
-                    # frames. `data` stays a string (the client contract);
-                    # code/reason ride as additive fields.
-                    await safe_send(session.portal_ws, {
-                        "type": "error",
-                        "data": f"{a.name} connection closed (code={close_code}): "
-                                f"{close_reason or 'no reason given'}",
-                        "code": close_code,
-                        "reason": close_reason,
-                    })
+                # Forward the close to the client (P1.7): setup rejections (the
+                # 1007 invalid tool schema that killed every Gemini session for
+                # two weeks) arrive ONLY as close frames. `data` stays a string
+                # (the client contract); code/reason ride as additive fields.
+                await safe_send(session.portal_ws, {
+                    "type": "error",
+                    "data": f"{a.name} connection closed (code={close_code}): "
+                            f"{close_reason or 'no reason given'}",
+                    "code": close_code,
+                    "reason": close_reason,
+                })
                 if getattr(session, "external_reconnect", False):
                     # The session's owner (the phone bridge) re-dials when this
                     # listener returns; a second dialer here would race it.
@@ -580,23 +574,24 @@ class LiveVoiceBridge:
                 else:
                     print(f"{p} Unexpected disconnect - triggering reconnect")
                     spawn_reconnect(session, a.reconnect(session))
-            elif session.intentional_disconnect or not a.quiet_reconnecting_close:
+            elif session.intentional_disconnect:
                 session.status = "disconnected"
                 await safe_send(session.portal_ws, {
                     "type": "disconnected",
                     "data": f"{a.name} connection closed"
                 })
             # else: the OLD socket closing mid-reconnect — the reconnect owns
-            # the status and the client notices.
+            # the status and the client notices (a "disconnected" here
+            # contradicted its "reconnecting" and started the reaper's grace
+            # clock mid-recovery).
 
         except Exception as e:
             print(f"{p} {a.name} listener error: {e}")
             session.status = "error"
-            if a.terminal_close:
-                # Nothing re-triggers a reconnect from here: tell the client and
-                # close instead of leaving a zombie WS answering pings.
-                await safe_send(session.portal_ws, {
-                    "type": "error",
-                    "data": f"{a.name} listener error: {e}",
-                })
-                await close_portal_ws(session, reason=f"{a.name.lower()} listener error")
+            # Terminal: nothing re-triggers a reconnect from here. Tell the
+            # client and close instead of leaving a zombie WS answering pings.
+            await safe_send(session.portal_ws, {
+                "type": "error",
+                "data": f"{a.name} listener error: {e}",
+            })
+            await close_portal_ws(session, reason=f"{a.name.lower()} listener error")

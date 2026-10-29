@@ -1052,9 +1052,6 @@ class GeminiLiveAdapter(VoiceAdapter):
     key_name = "GOOGLE_API_KEY"
     connecting_status = "Connecting to Gemini Live..."
     connect_failed = "Failed to connect to Gemini Live API"
-    forward_close_frames = True
-    quiet_reconnecting_close = True
-    terminal_close = True
 
     def sessions(self):
         return GEMINI_LIVE_SESSIONS

@@ -30,6 +30,12 @@
    "type": "transcript_delta"
   },
   {
+   "code": 1011,
+   "data": "OpenAI connection closed (code=1011): internal error",
+   "reason": "internal error",
+   "type": "error"
+  },
+  {
    "data": {
     "attempt": 1,
     "delay": 0.5,

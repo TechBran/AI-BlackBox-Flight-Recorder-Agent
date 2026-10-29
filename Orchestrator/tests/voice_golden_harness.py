@@ -965,7 +965,7 @@ for _p in ("gemini", "openai", "grok"):
     SCENARIOS[f"{_p}_connect_variants"] = (lambda p=_p: scenario_connect_variants(p))
     SCENARIOS[f"{_p}_tools"] = (lambda p=_p: scenario_tools(p))
     SCENARIOS[f"{_p}_tools_system"] = (lambda p=_p: scenario_tools(p, system_operator=True))
-SCENARIOS["gemini_give_up"] = lambda: scenario_give_up("gemini")
+    SCENARIOS[f"{_p}_give_up"] = (lambda p=_p: scenario_give_up(p))
 SCENARIOS["phone_grok"] = lambda: scenario_phone("grok")
 SCENARIOS["prompts"] = scenario_prompts
 
