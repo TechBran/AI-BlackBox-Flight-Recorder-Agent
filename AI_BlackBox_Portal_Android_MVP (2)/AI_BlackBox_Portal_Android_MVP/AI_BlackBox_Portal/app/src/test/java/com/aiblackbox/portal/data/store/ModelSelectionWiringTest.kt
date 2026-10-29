@@ -13,7 +13,8 @@ import java.io.File
  * to (ModelSelectionTest). This pins that they DO delegate — the surfaces drifted
  * once because each wrote the keys its own way:
  *  - both provider switches go through BlackBoxStore.setProviderAndModel (never a
- *    bare setProvider that leaves the previous provider's id in the global key);
+ *    bare setProvider that leaves the previous provider's id in the global key), the
+ *    composer pill's and the CU screen's by way of ProviderModelWiring;
  *  - every model picker goes through BlackBoxStore.selectModel: the Settings sheet
  *    (the on-device "Use" included, which selectModel keeps out of the global key),
  *    the composer pill, and the CU + robotics screens (BlackBoxNavGraph's
@@ -58,28 +59,63 @@ class ModelSelectionWiringTest {
         assertFalse(setModel, "store.setModel(" in setModel)
     }
 
+    /** A ProviderModelWiring member's body, through its closing brace at member indent. */
+    private fun wiringMember(src: String, name: String): String {
+        val start = src.indexOf("fun $name(", src.indexOf("class ProviderModelWiring("))
+        assertTrue("ProviderModelWiring.$name( not found", start >= 0)
+        val end = src.indexOf("\n    }", start).let { if (it < 0) src.length else it }
+        return src.substring(start, end)
+    }
+
+    /** The app's composition: the composer pill and the NavGraph call live here. */
+    private val app = "$root/NativeMainActivity.kt"
+    private val wiringFile = "$root/navigation/ProviderModelWiring.kt"
+
     @Test fun `the composer pill switches provider through the shared path`() {
-        val activity = moduleSource("$root/NativeMainActivity.kt")
+        val activity = moduleSource(app)
         val pill = activity.substringAfter("onProviderChange = { newProvider ->")
             .substringBefore("// Auto-navigate")
-        assertTrue(pill, "store.setProviderAndModel(newProvider)" in pill)
-        assertTrue(pill, "fetchLiveModelIds(" in pill)
+        assertTrue(pill, "providerModels.switchProvider(newProvider)" in pill)
         assertFalse(pill, "store.setProvider(" in pill)
         assertFalse(pill, "store.setModel(" in pill)
+        // The wiring is fed the live catalog's ids...
+        val built = activity.substringAfter("ProviderModelWiring(store.providerModels())").substringBefore("\n                }")
+        assertTrue(built, "ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)" in built)
+        // ...and switches through the store's shared path with them.
+        val wiring = moduleSource(wiringFile)
+        val switch = wiringMember(wiring, "switchProvider")
+        assertTrue(switch, "store.setProviderAndModel(newProvider) { liveModelIds(it) }" in switch)
+        assertFalse(switch, "store.setProvider(" in switch)
+        assertFalse(switch, "store.setModel(" in switch)
 
         // The composer's model pick (the line right after the pill) remembers per provider too.
         val composerModel = activity.substringAfter("onProviderChange = { newProvider ->")
             .substringAfter("onModelChange = ").substringBefore("\n")
-        assertTrue(composerModel, "store.selectModel(provider, it)" in composerModel)
+        assertTrue(composerModel, "providerModels.selectModel(provider, it)" in composerModel)
+        val select = wiringMember(wiring, "selectModel")
+        assertTrue(select, "store.selectModel(provider, model)" in select)
+        assertFalse(select, "store.setModel(" in select)
+    }
+
+    @Test fun `opening the CU screen switches provider through the shared path`() {
+        val wiring = moduleSource(wiringFile)
+        val entered = wiringMember(wiring, "onRouteEntered")
+        val cu = entered.substringAfter("if (path == Routes.COMPUTER_USE)").substringBefore("if (path == Routes.ROBOTICS)")
+        assertTrue(cu, "store.setProviderAndModel(\"computer-use\") { liveModelIds(it) }" in cu)
+        assertFalse(cu, "store.setProvider(" in cu)
+        // ...and every screen change goes through it.
+        val activity = moduleSource(app)
+        assertTrue("providerModels.onRouteEntered(entry.destination.route)" in activity)
     }
 
     @Test fun `the CU and robotics screens pick through the shared path`() {
-        val activity = moduleSource("$root/NativeMainActivity.kt")
+        val activity = moduleSource(app)
         val navGraphCall = activity.substringAfter("BlackBoxNavGraph(").substringBefore("onSpeak = ")
         val screenModel = navGraphCall.substringAfter("onModelChange = ").substringBefore("\n")
-        assertTrue(screenModel, "store.selectModel(provider, it)" in screenModel)
+        assertTrue(screenModel, "providerModels.selectModel(provider, it)" in screenModel)
         // No model picker in the activity writes the bare global key any more.
         assertFalse("onModelChange = { scope.launch { store.setModel(" in activity)
+        assertFalse("onModelChange = { scope.launch { store.selectModel(" in activity)
 
         // ...and that callback IS the CU + robotics screens' model picker.
         val navGraph = moduleSource("$root/navigation/NavGraph.kt")

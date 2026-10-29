@@ -79,6 +79,8 @@ import com.aiblackbox.portal.ui.components.SttStatusChip
 import com.aiblackbox.portal.ui.components.SttSwitchProviderDialog
 import com.aiblackbox.portal.ui.components.fetchSttCatalog
 import com.aiblackbox.portal.navigation.BlackBoxNavGraph
+import com.aiblackbox.portal.navigation.ProviderModelWiring
+import com.aiblackbox.portal.navigation.providerModels
 import com.aiblackbox.portal.ui.chat.AttachmentItem
 import com.aiblackbox.portal.ui.chat.ChatState
 import com.aiblackbox.portal.ui.chat.ChatViewModel
@@ -267,6 +269,13 @@ class NativeMainActivity : ComponentActivity() {
                 val currentModel by store.model.collectAsState(initial = "")
 
                 val chatViewModel: ChatViewModel = viewModel()
+                // Provider + model wiring (rank 76): the composer pill, the CU + robotics
+                // screens' pickers, and the provider those screens set when they open.
+                val providerModels = remember(store, chatViewModel) {
+                    ProviderModelWiring(store.providerModels()) {
+                        ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)
+                    }
+                }
                 // B5: ONE activity-owned UpdatesViewModel. In a ComponentActivity's
                 // setContent, viewModel() resolves to the activity ViewModelStoreOwner,
                 // so this instance survives navigation and stays alive on the Chat home
@@ -822,7 +831,7 @@ class NativeMainActivity : ComponentActivity() {
                         // W22: the CU + robotics screens' model pickers (NavGraph) take the
                         // shared pick path too, so model_<provider> never goes stale for a
                         // switch back to restore.
-                        onModelChange = { scope.launch { store.selectModel(provider, it) } },
+                        onModelChange = { scope.launch { providerModels.selectModel(provider, it) } },
                         bottomFocalGeometry = bottomFocalGeometry,
                         onSpeak = { text ->
                             scope.launch {
@@ -1007,31 +1016,7 @@ class NativeMainActivity : ComponentActivity() {
                     // Auto-set provider when on dedicated provider screens
                     LaunchedEffect(Unit) {
                         navController.currentBackStackEntryFlow.collect { entry ->
-                            // destination.route is the registered PATTERN — for
-                            // computer_use it now carries "?liveDevice={liveDevice}"
-                            // (the pill hand-off), so compare on the path segment.
-                            val route = entry.destination.route?.substringBefore('?')
-                            if (route == Routes.COMPUTER_USE) {
-                                if (store.provider.first() != "computer-use") {
-                                    // The composer's switch path (W22): Auto at once, then
-                                    // the remembered CU pick only if the live CU catalog
-                                    // still lists it, never the previous provider's id.
-                                    store.setProviderAndModel("computer-use") {
-                                        ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)
-                                    }
-                                }
-                            }
-                            if (route == Routes.ROBOTICS) {
-                                val currentProv = store.provider.first()
-                                if (currentProv != "robotics") {
-                                    store.setProvider("robotics")
-                                    val erModels = Constants.MODEL_CONFIG["robotics"] ?: emptyList()
-                                    val currentMdl = store.model.first()
-                                    if (erModels.isNotEmpty() && erModels.none { it.first == currentMdl }) {
-                                        store.setModel(erModels.first().first)
-                                    }
-                                }
-                            }
+                            providerModels.onRouteEntered(entry.destination.route)
                         }
                     }
 
@@ -1395,25 +1380,14 @@ class NativeMainActivity : ComponentActivity() {
                             provider = provider,
                             model = currentModel,
                             onProviderChange = { newProvider ->
-                                scope.launch {
-                                    // Reset model to Auto when switching providers
-                                    // so we don't send e.g. claude-opus-4-6 to Gemini,
-                                    // then restore this provider's remembered pick only
-                                    // if its live list still offers it. W22: the SAME
-                                    // path as the Settings sheet's provider dropdown.
-                                    store.setProviderAndModel(newProvider) {
-                                        ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)
-                                    }
-                                }
+                                // Reset model to Auto when switching providers
+                                // so we don't send e.g. claude-opus-4-6 to Gemini,
+                                // then restore this provider's remembered pick only
+                                // if its live list still offers it. W22: the SAME
+                                // path as the Settings sheet's provider dropdown.
+                                scope.launch { providerModels.switchProvider(newProvider) }
                                 // Auto-navigate to dedicated screens for special providers
-                                val targetRoute = when (newProvider) {
-                                    "computer-use" -> Routes.COMPUTER_USE
-                                    "robotics" -> Routes.ROBOTICS
-                                    "gemini-live", "grok-live", "realtime" -> Routes.VOICE
-                                    "agents" -> Routes.AGENT
-                                    "gemini-agents" -> Routes.GEMINI_AGENT
-                                    else -> null
-                                }
+                                val targetRoute = ProviderModelWiring.dedicatedRoute(newProvider)
                                 if (targetRoute != null) {
                                     navController.navigate(targetRoute) {
                                         launchSingleTop = true
@@ -1422,7 +1396,7 @@ class NativeMainActivity : ComponentActivity() {
                             },
                             // W22: remembered per provider too (model_<provider>), via the
                             // shared pick path the Settings sheet uses.
-                            onModelChange = { scope.launch { store.selectModel(provider, it) } },
+                            onModelChange = { scope.launch { providerModels.selectModel(provider, it) } },
                             autoTtsEnabled = autoTtsEnabled,
                             onAutoTtsToggle = { scope.launch { store.setAutoTtsEnabled(!autoTtsEnabled) } },
                             providerLabel = chatViewModel.getProviderLabel(),

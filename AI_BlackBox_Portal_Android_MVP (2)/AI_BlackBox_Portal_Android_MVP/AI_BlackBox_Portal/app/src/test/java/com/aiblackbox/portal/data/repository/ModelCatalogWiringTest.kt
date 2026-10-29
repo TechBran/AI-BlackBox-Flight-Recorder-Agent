@@ -47,7 +47,7 @@ class ModelCatalogWiringTest {
                 "ui/chat/Composer.kt",
                 "ui/computeruse/CuScreen.kt",
                 // Robotics' one model id (no catalog), and the voice providers' fallbacks.
-                "NativeMainActivity.kt",
+                "navigation/ProviderModelWiring.kt",
                 "ui/voice/VoiceScreen.kt",
                 // Constants' entry for a provider the box has no catalog for.
                 "ui/settings/SettingsViewModel.kt",
