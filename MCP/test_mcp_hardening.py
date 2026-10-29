@@ -358,6 +358,37 @@ def test_register_bounds_every_stored_field(body, field):
     assert _store(srv.BLACKBOX_MCP_OAUTH_CLIENTS_FILE) == {}
 
 
+@pytest.mark.parametrize("raw", [
+    b'{"redirect_uris":["https://claude.ai/cb"],"client_name":"\\ud800"}',
+    b'{"redirect_uris":["https://claude.ai/cb\\udfff"]}',
+    b'{"redirect_uris":["https://claude.ai/cb"],"contacts":["a\\ud83d"]}',
+    b'{"redirect_uris":["https://claude.ai/cb"],"scope":"mcp \\udc80"}',
+])
+def test_register_refuses_a_lone_surrogate(raw):
+    """JSON can spell a str that is not valid Unicode text ("\\ud800"). It
+    passed the type and length checks, was stored, and the 201 response then
+    failed to encode it: a 500 on the public surface."""
+    async def go(app):
+        return await app.client().post("/register", content=raw,
+                                       headers={"Content-Type": "application/json"})
+
+    r = run_app(go)
+    assert r.status_code == 400, r.text
+    assert r.json()["error"] in ("invalid_client_metadata", "invalid_redirect_uri")
+    assert _store(srv.BLACKBOX_MCP_OAUTH_CLIENTS_FILE) == {}
+
+
+def test_token_json_fields_that_are_not_text_are_dropped():
+    async def go(app):
+        return await app.client().post(
+            "/token", content=b'{"grant_type":"refresh_token","client_id":"\\ud800",'
+                              b'"refresh_token":"bbmcp_ort_x"}',
+            headers={"Content-Type": "application/json"})
+
+    r = run_app(go)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request", r.text
+
+
 def test_register_accepts_the_real_clients_shapes():
     async def go(app):
         c = app.client()
@@ -558,6 +589,110 @@ def test_a_replayed_refresh_token_revokes_its_family():
     assert replay.status_code == 400 and replay.json()["error"] == "invalid_grant"
     assert after.status_code == 400, "the rotated-to token dies with its family"
     assert a1 == 401 and a2 == 401, "every access token of the family is revoked"
+
+
+def _simulate_restart(monkeypatch):
+    """What a restart forgets: the in-process token mirror and revoked set."""
+    monkeypatch.setattr(srv, "_ACCESS_TOKENS", {})
+    monkeypatch.setattr(srv, "_REVOKED_FAMILIES", set(), raising=False)
+
+
+def _family_tokens(path, family):
+    return [k for k, r in _store(path).items() if isinstance(r, dict) and r.get("family") == family]
+
+
+def _replay_first(monkeypatch, attr, client_id_box, rt_box):
+    """Wrap srv.<attr> so its first call during a refresh runs a replay of
+    the same refresh token to completion first: the race of two concurrent
+    /token requests, forced into one interleaving."""
+    real = getattr(srv, attr)
+    fired = []
+
+    def wrapper(*a, **kw):
+        if rt_box and not fired:
+            fired.append(srv._redeem_refresh_token(rt_box[0], client_id_box[0],
+                                                    srv._live_consents(), time.time()))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(srv, attr, wrapper)
+    return fired
+
+
+@pytest.mark.parametrize("step", ["_issue_token_pair", "_persist_access_token"])
+def test_a_refresh_racing_its_own_replay_leaves_nothing_alive(monkeypatch, step):
+    """R1 spends the refresh token; before R1 has stored its new pair, R2
+    replays the same token and revokes the family. R1's pair must not land
+    in the dead family: not now, and not after a restart forgets the
+    in-memory revocation either."""
+    client_id_box, rt_box = [], []
+    fired = _replay_first(monkeypatch, step, client_id_box, rt_box)
+
+    async def go(app):
+        c = app.client()
+        client_id, t1 = await connect(c)
+        client_id_box.append(client_id)
+        rt_box.append(t1["refresh_token"])
+        family = srv._ACCESS_TOKENS[t1["access_token"]]["family"]
+        r1 = await refresh(c, client_id, t1["refresh_token"])
+        return client_id, t1, family, r1
+
+    client_id, t1, family, r1 = run_app(go)
+    assert fired and fired[0][1][0] == "invalid_grant", "the replay was caught"
+    assert r1.status_code == 400 and r1.json()["error"] == "invalid_grant", r1.text
+    assert "refresh_token" not in r1.json() and "access_token" not in r1.json()
+    assert _family_tokens(srv.BLACKBOX_MCP_OAUTH_REFRESH_FILE, family) == []
+    assert _family_tokens(srv.BLACKBOX_MCP_OAUTH_TOKENS_FILE, family) == []
+    assert not [t for t, b in srv._ACCESS_TOKENS.items() if b.get("family") == family]
+
+    _simulate_restart(monkeypatch)
+
+    async def after(app):
+        c = app.client()
+        return await mcp_status(c, t1["access_token"]), await refresh(c, client_id, t1["refresh_token"])
+
+    status, again = run_app(after)
+    assert status == 401 and again.status_code == 400
+
+
+def test_a_revoked_family_stays_revoked_across_a_restart(monkeypatch):
+    """A revocation interrupted after its tombstone is written (a crash before
+    the access-token store was cleaned) still refuses the family's access
+    tokens once a restart has emptied the in-memory set."""
+    monkeypatch.setattr(srv, "_drop_family_access_tokens", lambda family: None)
+
+    async def go(app):
+        c = app.client()
+        client_id, t1 = await connect(c)
+        family = srv._ACCESS_TOKENS[t1["access_token"]]["family"]
+        srv._revoke_family(family, "test")
+        return client_id, t1, family
+
+    client_id, t1, family = run_app(go)
+    assert _family_tokens(srv.BLACKBOX_MCP_OAUTH_TOKENS_FILE, family), "the crash left it on disk"
+    _simulate_restart(monkeypatch)
+
+    async def after(app):
+        c = app.client()
+        return await mcp_status(c, t1["access_token"]), await refresh(c, client_id, t1["refresh_token"])
+
+    status, r = run_app(after)
+    assert status == 401 and r.status_code == 400
+    tombstones = [r for r in _store(srv.BLACKBOX_MCP_OAUTH_REFRESH_FILE).values()
+                  if isinstance(r, dict) and r.get("revoked_at")]
+    assert len(tombstones) == 1
+    assert tombstones[0]["expiry"] >= time.time() + srv.REFRESH_TOKEN_TTL - 60
+    assert family not in json.dumps(tombstones), "the tombstone is keyed, not a token record"
+
+
+def test_a_family_revoked_in_memory_cannot_refresh():
+    async def go(app):
+        c = app.client()
+        client_id, t1 = await connect(c)
+        srv._REVOKED_FAMILIES.add(srv._ACCESS_TOKENS[t1["access_token"]]["family"])
+        return await refresh(c, client_id, t1["refresh_token"])
+
+    r = run_app(go)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
 
 
 def test_a_refresh_token_is_bound_to_its_client():
@@ -951,6 +1086,36 @@ def test_the_control_listener_reloads_on_loopback_only(monkeypatch, stores):
     assert host == "127.0.0.1"
     assert (ok, bad, other) == (200, 403, 404)
     assert _MW.token_map == {TOKEN_A: OP_A, TOKEN_B: OP_B}
+
+
+def test_the_control_listener_leaves_the_public_access_log_alone(stores):
+    """uvicorn's Config reconfigures the process-wide loggers when it is
+    built. The control listener's must not: the public listener's access log
+    (client address, path and status of every Funnel request) has to keep
+    its handlers once the control listener is up."""
+    import uvicorn
+
+    access = logging.getLogger("uvicorn.access")
+    saved = access.handlers[:], access.propagate, access.level
+    try:
+        uvicorn.Config(lambda *a: None, log_level="info")   # what run_http() builds
+        public = access.handlers[:], access.propagate
+        assert public[0], "the public Config installs an access handler"
+
+        async def go():
+            listener = await srv._start_control_listener(port=0)
+            assert listener is not None
+            try:
+                return access.handlers[:], access.propagate, access.hasHandlers()
+            finally:
+                await listener.stop()
+
+        handlers, propagate, has = asyncio.run(go())
+        assert (handlers, propagate) == public and has
+        assert (access.handlers, access.propagate) == public
+    finally:
+        access.handlers[:], access.propagate = saved[0], saved[1]
+        access.setLevel(saved[2])
 
 
 def test_a_taken_control_port_is_logged_not_fatal():

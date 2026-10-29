@@ -152,6 +152,40 @@ def test_valid_tool_names_memoized_and_complete():
     assert len(s1) == EXPECTED_TOOLS
 
 
+def test_a_tool_whose_key_arrives_after_the_first_call_is_callable():
+    """tools/list re-reads the availability gates on every call, so a provider
+    key the wizard writes to .env shows its tools at once. The dispatcher's
+    memoized name set, filled by an earlier call, must not answer
+    unknown_tool for one of them until blackbox-mcp restarts."""
+    from Orchestrator.toolvault import availability
+
+    _stub_operator("alice")
+    cap = _install_fake_client(
+        lambda *a: _FakeResponse(200, {"success": True, "result": "voices"}))
+    env = {}
+    saved = availability._read_env, availability._local_image_available
+    availability._read_env = lambda: dict(env)
+    availability._local_image_available = lambda: False
+    srv._VALID_TOOL_NAMES = None
+    try:
+        asyncio.run(srv.call_tool("roll_dice", {"sides": 6}))   # fills the memo, no key yet
+        assert "elevenlabs_list_voices" not in srv._valid_tool_names()
+        env["ELEVENLABS_API_KEY"] = "test-key"                  # the wizard saves the key
+        listed = {t.name for t in asyncio.run(srv.list_tools())}
+        assert "elevenlabs_list_voices" in listed
+        res = asyncio.run(srv.call_tool("elevenlabs_list_voices", {}))
+        proxied = cap["client"].calls
+        unknown = asyncio.run(srv.call_tool("still_not_a_tool", {}))
+    finally:
+        availability._read_env, availability._local_image_available = saved
+        _restore_client()
+        srv._VALID_TOOL_NAMES = None
+    assert not getattr(res, "isError", False), res
+    assert _text(res) == "voices"
+    assert proxied and proxied[-1][1].endswith("/local/tools/execute")
+    assert json.loads(unknown.content[0].text)["error"]["code"] == "unknown_tool"
+
+
 def test_generic_tool_routes_to_local_tools_execute():
     """A registry tool with no dedicated branch proxies to /local/tools/execute."""
     _stub_operator("alice")

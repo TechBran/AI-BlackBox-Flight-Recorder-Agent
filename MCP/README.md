@@ -38,7 +38,8 @@ tools. On stdio only the SDK writes to stdout; any other print goes to stderr.
   entering a bearer token at the consent form; the client then gets a 1-hour access token
   and a rotating 30-day refresh token. A refresh token presented twice revokes the whole
   connection, `POST /revoke` (RFC 7009) revokes on request, and revoking the bearer that
-  consented ends every connection made with it. Refresh tokens are stored as hashes.
+  consented ends every connection made with it. Refresh tokens are stored as hashes, and a
+  revoked connection leaves a tombstone in their store, so a restart does not revive it.
 - OAuth bootstrap endpoints (`/.well-known/*`, `/register`, `/authorize`, `/token`,
   `/revoke`) are public; only `/mcp` requires a credential. They are rate-limited per client
   address, their bodies are capped, and the client registry is bounded.

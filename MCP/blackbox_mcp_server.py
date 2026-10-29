@@ -503,19 +503,29 @@ from Orchestrator.tools.tool_registry import get_mcp_tools  # noqa: E402
 
 # Memoized valid-tool-name set (M1): the old catch-all rebuilt the entire tool
 # list (get_mcp_tools()) on EVERY unmatched call just to membership-test the name.
-# Compute it ONCE, lazily, and reuse. list_tools() still calls get_mcp_tools()
-# live (registry-driven, mtime-cached inside the registry) so the advertised
-# catalog stays fresh; this cache is only the dispatcher's name-validity gate and
-# is stable for the process lifetime (the catalog is fixed per server start).
+# Compute it lazily and reuse it. list_tools() still calls get_mcp_tools() live
+# (registry-driven, mtime-cached inside the registry, availability gates re-read
+# from .env), so the advertised catalog can grow while the server runs: a
+# provider key saved in the wizard, or a hot-reloaded tool module. A name the
+# memo lacks is therefore looked up once more in the live catalog before it is
+# an unknown tool (_is_catalog_tool), and the memo is refreshed.
 _VALID_TOOL_NAMES: Optional[set] = None
 
 
-def _valid_tool_names() -> set:
-    """Return (and memoize) the set of valid MCP tool names from the registry."""
+def _valid_tool_names(refresh: bool = False) -> set:
+    """Return (and memoize) the set of valid MCP tool names from the registry;
+    refresh=True rebuilds it from the live catalog."""
     global _VALID_TOOL_NAMES
-    if _VALID_TOOL_NAMES is None:
+    if _VALID_TOOL_NAMES is None or refresh:
         _VALID_TOOL_NAMES = {t.name for t in get_mcp_tools()}
     return _VALID_TOOL_NAMES
+
+
+def _is_catalog_tool(name: str) -> bool:
+    """Is `name` a tool tools/list would advertise now? The memo answers the
+    common case; a miss re-reads the live catalog once."""
+    return name in _valid_tool_names() or name in _valid_tool_names(refresh=True)
+
 
 # Direct file paths for efficient byte-offset access
 VOLUME_FILE = BLACKBOX_ROOT / "Volumes" / "SNAPSHOT_VOLUME.txt"
@@ -1348,8 +1358,8 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             # Every other registry tool (multimodal generation/analysis, Workspace,
             # web search, gmail_*, status/util, roll_dice, toolvault, control_*,
             # use_computer, ...) routes through the single proxy path. The valid
-            # name set is memoized (computed ONCE), not rebuilt per call.
-            elif name in _valid_tool_names():
+            # name set is memoized, rebuilt only when a name misses it.
+            elif _is_catalog_tool(name):
                 return await _proxy_tool(name, arguments, client)
 
             else:
@@ -2555,12 +2565,26 @@ MAX_REDIRECT_URI_LENGTH = 2048
 _FORBIDDEN_REDIRECT_SCHEMES = {"javascript", "data", "vbscript", "file", "blob", "about"}
 
 
+def _is_text(value) -> bool:
+    """A str that is valid Unicode text. JSON can spell a lone surrogate
+    ("\\ud800"), which no response, log line or store can encode as UTF-8."""
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _redirect_uris_error(uris: list) -> Optional[str]:
     """Why a registration's redirect_uris are unacceptable, or None."""
     from urllib.parse import urlsplit
     if len(uris) > MAX_REDIRECT_URIS:
         return f"at most {MAX_REDIRECT_URIS} redirect_uris"
     for uri in uris:
+        if not _is_text(uri):
+            return "a redirect_uri is not valid Unicode text"
         if len(uri) > MAX_REDIRECT_URI_LENGTH:
             return f"a redirect_uri is longer than {MAX_REDIRECT_URI_LENGTH} characters"
         if "#" in uri or any(ord(ch) < 0x21 or ord(ch) == 0x7f for ch in uri):
@@ -2647,7 +2671,7 @@ async def _oauth_register_handler(request):
         value = body.get(field)
         if value is None:
             continue
-        if not isinstance(value, str) or len(value) > limit:
+        if not _is_text(value) or len(value) > limit:
             return JSONResponse(
                 {"error": "invalid_client_metadata",
                  "error_description": f"{field} must be a string of at most {limit} characters"},
@@ -2656,7 +2680,7 @@ async def _oauth_register_handler(request):
     contacts = body.get("contacts")
     if contacts is not None:
         if (not isinstance(contacts, list) or len(contacts) > MAX_CLIENT_CONTACTS
-                or not all(isinstance(c, str) and len(c) <= 320 for c in contacts)):
+                or not all(_is_text(c) and len(c) <= 320 for c in contacts)):
             return JSONResponse(
                 {"error": "invalid_client_metadata",
                  "error_description": f"contacts must be a list of at most "
@@ -2769,7 +2793,14 @@ _ACCESS_TOKENS_LOCK = _threading.Lock()
 # Token families revoked in this process (a refresh token reused, its consent
 # withdrawn, or /revoke): checked on every match, so an access token read back
 # from the file store in the instant of a revocation can never be warmed again.
+# The durable copy is a tombstone in the refresh store (_tombstone_family),
+# which a restart does not forget.
 _REVOKED_FAMILIES: set = set()
+
+
+class _FamilyRevoked(Exception):
+    """A token pair was about to be issued into a revoked family."""
+
 
 # Refresh tokens (audit O20-mcp-server-13): without them claude.ai / Claude
 # Desktop lost the connection every hour and the operator pasted the long-lived
@@ -2795,12 +2826,13 @@ _OPAQUE_TOKEN_RE = re.compile(r"[A-Za-z0-9._~-]{1,512}")
 
 
 def _str_params(items) -> Dict[str, str]:
-    """Form / query / JSON fields that are plain strings (others dropped)."""
+    """Form / query / JSON fields that are plain strings of valid text (others
+    dropped)."""
     try:
         pairs = items.items()
     except AttributeError:
         return {}
-    return {k: v for k, v in pairs if isinstance(k, str) and isinstance(v, str)}
+    return {k: v for k, v in pairs if _is_text(k) and _is_text(v)}
 
 
 def _refresh_key(token: str) -> str:
@@ -2827,25 +2859,55 @@ def _consent_alive(binding: dict, consents: Dict[str, str]) -> bool:
 
 
 def _persist_refresh_token(token: str, record: dict, now: float) -> None:
-    """Store one refresh token (by hash), dropping the expired ones."""
+    """Store one refresh token (by hash), dropping the expired ones. Raises
+    _FamilyRevoked, storing nothing, when its family has been revoked."""
     with atomic_json.update_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
                                  valid=_valid_store, cross_process=True) as store:
         for key in [k for k, r in store.items()
                     if not (isinstance(r, dict) and r.get("expiry", 0) > now)]:
             del store[key]
+        if _family_revoked(record.get("family"), store):
+            raise _FamilyRevoked(record.get("family"))
         store[_refresh_key(token)] = record
 
 
-def _revoke_family(family: str, why: str) -> None:
-    """End every refresh and access token of one family (file and memory)."""
-    if not family:
-        return
+# A revoked family's tombstone in the refresh store: keyed apart from the
+# sha256 hex keys of the tokens, and kept as long as any token of the family
+# could otherwise still be presented.
+_TOMBSTONE_PREFIX = "revoked-family:"
+
+
+def _tombstone_family(store: dict, family: str, now: float) -> None:
+    """Inside an open edit of the refresh store: mark `family` revoked and drop
+    its refresh tokens, in one write. Issuance checks the tombstone under the
+    same lock, so no refresh token of the family can be stored after it."""
     _REVOKED_FAMILIES.add(family)
-    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
-                                 valid=_valid_store, cross_process=True) as store:
-        for key in [k for k, r in store.items()
-                    if isinstance(r, dict) and r.get("family") == family]:
-            del store[key]
+    store[_TOMBSTONE_PREFIX + family] = {
+        "revoked_at": now, "expiry": now + max(REFRESH_TOKEN_TTL, ACCESS_TOKEN_TTL)}
+    for key in [k for k, r in store.items()
+                if isinstance(r, dict) and r.get("family") == family]:
+        del store[key]
+
+
+def _family_revoked(family, store: Optional[dict] = None) -> bool:
+    """Is `family` revoked: in this process, or by a tombstone in the refresh
+    store (`store` when the caller holds it open, else read fresh)?"""
+    if not family:
+        return False
+    if family in _REVOKED_FAMILIES:
+        return True
+    if store is None:
+        store = atomic_json.read_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
+                                      valid=_valid_store, cross_process=True)
+    rec = store.get(_TOMBSTONE_PREFIX + family)
+    if isinstance(rec, dict) and rec.get("expiry", 0) > _time.time():
+        _REVOKED_FAMILIES.add(family)
+        return True
+    return False
+
+
+def _drop_family_access_tokens(family: str) -> None:
+    """Remove every access token of one family (file and memory)."""
     with atomic_json.update_json(BLACKBOX_MCP_OAUTH_TOKENS_FILE, {},
                                  valid=_valid_store, cross_process=True) as store:
         for tok in [t for t, b in store.items()
@@ -2854,6 +2916,17 @@ def _revoke_family(family: str, why: str) -> None:
     with _ACCESS_TOKENS_LOCK:
         for tok in [t for t, b in _ACCESS_TOKENS.items() if b.get("family") == family]:
             _ACCESS_TOKENS.pop(tok, None)
+
+
+def _revoke_family(family: str, why: str) -> None:
+    """End every refresh and access token of one family (file and memory),
+    durably: the tombstone outlives a restart."""
+    if not family:
+        return
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
+                                 valid=_valid_store, cross_process=True) as store:
+        _tombstone_family(store, family, _time.time())
+    _drop_family_access_tokens(family)
     logger.warning("OAuth: revoked token family %s (%s)", family[:12], why)
 
 
@@ -2863,31 +2936,41 @@ def _redeem_refresh_token(presented: str, client_id: str, consents: Dict[str, st
     used, so it can never be spent again -- or (None, (error, description)).
 
     A token that was already spent is a replay: the whole family is revoked.
-    A token whose consenting bearer is gone revokes its family too.
+    A token whose consenting bearer is gone revokes its family too. Either
+    revocation is written in the same locked edit that read the token, so a
+    concurrent refresh of the same family cannot slip a new pair in between.
     """
     key = _refresh_key(presented)
-    revoke, why, binding = None, None, None
+    revoked, why, binding = None, None, None
+    dead = ("invalid_grant", "refresh token is no longer valid; reconnect to authorize again")
     with atomic_json.update_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
                                  valid=_valid_store, cross_process=True) as store:
         for k in [k for k, r in store.items()
                   if not (isinstance(r, dict) and r.get("expiry", 0) > now)]:
             del store[k]
         rec = store.get(key)
-        if not isinstance(rec, dict):
+        if not isinstance(rec, dict) or not rec.get("family"):
             return None, ("invalid_grant", "refresh token is invalid or expired")
         if rec.get("client_id") != client_id:
             return None, ("invalid_grant", "refresh token was not issued to this client")
-        if rec.get("used_at") is not None:
-            revoke, why = rec.get("family"), "a spent refresh token was presented again"
+        family = rec["family"]
+        if _family_revoked(family, store):
+            why = "a token of an already revoked family was presented"
+        elif rec.get("used_at") is not None:
+            why = "a spent refresh token was presented again"
         elif not _consent_alive(rec, consents):
-            revoke, why = rec.get("family"), "the bearer that authorized it is no longer valid"
+            why = "the bearer that authorized it is no longer valid"
+        if why is not None:
+            _tombstone_family(store, family, now)
+            revoked = family
         else:
             rec["used_at"] = now
             rec["expiry"] = min(rec.get("expiry", now), now + REFRESH_REUSE_WINDOW)
             binding = {k: rec.get(k) for k in ("client_id", "operator", "scope", "consent", "family")}
-    if revoke is not None:
-        _revoke_family(revoke, why)
-        return None, ("invalid_grant", "refresh token is no longer valid; reconnect to authorize again")
+    if revoked is not None:
+        _drop_family_access_tokens(revoked)
+        logger.warning("OAuth: revoked token family %s (%s)", revoked[:12], why)
+        return None, dead
     return binding, None
 
 
@@ -2916,6 +2999,13 @@ def _issue_token_pair(binding: dict, now: float):
     try:
         _persist_access_token(access_token, binding["operator"], expiry,
                               **{k: v for k, v in common.items() if k != "operator"})
+        # A revocation that ran after the refresh token was stored removed it,
+        # but may have cleaned the access-token store before this one landed.
+        # It marks the family before it cleans, so looking again now catches
+        # every such interleaving.
+        if _family_revoked(family):
+            _drop_family_access_tokens(family)
+            raise _FamilyRevoked(family)
     except Exception:
         # Fail CLOSED: an access token chunk 6c cannot validate is worse than none.
         with _ACCESS_TOKENS_LOCK:
@@ -3030,7 +3120,11 @@ def _match_oauth_access_token(presented: str, consents: Optional[Dict[str, str]]
                 data = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     fb = data.get(presented)
-                    if isinstance(fb, dict) and fb.get("expiry", 0) > now:
+                    # A family tombstoned before a restart stays dead: the
+                    # in-memory set starts empty, and this is the only way
+                    # into the mirror.
+                    if (isinstance(fb, dict) and fb.get("expiry", 0) > now
+                            and not _family_revoked(fb.get("family"))):
                         binding = fb
                         # Warm the in-process mirror for subsequent requests.
                         with _ACCESS_TOKENS_LOCK:
@@ -3334,6 +3428,12 @@ async def _token_response(binding: dict, now: float, _err, how: str):
     from starlette.responses import JSONResponse
     try:
         access_token, refresh_token = await asyncio.to_thread(_issue_token_pair, binding, now)
+    except _FamilyRevoked:
+        # A replay of the same refresh token revoked the family mid-request.
+        logger.warning("OAuth token: refused a pair for a revoked family (client=%s)",
+                       binding.get("client_id"))
+        return _err("invalid_grant",
+                    "refresh token is no longer valid; reconnect to authorize again")
     except Exception as e:
         logger.error("OAuth token: failed to persist issued tokens (client=%s): %s",
                      binding.get("client_id"), e)
@@ -3457,8 +3557,12 @@ async def _start_control_listener(port: int = None):
 
     app = Starlette(routes=[Route("/internal/reload", endpoint=_internal_reload_handler,
                                   methods=["POST"])])
-    config = uvicorn.Config(app, lifespan="off", log_level=LOG_LEVEL.lower(),
-                            access_log=False, proxy_headers=False)
+    # log_config=None and no log_level: a uvicorn Config reconfigures the
+    # process-wide "uvicorn.*" loggers when it is built, and access_log=False
+    # would strip the access handler the PUBLIC listener logs every Funnel
+    # request through. This one reuses whatever run_http() set up.
+    config = uvicorn.Config(app, lifespan="off", log_config=None, log_level=None,
+                            proxy_headers=False)
     control = _QuietServer(config)
     task = asyncio.create_task(control.serve(sockets=[sock]))
     while not control.started and not task.done():
