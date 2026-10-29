@@ -377,6 +377,47 @@ def test_cli_agents_ready_when_all_ready():
     assert _section(sr.build_status(**inp), "cli_agents")["state"] == sr.READY
 
 
+def test_cli_agents_marker_on_a_checkable_cli_not_asked_yet_is_checking():
+    """The fast read never spawns: a claude/codex login only its credential
+    file vouches for is "not checked yet" until the live pass asks the CLI."""
+    inp = _empty_inputs()
+    inp["cli"] = {"providers": {
+        "claude": {"installed": True, "authenticated": True, "auth_source": "marker",
+                   "auth_verified": False, "auth_checkable": True, "auth_pending": True}},
+        "ready": True}
+    rollup = sr.build_status(**inp)
+    sec = _section(rollup, "cli_agents")
+    assert (sec["state"], sec["summary"]) == (sr.CHECKING, "claude sign-in not checked yet")
+    assert not [a for a in rollup["attention"] if a["section"] == "cli_agents"]
+
+
+def test_cli_agents_marker_the_cli_could_not_confirm_is_attention():
+    inp = _empty_inputs()
+    inp["cli"] = {"providers": {
+        "claude": {"installed": True, "authenticated": True, "auth_source": "marker",
+                   "auth_verified": False, "auth_checkable": True},
+        "gemini": {"installed": True, "authenticated": True, "auth_source": "marker",
+                   "auth_verified": False, "auth_checkable": False}},
+        "ready": True}
+    rollup = sr.build_status(**inp)
+    sec = _section(rollup, "cli_agents")
+    assert (sec["state"], sec["summary"]) == (sr.ATTENTION, "claude sign-in not verified")
+    assert any("could not be verified" in a["message"] for a in rollup["attention"]
+               if a["section"] == "cli_agents")
+
+
+def test_cli_agents_marker_on_a_file_only_cli_is_ready():
+    inp = _empty_inputs()
+    inp["cli"] = {"providers": {
+        "gemini": {"installed": True, "authenticated": True, "auth_source": "marker",
+                   "auth_verified": False, "auth_checkable": False},
+        "claude": {"installed": True, "authenticated": True, "auth_source": "cli",
+                   "auth_verified": True, "auth_checkable": True}},
+        "ready": True}
+    sec = _section(sr.build_status(**inp), "cli_agents")
+    assert (sec["state"], sec["summary"]) == (sr.READY, "2 agent(s) ready")
+
+
 def test_cli_agents_optional_when_none_installed():
     inp = _empty_inputs()
     inp["cli"] = {"providers": {
@@ -578,11 +619,20 @@ def _parse_sse(text):
 def test_status_stream_emits_section_events_then_done():
     import json as _json
     c = _client()
-    # Keep the live tailscale probe deterministic + cheap.
-    with patch("Orchestrator.onboarding.validators.validate_tailscale") as m:
+    asked = []
+
+    def fake_cli_status(*, probe_cli):
+        asked.append(probe_cli)
+        return {"providers": {}, "ready": False}
+
+    # Keep the live tailscale probe deterministic + cheap, and never run this
+    # box's real CLIs (the cli_agents live pass asks them).
+    with patch("Orchestrator.onboarding.validators.validate_tailscale") as m, \
+            patch("Orchestrator.routes.onboarding_routes._cli_agent_status", fake_cli_status):
         from Orchestrator.onboarding.validators import ValidationResult
         m.return_value = ValidationResult(ok=False, latency_ms=1, error="not running")
         r = c.get("/onboarding/status/stream")
+    assert asked == [False, True], "fast baseline, then the cli_agents live pass"
     assert r.status_code == 200
     assert "text/event-stream" in r.headers["content-type"]
     events = _parse_sse(r.text)

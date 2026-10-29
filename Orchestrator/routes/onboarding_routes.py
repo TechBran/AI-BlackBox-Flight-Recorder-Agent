@@ -854,9 +854,9 @@ def _collect_status_inputs() -> dict:
         logger.exception("status rollup: rerank status failed")
         rerank_block = None
 
-    # cli agents — installed + auth from a cached CLI answer or the markers
+    # cli agents — installed + auth from the CLI's last answer or the markers
     # (filesystem only, no spawn: this also runs on the SSE stream's event
-    # loop). Fail-soft.
+    # loop, whose live pass asks the CLIs). Fail-soft.
     try:
         cli = _cli_agent_status(probe_cli=False)
     except Exception:
@@ -912,10 +912,11 @@ async def onboarding_status_stream():
 
     Emits one `event: section` per section as its probe resolves, then a final
     `event: done`. Reuses the StreamingResponse SSE pattern from logs_stream /
-    tailscale_install_stream. The ONLY section needing a live probe today is
-    tailscale (serve/HTTPS state); the rest re-emit their persisted-derived
-    state. A probe failure falls back to the persisted state — the stream never
-    crashes over one bad section."""
+    tailscale_install_stream. The live probes are tailscale (serve/HTTPS
+    state), mcp (server/Funnel/OAuth up) and cli_agents (each CLI's own
+    sign-in answer, which the fast read only has cached); the rest re-emit
+    their persisted-derived state. A probe failure falls back to the persisted
+    state — the stream never crashes over one bad section."""
     import asyncio
     import json as _json
 
@@ -963,6 +964,18 @@ async def onboarding_status_stream():
                              "message": a["message"], "cta_step": "mcp"} for a in atts2]
                 except Exception:
                     logger.exception("status stream: mcp probe failed")
+
+            elif key == "cli_agents":
+                # Ask each CLI that can say (bounded, side by side, cached),
+                # off the loop. This also warms the fast read's answer.
+                try:
+                    cli = await asyncio.to_thread(_cli_agent_status, probe_cli=True)
+                    st, summary, _it, atts2 = status_rollup._derive_cli_agents(cli)
+                    sec = {**sec, "state": st, "summary": summary}
+                    atts = [{"section": "cli_agents", "severity": a["severity"],
+                             "message": a["message"], "cta_step": "cli_agents"} for a in atts2]
+                except Exception:
+                    logger.exception("status stream: cli agent probe failed")
 
             if sec["state"] == status_rollup.READY:
                 ready_count += 1
@@ -1382,12 +1395,14 @@ def _cli_agent_status(*, probe_cli: bool) -> dict:
             "claude": {"installed": bool, "authenticated": bool,
                        "auth_source": "cli"|"marker",  # who answered
                        "auth_verified": bool,          # True iff the CLI did
+                       "auth_checkable": bool,         # the CLI has a status command
                        "bin_path": str|None, "package": str},
             "gemini": {...},
             "codex":  {...},
             "antigravity": {"installed": bool,
                             "authenticated": None,
                             "auth_source": "none", "auth_verified": False,
+                            "auth_checkable": False,
                             "auth_method": "implicit_on_launch",
                             "bin_path": str|None,
                             "install_command": list[str]}
@@ -1403,26 +1418,48 @@ def _cli_agent_status(*, probe_cli: bool) -> dict:
     since auth is verified only by the user actually launching the
     CLI (D2b).
 
-    ``probe_cli=False`` (the hub rollup) never spawns: it takes the CLI's
-    answer only from auth_probe's cache, else the marker.
+    ``probe_cli=True`` asks the CLIs side by side (auth_probe.probe_many), so
+    the slowest one bounds the call. ``probe_cli=False`` (the hub rollup)
+    never spawns: it takes the last answer the CLI gave for the current
+    credential files (auth_probe.last_answer, at any age), else the marker,
+    and marks an installed checkable CLI not asked yet with
+    ``"auth_pending": True`` (status_rollup shows it as checking, not ready).
     """
     from pathlib import Path
     from Orchestrator.cli_agent import auth_probe
     from Orchestrator.routes.cli_agent_routes import _resolve_provider_bin, _PROVIDER_BINARY_NAMES
 
     home = Path.home()
-    out: dict[str, dict] = {}
-    all_ready = True
-    for prov, cmd in INSTALL_COMMANDS.items():
+    found: dict[str, tuple] = {}
+    for prov in INSTALL_COMMANDS:
         bin_name = _PROVIDER_BINARY_NAMES.get(prov, prov)
         bin_path = _resolve_provider_bin(prov)
         installed = bool(bin_path) and bin_path != bin_name and Path(bin_path).is_file()
+        found[prov] = (bin_path, installed)
+    checkable = [(prov, found[prov][0], _AUTH_MARKERS.get(prov, []))
+                 for prov in INSTALL_COMMANDS
+                 if found[prov][1] and auth_probe.has_status_command(prov)]
+    # The CLI's own answer first. None = it could not say.
+    pending: set[str] = set()
+    if probe_cli:
+        # Bounded, cached, concurrent; this sync route (and the SSE stream's
+        # to_thread) runs it off the event loop.
+        answers = auth_probe.probe_many(checkable, home=home)
+    else:
+        answers = {}
+        for prov, bin_path, markers in checkable:
+            asked, said = auth_probe.last_answer(prov, bin_path, home=home, markers=markers)
+            if asked:
+                answers[prov] = said
+            else:
+                pending.add(prov)
+
+    out: dict[str, dict] = {}
+    all_ready = True
+    for prov, cmd in INSTALL_COMMANDS.items():
+        bin_path, installed = found[prov]
         markers = _AUTH_MARKERS.get(prov, [])
-        # The CLI's own answer first (bounded, cached; this sync route runs
-        # in the threadpool, off the event loop). None = it could not say.
-        said = (auth_probe.probe(prov, bin_path, home=home, markers=markers,
-                                 cached_only=not probe_cli)
-                if installed and auth_probe.has_status_command(prov) else None)
+        said = answers.get(prov)
         if said is not None:
             authenticated: bool | None = said
             auth_source = "cli"
@@ -1439,9 +1476,12 @@ def _cli_agent_status(*, probe_cli: bool) -> dict:
             "authenticated": authenticated,
             "auth_source": auth_source,
             "auth_verified": auth_source == "cli",
+            "auth_checkable": auth_probe.has_status_command(prov),
             "bin_path": bin_path if installed else None,
             "install_command": cmd,
         }
+        if prov in pending:
+            entry["auth_pending"] = True
         # Keep `package` for backwards compatibility with existing
         # consumers that read it on the npm-based providers. Derive
         # from the install command's last element (the package name).

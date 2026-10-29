@@ -185,6 +185,8 @@ def test_every_existing_field_keeps_its_type(box):
         assert isinstance(entry["install_command"], list), prov
         assert entry["auth_source"] in ("cli", "marker", "none"), prov
         assert isinstance(entry["auth_verified"], bool), prov
+        assert entry["auth_checkable"] is (prov in ("claude", "codex")), prov
+        assert "auth_pending" not in entry, "the wizard's GET always asks"
     assert out["providers"]["claude"]["package"] == "@anthropic-ai/claude-code"
 
 
@@ -236,19 +238,140 @@ def test_a_timeout_is_cached_too(box, monkeypatch):
 
 
 # ------------------------------------------------- the hub's rollup
+#
+# GET /onboarding/status (the hub's and the done step's fast read) never
+# spawns. It takes the last answer each CLI gave for the current credential
+# files, at any age; a CLI not asked yet in this process is "not checked yet"
+# (state checking), never a marker-vouched "ready". The SSE live pass
+# (GET /onboarding/status/stream, fired on every hub view) asks the CLIs.
 
 
-def test_the_hub_rollup_never_spawns_and_reuses_a_cached_answer(box):
+def hub_cli_section() -> dict:
+    out = onboarding_routes.onboarding_status()
+    (sec,) = [s for s in out["sections"] if s["key"] == "cli_agents"]
+    atts = [a for a in out["attention"] if a["section"] == "cli_agents"]
+    return {"state": sec["state"], "summary": sec["summary"], "attention": atts}
+
+
+@pytest.fixture
+def quiet_stream(monkeypatch):
+    """The stream's other live probes (tailscale, MCP) stubbed out, and a
+    minimal app carrying only the onboarding router."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from Orchestrator.onboarding import validators
+    from Orchestrator.onboarding.validators import ValidationResult
+    from Orchestrator.routes import mcp_routes
+
+    monkeypatch.setattr(validators, "validate_tailscale",
+                        lambda: ValidationResult(ok=False, latency_ms=1, error="stub"))
+    for name in ("_mcp_up", "_funnel_up", "_oauth_ready"):
+        monkeypatch.setattr(mcp_routes, name, lambda: False)
+    app = FastAPI()
+    app.include_router(onboarding_routes.router)
+    return TestClient(app)
+
+
+def stream_cli_section(client) -> dict:
+    import json
+    text = client.get("/onboarding/status/stream").text
+    for block in text.split("\n\n"):
+        if block.startswith("event: section\n"):
+            payload = json.loads(block.split("data: ", 1)[1])
+            if payload["key"] == "cli_agents":
+                return payload
+    raise AssertionError(f"no cli_agents section in the stream: {text!r}")
+
+
+def test_the_hub_rollup_never_spawns_and_never_calls_a_marker_ready(box):
     marker(box, ".claude/.credentials.json")
     fake_cli(box, "claude", f"printf '%s\\n' '{CLAUDE_OUT % ('false', 'none')}'\nexit 1\n")
     rollup = onboarding_routes._cli_agent_status(probe_cli=False)["providers"]["claude"]
-    assert (rollup["authenticated"], rollup["auth_source"]) == (True, "marker"), "nothing cached yet"
+    assert (rollup["authenticated"], rollup["auth_source"], rollup["auth_verified"]) == (True, "marker", False)
+    assert rollup["auth_pending"] is True, "the CLI has not been asked yet"
+    hub = hub_cli_section()
+    assert hub["state"] == "checking", hub
+    assert "claude" in hub["summary"] and "not checked" in hub["summary"], hub
     assert calls(box) == [], "GET /onboarding/status promises no subprocess"
 
+
+def test_the_hub_keeps_the_cli_answer_past_the_cache_window(box, monkeypatch):
+    marker(box, ".claude/.credentials.json")
+    fake_cli(box, "claude", f"printf '%s\\n' '{CLAUDE_OUT % ('false', 'none')}'\nexit 1\n")
     assert status()["providers"]["claude"]["authenticated"] is False   # the wizard step asks
     rollup = onboarding_routes._cli_agent_status(probe_cli=False)["providers"]["claude"]
     assert (rollup["authenticated"], rollup["auth_source"], rollup["auth_verified"]) == (False, "cli", True)
+    assert "auth_pending" not in rollup
+
+    # 61 s later the hub must not flip back to the marker's "ready".
+    now = time.monotonic()
+    monkeypatch.setattr(auth_probe, "_now", lambda: now + auth_probe.CACHE_TTL_S + 1)
+    hub = hub_cli_section()
+    assert (hub["state"], hub["summary"]) == ("attention", "claude not signed in"), hub
+    assert len(calls(box)) == 1, "the fast read reuses the answer and never spawns"
+
+
+def test_a_sign_in_after_the_last_answer_is_not_checked_yet_in_the_hub(box):
+    creds = marker(box, ".claude/.credentials.json")
+    fake_cli(box, "claude", f"printf '%s\\n' '{CLAUDE_OUT % ('false', 'none')}'\nexit 1\n")
+    status()
+    creds.write_text('{"fresh": true}')
+    os.utime(creds, ns=(time.time_ns() + 10_000_000, time.time_ns() + 10_000_000))
+    assert hub_cli_section()["state"] == "checking", "the old answer was for other credential files"
     assert len(calls(box)) == 1
+
+
+def test_the_hub_stream_asks_the_cli(box, quiet_stream):
+    marker(box, ".claude/.credentials.json")
+    fake_cli(box, "claude", f"printf '%s\\n' '{CLAUDE_OUT % ('false', 'none')}'\nexit 1\n")
+    live = stream_cli_section(quiet_stream)
+    assert (live["state"], live["summary"]) == ("attention", "claude not signed in"), live
+    assert [a["cta_step"] for a in live["attention"]] == ["cli_agents"]
+    assert len([c for c in calls(box) if c.startswith("claude auth status")]) == 1
+    # The live pass warmed the fast read too.
+    assert hub_cli_section()["state"] == "attention"
+    assert len(calls(box)) == 1
+
+
+def test_the_hub_stream_says_ready_only_when_the_cli_does(box, quiet_stream):
+    marker(box, ".claude/.credentials.json")
+    fake_cli(box, "claude", f"printf '%s\\n' '{CLAUDE_OUT % ('true', 'claude.ai')}'\n")
+    live = stream_cli_section(quiet_stream)
+    assert (live["state"], live["summary"], live["attention"]) == ("ready", "1 agent(s) ready", [])
+
+
+def test_the_hub_says_when_the_cli_could_not_confirm_the_marker(box, quiet_stream, monkeypatch):
+    monkeypatch.setattr(auth_probe, "PROBE_TIMEOUT_S", 0.3)
+    marker(box, ".claude/.credentials.json")
+    fake_cli(box, "claude", "sleep 30\n")
+    live = stream_cli_section(quiet_stream)
+    assert (live["state"], live["summary"]) == ("attention", "claude sign-in not verified"), live
+    assert "could not be verified" in live["attention"][0]["message"]
+    # The fast read reports the same, without asking again.
+    assert hub_cli_section()["state"] == "attention"
+    assert len(calls(box)) == 1
+
+
+def test_a_marker_only_cli_stays_ready_in_the_hub(box):
+    marker(box, ".gemini/oauth_creds.json")
+    fake_cli(box, "gemini", "echo 'must not be run' >&2\nexit 7\n")
+    hub = hub_cli_section()
+    assert (hub["state"], hub["summary"]) == ("ready", "1 agent(s) ready"), hub
+    assert calls(box) == []
+
+
+def test_two_hanging_clis_cost_one_timeout_not_two(box, monkeypatch):
+    monkeypatch.setattr(auth_probe, "PROBE_TIMEOUT_S", 1.0)
+    marker(box, ".claude/.credentials.json")
+    marker(box, ".codex/auth.json")
+    fake_cli(box, "claude", "sleep 30\n")
+    fake_cli(box, "codex", "sleep 30\n")
+    t0 = time.monotonic()
+    out = status()["providers"]
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.8, f"status took {elapsed:.1f}s; the two probes must run side by side"
+    for prov in ("claude", "codex"):
+        assert (out[prov]["authenticated"], out[prov]["auth_source"]) == (True, "marker"), prov
 
 
 def test_the_status_rollup_reads_the_cli_status_without_probing(box, monkeypatch):

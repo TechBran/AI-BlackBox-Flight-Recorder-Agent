@@ -11,7 +11,10 @@ the dev box 2026-10-29):
             ...} (its default format); exit 1 when signed out, and the JSON
             still says so.
   * codex   `codex login status` prints "Logged in using ..." (exit 0) or
-            "Not logged in" (exit 1), on stderr.
+            "Not logged in" (exit 1), on stderr. It is not quite write-free:
+            every codex run replaces its helper dir under
+            ~/.codex/tmp/arg0-linux/ (apply_patch links and a lock), which is
+            not a credential file, so the cache key below ignores it.
   * gemini has no status command (0.66: only mcp/extensions/skills/hooks/gemma
     subcommands) and antigravity keeps its login in the OS keyring: both stay
     on the marker heuristic in onboarding_routes.
@@ -30,9 +33,13 @@ the caller then falls back to the marker. Answers, None included, are cached
 per process for CACHE_TTL_S, keyed on the binary, HOME and the stat of the
 provider's credential files: a sign-in or sign-out in a terminal rewrites those
 files, so the wizard's Re-check sees it at once, and a hung CLI costs one
-timeout per window instead of one per GET. The hub's rollup (GET
-/onboarding/status, also built on the SSE stream's event loop) promises no
-subprocess, so it reads the cache only (cached_only=True).
+timeout per window instead of one per GET. probe_many() asks several CLIs side
+by side, so the slowest one, not the sum, bounds a GET.
+
+The hub's rollup (GET /onboarding/status, also built on the SSE stream's event
+loop) promises no subprocess, so it reads last_answer(): the last answer for the
+current credential-file state at ANY age (the window only decides when a live
+GET asks again), or "not asked yet". The SSE live pass asks through probe().
 """
 from __future__ import annotations
 
@@ -44,8 +51,9 @@ import signal
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Iterable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -142,22 +150,35 @@ def _marker_signature(home: Path, markers: Sequence[str]) -> tuple:
     return tuple(sig)
 
 
-def probe(provider: str, bin_path: str, *, home: Path, markers: Sequence[str] = (),
-          cached_only: bool = False) -> Optional[bool]:
+def _key(provider: str, bin_path: str, home: Path, markers: Sequence[str]) -> tuple:
+    return (provider, bin_path, str(home), _marker_signature(home, markers))
+
+
+def last_answer(provider: str, bin_path: str, *, home: Path,
+                markers: Sequence[str] = ()) -> tuple[bool, Optional[bool]]:
+    """Never spawns. ``(True, answer)`` when the CLI was asked for this binary,
+    HOME and credential-file state (at any age; answer None = it could not
+    say), else ``(False, None)``: not asked yet in this process, or the
+    credential files changed since. The onboarding hub's probe-free rollup."""
+    if provider not in STATUS_ARGS:
+        return False, None
+    with _LOCK:
+        hit = _CACHE.get(_key(provider, bin_path, home, markers))
+    return (True, hit[1]) if hit else (False, None)
+
+
+def probe(provider: str, bin_path: str, *, home: Path,
+          markers: Sequence[str] = ()) -> Optional[bool]:
     """Whether ``provider``'s CLI at ``bin_path`` says it is signed in for
-    ``home``: True / False, or None when it cannot say. Cached (see module).
-    ``cached_only``: never spawn; answer from a fresh cache entry or None (the
-    onboarding hub's probe-free rollup)."""
+    ``home``: True / False, or None when it cannot say. Cached (see module)."""
     if provider not in STATUS_ARGS:
         return None
-    key = (provider, bin_path, str(home), _marker_signature(home, markers))
+    key = _key(provider, bin_path, home, markers)
     now = _now()
     with _LOCK:
         hit = _CACHE.get(key)
         if hit and hit[0] > now:
             return hit[1]
-    if cached_only:
-        return None
     answer = _run(provider, bin_path, home)
     with _LOCK:
         # Entries for an older credential-file state are dead; drop them.
@@ -165,3 +186,15 @@ def probe(provider: str, bin_path: str, *, home: Path, markers: Sequence[str] = 
             del _CACHE[stale]
         _CACHE[key] = (_now() + CACHE_TTL_S, answer)
     return answer
+
+
+def probe_many(jobs: Iterable[tuple[str, str, Sequence[str]]], *,
+               home: Path) -> dict[str, Optional[bool]]:
+    """probe() for each ``(provider, bin_path, markers)``, side by side: two
+    hung CLIs cost one PROBE_TIMEOUT_S, not two."""
+    jobs = list(jobs)
+    if len(jobs) <= 1:
+        return {p: probe(p, b, home=home, markers=m) for p, b, m in jobs}
+    with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="cli-auth") as pool:
+        futures = {p: pool.submit(probe, p, b, home=home, markers=m) for p, b, m in jobs}
+        return {p: f.result() for p, f in futures.items()}

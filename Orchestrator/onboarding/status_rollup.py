@@ -249,6 +249,22 @@ def _derive_cli_agents(cli):
         return ATTENTION, f"{', '.join(not_authed)} not signed in", items, [
             {"severity": "warn",
              "message": f"Agent installed but not authenticated: {', '.join(not_authed)}"}]
+    # A sign-in only a credential file vouches for, on a CLI that can say for
+    # itself (auth_checkable: claude, codex), is not "ready": either it was
+    # asked and could not answer (hung, unrecognised output), or it has not
+    # been asked yet (auth_pending: the probe-free fast read; the SSE live
+    # pass asks). A file-only CLI (gemini) is taken at its marker.
+    by_marker = [p for p, m in installed.items()
+                 if m.get("auth_source") == "marker" and m.get("auth_checkable")]
+    unverified = [p for p in by_marker if not installed[p].get("auth_pending")]
+    if unverified:
+        return ATTENTION, f"{', '.join(unverified)} sign-in not verified", items, [
+            {"severity": "warn",
+             "message": f"Agent sign-in could not be verified: {', '.join(unverified)}."
+                        " Open Agents to re-check."}]
+    pending = [p for p in by_marker if installed[p].get("auth_pending")]
+    if pending:
+        return CHECKING, f"{', '.join(pending)} sign-in not checked yet", items, []
     return READY, f"{len(installed)} agent(s) ready", items, []
 
 
