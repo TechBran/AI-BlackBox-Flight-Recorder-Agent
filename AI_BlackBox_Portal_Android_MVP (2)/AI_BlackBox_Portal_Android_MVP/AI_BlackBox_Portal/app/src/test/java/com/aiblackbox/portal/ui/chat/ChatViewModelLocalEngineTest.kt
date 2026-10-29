@@ -16,6 +16,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
@@ -241,6 +242,61 @@ class ChatViewModelLocalEngineTest {
                 h.assistant.content.contains("on-device", ignoreCase = true),
         )
         assertNull("a cancelled turn is not persisted", h.saved)
+    }
+
+    /**
+     * Root cause of the CI flake in the mid-stream fault tests: with the old
+     * `.flowOn(IO).catch {}` shape an upstream throw cancelled the collector before
+     * it was dispatched the deltas already sent to it, so the partial reply vanished
+     * and only the error text showed. A DISTINCT test dispatcher forces flowOn's real
+     * channel hop, and the shared scheduler pins that bad schedule deterministically:
+     * the producer emits both deltas AND throws in one task, before the collector's
+     * resume runs. The deltas must still arrive, in order, ahead of the fault.
+     */
+    @Test
+    fun `collectGeneration delivers every delta emitted before a fault, then the fault`() = runTest {
+        val io = StandardTestDispatcher(testScheduler)
+        val seen = mutableListOf<String>()
+
+        val fault = ChatViewModel.collectGeneration(
+            flow {
+                emit("par")
+                emit("tial ")
+                throw IllegalStateException("engine fault")
+            },
+            ioDispatcher = io,
+        ) { seen += it }
+
+        assertEquals("every pre-fault delta reaches the collector, in order", listOf("par", "tial "), seen)
+        assertTrue("the upstream fault is reported after them", fault is IllegalStateException)
+        assertEquals("engine fault", fault?.message)
+    }
+
+    /** Moving the catch upstream of flowOn must keep a REAL cancellation a cancellation. */
+    @Test
+    fun `collectGeneration propagates a real cancellation instead of reporting a fault`() = runTest {
+        val io = StandardTestDispatcher(testScheduler)
+        val started = CompletableDeferred<Unit>()
+        val seen = mutableListOf<String>()
+        var returned = false
+
+        val job = launch {
+            ChatViewModel.collectGeneration(
+                flow {
+                    emit("partial ")
+                    started.complete(Unit)
+                    awaitCancellation()
+                },
+                ioDispatcher = io,
+            ) { seen += it }
+            returned = true
+        }
+        started.await()
+        job.cancelAndJoin()
+
+        assertTrue("the collection was actually cancelled", job.isCancelled)
+        assertFalse("a cancelled collection never returns a fault (or null)", returned)
+        assertEquals("the delta before the stop was delivered", listOf("partial "), seen)
     }
 
     // ── Review follow-ups (Task 2.4) ──────────────────────────────────────────

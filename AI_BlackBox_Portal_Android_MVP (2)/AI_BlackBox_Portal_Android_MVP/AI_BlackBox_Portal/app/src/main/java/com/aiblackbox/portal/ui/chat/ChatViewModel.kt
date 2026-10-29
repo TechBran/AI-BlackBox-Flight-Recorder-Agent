@@ -58,10 +58,12 @@ import com.aiblackbox.portal.data.store.ChatHistoryStore
 import com.aiblackbox.portal.data.store.OperatorPrompt
 import com.aiblackbox.portal.data.store.OperatorResolution
 import com.aiblackbox.portal.data.store.OperatorResolver
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -71,6 +73,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -3047,6 +3050,48 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        /** One step of an on-device generation crossing the IO hop in [collectGeneration]. */
+        private sealed class GenerationStep<out T> {
+            class Item<T>(val value: T) : GenerationStep<T>()
+            class Fault(val cause: Throwable) : GenerationStep<Nothing>()
+        }
+
+        /**
+         * Collect an on-device generation [upstream] with the GENERATION on
+         * [ioDispatcher] and [onEach] on the caller's dispatcher (Main in production),
+         * delivering EVERY element the upstream emitted, in order, BEFORE reporting
+         * its fault. Returns the upstream's fault, or null on normal completion. A real
+         * cancellation still propagates (the upstream `catch` rethrows when its own
+         * coroutine is being cancelled), so a stop/new send is never reported as a fault.
+         *
+         * The fault is caught UPSTREAM of flowOn and sent through flowOn's buffer as
+         * the LAST element, so it queues behind the deltas instead of overtaking them.
+         * The earlier `.flowOn(IO).catch { ... }` shape raced: flowOn runs the
+         * upstream in a producer coroutine that is a CHILD of the collector's scope,
+         * so an upstream throw failed the producer and cancelled the collector at
+         * once, DROPPING every delta already sent but not yet dispatched to the
+         * collector and showing the error without the partial reply (a busy Main
+         * thread, or a one- or two-core CI runner, hit it).
+         */
+        internal suspend fun <T> collectGeneration(
+            upstream: Flow<T>,
+            ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+            onEach: (T) -> Unit,
+        ): Throwable? {
+            var fault: Throwable? = null
+            upstream
+                .map<T, GenerationStep<T>> { GenerationStep.Item(it) }
+                .catch { e -> emit(GenerationStep.Fault(e)) }
+                .flowOn(ioDispatcher)
+                .collect { step ->
+                    when (step) {
+                        is GenerationStep.Item -> onEach(step.value)
+                        is GenerationStep.Fault -> fault = step.cause
+                    }
+                }
+            return fault
+        }
+
         /**
          * PURE core of [sendViaLocalEngine]: run one on-device turn and stream its
          * deltas into [sink], then persist via [saveSink]. Extracted (like
@@ -3060,19 +3105,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *    EXACTLY the SSE token path.
          *  - On normal completion: `sink(fullText, isStreaming=false)` then
          *    `saveSink(SaveRequest, provider="local")`; returns `true`.
-         *  - On a mid-stream throw (runTurn's Flow can fault): caught via `.catch`,
-         *    appends [LOCAL_ENGINE_ERROR_TEXT] to whatever streamed so far,
+         *  - On a mid-stream throw (runTurn's Flow can fault): reported by
+         *    [collectGeneration] AFTER every delta emitted before it, appends
+         *    [LOCAL_ENGINE_ERROR_TEXT] to whatever streamed so far,
          *    `sink(partial+error, isStreaming=false)`, DOES NOT save (mirrors the
          *    SSE error path), and returns `false`. Never rethrows — the turn does
          *    not crash; the caller maps the `false` to [ChatState.ERROR].
          *  - Never reaches SSE.
          *
-         * Threading: `.flowOn(Dispatchers.IO)` moves GENERATION (the upstream
-         * [FcLoop.runTurn] Flow) onto IO, while `.collect` / [sink] run on the
+         * Threading: [collectGeneration] moves GENERATION (the upstream
+         * [FcLoop.runTurn] Flow) onto IO via flowOn, while [sink] runs on the
          * collector's dispatcher (the VM's Main in production) — mirroring
          * [sendViaSSE], which collects on viewModelScope and never wraps the sink
-         * in withContext(IO). flowOn is a no-op under the serial test dispatcher,
-         * so the unit tests below stay deterministic.
+         * in withContext(IO). The IO hop is real under runTest too (it does not
+         * replace Dispatchers.IO), which is why the fault is ordered in-band.
          *
          * @return `true` if the turn completed and was saved, `false` if it faulted.
          */
@@ -3087,21 +3133,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             saveSink: (request: SaveRequest, provider: String) -> Unit,
         ): Boolean {
             val acc = StringBuilder()
-            var faulted = false
-            fcLoop.runTurn(persona, history, text)
-                // Generation runs on IO; the collector/sink stay on the caller's
-                // dispatcher (Main in production) — parity with sendViaSSE.
-                .flowOn(Dispatchers.IO)
-                .catch { e ->
-                    faulted = true
-                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
-                    sink(acc.toString(), false)
-                }
-                .collect { delta ->
-                    acc.append(delta)
-                    sink(acc.toString(), true)
-                }
-            if (faulted) return false
+            // Generation runs on IO; the collector/sink stay on the caller's
+            // dispatcher (Main in production) — parity with sendViaSSE.
+            val fault = collectGeneration(fcLoop.runTurn(persona, history, text)) { delta ->
+                acc.append(delta)
+                sink(acc.toString(), true)
+            }
+            if (fault != null) {
+                acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                sink(acc.toString(), false)
+                return false
+            }
             // Normal completion: finalize the stream + persist the turn.
             val full = acc.toString()
             sink(full, false)
@@ -3138,12 +3180,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *  - Normal completion: `sink(fullText, false)` then
          *    `saveSink(SaveRequest, provider="local")`; returns `true`.
          *  - Mid-stream throw (generateWithImage's Flow can fault — e.g. the engine
-         *    can't run vision on this device): caught via `.catch`, appends
-         *    [LOCAL_ENGINE_ERROR_TEXT], `sink(partial+error, false)`, DOES NOT save,
-         *    returns `false`. Never rethrows.
+         *    can't run vision on this device): reported by [collectGeneration] after
+         *    every delta emitted before it, appends [LOCAL_ENGINE_ERROR_TEXT],
+         *    `sink(partial+error, false)`, DOES NOT save, returns `false`. Never
+         *    rethrows.
          *
-         * Threading mirrors [streamLocalTurn]: `.flowOn(Dispatchers.IO)` moves the
-         * generation onto IO; `.collect`/[sink] stay on the caller's dispatcher.
+         * Threading mirrors [streamLocalTurn]: [collectGeneration] moves the
+         * generation onto IO; [sink] stays on the caller's dispatcher.
          *
          * @return `true` if the turn completed and was saved, `false` if it faulted.
          */
@@ -3158,19 +3201,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             saveSink: (request: SaveRequest, provider: String) -> Unit,
         ): Boolean {
             val acc = StringBuilder()
-            var faulted = false
-            engine.generateWithImage(prompt, imageBytes)
-                .flowOn(Dispatchers.IO)
-                .catch { e ->
-                    faulted = true
-                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
-                    sink(acc.toString(), false)
-                }
-                .collect { delta ->
-                    acc.append(delta)
-                    sink(acc.toString(), true)
-                }
-            if (faulted) return false
+            val fault = collectGeneration(engine.generateWithImage(prompt, imageBytes)) { delta ->
+                acc.append(delta)
+                sink(acc.toString(), true)
+            }
+            if (fault != null) {
+                acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                sink(acc.toString(), false)
+                return false
+            }
             val full = acc.toString()
             sink(full, false)
             // EPHEMERALITY: the save request carries the user TEXT + the reply only —
@@ -3220,7 +3259,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *    `saveSink(SaveRequest, provider="local")`; returns `true`.
          *  - A TOOL-LEVEL failure (a [ToolResult] with `success=false`) is NOT a
          *    stream fault: it renders "failed" and the turn still completes + saves.
-         *  - A mid-stream THROW propagating out of runAgent is caught via `.catch`,
+         *  - A mid-stream THROW propagating out of runAgent is reported by
+         *    [collectGeneration] after every event emitted before it, and
          *    appends [LOCAL_ENGINE_ERROR_TEXT], `sink(partial+error, false)`, DOES
          *    NOT save, returns `false`. Note (Task 3.4 landed): an OFFLINE tool
          *    failure no longer reaches here — the bridge degrades to a
@@ -3228,8 +3268,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *    only a genuine non-IO fault (e.g. a SerializationException, or an
          *    engine fault) still surfaces as the local-engine error.
          *
-         * Threading mirrors [streamLocalTurn]: `.flowOn(Dispatchers.IO)` moves the
-         * agent loop onto IO; `.collect` / [sink] stay on the caller's dispatcher.
+         * Threading mirrors [streamLocalTurn]: [collectGeneration] moves the
+         * agent loop onto IO; [sink] stays on the caller's dispatcher.
          *
          * @return `true` if the turn completed and was saved, `false` if it faulted.
          */
@@ -3244,23 +3284,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             saveSink: (request: SaveRequest, provider: String) -> Unit,
         ): Boolean {
             val acc = StringBuilder()
-            var faulted = false
-            fcLoop.runAgent(persona, history, text)
-                .flowOn(Dispatchers.IO)
-                .catch { e ->
-                    faulted = true
-                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
-                    sink(acc.toString(), false)
+            val fault = collectGeneration(fcLoop.runAgent(persona, history, text)) { event ->
+                when (event) {
+                    is LlmEvent.TextDelta -> acc.append(event.text)
+                    is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
+                    is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
                 }
-                .collect { event ->
-                    when (event) {
-                        is LlmEvent.TextDelta -> acc.append(event.text)
-                        is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
-                        is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
-                    }
-                    sink(acc.toString(), true)
-                }
-            if (faulted) return false
+                sink(acc.toString(), true)
+            }
+            if (fault != null) {
+                acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                sink(acc.toString(), false)
+                return false
+            }
             val full = acc.toString()
             sink(full, false)
             val request = buildSaveRequest(
@@ -3310,7 +3346,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * Contract mirrors [streamLocalAgentTurn]: TextDelta -> append text; ToolCall ->
          * [renderToolCall]; ToolOutcome -> [renderToolOutcome]; `sink(runningText, true)`
          * per event; normal completion -> `sink(full, false)` + `saveSink`; a mid-stream
-         * THROW (engine `onError`) is caught via `.catch`, appends
+         * THROW (engine `onError`) is reported by [collectGeneration] after every
+         * event emitted before it, appends
          * [LOCAL_ENGINE_ERROR_TEXT], DOES NOT save, returns `false`.
          *
          * @return `true` if the turn completed and was saved, `false` if it faulted.
@@ -3364,7 +3401,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // fault litertlm's constrained decoding). Mirrors FcLoop's de-dup.
             val nativeTools = (phoneNativeTools + injected + cloudNativeTools).distinctBy { it.schema.name }
             val acc = StringBuilder()
-            var faulted = false
             // Runaway bounds on this native loop: the litertlm engine's OWN internal
             // recurring-tool-call guard is the PRIMARY bound (it owns termination via
             // onDone on this path by design), AND -- defense-in-depth (Task W3 hardening) --
@@ -3374,24 +3410,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // result, so a misbehaving model can't loop unbounded with real side effects
             // even if the engine-side guard were ever weakened/absent. This differs from
             // the manual FcLoop's explicit maxIterations only in WHERE the cap lives.
-            engine.generateWithToolsNative(prompt, nativeTools)
-                .flowOn(Dispatchers.IO)
-                .catch { e ->
-                    // Telemetry-before-fixes: the engine's onError was previously invisible.
-                    Log.w(TAG, "native turn faulted", e)
-                    faulted = true
-                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
-                    sink(acc.toString(), false)
+            val fault = collectGeneration(engine.generateWithToolsNative(prompt, nativeTools)) { event ->
+                when (event) {
+                    is LlmEvent.TextDelta -> acc.append(event.text)
+                    is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
+                    is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
                 }
-                .collect { event ->
-                    when (event) {
-                        is LlmEvent.TextDelta -> acc.append(event.text)
-                        is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
-                        is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
-                    }
-                    sink(acc.toString(), true)
-                }
-            if (faulted) return false
+                sink(acc.toString(), true)
+            }
+            if (fault != null) {
+                // Telemetry-before-fixes: the engine's onError was previously invisible.
+                Log.w(TAG, "native turn faulted", fault)
+                acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                sink(acc.toString(), false)
+                return false
+            }
             val full = acc.toString()
             sink(full, false)
             val request = buildSaveRequest(
