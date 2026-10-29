@@ -66,7 +66,7 @@ check's error and list no commits from that origin. Typical causes and fixes:
 | `… is not a trusted pin` | `sudo bash Scripts/install.sh` rewrites the pins root-owned 0644 and the directory without group/other write. |
 | `not signed with a release key` / `not from a pinned release key` | The commit at the tip of `main` is unsigned, or signed by a key this box does not pin. Do not work around it on the box: fix the release (section 3). |
 | `the objects for commit X in this checkout's .git are not the ones its id names` | An interrupted fetch can leave this; run the update again. If it persists, something rewrote `.git/objects`: treat the box as compromised. |
-| `after the reset these tracked files are not the ones commit X holds` | Something rewrote files during the reset: a filter in `.git/config` / `.git/info/attributes`, or a process writing into the checkout. Find it before updating again. |
+| `after the reset these tracked files are not the ones commit X holds` | Something rewrote files during the reset: a filter or an end-of-line conversion (`.git/config`, `.git/info/attributes`, a global `core.autocrlf=true`), or a process writing into the checkout. Find it before updating again. |
 
 ### A failed `install.sh` puts more back
 
