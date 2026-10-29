@@ -128,6 +128,10 @@ LOCAL_TZ = _resolve_local_tz()
 # Database path - lives alongside other Orchestrator databases
 # ---------------------------------------------------------------------------
 DB_PATH = Path(__file__).resolve().parent.parent / "cron_jobs.db"
+# Owner-only, like data/tasks.db (M2 U10): it holds every job's prompt, delivery
+# target and run history. Created 0600, and tightened when an older box's 0644
+# file is opened at boot (_secure_db_file). It stays where it is.
+DB_FILE_MODE = 0o600
 
 # ---------------------------------------------------------------------------
 # Retry-on-failure configuration (M2.8)
@@ -333,6 +337,8 @@ class CronJobManager:
         # all at once against the LLM/SMS/voice path (M3.2 follow-up).
         self._catchup_semaphore = asyncio.Semaphore(CATCHUP_CONCURRENCY)
         self._init_db()
+        # Tighten an older box's 0644 file and its -wal/-shm (DB_FILE_MODE).
+        self._secure_db_file(create=False)
 
     # ------------------------------------------------------------------
     # Trigger construction
@@ -481,8 +487,26 @@ class CronJobManager:
     # Database initialisation
     # ------------------------------------------------------------------
 
+    def _secure_db_file(self, *, create: bool) -> None:
+        """Owner-only cron_jobs.db. ``create``: make a missing file 0600 BEFORE
+        SQLite does (it would use the umask, 0644). Otherwise chmod the file and
+        its -wal/-shm 0600; SQLite gives later sidecars the main file's mode.
+        Never fatal: a mode this process cannot change is a warning."""
+        if create:
+            try:
+                fd = os.open(self.db_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, DB_FILE_MODE)
+                os.close(fd)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                logger.warning("[CRON] could not create %s 0600: %s", self.db_path, exc)
+            return
+        from Orchestrator.migrations.tasks_db_location import secure_db_files
+        secure_db_files(Path(self.db_path), log_tag="CRON")
+
     def _init_db(self) -> None:
         """Create tables if they do not exist."""
+        self._secure_db_file(create=True)
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()

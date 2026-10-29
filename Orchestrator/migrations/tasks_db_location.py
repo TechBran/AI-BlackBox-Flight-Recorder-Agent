@@ -153,15 +153,17 @@ def _task_rows(db: Path) -> Optional[int]:
         return None
 
 
-def secure_db_files(db: Path) -> None:
+def secure_db_files(db: Path, *, log_tag: str = "TASKS-DB") -> None:
     """chmod the DB and any present sidecars 0600. SQLite creates later -wal/-shm
-    files with the main file's mode, so this also covers future sidecars."""
+    files with the main file's mode, so this also covers future sidecars. Never
+    raises: a mode this process cannot change is logged (``log_tag`` names the
+    DB's owner; the scheduler's cron_jobs.db uses it too)."""
     for p in (db, *(_sidecar(db, s) for s in SIDECAR_SUFFIXES)):
         try:
             if p.exists():
                 os.chmod(p, FILE_MODE)
         except OSError as exc:
-            logger.warning("[TASKS-DB] could not chmod %s to 0600: %s", p, exc)
+            logger.warning("[%s] could not chmod %s to 0600: %s", log_tag, p, exc)
 
 
 def _ensure_private_dir(d: Path) -> None:
