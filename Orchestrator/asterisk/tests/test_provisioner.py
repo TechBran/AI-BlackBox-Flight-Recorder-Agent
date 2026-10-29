@@ -162,6 +162,14 @@ def test_reload_asterisk_ok(fake_run, monkeypatch):
     assert "dialplan reload" in flat1
 
 
+def test_reload_asterisk_never_prompts_for_a_password(fake_run, monkeypatch):
+    monkeypatch.delenv("ASTERISK_NO_SUDO", raising=False)
+    monkeypatch.setattr(provisioner, "ASTERISK_BIN", "/usr/sbin/asterisk")
+    provisioner.reload_asterisk()
+    for call in fake_run:
+        assert call["cmd"][:3] == ["sudo", "-n", "/usr/sbin/asterisk"], call["cmd"]
+
+
 def test_reload_asterisk_filenotfound(monkeypatch):
     def _boom(*a, **k):
         raise FileNotFoundError("asterisk: command not found")

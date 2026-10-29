@@ -153,10 +153,15 @@ def remove_gateway_config(trunk_name: str) -> bool:
 # Reload
 # ---------------------------------------------------------------------------
 def _asterisk_cmd(cli_arg: str) -> list:
-    """Build the argv for ``asterisk -rx "<cli_arg>"`` (with sudo unless told not to)."""
+    """Build the argv for ``asterisk -rx "<cli_arg>"`` (with sudo unless told not to).
+
+    ``sudo -n``: the install-time sudoers rule grants exactly these two
+    reloads without a password; anything else fails at once with a non-zero
+    code (reported as restart_recommended) instead of waiting for a password
+    no one can type (audit O11-telephony-asterisk-cellular-05)."""
     cmd = [ASTERISK_BIN, "-rx", cli_arg]
     if not os.getenv("ASTERISK_NO_SUDO"):
-        cmd = ["sudo"] + cmd
+        cmd = ["sudo", "-n"] + cmd
     return cmd
 
 

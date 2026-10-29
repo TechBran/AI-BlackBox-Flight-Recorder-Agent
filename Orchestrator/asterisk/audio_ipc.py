@@ -149,7 +149,7 @@ class AudioIPCClient:
         # Per-channel callbacks
         self._audio_handlers: Dict[str, Callable[[str, bytes], Awaitable[None]]] = {}
         self._hangup_handlers: Dict[str, Callable[[str], Awaitable[None]]] = {}
-        # Hangup callbacks run as tasks; held here until they end.
+        # Per-channel callbacks run as tasks; held here until they end.
         self._handler_tasks: set = set()
 
     # ------------------------------------------------------------------
@@ -295,6 +295,7 @@ class AudioIPCClient:
         self.last_error = ""
         self._address = None
         self._output_tail.clear()
+        parent_sock = None
         try:
             parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
@@ -309,6 +310,7 @@ class AudioIPCClient:
 
             # Wrap our socket end as asyncio streams
             reader, writer = await asyncio.open_connection(sock=parent_sock)
+            parent_sock = None  # the writer owns it now
             self._reader = reader
             self._writer = writer
             self._ready = asyncio.get_running_loop().create_future()
@@ -321,6 +323,8 @@ class AudioIPCClient:
         except Exception as e:
             self.last_error = f"could not spawn it: {e}"
             print(f"[IPC] Failed to start audio subprocess: {e}")
+            if parent_sock is not None:
+                parent_sock.close()
             await self._stop_child()
             return False
 
