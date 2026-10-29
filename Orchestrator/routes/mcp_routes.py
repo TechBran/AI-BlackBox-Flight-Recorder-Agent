@@ -23,6 +23,7 @@ import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -90,18 +91,52 @@ def _write_tokens(tokens: dict) -> None:
     atomic_json.write_json(MCP_TOKENS_FILE, tokens, trailing_newline=True, cross_process=True)
 
 
+def _legacy_reload_url() -> Optional[str]:
+    """Where an MCP server started before the control listener moved serves
+    /internal/reload: its main listener, MCP_SERVER_URL. Only a loopback
+    address qualifies, so the reload secret never leaves the box."""
+    try:
+        parts = urlsplit(MCP_SERVER_URL)
+        host = parts.hostname
+    except ValueError:
+        return None
+    if parts.scheme != "http" or host not in ("127.0.0.1", "localhost", "::1"):
+        return None
+    return f"{MCP_SERVER_URL.rstrip('/')}/internal/reload"
+
+
 def _trigger_reload() -> bool:
     """Best-effort: ask the running MCP server to hot-reload its token map + URL.
     True if reloaded; False if the endpoint is not up yet (changes then take effect
     on the next blackbox-mcp.service restart). The call goes to the MCP server's
     loopback control listener -- never its Funnel-exposed :9093 listener, which no
     longer serves /internal/reload (audit O20-mcp-server-08) -- and carries the
-    per-boot reload secret (audit M3 U20)."""
+    per-boot reload secret (audit M3 U20).
+
+    The in-app updater restarts blackbox.service only, so after an update the
+    MCP process can still be the old one, with no control listener and the
+    endpoint on its main loopback listener. When nothing listens on the control
+    port, the reload goes there once instead: a revoked token must not stay
+    valid on the public /mcp gate until someone restarts blackbox-mcp. A
+    current MCP server answers that path 404, so this never reloads one."""
     try:
         secret = internal_secret.ensure_secret(internal_secret.mcp_reload_secret_path())
+    except Exception:
+        return False
+    headers = {internal_secret.SECRET_HEADER: secret}
+    try:
         r = httpx.post(f"{internal_secret.mcp_control_url()}/internal/reload",
-                       headers={internal_secret.SECRET_HEADER: secret}, timeout=5)
+                       headers=headers, timeout=5)
         return r.status_code == 200
+    except httpx.ConnectError:
+        pass                    # nothing on the control port: maybe a pre-update server
+    except Exception:
+        return False
+    legacy = _legacy_reload_url()
+    if legacy is None:
+        return False
+    try:
+        return httpx.post(legacy, headers=headers, timeout=5).status_code == 200
     except Exception:
         return False
 
@@ -261,8 +296,15 @@ def revoke_token(token_id: str):
             raise HTTPException(404, "no token with that token_id")
         for tok in match:
             del tokens[tok]
-    _trigger_reload()
-    return {"ok": True, "revoked": len(match)}
+    reloaded = _trigger_reload()
+    return {
+        "ok": True,
+        "revoked": len(match),
+        "live": reloaded,
+        "note": None if reloaded else
+                "Token removed. The running MCP server still accepts it until "
+                "blackbox-mcp.service reloads or restarts.",
+    }
 
 
 class PublicUrlBody(BaseModel):

@@ -165,3 +165,111 @@ def test_control_port_parsing(monkeypatch, raw, port):
     monkeypatch.setenv("BLACKBOX_MCP_CONTROL_PORT", raw)
     assert isec.mcp_control_port() == port
     assert isec.mcp_control_url() == f"http://127.0.0.1:{port}"
+
+
+# ------------------- an MCP server started before the control listener moved
+
+def _closed_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_trigger_reload_reaches_an_mcp_server_from_before_the_move(secret_file, monkeypatch):
+    """The in-app updater restarts blackbox.service only, so an updated
+    Orchestrator can face the old MCP process: no control listener, and
+    /internal/reload still on its main loopback listener. The reload (a token
+    revoke above all) must still go live there."""
+    import http.server
+    import threading as _t
+    from Orchestrator.routes import mcp_routes
+
+    monkeypatch.setenv("BLACKBOX_MCP_RELOAD_SECRET_FILE", str(secret_file))
+    monkeypatch.setenv("BLACKBOX_MCP_CONTROL_PORT", str(_closed_port()))
+    seen = []
+
+    class _OldMcp(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            ok = (self.path == "/internal/reload"
+                  and isec.verify(self.headers.get(isec.SECRET_HEADER), secret_file))
+            seen.append((self.path, ok))
+            self.send_response(200 if ok else 403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    old = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _OldMcp)
+    _t.Thread(target=old.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(mcp_routes, "MCP_SERVER_URL",
+                            f"http://127.0.0.1:{old.server_address[1]}")
+        assert mcp_routes._trigger_reload() is True
+    finally:
+        old.shutdown()
+        old.server_close()
+    assert seen == [("/internal/reload", True)]
+
+
+def _recording_post(monkeypatch, mcp_routes, control_answer):
+    import httpx
+    urls = []
+
+    class _R:
+        def __init__(self, code):
+            self.status_code = code
+
+    def fake_post(url, headers=None, **kw):
+        urls.append(url)
+        if url.startswith(isec.mcp_control_url()):
+            if control_answer == "refused":
+                raise httpx.ConnectError("connection refused")
+            if control_answer == "timeout":
+                raise httpx.ReadTimeout("timed out")
+            return _R(control_answer)
+        return _R(200)
+
+    monkeypatch.setattr(mcp_routes.httpx, "post", fake_post)
+    return urls
+
+
+@pytest.mark.parametrize("answer", [403, 404, 500, "timeout"])
+def test_a_control_listener_that_answers_is_never_bypassed(secret_file, monkeypatch, answer):
+    """Only a refused connection (nothing listening) falls back: a control
+    listener that is there and says no, or hangs, is the answer."""
+    from Orchestrator.routes import mcp_routes
+
+    monkeypatch.setenv("BLACKBOX_MCP_RELOAD_SECRET_FILE", str(secret_file))
+    monkeypatch.delenv("BLACKBOX_MCP_CONTROL_PORT", raising=False)
+    urls = _recording_post(monkeypatch, mcp_routes, answer)
+    assert mcp_routes._trigger_reload() is False
+    assert urls == ["http://127.0.0.1:9094/internal/reload"]
+
+
+@pytest.mark.parametrize("legacy", ["http://10.0.0.5:9093", "https://box.example.ts.net:8443",
+                                    "http://127.0.0.1.evil.example:9093", "not a url"])
+def test_the_fallback_never_sends_the_secret_off_loopback(secret_file, monkeypatch, legacy):
+    from Orchestrator.routes import mcp_routes
+
+    monkeypatch.setenv("BLACKBOX_MCP_RELOAD_SECRET_FILE", str(secret_file))
+    monkeypatch.delenv("BLACKBOX_MCP_CONTROL_PORT", raising=False)
+    monkeypatch.setattr(mcp_routes, "MCP_SERVER_URL", legacy)
+    urls = _recording_post(monkeypatch, mcp_routes, "refused")
+    assert mcp_routes._trigger_reload() is False
+    assert urls == ["http://127.0.0.1:9094/internal/reload"]
+
+
+def test_the_fallback_goes_to_the_loopback_main_listener(secret_file, monkeypatch):
+    from Orchestrator.routes import mcp_routes
+
+    monkeypatch.setenv("BLACKBOX_MCP_RELOAD_SECRET_FILE", str(secret_file))
+    monkeypatch.delenv("BLACKBOX_MCP_CONTROL_PORT", raising=False)
+    monkeypatch.setattr(mcp_routes, "MCP_SERVER_URL", "http://127.0.0.1:9093")
+    urls = _recording_post(monkeypatch, mcp_routes, "refused")
+    assert mcp_routes._trigger_reload() is True
+    assert urls == ["http://127.0.0.1:9094/internal/reload",
+                    "http://127.0.0.1:9093/internal/reload"]

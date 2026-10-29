@@ -49,6 +49,12 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:9093/internal/
 The service refuses to start (and logs why) if its tool catalog is empty or fails
 to build, rather than serving clients zero tools.
 
+The in-app updater restarts `blackbox.service` only. After an update that changes
+`MCP/`, restart this service too (`sudo systemctl restart blackbox-mcp.service`) to
+load the new server code. Until then onboarding's reload still reaches the running
+server: when nothing listens on the control port, it posts to the old server's
+`/internal/reload` on `127.0.0.1:9093` instead (loopback only, same secret).
+
 ## 3. Public exposure (Tailscale Funnel)
 Publish **only** the MCP endpoint and the OAuth paths, each mounted at the same
 path on `:8443` (Funnel strips the mount and prepends the target's path):

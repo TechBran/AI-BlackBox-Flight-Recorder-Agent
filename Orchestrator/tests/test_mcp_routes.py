@@ -101,3 +101,20 @@ def test_funnel_up_requires_confirm(client):
     c, _ = client
     assert c.post("/mcp/funnel/up", json={"confirm": False}).status_code == 400
     assert c.post("/mcp/funnel/up", json={}).status_code == 400
+
+
+def test_revoke_says_whether_the_revocation_is_live(client, monkeypatch):
+    """A revoke the running MCP server did not pick up leaves the token valid
+    on the public /mcp gate until a restart: the answer must say so, as mint's
+    does, instead of an unconditional ok."""
+    c, _store = client
+    tid = c.post("/mcp/tokens", json={"operator": "Alice"}).json()["token_id"]
+    body = c.delete("/mcp/tokens", params={"token_id": tid}).json()
+    assert body["ok"] is True and body["revoked"] == 1
+    assert body["live"] is False
+    assert "restart" in body["note"]
+
+    monkeypatch.setattr(mcp_routes, "_trigger_reload", lambda: True)
+    tid = c.post("/mcp/tokens", json={"operator": "Bob"}).json()["token_id"]
+    body = c.delete("/mcp/tokens", params={"token_id": tid}).json()
+    assert body["live"] is True and body["note"] is None
