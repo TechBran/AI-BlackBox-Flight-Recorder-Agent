@@ -164,14 +164,6 @@ def test_twilio_cli_call_operator_is_optional():
     assert CLICallRequest(to="+15555550123").operator is None
 
 
-def test_cellular_ivr_single_operator_falls_back_to_the_roster_default(monkeypatch):
-    from Orchestrator.cellular import ivr as cell_ivr
-    monkeypatch.setattr(config, "USERS_LIST", [])
-    monkeypatch.setattr(config, "USERS_DEFAULT", "Default")
-    session = cell_ivr.CellularIVR.__new__(cell_ivr.CellularIVR)
-    assert asyncio.run(session.run_operator_selection()) == "Default"
-
-
 def test_asterisk_ivr_single_operator_falls_back_to_the_roster_default(monkeypatch):
     from Orchestrator.asterisk import ivr as ast_ivr
     monkeypatch.setattr(config, "USERS_LIST", [])

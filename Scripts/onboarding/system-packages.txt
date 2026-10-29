@@ -44,8 +44,6 @@ g++                      # SHOULD_HAVE # ydotool 1.x build (C++ compiler)
 scdoc                    # SHOULD_HAVE # ydotool 1.x manpage build
 
 # === FEATURE_OPTIONAL ===
-docker.io                # FEATURE_OPTIONAL # phone integration (FreeSwitch/Drachtio)
-docker-compose           # FEATURE_OPTIONAL # phone integration
 adb                      # FEATURE_OPTIONAL # Android device pairing routes
 asterisk                 # FEATURE_OPTIONAL # local PBX backend (TELEPHONY_PROVIDER=asterisk, see Orchestrator/asterisk/)
 

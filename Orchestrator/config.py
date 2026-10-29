@@ -1037,30 +1037,11 @@ GROK_LIVE_OUTPUT_SAMPLE_RATE = 24000    # PCM16 AI output — matches Portal/And
 GROK_LIVE_SAMPLE_RATE = GROK_LIVE_OUTPUT_SAMPLE_RATE  # legacy alias — status back-compat only
 
 # =============================================================================
-# Phone Integration (3CX + Drachtio + FreeSwitch)
+# Phone Integration (Twilio, Asterisk/TG200)
 # =============================================================================
 
 # Phone Feature Toggle
 PHONE_ENABLED = os.getenv("PHONE_ENABLED", "false").lower() == "true"
-
-# 3CX Cloud PBX Settings
-PBX_3CX_URL = os.getenv("PBX_3CX_URL", "")           # e.g., "yourcompany.3cx.us"
-PBX_3CX_EXTENSION = os.getenv("PBX_3CX_EXTENSION", "")
-PBX_3CX_PASSWORD = os.getenv("PBX_3CX_PASSWORD", "")
-PBX_3CX_DID = os.getenv("PBX_3CX_DID", "")           # DID phone number
-PBX_OUTBOUND_CALLER_ID = os.getenv("PBX_OUTBOUND_CALLER_ID", "")
-
-# Drachtio SIP Server (for SIP signaling)
-DRACHTIO_HOST = os.getenv("DRACHTIO_HOST", "localhost")
-DRACHTIO_PORT = int(os.getenv("DRACHTIO_PORT", "9022"))
-DRACHTIO_SECRET = os.getenv("DRACHTIO_SECRET", "cymru")
-
-# FreeSwitch Media Server (for audio handling)
-FREESWITCH_HOST = os.getenv("FREESWITCH_HOST", "localhost")
-FREESWITCH_ESL_PORT = int(os.getenv("FREESWITCH_ESL_PORT", "8021"))
-FREESWITCH_ESL_PASSWORD = os.getenv("FREESWITCH_ESL_PASSWORD", "ClueCon")
-FREESWITCH_RTP_START = int(os.getenv("FREESWITCH_RTP_START", "16384"))
-FREESWITCH_RTP_END = int(os.getenv("FREESWITCH_RTP_END", "32768"))
 
 # Phone Audio Settings
 PHONE_SAMPLE_RATE = 8000                 # G.711 standard (8kHz)

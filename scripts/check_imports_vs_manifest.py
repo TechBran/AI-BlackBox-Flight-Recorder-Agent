@@ -58,8 +58,6 @@ TAGS = ("[transitive]", "[runtime]")
 # Imports the runtime code makes that are deliberately NOT in requirements.in.
 # Each needs a reason; an entry nothing imports any more is reported as stale.
 OPTIONAL_IMPORTS = {
-    "greenswitch": "FreeSWITCH ESL client; Orchestrator/phone/sip_client.py "
-                   "runs without it (legacy SIP path)",
     "hf_transfer": "optional faster Hugging Face downloads; "
                    "localstack_downloads.py uses it only when present",
     "sentence_transformers": "CPU reranker, installed on capable boxes by "

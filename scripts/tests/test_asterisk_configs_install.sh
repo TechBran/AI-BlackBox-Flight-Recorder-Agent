@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Test for Orchestrator/asterisk/configs/install.sh (audit W05).
 #
-# The ARI password used to be a literal in this script and setup.sh. Now its
+# The ARI password used to be a literal in this script (and its old setup.sh
+# alias, now deleted). Now its
 # only home is ASTERISK_ARI_PASSWORD in .env: generated when empty, replaced on
 # --rotate-ari-password, and rendered into ari.conf. Runs the real script in a
 # mktemp sandbox (ASTERISK_ETC + BLACKBOX_ROOT overrides) with systemctl,
@@ -13,16 +14,14 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/Orchestrator/asterisk/configs/install.sh"
-SETUP="$REPO_ROOT/Orchestrator/asterisk/configs/setup.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 [[ -f "$SCRIPT" ]] || fail "install.sh not found at $SCRIPT"
 bash -n "$SCRIPT" || fail "install.sh does not parse"
-bash -n "$SETUP" || fail "setup.sh does not parse"
 
-# No credential literal may come back into either tracked script.
-for f in "$SCRIPT" "$SETUP"; do
+# No credential literal may come back into the tracked script.
+for f in "$SCRIPT"; do
     grep -nE '(^|[^$])-u [A-Za-z0-9_]+:[^$<"]' "$f" && fail "$f passes a literal user:password to curl"
     grep -nE '^[[:space:]]*password=[^$]' "$f" && fail "$f contains a literal password= line"
 done
@@ -36,9 +35,8 @@ trap 'rm -rf "$WORK"' EXIT
 CONFIGS="$WORK/root/Orchestrator/asterisk/configs"
 mkdir -p "$WORK/root/Scripts" "$CONFIGS" "$WORK/etc/asterisk" "$WORK/bin"
 cp "$REPO_ROOT/Scripts/env_key.py" "$WORK/root/Scripts/env_key.py"
-cp "$SCRIPT" "$SETUP" "$CONFIGS/"
+cp "$SCRIPT" "$CONFIGS/"
 SCRIPT="$CONFIGS/install.sh"
-SETUP="$CONFIGS/setup.sh"
 printf 'ASTERISK_ARI_USER=blackbox\nASTERISK_ARI_PASSWORD=\nOTHER=keep\n' > "$WORK/root/.env"
 chmod 600 "$WORK/root/.env"
 printf '; repo pjsip\n' > "$CONFIGS/pjsip.conf"
@@ -87,11 +85,10 @@ grep -q 'install_prompts' "$SCRIPT" && fail "install.sh still runs a root prompt
 run || fail "install.sh failed on second run"
 [[ "$(env_val ASTERISK_ARI_PASSWORD)" == "$PW1" ]] || fail "an existing ARI password was replaced"
 
-# ── Run 3: --rotate-ari-password replaces it (setup.sh delegates) ────────────
+# ── Run 3: --rotate-ari-password replaces it ─────────────────────────────────
 printf '; installed pjsip\n' > "$WORK/etc/asterisk/pjsip.conf"
 BAKS_BEFORE="$(ls "$WORK/etc/asterisk/" | grep -c '^pjsip.conf.bak')"
-PATH="$WORK/bin:$PATH" ASTERISK_ETC="$WORK/etc/asterisk" BLACKBOX_ROOT="$WORK/root" \
-    bash "$SETUP" --rotate-ari-password > "$WORK/out.log" 2>&1 || fail "setup.sh --rotate-ari-password failed"
+run --rotate-ari-password || fail "install.sh --rotate-ari-password failed"
 [[ "$(cat "$WORK/etc/asterisk/pjsip.conf")" == "; installed pjsip" ]] \
     || fail "--rotate-ari-password overwrote pjsip.conf (rotation must touch ari.conf only)"
 [[ "$(ls "$WORK/etc/asterisk/" | grep -c '^pjsip.conf.bak')" == "$BAKS_BEFORE" ]] \

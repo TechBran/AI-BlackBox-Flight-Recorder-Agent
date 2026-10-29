@@ -8,8 +8,9 @@ Telephony now runs on Asterisk/PJSIP via the TG200 gateway.
 Remaining components:
 - hotplug.py: USB hot-plug monitor for SIM detection
 - internet_manager.py: SIM8260G cellular internet failover
-- audio_stream.py: Serial audio stream (retained for compatibility)
-- ivr.py: Local IVR handling
+
+The serial audio stream and its IVR (audio_stream.py, ivr.py) had no importers
+and are gone (audit O11-telephony-asterisk-cellular-17).
 """
 
 from Orchestrator.cellular.hotplug import get_hotplug_monitor, start_hotplug_monitor

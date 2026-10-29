@@ -72,4 +72,3 @@ GATEWAYS_FILE = os.path.join(os.path.dirname(__file__), "gateways.json")
 # Asterisk dialplan contexts
 # ---------------------------------------------------------------------------
 ASTERISK_INBOUND_CONTEXT = "from-tg200"
-ASTERISK_OUTBOUND_CONTEXT = "to-tg200"

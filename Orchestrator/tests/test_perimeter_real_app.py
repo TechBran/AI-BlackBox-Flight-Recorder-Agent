@@ -112,7 +112,7 @@ def test_route_enumeration_finds_every_known_socket():
     must = {
         "/ws/agent/{session_id}", "/app-proxy/{port}/{path:path}",
         "/cu/view/{session_id}/ws", "/cli-agent/ws/{session_id}", "/ws/stt",
-        "/ws/phone/{session_id}", "/ws/realtime/{session_id}",
+        "/ws/realtime/{session_id}",
         "/ws/gemini-live/{session_id}", "/ws/grok-live/{session_id}",
         "/ws/gemini-agent/{session_id}", "/twilio/media/{session_id}",
         "/twilio/cli/media/{session_id}/{cli_session_id}",

@@ -12,7 +12,7 @@ works" becomes real.
 
 Layout written into ``BLACKBOX_D``:
   - ``_shared.conf``        : the gateway-INDEPENDENT dialplan contexts
-                              (``from-tg200`` / ``to-tg200`` / ``blackbox-audiosocket``).
+                              (``from-tg200`` / ``blackbox-audiosocket``).
                               Written ONCE (idempotent overwrite). If each
                               per-gateway file repeated these contexts, a
                               ``dialplan reload`` would error on duplicate
@@ -33,9 +33,9 @@ import subprocess
 
 from Orchestrator.asterisk import gateway_manager
 from Orchestrator.asterisk.config import (
+    ASTERISK_AUDIOSOCKET_HOST,
     ASTERISK_AUDIOSOCKET_PORT,
     ASTERISK_INBOUND_CONTEXT,
-    ASTERISK_OUTBOUND_CONTEXT,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,12 +73,16 @@ def render_shared_dialplan() -> str:
       - ``[from-tg200]``          inbound: hand any incoming call to the Stasis
                                   app ``blackbox``.
       - ``[blackbox-audiosocket]`` bridge a channel to the Orchestrator's
-                                  AudioSocket TCP server.
-      - ``[to-tg200]``            minimal outbound convenience (PJSIP dialing is
-                                  otherwise implicit via ``PJSIP/<num>@<trunk>``).
+                                  AudioSocket TCP server, at the address its
+                                  audio subprocess binds (audio_ipc.py).
+
+    Outbound calls need no context: ARI originates ``PJSIP/<num>@<trunk>``.
+    The ``[to-tg200]`` this used to render dialled ``PJSIP/${EXTEN}``, an
+    endpoint-name lookup that could not reach a phone number, and nothing
+    used it (audit O11-telephony-asterisk-cellular-17).
     """
     inbound = ASTERISK_INBOUND_CONTEXT       # "from-tg200"
-    outbound = ASTERISK_OUTBOUND_CONTEXT     # "to-tg200"
+    audiosocket_host = ASTERISK_AUDIOSOCKET_HOST
     audiosocket_port = ASTERISK_AUDIOSOCKET_PORT
 
     return f"""; === BlackBox shared dialplan (gateway-independent) ===
@@ -92,16 +96,10 @@ exten => _.,1,NoOp(Inbound via ${{CHANNEL(endpoint)}})
  same => n,Stasis(blackbox,inbound)
  same => n,Hangup()
 
-[{outbound}]
-; Outbound convenience. PJSIP dialing is normally PJSIP/<num>@<trunk>; this lets
-; channels originate into a trunk context generically.
-exten => _.,1,Dial(PJSIP/${{EXTEN}})
- same => n,Hangup()
-
 [blackbox-audiosocket]
 ; Bridge the channel's audio to the Orchestrator AudioSocket server over TCP.
 exten => s,1,Answer()
- same => n,AudioSocket(${{CALL_UUID}},127.0.0.1:{audiosocket_port})
+ same => n,AudioSocket(${{CALL_UUID}},{audiosocket_host}:{audiosocket_port})
  same => n,Hangup()
 """
 

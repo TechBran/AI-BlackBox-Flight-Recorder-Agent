@@ -35,6 +35,8 @@ credentials/
 
 # Asterisk / FreeSWITCH config files (contain inline SIP/ARI passwords)
 Orchestrator/asterisk/configs/*.conf
+# The FreeSWITCH stack under Docker/ is gone, but a box that ran it may still
+# hold these local files with their passwords: keep them ignored.
 Docker/freeswitch/config/freeswitch.xml
 Docker/freeswitch/config/directory/
 

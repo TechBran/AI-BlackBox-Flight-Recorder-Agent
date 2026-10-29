@@ -81,8 +81,16 @@ def test_render_shared_dialplan_contents():
     assert "AudioSocket(" in out
     assert str(ASTERISK_AUDIOSOCKET_PORT) in out
     assert "blackbox-audiosocket" in out
-    # Outbound context is implicit but included as a minimal convenience.
-    assert "to-tg200" in out
+    # Outbound calls are originated over ARI; the dead [to-tg200] context
+    # (Dial(PJSIP/${EXTEN}), an endpoint lookup) is not rendered.
+    assert "to-tg200" not in out
+
+
+def test_the_dialplan_dials_the_address_the_audio_subprocess_binds(monkeypatch):
+    from Orchestrator.asterisk import audio_ipc
+    client = audio_ipc.AudioIPCClient()
+    out = provisioner.render_shared_dialplan()
+    assert f"AudioSocket(${{CALL_UUID}},{client.host}:{client.port})" in out
 
 
 # ---------------------------------------------------------------------------

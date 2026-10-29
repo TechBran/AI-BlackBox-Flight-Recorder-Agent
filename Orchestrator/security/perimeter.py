@@ -25,8 +25,6 @@ from Orchestrator.config import (
     BLACKBOX_TAILNET_HOSTNAME,
     CFG,
     DEFAULT_ORIGIN,
-    DRACHTIO_PORT,
-    FREESWITCH_ESL_PORT,
     LOCAL_MODELS_BASE_URL,
     OLLAMA_BASE_URL,
     ORCHESTRATOR_PORT,
@@ -54,6 +52,10 @@ _CU_DESKTOP_PORTS = frozenset(range(5900, 6000)) | frozenset(range(6080, 6200))
 # MCP, Asterisk ARI, Ollama, llama-swap, the legacy vLLM reranker.
 _DEFAULT_SERVICE_PORTS = frozenset({9093, 8088, 11434, 9098, 8091})
 
+# The retired FreeSWITCH phone stack's control planes, ESL and the Drachtio
+# admin port: its code is gone, but a box that ran its Docker stack may still.
+_LEGACY_TELEPHONY_PORTS = frozenset({8021, 9022})
+
 
 def _loopback_url_port(url: str):
     """The port of a configured service URL when it points at THIS box's
@@ -79,9 +81,8 @@ def reserved_ports() -> frozenset:
     surface), Chrome DevTools (full control of the CU browser), the CU
     desktop bridges (the real screen), the telephony control planes and the
     local model servers."""
-    ports = set(_CU_DESKTOP_PORTS) | set(_DEFAULT_SERVICE_PORTS)
-    ports |= {ORCHESTRATOR_PORT, ASTERISK_AUDIOSOCKET_PORT, ASTERISK_AMI_PORT,
-              DRACHTIO_PORT, FREESWITCH_ESL_PORT}
+    ports = set(_CU_DESKTOP_PORTS) | set(_DEFAULT_SERVICE_PORTS) | set(_LEGACY_TELEPHONY_PORTS)
+    ports |= {ORCHESTRATOR_PORT, ASTERISK_AUDIOSOCKET_PORT, ASTERISK_AMI_PORT}
     rerank_url = CFG.get("rerank", "base_url", fallback="") or ""
     for url in (os.getenv("BLACKBOX_MCP_INTERNAL_URL", ""), ASTERISK_ARI_URL,
                 OLLAMA_BASE_URL, LOCAL_MODELS_BASE_URL, rerank_url):
