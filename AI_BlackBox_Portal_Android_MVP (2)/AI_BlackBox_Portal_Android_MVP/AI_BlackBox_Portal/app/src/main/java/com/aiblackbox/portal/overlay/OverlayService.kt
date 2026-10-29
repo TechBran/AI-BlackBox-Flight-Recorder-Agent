@@ -24,7 +24,6 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.ImageReader
 import android.media.MediaPlayer
-import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -255,7 +254,7 @@ class OverlayService : Service() {
     // =========================================================================
 
     // Realtime model selection
-    enum class RealtimeModel { NONE, GPT_REALTIME, GEMINI_LIVE, GROK_LIVE }
+    enum class RealtimeModel { GPT_REALTIME, GEMINI_LIVE, GROK_LIVE }
     private var currentRealtimeModel: RealtimeModel = RealtimeModel.GEMINI_LIVE
 
     // Realtime connection state
@@ -279,7 +278,6 @@ class OverlayService : Service() {
     private val audioTrackLock = Object()  // Lock for thread-safe AudioTrack access
     private var isAISpeaking = false
     private var isUserMuted = false  // User manually muted via button press
-    private var wasMicActiveBeforeAI = false  // Track mic state before AI started speaking
 
     // Audio playback completion tracking (prevents feedback loop)
     private var responseCompleteReceived = false  // Backend said response is done
@@ -598,7 +596,6 @@ class OverlayService : Service() {
         // Get other extras
         serverUrl = intent?.getStringExtra(EXTRA_SERVER_URL) ?: ""
         currentOperator = intent?.getStringExtra(EXTRA_OPERATOR)?.trim().orEmpty()
-        val requestedRecordingMode = intent?.getBooleanExtra(EXTRA_RECORDING_MODE, false) ?: false
 
         // Initialize MediaProjection after foreground started
         if (pendingResultCode == Activity.RESULT_OK && pendingResultData != null) {
@@ -717,11 +714,7 @@ class OverlayService : Service() {
         stopScreenSharing()
         releaseAudioTrack()
         // NOTE: Session transcript is saved by the BACKEND when WebSocket closes
-        // (see gemini_live_routes.py save_session_to_blackbox)
-        // Removed duplicate save here to prevent two snapshots from same session
-        // if (isRealtimeConnected) {
-        //     saveSessionToBlackBox()
-        // }
+        // (see gemini_live_routes.py save_session_to_blackbox); the overlay never saves it.
         realtimeWebSocket?.close(1000, "Service destroyed")
         realtimeWebSocket = null
         isRealtimeConnected = false
@@ -1844,170 +1837,6 @@ class OverlayService : Service() {
         }, delay)
     }
 
-    /**
-     * Legacy screenshot capture - creates new VirtualDisplay each time.
-     * Used as fallback when persistent display isn't available.
-     */
-    private fun captureScreenLegacy(callback: (File?) -> Unit) {
-        Log.d(TAG, "Using legacy screenshot capture (creates new VirtualDisplay)")
-        try {
-            // If we were in recording mode, release those resources first
-            if (currentDisplayMode == DisplayMode.RECORDING) {
-                Log.d(TAG, "Switching from recording mode to screenshot mode")
-                virtualDisplay?.release()
-                virtualDisplay = null
-                currentDisplayMode = DisplayMode.NONE
-            }
-
-            // Reuse existing screenshot VirtualDisplay if available
-            if (currentDisplayMode == DisplayMode.SCREENSHOT && virtualDisplay != null && imageReader != null) {
-                Log.d(TAG, "Reusing existing screenshot VirtualDisplay")
-                attemptImageCapture(callback, attempt = 1, maxAttempts = 3)
-                return
-            }
-
-            // Need to create new screenshot VirtualDisplay
-            Log.d(TAG, "Creating new screenshot VirtualDisplay")
-
-            // Clean up any existing resources
-            virtualDisplay?.release()
-            virtualDisplay = null
-            imageReader?.close()
-            imageReader = null
-
-            Log.d(TAG, "Creating ImageReader ${screenWidth}x${screenHeight}")
-            imageReader = ImageReader.newInstance(
-                screenWidth, screenHeight,
-                PixelFormat.RGBA_8888, 5
-            )
-
-            Log.d(TAG, "Creating VirtualDisplay...")
-            try {
-                virtualDisplay = mediaProjection?.createVirtualDisplay(
-                    "Screenshot",
-                    screenWidth, screenHeight, screenDensity,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    imageReader?.surface, null, handler
-                )
-            } catch (se: SecurityException) {
-                Log.e(TAG, "SecurityException creating VirtualDisplay - MediaProjection invalidated", se)
-                mediaProjectionInvalidated = true
-                imageReader?.close()
-                imageReader = null
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    handler.post { requestMediaProjectionRefresh() }
-                } else {
-                    handler.post {
-                        showToast("Restart overlay for screenshots")
-                        updateStatus("Restart overlay for screenshots")
-                    }
-                }
-                callback(null)
-                return
-            }
-
-            if (virtualDisplay == null) {
-                Log.e(TAG, "Failed to create virtual display for screenshot")
-                handler.post {
-                    showToast("Screenshot failed - restart overlay")
-                    updateStatus("Capture permission lost")
-                }
-                callback(null)
-                return
-            }
-
-            currentDisplayMode = DisplayMode.SCREENSHOT
-            Log.d(TAG, "VirtualDisplay created successfully, mode set to SCREENSHOT")
-
-            // Try multiple times with increasing delays
-            attemptImageCapture(callback, attempt = 1, maxAttempts = 3)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error setting up screen capture", e)
-            callback(null)
-        }
-    }
-
-    private fun attemptImageCapture(callback: (File?) -> Unit, attempt: Int, maxAttempts: Int) {
-        val delay = 200L + (attempt * 150L)  // 350ms, 500ms, 650ms
-        Log.d(TAG, "Attempting image capture (attempt $attempt/$maxAttempts) with ${delay}ms delay")
-
-        handler.postDelayed({
-            Log.d(TAG, "Acquiring image from ImageReader (attempt $attempt)...")
-            try {
-                val image = imageReader?.acquireLatestImage()
-                if (image != null) {
-                    Log.d(TAG, "Image acquired: ${image.width}x${image.height}")
-                    val planes = image.planes
-                    val buffer = planes[0].buffer
-                    val pixelStride = planes[0].pixelStride
-                    val rowStride = planes[0].rowStride
-                    val rowPadding = rowStride - pixelStride * screenWidth
-
-                    Log.d(TAG, "Creating bitmap from buffer...")
-                    val bitmap = Bitmap.createBitmap(
-                        screenWidth + rowPadding / pixelStride,
-                        screenHeight,
-                        Bitmap.Config.ARGB_8888
-                    )
-                    bitmap.copyPixelsFromBuffer(buffer)
-                    image.close()
-
-                    // Crop to actual screen size
-                    val croppedBitmap = Bitmap.createBitmap(
-                        bitmap, 0, 0, screenWidth, screenHeight
-                    )
-                    bitmap.recycle()
-
-                    // Save to file
-                    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-                    val file = File(cacheDir, "screenshot_$timestamp.png")
-                    FileOutputStream(file).use { out ->
-                        croppedBitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-                    }
-                    croppedBitmap.recycle()
-
-                    Log.d(TAG, "Screenshot saved: ${file.absolutePath}, size=${file.length()}")
-
-                    // DON'T cleanup - keep VirtualDisplay alive for subsequent screenshots
-                    // cleanupCapture() is now only called when switching to recording mode
-                    callback(file)
-                } else {
-                    Log.w(TAG, "Image is null on attempt $attempt")
-                    if (attempt < maxAttempts) {
-                        // Retry
-                        attemptImageCapture(callback, attempt + 1, maxAttempts)
-                    } else {
-                        Log.e(TAG, "Failed to acquire image after $maxAttempts attempts")
-                        // On failure, cleanup and reset mode so we can try fresh next time
-                        cleanupCapture()
-                        currentDisplayMode = DisplayMode.NONE
-                        showToast("Screenshot failed after retries")
-                        callback(null)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error capturing screen on attempt $attempt", e)
-                cleanupCapture()
-                currentDisplayMode = DisplayMode.NONE
-                showToast("Screenshot error: ${e.message}")
-                callback(null)
-            }
-        }, delay)
-    }
-
-    private fun cleanupCapture() {
-        try {
-            virtualDisplay?.release()
-            virtualDisplay = null
-            imageReader?.close()
-            imageReader = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error cleaning up capture resources", e)
-        }
-    }
-
     // ==================== Single-frame PNG capture (Task W4 — on-device vision) ====================
 
     /**
@@ -2885,85 +2714,6 @@ class OverlayService : Service() {
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
-    /**
-     * Extract key frames from a video file for AI analysis.
-     * Uses MediaMetadataRetriever to get frames at regular intervals.
-     */
-    private fun extractVideoFrames(videoFile: File, maxFrames: Int = 5): List<Bitmap> {
-        val frames = mutableListOf<Bitmap>()
-        val retriever = MediaMetadataRetriever()
-
-        try {
-            retriever.setDataSource(videoFile.absolutePath)
-
-            // Get video duration in milliseconds
-            val durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-            val duration = durationStr?.toLongOrNull() ?: 0L
-
-            if (duration <= 0) {
-                Log.w(TAG, "Could not get video duration")
-                // Try to get at least one frame
-                val bitmap = retriever.getFrameAtTime(0)
-                bitmap?.let { frames.add(it) }
-                return frames
-            }
-
-            Log.d(TAG, "Video duration: ${duration}ms")
-
-            // Calculate interval between frames
-            val interval = duration / (maxFrames + 1)
-
-            for (i in 1..maxFrames) {
-                val timeUs = (interval * i) * 1000 // Convert ms to microseconds
-                try {
-                    val bitmap = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    if (bitmap != null) {
-                        // Scale down if too large (max 1280px on longest side)
-                        val scaledBitmap = scaleBitmapIfNeeded(bitmap, 1280)
-                        frames.add(scaledBitmap)
-                        Log.d(TAG, "Extracted frame $i at ${interval * i}ms")
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error extracting frame $i", e)
-                }
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error setting up MediaMetadataRetriever", e)
-        } finally {
-            try {
-                retriever.release()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error releasing MediaMetadataRetriever", e)
-            }
-        }
-
-        return frames
-    }
-
-    /**
-     * Scale bitmap down if it exceeds max dimension to save bandwidth and memory.
-     */
-    private fun scaleBitmapIfNeeded(bitmap: Bitmap, maxDimension: Int): Bitmap {
-        val width = bitmap.width
-        val height = bitmap.height
-        val maxSide = maxOf(width, height)
-
-        if (maxSide <= maxDimension) {
-            return bitmap
-        }
-
-        val scale = maxDimension.toFloat() / maxSide
-        val newWidth = (width * scale).toInt()
-        val newHeight = (height * scale).toInt()
-
-        val scaled = Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
-        if (scaled != bitmap) {
-            bitmap.recycle()
-        }
-        return scaled
-    }
-
     private suspend fun uploadFile(file: File, mimeType: String): String? {
         if (serverUrl.isEmpty()) return null
 
@@ -3041,7 +2791,6 @@ class OverlayService : Service() {
             RealtimeModel.GEMINI_LIVE -> geminiVoices
             RealtimeModel.GPT_REALTIME -> gptVoices
             RealtimeModel.GROK_LIVE -> grokVoices
-            else -> geminiVoices
         }
 
         val adapter = ArrayAdapter(this, R.layout.spinner_item_dark, voices)
@@ -3074,11 +2823,10 @@ class OverlayService : Service() {
             currentRealtimeModel = newModel
             Log.d(TAG, "Realtime model selected: $newModel")
 
-            // Update UI visibility - show screen share/camera buttons for both realtime models
-            // Both Gemini Live and GPT Realtime now support vision via video_frame messages
-            val visionButtonsVisible = (newModel != RealtimeModel.NONE)
-            btnScreenShareContainer?.visibility = if (visionButtonsVisible) View.VISIBLE else View.GONE
-            btnCameraContainer?.visibility = if (visionButtonsVisible) View.VISIBLE else View.GONE
+            // Every realtime model shows the screen share/camera buttons: Gemini Live and GPT
+            // Realtime take video_frame messages (startScreenSharing refuses Grok, audio only).
+            btnScreenShareContainer?.visibility = View.VISIBLE
+            btnCameraContainer?.visibility = View.VISIBLE
 
             // Update voice spinner for new model
             setupVoiceSpinner()
@@ -3149,7 +2897,6 @@ class OverlayService : Service() {
             RealtimeModel.GPT_REALTIME -> "/ws/realtime/$realtimeSessionId"
             RealtimeModel.GEMINI_LIVE -> "/ws/gemini-live/$realtimeSessionId"
             RealtimeModel.GROK_LIVE -> "/ws/grok-live/$realtimeSessionId"
-            else -> return
         }
 
         // Build WebSocket URL
@@ -3182,13 +2929,10 @@ class OverlayService : Service() {
         // Reset mic state
         isUserMuted = false
         isAISpeaking = false
-        wasMicActiveBeforeAI = false
         updateBubbleGlow()  // Clear bubble glow on disconnect
 
         // NOTE: Session transcript is saved by the BACKEND when WebSocket closes
-        // (see gemini_live_routes.py save_session_to_blackbox)
-        // Removed duplicate save here to prevent two snapshots from same session
-        // saveSessionToBlackBox()
+        // (see gemini_live_routes.py save_session_to_blackbox); the overlay never saves it.
 
         // Close WebSocket
         realtimeWebSocket?.close(1000, "User disconnected")
@@ -3554,12 +3298,7 @@ class OverlayService : Service() {
     }
 
     private fun startScreenSharing() {
-        // Screen sharing now supported for both Gemini Live and GPT Realtime
-        if (currentRealtimeModel == RealtimeModel.NONE) {
-            showToast("Select a realtime model first")
-            return
-        }
-
+        // Screen sharing is supported for both Gemini Live and GPT Realtime
         // Grok Voice API only supports audio/text - no vision capability
         if (currentRealtimeModel == RealtimeModel.GROK_LIVE) {
             showToast("Screen sharing not available - Grok is audio/text only")
@@ -3908,26 +3647,6 @@ class OverlayService : Service() {
         }
     }
 
-    // Resume mic after AI finishes speaking
-    private fun resumeMicAfterAI() {
-        isAISpeaking = false
-
-        // Only resume if user hasn't manually muted
-        if (isUserMuted) {
-            Log.d(TAG, "AI finished speaking, mic stays muted (user muted)")
-            updateMicUI(false, userMuted = true)
-            return
-        }
-
-        if (!isRealtimeConnected) {
-            Log.d(TAG, "AI finished speaking, not connected")
-            return
-        }
-
-        Log.d(TAG, "AI finished speaking, resuming mic")
-        startRealtimeAudioStreaming()
-    }
-
     @OptIn(DelicateCoroutinesApi::class)
     private fun startRealtimeAudioStreaming() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
@@ -4246,82 +3965,6 @@ class OverlayService : Service() {
         isTranscriptExpanded = !isTranscriptExpanded
         transcriptScroll?.visibility = if (isTranscriptExpanded) View.VISIBLE else View.GONE
         transcriptExpandIcon?.rotation = if (isTranscriptExpanded) 180f else 0f
-    }
-
-    private fun saveSessionToBlackBox() {
-        if (transcriptEntries.isEmpty()) {
-            Log.d(TAG, "No transcript to save")
-            return
-        }
-
-        val transcript = transcriptEntries.joinToString("\n\n") { entry ->
-            "[${entry.speaker}]: ${entry.text}"
-        }
-
-        val modelName = when (currentRealtimeModel) {
-            RealtimeModel.GPT_REALTIME -> "GPT-4o Realtime"
-            RealtimeModel.GEMINI_LIVE -> "Gemini Live"
-            else -> "Unknown"
-        }
-
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-        val sessionSummary = """
-=== $modelName Voice Session ===
-Session ID: $realtimeSessionId
-Operator: $currentOperator
-Timestamp: ${dateFormat.format(Date())}
-Messages: ${transcriptEntries.size}
-
---- Transcript ---
-$transcript
---- End Session ---
-        """.trimIndent()
-
-        coroutineScope.launch {
-            try {
-                val client = HttpClients.base.newBuilder()
-                    .connectTimeout(30, TimeUnit.SECONDS)
-                    .readTimeout(30, TimeUnit.SECONDS)
-                    .build()
-
-                val body = JSONObject().apply {
-                    put("operator", currentOperator)
-                    put("messages", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("role", "user")
-                            put("content", "[Voice Session Transcript]\n$sessionSummary")
-                        })
-                    })
-                    put("provider", "google")
-                    put("model", "gemini-2.5-pro")
-                    put("streaming", false)
-                    put("auto_checkpoint", false)
-                }.toString()
-
-                val request = Request.Builder()
-                    .url("$serverUrl/chat")
-                    .post(body.toRequestBody("application/json".toMediaType()))
-                    .build()
-
-                client.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        Log.d(TAG, "Session saved to BlackBox")
-                        handler.post { showToast("Session saved") }
-                    } else {
-                        Log.e(TAG, "Failed to save session: ${response.code}")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error saving session", e)
-            }
-        }
-
-        // Clear transcript for next session
-        transcriptEntries.clear()
-        handler.post {
-            transcriptContainer?.removeAllViews()
-            transcriptCount?.text = "0 messages"
-        }
     }
 
     private fun updateRealtimeStatus(status: String) {
