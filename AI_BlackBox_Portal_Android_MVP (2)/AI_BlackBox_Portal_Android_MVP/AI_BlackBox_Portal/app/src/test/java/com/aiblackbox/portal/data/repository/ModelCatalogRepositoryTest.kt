@@ -203,6 +203,102 @@ class ModelCatalogRepositoryTest {
         assertNull(repo(down, FileLastGoodCatalogStore(dir, "http://other:9091")).cached("anthropic"))
     }
 
+    private val anthropicFallback = """{"provider":"anthropic","source":"fallback",
+        "models":[{"id":"claude-static-1","name":"Static 1"}]}"""
+
+    @Test fun `a fallback answer never replaces the live copy on disk`() = runTest {
+        val dir = tmp.newFolder()
+        val box = FakeBox(mutableMapOf("anthropic" to anthropic))
+        val r = repo(box, FileLastGoodCatalogStore(dir, "http://box:9091"))
+        r.refresh("anthropic")
+        clock += ModelCatalogRepository.TTL_MS
+        // The provider's key or upstream goes down: the box serves its static list.
+        box.bodies["anthropic"] = anthropicFallback
+        assertEquals("the answer is still what the box said", listOf("claude-static-1"), r.refresh("anthropic")!!.ids)
+
+        // A cold start with the box unreachable lists the real models the box last listed.
+        val restarted = repo(FakeBox(mutableMapOf("anthropic" to IOException("offline"))), FileLastGoodCatalogStore(dir, "http://box:9091"))
+        assertEquals(listOf("claude-opus-5-5", "claude-sonnet-5-5"), restarted.cached("anthropic")!!.ids)
+    }
+
+    @Test fun `with no live copy saved, a fallback answer is the cold-start copy`() = runTest {
+        val dir = tmp.newFolder()
+        repo(FakeBox(mutableMapOf("anthropic" to anthropicFallback)), FileLastGoodCatalogStore(dir, "http://box:9091"))
+            .refresh("anthropic")
+        val restarted = repo(FakeBox(), FileLastGoodCatalogStore(dir, "http://box:9091"))
+        assertEquals(listOf("claude-static-1"), restarted.cached("anthropic")!!.ids)
+
+        // computer-use on a box missing one vendor's key is never fully live; its latest
+        // answer still replaces an earlier partial one.
+        val cuPartial = { id: String -> """{"source":"live","models":[{"id":"$id","backend":"anthropic"}],
+            "backends":{"anthropic":"live","google":"live","openai":"error"}}""" }
+        val cuBox = FakeBox(mutableMapOf("computer-use" to cuPartial("cu-a")))
+        val cu = repo(cuBox, FileLastGoodCatalogStore(dir, "http://box:9091"))
+        cu.refresh("computer-use")
+        cuBox.bodies["computer-use"] = cuPartial("cu-b")
+        cu.refresh("computer-use", force = true)
+        assertEquals(listOf("cu-b"), repo(FakeBox(), FileLastGoodCatalogStore(dir, "http://box:9091")).cached("computer-use")!!.ids)
+    }
+
+    @Test fun `a fallback answer is kept only as long as the box keeps it`() = runTest {
+        val box = FakeBox(mutableMapOf("anthropic" to anthropicFallback))
+        val r = repo(box)
+        r.refresh("anthropic")
+        clock += ModelCatalogRepository.FALLBACK_TTL_MS - 1
+        r.refresh("anthropic")
+        assertEquals("within the box's own fallback window", 1, box.calls.size)
+        clock += 1
+        box.bodies["anthropic"] = anthropic
+        assertEquals(2, r.refresh("anthropic")!!.ids.size)
+        assertEquals("the box is asked again once its fallback has expired", 2, box.calls.size)
+        // A live answer keeps the full TTL.
+        clock += ModelCatalogRepository.FALLBACK_TTL_MS
+        r.refresh("anthropic")
+        assertEquals(2, box.calls.size)
+    }
+
+    /** Counts disk reads and writes, and where each write ran. */
+    private class CountingStore : LastGoodCatalogStore {
+        val saved = mutableMapOf<String, LastGoodCatalogStore.Saved>()
+        var reads = 0
+        val writeThreads = mutableListOf<String>()
+        override fun read(apiProvider: String): LastGoodCatalogStore.Saved? { reads++; return saved[apiProvider] }
+        override fun write(apiProvider: String, body: String, fetchedAtMs: Long) {
+            writeThreads += Thread.currentThread().name
+            saved[apiProvider] = LastGoodCatalogStore.Saved(body, fetchedAtMs)
+        }
+    }
+
+    @Test fun `the disk copy is read once, and an unchanged answer is not written again`() = runTest {
+        val store = CountingStore()
+        store.saved["anthropic"] = LastGoodCatalogStore.Saved(anthropic, 7)
+        val box = FakeBox(mutableMapOf("anthropic" to anthropic))
+        val r = repo(box, store)
+        // The cron list asks for a name per job card on every recomposition.
+        repeat(50) { assertEquals(2, r.cached("anthropic")!!.ids.size) }
+        assertNull(r.cached("openai"))
+        assertNull(r.cached("openai"))
+        assertEquals("one read per provider per process", 2, store.reads)
+        assertFalse("still the disk copy, never trusted", r.cached("anthropic")!!.isAuthoritative)
+
+        r.refresh("anthropic")
+        r.refresh("anthropic", force = true)
+        assertEquals("the box answered what is already saved", 0, store.writeThreads.size)
+        box.bodies["anthropic"] = anthropic.replace("Claude Sonnet 5.5", "Claude Sonnet 5.5 (new)")
+        r.refresh("anthropic", force = true)
+        assertEquals(1, store.writeThreads.size)
+        assertEquals(2, store.reads)
+    }
+
+    @Test fun `the disk copy is written off the caller's thread`() {
+        val store = CountingStore()
+        val r = ModelCatalogRepository(FakeBox(mutableMapOf("anthropic" to anthropic)).fetch, store, now = { clock })
+        val caller = Thread.currentThread().name
+        kotlinx.coroutines.runBlocking { r.refresh("anthropic") }
+        assertEquals(1, store.writeThreads.size)
+        assertTrue("written on ${store.writeThreads[0]}", store.writeThreads[0] != caller)
+    }
+
     @Test fun `a damaged last-good file is set aside and read as nothing`() {
         val dir = tmp.newFolder()
         val store = FileLastGoodCatalogStore(dir, "http://box:9091")

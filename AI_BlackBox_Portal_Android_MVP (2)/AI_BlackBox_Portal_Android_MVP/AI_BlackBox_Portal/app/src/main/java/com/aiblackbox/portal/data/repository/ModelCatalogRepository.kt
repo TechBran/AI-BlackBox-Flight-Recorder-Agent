@@ -6,6 +6,9 @@ import androidx.annotation.VisibleForTesting
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.ModelCatalog
 import com.aiblackbox.portal.data.store.AtomicTextFile
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -30,12 +33,17 @@ private const val TAG = "ModelCatalogs"
  * which went stale (retired Claude ids 404'd until it was hand-patched) and disagreed with
  * the Portal, and the chat and cron screens each kept their own 5-minute cache.
  *
- *  - [refresh] answers from memory while a catalog is younger than [ttlMs], else asks the
- *    box; a successful answer replaces the memory copy and the [lastGood] copy on disk.
+ *  - [refresh] answers from memory while a catalog is younger than [ttlMs] (a live one)
+ *    or [FALLBACK_TTL_MS] (the box's static fallback list, which the box itself keeps
+ *    for only 30 s), else asks the box; an answer replaces the memory copy, and the
+ *    [lastGood] copy on disk unless it would put a fallback list over a live one.
  *  - [cached] is what the pickers show at once, with no network: the memory copy, else the
  *    last-good copy from disk, so a cold start or an unreachable box still lists real
  *    models; Constants.MODEL_CONFIG is only the placeholder for a phone that has never
- *    reached its box.
+ *    reached its box. The disk copy is read once per provider and then kept in memory:
+ *    the cron list asks for a model name per job card on every recomposition.
+ *  - [lastGood] is written on [io], never on the caller's (main) thread, since the write
+ *    fsyncs, and not at all when the box answered what is already saved.
  *  - custom (user-registered LAN servers) is never cached at any layer, here as on the
  *    box: servers are added in the wizard and models load and unload between two looks,
  *    so every [refresh] asks the box and [cached] is always null.
@@ -47,15 +55,57 @@ class ModelCatalogRepository(
     private val lastGood: LastGoodCatalogStore? = null,
     private val now: () -> Long = { System.currentTimeMillis() },
     private val ttlMs: Long = TTL_MS,
+    private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val memory = ConcurrentHashMap<String, ModelCatalog>()
+
+    /** The disk copy as read once per provider (or since written); [catalog] null = none. */
+    private class DiskCopy(val body: String?, val catalog: ModelCatalog?)
+    private val disk = ConcurrentHashMap<String, DiskCopy>()
 
     /** The freshest copy known without the network: memory, else disk; null for custom. */
     fun cached(apiProvider: String): ModelCatalog? {
         if (apiProvider == ModelCatalog.CUSTOM) return null
         memory[apiProvider]?.let { return it }
-        val saved = lastGood?.read(apiProvider) ?: return null
-        return ModelCatalog.parse(apiProvider, saved.body, saved.fetchedAtMs, fromBox = false)
+        return diskCopy(apiProvider)?.catalog
+    }
+
+    private fun diskCopy(apiProvider: String): DiskCopy? {
+        val store = lastGood ?: return null
+        disk[apiProvider]?.let { return it }
+        val saved = try {
+            store.read(apiProvider)
+        } catch (e: Exception) {
+            Log.w(TAG, "last-good $apiProvider catalog not read: ${e.message}")
+            null
+        }
+        val copy = DiskCopy(
+            saved?.body,
+            saved?.let { ModelCatalog.parse(apiProvider, it.body, it.fetchedAtMs, fromBox = false) },
+        )
+        return disk.putIfAbsent(apiProvider, copy) ?: copy
+    }
+
+    /**
+     * Save [raw] as [apiProvider]'s last-good copy, unless it is what is saved already or
+     * it would put a fallback list over a live one: a cold start with the box unreachable
+     * should list the real models the box last saw, not its static guess. A list that is
+     * never fully live (computer-use on a box missing one vendor's key) still replaces an
+     * earlier one that was not live either.
+     */
+    private suspend fun saveLastGood(apiProvider: String, raw: String, catalog: ModelCatalog) {
+        val store = lastGood ?: return
+        withContext(io) {
+            val saved = diskCopy(apiProvider)
+            if (saved?.body == raw) return@withContext
+            if (!catalog.isLive && saved?.catalog?.isLive == true) return@withContext
+            try {
+                store.write(apiProvider, raw, catalog.fetchedAtMs)
+                disk[apiProvider] = DiskCopy(raw, catalog.copy(fromBox = false))
+            } catch (e: Exception) {
+                Log.w(TAG, "last-good $apiProvider catalog not saved: ${e.message}")
+            }
+        }
     }
 
     /**
@@ -67,7 +117,10 @@ class ModelCatalogRepository(
     suspend fun refresh(apiProvider: String, force: Boolean = false): ModelCatalog? {
         val custom = apiProvider == ModelCatalog.CUSTOM
         if (!custom && !force) {
-            memory[apiProvider]?.let { hit -> if (now() - hit.fetchedAtMs < ttlMs) return hit }
+            memory[apiProvider]?.let { hit ->
+                val ttl = if (hit.isLive) ttlMs else minOf(ttlMs, FALLBACK_TTL_MS)
+                if (now() - hit.fetchedAtMs < ttl) return hit
+            }
         }
         val fetchedAt = now()
         val raw = try {
@@ -81,11 +134,7 @@ class ModelCatalogRepository(
         val catalog = ModelCatalog.parse(apiProvider, raw, fetchedAt, fromBox = true) ?: return null
         if (!custom && catalog.models.isNotEmpty()) {
             memory[apiProvider] = catalog
-            try {
-                lastGood?.write(apiProvider, raw, fetchedAt)
-            } catch (e: Exception) {
-                Log.w(TAG, "last-good $apiProvider catalog not saved: ${e.message}")
-            }
+            saveLastGood(apiProvider, raw, catalog)
         }
         return catalog
     }
@@ -100,6 +149,9 @@ class ModelCatalogRepository(
     companion object {
         /** The box caches a live catalog for 10 minutes; the phone asks again after 5. */
         const val TTL_MS = 5 * 60 * 1_000L
+
+        /** The box keeps its fallback list 30 s before trying the provider again; so does the phone. */
+        const val FALLBACK_TTL_MS = 30 * 1_000L
 
         /**
          * The box's catalog key for an app provider id; null for providers with no

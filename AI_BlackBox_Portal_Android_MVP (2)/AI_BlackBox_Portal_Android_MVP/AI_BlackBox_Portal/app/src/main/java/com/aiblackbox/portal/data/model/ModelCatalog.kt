@@ -62,14 +62,21 @@ data class ModelCatalog(
     val ids: List<String> get() = models.map { it.id }
 
     /**
+     * True when the box read this list from the provider's own live catalog (every
+     * vendor's, for the merged computer-use one). Otherwise some or all of it is the box's
+     * static "fallback" guess, served while a provider's key or upstream is down.
+     */
+    val isLive: Boolean
+        get() = source == "live" && vendorStatus.values.all { it == "live" }
+
+    /**
      * True when this catalog may replace stored ids it does not list: fetched from the
-     * box just now, from the provider's own live catalog (every vendor's, for the merged
-     * computer-use one), and not empty. A "fallback" list is the box's static guess while
-     * a provider is unreachable, and a copy from disk may predate a model the box has
+     * box just now, [isLive], and not empty. A "fallback" list is the box's static guess
+     * while a provider is unreachable, and a copy from disk may predate a model the box has
      * since added, so neither may.
      */
     val isAuthoritative: Boolean
-        get() = fromBox && source == "live" && models.isNotEmpty() && vendorStatus.values.all { it == "live" }
+        get() = fromBox && isLive && models.isNotEmpty()
 
     /**
      * The picker rows: Auto ("") first, then every model as (id, name). Empty when the box
