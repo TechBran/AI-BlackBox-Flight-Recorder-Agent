@@ -854,9 +854,11 @@ def _collect_status_inputs() -> dict:
         logger.exception("status rollup: rerank status failed")
         rerank_block = None
 
-    # cli agents — installed/auth markers (filesystem only, no spawn). Fail-soft.
+    # cli agents — installed + auth from a cached CLI answer or the markers
+    # (filesystem only, no spawn: this also runs on the SSE stream's event
+    # loop). Fail-soft.
     try:
-        cli = cli_agent_status()
+        cli = _cli_agent_status(probe_cli=False)
     except Exception:
         logger.exception("status rollup: cli_agent_status failed")
         cli = {"providers": {}, "ready": False}
@@ -1269,8 +1271,12 @@ async def open_external_url(req: OpenUrlRequest) -> dict:
 # Per-provider auth markers. Each CLI writes credentials to a
 # well-known location on first successful login; presence of that
 # path = authenticated. Heuristic, not authoritative — a malformed
-# config file would still show "auth ok" here, but the user can
-# always re-run "Sign in" if the CLI complains later.
+# config file would still show "auth ok" here. So claude and codex
+# are ASKED first (cli_agent/auth_probe.py: their own non-interactive
+# status commands, scrubbed env, 3 s timeout, 60 s cache); the marker
+# answers only when the CLI cannot (gemini has no status command; a
+# missing binary, a timeout, output it does not recognise), and the
+# response says which one answered (auth_source / auth_verified).
 #
 # Antigravity is an exception: it stores credentials in the OS
 # keyring (Linux secret-service), so there is no file to check.
@@ -1353,6 +1359,12 @@ def _build_user_env() -> dict:
 
 @router.get("/cli-agent/status")
 def cli_agent_status() -> dict:
+    """Per-provider install + auth status for the wizard's CLI agents step,
+    asking each CLI that can say (see _cli_agent_status)."""
+    return _cli_agent_status(probe_cli=True)
+
+
+def _cli_agent_status(*, probe_cli: bool) -> dict:
     """Per-provider install + auth status for the wizard's CLI agents step.
 
     Probes via two mechanisms:
@@ -1360,18 +1372,22 @@ def cli_agent_status() -> dict:
          ._resolve_provider_bin, which walks an extended PATH that
          includes ~/.nvm/versions/node/<ver>/bin so it finds the npm
          globals install.sh's Step 1c laid down.
-      2. Auth marker presence — checks for any one of a small list of
-         credential-file paths under the user's home dir per provider.
+      2. Auth — the CLI's own status command where it has one
+         (claude, codex: auth_probe.probe), else the presence of any one
+         of a small list of credential-file paths under the home dir.
 
     Returns:
         {
           "providers": {
             "claude": {"installed": bool, "authenticated": bool,
+                       "auth_source": "cli"|"marker",  # who answered
+                       "auth_verified": bool,          # True iff the CLI did
                        "bin_path": str|None, "package": str},
             "gemini": {...},
             "codex":  {...},
             "antigravity": {"installed": bool,
                             "authenticated": None,
+                            "auth_source": "none", "auth_verified": False,
                             "auth_method": "implicit_on_launch",
                             "bin_path": str|None,
                             "install_command": list[str]}
@@ -1386,8 +1402,12 @@ def cli_agent_status() -> dict:
     calculation, antigravity counts as ready when merely installed,
     since auth is verified only by the user actually launching the
     CLI (D2b).
+
+    ``probe_cli=False`` (the hub rollup) never spawns: it takes the CLI's
+    answer only from auth_probe's cache, else the marker.
     """
     from pathlib import Path
+    from Orchestrator.cli_agent import auth_probe
     from Orchestrator.routes.cli_agent_routes import _resolve_provider_bin, _PROVIDER_BINARY_NAMES
 
     home = Path.home()
@@ -1398,15 +1418,27 @@ def cli_agent_status() -> dict:
         bin_path = _resolve_provider_bin(prov)
         installed = bool(bin_path) and bin_path != bin_name and Path(bin_path).is_file()
         markers = _AUTH_MARKERS.get(prov, [])
-        if markers:
-            authenticated: bool | None = any((home / marker).exists() for marker in markers)
+        # The CLI's own answer first (bounded, cached; this sync route runs
+        # in the threadpool, off the event loop). None = it could not say.
+        said = (auth_probe.probe(prov, bin_path, home=home, markers=markers,
+                                 cached_only=not probe_cli)
+                if installed and auth_probe.has_status_command(prov) else None)
+        if said is not None:
+            authenticated: bool | None = said
+            auth_source = "cli"
+        elif markers:
+            authenticated = any((home / marker).exists() for marker in markers)
+            auth_source = "marker"
         else:
             # No file markers (e.g., antigravity uses OS keyring) → auth
             # state unobservable. Wizard handles via "Launch & Sign In" UI.
             authenticated = None
+            auth_source = "none"
         entry: dict = {
             "installed": installed,
             "authenticated": authenticated,
+            "auth_source": auth_source,
+            "auth_verified": auth_source == "cli",
             "bin_path": bin_path if installed else None,
             "install_command": cmd,
         }
