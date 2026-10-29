@@ -49,7 +49,8 @@ def all_providers_available():
     from Orchestrator.toolvault import availability
 
     keys = {env for spec in availability.FEATURES.values()
-            for env in spec["provider_env"].values() if env}
+            for value in spec["provider_env"].values()
+            for env in availability.env_names(value)}
     saved = availability._read_env, availability._local_image_available
     availability._read_env = lambda: {k: "test-key" for k in keys}
     availability._local_image_available = lambda: True

@@ -96,7 +96,8 @@ def _all_providers_available(monkeypatch):
     from Orchestrator.toolvault import availability
 
     keys = {env for spec in availability.FEATURES.values()
-            for env in spec["provider_env"].values() if env}
+            for value in spec["provider_env"].values()
+            for env in availability.env_names(value)}
     monkeypatch.setattr(availability, "_read_env",
                         lambda: {k: "test-key" for k in keys})
 

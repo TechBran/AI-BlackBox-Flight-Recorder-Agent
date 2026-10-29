@@ -135,6 +135,38 @@ def test_a_schema_edit_on_a_running_box_cannot_break_injection(tools_dir, monkey
     assert "edited_tool" not in {t.get("name") for t in tools}
 
 
+@pytest.mark.parametrize("required", [
+    [{"name": "q"}],          # unhashable: set() in the injector raised TypeError
+    [["q"]],
+    [3],
+    ["q", None],
+    ["not_a_property"],
+])
+def test_a_bad_required_list_is_excluded_at_load(tools_dir, monkeypatch, required):
+    """`required` was checked to be a list, nothing more; an entry that is not
+    the name of a declared property broke every injection format at once."""
+    monkeypatch.setattr(availability, "_read_env", lambda: {})
+    bad = _schema("bad_required_tool")
+    bad["parameters"]["required"] = required
+    _write(tools_dir, bad)
+    _write(tools_dir, _schema("good_tool"))
+    assert [t["name"] for t in registry.load_canonical()] == ["good_tool"]
+    errs = registry.load_errors()["bad_required_tool"]
+    assert any("required" in e for e in errs), errs
+    for fmt in ("anthropic", "openai_rest", "gemini_rest", "gemini_live", "openai_realtime"):
+        tools, _ = injector.inject_for_prompt("", fmt, group="chat")
+        assert tools, fmt
+    assert tool_registry.get_group_tool_names("mcp") == ["good_tool"]
+
+
+def test_a_valid_required_list_still_loads(tools_dir):
+    ok = _schema("ok_tool")
+    ok["parameters"]["required"] = ["q"]
+    _write(tools_dir, ok)
+    assert [t["name"] for t in registry.load_canonical()] == ["ok_tool"]
+    assert "ok_tool" not in registry.load_errors()
+
+
 def test_validate_module_dict_runs_the_guards_for_every_caller():
     """The guards live in schema_spec, so any caller of validate_module_dict
     (registry, validate.py, the tests that vet one schema) gets them."""

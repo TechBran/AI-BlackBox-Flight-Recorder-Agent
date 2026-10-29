@@ -11,7 +11,9 @@ _ROOT = os.environ.get("BLACKBOX_ROOT") or os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Feature registry: each feature carries its enable/default preference env vars,
-# a provider->env map, and a keyless-floor set (providers always enabled, no key).
+# a provider->env map (an env var name, a tuple of alternative names any one of
+# which enables the provider, or None for a keyless provider), and a
+# keyless-floor set (providers always enabled, no key).
 # Add a feature entry and tag tool schemas with x-availability.feature; the
 # registry refuses a schema naming a feature that is not here (schema_spec).
 # web_search is the DEFAULT feature (back-compat: shipped web tools have no
@@ -77,14 +79,15 @@ FEATURES = {
     },
     # The provider-specific speech and voice tools. The catalog-driven
     # text_to_speech / list_tts_voices / speech_to_text tools stay ungated:
-    # they also reach the on-box engines. A box whose Gemini TTS runs only on a
-    # service account enables it explicitly (TTS_ENABLED=gemini,...).
+    # they also reach the on-box engines. Gemini TTS runs on Cloud TTS under
+    # the service account when there is one, else on the AI Studio API key
+    # (tts_routes.call_gemini_tts), so either enables it.
     "tts": {
         "enabled_pref": "TTS_ENABLED",
         "default_pref": "TTS_DEFAULT",
         "provider_env": {
-            "gemini": "GOOGLE_API_KEY", "elevenlabs": "ELEVENLABS_API_KEY",
-            "xai": "XAI_API_KEY",
+            "gemini": ("GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"),
+            "elevenlabs": "ELEVENLABS_API_KEY", "xai": "XAI_API_KEY",
         },
         "provider_tool": {
             "gemini": "gemini_pro_tts", "elevenlabs": "elevenlabs_list_voices",
@@ -121,6 +124,21 @@ PROVIDER_TOOL = dict(FEATURES["web_search"]["provider_tool"])
 WEB_SEARCH_TOOLS = set(PROVIDER_TOOL.values())
 
 
+def env_names(value) -> tuple:
+    """The env var names a provider_env value stands for: () for a keyless
+    provider, else the one name or the tuple of alternatives."""
+    if not value:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(value)
+
+
+def _has_key(env: dict, value) -> bool:
+    """Does `env` hold any of the env vars a provider_env value names?"""
+    return any(env.get(name) for name in env_names(value))
+
+
 def _read_env() -> dict:
     env = {}
     p = os.path.join(_ROOT, ".env")
@@ -135,7 +153,8 @@ def _read_env() -> dict:
     # provider env vars + enable/default prefs, plus the GEMINI_API_KEY alias.
     keys = {"GEMINI_API_KEY"}
     for spec in FEATURES.values():
-        keys.update(v for v in spec["provider_env"].values() if v)
+        for v in spec["provider_env"].values():
+            keys.update(env_names(v))
         keys.add(spec["enabled_pref"])
         keys.add(spec["default_pref"])
     for k in keys:
@@ -192,7 +211,7 @@ def enabled_providers(feature: str = "web_search") -> set:
     else:
         enabled = set(spec["keyless_floor"])
         for prov, key in spec["provider_env"].items():
-            if key and env.get(key):
+            if _has_key(env, key):
                 enabled.add(prov)
     # Registry-gated providers (no env key): the local image server is enabled iff
     # a registered+enabled custom server hosts an image model -- ADDITIVE even under
@@ -308,7 +327,7 @@ def default_provider_tool(feature: str = "web_search") -> str:
 
     def _keyed(prov: str) -> bool:
         key = provider_env.get(prov)
-        return key is None or bool(env.get(key))  # key is None => keyless provider
+        return key is None or _has_key(env, key)  # key is None => keyless provider
 
     default = (env.get(spec["default_pref"]) or "").strip()
     if default in provider_tool and _keyed(default):

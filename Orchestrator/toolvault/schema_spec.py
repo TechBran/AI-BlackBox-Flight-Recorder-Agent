@@ -158,12 +158,28 @@ def _validate_parameters(params, known_sources: set) -> list[str]:
         )
         return errors
 
-    # required (optional) must be a list if present.
-    if "required" in params and not isinstance(params.get("required"), list):
-        errors.append(
-            f"'parameters.required' must be a list, got "
-            f"{type(params.get('required')).__name__}"
-        )
+    # required (optional) must be a list if present, of declared property
+    # names: the injectors build a set of it and look properties up by it, so
+    # one unhashable entry took down injection for every provider format.
+    if "required" in params:
+        required = params.get("required")
+        if not isinstance(required, list):
+            errors.append(
+                f"'parameters.required' must be a list, got "
+                f"{type(required).__name__}"
+            )
+        else:
+            for entry in required:
+                if not isinstance(entry, str):
+                    errors.append(
+                        f"'parameters.required' entries must be property names "
+                        f"(strings), got {type(entry).__name__}"
+                    )
+                elif entry not in properties:
+                    errors.append(
+                        f"'parameters.required' names {entry!r}, which is not "
+                        f"a declared property"
+                    )
 
     for prop_name, prop in properties.items():
         if not isinstance(prop, dict):
