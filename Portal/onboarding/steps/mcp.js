@@ -177,8 +177,17 @@ async function renderTokenList(container) {
             </div>`).join("");
     list.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
         b.disabled = true;
-        await fetch(`/mcp/tokens?token_id=${encodeURIComponent(b.dataset.revoke)}`, { method: "DELETE" });
+        const tokenId = b.dataset.revoke;
+        const res = await fetchJson(`/mcp/tokens?token_id=${encodeURIComponent(tokenId)}`, { method: "DELETE" });
         await renderTokenList(container);
+        // live:false = the running MCP server could not be told, so it accepts
+        // the token until it reloads or restarts; the backend's note says so.
+        if (res && res.live === false) {
+            const note = document.createElement("p");
+            note.className = "ob-step-helper";
+            note.textContent = `${tokenId}: ${res.note || "revoked; the running MCP server accepts it until it restarts."}`;
+            list.appendChild(note);
+        }
     }));
 }
 
