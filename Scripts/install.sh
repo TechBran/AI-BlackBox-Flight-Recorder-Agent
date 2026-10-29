@@ -983,6 +983,9 @@ grant_journal_read_access
 #    = 10 % of the journal filesystem, clamped to [1 GiB, 16 GiB]; journald's
 #    SystemKeepFree default still holds free disk in reserve. Garbage input
 #    (df failed) falls back to the 1 GiB floor rather than failing the install.
+#    SystemMaxFiles=2000: the default (100 files) bound first, at 3.0 GB of
+#    MS02's 16 GB cap (about 7 days), so the size above is now the limit.
+#    The whole-file cmp below rewrites an older drop-in and restarts journald.
 journald_system_max_use_mb() {  # <filesystem size in KiB> → MiB
     local fs_kb="${1:-0}" mb
     [[ "$fs_kb" =~ ^[0-9]+$ ]] || fs_kb=0
@@ -1013,11 +1016,13 @@ install_journald_retention() {
 # BlackBox journal retention. DO NOT EDIT — install.sh manages this file.
 # blackbox.service logs only to the journal, so this is the incident-evidence
 # horizon: persistent storage, SystemMaxUse = 10 % of the journal filesystem
-# within [1 GiB, 16 GiB]. No MaxRetentionSec on purpose — it is a ceiling that
-# deletes older entries, never a retention floor.
+# within [1 GiB, 16 GiB]. SystemMaxFiles is raised from the default 100 so the
+# file count never binds before that size. No MaxRetentionSec on purpose — it
+# is a ceiling that deletes older entries, never a retention floor.
 [Journal]
 Storage=persistent
 SystemMaxUse=${max_mb}M
+SystemMaxFiles=2000
 JOURNALD_EOF
     if $SUDO test -f "$dropin" && $SUDO cmp -s "$tmp" "$dropin"; then
         rm -f "$tmp"
@@ -1027,7 +1032,7 @@ JOURNALD_EOF
     $SUDO mkdir -p "$JOURNALD_DROPIN_DIR"
     $SUDO install -m 0644 "$tmp" "$dropin"
     rm -f "$tmp"
-    echo "[install] Wrote $dropin (Storage=persistent, SystemMaxUse=${max_mb}M)"
+    echo "[install] Wrote $dropin (Storage=persistent, SystemMaxUse=${max_mb}M, SystemMaxFiles=2000)"
     if [[ "$JOURNALD_DROPIN_DIR" == "/etc/systemd/journald.conf.d" ]]; then
         # Safe for running services: journald keeps their stdout streams in
         # its fd store across a restart (Ubuntu 24.04 ships systemd 255).

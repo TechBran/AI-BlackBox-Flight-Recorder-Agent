@@ -13,10 +13,14 @@
 #   1. the SystemMaxUse sizing is 10 % of the journal filesystem, clamped to
 #      [1 GiB, 16 GiB] (larger than the old 4 GiB default horizon on any real
 #      disk, never below 1 GiB, and garbage input never fails the installer);
-#   2. install_journald_retention writes a drop-in with Storage=persistent and
-#      that SystemMaxUse, and NO MaxRetentionSec (a ceiling that deletes old
-#      entries, not a floor);
-#   3. it is idempotent and never restarts journald in the sandbox;
+#   2. install_journald_retention writes a drop-in with Storage=persistent,
+#      that SystemMaxUse and SystemMaxFiles=2000, and NO MaxRetentionSec (a
+#      ceiling that deletes old entries, not a floor). journald's default
+#      SystemMaxFiles=100 bound before the size did (2026-10-29: MS02 at 100
+#      files / 3.0 GB of a 16 GB cap, about 7 days), so the size is the limit;
+#   3. it is idempotent, rewrites a drop-in an older install.sh wrote (the
+#      "already current" check compares the whole file), and never restarts
+#      journald in the sandbox;
 #   4. install.sh runs both steps before Step 1's apt phase, adds the service
 #      user to systemd-journal, and retires the dead logrotate rule.
 #
@@ -82,10 +86,12 @@ run_install || fail "install_journald_retention returned non-zero: $(cat "$WORK/
 grep -qx '\[Journal\]' "$DROPIN" || fail "drop-in has no [Journal] section"
 grep -qx 'Storage=persistent' "$DROPIN" || fail "drop-in does not set Storage=persistent"
 grep -qx "SystemMaxUse=${WANT_MB}M" "$DROPIN" || fail "drop-in does not set SystemMaxUse=${WANT_MB}M: $(cat "$DROPIN")"
+grep -qx 'SystemMaxFiles=2000' "$DROPIN" \
+    || fail "drop-in does not set SystemMaxFiles=2000 (the default 100 files binds before SystemMaxUse): $(cat "$DROPIN")"
 grep -qE '^[[:space:]]*MaxRetentionSec=' "$DROPIN" \
     && fail "drop-in sets MaxRetentionSec — that is a CEILING that deletes evidence, not a retention floor"
-[[ "$(grep -cE '^[A-Za-z]+=' "$DROPIN")" -eq 2 ]] \
-    || fail "drop-in sets more than Storage= and SystemMaxUse=: $(grep -E '^[A-Za-z]+=' "$DROPIN")"
+[[ "$(grep -cE '^[A-Za-z]+=' "$DROPIN")" -eq 3 ]] \
+    || fail "drop-in sets more than Storage=, SystemMaxUse= and SystemMaxFiles=: $(grep -E '^[A-Za-z]+=' "$DROPIN")"
 grep -q 'restart' "$FAKE_SYSTEMCTL_LOG" && fail "sandbox run restarted systemd-journald"
 
 # ── 3. idempotent ─────────────────────────────────────────────────────────────
@@ -93,6 +99,24 @@ cp "$DROPIN" "$WORK/first.conf"
 run_install || fail "second install_journald_retention returned non-zero"
 cmp -s "$DROPIN" "$WORK/first.conf" || fail "second run changed the drop-in"
 grep -qi 'already current' "$WORK/run.log" || fail "second run did not report the drop-in as already current"
+
+# A box that ran an older install.sh has the drop-in without SystemMaxFiles=:
+# same SystemMaxUse, so only a whole-file comparison notices it is stale.
+cat > "$DROPIN" <<OLD_DROPIN
+# BlackBox journal retention. DO NOT EDIT — install.sh manages this file.
+# blackbox.service logs only to the journal, so this is the incident-evidence
+# horizon: persistent storage, SystemMaxUse = 10 % of the journal filesystem
+# within [1 GiB, 16 GiB]. No MaxRetentionSec on purpose — it is a ceiling that
+# deletes older entries, never a retention floor.
+[Journal]
+Storage=persistent
+SystemMaxUse=${WANT_MB}M
+OLD_DROPIN
+run_install || fail "install_journald_retention over an older drop-in returned non-zero"
+grep -qi 'already current' "$WORK/run.log" && fail "an older drop-in (no SystemMaxFiles=) was reported as already current"
+grep -qi '^\[install\] Wrote' "$WORK/run.log" || fail "an older drop-in was not rewritten: $(cat "$WORK/run.log")"
+cmp -s "$DROPIN" "$WORK/first.conf" || fail "the rewritten drop-in differs from a fresh one"
+grep -q 'restart' "$FAKE_SYSTEMCTL_LOG" && fail "sandbox rewrite restarted systemd-journald"
 
 # ── 4. install.sh wiring (source-level) ───────────────────────────────────────
 APT_LINE="$(grep -nE '^[[:space:]]*\| xargs sudo apt install -y' "$INSTALL_SH" | head -1 | cut -d: -f1)"
