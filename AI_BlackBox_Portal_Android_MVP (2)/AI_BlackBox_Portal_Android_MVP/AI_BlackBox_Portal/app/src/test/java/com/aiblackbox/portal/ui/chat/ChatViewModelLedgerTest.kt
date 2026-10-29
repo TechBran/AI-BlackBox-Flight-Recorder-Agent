@@ -164,4 +164,24 @@ class ChatViewModelLedgerTest {
         assertTrue("loadHistory always assigns", "_messages.value = restoredHistory(" in loadBody)
         assertFalse("loadHistory must not keep the old conversation for an empty new one", "isNotEmpty()" in loadBody)
     }
+
+    // ── review follow-up: a pick mid-reply would cancel the reply unminted ───
+
+    @Test fun `an operator pick waits while a reply is coming in`() {
+        assertEquals(OPERATOR_SWITCH_WAIT_MESSAGE, operatorSwitchBlockedReason(turnInFlight = true))
+        assertNull(operatorSwitchBlockedReason(turnInFlight = false))
+        assertTrue("the message says how to go on", "Stop" in OPERATOR_SWITCH_WAIT_MESSAGE)
+    }
+
+    @Test fun `every operator picker asks the chat first`() {
+        assertTrue("the gate reads the running turn", "operatorSwitchBlockedReason(streamJob?.isActive == true)" in functionBody(vm, "operatorSwitchBlocked"))
+        // The app's composition (out of NativeMainActivity, rank 76) holds the top bar and the sheet.
+        val main = source("src/main/java/com/aiblackbox/portal/navigation/BlackBoxApp.kt")
+        assertTrue("the top-bar pick", "if (!chatViewModel.operatorSwitchBlocked()) scope.launch { store.setOperator(it) }" in main)
+        assertTrue("the top-bar add", Regex("onAddOperator = \\{ name ->\\s+if \\(!chatViewModel.operatorSwitchBlocked\\(\\)\\)").containsMatchIn(main))
+        assertTrue("the Settings sheet", "canSwitchOperator = { !chatViewModel.operatorSwitchBlocked() }" in main)
+        val settings = source("src/main/java/com/aiblackbox/portal/ui/settings/SettingsSheet.kt")
+        assertTrue("if (canSwitchOperator()) viewModel.setOperator(op)" in settings)
+        assertTrue("name.isNotBlank() && canSwitchOperator()" in settings)
+    }
 }

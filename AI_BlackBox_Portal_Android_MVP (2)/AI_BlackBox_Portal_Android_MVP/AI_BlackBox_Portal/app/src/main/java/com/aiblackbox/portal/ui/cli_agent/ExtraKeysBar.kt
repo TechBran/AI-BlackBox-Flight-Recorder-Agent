@@ -39,6 +39,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,7 +64,7 @@ import androidx.compose.foundation.border
  *   Pending — armed for the next key tap only (one-shot)
  *   Locked  — armed until the user taps the modifier again
  */
-private enum class StickyState { Off, Pending, Locked }
+internal enum class StickyState { Off, Pending, Locked }
 
 /**
  * One byte sequence for the terminal. `isLetter = true` means the bytes
@@ -113,6 +114,51 @@ internal fun resolveKeyBytes(
     else -> bytes
 }
 
+/**
+ * Resolve the bytes for a code point TYPED on the soft keyboard (it arrives through
+ * TerminalViewClient.onCodePoint, not through a bar key): Ctrl (held on a hardware
+ * keyboard, or armed on the bar) maps 0x40..0x7F to its control character, Alt prefixes
+ * ESC, anything else is UTF-8. Pure for unit tests.
+ */
+internal fun resolveCodePointBytes(codePoint: Int, ctrl: Boolean, alt: Boolean): ByteArray {
+    val base = if (ctrl && codePoint in 0x40..0x7F) {
+        byteArrayOf((codePoint and 0x1f).toByte())
+    } else {
+        String(Character.toChars(codePoint)).toByteArray(Charsets.UTF_8)
+    }
+    return if (alt) ESC + base else base
+}
+
+/**
+ * The bar's sticky Ctrl/Alt/Shift, hoisted so the terminal screens apply them to letters
+ * typed on the soft keyboard too (A08-cli-agent-ui-01): before, the state lived privately
+ * inside the bar, no bar key is a letter, and onCodePoint never consulted it, so Ctrl
+ * then "c" sent a plain "c" and Ctrl+C was unreachable. Pending clears after one key;
+ * Locked stays until tapped off. Compose state, mutated on the main thread only.
+ */
+@Stable
+class StickyModifiers {
+    internal var ctrl by mutableStateOf(StickyState.Off)
+    internal var alt by mutableStateOf(StickyState.Off)
+    internal var shift by mutableStateOf(StickyState.Off)
+
+    /** The bytes for a typed [codePoint] with the armed modifiers applied (consumes Pending). */
+    fun bytesForCodePoint(codePoint: Int, ctrlDown: Boolean): ByteArray {
+        val out = resolveCodePointBytes(
+            codePoint,
+            ctrl = ctrlDown || ctrl != StickyState.Off,
+            alt = alt != StickyState.Off,
+        )
+        if (ctrl == StickyState.Pending) ctrl = StickyState.Off
+        if (alt == StickyState.Pending) alt = StickyState.Off
+        return out
+    }
+}
+
+/** One [StickyModifiers] per terminal screen, shared by its bar and its onCodePoint. */
+@Composable
+fun rememberStickyModifiers(): StickyModifiers = remember { StickyModifiers() }
+
 @Composable
 fun ExtraKeysBar(
     onKeyBytes: (ByteArray) -> Unit,
@@ -120,6 +166,8 @@ fun ExtraKeysBar(
     micSlot: @Composable () -> Unit = {},
     attachSlot: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
+    // Shared with the screen's onCodePoint so soft-keyboard letters see Ctrl/Alt.
+    modifiers: StickyModifiers = rememberStickyModifiers(),
 ) {
     // Bluetooth / USB hardware keyboard attached → no soft-key bar needed.
     val configuration = LocalConfiguration.current
@@ -127,9 +175,7 @@ fun ExtraKeysBar(
         return
     }
 
-    var ctrl by remember { mutableStateOf(StickyState.Off) }
-    var alt by remember { mutableStateOf(StickyState.Off) }
-    var shift by remember { mutableStateOf(StickyState.Off) }
+    val sticky = modifiers
 
     /**
      * Apply armed Ctrl/Alt/Shift to outgoing bytes and clear Pending state.
@@ -140,14 +186,14 @@ fun ExtraKeysBar(
             bytes = spec.bytes,
             isLetter = spec.isLetter,
             shiftBytes = spec.shiftBytes,
-            ctrlArmed = ctrl != StickyState.Off,
-            altArmed = alt != StickyState.Off,
-            shiftArmed = shift != StickyState.Off,
+            ctrlArmed = sticky.ctrl != StickyState.Off,
+            altArmed = sticky.alt != StickyState.Off,
+            shiftArmed = sticky.shift != StickyState.Off,
         )
         onKeyBytes(out)
-        if (ctrl == StickyState.Pending) ctrl = StickyState.Off
-        if (alt == StickyState.Pending) alt = StickyState.Off
-        if (shift == StickyState.Pending) shift = StickyState.Off
+        if (sticky.ctrl == StickyState.Pending) sticky.ctrl = StickyState.Off
+        if (sticky.alt == StickyState.Pending) sticky.alt = StickyState.Off
+        if (sticky.shift == StickyState.Pending) sticky.shift = StickyState.Off
     }
 
     /** Tap on Ctrl/Alt: Off → Pending; Pending → Off; Locked → Off. */
@@ -229,18 +275,18 @@ fun ExtraKeysBar(
             item {
                 ModifierKey(
                     label = "Ctrl",
-                    state = ctrl,
-                    onTap = { ctrl = toggleSticky(ctrl) },
-                    onLongPress = { ctrl = lockSticky(ctrl) },
+                    state = sticky.ctrl,
+                    onTap = { sticky.ctrl = toggleSticky(sticky.ctrl) },
+                    onLongPress = { sticky.ctrl = lockSticky(sticky.ctrl) },
                 )
             }
             // --- Alt (modifier) ---
             item {
                 ModifierKey(
                     label = "Alt",
-                    state = alt,
-                    onTap = { alt = toggleSticky(alt) },
-                    onLongPress = { alt = lockSticky(alt) },
+                    state = sticky.alt,
+                    onTap = { sticky.alt = toggleSticky(sticky.alt) },
+                    onLongPress = { sticky.alt = lockSticky(sticky.alt) },
                 )
             }
             // --- Shift (modifier) — armed for one-shot via tap, locked
@@ -251,9 +297,9 @@ fun ExtraKeysBar(
             item {
                 ModifierKey(
                     label = "Shift",
-                    state = shift,
-                    onTap = { shift = toggleSticky(shift) },
-                    onLongPress = { shift = lockSticky(shift) },
+                    state = sticky.shift,
+                    onTap = { sticky.shift = toggleSticky(sticky.shift) },
+                    onLongPress = { sticky.shift = lockSticky(sticky.shift) },
                 )
             }
             // --- Arrows (with Shift+arrow xterm sequences) ---
@@ -316,7 +362,7 @@ fun ExtraKeysBar(
             //     Claude Code's scroll binding actually fires on. ---
             item {
                 ExtraKey(label = "PgUp", widthDp = 56) {
-                    if (shift != StickyState.Off) {
+                    if (sticky.shift != StickyState.Off) {
                         fireKey(KeySpec(
                             label = "PgUp",
                             bytes = byteArrayOf(
@@ -336,7 +382,7 @@ fun ExtraKeysBar(
             }
             item {
                 ExtraKey(label = "PgDn", widthDp = 56) {
-                    if (shift != StickyState.Off) {
+                    if (sticky.shift != StickyState.Off) {
                         fireKey(KeySpec(
                             label = "PgDn",
                             bytes = byteArrayOf(

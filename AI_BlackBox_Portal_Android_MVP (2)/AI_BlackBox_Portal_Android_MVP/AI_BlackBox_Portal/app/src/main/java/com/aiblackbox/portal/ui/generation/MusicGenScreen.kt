@@ -645,6 +645,12 @@ fun MusicGenScreen(
                         }
                     }
                     Spacer(Modifier.height(12.dp))
+                    // Play it here (the result used to be only a URL line).
+                    com.aiblackbox.portal.ui.components.AudioPlayerBar(
+                        audioUrl = url,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(12.dp))
 
                     // Generate another button
                     Box(

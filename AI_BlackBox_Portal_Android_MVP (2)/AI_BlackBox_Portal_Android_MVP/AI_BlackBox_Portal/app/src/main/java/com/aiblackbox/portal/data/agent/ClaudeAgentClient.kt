@@ -178,12 +178,24 @@ internal fun buildInputMessage(text: String, permissionMode: String?): String = 
 //   - Full message type parsing
 //   - permission_mode (+ skip_permissions for YOLO) in prompt message
 // =============================================================================
+/** Reconnect attempts after a drop before the session gives up (Portal maxReconnectAttempts). */
+internal const val AGENT_MAX_RECONNECT_ATTEMPTS = 15
+
+/**
+ * The wait before reconnect attempt [attempt] (1-based): 1s, 2s, 4s ... capped at 30s
+ * (Portal: Math.min(1000 * 2^n, 30000)); null past [maxAttempts], meaning give up.
+ */
+internal fun agentReconnectDelayMs(attempt: Int, maxAttempts: Int = AGENT_MAX_RECONNECT_ATTEMPTS): Long? =
+    if (attempt < 1 || attempt > maxAttempts) null
+    else min(1000L * 2.0.pow(min(attempt - 1, 30)).toLong(), 30_000L)
+
 class ClaudeAgentClient(
     private val client: OkHttpClient,
     private val baseWsUrl: String,
-    private val wsPath: String = "/ws/agent"
+    private val wsPath: String = "/ws/agent",
+    // Injectable so the reconnect policy is testable with a fake socket.
+    private val wsClient: WebSocketClient = WebSocketClient(client),
 ) {
-    private val wsClient = WebSocketClient(client)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val _connectionState = MutableStateFlow(AgentConnectionState.DISCONNECTED)
@@ -199,7 +211,7 @@ class ClaudeAgentClient(
 
     // Reconnect state — mirrors Portal reconnectAttempts / maxReconnectAttempts
     private var reconnectAttempts = 0
-    private val maxReconnectAttempts = 15
+    private val maxReconnectAttempts = AGENT_MAX_RECONNECT_ATTEMPTS
     private var reconnectScope: CoroutineScope? = null
 
     // Pending prompt to send immediately on WebSocket open (mirrors Portal onopen handler)
@@ -210,10 +222,21 @@ class ClaudeAgentClient(
      * Mirrors Portal: ws = new WebSocket(wsUrl) in startSession()
      */
     fun connect(sessionId: String, scope: CoroutineScope) {
+        // A fresh connect starts a new retry budget; a reconnect (openSocket) keeps it.
+        reconnectAttempts = 0
+        openSocket(sessionId, scope)
+    }
+
+    /**
+     * Open the socket for [sessionId]. Shared by [connect] and [attemptReconnect], and
+     * deliberately NOT resetting [reconnectAttempts] (A09-data-local-model-01): the
+     * reset inside connect() made every retry attempt #1, so the delay never grew and
+     * the 15-attempt cap was unreachable. The counter resets on a real Connected.
+     */
+    private fun openSocket(sessionId: String, scope: CoroutineScope) {
         _sessionId.value = sessionId
         _connectionState.value = AgentConnectionState.CONNECTING
         reconnectScope = scope
-        reconnectAttempts = 0
 
         connectionJob?.cancel()
         connectionJob = scope.launch {
@@ -282,21 +305,22 @@ class ClaudeAgentClient(
         val scope = reconnectScope ?: return
         val sid = _sessionId.value ?: return
 
-        if (reconnectAttempts >= maxReconnectAttempts) {
+        val delayMs = agentReconnectDelayMs(reconnectAttempts + 1, maxReconnectAttempts)
+        if (delayMs == null) {
             android.util.Log.w("AgentClient", "Max reconnect attempts reached")
             _connectionState.value = AgentConnectionState.ERROR
+            _events.tryEmit(AgentEvent.Error("Could not reconnect to the agent session. Send a prompt to start a new one."))
             return
         }
 
         reconnectAttempts++
-        val delayMs = min(1000L * 2.0.pow(reconnectAttempts - 1).toLong(), 30000L)
         android.util.Log.d("AgentClient", "Reconnecting ($reconnectAttempts/$maxReconnectAttempts) in ${delayMs}ms")
         _connectionState.value = AgentConnectionState.CONNECTING
 
         scope.launch {
             delay(delayMs)
             if (_sessionId.value != null) {
-                connect(sid, scope)
+                openSocket(sid, scope)
             }
         }
     }
@@ -453,6 +477,9 @@ class ClaudeAgentClient(
                 // Session ended — Portal: hasActiveSession = false, sessionId = null
                 "session_ended" -> {
                     val message = extractText(data)
+                    // The server ended the session: forget it, so the socket closing
+                    // after this is not followed by a reconnect to a dead session.
+                    _sessionId.value = null
                     _events.emit(AgentEvent.SessionEnded(message))
                     _connectionState.value = AgentConnectionState.DISCONNECTED
                 }

@@ -10,13 +10,13 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
 
 class KeepAliveService : Service() {
 
     companion object {
+        private const val TAG = "KeepAliveService"
         private const val CHANNEL_ID_SERVICE = "blackbox_service"
-        private const val NOTIFICATION_ID_SERVICE = 9999
+        private const val NOTIFICATION_ID_SERVICE = NotificationIds.KEEP_ALIVE
     }
 
     override fun onBind(intent: Intent?): IBinder? {
@@ -45,18 +45,23 @@ class KeepAliveService : Service() {
             .setOngoing(true)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID_SERVICE,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        if (!FgsSupport.startForegroundSafely(
+                this, NOTIFICATION_ID_SERVICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC, TAG,
             )
-        } else {
-            startForeground(NOTIFICATION_ID_SERVICE, notification)
+        ) {
+            // Refused (a background re-creation): a sticky non-foreground service only
+            // waits to be killed, so stop instead of being restarted into the same refusal.
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         return START_STICKY
+    }
+
+    // dataSync is capped at 6 hours a day on Android 15+; this service runs for as long
+    // as the WebView activity lives, so it reaches the cap on a long evening.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        FgsSupport.stopOnTimeout(this, TAG, fgsType)
     }
 
     private fun createNotificationChannel() {

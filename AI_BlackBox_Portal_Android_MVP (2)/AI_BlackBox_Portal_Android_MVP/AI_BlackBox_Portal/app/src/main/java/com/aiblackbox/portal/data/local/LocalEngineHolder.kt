@@ -144,7 +144,9 @@ object LocalEngineHolder {
  *  - [holderHasEngine] false (service not running / holder empty) -> [EngineSource.BUILD_OWN].
  *  - held but [holderModelPath] != [activeModelPath] (user switched models) ->
  *    [EngineSource.BUILD_OWN] (the held engine is the wrong bundle).
- *  - held AND the path matches -> [EngineSource.USE_HOLDER] (warm, instant).
+ *  - held AND the path matches -> [EngineSource.USE_HOLDER] (warm, instant), unless
+ *    [holderConfigMatches] is false: the held engine was built with a context window or
+ *    sampler the user has since changed, so it is rebuilt, not borrowed.
  *
  * A blank/empty [activeModelPath] can never match a held path, so it falls back to
  * BUILD_OWN (defensive -- the caller always resolves a concrete path first). The
@@ -154,12 +156,22 @@ fun engineSourceFor(
     holderHasEngine: Boolean,
     holderModelPath: String?,
     activeModelPath: String,
+    holderConfigMatches: Boolean = true,
 ): EngineSource = when {
     !holderHasEngine -> EngineSource.BUILD_OWN
     activeModelPath.isBlank() -> EngineSource.BUILD_OWN
-    holderModelPath == activeModelPath -> EngineSource.USE_HOLDER
+    holderModelPath == activeModelPath && holderConfigMatches -> EngineSource.USE_HOLDER
     else -> EngineSource.BUILD_OWN
 }
+
+/**
+ * What an engine was built as: the bundle and the settings fixed when [LiteRtEngine] is
+ * constructed. Two engines with the same key are interchangeable; a settings apply
+ * changes the key, so an engine another warmer pinned at the old settings is not reused
+ * (see [pinWarm]). Pure, so it is JVM-testable without the native engine.
+ */
+fun engineConfigKey(path: String, maxTokens: Int, sampler: SamplerSettings, supportImage: Boolean): String =
+    "$path|maxTokens=$maxTokens|topK=${sampler.topK}|topP=${sampler.topP}|temperature=${sampler.temperature}|image=$supportImage"
 
 /**
  * Whether [LocalModelService] should (re)build + warm-load a fresh engine for the

@@ -104,6 +104,8 @@ fun TerminalScreen(
 
     // Reference to the Termux TerminalView so callbacks can poke it.
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
+    // The bar's sticky Ctrl/Alt, also applied to letters typed on the soft keyboard.
+    val stickyModifiers = rememberStickyModifiers()
     // Reference to the active TerminalSession so onBytes can write into it.
     var terminalSession by remember { mutableStateOf<TerminalSession?>(null) }
 
@@ -453,21 +455,12 @@ fun TerminalScreen(
                             ctrlDown: Boolean,
                             session: TerminalSession,
                         ): Boolean {
-                            // Convert codePoint to UTF-8 bytes (with Ctrl
-                            // modifier if applicable) and forward to ws.
-                            // Returning true tells TerminalView we handled
-                            // this keystroke — don't route to local PTY.
-                            val bytes: ByteArray = if (
-                                ctrlDown && codePoint in 0x40..0x7F
-                            ) {
-                                byteArrayOf((codePoint and 0x1f).toByte())
-                            } else if (ctrlDown && codePoint in 0x60..0x7A) {
-                                // ctrl+lowercase a-z → 0x01..0x1A
-                                byteArrayOf((codePoint and 0x1f).toByte())
-                            } else {
-                                String(Character.toChars(codePoint))
-                                    .toByteArray(Charsets.UTF_8)
-                            }
+                            // Convert codePoint to UTF-8 bytes with Ctrl (held
+                            // on a hardware keyboard OR armed on the bar) and
+                            // Alt applied, and forward to ws. Returning true
+                            // tells TerminalView we handled this keystroke —
+                            // don't route to local PTY.
+                            val bytes = stickyModifiers.bytesForCodePoint(codePoint, ctrlDown)
                             view.setTopRow(0)  // snap to live on input
                             ws.sendBytes(bytes)
                             return true
@@ -564,6 +557,7 @@ fun TerminalScreen(
 
         // --- Extra-keys bar + mic ---
         ExtraKeysBar(
+            modifiers = stickyModifiers,
             onKeyBytes = { bytes ->
                 // Snap back to live screen on user input — every terminal
                 // emulator does this so a keystroke after scrolling history

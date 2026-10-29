@@ -95,6 +95,8 @@ fun ImageGenScreen(
     var prompt by remember { mutableStateOf("") }
     val state by viewModel.state.collectAsState()
     val resultUrl by viewModel.resultUrl.collectAsState()
+    // Every image of a multi-image request (result_data.all_urls), absolute.
+    val resultUrls by viewModel.resultUrls.collectAsState()
     val error by viewModel.error.collectAsState()
     val taskStatus by viewModel.taskStatus.collectAsState()
     val providers by viewModel.imageProviders.collectAsState()
@@ -373,18 +375,21 @@ fun ImageGenScreen(
                         color = SolidGreen
                     )
                     Spacer(Modifier.height(10.dp))
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(RadiusXl)
-                    ) {
-                        AsyncImage(
-                            model = url,
-                            contentDescription = "Generated image",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(RadiusXl)),
-                            contentScale = ContentScale.FillWidth
-                        )
+                    resultUrls.ifEmpty { listOf(url) }.forEachIndexed { i, imageUrl ->
+                        if (i > 0) Spacer(Modifier.height(10.dp))
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(RadiusXl)
+                        ) {
+                            AsyncImage(
+                                model = imageUrl,
+                                contentDescription = "Generated image ${i + 1}",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(RadiusXl)),
+                                contentScale = ContentScale.FillWidth
+                            )
+                        }
                     }
                     Spacer(Modifier.height(12.dp))
 

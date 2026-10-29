@@ -69,7 +69,7 @@ class OverlayService : Service() {
     companion object {
         private const val TAG = "OverlayService"
         private const val CHANNEL_ID = "blackbox_overlay"
-        private const val NOTIFICATION_ID = 1001
+        private const val NOTIFICATION_ID = com.aiblackbox.portal.NotificationIds.OVERLAY
 
         // Intent extras
         const val EXTRA_RESULT_CODE = "result_code"
@@ -1680,9 +1680,6 @@ class OverlayService : Service() {
             } else {
                 progressBar?.visibility = if (connecting) View.VISIBLE else View.GONE
             }
-        }
-        override fun hideProgress() {
-            progressBar?.visibility = View.GONE
         }
         override fun showTranscriptEntry(speaker: String, text: String, count: Int) =
             this@OverlayService.showTranscriptEntry(speaker, text, count)

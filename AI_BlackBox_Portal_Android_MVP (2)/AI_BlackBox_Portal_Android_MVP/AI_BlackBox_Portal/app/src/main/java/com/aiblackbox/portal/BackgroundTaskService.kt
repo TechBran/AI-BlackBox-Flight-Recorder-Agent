@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -21,8 +22,9 @@ import androidx.core.app.NotificationCompat
 class BackgroundTaskService : Service() {
 
     companion object {
+        private const val TAG = "BGTaskService"
         const val CHANNEL_ID = "blackbox_tasks"
-        const val NOTIFICATION_ID = 9091
+        const val NOTIFICATION_ID = NotificationIds.BACKGROUND_TASK
         const val ACTION_START = "com.aiblackbox.portal.START_TASKS"
         const val ACTION_STOP = "com.aiblackbox.portal.STOP_TASKS"
         const val EXTRA_TASK_LABEL = "task_label"
@@ -48,17 +50,30 @@ class BackgroundTaskService : Service() {
             else -> {
                 val label = intent?.getStringExtra(EXTRA_TASK_LABEL) ?: "Processing..."
                 val notification = buildNotification(label)
-                startForeground(NOTIFICATION_ID, notification)
+                if (!FgsSupport.startForegroundSafely(
+                        this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC, TAG,
+                    )
+                ) {
+                    // Refused (background re-creation): stop rather than linger unprotected.
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 _isRunning = true
-                Log.d("BGTaskService", "Started: $label")
+                Log.d(TAG, "Started: $label")
             }
         }
         return START_STICKY
     }
 
+    // dataSync is capped at 6 hours a day on Android 15+.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        _isRunning = false
+        FgsSupport.stopOnTimeout(this, TAG, fgsType)
+    }
+
     override fun onDestroy() {
         _isRunning = false
-        Log.d("BGTaskService", "Stopped")
+        Log.d(TAG, "Stopped")
         super.onDestroy()
     }
 

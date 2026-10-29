@@ -91,7 +91,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 // =============================================================================
-// GoogleVoice — data class for parsed voice entries from /tts/voices
+// GoogleVoice — data class for parsed voice entries from /tts/google/voices
 // =============================================================================
 
 data class GoogleVoice(
@@ -204,7 +204,11 @@ class GoogleSsmlViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             try {
                 _status.value = "Loading voices..."
-                val response = api.get("/tts/voices")
+                // The Google voices route (A11-settings-generation-04): /tts/voices does not
+                // exist (404), so the list stayed empty and Generate never enabled.
+                val op = store.operator.first()
+                val query = if (op.isBlank()) "" else "?operator=" + java.net.URLEncoder.encode(op, "UTF-8")
+                val response = api.get("/tts/google/voices$query")
                 val root = json.parseToJsonElement(response).jsonObject
                 val voicesArray = root["voices"]?.jsonArray ?: return@launch
 
@@ -253,7 +257,8 @@ class GoogleSsmlViewModel(application: Application) : AndroidViewModel(applicati
         }
         _status.value = when (outcome) {
             is TaskPollOutcome.Completed -> {
-                _audioUrl.value = outcome.resultUrl
+                // Absolute: MediaPlayer cannot open a box-relative "/ui/uploads/..." path.
+                _audioUrl.value = absoluteMediaUrl(api.getBaseUrl(), outcome.status.resultUrl)
                 "Audio ready"
             }
             is TaskPollOutcome.Failed -> "Error: ${outcome.message}"

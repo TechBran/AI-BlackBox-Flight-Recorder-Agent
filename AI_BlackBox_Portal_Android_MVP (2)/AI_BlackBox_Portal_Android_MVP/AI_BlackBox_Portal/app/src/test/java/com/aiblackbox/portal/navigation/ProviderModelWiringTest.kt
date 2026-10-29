@@ -69,6 +69,18 @@ class ProviderModelWiringTest {
         }
     }
 
+    @Test fun `a send with an agent provider waits on its agent screen`() {
+        assertEquals(Routes.AGENT, ProviderModelWiring.agentRoute("agents"))
+        assertEquals(Routes.GEMINI_AGENT, ProviderModelWiring.agentRoute("gemini-agents"))
+        for (other in listOf("gemini", "anthropic", "computer-use", "robotics", "gemini-live", "")) {
+            assertNull(other, ProviderModelWiring.agentRoute(other))
+        }
+        // The same screens the composer's provider switch opens for them.
+        for (agent in listOf("agents", "gemini-agents")) {
+            assertEquals(ProviderModelWiring.dedicatedRoute(agent), ProviderModelWiring.agentRoute(agent))
+        }
+    }
+
     @Test fun `opening computer use switches to it through the shared path, once`() = runBlocking {
         val store = RecordingStore("anthropic", "claude-opus-5-5")
         val w = wiring(store)

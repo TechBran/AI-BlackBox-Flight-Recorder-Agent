@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.repository
 
 import android.util.Log
+import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.SSEClient
 import com.aiblackbox.portal.data.api.SSEEvent
@@ -17,7 +18,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import java.io.IOException
 
 /**
  * Repository for the update pipeline backend (Orchestrator/routes/update_routes.py).
@@ -101,8 +101,10 @@ class UpdateRepository(private val api: BlackBoxApi) {
         )
         try {
             api.post("/embeddings/migrate", body)
-        } catch (e: IOException) {
-            if (e.message?.startsWith("HTTP 409") != true) throw e
+        } catch (e: ApiHttpException) {
+            // The typed status (A10-data-remote-02): the message is the backend's
+            // `detail` now, so the old "HTTP 409" prefix test never matched.
+            if (e.code != 409) throw e
         }
     }
 

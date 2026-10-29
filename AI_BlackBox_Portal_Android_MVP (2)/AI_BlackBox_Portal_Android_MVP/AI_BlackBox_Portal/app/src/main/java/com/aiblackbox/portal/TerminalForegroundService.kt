@@ -130,23 +130,18 @@ class TerminalForegroundService : Service() {
         runCatching { TerminalSessionManager.activeCount() }.getOrDefault(0)
 
     private fun startForegroundWith(notification: Notification) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-        } catch (t: Throwable) {
-            // Platform may refuse a (background) FGS start under Android 14+
-            // restrictions. Never crash onStartCommand — log + carry on; the
-            // null-redelivery/STOP paths still reconcile against the live count.
-            Log.w(TAG, "startForeground refused (${t.javaClass.simpleName}); not foregrounded", t)
-        }
+        // Platform may refuse a (background) FGS start under Android 14+
+        // restrictions. Never crash onStartCommand — the helper logs, and we carry on;
+        // the null-redelivery/STOP paths still reconcile against the live count.
+        FgsSupport.startForegroundSafely(
+            this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE, TAG,
+        )
+    }
+
+    // connectedDevice has no time limit today; stop cleanly if the platform ever imposes one.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        _isRunning = false
+        FgsSupport.stopOnTimeout(this, TAG, fgsType)
     }
 
     private fun stopForegroundCompat() {
@@ -197,9 +192,9 @@ class TerminalForegroundService : Service() {
     companion object {
         private const val TAG = "TerminalFgService"
 
-        // Distinct channel + notification id from LocalModelService (9093 / "blackbox_local_model").
+        // Distinct channel + notification id (every id is registered in NotificationIds).
         const val CHANNEL_ID = "blackbox_terminal_sessions"
-        const val NOTIFICATION_ID = 9094
+        const val NOTIFICATION_ID = NotificationIds.TERMINAL
         const val ACTION_START = "com.aiblackbox.portal.START_TERMINAL_FGS"
         const val ACTION_STOP = "com.aiblackbox.portal.STOP_TERMINAL_FGS"
         const val ACTION_UPDATE = "com.aiblackbox.portal.UPDATE_TERMINAL_FGS"

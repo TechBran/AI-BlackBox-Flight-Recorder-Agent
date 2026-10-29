@@ -98,6 +98,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -131,6 +132,47 @@ internal fun cliLiveEdgeSection(phase: LiveStreamPhase): LiveTextSection? = when
     LiveStreamPhase.ANSWERING -> LiveTextSection.ANSWER
     LiveStreamPhase.TOOL -> LiveTextSection.TOOL_FALLBACK
     LiveStreamPhase.IDLE -> null
+}
+
+/**
+ * Settle the streaming assistant bubble with [content] — only when a reply WAS streaming
+ * ([wasStreaming]). At idle the list is returned untouched: the last bubble is a finished
+ * answer that an error or disconnect must not rewrite (A05-chat-ui-02).
+ */
+internal fun finishStreamingBubble(
+    messages: List<UiMessage>,
+    wasStreaming: Boolean,
+    content: String,
+): List<UiMessage> {
+    if (!wasStreaming) return messages
+    val last = messages.lastOrNull() ?: return messages
+    if (last.role != "assistant") return messages
+    return messages.dropLast(1) + last.copy(content = content, isStreaming = false, isThinking = false)
+}
+
+/**
+ * The operator an agent prompt runs as: the one it was queued under at send time, else
+ * the agent screen's own. A freshly created agent screen has not read its operator from
+ * the store yet, so its own is "" for the first frames (A05-chat-ui-01).
+ */
+internal fun agentPromptOperator(queuedAs: String, screenOperator: String): String =
+    queuedAs.ifBlank { screenOperator }
+
+/**
+ * Deliver the prompts the chat holds for the agent screen (A05-chat-ui-01). A prompt is
+ * taken from [pending] only while [ready] (the screen's agent client exists), and handed
+ * to [send] with the operator it was queued under. Taking it earlier lost it: the send
+ * after a navigation lands on a NEW agent screen, whose client and operator were not
+ * there yet, so it refused the prompt after the chat had already cleared it.
+ */
+internal suspend fun deliverHeldAgentPrompts(
+    pending: StateFlow<PendingAgentPrompt?>,
+    ready: StateFlow<Boolean>,
+    take: (PendingAgentPrompt) -> Boolean,
+    send: (PendingAgentPrompt) -> Unit,
+) {
+    combine(pending, ready) { prompt, isReady -> prompt.takeIf { isReady } }
+        .collect { prompt -> if (prompt != null && take(prompt)) send(prompt) }
 }
 
 internal fun reduceActiveTool(
@@ -242,6 +284,10 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         store.operator.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     private val currentOperator: String get() = operatorNow.value
     private var currentProvider = "agents"
+
+    // True once [initialize] has built the agent client: held prompts wait for it.
+    private val _clientReady = MutableStateFlow(false)
+    val clientReady: StateFlow<Boolean> = _clientReady.asStateFlow()
     private var outputBuffer = StringBuilder()
     private var thinkingBuffer = StringBuilder()
 
@@ -258,6 +304,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         val wsUrl = origin.replace("https://", "wss://").replace("http://", "ws://")
         val wsPath = if (provider == "gemini-agents") "/ws/gemini-agent" else "/ws/agent"
         agentClient = ClaudeAgentClient(api!!.getClient(), wsUrl, wsPath)
+        _clientReady.value = true
 
         // Set correct default model per provider
         if (provider == "gemini-agents") {
@@ -411,12 +458,18 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 _duration.value = event.duration
             }
 
-            // Error — Portal: toast('Agent error:')
+            // Error — Portal: toast('Agent error:'). Only a reply that is streaming takes
+            // the error into its bubble (A05-chat-ui-02): at idle the last bubble is a
+            // finished answer, and a session-close or failed-reconnect error must not be
+            // appended to it, so it goes to the status line instead.
             is AgentEvent.Error -> {
-                _status.value = "Error"
+                val wasStreaming = _isStreaming.value
+                _status.value = if (wasStreaming) "Error" else "Error: ${event.message}"
                 _isStreaming.value = false
-                outputBuffer.append("\n\u26A0\uFE0F ${event.message}")
-                updateLastAssistant(outputBuffer.toString(), streaming = false)
+                _isThinking.value = false
+                _activeTool.value = null
+                if (wasStreaming) outputBuffer.append("\n\u26A0\uFE0F ${event.message}")
+                _messages.value = finishStreamingBubble(_messages.value, wasStreaming, outputBuffer.toString())
             }
 
             // Info — Portal: toast(msg.data)
@@ -453,8 +506,11 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             is AgentEvent.Disconnected -> {
+                val wasStreaming = _isStreaming.value
                 _isStreaming.value = false
-                updateLastAssistant(outputBuffer.toString(), streaming = false)
+                _isThinking.value = false
+                _activeTool.value = null
+                _messages.value = finishStreamingBubble(_messages.value, wasStreaming, outputBuffer.toString())
             }
 
             // Provenance — Plan Task 10: parse-from-WS reaches the streaming bubble
@@ -472,10 +528,15 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         client.connect(sessionId, viewModelScope)
     }
 
-    fun sendPrompt(text: String) {
+    /**
+     * Send [text] as [operator], the operator the chat queued it under ([agentPromptOperator]
+     * falls back to this screen's own, which a new screen has not read yet).
+     */
+    fun sendPrompt(text: String, operator: String = "") {
         val client = agentClient ?: return
+        val op = agentPromptOperator(operator, currentOperator)
         // Every prompt is the resolved operator's: with none yet, nothing is sent.
-        if (currentOperator.isBlank()) {
+        if (op.isBlank()) {
             _status.value = OperatorResolver.CHOOSE_MESSAGE
             return
         }
@@ -506,19 +567,19 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             // Mirrors Portal: startSession() sends prompt inside ws.onopen handler
             _status.value = "Connecting..."
             val sessionId = client.generateSessionId()
-            viewModelScope.launch { store.setString("agent_session_$currentOperator", sessionId) }
+            viewModelScope.launch { store.setString("agent_session_$op", sessionId) }
             client.connectAndSend(
                 sessionId = sessionId,
                 scope = viewModelScope,
                 text = text,
-                operator = currentOperator,
+                operator = op,
                 model = _currentModel.value,
                 permissionMode = permissionKey
             )
         } else {
             // Already connected — send directly
             _status.value = "Continuing..."
-            client.sendPrompt(text, currentOperator, _currentModel.value, permissionKey)
+            client.sendPrompt(text, op, _currentModel.value, permissionKey)
         }
     }
 
@@ -677,11 +738,19 @@ fun AgentChatScreen(
         com.aiblackbox.portal.ui.components.setChatBaseUrl(origin)
     }
 
-    // Listen for prompts forwarded from Composer via ChatViewModel
-    LaunchedEffect(chatViewModel) {
-        chatViewModel?.agentPromptEvent?.collect { prompt ->
-            viewModel.sendPrompt(prompt)
-        }
+    // Prompts forwarded from the Composer via ChatViewModel. They are HELD until this
+    // screen can send them (A05-chat-ui-01): one sent while the screen was not composed,
+    // or that made the app open a new agent screen, is sent once that screen's client is
+    // up, under the operator it was sent as. Consume-once means a recomposition never
+    // sends it twice.
+    LaunchedEffect(chatViewModel, viewModel) {
+        val chat = chatViewModel ?: return@LaunchedEffect
+        deliverHeldAgentPrompts(
+            pending = chat.pendingAgentPrompt,
+            ready = viewModel.clientReady,
+            take = chat::consumeAgentPrompt,
+            send = { prompt -> viewModel.sendPrompt(prompt.text, agentPromptOperator(prompt.operator, operator)) },
+        )
     }
 
     val isGeminiAgent = provider == "gemini-agents"

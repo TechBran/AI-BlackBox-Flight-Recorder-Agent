@@ -67,7 +67,7 @@ class ModelCatalogWiringTest {
         assertTrue("viewModel.modelOptions.collectAsState()" in sheet)
         assertTrue("viewModel.loadModels(provider)" in sheet)
         val sms = source("ui/sms/SmsInboxScreen.kt")
-        assertTrue("viewModel.smsModelOptions.collectAsState()" in sms)
+        assertTrue("viewModel.smsModelOptions.collectAsStateWithLifecycle()" in sms)
         assertFalse("Constants." in sms)
 
         // A fresh live catalog replaces the stored picks it no longer lists.

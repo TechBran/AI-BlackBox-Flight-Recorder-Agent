@@ -93,6 +93,17 @@ internal class ProviderModelWiring(
     }
 
     companion object {
+        /**
+         * The agent screen a prompt sent with [provider] waits for (A05-chat-ui-01): the
+         * composer's send puts it on view, since the prompt is held until that screen takes
+         * it. Null for every other provider.
+         */
+        fun agentRoute(provider: String): String? = when (provider) {
+            "agents" -> Routes.AGENT
+            "gemini-agents" -> Routes.GEMINI_AGENT
+            else -> null
+        }
+
         /** The screen a provider lives on, which picking it in the composer opens; null for chat. */
         fun dedicatedRoute(provider: String): String? = when (provider) {
             "computer-use" -> Routes.COMPUTER_USE

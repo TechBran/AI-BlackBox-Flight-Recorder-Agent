@@ -11,12 +11,16 @@ import com.aiblackbox.portal.data.local.LocalEngineHolder
 import com.aiblackbox.portal.data.local.LocalLlm
 import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.SamplerSettings
+import com.aiblackbox.portal.data.local.engineConfigKey
 import com.aiblackbox.portal.data.local.engineSourceFor
 import com.aiblackbox.portal.data.local.pinWarmEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -197,13 +201,21 @@ class LocalEngineCoordinator(
      * by the warm marker and the crash-loop flag, pinned in [LocalEngineHolder]) and
      * adopt the engine it settles on — this one, or the one another warmer already
      * pinned for the same bundle. A no-op for a test fake (no model file).
+     *
+     * A STOP or an operator switch during the 10-75 s cold load still keeps the loaded
+     * engine while this view model lives (the next send reuses it instead of loading
+     * again); the cancellation then ends this turn here.
      */
     suspend fun loadWired() {
         val wired = engine ?: return
         val modelFile = engineModelFile ?: return
-        val pinned = pinWarmEngine(appContext, wired, modelFile.absolutePath, engineDelegate)
+        val pinned = pinWarmEngine(
+            appContext, wired, modelFile.absolutePath, engineDelegate,
+            keepIfCancelled = { scope.isActive },
+        )
         engine = pinned
         engineFromHolder = true
+        currentCoroutineContext().ensureActive()
     }
 
     private suspend fun wire(): (() -> LocalLlm)? {
@@ -248,6 +260,12 @@ class LocalEngineCoordinator(
             }
         }
 
+        // The settings this bundle's engine is built with (Task W2): maxTokens (falling
+        // back to the engine default when the descriptor leaves it null) + sampler trio.
+        val cfg = bundle.config
+        val maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS
+        val sampler = SamplerSettings(topK = cfg.topK, topP = cfg.topP, temperature = cfg.temperature)
+
         // R2-C: PREFER the warm, PROCESS-resident engine pinned by
         // [LocalModelService] when it matches the active bundle -- it is already
         // loaded (no ~10-75s cold load) and survives VM/process recycles. The pure
@@ -255,7 +273,11 @@ class LocalEngineCoordinator(
         // AND built for THIS bundle path; otherwise BUILD_OWN (the pre-R2-C path,
         // also taken when the service never started -- the graceful fallback).
         val held = LocalEngineHolder.getOrNull()
-        if (engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath) == EngineSource.USE_HOLDER) {
+        // A held engine built before a settings apply is not borrowed: it would answer
+        // with the old context window or sampler.
+        val heldConfigMatches =
+            held?.configKey == engineConfigKey(targetPath, maxTokens, sampler, cfg.supportImage)
+        if (engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath, heldConfigMatches) == EngineSource.USE_HOLDER) {
             // Borrow the service-owned warm engine. We do NOT own it, so onCleared /
             // invalidate must not close() it (engineFromHolder = true).
             val warm = held!!
@@ -274,17 +296,12 @@ class LocalEngineCoordinator(
         // delegate), threading the PER-MODEL config (Task W2): maxTokens (fallback
         // to the engine default when the descriptor leaves it null) + sampler trio.
         // This is exactly the pre-R2-C path -- the guaranteed fallback.
-        val cfg = bundle.config
         val built = LiteRtEngine.fromInstalled(
             appContext,
             bundle.file,
             delegate = delegate,
-            maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS,
-            sampler = SamplerSettings(
-                topK = cfg.topK,
-                topP = cfg.topP,
-                temperature = cfg.temperature,
-            ),
+            maxTokens = maxTokens,
+            sampler = sampler,
             // Task W4: thread the per-model vision capability so the engine sets a
             // visionBackend + allows generateWithImage ONLY for image-capable bundles
             // (text-only models keep the working CPU text path untouched).

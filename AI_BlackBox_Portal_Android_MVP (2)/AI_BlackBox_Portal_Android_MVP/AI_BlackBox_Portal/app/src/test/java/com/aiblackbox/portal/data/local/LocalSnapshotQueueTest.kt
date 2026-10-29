@@ -244,37 +244,43 @@ class LocalSnapshotQueueTest {
         }
     }
 
+    /**
+     * Review repro: a short 500 outage (the box answers 500 for any handler error) with
+     * on-device turns still being made. Each turn's enqueue flushes once; the head the
+     * outage refused most often must still reach the ledger when the box recovers.
+     */
     @Test
-    fun `a head the box keeps refusing is dead-lettered after the attempt cap`() = runTest {
+    fun `a server outage delays turns but every one reaches the ledger in order`() = runTest {
         val store = JsonFileQueueStore(File(tmp.root, "q.json"))
-        val head = req("server keeps failing")
-        val next = req("fine")
-        store.save(listOf(head, next))
-        val sender = ScriptedSender(failWith = { if (it == head) http(500) else null })
+        var boxDown = true
+        val sender = ScriptedSender(failWith = { if (boxDown) http(500) else null })
         val queue = LocalSnapshotQueue(sender, store)
 
-        repeat(LocalSnapshotQueue.MAX_REFUSED_ATTEMPTS - 1) { queue.flush() }
-        assertEquals("below the cap the head stays queued", listOf(head, next), store.load())
-        assertTrue(store.deadLetters().isEmpty())
+        for (i in 1..12) queue.enqueue(req("turn-$i"))
+        assertEquals("nothing is delivered or dropped during the outage", 12, store.load().size)
+        assertTrue("a 5xx is never dead-lettered", store.deadLetters().isEmpty())
 
-        queue.flush()
-        assertEquals("at the cap the head is parked and the drain continues", listOf(next), sender.sent)
+        boxDown = false
+        queue.enqueue(req("turn-13"))
+
+        assertEquals("every turn, in order", (1..13).map { "turn-$it" }, sender.sent.map { it.userMessage })
         assertTrue(store.load().isEmpty())
-        assertEquals(listOf(head), store.deadLetters().map { it.request })
+        assertTrue(store.deadLetters().isEmpty())
     }
 
     @Test
-    fun `an unreachable box never counts toward the cap`() = runTest {
-        val store = JsonFileQueueStore(File(tmp.root, "q.json"))
-        val head = req("offline for a week")
-        store.save(listOf(head))
-        val sender = ScriptedSender(failWith = { IOException("unreachable") })
-        val queue = LocalSnapshotQueue(sender, store)
+    fun `an unreachable box or a busy one keeps the head however long it lasts`() = runTest {
+        for ((label, failure) in listOf("unreachable" to IOException("unreachable"), "busy" to http(503))) {
+            val store = JsonFileQueueStore(File(tmp.root, "q-$label.json"))
+            val head = req("$label for a week")
+            store.save(listOf(head))
+            val queue = LocalSnapshotQueue(ScriptedSender(failWith = { failure }), store)
 
-        repeat(LocalSnapshotQueue.MAX_REFUSED_ATTEMPTS * 3) { queue.flush() }
+            repeat(50) { queue.flush() }
 
-        assertEquals("an offline turn is kept however long the outage", listOf(head), store.load())
-        assertTrue(store.deadLetters().isEmpty())
+            assertEquals("$label: the turn is kept", listOf(head), store.load())
+            assertTrue(store.deadLetters().isEmpty())
+        }
     }
 
     @Test

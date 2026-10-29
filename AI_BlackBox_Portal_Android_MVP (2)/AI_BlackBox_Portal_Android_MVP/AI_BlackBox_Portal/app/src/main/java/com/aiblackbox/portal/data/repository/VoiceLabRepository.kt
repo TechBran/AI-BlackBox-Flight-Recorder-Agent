@@ -1,7 +1,9 @@
 package com.aiblackbox.portal.data.repository
 
 import android.util.Log
+import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -242,7 +244,12 @@ internal fun parseXaiVoicesResponse(raw: String): XaiVoicesResult {
     return XaiVoicesResult(configured, voices)
 }
 
-class VoiceLabRepository(private val api: BlackBoxApi) {
+class VoiceLabRepository(
+    private val api: BlackBoxApi,
+    // Every hand-rolled execute() below runs here, never on the caller's thread: the VM
+    // launches on Main, where a socket call throws NetworkOnMainThreadException.
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     // -------------------------------------------------------------------------
@@ -316,17 +323,21 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
             .post(builder.build())
             .build()
 
-        api.getClient().newCall(request).execute().use { response ->
-            val body = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                throw VoiceLabException(response.code, extractError(body, response.code))
+        // Main-safe (A10-data-remote-01): a bare execute() on the VM's Main thread threw
+        // NetworkOnMainThreadException, so every ElevenLabs clone failed on the phone.
+        return withContext(ioDispatcher) {
+            api.getClient().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    throw VoiceLabException(response.code, extractError(body, response.code))
+                }
+                val o = json.parseToJsonElement(body).jsonObject
+                CloneResult(
+                    voiceId = o["voice_id"]?.jsonPrimitive?.content ?: "",
+                    requiresVerification = o["requires_verification"]
+                        ?.jsonPrimitive?.content?.toBoolean() ?: false,
+                )
             }
-            val o = json.parseToJsonElement(body).jsonObject
-            return CloneResult(
-                voiceId = o["voice_id"]?.jsonPrimitive?.content ?: "",
-                requiresVerification = o["requires_verification"]
-                    ?.jsonPrimitive?.content?.toBoolean() ?: false,
-            )
         }
     }
 
@@ -383,18 +394,21 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
             .header("X-BlackBox-Client", "native-android/1.0")
             .delete()
             .build()
-        api.getClient().newCall(request).execute().use { response ->
-            val body = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                throw VoiceLabException(response.code, extractError(body, response.code))
+        // Main-safe (same NetworkOnMainThreadException hazard as cloneVoice).
+        return withContext(ioDispatcher) {
+            api.getClient().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    throw VoiceLabException(response.code, extractError(body, response.code))
+                }
+                val o = json.parseToJsonElement(body).jsonObject
+                val inUse = (o["in_use"]?.jsonArray ?: JsonArray(emptyList()))
+                    .mapNotNull { it.jsonPrimitive.content }
+                DeleteResult(
+                    ok = o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false,
+                    inUse = inUse,
+                )
             }
-            val o = json.parseToJsonElement(body).jsonObject
-            val inUse = (o["in_use"]?.jsonArray ?: JsonArray(emptyList()))
-                .mapNotNull { it.jsonPrimitive.content }
-            return DeleteResult(
-                ok = o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-                inUse = inUse,
-            )
         }
     }
 
@@ -466,13 +480,16 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
             .header("X-BlackBox-Client", "native-android/1.0")
             .post(builder.build())
             .build()
-        api.getClient().newCall(request).execute().use { response ->
-            val body = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                throw VoiceLabException(response.code, extractError(body, response.code))
+        // Main-safe (same NetworkOnMainThreadException hazard as cloneVoice).
+        return withContext(ioDispatcher) {
+            api.getClient().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    throw VoiceLabException(response.code, extractError(body, response.code))
+                }
+                val o = json.parseToJsonElement(body).jsonObject
+                o["voice_id"]?.jsonPrimitive?.contentOrNull ?: ""
             }
-            val o = json.parseToJsonElement(body).jsonObject
-            return o["voice_id"]?.jsonPrimitive?.contentOrNull ?: ""
         }
     }
 
@@ -482,13 +499,16 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
             .header("X-BlackBox-Client", "native-android/1.0")
             .delete()
             .build()
-        api.getClient().newCall(request).execute().use { response ->
-            val body = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                throw VoiceLabException(response.code, extractError(body, response.code))
+        // Main-safe (same NetworkOnMainThreadException hazard as cloneVoice).
+        return withContext(ioDispatcher) {
+            api.getClient().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    throw VoiceLabException(response.code, extractError(body, response.code))
+                }
+                val o = json.parseToJsonElement(body).jsonObject
+                o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false
             }
-            val o = json.parseToJsonElement(body).jsonObject
-            return o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false
         }
     }
 
@@ -534,7 +554,7 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
         // Main-safe: the VM launches on Main; a bare execute() there throws
         // NetworkOnMainThreadException (null message -> the bare "Clone failed"
         // toast Brandon hit 2026-07-23) BEFORE any request leaves the phone.
-        return withContext(Dispatchers.IO) {
+        return withContext(ioDispatcher) {
             api.getClient().newCall(request).execute().use { response ->
                 val body = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
@@ -571,7 +591,7 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
             .delete()
             .build()
         // Main-safe (same NetworkOnMainThreadException hazard as cloneQwenVoice).
-        return withContext(Dispatchers.IO) {
+        return withContext(ioDispatcher) {
             api.getClient().newCall(request).execute().use { response ->
                 val body = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
@@ -588,18 +608,19 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
     // -------------------------------------------------------------------------
 
     /**
-     * POST JSON and surface the HTTP status on failure. BlackBoxApi.post throws a
-     * generic IOException("HTTP <code>...") which would lose the body; this calls
-     * the shared client directly so 422/400 detail reaches the UI.
+     * POST JSON and surface the HTTP status on failure, so the ViewModel can branch on
+     * 422/400. BlackBoxApi.post throws [ApiHttpException] carrying the status and the
+     * backend's `detail` as the message (A10-data-remote-02: the old "HTTP <code>"
+     * message parse found nothing once `detail` became the message, so every 4xx came
+     * back as status 0). A transport failure has no status (0).
      */
     private suspend fun postOrThrow(path: String, body: String): String {
-        // Reuse BlackBoxApi.post for the happy path; rewrap its IOException with
-        // the parsed status code so the ViewModel can branch on 4xx.
         return try {
             api.post(path, body)
+        } catch (e: ApiHttpException) {
+            throw VoiceLabException(e.code, e.message ?: "Request failed")
         } catch (e: IOException) {
-            val code = Regex("HTTP (\\d+)").find(e.message ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-            throw VoiceLabException(code, e.message ?: "Request failed")
+            throw VoiceLabException(0, e.message ?: "Request failed")
         }
     }
 

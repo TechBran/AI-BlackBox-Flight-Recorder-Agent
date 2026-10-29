@@ -34,7 +34,6 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.webkit.URLUtil
 import android.widget.Button
 import android.widget.Toast
@@ -54,6 +53,10 @@ import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.FoldingFeatureMonitor
 import com.aiblackbox.portal.overlay.OverlayService
+import com.aiblackbox.portal.ui.webview.BbxWebChromeClient
+import com.aiblackbox.portal.ui.webview.BbxWebViewClient
+import com.aiblackbox.portal.ui.webview.FileChooserLauncher
+import com.aiblackbox.portal.ui.webview.RendererCrashBudget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -67,6 +70,9 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
+
+// Renderer crashes counted across recreate(), which is how a crash is recovered here.
+private val portalRendererCrashes = RendererCrashBudget()
 
 class PortalActivity : AppCompatActivity() {
 
@@ -137,6 +143,28 @@ class PortalActivity : AppCompatActivity() {
             notificationManager.showTaskNotification("BlackBox Ready", "Notifications are enabled!")
         } else {
             Toast.makeText(this, "Notification permission is recommended for alerts.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // The page's own <input type=file> (audit rank 62), answered exactly once: picked,
+    // cancelled, or a second chooser replacing a pending one.
+    private var pendingWebFileCallback: ((Array<Uri>?) -> Unit)? = null
+    private val webFileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val callback = pendingWebFileCallback
+        pendingWebFileCallback = null
+        callback?.invoke(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+    }
+    private val portalFileChooser = FileChooserLauncher { params, onResult ->
+        pendingWebFileCallback?.invoke(null)
+        pendingWebFileCallback = onResult
+        try {
+            webFileChooserLauncher.launch(params.createIntent())
+            true
+        } catch (e: Exception) {
+            pendingWebFileCallback = null
+            false
         }
     }
 
@@ -379,7 +407,9 @@ class PortalActivity : AppCompatActivity() {
             }
         }
 
-        web.webViewClient = object : WebViewClient() {
+        // BbxWebViewClient (audit rank 62): a renderer crash recreates the activity (a fresh
+        // WebView reloads the Portal) instead of Android killing the whole app.
+        web.webViewClient = object : BbxWebViewClient(onRendererGone = { onPortalRendererGone() }) {
             /**
              * (A01-activities-root-01) Only the paired box stays in this WebView — a link in a chat
              * reply, a target=_blank, a redirect off-box all go to the system (a browser, the
@@ -465,7 +495,9 @@ class PortalActivity : AppCompatActivity() {
             }
         }
 
-        web.webChromeClient = object : WebChromeClient() {
+        // BbxWebChromeClient (audit rank 62): JS confirm()/alert() show real dialogs (confirm()
+        // returned false before) and the page's own <input type=file> opens the picker.
+        web.webChromeClient = object : BbxWebChromeClient(portalFileChooser) {
             override fun onPermissionRequest(request: PermissionRequest) {
                 runOnUiThread {
                     val wantsAudio = request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
@@ -1746,6 +1778,30 @@ class PortalActivity : AppCompatActivity() {
                 Log.d("UploadWhisper", "Deleted temp file ${file.name}: $deleted")
             }
         }
+    }
+
+    /**
+     * The Portal's renderer died: recreate the activity for a fresh WebView, but only as
+     * often as [portalRendererCrashes] allows, so a page that kills its renderer on every
+     * load is not reloaded forever. Past that the dead WebView is taken off screen (it is
+     * destroyed in onDestroy) and the user chooses Reload or Close.
+     */
+    private fun onPortalRendererGone() {
+        if (portalRendererCrashes.recordCrash()) {
+            recreate()
+            return
+        }
+        (web.parent as? android.view.ViewGroup)?.removeView(web)
+        if (isFinishing || isDestroyed) return
+        android.app.AlertDialog.Builder(this)
+            .setMessage("The BlackBox page crashed.")
+            .setPositiveButton("Reload") { _, _ ->
+                portalRendererCrashes.reset()
+                recreate()
+            }
+            .setNegativeButton("Close") { _, _ -> finish() }
+            .setCancelable(false)
+            .show()
     }
 
     override fun onDestroy() {

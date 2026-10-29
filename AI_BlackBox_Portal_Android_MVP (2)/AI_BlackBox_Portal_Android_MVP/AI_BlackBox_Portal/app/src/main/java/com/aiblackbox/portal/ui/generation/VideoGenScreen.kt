@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.ui.components.EmberBackdrop
 import com.aiblackbox.portal.ui.components.GlassCard
+import com.aiblackbox.portal.ui.components.InlineVideoPlayer
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -476,6 +477,15 @@ fun VideoGenScreen(
                             )
                         }
                     }
+                    Spacer(Modifier.height(12.dp))
+                    // Play it here (the result used to be only a URL line).
+                    InlineVideoPlayer(
+                        url = url,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp)
+                            .clip(RoundedCornerShape(RadiusMd))
+                    )
                     Spacer(Modifier.height(12.dp))
 
                     // Generate another button

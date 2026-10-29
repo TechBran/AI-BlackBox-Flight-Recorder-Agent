@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -33,6 +34,24 @@ data class Contact(
     val inboundAllowed: Boolean = true,
     val isOperatorSelf: Boolean = false
 )
+
+/**
+ * The message for a finished contact save (A14-ui-misc-06). The box's own warning wins.
+ * An edit the box saved under a DIFFERENT id (a box that still matches contacts by name
+ * only, so a rename made a second contact) says so instead of "Contact updated", so the
+ * old record is not silently left behind.
+ */
+internal fun contactSavedMessage(editedId: String?, response: String, json: Json): String {
+    val obj = runCatching { json.parseToJsonElement(response).jsonObject }.getOrNull()
+    runCatching { obj?.get("warning")?.jsonPrimitive?.contentOrNull }.getOrNull()?.let { return it }
+    if (editedId == null) return "Contact created"
+    val savedId = runCatching { obj?.get("contact")?.jsonObject?.get("id")?.jsonPrimitive?.contentOrNull }.getOrNull()
+    return if (savedId != null && savedId != editedId) {
+        "Saved as a new contact: this BlackBox cannot rename contacts yet. Delete the old one if it is now a duplicate."
+    } else {
+        "Contact updated"
+    }
+}
 
 class ContactsViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
@@ -164,21 +183,18 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
 
         viewModelScope.launch {
             try {
-                // Always a POST — backend upserts by name (case-insensitive match)
+                // Always a POST. An edit names the contact by id, so a rename updates it
+                // in place instead of creating a second contact (A14-ui-misc-06).
+                val existingId = _editingContact.value?.id
                 val response = book.save(
                     name = name, phone = phone, email = email, relationship = relationship,
                     notes = notes, tags = tags, inboundAllowed = inboundAllowed, isOperatorSelf = isOperatorSelf,
+                    id = existingId,
                 )
-                val existingId = _editingContact.value?.id
 
-                // Surface the write-time identity guard warning if present (save still succeeded)
-                val warning = try {
-                    json.parseToJsonElement(response).jsonObject["warning"]?.jsonPrimitive?.content
-                } catch (_: Exception) {
-                    null
-                }
-                _actionMessage.value = warning
-                    ?: if (existingId != null) "Contact updated" else "Contact created"
+                // The write-time identity guard's warning if present (the save still
+                // succeeded), else what the box actually did with an edit.
+                _actionMessage.value = contactSavedMessage(existingId, response, json)
 
                 _showEditDialog.value = false
                 _editingContact.value = null

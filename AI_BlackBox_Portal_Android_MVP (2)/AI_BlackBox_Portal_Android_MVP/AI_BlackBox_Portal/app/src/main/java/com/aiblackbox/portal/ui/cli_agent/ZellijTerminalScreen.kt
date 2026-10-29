@@ -143,6 +143,8 @@ fun ZellijTerminalScreen(
 
     // --- Termux view / session references -----------------------------------
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
+    // The bar's sticky Ctrl/Alt, also applied to letters typed on the soft keyboard.
+    val stickyModifiers = rememberStickyModifiers()
     var terminalSession by remember { mutableStateOf<TerminalSession?>(null) }
 
     // --- Grid dimensions; pushed via sendResize whenever they change --------
@@ -662,13 +664,9 @@ fun ZellijTerminalScreen(
                             ctrlDown: Boolean,
                             session: TerminalSession,
                         ): Boolean {
-                            val bytes: ByteArray = if (ctrlDown && codePoint in 0x40..0x7F) {
-                                byteArrayOf((codePoint and 0x1f).toByte())
-                            } else if (ctrlDown && codePoint in 0x60..0x7A) {
-                                byteArrayOf((codePoint and 0x1f).toByte())
-                            } else {
-                                String(Character.toChars(codePoint)).toByteArray(Charsets.UTF_8)
-                            }
+                            // Ctrl (held on a hardware keyboard OR armed on the
+                            // bar) and Alt applied to the typed code point.
+                            val bytes = stickyModifiers.bytesForCodePoint(codePoint, ctrlDown)
                             // Programmatic view reset → kill any live fling too.
                             scrollEngine.stopAll()
                             view.setTopRow(0)
@@ -790,6 +788,7 @@ fun ZellijTerminalScreen(
 
         // --- Extra-keys bar + mic ----------------------------------------------
         ExtraKeysBar(
+            modifiers = stickyModifiers,
             onKeyBytes = { bytes ->
                 // Programmatic view reset → kill any live fling too.
                 scrollEngine.stopAll()

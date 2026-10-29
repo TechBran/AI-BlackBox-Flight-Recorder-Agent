@@ -7,7 +7,11 @@ import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -46,14 +50,22 @@ interface EngineSlot<E : Any> {
  * The ONE warm protocol (A09-data-local-model-02, A04-chat-viewmodel-09). Every engine
  * load in the process runs it under the same [mutex], so two multi-GB GPU loads can
  * never overlap (the double-warm OOM). Under the lock it:
- *  - returns the engine already pinned for [path], closing the unloaded [engine] it was
+ *  - returns the engine already pinned for [path] when [sameConfig] says it was built
+ *    like [engine] (context window, sampler), closing the unloaded [engine] it was
  *    handed, so a second warmer reuses the first one's work instead of loading a copy;
- *  - retires an engine pinned for a DIFFERENT model before loading, so two models never
- *    sit in memory together;
+ *  - retires an engine pinned for a DIFFERENT model, or for the same model with a
+ *    config that has since changed, before loading, so two engines never sit in memory
+ *    together and a settings apply is never answered with the stale engine;
  *  - publishes the warm marker ([EngineSlot.beginWarming]) that the chat waits on, and
  *    the crash-loop flag ([WarmInflightStore]) that a SIGKILL mid-load leaves set;
  *  - pins the loaded engine in the slot (the single owner), or closes it and rethrows
  *    when the load fails.
+ *
+ * The native load cannot be interrupted, so it always runs to its end. A caller
+ * cancelled meanwhile (a STOP, an operator switch) still gets the loaded engine pinned
+ * when [keepIfCancelled] says the engine is still wanted, and the cancellation then
+ * surfaces at its next suspension; otherwise (a service stopping, a cleared screen) the
+ * engine is closed and the cancellation rethrown, so nothing stays pinned unowned.
  */
 suspend fun <E : Any> pinWarm(
     mutex: Mutex,
@@ -63,9 +75,11 @@ suspend fun <E : Any> pinWarm(
     path: String,
     load: suspend (E) -> Unit,
     close: (E) -> Unit,
+    sameConfig: (held: E, wanted: E) -> Boolean = { _, _ -> true },
+    keepIfCancelled: () -> Boolean = { false },
 ): E = mutex.withLock {
     val held = slot.held()
-    if (held != null && slot.heldPath() == path) {
+    if (held != null && slot.heldPath() == path && (held === engine || sameConfig(held, engine))) {
         if (held !== engine) runCatching { close(engine) }
         return@withLock held
     }
@@ -73,12 +87,21 @@ suspend fun <E : Any> pinWarm(
     slot.beginWarming(path)
     inflight.setInflight(true)
     try {
-        load(engine)
+        // Only a load that THREW closes the engine; a cancelled caller is decided below.
+        withContext(NonCancellable) {
+            try {
+                load(engine)
+            } catch (t: Throwable) {
+                runCatching { close(engine) }
+                throw t
+            }
+        }
+        if (!currentCoroutineContext().isActive && !keepIfCancelled()) {
+            runCatching { close(engine) }
+            currentCoroutineContext().ensureActive()
+        }
         slot.pin(engine, path)
         engine
-    } catch (t: Throwable) {
-        runCatching { close(engine) }
-        throw t
     } finally {
         // Success, a caught failure and a cancellation are all graceful: only a real
         // process kill leaves the flag set for the next launch's auto-warm to skip on.
@@ -100,15 +123,17 @@ private class HolderSlot(private val delegate: String) : EngineSlot<LiteRtEngine
 /**
  * Load [engine] (built for the bundle at [path]) through the one process warm and
  * return the engine to use: [engine] itself once pinned, or the engine another warmer
- * already pinned for [path]. The foreground service's warm, the control_phone wake and
- * the chat's own load all go through here, so the engine has exactly one owner
- * ([LocalEngineHolder]) and is loaded once.
+ * already pinned for [path] with the same config ([LiteRtEngine.configKey]). The
+ * foreground service's warm, the control_phone wake and the chat's own load all go
+ * through here, so the engine has exactly one owner ([LocalEngineHolder]) and is loaded
+ * once. [keepIfCancelled]: see [pinWarm].
  */
 suspend fun pinWarmEngine(
     context: Context,
     engine: LiteRtEngine,
     path: String,
     delegate: String,
+    keepIfCancelled: () -> Boolean = { false },
 ): LiteRtEngine = pinWarm(
     mutex = LocalEngineHolder.warmMutex,
     slot = HolderSlot(delegate),
@@ -117,6 +142,8 @@ suspend fun pinWarmEngine(
     path = path,
     load = { withContext(Dispatchers.IO) { it.load(File(path), delegate) } },
     close = { it.close() },
+    sameConfig = { held, wanted -> held.configKey == wanted.configKey },
+    keepIfCancelled = keepIfCancelled,
 )
 
 /**

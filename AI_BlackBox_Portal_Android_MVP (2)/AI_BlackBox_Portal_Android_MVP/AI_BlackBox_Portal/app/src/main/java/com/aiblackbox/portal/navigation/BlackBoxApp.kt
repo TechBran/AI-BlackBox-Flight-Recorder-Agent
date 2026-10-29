@@ -721,9 +721,12 @@ internal fun BlackBoxApp(
                 // taps straight to the Updates screen.
                 showUpdatesBadge = updatesVm.attention.collectAsState().value,
                 onUpdatesClick = { navController.navigate(Routes.UPDATES) },
-                onOperatorChange = { scope.launch { store.setOperator(it) } },
+                // A pick waits while a reply streams (it would cancel it unminted).
+                onOperatorChange = {
+                    if (!chatViewModel.operatorSwitchBlocked()) scope.launch { store.setOperator(it) }
+                },
                 onAddOperator = { name ->
-                    scope.launch {
+                    if (!chatViewModel.operatorSwitchBlocked()) scope.launch {
                         try {
                             val api = chatViewModel.getApi() ?: return@launch
                             val body = """{"name":"$name"}"""
@@ -872,6 +875,12 @@ internal fun BlackBoxApp(
                     // M1: first-use location ask. Fire-and-forget — it never
                     // gates, delays, or blocks the send below.
                     maybeAskForLocation()
+                    // An agent prompt is held for the agent screen until it
+                    // takes it (A05-chat-ui-01): put that screen on view.
+                    val agentRoute = ProviderModelWiring.agentRoute(provider)
+                    if (agentRoute != null && currentRoute != agentRoute) {
+                        navController.navigate(agentRoute) { launchSingleTop = true }
+                    }
                     // Upload attachments first, then send message with URLs
                     val hasAttachments = attachments.isNotEmpty()
                     val hasPreUploaded = preUploadedUrls.isNotEmpty()
@@ -1137,7 +1146,8 @@ internal fun BlackBoxApp(
             onNavigate = { route ->
                 navController.navigate(route)
             },
-            onClearHistory = { chatViewModel.clearHistory() }
+            onClearHistory = { chatViewModel.clearHistory() },
+            canSwitchOperator = { !chatViewModel.operatorSwitchBlocked() },
         )
     }
 }

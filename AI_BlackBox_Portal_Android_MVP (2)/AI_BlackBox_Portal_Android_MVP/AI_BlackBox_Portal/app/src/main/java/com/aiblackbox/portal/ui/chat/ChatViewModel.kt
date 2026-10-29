@@ -185,6 +185,21 @@ private const val MAX_CHAT_MESSAGES = 100
  */
 private const val LOCAL_HISTORY_BUDGET_CHARS = 4000
 
+/** Why an operator pick has to wait, or null when it can go ahead ([ChatViewModel.operatorSwitchBlocked]). */
+internal fun operatorSwitchBlockedReason(turnInFlight: Boolean): String? =
+    if (turnInFlight) OPERATOR_SWITCH_WAIT_MESSAGE else null
+
+internal const val OPERATOR_SWITCH_WAIT_MESSAGE =
+    "A reply is still coming in. Wait for it, or tap Stop, before switching operator."
+
+/**
+ * A prompt waiting for the CLI agent screen, with the [operator] it was sent as (read at
+ * send time, like a cloud turn's operator): the agent screen it lands on may be new and
+ * not have read the operator yet. A class (identity equality), so the same text sent
+ * twice is two prompts and [ChatViewModel.consumeAgentPrompt] takes each once.
+ */
+class PendingAgentPrompt(val text: String, val operator: String = "")
+
 /**
  * One cloud turn's identity, read ONCE at send time (A04-chat-viewmodel-16): the
  * operator, provider and model it was sent with and the ids of its two bubbles. The
@@ -365,8 +380,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Agent prompt forwarding ──
     // When provider is an agent type, prompts are forwarded here instead of SSE
-    private val _agentPromptEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
-    val agentPromptEvent: SharedFlow<String> = _agentPromptEvent.asSharedFlow()
+    // A prompt for the CLI agent screen, held until that screen takes it
+    // (A05-chat-ui-01). It was a SharedFlow with no replay: sent while the agent screen
+    // was not composed (cold start or back-navigation with the agent provider still
+    // selected), the prompt was dropped with the input already cleared.
+    private val _pendingAgentPrompt = MutableStateFlow<PendingAgentPrompt?>(null)
+    val pendingAgentPrompt: StateFlow<PendingAgentPrompt?> = _pendingAgentPrompt.asStateFlow()
+
+    /** Hand [text] to the agent screen; it stays pending until [consumeAgentPrompt]. */
+    private fun queueAgentPrompt(text: String) {
+        _pendingAgentPrompt.value = PendingAgentPrompt(text, operator = currentOperator)
+    }
+
+    /**
+     * Take [prompt] exactly once: true for the first caller, false when it was already
+     * taken (or replaced by a newer prompt), so a recomposition cannot send it twice.
+     */
+    fun consumeAgentPrompt(prompt: PendingAgentPrompt): Boolean =
+        _pendingAgentPrompt.compareAndSet(prompt, null)
 
     // ── Dynamic model list (fetched from /models/{provider}) ──
     private val _liveModels = MutableStateFlow<List<Pair<String, String>>>(emptyList())
@@ -720,8 +751,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // without instantiating this AndroidViewModel.
         when (routeFor(provider, _erMissionActive.value)) {
             ChatRoute.AGENT -> {
-                // Forward to AgentChatScreen via shared event
-                _agentPromptEvent.tryEmit(text)
+                // Held for AgentChatScreen until it takes it (lossless handoff).
+                queueAgentPrompt(text)
                 _inputText.value = TextFieldValue()
             }
             ChatRoute.VOICE -> {
@@ -790,7 +821,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         when (routeFor(ChatProvider.fromId(currentProvider), _erMissionActive.value)) {
-            ChatRoute.AGENT -> _agentPromptEvent.tryEmit(text)
+            ChatRoute.AGENT -> queueAgentPrompt(text)
             ChatRoute.VOICE -> Log.w(TAG, "Voice provider $currentProvider — use Voice screen")
             ChatRoute.ER_INJECT -> injectErPrompt(text)
             ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalEngine(text, clearInput = false)
@@ -1921,6 +1952,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             isStreaming = false,
             isThinking = false
         )
+    }
+
+    /**
+     * Whether an operator pick must wait (review follow-up to A04-chat-viewmodel-16). A
+     * switch settles the turn still streaming in its own operator's conversation by
+     * cancelling it, and a cancelled reply is not minted (like a STOP), so a pick made
+     * mid-reply would lose that reply from the ledger. The pickers call this first: true,
+     * with the reason toasted, while a turn is in flight.
+     */
+    fun operatorSwitchBlocked(): Boolean {
+        val reason = operatorSwitchBlockedReason(streamJob?.isActive == true) ?: return false
+        _operatorNotice.tryEmit(reason)
+        return true
     }
 
     /**

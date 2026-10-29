@@ -352,6 +352,10 @@ def _scan_self_flag_collision(
     return None
 
 
+class ContactNameTaken(ValueError):
+    """A rename onto a name another contact in the same book already has."""
+
+
 def upsert_contact(
     name: str,
     notes: Optional[str],
@@ -362,21 +366,30 @@ def upsert_contact(
     email: Optional[str] = None,
     relationship: Optional[str] = None,
     inbound_allowed: Optional[bool] = None,
-    is_operator_self: Optional[bool] = None
+    is_operator_self: Optional[bool] = None,
+    match_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create or update a contact. Matches existing by name (case-insensitive).
     Returns the saved contact. When ``is_operator_self`` collides with another
     operator's self-flag for the same number, a ``warning`` key is included on
     the returned contact (it still saves).
+
+    ``match_id`` names the contact an editor is changing (A14-ui-misc-06): when it
+    is in this operator's book it wins over the name match, so a rename updates that
+    record instead of creating a second one under the new name. A rename onto a
+    name another contact in the book already has raises ``ContactNameTaken``
+    (names stay unique per book; name-keyed callers rely on it).
     """
     with editing_contacts() as data:
         return _upsert_into(data, name, notes, tags, operator, created_by, phone,
-                            email, relationship, inbound_allowed, is_operator_self)
+                            email, relationship, inbound_allowed, is_operator_self,
+                            match_id)
 
 
 def _upsert_into(data, name, notes, tags, operator, created_by, phone, email,
-                 relationship, inbound_allowed, is_operator_self) -> Dict[str, Any]:
+                 relationship, inbound_allowed, is_operator_self,
+                 match_id=None) -> Dict[str, Any]:
     """upsert_contact's edit of `data`, under editing_contacts()."""
     ensure_operator_book(data, operator)
     book = data[operator]
@@ -387,12 +400,17 @@ def _upsert_into(data, name, notes, tags, operator, created_by, phone, email,
     if is_operator_self:
         warning = _scan_self_flag_collision(data, phone, operator)
 
-    # Check for existing contact with same name
-    existing_id = None
-    for cid, contact in book.items():
-        if contact.get("name", "").lower() == name.lower():
-            existing_id = cid
-            break
+    # The contact an edit names by id, else an existing contact with the same name
+    existing_id = match_id if match_id and match_id in book else None
+    if existing_id is not None:
+        for cid, contact in book.items():
+            if cid != existing_id and contact.get("name", "").lower() == name.lower():
+                raise ContactNameTaken(f'Another contact is already named "{contact.get("name", "")}".')
+    else:
+        for cid, contact in book.items():
+            if contact.get("name", "").lower() == name.lower():
+                existing_id = cid
+                break
 
     if existing_id:
         # Update existing

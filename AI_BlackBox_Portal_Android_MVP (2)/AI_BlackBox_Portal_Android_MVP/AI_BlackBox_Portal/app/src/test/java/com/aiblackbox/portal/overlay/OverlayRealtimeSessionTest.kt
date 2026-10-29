@@ -61,7 +61,6 @@ class OverlayRealtimeSessionTest {
         override fun updateScreenShareUi(isActive: Boolean) {}
         override fun syncBridgeState() {}
         override fun showConnecting(connecting: Boolean) { this.connecting = connecting }
-        override fun hideProgress() { connecting = false }
         override fun showTranscriptEntry(speaker: String, text: String, count: Int) { transcript += speaker to text }
         override fun updateLiveResponse(text: String) { live += text }
         override fun screenCaptureAvailable() = false
@@ -159,6 +158,40 @@ class OverlayRealtimeSessionTest {
         session(noBox).connectRealtime()
         assertEquals(listOf("Server URL not set"), noBox.toasts)
         assertEquals(0, server.requestCount)
+    }
+
+    @Test fun `the box closing the socket ends the whole session`() {
+        val host = FakeHost(server.url("").toString().trimEnd('/'))
+        val s = session(host)
+        s.connectRealtime()
+        pumpUntil("the socket to open") { s.isRealtimeConnected && boxSocket != null }
+
+        boxSocket!!.close(1001, "restarting")
+        pumpUntil("the teardown") { !s.isRealtimeConnected }
+        assertEquals("Disconnected", host.statuses.last())
+        assertEquals(false, host.connecting)
+        assertFalse("the mic is off", s.isRealtimeRecording)
+        assertFalse(s.isAISpeaking)
+        assertFalse(s.isUserMuted)
+        assertTrue("no failure toast for a clean close", host.toasts.isEmpty())
+    }
+
+    @Test fun `a failed connection ends the session and says so`() {
+        // A box that is gone: the socket fails instead of opening.
+        val gone = MockWebServer().apply { start() }
+        val url = gone.url("").toString().trimEnd('/')
+        gone.close()
+        val host = FakeHost(url)
+        val s = session(host)
+        s.connectRealtime()
+        assertEquals(true, host.connecting)
+
+        pumpUntil("the failure") { host.toasts.isNotEmpty() }
+        assertFalse(s.isRealtimeConnected)
+        assertEquals("Connection failed", host.statuses.last())
+        assertEquals("the spinner goes", false, host.connecting)
+        assertFalse(s.isRealtimeRecording)
+        assertTrue(host.toasts.single(), host.toasts.single().startsWith("Connection failed: "))
     }
 
     @Test fun `grok cannot share the screen, and no projection means no share`() {

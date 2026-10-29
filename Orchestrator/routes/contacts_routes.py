@@ -16,6 +16,7 @@ class ContactUpsertRequest(BaseModel):
     tags: Optional[List[str]] = None  # None = leave unchanged on update
     inbound_allowed: Optional[bool] = None   # may this number text in? (None = leave unchanged)
     is_operator_self: Optional[bool] = None  # is this the operator's own line? (None = leave unchanged)
+    id: Optional[str] = None  # the contact an editor is changing: a rename updates it in place
 
 
 @router.get("")
@@ -39,20 +40,26 @@ async def search_contacts_endpoint(operator: str = Query(...), query: str = Quer
 
 @router.post("")
 async def upsert_contact(req: ContactUpsertRequest):
-    """Create or update a contact. Matches existing by name (case-insensitive)."""
-    from Orchestrator.contacts import upsert_contact
-    contact = upsert_contact(
-        name=req.name,
-        notes=req.notes,    # None = leave unchanged (additive)
-        tags=req.tags,      # None = leave unchanged (additive)
-        operator=req.operator,
-        created_by=req.operator,
-        phone=req.phone,
-        email=req.email,
-        relationship=req.relationship,
-        inbound_allowed=req.inbound_allowed,    # None = leave unchanged (additive)
-        is_operator_self=req.is_operator_self,  # None = leave unchanged (additive)
-    )
+    """Create or update a contact: the one `id` names in the operator's book, else
+    the one with the same name (case-insensitive). 409 when a rename would give the
+    contact a name another contact already has."""
+    from Orchestrator.contacts import ContactNameTaken, upsert_contact
+    try:
+        contact = upsert_contact(
+            name=req.name,
+            notes=req.notes,    # None = leave unchanged (additive)
+            tags=req.tags,      # None = leave unchanged (additive)
+            operator=req.operator,
+            created_by=req.operator,
+            phone=req.phone,
+            email=req.email,
+            relationship=req.relationship,
+            inbound_allowed=req.inbound_allowed,    # None = leave unchanged (additive)
+            is_operator_self=req.is_operator_self,  # None = leave unchanged (additive)
+            match_id=req.id,
+        )
+    except ContactNameTaken as e:
+        raise HTTPException(status_code=409, detail=str(e))
     resp = {"success": True, "contact": contact}
     if contact.get("warning"):
         resp["warning"] = contact["warning"]
