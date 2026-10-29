@@ -19,6 +19,15 @@ The parent (audio_ipc.py) runs it with -I, so this directory is not put first
 on sys.path: nothing here may shadow the stdlib for numpy and scipy (audit
 W14). It sends READY with the bound address once it listens; the parent
 reports the AudioSocket server started only then.
+
+It exits on its own when the parent dies without sending SHUTDOWN (SIGKILL,
+the OOM killer; blackbox.service's KillMode=process leaves it running): the IPC
+socket reaches EOF, and a reparent check backs that up. Both used to be
+defeated by the log pipe: stdout is a pipe the parent reads, so once the parent
+was gone the next print raised BrokenPipeError from the very branch that set
+_shutdown, and the orphan kept the AudioSocket port (the unit's
+`pkill -9 -f audio_subprocess.py` ExecStartPre was the backstop). Writes to the
+dead pipe are now dropped (_QuietStream) and _shutdown is set before logging.
 """
 
 import asyncio
@@ -62,6 +71,31 @@ AS_FRAME_BYTES = 320      # 20ms at 8kHz, 16-bit mono (160 samples × 2 bytes)
 # Reduced from 50 (1000ms) to 5 (100ms) for interactive voice latency.
 # 100ms absorbs jitter without adding perceptible delay.
 PRE_BUFFER_FRAMES = 5     # 5 × 20ms = 100ms
+
+
+
+
+class _QuietStream:
+    """stdout/stderr that drops a write once the parent's log pipe is gone,
+    instead of raising BrokenPipeError into whatever was logging."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        try:
+            return self._stream.write(text)
+        except (OSError, ValueError):
+            return len(text)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +255,9 @@ class AudioSubprocess:
         self._as_writers: dict[str, asyncio.StreamWriter] = {}
         self._shutdown = False
         self._server: asyncio.Server | None = None
+        # Who started us. A different getppid() later means we were reparented:
+        # the parent died without SHUTDOWN (see the module docstring).
+        self._parent_pid = os.getppid()
 
     async def run(self) -> int:
         """Main entry point — set up IPC, AudioSocket server, and run forever.
@@ -273,6 +310,11 @@ class AudioSubprocess:
         try:
             while not self._shutdown:
                 await asyncio.sleep(1.0)
+                if os.getppid() != self._parent_pid:
+                    # The IPC EOF normally says this first; this covers an IPC
+                    # end something else still holds.
+                    self._shutdown = True
+                    print("[AudioSubprocess] Parent gone (reparented), shutting down")
         except asyncio.CancelledError:
             pass
 
@@ -316,8 +358,8 @@ class AudioSubprocess:
 
     def _signal_handler(self) -> None:
         """Handle SIGTERM/SIGINT for graceful shutdown."""
-        print("[AudioSubprocess] Signal received, shutting down...")
         self._shutdown = True
+        print("[AudioSubprocess] Signal received, shutting down...")
 
     # ------------------------------------------------------------------
     # AudioSocket connection handler
@@ -430,8 +472,8 @@ class AudioSubprocess:
                 try:
                     header_bytes = await self._ipc_reader.readexactly(IPC_HEADER_SIZE)
                 except (asyncio.IncompleteReadError, ConnectionError):
-                    print("[AudioSubprocess] IPC disconnected (parent gone?)")
                     self._shutdown = True
+                    print("[AudioSubprocess] IPC disconnected (parent gone?)")
                     return
 
                 msg_type, length = IPC_HEADER_STRUCT.unpack(header_bytes)
@@ -441,8 +483,8 @@ class AudioSubprocess:
                     try:
                         payload = await self._ipc_reader.readexactly(length)
                     except (asyncio.IncompleteReadError, ConnectionError):
-                        print("[AudioSubprocess] IPC read error")
                         self._shutdown = True
+                        print("[AudioSubprocess] IPC read error")
                         return
                 else:
                     payload = b""
@@ -468,8 +510,8 @@ class AudioSubprocess:
                         ch.clear()
 
                 elif msg_type == MSG_SHUTDOWN:
-                    print("[AudioSubprocess] Shutdown command received")
                     self._shutdown = True
+                    print("[AudioSubprocess] Shutdown command received")
                     return
 
                 else:
@@ -478,8 +520,8 @@ class AudioSubprocess:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"[AudioSubprocess] IPC listener error: {e}")
             self._shutdown = True
+            print(f"[AudioSubprocess] IPC listener error: {e}")
 
     # ------------------------------------------------------------------
     # IPC send helper
@@ -502,8 +544,8 @@ class AudioSubprocess:
             # Don't await drain here — called from sync context (push callbacks)
             # and from async context (IPC listener). The event loop will flush.
         except (ConnectionError, BrokenPipeError, OSError):
-            print("[AudioSubprocess] IPC write failed (parent gone?)")
             self._shutdown = True
+            print("[AudioSubprocess] IPC write failed (parent gone?)")
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +556,9 @@ if __name__ == "__main__":
         print("Usage: audio_subprocess.py <ipc_fd> <host> <port>")
         sys.exit(1)
 
+    # stdout/stderr are the parent's log pipe: never let it dying raise here.
+    sys.stdout = _QuietStream(sys.stdout)
+    sys.stderr = _QuietStream(sys.stderr)
     sub = AudioSubprocess(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]))
 
     try:
