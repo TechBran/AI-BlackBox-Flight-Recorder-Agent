@@ -68,7 +68,7 @@ from Orchestrator.routes.voice_ws_shared import (
     save_voice_transcript,
     send_openai_style_tool_error,
 )
-from Orchestrator.voice import tools as voice_tools
+from Orchestrator.voice import tools as voice_tools, wire
 from Orchestrator.voice.bridge import LiveVoiceBridge, VoiceAdapter
 from Orchestrator.voice.transcript import save_session_transcript
 
@@ -449,10 +449,8 @@ async def handle_portal_message(session: RealtimeSession, data: Dict):
     if msg_type == "audio_input":
         # Forward audio to OpenAI
         if session.openai_ws:
-            await session.openai_ws.send(json.dumps({
-                "type": "input_audio_buffer.append",
-                "audio": data.get("data", ""),  # Base64 PCM16
-            }))
+            # Base64 PCM16
+            await session.openai_ws.send(json.dumps(wire.openai_audio(data.get("data", ""))))
             session.is_recording = True
             session.last_activity = now_utc_iso()
     elif msg_type == "audio_commit":
@@ -475,19 +473,9 @@ async def handle_portal_message(session: RealtimeSession, data: Dict):
         # Send text message
         text = data.get("text", "")
         if session.openai_ws and text:
-            # Create conversation item
-            await session.openai_ws.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": text}]
-                }
-            }))
-            # Request response
-            await session.openai_ws.send(json.dumps({
-                "type": "response.create"
-            }))
+            # The conversation item, then the request to answer it.
+            for frame in wire.openai_user_text(text):
+                await session.openai_ws.send(json.dumps(frame))
             session.last_activity = now_utc_iso()
 
     elif msg_type == "interrupt":
@@ -692,6 +680,7 @@ class OpenAIRealtimeAdapter(VoiceAdapter):
     key_name = "OPENAI_API_KEY"
     connecting_status = "Connecting to OpenAI..."
     connect_failed = "Failed to connect to OpenAI Realtime API"
+    input_rate = 24000
 
     def sessions(self):
         return REALTIME_SESSIONS
@@ -796,18 +785,6 @@ class OpenAIRealtimeAdapter(VoiceAdapter):
               f"model={params['model'] or OPENAI_REALTIME_MODEL}; "
               f"vad_type={params['vad_type'] or 'server_vad'}")
 
-    async def inject_greeting(self, session, greeting):
-        prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
-        await session.openai_ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": prompt}]
-            }
-        }))
-        await session.openai_ws.send(json.dumps({"type": "response.create"}))
-
     def connected_data(self, session, session_id, params):
         return {
             "session_id": session_id,
@@ -832,7 +809,18 @@ class OpenAIRealtimeAdapter(VoiceAdapter):
             session.reconnect_count = 0
 
     def keepalive_frame(self, session):
-        return {"type": "input_audio_buffer.append", "audio": _SILENCE_20MS_B64}
+        return wire.openai_audio(_SILENCE_20MS_B64)
+
+    def audio_frame(self, audio_b64):
+        return wire.openai_audio(audio_b64)
+
+    def text_turn_frames(self, text):
+        return wire.openai_user_text(text)
+
+    async def configure_call(self, session, operator, custom_role):
+        # Server VAD handles phone turn detection; the "phone-" session id gets
+        # near-field noise reduction (configure_openai_session).
+        await configure_openai_session(session, operator, voice="ash", custom_role=custom_role)
 
     async def redial(self, session):
         # Translate sessions must rebind the translate model and must NOT

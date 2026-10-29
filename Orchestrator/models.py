@@ -118,6 +118,10 @@ class RealtimeSession:
     reconnect_tasks: Set[Any] = field(default_factory=set)
     tool_tasks: Dict[Any, str] = field(default_factory=dict)
     tool_lock: Optional[Any] = None
+    # True when the session's owner runs its own reconnect loop around the
+    # listener (a phone call leg, phone/bridge.py): the voice bridge then never
+    # dials a second upstream for it on a close.
+    external_reconnect: bool = False
 
 # Global storage for Realtime sessions
 REALTIME_SESSIONS: Dict[str, RealtimeSession] = {}
@@ -190,9 +194,9 @@ class GeminiLiveSession:
     reconnect_tasks: Set[Any] = field(default_factory=set)
     tool_tasks: Dict[Any, str] = field(default_factory=dict)
     tool_lock: Optional[Any] = None
-    # True when the session's owner runs its own reconnect loop around
-    # gemini_listener (phone/bridge.py): the route then never dials a second
-    # upstream for it on a close or a goAway.
+    # True when the session's owner runs its own reconnect loop around the
+    # listener (a phone call leg, phone/bridge.py): the voice bridge then never
+    # dials a second upstream for it on a close or a goAway.
     external_reconnect: bool = False
 
 # Global storage for Gemini Live sessions
@@ -244,6 +248,11 @@ class GrokLiveSession:
     reconnect_tasks: Set[Any] = field(default_factory=set)
     tool_tasks: Dict[Any, str] = field(default_factory=dict)
     tool_lock: Optional[Any] = None
+    # A phone call leg (phone/bridge.py): its owner runs the reconnect loop,
+    # and with no client to commit the caller's audio, every turn the server
+    # VAD commits is answered (response.create).
+    external_reconnect: bool = False
+    respond_on_commit: bool = False
 
 # Global storage for Grok Live sessions
 GROK_LIVE_SESSIONS: Dict[str, GrokLiveSession] = {}

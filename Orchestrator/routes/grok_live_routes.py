@@ -66,7 +66,7 @@ from Orchestrator.routes.voice_ws_shared import (
     send_openai_style_tool_error,
     voice_debug_enabled,
 )
-from Orchestrator.voice import tools as voice_tools
+from Orchestrator.voice import tools as voice_tools, wire
 from Orchestrator.voice.bridge import LiveVoiceBridge, VoiceAdapter
 from Orchestrator.voice.transcript import save_session_transcript
 
@@ -435,10 +435,8 @@ async def handle_grok_portal_message(session: 'GrokLiveSession', data: Dict):
     if msg_type == "audio_input":
         # Forward audio to Grok
         if session.grok_ws:
-            await session.grok_ws.send(json.dumps({
-                "type": "input_audio_buffer.append",
-                "audio": data.get("data", "")  # Base64 PCM16
-            }))
+            # Base64 PCM16
+            await session.grok_ws.send(json.dumps(wire.openai_audio(data.get("data", ""))))
             session.is_recording = True
             session.last_activity = now_utc_iso()
 
@@ -458,19 +456,9 @@ async def handle_grok_portal_message(session: 'GrokLiveSession', data: Dict):
         # Send text message
         text = data.get("text", "")
         if session.grok_ws and text:
-            # Create conversation item
-            await session.grok_ws.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": text}]
-                }
-            }))
-            # Request response
-            await session.grok_ws.send(json.dumps({
-                "type": "response.create"
-            }))
+            # The conversation item, then the request to answer it.
+            for frame in wire.openai_user_text(text):
+                await session.grok_ws.send(json.dumps(frame))
             session.last_activity = now_utc_iso()
 
     elif msg_type == "interrupt":
@@ -629,6 +617,12 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
                 "type": "speech_stopped"
             })
 
+    elif event_type == "input_audio_buffer.committed" and session.respond_on_commit:
+        # A phone call leg has no client to commit its audio: answer each turn
+        # the server VAD commits (a Portal client sends audio_commit itself).
+        if session.grok_ws:
+            await session.grok_ws.send(json.dumps({"type": "response.create"}))
+
     elif event_type == "session.updated":
         # Session configuration confirmed
         print(f"[GROK-LIVE] ===== SESSION CONFIGURATION CONFIRMED =====")
@@ -690,6 +684,7 @@ class GrokLiveAdapter(VoiceAdapter):
     key_name = "XAI_API_KEY"
     connecting_status = "Connecting to Grok..."
     connect_failed = "Failed to connect to Grok Voice Agent API"
+    input_rate = GROK_LIVE_INPUT_SAMPLE_RATE
 
     def sessions(self):
         return GROK_LIVE_SESSIONS
@@ -757,18 +752,6 @@ class GrokLiveAdapter(VoiceAdapter):
                                      tool_group_override=params["tool_group_override"])
         print(f"{LOG_PREFIX} Voice selected: {params['voice']}")
 
-    async def inject_greeting(self, session, greeting):
-        prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
-        await session.grok_ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": prompt}]
-            }
-        }))
-        await session.grok_ws.send(json.dumps({"type": "response.create"}))
-
     def connected_data(self, session, session_id, params):
         return {
             "session_id": session_id,
@@ -797,7 +780,33 @@ class GrokLiveAdapter(VoiceAdapter):
         # The socket's ping/pong still detects a dead connection.
         if session.call_id:
             return None
-        return {"type": "input_audio_buffer.append", "audio": _SILENCE_20MS_B64}
+        return wire.openai_audio(_SILENCE_20MS_B64)
+
+    def audio_frame(self, audio_b64):
+        return wire.openai_audio(audio_b64)
+
+    def text_turn_frames(self, text):
+        return wire.openai_user_text(text)
+
+    async def configure_call(self, session, operator, custom_role):
+        await configure_grok_session(session, operator, voice=GROK_LIVE_DEFAULT_VOICE,
+                                     custom_role=custom_role)
+        # Server-side VAD tuned for phone audio: a higher threshold for line
+        # noise, a longer silence before the turn ends. The server commits the
+        # caller's turns and the listener answers each commit.
+        print(f"{LOG_PREFIX} Enabling server-side VAD for a phone call")
+        await session.grok_ws.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.8,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 1000
+                }
+            }
+        }))
+        session.respond_on_commit = True
 
     async def redial(self, session):
         # Resume the server-side conversation when there is an id (xAI replays

@@ -85,7 +85,7 @@ from Orchestrator.routes.voice_ws_shared import (
     spawn_reconnect,
     superseded,
 )
-from Orchestrator.voice import tools as voice_tools
+from Orchestrator.voice import tools as voice_tools, wire
 from Orchestrator.voice.bridge import LiveVoiceBridge, VoiceAdapter
 from Orchestrator.voice.transcript import save_session_transcript
 
@@ -622,17 +622,10 @@ async def handle_portal_message(session: GeminiLiveSession, data: Dict):
 
     if msg_type == "audio_input":
         # Forward audio to Gemini using BidiGenerateContentRealtimeInput
-        audio_data = data.get("data", "")
+        audio_data = data.get("data", "")  # Base64 PCM16 at 16kHz
         if session.gemini_ws and audio_data:
-            realtime_input = {
-                "realtime_input": {
-                    "audio": {
-                        "mimeType": f"audio/pcm;rate={GEMINI_LIVE_INPUT_SAMPLE_RATE}",
-                        "data": audio_data  # Base64 PCM16 at 16kHz
-                    }
-                }
-            }
-            await session.gemini_ws.send(json.dumps(realtime_input))
+            await session.gemini_ws.send(json.dumps(
+                wire.gemini_audio(audio_data, GEMINI_LIVE_INPUT_SAMPLE_RATE)))
 
             # Buffer audio for Whisper transcription (Gemini doesn't provide user transcription)
             session.user_audio_buffer.append(audio_data)
@@ -693,16 +686,8 @@ async def handle_portal_message(session: GeminiLiveSession, data: Dict):
                 "timestamp": now_utc_iso(),
                 "source": "text"
             })
-            client_content = {
-                "clientContent": {
-                    "turns": [{
-                        "role": "user",
-                        "parts": [{"text": text}]
-                    }],
-                    "turnComplete": True
-                }
-            }
-            await session.gemini_ws.send(json.dumps(client_content))
+            for frame in wire.gemini_user_text(text):
+                await session.gemini_ws.send(json.dumps(frame))
             session.last_activity = now_utc_iso()
 
     elif msg_type == "interrupt":
@@ -1052,6 +1037,7 @@ class GeminiLiveAdapter(VoiceAdapter):
     key_name = "GOOGLE_API_KEY"
     connecting_status = "Connecting to Gemini Live..."
     connect_failed = "Failed to connect to Gemini Live API"
+    input_rate = GEMINI_LIVE_INPUT_SAMPLE_RATE
 
     def sessions(self):
         return GEMINI_LIVE_SESSIONS
@@ -1144,15 +1130,6 @@ class GeminiLiveAdapter(VoiceAdapter):
             tool_group_override=params["tool_group_override"],
         )
 
-    async def inject_greeting(self, session, greeting):
-        prompt = f"The user just answered the phone. Greet them and deliver this message: {greeting}"
-        await session.gemini_ws.send(json.dumps({
-            "clientContent": {
-                "turns": [{"role": "user", "parts": [{"text": prompt}]}],
-                "turnComplete": True
-            }
-        }))
-
     def connected_data(self, session, session_id, params):
         return {
             "session_id": session_id,
@@ -1176,14 +1153,19 @@ class GeminiLiveAdapter(VoiceAdapter):
                                      getattr(session, "answered_tool_call_ids", None))
 
     def keepalive_frame(self, session):
-        return {
-            "realtime_input": {
-                "audio": {
-                    "mimeType": f"audio/pcm;rate={GEMINI_LIVE_INPUT_SAMPLE_RATE}",
-                    "data": _SILENCE_20MS_B64
-                }
-            }
-        }
+        return wire.gemini_audio(_SILENCE_20MS_B64, GEMINI_LIVE_INPUT_SAMPLE_RATE)
+
+    def audio_frame(self, audio_b64):
+        return wire.gemini_audio(audio_b64, GEMINI_LIVE_INPUT_SAMPLE_RATE)
+
+    def text_turn_frames(self, text):
+        return wire.gemini_user_text(text)
+
+    async def configure_call(self, session, operator, custom_role):
+        # phone_mode: server-side VAD tuned for phone audio (LOW sensitivity,
+        # 1000 ms silence); audio streams straight in, Gemini finds the turns.
+        await configure_gemini_session(session, operator, voice=GEMINI_LIVE_DEFAULT_VOICE,
+                                       custom_role=custom_role, phone_mode=True)
 
     def flush(self, session):
         _flush_open_turn(session)

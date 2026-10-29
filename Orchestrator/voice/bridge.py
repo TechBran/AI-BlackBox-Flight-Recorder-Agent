@@ -26,7 +26,7 @@ call or swap one of them drive this same machine.
 import asyncio
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import websockets
 import websockets.exceptions
@@ -48,6 +48,24 @@ from Orchestrator.volume import now_utc_iso
 # How long the client WS may stay silent before the session is dropped: a
 # suspended or dead Android client stops sending even its pings.
 CLIENT_IDLE_TIMEOUT_S = 120.0
+
+# The provider bridges by backend name (the phone session's AIBackend values,
+# also the make_phone_call tool's "backend"): the route module that defines it
+# and its module attribute. Imported on first use, the routes import half the
+# Orchestrator.
+_BRIDGE_HOMES = {
+    "gemini_live": ("Orchestrator.routes.gemini_live_routes", "GEMINI_LIVE_BRIDGE"),
+    "openai_realtime": ("Orchestrator.routes.realtime_routes", "REALTIME_BRIDGE"),
+    "grok_live": ("Orchestrator.routes.grok_live_routes", "GROK_LIVE_BRIDGE"),
+}
+
+
+def live_bridge(backend: str) -> "LiveVoiceBridge":
+    """The LiveVoiceBridge of a live-voice backend ("gemini_live",
+    "openai_realtime", "grok_live"). KeyError for any other backend."""
+    import importlib
+    module_name, attr = _BRIDGE_HOMES[backend]
+    return getattr(importlib.import_module(module_name), attr)
 
 
 class VoiceAdapter:
@@ -71,6 +89,8 @@ class VoiceAdapter:
     connect_failed = ""
     #: Seconds between keepalive frames (an idle provider times the session out).
     keepalive_interval = 15
+    #: Sample rate (Hz) of the PCM16 input audio the provider takes.
+    input_rate = 16000
 
     # --- session store ---
     def sessions(self) -> Dict[str, Any]:
@@ -105,10 +125,21 @@ class VoiceAdapter:
     async def configure(self, session, params: Dict) -> None:
         raise NotImplementedError
 
-    async def inject_greeting(self, session, greeting: str) -> None:
-        """Make the model speak first (an outbound call's greeting)."""
-
     def connected_data(self, session, session_id: str, params: Dict) -> Dict:
+        raise NotImplementedError
+
+    async def configure_call(self, session, operator: str, custom_role: str) -> None:
+        """Configure a phone call's leg (phone/bridge.py): the provider's
+        telephony tuning (voice, server VAD) on top of the normal session."""
+        raise NotImplementedError
+
+    # --- upstream frames ---
+    def audio_frame(self, audio_b64: str) -> Dict:
+        """One chunk of base64 PCM16 input audio at input_rate."""
+        raise NotImplementedError
+
+    def text_turn_frames(self, text: str) -> List[Dict]:
+        """A user text turn the model answers."""
         raise NotImplementedError
 
     # --- traffic ---
@@ -310,7 +341,11 @@ class LiveVoiceBridge:
             # Outbound call: the model speaks first when the callee answers.
             print(f"{a.log_prefix} Injecting outbound greeting: {greeting[:80]}...")
             try:
-                await a.inject_greeting(session, greeting)
+                prompt = ("The user just answered the phone. Greet them and deliver "
+                          f"this message: {greeting}")
+                upstream = getattr(session, a.ws_attr)
+                for frame in a.text_turn_frames(prompt):
+                    await upstream.send(json.dumps(frame))
             except Exception as e:
                 print(f"{a.log_prefix} Greeting injection failed: {e}")
 
