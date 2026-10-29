@@ -344,6 +344,11 @@
      "prompt": "calm piano"
     },
     {
+     "task_id": "exec-extend_video",
+     "type": "video",
+     "prompt": "longer"
+    },
+    {
      "task_id": "exec-elevenlabs_music",
      "type": "music",
      "prompt": "upbeat jingle"

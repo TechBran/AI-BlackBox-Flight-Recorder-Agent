@@ -21,6 +21,13 @@ are DATA in each loop's LoopProfile, not code: which executor tools have their
 own labels, which result-text variant the native media branches return, whether
 an empty catch-all result becomes a "(no output)" note, and the order of the
 catch-all's events. Converging one of them is now a one-line profile change.
+The differences that were bugs are gone (O02-chat-routes-A-10,
+O03-chat-routes-B-07): no loop keeps an executor-only branch that bypasses the
+catch-all's media placeholder, CLI event and empty-result note; call_gemini's
+get_current_time is the ToolVault tool; the native branches coerce the model's
+numeric arguments instead of crashing the turn on "2"; every stream's
+image_task carries predicted_url and every stream's use_computer emits
+browser_task.
 
 The native branches read their helpers (create_task, web fetch, retrieval,
 media lookups, upload resolution) from ToolServices, which chat_routes builds
@@ -122,12 +129,6 @@ _CALL_TOOLS = frozenset({"send_sms", "make_phone_call", "make_voice_call"})
 _EXECUTOR_LABELLED = _CALL_TOOLS | frozenset({
     "search_contacts", "save_contact", "create_cron_job", "edit_cron_job",
     "search_cron_jobs", "use_computer"})
-_DEVICE_TOOLS = frozenset({"list_devices", "control_android_device"})
-_GMAIL_TOOLS = frozenset({"gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"})
-_MEDIA_INFO_TOOLS = frozenset({
-    "get_task_status", "get_snapshot", "list_recent_snapshots", "get_current_time",
-    "analyze_image", "analyze_audio", "analyze_video", "speech_to_text",
-    "text_to_speech", "list_tts_voices", "gemini_pro_tts", "extend_video"})
 
 
 @dataclass(frozen=True)
@@ -138,15 +139,11 @@ class LoopProfile:
     stream: bool                              # SSE events + helpers off the event loop
     native: bool = False                      # native media / snapshot / media-lookup branches
     labelled: frozenset = frozenset()         # executor tools with their own progress label
-    plain: frozenset = frozenset()            # executor tools with the "<name>: <result>" label
     native_text: str = "stream"               # media result-text variant: stream | anthropic_call | gemini_call
-    image_event_url: bool = True              # image_task carries predicted_url
-    browser_task: bool = True                 # use_computer emits browser_task
     full_call_labels: bool = False            # make_*_call labels untruncated ("Phone call: ...")
     empty_note: bool = True                   # catch-all: empty result -> "(no output)" note
     label_first: bool = False                 # catch-all: label before the cli/media events
     record_media: bool = False                # non-stream: report the media task it created
-    inline_time: bool = False                 # call_gemini's own get_current_time
 
 
 PROFILES: Dict[str, LoopProfile] = {
@@ -155,27 +152,23 @@ PROFILES: Dict[str, LoopProfile] = {
     "call_custom": LoopProfile(tag="[CUSTOM-CALL]", stream=False, record_media=True),
     "call_anthropic": LoopProfile(
         tag="[ANTHROPIC]", stream=False, native=True, labelled=_EXECUTOR_LABELLED,
-        plain=_MEDIA_INFO_TOOLS | _DEVICE_TOOLS, native_text="anthropic_call", record_media=True),
+        native_text="anthropic_call", record_media=True),
     "call_gemini": LoopProfile(
         tag="[GEMINI]", stream=False, native=True, labelled=_EXECUTOR_LABELLED,
-        plain=_DEVICE_TOOLS, native_text="gemini_call", record_media=True, inline_time=True),
+        native_text="gemini_call", record_media=True),
     "stream_openai": LoopProfile(
         tag="[OPENAI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED,
-        plain=_DEVICE_TOOLS | _GMAIL_TOOLS, full_call_labels=True, empty_note=False,
-        label_first=True),
+        full_call_labels=True, empty_note=False, label_first=True),
     "stream_xai": LoopProfile(
         tag="[XAI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED - _CALL_TOOLS,
-        plain=_DEVICE_TOOLS | _GMAIL_TOOLS, empty_note=False, label_first=True),
+        empty_note=False, label_first=True),
     "stream_custom": LoopProfile(
         tag="[CUSTOM-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED - _CALL_TOOLS,
-        plain=_DEVICE_TOOLS | _GMAIL_TOOLS, browser_task=False, empty_note=False,
-        label_first=True),
+        empty_note=False, label_first=True),
     "stream_anthropic": LoopProfile(
-        tag="[ANTHROPIC-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED,
-        plain=_MEDIA_INFO_TOOLS | _GMAIL_TOOLS | _DEVICE_TOOLS, image_event_url=False),
+        tag="[ANTHROPIC-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED),
     "stream_gemini": LoopProfile(
-        tag="[GEMINI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED,
-        plain=_DEVICE_TOOLS | _MEDIA_INFO_TOOLS | _GMAIL_TOOLS, image_event_url=False),
+        tag="[GEMINI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED),
 }
 
 
@@ -224,14 +217,9 @@ async def dispatch_tool(name: str, args: Dict, ctx: ToolContext) -> ToolOutcome:
             return await handler(name, args, ctx)
     if name in profile.labelled:
         return await _labelled(name, args, ctx)
-    if name in profile.plain:
-        return await _plain(name, args, ctx)
-    if profile.inline_time and name == "get_current_time":
-        from datetime import datetime
-        now = datetime.now()
-        result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-        print(f"{profile.tag} get_current_time: {result}")
-        return ToolOutcome(result)
+    # Everything else, the ToolVault executor tools included, is the catch-all:
+    # it alone emits the media placeholder, the cli_task event and the
+    # empty-result note (O02-chat-routes-A-10).
     return await _catch_all(name, args, ctx)
 
 
@@ -263,6 +251,51 @@ async def _run_executor(ctx: ToolContext, name: str, args):
     return await executor.execute(name, args)
 
 
+def _int_arg(args: Dict, keys, default: int, lo: Optional[int] = None,
+             hi: Optional[int] = None) -> int:
+    """A numeric tool argument as the model sent it: an int, an integral float
+    or a numeric string ("2", " 2 ", "2.0") all count, anything else is
+    ``default``; then clamped to [lo, hi]. The first of ``keys`` present wins.
+    Models stringify numbers, and range("2") used to kill the whole turn
+    (O03-chat-routes-B-07)."""
+    for key in ((keys,) if isinstance(keys, str) else keys):
+        if key in args:
+            raw = args[key]
+            break
+    else:
+        raw = None
+    value = default
+    if isinstance(raw, bool):
+        pass
+    elif isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        value = int(raw)
+    elif isinstance(raw, str):
+        try:
+            number = float(raw.strip())
+            if number.is_integer():
+                value = int(number)
+        except ValueError:
+            pass
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
+def _list_arg(args: Dict, key: str) -> List:
+    """A list argument, also when the model sent it as a JSON string."""
+    raw = args.get(key, [])
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip().startswith("[") else [raw]
+        except ValueError:
+            raw = []
+    return raw if isinstance(raw, list) else []
+
+
 def _read_b64(path) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
@@ -287,8 +320,8 @@ async def _image(name, args, ctx: ToolContext) -> ToolOutcome:
     prompt = args.get("prompt", "")
     aspect_ratio = args.get("aspectRatio", "16:9")
     resolution = args.get("resolution", "1K")
-    num_images = args.get("numberOfImages", 1)
-    reference_images = args.get("reference_images", [])
+    num_images = _int_arg(args, "numberOfImages", 1, lo=1, hi=4)  # the schema's 1..4
+    reference_images = _list_arg(args, "reference_images")
     mode = "image-to-image" if reference_images else "text-to-image"
     print(f"{profile.tag} Executing {mode} generation: {prompt[:100]}... ({num_images} @ {resolution}, {len(reference_images)} refs)")
 
@@ -344,12 +377,10 @@ async def _image(name, args, ctx: ToolContext) -> ToolOutcome:
     if not profile.stream:
         return ToolOutcome(result, media_task=(task.task_id, "image", prompt))
     print(f"[STREAM] Sending image_task event: task_id={task.task_id}, prompt={prompt[:50]}, count={num_images}")
-    image_task = {"task_id": task.task_id, "prompt": prompt, "count": num_images}
-    if profile.image_event_url:
-        image_task["predicted_url"] = predicted_url if num_images == 1 else predicted_urls[0]
     return ToolOutcome(result, [
         {"type": "tool_result", "data": f"Image generation task created: {task.task_id}"},
-        {"type": "image_task", "data": image_task},
+        {"type": "image_task", "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images,
+                                        "predicted_url": predicted_url if num_images == 1 else predicted_urls[0]}},
     ])
 
 
@@ -362,7 +393,7 @@ async def _video(name, args, ctx: ToolContext) -> ToolOutcome:
     video_url = args.get("video_url") if call_text else args.get("video_url", "")
     image_url = args.get("image_url") if call_text else args.get("image_url", "")
     aspect_ratio = args.get("aspectRatio", "16:9")
-    duration = args.get("duration", 8)
+    duration = _int_arg(args, "duration", 8)
     resolution = args.get("resolution", "720p")
     negative_prompt = args.get("negativePrompt", "")
 
@@ -462,7 +493,7 @@ async def _music(name, args, ctx: ToolContext) -> ToolOutcome:
     create_task = ctx.services.create_task
     prompt = args.get("prompt", "")
     negative_prompt = args.get("negativePrompt", "")
-    sample_count = args.get("sampleCount", 1)
+    sample_count = _int_arg(args, "sampleCount", 1, lo=1)
     print(f"{profile.tag} Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
 
     music_options = {
@@ -505,7 +536,7 @@ async def _get_media(name, args, ctx: ToolContext) -> ToolOutcome:
 
 async def _list_media(name, args, ctx: ToolContext) -> ToolOutcome:
     media_type = args.get("media_type")
-    limit = args.get("limit", 20)
+    limit = _int_arg(args, "limit", 20)
     print(f"{ctx.profile.tag} Executing list_media: type={media_type}, limit={limit}")
     listed = await _blocking(ctx, ctx.services.execute_list_media, media_type=media_type, limit=limit)
     return ToolOutcome(json.dumps(listed, indent=2),
@@ -515,7 +546,7 @@ async def _list_media(name, args, ctx: ToolContext) -> ToolOutcome:
 async def _search_media(name, args, ctx: ToolContext) -> ToolOutcome:
     query = args.get("query", "")
     media_type = args.get("media_type")
-    limit = args.get("limit", 10)
+    limit = _int_arg(args, "limit", 10)
     print(f"{ctx.profile.tag} Executing search_media: query='{query}', type={media_type}")
     found = await _blocking(ctx, ctx.services.execute_search_media, query=query, media_type=media_type, limit=limit)
     return ToolOutcome(json.dumps(found, indent=2),
@@ -525,7 +556,8 @@ async def _search_media(name, args, ctx: ToolContext) -> ToolOutcome:
 async def _search_snapshots(name, args, ctx: ToolContext) -> ToolOutcome:
     tag, operator = ctx.profile.tag, ctx.operator
     query = args.get("query", "")
-    k = min(args.get("k", 3), 5)  # Cap at 5 results
+    # The schema's "limit" (older prompts say "k"); 3 by default, capped at 5.
+    k = _int_arg(args, ("limit", "k"), 3, lo=1, hi=5)
     print(f"{tag} Executing snapshot search: '{query}' (k={k})")
 
     if not query:
@@ -579,6 +611,10 @@ _LABELLED_ARGS: Dict[str, Callable[[Dict], Dict]] = {
 }
 
 
+# The event a labelled tool adds after its label in a stream.
+_LABELLED_EVENTS: Dict[str, Callable] = {"use_computer": _browser_task_event}
+
+
 def _label(name: str, result: str, profile: LoopProfile) -> str:
     if name == "send_sms":
         return f"SMS: {result[:100]}"
@@ -605,22 +641,14 @@ async def _labelled(name, args, ctx: ToolContext) -> ToolOutcome:
     if not ctx.profile.stream:
         return ToolOutcome(result)
     events = [{"type": "tool_result", "data": _label(name, result, ctx.profile)}]
-    if name == "use_computer" and ctx.profile.browser_task:
-        # The browser_task SSE event on SUCCESS only (the guard lives in the
+    follow_up = _LABELLED_EVENTS.get(name)
+    if follow_up:
+        # use_computer's browser_task, on SUCCESS only (the guard lives in the
         # tested _browser_task_event helper).
-        browser = _browser_task_event(tool_result, args)
-        if browser:
-            events.append(browser)
+        event = follow_up(tool_result, args)
+        if event:
+            events.append(event)
     return ToolOutcome(result, events)
-
-
-async def _plain(name, args, ctx: ToolContext) -> ToolOutcome:
-    tool_result = await _run_executor(ctx, name, args)
-    result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
-    print(f"{ctx.profile.tag} {name}: {result[:100]}")
-    if not ctx.profile.stream:
-        return ToolOutcome(result)
-    return ToolOutcome(result, [{"type": "tool_result", "data": f"{name}: {result[:80]}"}])
 
 
 async def _catch_all(name, args, ctx: ToolContext) -> ToolOutcome:

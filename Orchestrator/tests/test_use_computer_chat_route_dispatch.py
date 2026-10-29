@@ -235,8 +235,9 @@ def test_stream_loops_still_emit_browser_task_through_the_helper(monkeypatch):
     """M3 (2026-07-23) extended the browser_task emit from the single Anthropic
     stream to EVERY provider's use_computer branch (openai/gemini/xai +
     anthropic), so the in-chat agent pill appears no matter which model launched
-    the run; the custom stream never had it. A loop that silently stops emitting
-    it fails here, and a failure (no task_id) never emits one."""
+    the run, and audit rank 74 gave the custom stream the one it lacked. A loop
+    that silently stops emitting it fails here, and a failure (no task_id) never
+    emits one."""
     emitting = []
     for loop, profile in sorted(cr._TOOL_PROFILES.items()):
         if not profile.stream:
@@ -249,7 +250,8 @@ def test_stream_loops_still_emit_browser_task_through_the_helper(monkeypatch):
             emitting.append(loop)
         failed, _, _ = _dispatch_use_computer(monkeypatch, loop, {"retryable": True})
         assert not [e for e in failed.events if e["type"] == "browser_task"]
-    assert set(emitting) >= {"stream_anthropic", "stream_openai", "stream_gemini", "stream_xai"}, emitting
+    assert set(emitting) == {"stream_anthropic", "stream_openai", "stream_gemini", "stream_xai",
+                             "stream_custom"}, emitting
 
 
 # --------------------------------------------------------------------------- #
