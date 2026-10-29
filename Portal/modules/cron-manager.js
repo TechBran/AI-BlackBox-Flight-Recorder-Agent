@@ -3,7 +3,7 @@
  * Cron Job Scheduler management interface
  */
 
-import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr, createPoller } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr, createPoller } from './core-utils.js';
 import { getOperator, fetchAvailableModels, getHydratedModels } from './state-management.js';
 
 // Cache server operator list (populated once on first modal open)
@@ -1086,12 +1086,6 @@ function handleDeliverySourceChange() {
 // =============================================================================
 // Utility Functions
 // =============================================================================
-
-function escapeHtml(str) {
-    // Shared helper: also escapes quotes
-    if (!str) return '';
-    return sharedEscapeHtml(str);
-}
 
 function formatTime(isoStr) {
     if (!isoStr) return '';

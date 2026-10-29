@@ -23,7 +23,9 @@ installDom();
 loadPurify();
 loadMarked();
 
-const settle = () => new Promise((r) => setTimeout(r, 40));
+// The real setTimeout: the tests mock it to drive the 10 s poll.
+const realSetTimeout = globalThis.setTimeout;
+const settle = () => new Promise((r) => realSetTimeout(r, 40));
 const $ = (id) => document.getElementById(id);
 const json = (b, status = 200) => Promise.resolve({
     ok: status >= 200 && status < 300, status,
@@ -104,7 +106,7 @@ function layout(perBubble) {
 const bodies = () => Array.from($("smsMessages").querySelectorAll(".sms-bubble-body")).map((b) => b.textContent);
 
 async function open(t) {
-    t.mock.timers.enable({ apis: ["setInterval"] });
+    t.mock.timers.enable({ apis: ["setTimeout"] });   // the inbox poll (createPoller)
     localStorage.clear();
     sessionStorage.clear();
     state.setOperator("Ana");

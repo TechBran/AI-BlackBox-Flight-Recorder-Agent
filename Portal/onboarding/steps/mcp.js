@@ -8,7 +8,7 @@
 // it and one-clicks the runtime pieces. Funnel-up is PUBLIC-internet exposure, so
 // it's gated behind an explicit inline confirmation.
 
-import { cssEscape, escapeHtml } from "../util.js";
+import { cssEscape, escapeHtml, fetchJson } from "../util.js";
 
 let lastMintedToken = null;   // shown ONCE after a mint, for the config snippets
 
@@ -247,9 +247,6 @@ function wireCopy(scope) {
         try { await navigator.clipboard.writeText(b.dataset.copy); const t = b.textContent; b.textContent = "Copied ✓"; setTimeout(() => (b.textContent = t), 1200); }
         catch (_) { b.textContent = "Copy failed"; }
     }));
-}
-async function fetchJson(url) {
-    try { const r = await fetch(url); if (!r.ok) return null; return await r.json(); } catch (_) { return null; }
 }
 async function postJson(url, body) {
     try {

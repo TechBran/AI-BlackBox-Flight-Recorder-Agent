@@ -45,7 +45,11 @@
 // no buttons and no errors.
 
 import { audioArtifacts, audioArtifactRowHtml, runArtifactDownload } from "./local_models.js";
-import { escapeHtml } from "../util.js";
+import { escapeHtml, fetchJson } from "../util.js";
+import { showHint } from "../hint.js";
+
+// The step's status line, right under the provider grid (../hint.js).
+const STT_HINT = { id: "ob-stt-hint", after: "#ob-stt-grid" };
 
 const PROVIDERS = [
     {
@@ -265,7 +269,7 @@ async function choose(container, id) {
         updateContinue(container);
     } catch (e) {
         selected = prev;  // roll back the visual selection
-        showHint(container, `Couldn't save your choice: ${e.message}. Try again.`, true);
+        showHint(container, `Couldn't save your choice: ${e.message}. Try again.`, true, STT_HINT);
     } finally {
         saving = false;
     }
@@ -417,7 +421,7 @@ function wireVoiceSection(container) {
 async function startVoiceDownload(container, key) {
     await runArtifactDownload(key, {
         onProgress: (dl) => updateVoiceDownloadBar(container, key, dl),
-        onError: (e) => showHint(container, `Couldn't download: ${e.message}. Try again.`, true),
+        onError: (e) => showHint(container, `Couldn't download: ${e.message}. Try again.`, true, STT_HINT),
         onDone: async () => {
             lmStatus = await fetchJson("/local-models/status");  // downloaded=true → unlock flows
             renderVoiceSection(container);
@@ -600,28 +604,5 @@ async function submitDesignSave(container) {
         voiceResult(container, "#ob-stt-design-result", escapeHtml(e.message), true);
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = "Save voice"; }
-    }
-}
-
-function showHint(container, msg, isError) {
-    let hint = container.querySelector("#ob-stt-hint");
-    if (!hint) {
-        hint = document.createElement("div");
-        hint.id = "ob-stt-hint";
-        hint.className = "ob-cli-agent-hint";
-        const grid = container.querySelector("#ob-stt-grid");
-        if (grid) grid.insertAdjacentElement("afterend", hint);
-    }
-    hint.classList.toggle("ob-cli-agent-hint-error", !!isError);
-    hint.textContent = msg;
-}
-
-async function fetchJson(url) {
-    try {
-        const r = await fetch(url);
-        if (!r.ok) return null;
-        return await r.json();
-    } catch (_) {
-        return null;
     }
 }

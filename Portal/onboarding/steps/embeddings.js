@@ -41,7 +41,8 @@
 
 // Selected-card highlight is the shared .ob-card-selected class (onboarding.css).
 
-import { escapeHtml } from "../util.js";
+import { escapeHtml, fetchJson, safeDetail } from "../util.js";
+import { showHint } from "../hint.js";
 
 const POLL_MS = 2000;
 // Rough chars-per-snapshot used ONLY for the cloud re-embed cost PREVIEW
@@ -195,7 +196,7 @@ async function tick() {
             renderJobStalled(job);
         } else {
             renderPicker();
-            showHint(
+            embHint(
                 job.kind === "reembed"
                     ? "Re-embed cancelled — progress so far is kept."
                     : "Migration cancelled — progress so far is kept.",
@@ -214,7 +215,7 @@ async function tick() {
     stopPolling();
     if (pull && pull.state === "error") {
         renderPicker();
-        showHint(`Model download failed: ${pull.error || "unknown error"}. Try the pull again.`, true);
+        embHint(`Model download failed: ${pull.error || "unknown error"}. Try the pull again.`, true);
     } else {
         // Pull finished — blockers refresh; validate→migrate flow continues.
         renderPicker();
@@ -381,10 +382,10 @@ async function onPlacementClick(btn) {
             }),
         });
         if (!r.ok) {
-            showHint(`Couldn't change device placement: ${await safeDetail(r)}`, true);
+            embHint(`Couldn't change device placement: ${await safeDetail(r)}`, true);
         }
     } catch (e) {
-        showHint(`Network error changing device placement: ${e.message}`, true);
+        embHint(`Network error changing device placement: ${e.message}`, true);
     }
     placementBusy = null;
     await refreshStatus(); // re-render with the server's truth
@@ -554,10 +555,10 @@ async function onRerankSelect(btn) {
             body: JSON.stringify({ provider, model: slug, enabled }),
         });
         if (!r.ok) {
-            showHint(`Couldn't change the reranker: ${await safeDetail(r)}`, true);
+            embHint(`Couldn't change the reranker: ${await safeDetail(r)}`, true);
         }
     } catch (e) {
-        showHint(`Network error changing the reranker: ${e.message}`, true);
+        embHint(`Network error changing the reranker: ${e.message}`, true);
     }
     rerankBusy = null;
     await refreshStatus(); // reflect the server's truth (key_present, preflight)
@@ -1069,7 +1070,7 @@ async function startEmbDownload(memberId, slug) {
             }
         }
     } catch (e) {
-        showHint(`Couldn't download the on-box weights: ${e.message}. Try again.`, true);
+        embHint(`Couldn't download the on-box weights: ${e.message}. Try again.`, true);
     }
     delete embDownloading[memberId];
     await refreshStatus(); // reflect downloaded=true (blocker clears)
@@ -1101,10 +1102,10 @@ async function setKeepAlive(slug, warm) {
             body: JSON.stringify({ slug, warm }),
         });
         if (!r.ok) {
-            showHint(`Couldn't change the warm/cold setting: ${await safeDetail(r)}`, true);
+            embHint(`Couldn't change the warm/cold setting: ${await safeDetail(r)}`, true);
         }
     } catch (e) {
-        showHint(`Network error changing warm/cold: ${e.message}`, true);
+        embHint(`Network error changing warm/cold: ${e.message}`, true);
     }
     keepAliveBusy = null;
     await refreshStatus(); // reflect the new warm state from the server
@@ -1159,13 +1160,13 @@ async function startPull(slug) {
         if (!r.ok && r.status !== 409) {
             // 409 = a pull is already streaming — just watch it.
             const detail = await safeDetail(r);
-            showHint(`Couldn't start the download: ${detail}`, true);
+            embHint(`Couldn't start the download: ${detail}`, true);
             pulling = false;
             renderGrid();
             return;
         }
     } catch (e) {
-        showHint(`Network error starting the download: ${e.message}`, true);
+        embHint(`Network error starting the download: ${e.message}`, true);
         pulling = false;
         renderGrid();
         return;
@@ -1237,7 +1238,7 @@ async function startMigrate(target, btn) {
         if (!r.ok) {
             const detail = await safeDetail(r);
             migrating = false;
-            showHint(`Couldn't start the migration: ${detail}`, true);
+            embHint(`Couldn't start the migration: ${detail}`, true);
             if (btn) btn.disabled = false;
             return;
         }
@@ -1251,7 +1252,7 @@ async function startMigrate(target, btn) {
         }
     } catch (e) {
         migrating = false;
-        showHint(`Network error starting the migration: ${e.message}`, true);
+        embHint(`Network error starting the migration: ${e.message}`, true);
         if (btn) btn.disabled = false;
         return;
     }
@@ -1296,7 +1297,7 @@ async function startReembed(slug, btn, preConfirmed = false) {
             return;
         }
     } else if (m && m.cpu_warning) {
-        showHint(m.cpu_warning, false);
+        embHint(m.cpu_warning, false);
     }
     reembedConfirm = null;
     migrating = true;
@@ -1317,7 +1318,7 @@ async function startReembed(slug, btn, preConfirmed = false) {
         if (!r.ok) {
             const detail = await safeDetail(r);
             migrating = false;
-            showHint(`Couldn't start the re-embed: ${detail}`, true);
+            embHint(`Couldn't start the re-embed: ${detail}`, true);
             if (btn) btn.disabled = false;
             return;
         }
@@ -1331,7 +1332,7 @@ async function startReembed(slug, btn, preConfirmed = false) {
         }
     } catch (e) {
         migrating = false;
-        showHint(`Network error starting the re-embed: ${e.message}`, true);
+        embHint(`Network error starting the re-embed: ${e.message}`, true);
         if (btn) btn.disabled = false;
         return;
     }
@@ -1580,20 +1581,11 @@ function modelLabel(slug) {
     return (m && m.label) || slug || "";
 }
 
-function showHint(msg, isError) {
-    const slot = contentEl() && contentEl().querySelector("#ob-emb-hint-slot");
-    if (!slot) return;
-    slot.innerHTML = `<div class="ob-cli-agent-hint${isError ? " ob-cli-agent-hint-error" : ""}"></div>`;
-    slot.firstElementChild.textContent = msg;
-}
+// The step's status line, in its hint slot (../hint.js).
+const EMB_HINT = { id: "ob-emb-hint", inside: "#ob-emb-hint-slot" };
 
-async function safeDetail(r) {
-    try {
-        const body = await r.json();
-        return body && body.detail ? String(body.detail) : `HTTP ${r.status}`;
-    } catch (_) {
-        return `HTTP ${r.status}`;
-    }
+function embHint(msg, isError) {
+    showHint(contentEl(), msg, isError, EMB_HINT);
 }
 
 function fmtInt(n) {
@@ -1609,14 +1601,4 @@ function fmtBytes(n) {
     if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
     if (n >= 1e6) return Math.round(n / 1e6) + " MB";
     return Math.round(n / 1e3) + " KB";
-}
-
-async function fetchJson(url) {
-    try {
-        const r = await fetch(url);
-        if (!r.ok) return null;
-        return await r.json();
-    } catch (_) {
-        return null;
-    }
 }

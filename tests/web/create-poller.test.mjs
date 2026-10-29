@@ -179,7 +179,10 @@ test("the Portal's network pollers run on createPoller, not bare setInterval", a
     const { PORTAL } = await import("./helpers/portal-dom.mjs");
     const { stripComments } = await import("./helpers/sink-scan.mjs");
     const modules = ["ui-setup", "app-init", "task-manager", "chat-send", "cellular-manager",
-        "cron-manager", "telephony-manager", "device-manager", "cu-interact"];
+        "cron-manager", "telephony-manager", "device-manager", "cu-interact",
+        // The last bare ones (audit P02-voice-web-12): the SMS inbox, the
+        // embeddings job progress and the CU sessions badge.
+        "sms-inbox", "updates-manager", "cu-live-view"];
     const offenders = modules.filter((m) =>
         /\bsetInterval\s*\(/.test(stripComments(readFileSync(resolve(PORTAL, "modules", `${m}.js`), "utf8"))));
     assert.deepEqual(offenders, [], "a bare setInterval polls a hidden tab forever and overlaps slow requests");

@@ -1,6 +1,7 @@
-// Shared onboarding-wizard utilities. Keep this dependency-free and
-// side-effect-free (pure functions only) so any step module — or the
-// future hub/status modules — can import it without ordering concerns.
+// Shared onboarding-wizard utilities. Keep this dependency-free and free of
+// import-time side effects (no DOM, no state) so any step module — or the
+// hub/status modules — can import it without ordering concerns. DOM helpers
+// live in hint.js.
 
 // Escape an arbitrary string for safe interpolation into a CSS attribute
 // selector (e.g. `[data-slug="${cssEscape(slug)}"]`). Backslash-escapes
@@ -26,4 +27,29 @@ export function escapeHtml(value) {
 
 export function escapeAttr(value) {
     return escapeHtml(value);
+}
+
+// GET (or `init`) a JSON endpoint: the parsed body, or null on ANY failure
+// (network, non-2xx, bad JSON) — a step renders its fallback instead of
+// throwing. One copy for the steps (they had six; local_models' needed the
+// fetch options, e.g. { cache: "no-store" }).
+export async function fetchJson(url, init) {
+    try {
+        const r = await fetch(url, init);
+        if (!r.ok) return null;
+        return await r.json();
+    } catch (_) {
+        return null;
+    }
+}
+
+// The reason a failed response gives: its JSON `detail` when that is a
+// non-empty string (FastAPI's error field), else "HTTP <status>".
+export async function safeDetail(r) {
+    try {
+        const body = await r.json();
+        return body && typeof body.detail === "string" && body.detail ? body.detail : `HTTP ${r.status}`;
+    } catch (_) {
+        return `HTTP ${r.status}`;
+    }
 }

@@ -3,13 +3,13 @@
  * SMS Inbox — thread list, conversation view, compose, unread badges
  * Works in both web (two-panel) and Android/mobile (full-screen) contexts
  */
-import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml, createPoller } from './core-utils.js';
 import {
     getOperator, OPERATOR_REQUIRED_MESSAGE, fetchAvailableModels, getHydratedModels, getProviderName,
 } from './state-management.js';
 import { normalizePhone, parsePhoneInput } from './phone.js';
 
-let _pollTimer = null;
+let _poller = null;
 // The open thread: its key (the box's phone_number, last 10 digits) and where a send
 // from it goes (the number as typed for a new conversation, digits only).
 let _currentPhone = null;
@@ -76,11 +76,6 @@ function dateLabel(isoTimestamp) {
 function truncate(str, len = 38) {
     if (!str) return '';
     return str.length > len ? str.slice(0, len) + '…' : str;
-}
-
-function escapeHtml(text) {
-    // Shared helper: also escapes quotes (used in data-phone / value attributes)
-    return sharedEscapeHtml(text);
 }
 
 /** One thread, however each side wrote the number. */
@@ -851,16 +846,18 @@ async function refreshThreads() {
 
 function startPolling() {
     stopPolling();
-    _pollTimer = setInterval(async () => {
-        // Nobody is looking: skip the tick (the next visible one catches up).
-        if (!_isOpen || document.hidden) return;
+    // createPoller: paused while the page is hidden (one tick as soon as it is
+    // visible again), never overlapping a slow tick.
+    _poller = createPoller(async () => {
+        if (!_isOpen) return;
         await refreshThreads();
         if (_currentPhone) await loadConversation('follow');
-    }, 10000);
+    }, { intervalMs: 10000, immediate: false });
+    _poller.start();
 }
 
 function stopPolling() {
-    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+    if (_poller) { _poller.stop(); _poller = null; }
 }
 
 // ============================================================================

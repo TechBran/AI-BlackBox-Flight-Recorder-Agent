@@ -3,8 +3,10 @@
 // CONCURRENT (cap 3), so the badge shows a COUNT ("N agents running — watch"),
 // not an exclusive lock — no per-operator gating. (An exclusive "desktop in use"
 // warning is native-mode only, driven by display_arbiter, not this badge.)
+import { createPoller } from './core-utils.js';
+
 const POLL_MS = 4000;
-let _timer = null;
+let _poller = null;
 // Latest sessions snapshot, read at click time so the pill's handler never
 // captures a stale session list (sessions rotate while the pill persists).
 let latest = { active: false, sessions: [] };
@@ -50,8 +52,8 @@ export function openStreamPanel(session) {
 }
 
 export function initCuLiveView() {
-  // Re-entrancy guard: never leak a second polling interval on a re-init.
-  if (_timer !== null) { clearInterval(_timer); _timer = null; }
+  // Re-entrancy guard: never leak a second poller on a re-init.
+  if (_poller !== null) { _poller.stop(); _poller = null; }
   const closeBtn = document.getElementById('cuLiveViewClose');
   if (closeBtn) closeBtn.onclick = () => {
     const panel = document.getElementById('cuLiveViewPanel');
@@ -59,7 +61,8 @@ export function initCuLiveView() {
     if (frame) frame.src = 'about:blank';
     if (panel) panel.style.display = 'none';
   };
-  const tick = async () => renderPill(await fetchSessions());
-  tick();
-  _timer = setInterval(tick, POLL_MS);
+  // createPoller: paused while the page is hidden (a backgrounded tab or the
+  // Android WebView no longer polls /cu/sessions every 4 s), never overlapping.
+  _poller = createPoller(async () => renderPill(await fetchSessions()), { intervalMs: POLL_MS });
+  _poller.start();
 }

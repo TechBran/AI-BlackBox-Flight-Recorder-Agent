@@ -38,6 +38,10 @@
 // click Re-check. Same passive UX as the api_keys validate buttons.
 
 import { escapeHtml } from "../util.js";
+import { showHint } from "../hint.js";
+
+// The step's status line, right under the toolbar (../hint.js).
+const HINT = { id: "ob-cli-agent-hint", after: ".ob-cli-agent-toolbar" };
 
 const PROVIDERS = [
     {
@@ -327,24 +331,11 @@ async function spawnTerminal(container, provider, mode) {
         showHint(container,
             mode === "install"
                 ? `Installing ${provider.name} in a new terminal. Re-check when it finishes.`
-                : `Sign-in terminal opened for ${provider.name}. Finish the prompts there, then click Re-check.`);
+                : `Sign-in terminal opened for ${provider.name}. Finish the prompts there, then click Re-check.`, false, HINT);
     } else {
         const err = (result && (result.stderr || result.error)) || "unknown error";
-        showHint(container, `Couldn't open terminal for ${provider.name}: ${err}`, true);
+        showHint(container, `Couldn't open terminal for ${provider.name}: ${err}`, true, HINT);
     }
     // Always re-render to clear the per-button "Opening terminal…" label.
     if (lastStatus) renderGrid(container, lastStatus);
-}
-
-function showHint(container, msg, isError) {
-    let hint = container.querySelector("#ob-cli-agent-hint");
-    if (!hint) {
-        hint = document.createElement("div");
-        hint.id = "ob-cli-agent-hint";
-        hint.className = "ob-cli-agent-hint";
-        const toolbar = container.querySelector(".ob-cli-agent-toolbar");
-        if (toolbar) toolbar.insertAdjacentElement("afterend", hint);
-    }
-    hint.classList.toggle("ob-cli-agent-hint-error", !!isError);
-    hint.textContent = msg;
 }

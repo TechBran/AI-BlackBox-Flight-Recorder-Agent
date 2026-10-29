@@ -14,7 +14,7 @@
  * older GET /devices/ CRUD) — it does not touch that surface.
  */
 
-import { $, escapeHtml, toastSuccess, toastError } from './core-utils.js';
+import { $, escapeHtml, toastSuccess, toastError, postJson } from './core-utils.js';
 
 // Provider choices mirror the backend enum {gemma,gemini,claude,openai|null}.
 const PROVIDERS = [
@@ -74,19 +74,6 @@ async function fetchMesh(operator) {
     if (!res.ok) throw new Error(`mesh ${res.status}`);
     const data = await res.json();
     return Array.isArray(data.devices) ? data.devices : [];
-}
-
-async function postJson(url, body) {
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `Request failed (${res.status})`);
-    }
-    return res.json();
 }
 
 const assignOperator = (id, operator) =>

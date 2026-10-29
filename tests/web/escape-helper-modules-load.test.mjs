@@ -21,7 +21,8 @@ document.body.innerHTML = page.slice(page.indexOf("<body"), page.lastIndexOf("</
 globalThis.fetch = () => new Promise(() => {});
 
 const MODULES = [
-    "onboarding/util.js", "onboarding/status.js", "onboarding/hub.js", "onboarding/onboarding.js",
+    "onboarding/util.js", "onboarding/hint.js", "onboarding/provider-toggle-step.js",
+    "onboarding/status.js", "onboarding/hub.js", "onboarding/onboarding.js",
     ...["api_keys", "cli_agents", "done", "embeddings", "image", "local_models", "mcp", "operator",
         "optional_integrations", "pair_phone", "tailscale", "transcription", "web_search", "welcome"]
         .map((s) => `onboarding/steps/${s}.js`),

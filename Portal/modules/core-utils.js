@@ -130,6 +130,42 @@ export function simpleHash(str) {
 export const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
+ * fetch() a JSON endpoint and return the parsed body.
+ *
+ * A non-2xx answer throws an Error whose message is the server's `detail`
+ * (FastAPI's error field) when it sent one, else `HTTP <status>`; the status
+ * is on err.status. The per-module copies differed only in that message.
+ * @param {string} url - Endpoint
+ * @param {RequestInit} [init] - fetch options (method, headers, body, cache...)
+ * @returns {Promise<*>} The parsed JSON body
+ */
+export async function fetchJson(url, init) {
+    const res = await fetch(url, init);
+    if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        const detail = body && typeof body.detail === 'string' ? body.detail : '';
+        const err = new Error(detail || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+    }
+    return res.json();
+}
+
+/**
+ * POST a JSON body to a JSON endpoint (fetchJson's errors).
+ * @param {string} url - Endpoint
+ * @param {*} body - Sent as JSON
+ * @returns {Promise<*>} The parsed JSON reply
+ */
+export function postJson(url, body) {
+    return fetchJson(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+}
+
+/**
  * The one poller the Portal uses (audit P01-chat-core-web-21, rank 67).
  *
  * Bare setInterval pollers kept a backgrounded tab or the Android WebView

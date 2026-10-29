@@ -3,7 +3,7 @@
  * Telephony Gateway Manager — discover, add, configure, and monitor Yeastar TG200 GSM-to-SIP gateways
  */
 
-import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr, createPoller } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr, createPoller } from './core-utils.js';
 import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { openWizard } from './telephony-wizard.js';
 
@@ -615,12 +615,6 @@ function _stopPolling() {
 // =============================================================================
 // Utility
 // =============================================================================
-
-function escapeHtml(str) {
-    // Shared helper: also escapes quotes (used in value= / data-* attributes)
-    if (!str) return '';
-    return sharedEscapeHtml(str);
-}
 
 // =============================================================================
 // Init & Export

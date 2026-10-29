@@ -6,7 +6,7 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, toastError, escapeHtml } from './core-utils.js';
+import { $, toast, toastError, escapeHtml, fetchJson } from './core-utils.js';
 
 // Re-export applySyntaxHighlighting from markdown-renderer for convenience
 // (many modules import it from timeline-browser due to historical coupling)
@@ -159,12 +159,6 @@ function toTimelineItem(row) {
         preview: row.snippet || 'No preview available',
         content: null,  // fetched from /fossil/snapshot/{id} when opened
     };
-}
-
-async function fetchJson(url) {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.json();
 }
 
 async function fetchTimelinePage(operator, before) {

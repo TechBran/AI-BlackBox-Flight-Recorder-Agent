@@ -49,7 +49,7 @@
 // drops mid-update, /update/state says whether that task is still running,
 // finished with a restart coming, or ended without one (A13-ui-ops-06).
 
-import { escapeHtml, toastError } from "./core-utils.js";
+import { createPoller, escapeHtml, toastError } from "./core-utils.js";
 
 let _state = "loading";
 let _lastStatus = null;  // last /update/status response
@@ -560,7 +560,7 @@ async function _onRestartClick() {
 // watcher's auto-migration is underway) > job running (progress + [Manage])
 // > superseded ([Update] when successor_slug known + [Manage]) > hidden.
 
-let _embedPollTimer = null;   // 5s job-progress poll; self-clears (see below)
+let _embedPoller = null;      // 5s job-progress poll; self-stops (see below)
 let _embedWarnedOnce = false; // one console.warn per page load, never spam
 let _rerankStatus = null;     // last GET /rerank/status payload (read-only line; null = hide)
 
@@ -797,25 +797,27 @@ async function _onEmbeddingsUpdateClick(btn, targetSlug) {
 }
 
 function _startEmbedPoll() {
-    if (_embedPollTimer) return;
-    _embedPollTimer = setInterval(() => {
+    if (_embedPoller) return;
+    // createPoller: paused while the page is hidden, never overlapping a slow tick.
+    _embedPoller = createPoller(() => {
         const container = document.getElementById("embeddingsCard");
         const menu = document.getElementById("menuModal");
-        // Self-clear when the card left the DOM or the menu modal closed —
+        // Self-stop when the card left the DOM or the menu modal closed —
         // no progress polling in the background.
         if (!container || !container.isConnected
             || !menu || menu.classList.contains("hide")) {
             _stopEmbedPoll();
             return;
         }
-        _refreshEmbeddingsCard();  // catches its own errors
-    }, 5000);
+        return _refreshEmbeddingsCard();  // catches its own errors
+    }, { intervalMs: 5000, immediate: false });
+    _embedPoller.start();
 }
 
 function _stopEmbedPoll() {
-    if (_embedPollTimer) {
-        clearInterval(_embedPollTimer);
-        _embedPollTimer = null;
+    if (_embedPoller) {
+        _embedPoller.stop();
+        _embedPoller = null;
     }
 }
 

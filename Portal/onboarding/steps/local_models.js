@@ -9,7 +9,13 @@
 //   stt / tts  → /local-models/capability (config seed flag; stt also pins
 //                STT_PROVIDER=onbox)
 import { stepSigilContext } from "../onboarding.js";
-import { escapeHtml } from "../util.js";
+import { escapeHtml, fetchJson, safeDetail } from "../util.js";
+import { showHint } from "../hint.js";
+
+// The step's status line (in its markup; ../hint.js) and the status reads,
+// which must never come from the HTTP cache.
+const LM_HINT = { id: "ob-lm-hint", className: "ob-lm-hint" };
+const NO_STORE = { cache: "no-store" };
 
 let status = null;         // last GET /local-models/status
 let busy = {};             // per-capability activation in-flight guard
@@ -81,7 +87,7 @@ export async function render(container, { next, back, skip, sigil }) {
     document.getElementById("ob-lm-continue").addEventListener("click", () => { stopPoll(); next(); });
     document.getElementById("ob-lm-skip").addEventListener("click", () => { stopPoll(); skip(); });
 
-    status = await fetchJson("/local-models/status");
+    status = await fetchJson("/local-models/status", NO_STORE);
     renderBody(container);
 }
 
@@ -446,9 +452,9 @@ async function startDownload(container, key) {
         // in updateDownloadBar (no .ob-lm-progress-fill yet) — same visual flow
         // as before the shared-core refactor.
         onProgress: () => updateDownloadBar(container, key),
-        onError: (e) => showHint(container, `Couldn't download: ${e.message}. Try again.`, true),
+        onError: (e) => showHint(container, `Couldn't download: ${e.message}. Try again.`, true, LM_HINT),
         onDone: async () => {
-            status = await fetchJson("/local-models/status");  // reflect downloaded=true
+            status = await fetchJson("/local-models/status", NO_STORE);  // reflect downloaded=true
             renderBody(container);
         },
     });
@@ -479,10 +485,10 @@ async function activate(container, capId, on) {
             body: JSON.stringify({ capability: capId, enabled: on }),
         });
         if (!r.ok) throw new Error(await safeDetail(r));
-        status = await fetchJson("/local-models/status");
+        status = await fetchJson("/local-models/status", NO_STORE);
         renderBody(container);
     } catch (e) {
-        showHint(container, `Couldn't change ${capId}: ${e.message}`, true);
+        showHint(container, `Couldn't change ${capId}: ${e.message}`, true, LM_HINT);
     } finally {
         busy[capId] = false;
     }
@@ -498,21 +504,21 @@ async function activateRerank(container, on) {
         }),
     });
     if (!r.ok) throw new Error(await safeDetail(r));
-    status = await fetchJson("/local-models/status");
+    status = await fetchJson("/local-models/status", NO_STORE);
     renderBody(container);
 }
 
 async function activateEmbeddings(container, on) {
     if (!on) {
-        showHint(container, "To move memory back to cloud, pick a cloud model in the Memory step — the on-box corpus stays searchable meanwhile.", false);
+        showHint(container, "To move memory back to cloud, pick a cloud model in the Memory step — the on-box corpus stays searchable meanwhile.", false, LM_HINT);
         return;
     }
     // BLOCKING GPU-idle precondition (Phase-2 Step-0): the retrieval group
     // lazy-loads ~11.5-13GB on the first re-embed and OOMs if the old pinned
     // embedder/reranker is still resident.
-    const pf = await fetchJson("/local-models/gpu-preflight");
+    const pf = await fetchJson("/local-models/gpu-preflight", NO_STORE);
     if (pf && pf.ok === false) {
-        showHint(container, pf.detail || "Free the GPU before moving memory on-box, then retry.", true);
+        showHint(container, pf.detail || "Free the GPU before moving memory on-box, then retry.", true, LM_HINT);
         return;
     }
     const target = rec("embeddings").slug || (tierKey() === "gpu" ? "qwen3-embedding-8b-local" : "qwen3-embedding-0.6b-local");
@@ -520,9 +526,9 @@ async function activateEmbeddings(container, on) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target }),
     });
-    if (r.status === 409) { showHint(container, "A memory rebuild is already running — see the Memory step for progress.", false); startEmbedPoll(container, target); return; }
+    if (r.status === 409) { showHint(container, "A memory rebuild is already running — see the Memory step for progress.", false, LM_HINT); startEmbedPoll(container, target); return; }
     if (!r.ok) throw new Error(await safeDetail(r));
-    showHint(container, "Rebuilding your memory index on-box. Voice features may be slow until it finishes — track detailed progress in the Memory step.", false);
+    showHint(container, "Rebuilding your memory index on-box. Voice features may be slow until it finishes — track detailed progress in the Memory step.", false, LM_HINT);
     startEmbedPoll(container, target);
 }
 
@@ -532,37 +538,21 @@ async function activateEmbeddings(container, on) {
 function startEmbedPoll(container, target) {
     stopPoll();
     pollTimer = setInterval(async () => {
-        const es = await fetchJson("/embeddings/status");
+        const es = await fetchJson("/embeddings/status", NO_STORE);
         const job = es && es.job;
         if (job && job.state === "running") {
             const pct = job.total ? Math.floor((job.done / job.total) * 100) : 0;
-            showHint(container, `Rebuilding memory on-box: ${job.done || 0}/${job.total || "?"} (${pct}%)…`, false);
+            showHint(container, `Rebuilding memory on-box: ${job.done || 0}/${job.total || "?"} (${pct}%)…`, false, LM_HINT);
             return;
         }
         stopPoll();
         if (es && (es.active || "").endsWith("-local")) {
             await fetch("/toolvault/reload", { method: "POST" }).catch(() => {});
-            showHint(container, "On-box memory active. Tool + code search caches refreshed.", false);
+            showHint(container, "On-box memory active. Tool + code search caches refreshed.", false, LM_HINT);
         }
-        status = await fetchJson("/local-models/status");
+        status = await fetchJson("/local-models/status", NO_STORE);
         renderBody(container);
     }, 3000);
 }
 
 function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
-
-// ── helpers ──────────────────────────────────────────────────────────────
-function showHint(container, msg, isError) {
-    const hint = container.querySelector("#ob-lm-hint");
-    if (!hint) return;
-    hint.className = "ob-lm-hint" + (isError ? " ob-lm-hint-error" : "");
-    hint.textContent = msg;
-    hint.hidden = false;
-}
-async function fetchJson(url) {
-    try { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) return null; return await r.json(); }
-    catch (_) { return null; }
-}
-async function safeDetail(r) {
-    try { const j = await r.json(); return j.detail || `HTTP ${r.status}`; } catch (_) { return `HTTP ${r.status}`; }
-}

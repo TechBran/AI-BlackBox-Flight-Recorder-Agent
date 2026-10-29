@@ -3,7 +3,7 @@
  * Device Manager — browse, pair, connect, and control mesh devices
  */
 
-import { $, toast, toastSuccess, toastError, escapeHtml as sharedEscapeHtml, escapeAttr, createPoller } from './core-utils.js';
+import { $, toast, toastSuccess, toastError, escapeHtml, escapeAttr, createPoller } from './core-utils.js';
 
 // =============================================================================
 // State
@@ -787,12 +787,6 @@ async function openScreenshotModal(deviceId) {
 // =============================================================================
 // Utilities
 // =============================================================================
-
-function escapeHtml(str) {
-    // Shared helper: also escapes quotes
-    if (!str) return '';
-    return sharedEscapeHtml(str);
-}
 
 // =============================================================================
 // Polling
