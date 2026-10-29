@@ -7,6 +7,14 @@ defensive: malformed input yields errors, never an exception.
 
 The set of known ``x-source`` resolver names is passed in as ``known_sources``
 to avoid an import cycle with the resolvers module (built in a later task).
+
+It also carries the three guards that used to run only in ``validate.py`` (the
+CI gate): an unknown ``x-availability.feature``, a ``cli_agent`` tool in the
+public ``mcp`` group, and an array without ``items``. The registry validates
+every module through here when it loads, so a schema edited on a running box
+(picked up by the registry's mtime cache — no restart) is excluded at load time
+instead of taking down injection, the voice sessions or the Funnel's catalog
+(audit O17-toolvault-runtime-04).
 """
 
 KNOWN_GROUPS = {"chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"}
@@ -17,13 +25,16 @@ MAX_TIMEOUT_S = 3600
 REQUIRED_KEYS = ("name", "description", "category", "groups", "tier", "parameters")
 
 
-def validate_module_dict(d: dict, folder_name: str, known_sources: set) -> list[str]:
+def validate_module_dict(d: dict, folder_name: str, known_sources: set,
+                         known_features=None) -> list[str]:
     """Validate a single module's schema dict.
 
     Args:
         d: The parsed schema.json contents.
         folder_name: The tool's folder name; ``d["name"]`` must equal it.
         known_sources: Set of registered ``x-source`` resolver names.
+        known_features: The ``x-availability.feature`` names the availability
+            gate serves; None means ``availability.FEATURES``.
 
     Returns:
         A list of human-readable error strings; empty when the schema is valid.
@@ -114,6 +125,13 @@ def validate_module_dict(d: dict, folder_name: str, known_sources: set) -> list[
     if "x-availability" in d:
         errors.extend(_validate_x_availability(d.get("x-availability")))
 
+    if known_features is None:
+        from . import availability  # stdlib only; no cycle back to this module
+        known_features = availability.FEATURES
+    errors.extend(x_availability_feature_errors(d, known_features))
+    errors.extend(cli_agent_mcp_group_errors(d))
+    errors.extend(array_items_errors(d))
+
     return errors
 
 
@@ -181,4 +199,93 @@ def _validate_x_availability(gate) -> list[str]:
             errors.append(
                 "'x-availability.requires_env' (optional) must be a list of strings"
             )
+    return errors
+
+
+def x_availability_feature_errors(data, known_features) -> list:
+    """Guard: an ``x-availability.feature``, when present, MUST be one the
+    availability gate serves (a key of ``availability.FEATURES``).
+
+    An unknown feature is not a structural error, it is a runtime landmine: the
+    gate has no provider map for it, so before this guard ran at load time a
+    bogus feature raised KeyError inside ``filter_available`` and took down the
+    live injector AND made the MCP ``list_tools`` return ZERO tools.
+
+    Returns a list of error strings (empty when clean). Never raises.
+    """
+    if not isinstance(data, dict):
+        return []
+    gate = data.get("x-availability")
+    if not isinstance(gate, dict) or "feature" not in gate:
+        return []
+    feature = gate.get("feature")
+    known = set(known_features or ())
+    if isinstance(feature, str) and feature in known:
+        return []
+    return [
+        f"x-availability.feature {feature!r} is not a known availability.FEATURES "
+        f"key; known features: {sorted(known)}"
+    ]
+
+
+def cli_agent_mcp_group_errors(data) -> list:
+    """Guard the D1 invariant for EVERY tool, not just the three known names: a
+    tool categorized ``cli_agent`` must NEVER be in the ``mcp`` group.
+
+    The ``mcp`` group feeds ``MCP/blackbox_mcp_server.py``, exposed over the
+    Tailscale **Funnel** (public HTTPS ingress). A fully-open CLI-agent tool there
+    is remote arbitrary command execution under the operator's shell. A test
+    parametrized over today's tool names can't catch a 4th cli_agent tool added
+    later with ``mcp`` in its groups — a category-keyed check can, and does.
+
+    Returns a list of error strings (empty when clean). Never raises.
+    """
+    if not isinstance(data, dict) or data.get("category") != "cli_agent":
+        return []
+    groups = data.get("groups")
+    if isinstance(groups, list) and "mcp" in groups:
+        name = data.get("name", "<unknown>")
+        return [
+            f"cli_agent tool {name!r} must NOT be in the 'mcp' group: the mcp "
+            f"group is served over the public Tailscale Funnel, which would make a "
+            f"fully-open CLI agent remote arbitrary command execution (invariant D1)."
+        ]
+    return []
+
+
+def array_items_errors(data) -> list:
+    """Guard: every ``"type": "array"`` node anywhere in ``parameters`` MUST
+    carry an ``items`` schema (a dict).
+
+    Google's Gemini Live BidiGenerateContent setup validator rejects the ENTIRE
+    multi-tool setup with WS close 1007 (``...items: missing field``) when any
+    declared array lacks ``items`` — one bad tool kills every voice session for
+    every operator, silently (2026-07-11 root cause: update_sheet_values' 2D
+    ``values`` param, dead since 2026-06-20). This check walks the whole
+    parameters tree (properties, items, nested anything) so N-dimensional
+    arrays are covered.
+
+    Returns a list of error strings (empty when clean). Never raises.
+    """
+    if not isinstance(data, dict):
+        return []
+    params = data.get("parameters")
+    if not isinstance(params, dict):
+        return []
+    errors: list = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            if node.get("type") == "array" and not isinstance(node.get("items"), dict):
+                errors.append(
+                    f"array at {path} lacks required 'items' schema — Gemini Live "
+                    f"rejects the whole tool setup with WS close 1007"
+                )
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, f"{path}[{i}]")
+
+    walk(params, "parameters")
     return errors

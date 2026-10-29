@@ -6,7 +6,8 @@ anything) and how complete the system is:
 
 * **schema** — ``schema.json`` parses as JSON and passes
   :func:`schema_spec.validate_module_dict` (with the live
-  :data:`resolvers.KNOWN_SOURCES`).
+  :data:`resolvers.KNOWN_SOURCES` and ``availability.FEATURES``) — the same
+  check the registry applies when it loads a module.
 * **executor** — if ``<folder>/executor.py`` exists, ``registry.get_executor``
   must return a callable; otherwise the executor-load error from
   ``registry.load_errors()`` is surfaced. A *missing* ``executor.py`` is NOT an
@@ -27,96 +28,16 @@ import sys
 from . import availability, embeddings, registry, resolvers, schema_spec
 
 
+# The three guards that used to live only here now run in
+# schema_spec.validate_module_dict, so the live registry applies them too
+# (audit O17-toolvault-runtime-04). These names stay for their callers.
 def _x_availability_feature_errors(data) -> list:
-    """Guard: an ``x-availability.feature``, when present, MUST be a known
-    ``availability.FEATURES`` key.
-
-    schema_spec validates the gate's shape (provider/requires_env) but is kept
-    free of the FEATURES registry. This check lives here, next to that registry,
-    because an unknown feature is not a structural error — it is a *runtime
-    landmine*: ``availability.enabled_providers`` does ``FEATURES[feature]``, so a
-    bogus feature raises KeyError inside ``filter_available`` and takes down the
-    live injector AND makes the MCP ``list_tools`` return ZERO tools. Catching it
-    at validate time (CI gate) is the guard against the next person tagging a tool
-    with a feature the gate cannot serve.
-
-    Returns a list of error strings (empty when clean). Never raises.
-    """
-    if not isinstance(data, dict):
-        return []
-    gate = data.get("x-availability")
-    if not isinstance(gate, dict) or "feature" not in gate:
-        return []
-    feature = gate.get("feature")
-    if feature in availability.FEATURES:
-        return []
-    return [
-        f"x-availability.feature {feature!r} is not a known availability.FEATURES "
-        f"key; known features: {sorted(availability.FEATURES)}"
-    ]
+    """An unknown ``x-availability.feature`` (see schema_spec)."""
+    return schema_spec.x_availability_feature_errors(data, availability.FEATURES)
 
 
-def _cli_agent_mcp_group_errors(data) -> list:
-    """Guard the D1 invariant for EVERY tool, not just the three known names: a
-    tool categorized ``cli_agent`` must NEVER be in the ``mcp`` group.
-
-    The ``mcp`` group feeds ``MCP/blackbox_mcp_server.py``, exposed over the
-    Tailscale **Funnel** (public HTTPS ingress). A fully-open CLI-agent tool there
-    is remote arbitrary command execution under the operator's shell. A test
-    parametrized over today's tool names can't catch a 4th cli_agent tool added
-    later with ``mcp`` in its groups — a category-keyed CI check can, and does.
-
-    Returns a list of error strings (empty when clean). Never raises.
-    """
-    if not isinstance(data, dict) or data.get("category") != "cli_agent":
-        return []
-    groups = data.get("groups")
-    if isinstance(groups, list) and "mcp" in groups:
-        name = data.get("name", "<unknown>")
-        return [
-            f"cli_agent tool {name!r} must NOT be in the 'mcp' group: the mcp "
-            f"group is served over the public Tailscale Funnel, which would make a "
-            f"fully-open CLI agent remote arbitrary command execution (invariant D1)."
-        ]
-    return []
-
-
-def _array_items_errors(data) -> list:
-    """Guard: every ``"type": "array"`` node anywhere in ``parameters`` MUST
-    carry an ``items`` schema (a dict).
-
-    Google's Gemini Live BidiGenerateContent setup validator rejects the ENTIRE
-    multi-tool setup with WS close 1007 (``...items: missing field``) when any
-    declared array lacks ``items`` — one bad tool kills every voice session for
-    every operator, silently (2026-07-11 root cause: update_sheet_values' 2D
-    ``values`` param, dead since 2026-06-20). This check walks the whole
-    parameters tree (properties, items, nested anything) so N-dimensional
-    arrays are covered.
-
-    Returns a list of error strings (empty when clean). Never raises.
-    """
-    if not isinstance(data, dict):
-        return []
-    params = data.get("parameters")
-    if not isinstance(params, dict):
-        return []
-    errors: list = []
-
-    def walk(node, path):
-        if isinstance(node, dict):
-            if node.get("type") == "array" and not isinstance(node.get("items"), dict):
-                errors.append(
-                    f"array at {path} lacks required 'items' schema — Gemini Live "
-                    f"rejects the whole tool setup with WS close 1007"
-                )
-            for key, value in node.items():
-                walk(value, f"{path}.{key}")
-        elif isinstance(node, list):
-            for i, value in enumerate(node):
-                walk(value, f"{path}[{i}]")
-
-    walk(params, "parameters")
-    return errors
+_cli_agent_mcp_group_errors = schema_spec.cli_agent_mcp_group_errors
+_array_items_errors = schema_spec.array_items_errors
 
 
 def validate_all() -> dict:
@@ -164,19 +85,13 @@ def validate_all() -> dict:
             folder_errors.append(f"failed to load schema.json: {e}")
 
         if data is not None:
+            # Includes the feature, cli_agent/mcp and array-items guards.
             folder_errors.extend(
                 schema_spec.validate_module_dict(
-                    data, folder_name, known_sources=resolvers.KNOWN_SOURCES
+                    data, folder_name, known_sources=resolvers.KNOWN_SOURCES,
+                    known_features=availability.FEATURES,
                 )
             )
-            # An x-availability.feature must be a known FEATURES key (see the
-            # helper's docstring: an unknown one is a live-injector/MCP landmine).
-            folder_errors.extend(_x_availability_feature_errors(data))
-            # A cli_agent-category tool must never be in the public `mcp` group.
-            folder_errors.extend(_cli_agent_mcp_group_errors(data))
-            # Every declared array MUST carry an `items` schema — Gemini Live's
-            # setup validator rejects the whole tool payload otherwise (P1.2).
-            folder_errors.extend(_array_items_errors(data))
 
         # Track the canonical name for embedding coverage (best effort —
         # even if other fields are invalid, a string name is what the store

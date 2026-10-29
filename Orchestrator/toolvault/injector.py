@@ -17,6 +17,7 @@ Token economics:
   New: ~800-1,500 tokens (meta-tool + Tier 1 + a few relevant Tier 2 tools)
 """
 
+import sys
 from typing import Dict, List, Optional, Tuple
 
 from Orchestrator.toolvault.meta_tool import META_TOOL_SCHEMA
@@ -163,7 +164,8 @@ def _format_tools(canonical_tools: List[Dict], provider_format: str) -> list:
 
     else:
         # Unknown format — return canonical
-        print(f"[TOOLVAULT-INJECT] Unknown format '{provider_format}', returning canonical")
+        print(f"[TOOLVAULT-INJECT] Unknown format '{provider_format}', returning canonical",
+              file=sys.stderr)
         return canonical_tools
 
 

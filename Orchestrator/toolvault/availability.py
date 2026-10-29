@@ -5,6 +5,7 @@ Orchestrator.config -- the MCP server's lean venv lacks fastapi). See the
 feedback-mcp-lean-venv lesson (resolvers._list_operators uses the same approach).
 """
 import os
+import sys
 
 _ROOT = os.environ.get("BLACKBOX_ROOT") or os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,6 +48,10 @@ FEATURES = {
         "keyless_floor": set(),            # NO free image provider
     },
 }
+
+# Features already warned about by enabled_providers (one line each, not one
+# per injection).
+_warned_unknown_features: set = set()
 
 # provider key -> env var that must be present (duckduckgo: none, it is keyless).
 # Derived from the web_search feature so there is no dual source of truth; the
@@ -111,8 +116,19 @@ def enabled_providers(feature: str = "web_search") -> set:
     keyless floor (web_search -> duckduckgo; image -> none). The image feature
     ADDITIONALLY includes the registry-gated 'local' provider whenever a custom
     server hosts an image model -- additive regardless of the pref, since local is
-    governed by the custom-server registry, not the cloud enable list."""
-    spec = FEATURES[feature]
+    governed by the custom-server registry, not the cloud enable list.
+
+    An unknown ``feature`` enables nothing (with one warning on stderr): the
+    registry already refuses such a schema at load time, and a gate must never
+    raise on the request path, where it would take down every injection and the
+    MCP catalog (audit O17-toolvault-runtime-04)."""
+    spec = FEATURES.get(feature)
+    if spec is None:
+        if feature not in _warned_unknown_features:
+            _warned_unknown_features.add(feature)
+            print(f"[toolvault.availability] WARNING: unknown x-availability feature "
+                  f"{feature!r}; its tools stay unavailable", file=sys.stderr)
+        return set()
     env = _read_env()
     raw = (env.get(spec["enabled_pref"]) or "").strip()
     if raw:

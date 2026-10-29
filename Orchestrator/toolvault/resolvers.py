@@ -15,6 +15,7 @@ importing this module is cheap/side-effect-free, and so tests can monkeypatch
 """
 
 import copy
+import sys
 from typing import Optional
 
 from .context import ToolContext
@@ -115,7 +116,8 @@ def resolve_schema(schema: dict, ctx: Optional[ToolContext] = None) -> dict:
         if resolver is None:
             print(
                 f"[toolvault.resolvers] WARNING: property {prop_name!r} has "
-                f"unknown x-source {source!r}; leaving property unresolved"
+                f"unknown x-source {source!r}; leaving property unresolved",
+                file=sys.stderr,  # stdout is the MCP stdio JSON-RPC channel
             )
             continue
 

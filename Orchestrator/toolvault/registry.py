@@ -28,12 +28,13 @@ import importlib.util
 import inspect
 import json
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 
 from .config import PROJECT_ROOT
-from . import resolvers, schema_spec
+from . import availability, resolvers, schema_spec
 
 # ---------------------------------------------------------------------------
 # Where the modules live (overridable by tests — do not capture this at import).
@@ -160,17 +161,23 @@ def _build() -> tuple:
             data = json.loads(raw)
         except (OSError, ValueError) as e:  # ValueError covers JSONDecodeError
             errors[folder_name] = [f"failed to load schema.json: {e}"]
-            print(f"[toolvault.registry] WARNING: {folder_name}: {e}")
+            print(f"[toolvault.registry] WARNING: {folder_name}: {e}", file=sys.stderr)
             continue
 
+        # The full CI-gate check (unknown availability feature, cli_agent in
+        # the public mcp group, array without items included): a schema saved
+        # on a running box is picked up by the mtime cache, so it is vetted
+        # here, not only by validate.py (audit O17-toolvault-runtime-04).
         errs = schema_spec.validate_module_dict(
-            data, folder_name, known_sources=resolvers.KNOWN_SOURCES
+            data, folder_name, known_sources=resolvers.KNOWN_SOURCES,
+            known_features=availability.FEATURES,
         )
         if errs:
             errors[folder_name] = errs
             print(
                 f"[toolvault.registry] WARNING: {folder_name} excluded "
-                f"({len(errs)} error(s)): {errs}"
+                f"({len(errs)} error(s)): {errs}",
+                file=sys.stderr,
             )
             continue
 
@@ -288,7 +295,8 @@ def get_executor(name: str) -> Optional[Callable]:
     exec_path = TOOLS_DIR / canonical / "executor.py"
     try:
         if not exec_path.resolve().is_relative_to(Path(TOOLS_DIR).resolve()):
-            print(f"[toolvault.registry] WARNING: refused {canonical!r}: executor escapes TOOLS_DIR")
+            print(f"[toolvault.registry] WARNING: refused {canonical!r}: executor escapes TOOLS_DIR",
+                  file=sys.stderr)
             return None
     except (OSError, RuntimeError):
         return None
@@ -320,14 +328,14 @@ def get_executor(name: str) -> Optional[Callable]:
         spec.loader.exec_module(module)
     except Exception as e:  # noqa: BLE001 — never crash on a bad executor.
         _executor_errors[canonical] = [f"failed to load executor.py: {e}"]
-        print(f"[toolvault.registry] WARNING: {canonical} executor: {e}")
+        print(f"[toolvault.registry] WARNING: {canonical} executor: {e}", file=sys.stderr)
         return None
 
     execute = getattr(module, "execute", None)
     err = _validate_execute(execute)
     if err is not None:
         _executor_errors[canonical] = [err]
-        print(f"[toolvault.registry] WARNING: {canonical} executor: {err}")
+        print(f"[toolvault.registry] WARNING: {canonical} executor: {err}", file=sys.stderr)
         return None
 
     if not inspect.iscoroutinefunction(execute):
