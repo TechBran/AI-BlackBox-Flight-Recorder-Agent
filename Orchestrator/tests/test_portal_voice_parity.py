@@ -26,29 +26,32 @@ FILE_LITERALS = {
         "appendBubble",
         "voice-presets.js",
         "connectMsg.agent",
-        "reconnectMsg.agent",
+        # One connect-message builder for the first connect AND every reconnect
+        # (live-session.js replays it), so a reconnect can no longer send a
+        # thinner message than the first connect (T14 F1).
+        "buildConnectMsg,",
+        "new LiveSession(",
     ],
     "modules/grok-live.js": [
         "populateGrokModelDropdown",
         "bb_grok_live_catalog",
         "model_default",
         "connectMsg.model",
-        "reconnectMsg.model",
         "connectMsg.reasoning_effort",
-        "reconnectMsg.reasoning_effort",
         "voice-presets.js",
         "connectMsg.agent",
-        "reconnectMsg.agent",
+        "buildConnectMsg,",
+        "new LiveSession(",
         # Audit P03-live-agents-web-03: AndroidMic streams 24 kHz PCM16 and the
         # bridge configures Grok for 16 kHz, so the native path resamples.
         "data: resampleNativeChunkForGrok(base64Audio)",
     ],
     "modules/gpt-realtime.js": [
         "connectMsg.noise_reduction",
-        "reconnectMsg.noise_reduction",
         "voice-presets.js",
         "connectMsg.agent",
-        "reconnectMsg.agent",
+        "buildConnectMsg,",
+        "new LiveSession(",
     ],
     "modules/voice-presets.js": [
         "/voice-agents",

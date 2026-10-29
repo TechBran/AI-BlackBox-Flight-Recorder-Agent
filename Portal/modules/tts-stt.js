@@ -12,6 +12,7 @@ import { getOperator, getAudioCache, saveAudioCache } from './state-management.j
 import { sttStream } from './stt-stream.js';
 import { htmlToText } from './sanitize.js';
 import { claimMic, releaseMic } from './mic-arbiter.js';
+import { hasMic, hasNativeDownload, isNativeAndroid, nativeDownloadFile } from './native-bridge.js';
 
 /** Dictation's mic-arbiter owner id. */
 const DICTATION_MIC_OWNER = 'dictation';
@@ -1378,13 +1379,13 @@ export function downloadTTSAudio(audioSrc, filenamePrefix = 'tts-audio') {
 
     const filename = `${filenamePrefix}-${timestamp}.${ext}`;
 
-    if (typeof Android !== 'undefined' && Android.downloadFile) {
+    if (hasNativeDownload()) {
         if (isDataURL) {
             fetch(audioSrc)
                 .then(res => res.blob())
                 .then(blob => {
                     const blobUrl = URL.createObjectURL(blob);
-                    Android.downloadFile(blobUrl, filename);
+                    nativeDownloadFile(blobUrl, filename);
                     toast(`Downloading ${filename}...`);
                     setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
                 })
@@ -1393,7 +1394,7 @@ export function downloadTTSAudio(audioSrc, filenamePrefix = 'tts-audio') {
                     toast('Download failed');
                 });
         } else {
-            Android.downloadFile(ensureAbsoluteUrl(audioSrc), filename);
+            nativeDownloadFile(ensureAbsoluteUrl(audioSrc), filename);
             toast(`Downloading ${filename}...`);
         }
     } else {
@@ -1424,8 +1425,7 @@ export function downloadGeneratedAudio(audioURL, filenamePrefix = 'generated-aud
 
     const filename = `${filenamePrefix}-${timestamp}.${ext}`;
 
-    if (typeof Android !== 'undefined' && Android.downloadFile) {
-        Android.downloadFile(ensureAbsoluteUrl(audioURL), filename);
+    if (nativeDownloadFile(ensureAbsoluteUrl(audioURL), filename)) {
         toast(`Downloading ${filename}...`);
     } else {
         const a = document.createElement('a');
@@ -2199,21 +2199,9 @@ export function initVoiceSelector() {
 // STT Functions
 // =============================================================================
 
-/**
- * Check if microphone is available
- * @returns {boolean} Mic available
- */
-export function hasMic() {
-    return (typeof AndroidMic !== "undefined") || !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-}
-
-/**
- * Check if running on native Android
- * @returns {boolean} Is native Android
- */
-export function isNativeAndroid() {
-    return typeof AndroidMic !== "undefined";
-}
+// Mic availability and the Android WebView check live in native-bridge.js;
+// re-exported here for existing importers.
+export { hasMic, isNativeAndroid };
 
 // =============================================================================
 // STT public entry points — streaming-first with legacy record->/stt fallback

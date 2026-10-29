@@ -41,13 +41,15 @@
  * EMPTY final for hallucination-filtered stops clears the pending interim
  * first, so filtered interims are discarded, not resurrected.
  *
- * Audio capture mechanics (resampling, PCM16 encoding, native Android path) are
- * mirrored from Portal/modules/gemini-live.js — the proven voice-agent capture
- * path — minus the AI-speaking auto-mute logic (an STT mic has no AI playback).
+ * Audio capture is the voice agents' (mic-capture.js, audio-dsp.js,
+ * native-bridge.js) minus the AI-speaking auto-mute logic (an STT mic has no
+ * AI playback).
  */
 
 import { $, toast } from './core-utils.js';
-import { bindNativeStream, unbindNativeStream } from './mic-arbiter.js';
+import { conditionMicFrame, createHighPassFilter } from './audio-dsp.js';
+import { hasMic, isNativeAndroid, startNativeStream, stopNativeStream } from './native-bridge.js';
+import { micFrameSize, openMicCapture } from './mic-capture.js';
 
 // =============================================================================
 // Module state
@@ -58,11 +60,8 @@ let streaming = false;          // public isStreaming() flag
 let wsReady = false;            // true once stt_start has been sent
 
 // Capture state (browser path)
-let recordingContext = null;    // AudioContext
-let mediaStream = null;         // MediaStream from getUserMedia
-let sourceNode = null;          // MediaStreamAudioSourceNode
-let scriptProcessor = null;     // ScriptProcessorNode
-let nativeRate = 48000;         // actual capture rate, set on start
+let micCapture = null;          // the open mic capture (mic-capture.js)
+const STT_SAMPLE_RATE = 24000;  // the uniform rate stt_start declares
 
 // Native Android path (callbacks routed by mic-arbiter.js)
 let usingNative = false;
@@ -116,109 +115,6 @@ function invokeUnavailable(cb, reason) {
         try { cb(reason); } catch (e) { console.error('[STT-STREAM] onUnavailable cb error:', e); }
     }
     return !!cb;  // whether a fallback handler consumed it
-}
-
-// =============================================================================
-// Native Android detection (same check as tts-stt.js / gemini-live.js)
-// =============================================================================
-
-function isNativeAndroid() {
-    return typeof AndroidMic !== 'undefined';
-}
-
-function hasMic() {
-    return isNativeAndroid() || !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-}
-
-// =============================================================================
-// Audio encoding helpers (mirrored from gemini-live.js)
-// =============================================================================
-
-/**
- * Convert a Float32 sample buffer to base64-encoded PCM16.
- */
-function float32ToPCM16Base64(float32Array) {
-    const pcm16 = new Int16Array(float32Array.length);
-    for (let i = 0; i < float32Array.length; i++) {
-        const s = Math.max(-1, Math.min(1, float32Array[i]));
-        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-    const bytes = new Uint8Array(pcm16.buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-}
-
-/**
- * Single-pole low-pass filter to prevent aliasing before downsampling.
- */
-function lowPassFilter(input, cutoffRatio = 0.4) {
-    const output = new Float32Array(input.length);
-    const rc = 1.0 / (cutoffRatio * 2 * Math.PI);
-    const dt = 1.0;
-    const alpha = dt / (rc + dt);
-    output[0] = input[0];
-    for (let i = 1; i < input.length; i++) {
-        output[i] = output[i - 1] + alpha * (input[i] - output[i - 1]);
-    }
-    return output;
-}
-
-/**
- * Resample Float32 audio from sourceRate to 24kHz (Catmull-Rom interpolation
- * with anti-alias low-pass). 24kHz is the single uniform STT rate: OpenAI
- * realtime transcription REQUIRES >= 24000 (it rejects 16000 with "format.rate
- * integer below minimum value"); Google Cloud Speech v2 accepts it; and the
- * native Android capture is already 24kHz.
- */
-function resampleTo24kHz(input, sourceRate) {
-    const targetRate = 24000;
-    if (sourceRate === targetRate) return input;
-
-    const cutoff = (targetRate / sourceRate) * 0.9;
-    const filtered = lowPassFilter(input, cutoff);
-
-    const ratio = sourceRate / targetRate;
-    const outputLength = Math.floor(filtered.length / ratio);
-    const output = new Float32Array(outputLength);
-
-    for (let i = 0; i < outputLength; i++) {
-        const srcIndex = i * ratio;
-        const idx = Math.floor(srcIndex);
-        const frac = srcIndex - idx;
-
-        const s0 = filtered[Math.max(0, idx - 1)];
-        const s1 = filtered[idx];
-        const s2 = filtered[Math.min(filtered.length - 1, idx + 1)];
-        const s3 = filtered[Math.min(filtered.length - 1, idx + 2)];
-
-        const a = -0.5 * s0 + 1.5 * s1 - 1.5 * s2 + 0.5 * s3;
-        const b = s0 - 2.5 * s1 + 2 * s2 - 0.5 * s3;
-        const c = -0.5 * s0 + 0.5 * s2;
-        const d = s1;
-
-        output[i] = a * frac * frac * frac + b * frac * frac + c * frac + d;
-    }
-    return output;
-}
-
-// =============================================================================
-// AudioContext lifecycle
-// =============================================================================
-
-async function initRecordingContext() {
-    if (!recordingContext) {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) {
-            throw new Error('AudioContext not supported on this device');
-        }
-        recordingContext = new AudioContextClass();
-    }
-    if (recordingContext.state === 'suspended') {
-        await recordingContext.resume();
-    }
 }
 
 // =============================================================================
@@ -497,103 +393,34 @@ function handleMessage(msg) {
 }
 
 // =============================================================================
-// Capture: browser ScriptProcessor path
+// Capture: browser path (mic-capture.js: AudioWorklet, ScriptProcessor fallback)
 // =============================================================================
 
 async function startBrowserCapture() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Microphone not supported. Requires HTTPS or localhost.');
-    }
+    // Each capture gets its own high-pass state (it carries across frames).
+    const highPass = createHighPassFilter();
+    micCapture = await openMicCapture({
+        frameSize: micFrameSize(),
+        logPrefix: '[STT-STREAM]',
+        retries: 0,   // a dictation fails fast; the caller may fall back
+        onFrame: (inputData, nativeRate) => {
+            if (!streaming || !ws || ws.readyState !== WebSocket.OPEN || !wsReady) return;
 
-    await initRecordingContext();
-
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    const audioConstraints = {
-        audio: {
-            sampleRate: { ideal: 48000 },
-            channelCount: 1,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-        }
-    };
-
-    try {
-        mediaStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
-    } catch (micError) {
-        if (micError.name === 'NotAllowedError') {
-            throw new Error('Microphone permission denied.');
-        } else if (micError.name === 'NotFoundError') {
-            throw new Error('No microphone found.');
-        } else if (micError.name === 'NotReadableError') {
-            throw new Error('Microphone is busy.');
-        }
-        throw new Error(`Microphone error: ${micError.message || micError.name}`);
-    }
-
-    sourceNode = recordingContext.createMediaStreamSource(mediaStream);
-    nativeRate = recordingContext.sampleRate;
-
-    const bufferSize = isMobile ? 4096 : 8192;
-    scriptProcessor = recordingContext.createScriptProcessor(bufferSize, 1, 1);
-
-    scriptProcessor.onaudioprocess = (e) => {
-        if (!streaming || !ws || ws.readyState !== WebSocket.OPEN || !wsReady) return;
-
-        const inputData = e.inputBuffer.getChannelData(0);
-
-        // Noise gate: skip frames below the noise floor.
-        let maxLevel = 0;
-        for (let i = 0; i < inputData.length; i++) {
-            const abs = Math.abs(inputData[i]);
-            if (abs > maxLevel) maxLevel = abs;
-        }
-        if (maxLevel < 0.015) return;
-
-        // High-pass to cut sub-100Hz rumble (single-pole).
-        const hpAlpha = 0.98;
-        let hpPrev = 0;
-        const filtered = new Float32Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-            filtered[i] = hpAlpha * (hpPrev + inputData[i] - (i > 0 ? inputData[i - 1] : 0));
-            hpPrev = filtered[i];
-        }
-
-        // Capped-gain normalize.
-        const normalizedData = new Float32Array(filtered.length);
-        const targetLevel = 0.4;
-        const gain = maxLevel > 0.03 ? Math.min(targetLevel / maxLevel, 1.5) : 1.0;
-        for (let i = 0; i < filtered.length; i++) {
-            normalizedData[i] = Math.max(-1, Math.min(1, filtered[i] * gain));
-        }
-
-        // Resample native rate -> 24kHz, encode PCM16 -> base64.
-        const resampled = resampleTo24kHz(normalizedData, nativeRate);
-        const base64 = float32ToPCM16Base64(resampled);
-        sendAudio(base64);
-    };
-
-    sourceNode.connect(scriptProcessor);
-    scriptProcessor.connect(recordingContext.destination);
+            // Noise gate, high-pass, capped-gain normalize, resample native rate
+            // -> 24kHz, encode PCM16 -> base64.
+            const base64 = conditionMicFrame(inputData, {
+                sourceRate: nativeRate, targetRate: STT_SAMPLE_RATE, highPass,
+            });
+            if (base64) sendAudio(base64);
+        },
+    });
 }
 
 function stopBrowserCapture() {
-    if (scriptProcessor) {
-        try { scriptProcessor.disconnect(); } catch (e) {}
-        scriptProcessor.onaudioprocess = null;
-        scriptProcessor = null;
-    }
-    if (sourceNode) {
-        try { sourceNode.disconnect(); } catch (e) {}
-        sourceNode = null;
-    }
-    if (mediaStream) {
-        try { mediaStream.getTracks().forEach(t => t.stop()); } catch (e) {}
-        mediaStream = null;
-    }
-    if (recordingContext) {
-        try { recordingContext.close(); } catch (e) {}
-        recordingContext = null;
+    if (micCapture) {
+        micCapture.close();
+        try { micCapture.context.close(); } catch (e) {}
+        micCapture = null;
     }
 }
 
@@ -606,34 +433,29 @@ function startNativeCapture() {
     // save-and-restore of the window globals restored a stale handler (often
     // null) on stop and silently cut a voice agent's audio feed (audit
     // P02-voice-web-02); unbinding only ever drops OUR binding.
-    bindNativeStream(NATIVE_OWNER, {
-        onNativeStreamStart: () => {
+    startNativeStream(NATIVE_OWNER, {
+        onStart: () => {
             console.log('[STT-STREAM] Native streaming started');
         },
-        onNativeStreamStop: () => {
+        onStop: () => {
             console.log('[STT-STREAM] Native streaming stopped');
         },
-        onNativeStreamError: (error) => {
+        onError: (error) => {
             console.error('[STT-STREAM] Native streaming error:', error);
             toast('Mic error: ' + error);
             cleanup();
         },
-        onNativeAudioChunk: (base64Data) => {
+        onChunk: (base64Data) => {
             // Native frames are already 24kHz PCM16 base64 — send as-is (stt_start
             // declared sample_rate:24000 for the native path).
             sendAudio(base64Data);
         },
     });
-
-    AndroidMic.startAudioStreaming();
     usingNative = true;
 }
 
 function stopNativeCapture() {
-    if (typeof AndroidMic !== 'undefined' && typeof AndroidMic.stopAudioStreaming === 'function') {
-        try { AndroidMic.stopAudioStreaming(); } catch (e) {}
-    }
-    unbindNativeStream(NATIVE_OWNER);
+    stopNativeStream(NATIVE_OWNER);
     usingNative = false;
 }
 

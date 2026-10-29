@@ -18,7 +18,14 @@ import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
 import { pauseAllPlayers } from './tts-stt.js';
 import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
-import { claimMic, releaseMic, bindNativeStream, unbindNativeStream } from './mic-arbiter.js';
+import { claimMic, releaseMic } from './mic-arbiter.js';
+import {
+    createHighPassFilter, float32ToPCM16Base64, normalizePeak, pcm16Base64ToFloat32, peakLevel,
+    resampleAudio, rmsLevel, rmsLevelPCM16Base64, silencePCM16Base64, upsampleAudio,
+} from './audio-dsp.js';
+import { hasNativeStreaming, startNativeStreamAwaited, stopNativeStream } from './native-bridge.js';
+import { micFrameSize, openMicCapture } from './mic-capture.js';
+import { LiveSession } from './live-session.js';
 
 /** This module's mic-arbiter owner id. */
 const MIC_OWNER = 'realtime';
@@ -61,12 +68,6 @@ const SEL = {
 // State
 // =============================================================================
 
-/** WebSocket connection to Orchestrator */
-let ws = null;
-
-/** Session ID */
-let sessionId = null;
-
 /** Selected voice */
 let selectedVoice = 'ash';
 
@@ -91,17 +92,14 @@ let playbackContext = null;
 /** Native playback sample rate */
 let playbackSampleRate = 48000;
 
-/** Audio context for recording (native rate) */
+/** Audio context for recording (native rate), kept across captures */
 let recordingContext = null;
 
-/** Media stream for recording */
-let mediaStream = null;
+/** The open browser mic capture (mic-capture.js), while recording */
+let micCapture = null;
 
-/** Script processor for audio capture */
-let scriptProcessor = null;
-
-/** Source node for media stream */
-let sourceNode = null;
+/** OpenAI Realtime's input and output rate (PCM16) */
+const REALTIME_SAMPLE_RATE = 24000;
 
 /** Whether currently recording */
 let isRecording = false;
@@ -118,14 +116,8 @@ const POST_SPEECH_DELAY_MS = 800;
 /** Whether using native Android recording */
 let usingNativeRecording = false;
 
-/** Buffer for native Android audio chunks */
-let nativeAudioBuffer = [];
-
 /** Whether connected to Realtime API */
 let isConnected = false;
-
-/** Audio playback queue */
-let audioQueue = [];
 
 /** Current audio source being played */
 let currentAudioSource = null;
@@ -142,12 +134,6 @@ let userTranscriptBuffer = '';
 /** Transient (non-persisted) live user bubble built from interim deltas */
 let liveUserBubble = null;
 
-/** Audio buffer for smoother playback - collect chunks before playing */
-let audioBufferChunks = [];
-
-/** Minimum audio chunks to buffer before starting playback (higher = smoother but more latency) */
-const AUDIO_BUFFER_MIN_CHUNKS = 12;  // Increased for smoother audio
-
 /** Whether we're currently buffering audio */
 let isBufferingAudio = false;
 
@@ -156,12 +142,6 @@ let nextPlaybackTime = 0;
 
 /** Whether the response is complete (API sent response_complete) but audio may still be playing */
 let responseCompleteReceived = false;
-
-/** AudioWorklet node for gapless playback */
-let audioWorkletNode = null;
-
-/** Whether AudioWorklet is initialized */
-let audioWorkletReady = false;
 
 /** Accumulated audio samples for continuous playback */
 let accumulatedSamples = new Float32Array(0);
@@ -198,83 +178,141 @@ let vadSilenceFrameCount = 0;
 /** Ring buffer of recent encoded audio frames for pre-buffering */
 let vadPreBuffer = [];
 
-/** High-pass filter state (persists across frames for proper filtering) */
-let hpFilterPrev = 0;
-let hpFilterPrevInput = 0;
+/** High-pass filter of the browser capture (its state persists across frames) */
+let micHighPass = createHighPassFilter();
+
+/** 20 ms of PCM16 silence at 24kHz, for the end-of-speech burst */
+const SILENCE_20MS_B64 = silencePCM16Base64(480);
+
+/** Forget the client VAD's state (muted, or a new capture). */
+function resetVad() {
+    vadIsSpeaking = false;
+    vadSpeechFrameCount = 0;
+    vadSilenceFrameCount = 0;
+    vadPreBuffer = [];
+}
+
+/**
+ * The client VAD gate, for the browser and the native frames alike: speech
+ * frames go out (with the pre-buffered onset), silence is held back, and the
+ * end of speech is followed by ~800ms of silence so OpenAI's server VAD sees
+ * the turn end (without it the server just waits).
+ * @param {string} base64 - The frame, base64 PCM16 at 24kHz
+ * @param {number} rms - The frame's RMS level (raw, before any filtering)
+ */
+function gateSpeechFrame(base64, rms) {
+    const isSpeechFrame = rms >= VAD_SPEECH_RMS;
+
+    if (isSpeechFrame) {
+        vadSpeechFrameCount++;
+        vadSilenceFrameCount = 0;
+    } else {
+        vadSilenceFrameCount++;
+        vadSpeechFrameCount = 0;
+    }
+
+    if (!vadIsSpeaking) {
+        // Not currently speaking — buffer frames and watch for speech onset
+        vadPreBuffer.push(base64);
+        if (vadPreBuffer.length > VAD_PRE_BUFFER_SIZE) {
+            vadPreBuffer.shift();
+        }
+
+        // Activate speech if enough consecutive speech frames
+        if (vadSpeechFrameCount >= VAD_MIN_SPEECH_FRAMES) {
+            vadIsSpeaking = true;
+            console.log(`[REALTIME-VAD] Speech detected (RMS: ${rms.toFixed(4)})`);
+
+            // Flush pre-buffer to catch speech onset
+            for (const bufferedFrame of vadPreBuffer) {
+                liveSession.send({ type: 'audio_input', data: bufferedFrame });
+            }
+            vadPreBuffer = [];
+        }
+    }
+
+    if (vadIsSpeaking) {
+        // Currently speaking — send audio to OpenAI
+        liveSession.send({ type: 'audio_input', data: base64 });
+
+        // Check for speech end
+        if (vadSilenceFrameCount >= VAD_MAX_SILENCE_FRAMES) {
+            vadIsSpeaking = false;
+            vadPreBuffer = [];
+            console.log(`[REALTIME-VAD] Speech ended (${vadSilenceFrameCount} silent frames) — sending silence burst`);
+            for (let burst = 0; burst < 40; burst++) {  // 40 * 20ms = 800ms
+                liveSession.send({ type: 'audio_input', data: SILENCE_20MS_B64 });
+            }
+        }
+    }
+}
 
 // =============================================================================
-// Reconnection State
+// Connection (live-session.js: keepalive, reconnect with backoff, teardown)
 // =============================================================================
-
-/** Number of reconnection attempts */
-let reconnectAttempts = 0;
-
-/** Maximum reconnection attempts before giving up */
-const MAX_RECONNECT_ATTEMPTS = 15;
-
-/** Reconnection timer */
-let reconnectTimer = null;
-
-/** Keepalive ping interval timer */
-let keepaliveTimer = null;
-
-/** Last time we received a pong from server */
-let lastPongTime = 0;
 
 /** Whether mic was recording before disconnect (to resume after reconnect) */
 let wasRecordingBeforeDisconnect = false;
 
-/** Whether this is an intentional disconnect (user clicked disconnect) */
-let intentionalDisconnect = false;
-
 /** Stored operator for reconnection */
 let currentOperator = '';
 
-// =============================================================================
-// Audio Utilities
-// =============================================================================
+const liveSession = new LiveSession({
+    path: '/ws/realtime/',
+    logPrefix: '[REALTIME]',
+    buildConnectMsg,
+    onMessage: handleMessage,
+    onStatus: updateStatus,
+    onDropped: () => {
+        isConnected = false;
+        wasRecordingBeforeDisconnect = isRecording;
+        if (isRecording) {
+            stopRecordingFully();
+        }
+    },
+    onClosed: () => {
+        isConnected = false;
+        updateStatus('Disconnected');
+        updateUI();
+    },
+    onGiveUp: (exhausted) => {
+        updateStatus('Disconnected');
+        updateUI();
+        if (exhausted) {
+            toast('Realtime connection lost');
+        }
+    },
+    onResumed: () => {
+        // Resume recording after a reconnect if the mic was on when it dropped.
+        if (wasRecordingBeforeDisconnect) {
+            wasRecordingBeforeDisconnect = false;
+            setTimeout(() => startRecording(), 500);
+        }
+    },
+});
 
 /**
- * Convert Float32 audio samples to base64-encoded PCM16
- * @param {Float32Array} float32Array - Audio samples (-1 to 1)
- * @returns {string} Base64 encoded PCM16
+ * The connect message — the first connect and every reconnect send the same
+ * one (a reconnect that dropped fields silently downgraded the session to the
+ * backend env defaults, T14 F1). Undefined fields are omitted.
  */
-function float32ToPCM16Base64(float32Array) {
-    const pcm16 = new Int16Array(float32Array.length);
-    for (let i = 0; i < float32Array.length; i++) {
-        // Clamp and convert to 16-bit
-        const s = Math.max(-1, Math.min(1, float32Array[i]));
-        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+function buildConnectMsg() {
+    const connectMsg = {
+        type: 'connect',
+        operator: currentOperator,
+        voice: selectedVoice
+    };
+    if (currentRealtimeModel) connectMsg.model = currentRealtimeModel;
+    if (currentRealtimeVadType) connectMsg.vad_type = currentRealtimeVadType;
+    if (currentRealtimeVadEagerness) connectMsg.vad_eagerness = currentRealtimeVadEagerness;
+    if (currentRealtimeIdleTimeoutMs !== null) connectMsg.idle_timeout_ms = currentRealtimeIdleTimeoutMs;
+    if (currentRealtimeNoiseReduction) connectMsg.noise_reduction = currentRealtimeNoiseReduction;
+    if (currentRealtimePresetId) connectMsg.agent = currentRealtimePresetId;
+    if (currentRealtimeTranslateMode) {
+        connectMsg.mode = currentRealtimeTranslateMode;
+        connectMsg.target_language = currentRealtimeTargetLanguage;
     }
-
-    // Convert to base64
-    const bytes = new Uint8Array(pcm16.buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-}
-
-/**
- * Convert base64-encoded PCM16 to Float32 audio samples
- * @param {string} base64 - Base64 encoded PCM16
- * @returns {Float32Array} Audio samples
- */
-function pcm16Base64ToFloat32(base64) {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-
-    const pcm16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(pcm16.length);
-    for (let i = 0; i < pcm16.length; i++) {
-        float32[i] = pcm16[i] / 32768.0;
-    }
-
-    return float32;
+    return connectMsg;
 }
 
 // =============================================================================
@@ -301,166 +339,6 @@ async function initPlaybackContext() {
 }
 
 /**
- * Initialize audio context for recording (native sample rate)
- */
-async function initRecordingContext() {
-    if (!recordingContext) {
-        // Use browser's native sample rate for recording
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) {
-            throw new Error('AudioContext not supported on this device');
-        }
-        recordingContext = new AudioContextClass();
-        console.log(`[REALTIME] Recording context created at ${recordingContext.sampleRate}Hz`);
-    }
-
-    // Resume AudioContext - required after user interaction on mobile
-    if (recordingContext.state === 'suspended') {
-        console.log('[REALTIME] Resuming suspended AudioContext...');
-        await recordingContext.resume();
-    }
-
-    // Double-check it's running
-    if (recordingContext.state !== 'running') {
-        console.warn(`[REALTIME] AudioContext state: ${recordingContext.state}`);
-    }
-}
-
-/**
- * Simple low-pass filter to prevent aliasing before downsampling
- * @param {Float32Array} input - Input samples
- * @param {number} cutoffRatio - Cutoff as ratio of sample rate (0.5 = Nyquist)
- * @returns {Float32Array} Filtered audio
- */
-function lowPassFilter(input, cutoffRatio = 0.4) {
-    const output = new Float32Array(input.length);
-    const rc = 1.0 / (cutoffRatio * 2 * Math.PI);
-    const dt = 1.0;
-    const alpha = dt / (rc + dt);
-
-    output[0] = input[0];
-    for (let i = 1; i < input.length; i++) {
-        output[i] = output[i - 1] + alpha * (input[i] - output[i - 1]);
-    }
-    return output;
-}
-
-/**
- * Resample audio from source rate to target rate with anti-aliasing
- * @param {Float32Array} input - Input samples
- * @param {number} sourceRate - Source sample rate
- * @param {number} targetRate - Target sample rate (24000 for OpenAI)
- * @returns {Float32Array} Resampled audio
- */
-function resampleAudio(input, sourceRate, targetRate) {
-    if (sourceRate === targetRate) {
-        return input;
-    }
-
-    // Apply low-pass filter to prevent aliasing when downsampling
-    const cutoff = targetRate / sourceRate * 0.9;  // Slightly below Nyquist
-    const filtered = lowPassFilter(input, cutoff);
-
-    const ratio = sourceRate / targetRate;
-    const outputLength = Math.floor(filtered.length / ratio);
-    const output = new Float32Array(outputLength);
-
-    // Cubic interpolation for better quality
-    for (let i = 0; i < outputLength; i++) {
-        const srcIndex = i * ratio;
-        const idx = Math.floor(srcIndex);
-        const frac = srcIndex - idx;
-
-        // Get 4 samples for cubic interpolation
-        const s0 = filtered[Math.max(0, idx - 1)];
-        const s1 = filtered[idx];
-        const s2 = filtered[Math.min(filtered.length - 1, idx + 1)];
-        const s3 = filtered[Math.min(filtered.length - 1, idx + 2)];
-
-        // Cubic interpolation (Catmull-Rom)
-        const a = -0.5 * s0 + 1.5 * s1 - 1.5 * s2 + 0.5 * s3;
-        const b = s0 - 2.5 * s1 + 2 * s2 - 0.5 * s3;
-        const c = -0.5 * s0 + 0.5 * s2;
-        const d = s1;
-
-        output[i] = a * frac * frac * frac + b * frac * frac + c * frac + d;
-    }
-
-    return output;
-}
-
-/**
- * Upsample audio from 24kHz to target rate with high quality
- * Uses linear interpolation for speed with optional higher quality mode
- * @param {Float32Array} input - Input samples at 24kHz
- * @param {number} targetRate - Target sample rate (e.g., 48000)
- * @returns {Float32Array} Upsampled audio
- */
-function upsampleAudio(input, targetRate) {
-    const sourceRate = 24000;  // OpenAI Realtime always sends 24kHz
-
-    if (targetRate === sourceRate) {
-        return input;
-    }
-
-    // For exact 2x upsampling (24kHz -> 48kHz), use optimized path
-    if (targetRate === 48000) {
-        return upsample2x(input);
-    }
-
-    const ratio = targetRate / sourceRate;
-    const outputLength = Math.floor(input.length * ratio);
-    const output = new Float32Array(outputLength);
-
-    // Use cubic interpolation for good quality with reasonable performance
-    for (let i = 0; i < outputLength; i++) {
-        const srcPos = i / ratio;
-        const srcIndex = Math.floor(srcPos);
-        const frac = srcPos - srcIndex;
-
-        // Get 4 samples for cubic interpolation (Catmull-Rom)
-        const s0 = input[Math.max(0, srcIndex - 1)];
-        const s1 = input[srcIndex];
-        const s2 = input[Math.min(input.length - 1, srcIndex + 1)];
-        const s3 = input[Math.min(input.length - 1, srcIndex + 2)];
-
-        // Catmull-Rom spline interpolation
-        const a = -0.5 * s0 + 1.5 * s1 - 1.5 * s2 + 0.5 * s3;
-        const b = s0 - 2.5 * s1 + 2 * s2 - 0.5 * s3;
-        const c = -0.5 * s0 + 0.5 * s2;
-        const d = s1;
-
-        output[i] = a * frac * frac * frac + b * frac * frac + c * frac + d;
-    }
-
-    return output;
-}
-
-/**
- * Optimized 2x upsampling for 24kHz -> 48kHz
- * Uses linear interpolation with zero-stuffing for speed
- * @param {Float32Array} input - Input samples at 24kHz
- * @returns {Float32Array} Upsampled audio at 48kHz
- */
-function upsample2x(input) {
-    const output = new Float32Array(input.length * 2);
-
-    for (let i = 0; i < input.length - 1; i++) {
-        const idx = i * 2;
-        output[idx] = input[i];
-        // Linear interpolation for the intermediate sample
-        output[idx + 1] = (input[i] + input[i + 1]) * 0.5;
-    }
-
-    // Handle last sample
-    const lastIdx = (input.length - 1) * 2;
-    output[lastIdx] = input[input.length - 1];
-    output[lastIdx + 1] = input[input.length - 1];
-
-    return output;
-}
-
-/**
  * Play base64-encoded PCM16 audio with seamless scheduling
  * Uses continuous buffer approach for gapless playback
  * @param {string} base64Audio - Base64 encoded PCM16
@@ -468,11 +346,9 @@ function upsample2x(input) {
 async function playAudio(base64Audio) {
     await initPlaybackContext();
 
-    // Decode PCM16 to float32
-    const float32_24k = pcm16Base64ToFloat32(base64Audio);
-
-    // Upsample from 24kHz to native playback rate for better quality
-    const float32 = upsampleAudio(float32_24k, playbackSampleRate);
+    // Decode PCM16 to float32, upsample from 24kHz to the native playback rate
+    const float32 = upsampleAudio(pcm16Base64ToFloat32(base64Audio), REALTIME_SAMPLE_RATE,
+                                  playbackSampleRate);
 
     // Add to accumulated samples for continuous playback
     const newAccumulated = new Float32Array(accumulatedSamples.length + float32.length);
@@ -528,11 +404,6 @@ function playAccumulatedAudio() {
         // Check if more audio accumulated while this was playing
         if (accumulatedSamples.length > 0) {
             playAccumulatedAudio();
-        } else if (audioBufferChunks.length > 0) {
-            // Process any remaining queued chunks
-            const batch = audioBufferChunks.splice(0, audioBufferChunks.length);
-            const combined = concatenateAudioChunks(batch);
-            playAudio(combined);
         } else {
             currentAudioSource = null;
             isBufferingAudio = false;
@@ -547,33 +418,6 @@ function playAccumulatedAudio() {
             }
         }
     };
-}
-
-/**
- * Concatenate multiple audio chunks into one for smoother playback
- * @param {string[]} chunks - Array of base64 encoded PCM16 chunks
- * @returns {string} Single concatenated base64 chunk
- */
-function concatenateAudioChunks(chunks) {
-    if (chunks.length === 0) return '';
-    if (chunks.length === 1) return chunks[0];
-
-    // Decode all chunks
-    const floatArrays = chunks.map(chunk => pcm16Base64ToFloat32(chunk));
-
-    // Calculate total length
-    const totalLength = floatArrays.reduce((sum, arr) => sum + arr.length, 0);
-
-    // Concatenate
-    const combined = new Float32Array(totalLength);
-    let offset = 0;
-    for (const arr of floatArrays) {
-        combined.set(arr, offset);
-        offset += arr.length;
-    }
-
-    // Convert back to base64 PCM16
-    return float32ToPCM16Base64(combined);
 }
 
 /**
@@ -605,32 +449,14 @@ function stopAudio() {
         }
         currentAudioSource = null;
     }
-    audioQueue = [];
-    audioBufferChunks = [];
     accumulatedSamples = new Float32Array(0);  // Clear accumulated samples
     isBufferingAudio = false;
     nextPlaybackTime = 0;
 }
 
 // =============================================================================
-// Native Android Detection
+// Native Android streaming (native-bridge.js)
 // =============================================================================
-
-/**
- * Check if running in native Android app with AndroidMic bridge
- * @returns {boolean}
- */
-function isNativeAndroid() {
-    return typeof AndroidMic !== 'undefined';
-}
-
-/**
- * Check if microphone is available
- * @returns {boolean}
- */
-function hasMic() {
-    return isNativeAndroid() || !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-}
 
 /**
  * Stop other modules that may be using the microphone (dictation, the Gemini
@@ -641,178 +467,42 @@ async function stopOtherMicUsers() {
 }
 
 /**
- * Release the native Android microphone and wait for confirmation
- * @returns {Promise<void>} Resolves when mic is released
- */
-async function releaseNativeMicAndWait() {
-    return new Promise((resolve) => {
-        // Set up callback for when mic is released
-        const originalCallback = window.onNativeMicReleased;
-        let resolved = false;
-
-        window.onNativeMicReleased = () => {
-            console.log('[REALTIME] Native mic released callback received');
-            resolved = true;
-            window.onNativeMicReleased = originalCallback;
-            resolve();
-        };
-
-        try {
-            if (typeof AndroidMic !== 'undefined') {
-                if (typeof AndroidMic.releaseMic === 'function') {
-                    console.log('[REALTIME] Calling AndroidMic.releaseMic()...');
-                    AndroidMic.releaseMic();
-                } else if (typeof AndroidMic.stopRecording === 'function') {
-                    console.log('[REALTIME] Calling AndroidMic.stopRecording()...');
-                    AndroidMic.stopRecording();
-                    // stopRecording doesn't have a callback, so resolve after delay
-                    setTimeout(() => {
-                        if (!resolved) {
-                            console.log('[REALTIME] stopRecording timeout - assuming mic released');
-                            window.onNativeMicReleased = originalCallback;
-                            resolve();
-                        }
-                    }, 500);
-                    return;
-                }
-            }
-        } catch (e) {
-            console.warn('[REALTIME] Error releasing native mic:', e);
-        }
-
-        // Timeout fallback - if callback doesn't come within 1 second, proceed anyway
-        setTimeout(() => {
-            if (!resolved) {
-                console.log('[REALTIME] Native mic release timeout - proceeding anyway');
-                window.onNativeMicReleased = originalCallback;
-                resolve();
-            }
-        }, 1000);
-    });
-}
-
-/**
- * Start native Android audio streaming
- * Uses AndroidMic.startAudioStreaming() which captures at 24kHz PCM16
- * Audio is already in OpenAI Realtime format - no resampling needed
+ * Start native Android audio streaming: AndroidMic captures 24kHz PCM16,
+ * exactly what OpenAI Realtime takes (no resampling).
  */
 async function startNativeStreaming() {
-    return new Promise((resolve, reject) => {
-        // Set up callbacks (routed to this module by the mic arbiter below)
-        const nativeHandlers = {};
-        nativeHandlers.onNativeStreamStart = () => {
+    console.log('[REALTIME] Calling AndroidMic.startAudioStreaming()...');
+    await startNativeStreamAwaited(MIC_OWNER, {
+        onStart: () => {
             console.log('[REALTIME] Native streaming started');
             isRecording = true;
             usingNativeRecording = true;
             updateUI();
-            resolve();
-        };
-
-        nativeHandlers.onNativeStreamError = (error) => {
+        },
+        onError: (error) => {
             console.error('[REALTIME] Native streaming error:', error);
             isRecording = false;
             usingNativeRecording = false;
             toast('Native audio error: ' + error);
-            reject(new Error(error));
-        };
-
-        nativeHandlers.onNativeAudioChunk = (base64Data) => {
-            // Native Android captures at 24kHz PCM16 - exactly what OpenAI needs
+        },
+        onChunk: (base64Data) => {
             // Auto-mute while AI is speaking AND for POST_SPEECH_DELAY_MS after
             const timeSinceAIStopped = Date.now() - aiStoppedSpeakingAt;
             const inPostSpeechDelay = timeSinceAIStopped < POST_SPEECH_DELAY_MS;
 
-            if (!ws || ws.readyState !== WebSocket.OPEN || !isRecording || isAISpeaking || inPostSpeechDelay) {
-                vadIsSpeaking = false;
-                vadSpeechFrameCount = 0;
-                vadSilenceFrameCount = 0;
-                vadPreBuffer = [];
+            if (!liveSession.isOpen || !isRecording || isAISpeaking || inPostSpeechDelay) {
+                resetVad();
                 return;
             }
-
-            // Decode base64 PCM16 to calculate RMS energy for VAD
-            const binaryString = atob(base64Data);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            const pcm16 = new Int16Array(bytes.buffer);
-            let sumSquares = 0;
-            for (let i = 0; i < pcm16.length; i++) {
-                const sample = pcm16[i] / 32768.0;
-                sumSquares += sample * sample;
-            }
-            const rms = Math.sqrt(sumSquares / pcm16.length);
-
-            // VAD state machine (same as browser path)
-            const isSpeechFrame = rms >= VAD_SPEECH_RMS;
-            if (isSpeechFrame) {
-                vadSpeechFrameCount++;
-                vadSilenceFrameCount = 0;
-            } else {
-                vadSilenceFrameCount++;
-                vadSpeechFrameCount = 0;
-            }
-
-            if (!vadIsSpeaking) {
-                vadPreBuffer.push(base64Data);
-                if (vadPreBuffer.length > VAD_PRE_BUFFER_SIZE) {
-                    vadPreBuffer.shift();
-                }
-                if (vadSpeechFrameCount >= VAD_MIN_SPEECH_FRAMES) {
-                    vadIsSpeaking = true;
-                    for (const buffered of vadPreBuffer) {
-                        ws.send(JSON.stringify({ type: 'audio_input', data: buffered }));
-                    }
-                    vadPreBuffer = [];
-                }
-            }
-
-            if (vadIsSpeaking) {
-                ws.send(JSON.stringify({ type: 'audio_input', data: base64Data }));
-                if (vadSilenceFrameCount >= VAD_MAX_SILENCE_FRAMES) {
-                    vadIsSpeaking = false;
-                    vadPreBuffer = [];
-                    // Send silence burst for OpenAI's server-side VAD
-                    const silenceSamples = 480;
-                    const silencePcm16 = new Int16Array(silenceSamples);
-                    const silenceBytes = new Uint8Array(silencePcm16.buffer);
-                    let silenceBinary = '';
-                    for (let j = 0; j < silenceBytes.length; j++) {
-                        silenceBinary += String.fromCharCode(silenceBytes[j]);
-                    }
-                    const silenceB64 = btoa(silenceBinary);
-                    for (let burst = 0; burst < 40; burst++) {
-                        ws.send(JSON.stringify({ type: 'audio_input', data: silenceB64 }));
-                    }
-                }
-            }
-        };
-
-        nativeHandlers.onNativeStreamStop = () => {
+            // VAD gate on the frame's RMS energy (same as the browser path)
+            gateSpeechFrame(base64Data, rmsLevelPCM16Base64(base64Data));
+        },
+        onStop: () => {
             console.log('[REALTIME] Native streaming stopped');
             isRecording = false;
             usingNativeRecording = false;
             updateUI();
-        };
-
-        // Start native streaming
-        try {
-            console.log('[REALTIME] Calling AndroidMic.startAudioStreaming()...');
-            bindNativeStream(MIC_OWNER, nativeHandlers);
-            AndroidMic.startAudioStreaming();
-        } catch (e) {
-            console.error('[REALTIME] Failed to start native streaming:', e);
-            reject(e);
-        }
-
-        // Timeout if streaming doesn't start within 3 seconds
-        setTimeout(() => {
-            if (!isRecording) {
-                console.error('[REALTIME] Native streaming timeout');
-                reject(new Error('Native streaming timeout'));
-            }
-        }, 3000);
+        },
     });
 }
 
@@ -820,18 +510,11 @@ async function startNativeStreaming() {
  * Stop native Android audio streaming
  */
 function stopNativeStreaming() {
-    if (typeof AndroidMic !== 'undefined' && typeof AndroidMic.stopAudioStreaming === 'function') {
-        console.log('[REALTIME] Stopping native audio streaming');
-        AndroidMic.stopAudioStreaming();
-    }
-    unbindNativeStream(MIC_OWNER);
+    console.log('[REALTIME] Stopping native audio streaming');
+    stopNativeStream(MIC_OWNER);
 
     // Send commit to trigger AI response
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-            type: 'audio_commit'
-        }));
-    }
+    liveSession.send({ type: 'audio_commit' });
 
     isRecording = false;
     usingNativeRecording = false;
@@ -849,220 +532,69 @@ function stopNativeStreaming() {
 async function startRecording() {
     if (isRecording) return;
 
-    // Detect mobile for compatibility adjustments
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
     try {
         // First, stop any other modules using the microphone
         await stopOtherMicUsers();
 
         // If native Android, use native streaming (bypasses WebView getUserMedia issues)
-        if (isNativeAndroid() && typeof AndroidMic.startAudioStreaming === 'function') {
+        if (hasNativeStreaming()) {
             console.log('[REALTIME] Using native Android audio streaming');
             await startNativeStreaming();
             return;  // Native streaming handles everything
         }
 
-        // Release any existing media stream
-        if (mediaStream) {
+        // Release any existing capture
+        if (micCapture) {
             console.log('[REALTIME] Releasing existing media stream...');
-            mediaStream.getTracks().forEach(track => track.stop());
-            mediaStream = null;
+            micCapture.close();
+            micCapture = null;
             await new Promise(resolve => setTimeout(resolve, 100));
         }
 
-        // Check if we have mediaDevices API
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error('Microphone not supported. Requires HTTPS or localhost.');
-        }
+        // A new capture starts the high-pass filter and the VAD from rest.
+        micHighPass = createHighPassFilter();
+        resetVad();
+        micCapture = await openMicCapture({
+            context: recordingContext,
+            frameSize: micFrameSize(),
+            logPrefix: '[REALTIME]',
+            // Samsung devices need the retries; the longer texts are this panel's.
+            messages: {
+                NotAllowedError: 'Microphone permission denied. Please allow microphone access.',
+                NotFoundError: 'No microphone found. Please connect a microphone.',
+                NotReadableError: 'Microphone is busy. Please close other apps or wait a moment.',
+            },
+            onFrame: (inputData, nativeRate) => {
+                if (!isRecording || !liveSession.isOpen) return;
 
-        // Initialize recording context at native sample rate
-        await initRecordingContext();
-
-        // Get microphone stream with mono forced and audio processing enabled
-        // Audio constraints - require echo cancellation for real-time voice
-        const audioConstraints = {
-            audio: {
-                sampleRate: { ideal: 48000 },
-                channelCount: 1,              // FORCE MONO - Critical for audio interfaces
-                echoCancellation: true,       // Required - not just ideal
-                noiseSuppression: true,       // Required - not just ideal
-                autoGainControl: true         // Required - not just ideal
-            }
-        };
-
-        console.log(`[REALTIME] Requesting microphone in MONO with processing (mobile: ${isMobile}, native: ${isNativeAndroid()})`);
-
-        // Retry logic for mic access - Samsung devices need more retries
-        let retryCount = 0;
-        const maxRetries = 5;  // More retries for slow audio HAL
-
-        while (retryCount <= maxRetries) {
-            try {
-                mediaStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
-                console.log('[REALTIME] Got media stream successfully');
-                break;
-            } catch (micError) {
-                console.error(`[REALTIME] Microphone error (attempt ${retryCount + 1}):`, micError.name, micError.message);
-
-                if (micError.name === 'NotReadableError' && retryCount < maxRetries) {
-                    // Mic busy - wait longer each retry (exponential backoff)
-                    const delay = 500 + (retryCount * 500);  // 500ms, 1000ms, 1500ms, 2000ms, 2500ms
-                    console.log(`[REALTIME] Mic busy, waiting ${delay}ms and retrying...`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    retryCount++;
-                    continue;
+                // Auto-mute while AI is speaking AND for POST_SPEECH_DELAY_MS after to prevent feedback
+                const timeSinceAIStopped = Date.now() - aiStoppedSpeakingAt;
+                const inPostSpeechDelay = timeSinceAIStopped < POST_SPEECH_DELAY_MS;
+                if (isAISpeaking || inPostSpeechDelay) {
+                    // Reset VAD + filter state when muted
+                    resetVad();
+                    micHighPass.reset();
+                    return;
                 }
 
-                if (micError.name === 'NotAllowedError') {
-                    throw new Error('Microphone permission denied. Please allow microphone access.');
-                } else if (micError.name === 'NotFoundError') {
-                    throw new Error('No microphone found. Please connect a microphone.');
-                } else if (micError.name === 'NotReadableError') {
-                    throw new Error('Microphone is busy. Please close other apps or wait a moment.');
-                } else {
-                    throw new Error(`Microphone error: ${micError.message || micError.name}`);
-                }
-            }
-        }
+                // RMS on the RAW audio for the VAD decision (before any filtering)
+                const rms = rmsLevel(inputData);
+                const maxLevel = peakLevel(inputData);
 
-        // Create source from stream using recording context
-        sourceNode = recordingContext.createMediaStreamSource(mediaStream);
-        const nativeRate = recordingContext.sampleRate;
-        console.log(`[REALTIME] Recording at native rate: ${nativeRate}Hz`);
-
-        // Create script processor for audio capture
-        // Use 4096 on mobile (better compatibility), 8192 on desktop (better quality)
-        // Note: ScriptProcessorNode is deprecated but widely supported
-        const bufferSize = isMobile ? 4096 : 8192;
-        console.log(`[REALTIME] Using buffer size: ${bufferSize}`);
-        scriptProcessor = recordingContext.createScriptProcessor(bufferSize, 1, 1);
-
-        scriptProcessor.onaudioprocess = (e) => {
-            if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-            // Auto-mute while AI is speaking AND for POST_SPEECH_DELAY_MS after to prevent feedback
-            const timeSinceAIStopped = Date.now() - aiStoppedSpeakingAt;
-            const inPostSpeechDelay = timeSinceAIStopped < POST_SPEECH_DELAY_MS;
-            if (isAISpeaking || inPostSpeechDelay) {
-                // Reset VAD + filter state when muted
-                vadIsSpeaking = false;
-                vadSpeechFrameCount = 0;
-                vadSilenceFrameCount = 0;
-                vadPreBuffer = [];
-                hpFilterPrev = 0;
-                hpFilterPrevInput = 0;
-                return;
-            }
-
-            const inputData = e.inputBuffer.getChannelData(0);
-
-            // Calculate RMS on RAW audio for VAD decision (before any filtering)
-            let sumSquares = 0;
-            let maxLevel = 0;
-            for (let i = 0; i < inputData.length; i++) {
-                sumSquares += inputData[i] * inputData[i];
-                const abs = Math.abs(inputData[i]);
-                if (abs > maxLevel) maxLevel = abs;
-            }
-            const rms = Math.sqrt(sumSquares / inputData.length);
-
-            // Log RMS every ~2 seconds for diagnostics
-            vadLogCounter++;
-            if (vadLogCounter % 12 === 0) {
-                console.log(`[REALTIME-VAD] RMS: ${rms.toFixed(5)} | threshold: ${VAD_SPEECH_RMS} | speaking: ${vadIsSpeaking} | peak: ${maxLevel.toFixed(4)}`);
-            }
-
-            // High-pass filter with PERSISTENT state across frames
-            const hpAlpha = 0.98;
-            const filtered = new Float32Array(inputData.length);
-            for (let i = 0; i < inputData.length; i++) {
-                const currentInput = inputData[i];
-                filtered[i] = hpAlpha * (hpFilterPrev + currentInput - hpFilterPrevInput);
-                hpFilterPrev = filtered[i];
-                hpFilterPrevInput = currentInput;
-            }
-
-            // Normalize (capped gain)
-            const targetLevel = 0.4;
-            const gain = maxLevel > 0.03 ? Math.min(targetLevel / maxLevel, 1.5) : 1.0;
-            const normalizedData = new Float32Array(filtered.length);
-            for (let i = 0; i < filtered.length; i++) {
-                normalizedData[i] = Math.max(-1, Math.min(1, filtered[i] * gain));
-            }
-            const resampled = resampleAudio(normalizedData, nativeRate, 24000);
-            const base64 = float32ToPCM16Base64(resampled);
-
-            // --- VAD State Machine ---
-            const isSpeechFrame = rms >= VAD_SPEECH_RMS;
-
-            if (isSpeechFrame) {
-                vadSpeechFrameCount++;
-                vadSilenceFrameCount = 0;
-            } else {
-                vadSilenceFrameCount++;
-                vadSpeechFrameCount = 0;
-            }
-
-            if (!vadIsSpeaking) {
-                // Not currently speaking — buffer frames and watch for speech onset
-                vadPreBuffer.push(base64);
-                if (vadPreBuffer.length > VAD_PRE_BUFFER_SIZE) {
-                    vadPreBuffer.shift();
+                // Log RMS every ~2 seconds for diagnostics
+                vadLogCounter++;
+                if (vadLogCounter % 12 === 0) {
+                    console.log(`[REALTIME-VAD] RMS: ${rms.toFixed(5)} | threshold: ${VAD_SPEECH_RMS} | speaking: ${vadIsSpeaking} | peak: ${maxLevel.toFixed(4)}`);
                 }
 
-                // Activate speech if enough consecutive speech frames
-                if (vadSpeechFrameCount >= VAD_MIN_SPEECH_FRAMES) {
-                    vadIsSpeaking = true;
-                    console.log(`[REALTIME-VAD] Speech detected (RMS: ${rms.toFixed(4)})`);
+                // High-pass (persistent state), capped-gain normalize, resample to 24kHz
+                const normalizedData = normalizePeak(micHighPass.process(inputData), maxLevel);
+                const base64 = float32ToPCM16Base64(resampleAudio(normalizedData, nativeRate, REALTIME_SAMPLE_RATE));
 
-                    // Flush pre-buffer to catch speech onset
-                    for (const bufferedFrame of vadPreBuffer) {
-                        ws.send(JSON.stringify({
-                            type: 'audio_input',
-                            data: bufferedFrame
-                        }));
-                    }
-                    vadPreBuffer = [];
-                }
-            }
-
-            if (vadIsSpeaking) {
-                // Currently speaking — send audio to OpenAI
-                ws.send(JSON.stringify({
-                    type: 'audio_input',
-                    data: base64
-                }));
-
-                // Check for speech end
-                if (vadSilenceFrameCount >= VAD_MAX_SILENCE_FRAMES) {
-                    vadIsSpeaking = false;
-                    vadPreBuffer = [];
-                    console.log(`[REALTIME-VAD] Speech ended (${vadSilenceFrameCount} silent frames) — sending silence burst`);
-
-                    // Send ~800ms of silence so OpenAI's server-side VAD
-                    // can detect end-of-speech and trigger a response.
-                    // Without this, OpenAI never "sees" the silence and just waits.
-                    const silenceSamples = 480;  // 20ms at 24kHz
-                    const silencePcm16 = new Int16Array(silenceSamples);  // all zeros = silence
-                    const silenceBytes = new Uint8Array(silencePcm16.buffer);
-                    let silenceBinary = '';
-                    for (let j = 0; j < silenceBytes.length; j++) {
-                        silenceBinary += String.fromCharCode(silenceBytes[j]);
-                    }
-                    const silenceB64 = btoa(silenceBinary);
-                    for (let burst = 0; burst < 40; burst++) {  // 40 * 20ms = 800ms
-                        ws.send(JSON.stringify({
-                            type: 'audio_input',
-                            data: silenceB64
-                        }));
-                    }
-                }
-            }
-        };
-
-        sourceNode.connect(scriptProcessor);
-        scriptProcessor.connect(recordingContext.destination);
+                gateSpeechFrame(base64, rms);
+            },
+        });
+        recordingContext = micCapture.context;
 
         isRecording = true;
         updateUI();
@@ -1094,8 +626,8 @@ function muteRecording() {
  */
 function unmuteRecording() {
     if (isRecording) return;
-    if (!mediaStream || !scriptProcessor) {
-        // Media stream was released, need to restart
+    if (!micCapture) {
+        // The capture was released (or this is the native stream), need to restart
         console.log('[REALTIME] Media stream not active, starting fresh...');
         startRecording();
         return;
@@ -1125,24 +657,11 @@ function stopRecordingFully() {
     // Stop recording
     isRecording = false;
 
-    // Disconnect audio nodes
-    if (scriptProcessor) {
-        scriptProcessor.disconnect();
-        scriptProcessor = null;
-    }
-    if (sourceNode) {
-        sourceNode.disconnect();
-        sourceNode = null;
-    }
-
-    // Stop media stream - release mic
-    if (mediaStream) {
+    // Release the capture (audio nodes, mic tracks)
+    if (micCapture) {
         console.log('[REALTIME] Releasing media stream tracks...');
-        mediaStream.getTracks().forEach(track => {
-            console.log(`[REALTIME] Stopping track: ${track.kind}, state: ${track.readyState}`);
-            track.stop();
-        });
-        mediaStream = null;
+        micCapture.close();
+        micCapture = null;
         console.log('[REALTIME] Media stream released - mic free');
     }
 
@@ -1159,7 +678,7 @@ function stopRecordingFully() {
  * @param {string} operator - Operator name
  */
 export async function connect(operator) {
-    if (isConnected || (ws && ws.readyState === WebSocket.CONNECTING)) {
+    if (isConnected || liveSession.isConnecting) {
         console.log('[REALTIME] Already connected or connecting');
         return;
     }
@@ -1175,15 +694,11 @@ export async function connect(operator) {
     pauseAllPlayers();
 
     // Reset session state for new connection
-    audioBufferChunks = [];
     isBufferingAudio = false;
     nextPlaybackTime = 0;
 
     // Reset VAD state
-    vadIsSpeaking = false;
-    vadSpeechFrameCount = 0;
-    vadSilenceFrameCount = 0;
-    vadPreBuffer = [];
+    resetVad();
 
     // Get selected voice
     const voiceSelect = SEL.voiceSelect ? $(SEL.voiceSelect) : null;
@@ -1225,9 +740,8 @@ export async function connect(operator) {
     const presetId = (presetSelect && presetSelect.value) ? presetSelect.value : undefined;
     currentRealtimePresetId = presetId || null;
 
-    // Capture v2 config into module state so reconnect can replay it
-    // (otherwise reconnect rebuilds with only {type, operator, voice} and
-    // the backend silently falls back to env defaults — T14 F1).
+    // Capture the config into module state: buildConnectMsg() sends it on the
+    // first connect and replays it on every reconnect (T14 F1).
     currentRealtimeModel = selectedModel || null;
     currentRealtimeVadType = vadType || null;
     currentRealtimeVadEagerness = vadEagerness || null;
@@ -1236,71 +750,8 @@ export async function connect(operator) {
     currentRealtimeTranslateMode = translateOn ? 'translate' : null;   // P6a
     currentRealtimeTargetLanguage = translateOn ? targetLanguage : null;
 
-    sessionId = crypto.randomUUID();
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/realtime/${sessionId}`;
-
-    console.log('[REALTIME] Connecting to:', wsUrl);
-    updateStatus('Connecting...');
-
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-        console.log('[REALTIME] WebSocket connected');
-        updateStatus('Initializing...');
-        currentOperator = operator;
-        intentionalDisconnect = false;
-
-        // Build connect message with new live-models-v2 fields; omit undefined to keep wire clean
-        const connectMsg = {
-            type: 'connect',
-            operator: operator,
-            voice: selectedVoice
-        };
-        if (selectedModel) connectMsg.model = selectedModel;
-        if (vadType) connectMsg.vad_type = vadType;
-        if (vadEagerness) connectMsg.vad_eagerness = vadEagerness;
-        if (idleTimeoutMs !== undefined) connectMsg.idle_timeout_ms = idleTimeoutMs;
-        if (noiseReduction) connectMsg.noise_reduction = noiseReduction;
-        if (presetId) connectMsg.agent = presetId;
-        if (translateOn) {
-            connectMsg.mode = 'translate';
-            connectMsg.target_language = targetLanguage;
-        }
-        ws.send(JSON.stringify(connectMsg));
-    };
-
-    ws.onmessage = (event) => {
-        try {
-            const msg = JSON.parse(event.data);
-            handleMessage(msg);
-        } catch (err) {
-            console.error('[REALTIME] Failed to parse message:', err);
-        }
-    };
-
-    ws.onclose = (event) => {
-        console.log('[REALTIME] WebSocket closed:', event.code, event.reason);
-        stopKeepalive();
-
-        if (event.code === 1000 || intentionalDisconnect) {
-            isConnected = false;
-            updateStatus('Disconnected');
-            updateUI();
-            return;
-        }
-
-        isConnected = false;
-        wasRecordingBeforeDisconnect = isRecording;
-        if (isRecording) {
-            stopRecordingFully();
-        }
-        attemptReconnect();
-    };
-
-    ws.onerror = (err) => {
-        console.error('[REALTIME] WebSocket error:', err);
-    };
+    currentOperator = operator;
+    liveSession.connect();
 }
 
 /**
@@ -1309,29 +760,13 @@ export async function connect(operator) {
 export function disconnect() {
     // NOTE: Session transcript is saved by the BACKEND when WebSocket closes
 
-    // Suppress auto-reconnect
-    intentionalDisconnect = true;
-    reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
-    if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-    }
-    stopKeepalive();
-
-    if (ws) {
-        try {
-            ws.send(JSON.stringify({ type: 'disconnect' }));
-        } catch (e) {}
-        ws.close();
-        ws = null;
-    }
+    // No auto-reconnect: tell the server, close the socket.
+    liveSession.disconnect();
 
     stopRecordingFully();
     stopAudio();
 
     isConnected = false;
-    sessionId = null;
-    reconnectAttempts = 0;
     updateStatus('Disconnected');
     updateUI();
 }
@@ -1346,10 +781,8 @@ function handleMessage(msg) {
     switch (type) {
         case 'connected':
             isConnected = true;
-            reconnectAttempts = 0;
             updateStatus('Connected');
             updateUI();
-            startKeepalive();
             toast('GPT-4o Realtime connected');
             console.log('[REALTIME] Connected:', msg.data);
             break;
@@ -1383,7 +816,7 @@ function handleMessage(msg) {
 
             // If no audio is playing/buffered, we can immediately mark as done
             // Otherwise, the onended callback will handle it when audio finishes
-            if (!currentAudioSource && accumulatedSamples.length === 0 && audioBufferChunks.length === 0) {
+            if (!currentAudioSource && accumulatedSamples.length === 0) {
                 console.log('[REALTIME] No audio playing - immediately marking AI stopped');
                 isAISpeaking = false;
                 aiStoppedSpeakingAt = Date.now();
@@ -1502,141 +935,14 @@ function handleMessage(msg) {
 
         case 'reconnected':
             console.log('[REALTIME] Backend reconnected on attempt', msg.data.attempt);
-            reconnectAttempts = 0;
             updateStatus('Connected');
             break;
 
         case 'pong':
-            lastPongTime = Date.now();
-            break;
+            break;  // keepalive (live-session.js)
 
         default:
             console.log('[REALTIME] Unknown message type:', type, msg);
-    }
-}
-
-// =============================================================================
-// Auto-Reconnect + Keepalive
-// =============================================================================
-
-/**
- * Attempt to reconnect to the existing session
- */
-function attemptReconnect() {
-    if (intentionalDisconnect || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.log('[REALTIME] Not reconnecting (intentional or max attempts reached)');
-        updateStatus('Disconnected');
-        updateUI();
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            toast('Realtime connection lost');
-        }
-        return;
-    }
-
-    reconnectAttempts++;
-    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
-    console.log(`[REALTIME] Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) in ${delay}ms...`);
-    updateStatus(`Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-
-    reconnectTimer = setTimeout(() => {
-        reconnectToExistingSession();
-    }, delay);
-}
-
-/**
- * Reconnect to the existing session
- */
-function reconnectToExistingSession() {
-    if (!sessionId || !currentOperator) {
-        console.log('[REALTIME] No session to reconnect to');
-        return;
-    }
-
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/realtime/${sessionId}`;
-
-    console.log('[REALTIME] Reconnecting to:', wsUrl);
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-        console.log('[REALTIME] Reconnect WebSocket opened');
-        intentionalDisconnect = false;
-        // Restore v2 config from module state — prevents silent
-        // server-default downgrade on network blip (T14 F1).
-        const reconnectMsg = {
-            type: 'connect',
-            operator: currentOperator,
-            voice: selectedVoice
-        };
-        if (currentRealtimeModel) reconnectMsg.model = currentRealtimeModel;
-        if (currentRealtimeVadType) reconnectMsg.vad_type = currentRealtimeVadType;
-        if (currentRealtimeVadEagerness) reconnectMsg.vad_eagerness = currentRealtimeVadEagerness;
-        if (currentRealtimeIdleTimeoutMs !== null) reconnectMsg.idle_timeout_ms = currentRealtimeIdleTimeoutMs;
-        if (currentRealtimeNoiseReduction) reconnectMsg.noise_reduction = currentRealtimeNoiseReduction;
-        if (currentRealtimePresetId) reconnectMsg.agent = currentRealtimePresetId;
-        if (currentRealtimeTranslateMode) {
-            reconnectMsg.mode = currentRealtimeTranslateMode;
-            reconnectMsg.target_language = currentRealtimeTargetLanguage;
-        }
-        ws.send(JSON.stringify(reconnectMsg));
-    };
-
-    ws.onmessage = (event) => {
-        try {
-            const msg = JSON.parse(event.data);
-            handleMessage(msg);
-            if (msg.type === 'connected' && wasRecordingBeforeDisconnect) {
-                wasRecordingBeforeDisconnect = false;
-                setTimeout(() => startRecording(), 500);
-            }
-        } catch (err) {
-            console.error('[REALTIME] Failed to parse message:', err);
-        }
-    };
-
-    ws.onclose = (event) => {
-        console.log('[REALTIME] Reconnect WebSocket closed:', event.code);
-        stopKeepalive();
-        if (!intentionalDisconnect && event.code !== 1000) {
-            attemptReconnect();
-        } else {
-            isConnected = false;
-            updateStatus('Disconnected');
-            updateUI();
-        }
-    };
-
-    ws.onerror = (err) => {
-        console.error('[REALTIME] Reconnect WebSocket error:', err);
-    };
-}
-
-/**
- * Start keepalive ping interval
- */
-function startKeepalive() {
-    stopKeepalive();
-    lastPongTime = Date.now();
-
-    keepaliveTimer = setInterval(() => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }));
-
-            if (lastPongTime && (Date.now() - lastPongTime > 25000)) {
-                console.log('[REALTIME] No pong received in 25s, closing for reconnect');
-                ws.close();
-            }
-        }
-    }, 15000);
-}
-
-/**
- * Stop keepalive ping interval
- */
-function stopKeepalive() {
-    if (keepaliveTimer) {
-        clearInterval(keepaliveTimer);
-        keepaliveTimer = null;
     }
 }
 
@@ -1649,7 +955,7 @@ function stopKeepalive() {
  * @param {string} text - Message text
  */
 export function sendText(text) {
-    if (!isConnected || !ws || ws.readyState !== WebSocket.OPEN) {
+    if (!isConnected || !liveSession.isOpen) {
         toast('Not connected to Realtime API');
         return;
     }
@@ -1661,10 +967,10 @@ export function sendText(text) {
 
 
     // Send to server
-    ws.send(JSON.stringify({
+    liveSession.send({
         type: 'text_input',
         text: text
-    }));
+    });
 
     updateStatus('Processing...');
 }
@@ -1673,7 +979,7 @@ export function sendText(text) {
  * Interrupt AI response (barge-in)
  */
 export function interrupt() {
-    if (!isConnected || !ws) return;
+    if (!isConnected || !liveSession.isOpen) return;
 
     // Stop audio playback
     stopAudio();
@@ -1682,9 +988,9 @@ export function interrupt() {
     responseCompleteReceived = false;  // Reset response state
 
     // Send interrupt to server
-    ws.send(JSON.stringify({
+    liveSession.send({
         type: 'interrupt'
-    }));
+    });
 
     updateStatus('Interrupted');
 }
@@ -1810,7 +1116,7 @@ export function toggleRecording() {
             interrupt();
         }
         // Start or unmute
-        if (mediaStream && scriptProcessor) {
+        if (micCapture) {
             unmuteRecording();
         } else {
             startRecording();

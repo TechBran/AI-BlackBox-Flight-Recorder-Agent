@@ -73,10 +73,14 @@ test("no module reads the never-assigned mic globals or overwrites the native ca
 });
 
 test("every mic user goes through the arbiter", () => {
+    // Directly, or through native-bridge.js, which binds the native stream
+    // callbacks through it (audit rank 75).
     for (const name of ["tts-stt.js", "stt-stream.js", "gpt-realtime.js", "gemini-live.js", "grok-live.js", "gemini-recorder.js"]) {
         const src = readFileSync(resolve(PORTAL, "modules", name), "utf8");
-        assert.match(src, /from '\.\/mic-arbiter\.js'/, name);
+        assert.match(src, /from '\.\/(mic-arbiter|native-bridge)\.js'/, name);
     }
+    const bridge = readFileSync(resolve(PORTAL, "modules", "native-bridge.js"), "utf8");
+    assert.match(bridge, /from '\.\/mic-arbiter\.js'/);
 });
 
 // ── Grok native audio ────────────────────────────────────────────────────

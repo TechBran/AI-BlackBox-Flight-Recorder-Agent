@@ -9,6 +9,7 @@
 import { $, toast, toastError } from './core-utils.js';
 import { getAttachedFiles, addAttachedFile } from './file-upload.js';
 import { claimMic, releaseMic } from './mic-arbiter.js';
+import { hasMic, isNativeAndroid } from './native-bridge.js';
 
 /** This module's mic-arbiter owner id. */
 const MIC_OWNER = 'gemini-recorder';
@@ -57,21 +58,9 @@ let simWaveNoiseOffset = 0;
 // Utility Functions
 // =============================================================================
 
-/**
- * Check if microphone is available
- * @returns {boolean}
- */
-function hasMic() {
-    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-}
-
-/**
- * Check if running in native Android app
- * @returns {boolean}
- */
-function isNativeAndroid() {
-    return typeof AndroidBridge !== 'undefined' || typeof AndroidMic !== 'undefined';
-}
+// hasMic / isNativeAndroid: native-bridge.js. hasMic counts the native mic:
+// the WebView may have no getUserMedia, and the recorder used to refuse to
+// record there although AndroidMic could (audit P02-voice-web-12).
 
 // =============================================================================
 // Timer and Waveform
@@ -515,7 +504,7 @@ export function initGeminiAudioRecorder(options = {}) {
         geminiAudioChunks = [];
         recordBtn.setAttribute('aria-pressed', 'true');
 
-        if (isNativeAndroid() && typeof AndroidMic !== 'undefined' && typeof AndroidMic.stopRecordingAndGetAudio === 'function') {
+        if (isNativeAndroid() && typeof AndroidMic.stopRecordingAndGetAudio === 'function') {
             console.log('[GeminiAudio] Using native Android recording');
             usingNativeGeminiRecording = true;
 

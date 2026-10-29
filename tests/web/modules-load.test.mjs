@@ -15,6 +15,9 @@ const MODULES = [
     "contacts-manager", "slash-commands", "grok-live", "cellular-manager",
     "media-manager", "task-manager", "tts-stt", "file-upload", "generation-modals",
     "sms-inbox", "telephony-manager", "telephony-wizard", "device-manager", "cron-manager",
+    // The live voice agents and the modules they share (audit rank 75).
+    "gemini-live", "gpt-realtime", "stt-stream", "gemini-recorder", "audio-dsp",
+    "native-bridge", "mic-capture", "pcm-capture-worklet", "live-session",
 ];
 
 for (const name of MODULES) {
