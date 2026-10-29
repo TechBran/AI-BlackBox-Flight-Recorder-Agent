@@ -29,8 +29,10 @@ ASTERISK_ARI_WS_URL = os.getenv(
 # ---------------------------------------------------------------------------
 # AudioSocket (TCP audio bridge between Asterisk and Orchestrator)
 # ---------------------------------------------------------------------------
-ASTERISK_AUDIOSOCKET_HOST = os.getenv("ASTERISK_AUDIOSOCKET_HOST", "127.0.0.1")
-ASTERISK_AUDIOSOCKET_PORT = int(os.getenv("ASTERISK_AUDIOSOCKET_PORT", "9092"))
+# Set-but-empty means the default: an empty host bound the child on every
+# interface, and AudioSocket has no authentication beyond the call uuid.
+ASTERISK_AUDIOSOCKET_HOST = os.getenv("ASTERISK_AUDIOSOCKET_HOST") or "127.0.0.1"
+ASTERISK_AUDIOSOCKET_PORT = int(os.getenv("ASTERISK_AUDIOSOCKET_PORT") or "9092")
 
 # Audio format: Asterisk AudioSocket() app sends slin 8kHz (forced by app_audiosocket.c)
 # TG200 negotiates G.711 u-law — Asterisk transcodes to slin before AudioSocket

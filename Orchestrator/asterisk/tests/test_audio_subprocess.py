@@ -64,6 +64,24 @@ def test_the_default_address_comes_from_the_asterisk_config(monkeypatch):
     assert (client.host, client.port) == ("127.0.0.2", 19555)
 
 
+def test_an_empty_address_setting_falls_back_to_loopback(tmp_path):
+    """ASTERISK_AUDIOSOCKET_HOST set but empty bound the child on every
+    interface ('::') and wrote AudioSocket(${CALL_UUID},:9092) into the
+    dialplan. AudioSocket has no authentication beyond the call uuid, so an
+    empty value means the default, loopback; an empty port means 9092."""
+    import os
+    repo_root = ASTERISK_DIR.parents[1]
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); "
+             "from Orchestrator.asterisk import config as c; "
+             "print(repr(c.ASTERISK_AUDIOSOCKET_HOST), c.ASTERISK_AUDIOSOCKET_PORT)")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ASTERISK_")}
+    env.update(ASTERISK_AUDIOSOCKET_HOST="", ASTERISK_AUDIOSOCKET_PORT="")
+    out = subprocess.run([sys.executable, "-I", "-c", probe, str(repo_root)], cwd=tmp_path,
+                         env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["'127.0.0.1'", "9092"]
+
+
 def test_the_child_starts_listens_and_carries_a_call():
     async def scenario():
         client = audio_ipc.AudioIPCClient(host="127.0.0.1", port=0)
