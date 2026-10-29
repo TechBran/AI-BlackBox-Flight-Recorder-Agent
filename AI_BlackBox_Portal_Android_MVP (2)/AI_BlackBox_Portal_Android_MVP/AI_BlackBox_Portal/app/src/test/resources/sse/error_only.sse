@@ -1,0 +1,12 @@
+event: stream_start
+data: {"provider": "anthropic", "model": "claude-opus-5-5", "provenance": null}
+
+event: error_detail
+data: {"kind": "credits_exhausted", "provider": "anthropic", "reason": "billing", "message": "Anthropic credits are exhausted."}
+
+event: error
+data: "Anthropic credits are exhausted."
+
+event: stream_end
+data: {"status": "complete"}
+

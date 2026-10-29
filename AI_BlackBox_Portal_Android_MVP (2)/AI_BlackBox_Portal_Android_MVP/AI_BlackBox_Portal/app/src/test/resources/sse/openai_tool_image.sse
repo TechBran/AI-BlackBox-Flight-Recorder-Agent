@@ -1,0 +1,30 @@
+event: stream_start
+data: {"provider": "openai", "model": "gpt-5.5", "provenance": null}
+
+event: usage
+data: {"prompt_tokens": 20785, "completion_tokens": 0}
+
+event: tool_start
+data: "generate_image"
+
+event: heartbeat
+data: ""
+
+event: tool_result
+data: "generate_image: queued"
+
+event: image_task
+data: {"task_id": "img-task-1", "prompt": "a red fox", "count": 1, "predicted_url": "/ui/uploads/a_red_fox_img-task-1.png"}
+
+event: content
+data: "Here is your fox."
+
+event: usage
+data: {"prompt_tokens": 20785, "completion_tokens": 10}
+
+event: done
+data: {"content": "Here is your fox.", "reasoning": ""}
+
+event: stream_end
+data: {"status": "complete"}
+

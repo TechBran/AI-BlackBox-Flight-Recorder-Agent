@@ -1,0 +1,85 @@
+{
+  "fixture": "media_tasks",
+  "provider": "gemini",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: media_tasks",
+      "reasoning": null,
+      "model": "",
+      "provider": "gemini",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "Rendering a video and a track.",
+      "reasoning": null,
+      "model": "gemini-3.1-pro-preview",
+      "provider": "gemini",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": [
+        "{BOX}/ui/uploads/vid-task-9.png",
+        "{BOX}/ui/uploads/mus-task-3.png"
+      ]
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "idle",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "",
+    "sessionId": null,
+    "deviceId": "blackbox",
+    "screenshotUrl": null
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: media_tasks",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "gemini",
+    "model": null,
+    "session_id": null,
+    "device_id": null,
+    "camera": null
+  },
+  "save": {
+    "operator": "golden-op",
+    "user_message": "turn: media_tasks",
+    "assistant_response": "Rendering a video and a track.",
+    "reasoning": null,
+    "model": "gemini-3.1-pro-preview",
+    "tokens": null,
+    "provenance": null
+  },
+  "taskStatusPolls": [
+    "/tasks/status/mus-task-3",
+    "/tasks/status/vid-task-9"
+  ]
+}

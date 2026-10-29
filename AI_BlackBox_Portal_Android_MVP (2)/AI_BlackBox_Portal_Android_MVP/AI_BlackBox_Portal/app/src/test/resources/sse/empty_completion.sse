@@ -1,0 +1,9 @@
+event: stream_start
+data: {"provider": "google", "model": "gemini-3.1-pro-preview", "provenance": null}
+
+event: done
+data: {"content": ""}
+
+event: stream_end
+data: {"status": "complete"}
+

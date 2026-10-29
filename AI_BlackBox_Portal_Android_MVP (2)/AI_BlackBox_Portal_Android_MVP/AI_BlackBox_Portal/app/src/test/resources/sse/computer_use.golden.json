@@ -1,0 +1,71 @@
+{
+  "fixture": "computer_use",
+  "provider": "computer-use",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: computer_use",
+      "reasoning": null,
+      "model": "",
+      "provider": "computer-use",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "\n`[left_click (640, 360)]` \n```\n$ ls /tmp\na.txt\nb.txt\n```\n\n`[create /tmp/c.txt]` \nDone clicking.",
+      "reasoning": null,
+      "model": "claude-opus-5-5",
+      "provider": "computer-use",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "complete",
+    "step": 2,
+    "stepTotal": 5,
+    "actionLabel": "left_click (640, 360)",
+    "sessionId": "cu-sess-1",
+    "deviceId": "blackbox",
+    "screenshotUrl": "{BOX}/ui/uploads/cu_step1.png?t={T}"
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: computer_use",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "computer-use",
+    "model": null,
+    "session_id": null,
+    "device_id": "blackbox",
+    "camera": null
+  },
+  "save": null,
+  "taskStatusPolls": []
+}

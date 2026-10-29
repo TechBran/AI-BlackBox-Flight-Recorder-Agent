@@ -1,0 +1,71 @@
+{
+  "fixture": "empty_completion",
+  "provider": "gemini",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: empty_completion",
+      "reasoning": null,
+      "model": "",
+      "provider": "gemini",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "reasoning": null,
+      "model": "gemini-3.1-pro-preview",
+      "provider": "gemini",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "idle",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "",
+    "sessionId": null,
+    "deviceId": "blackbox",
+    "screenshotUrl": null
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: empty_completion",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "gemini",
+    "model": null,
+    "session_id": null,
+    "device_id": null,
+    "camera": null
+  },
+  "save": null,
+  "taskStatusPolls": []
+}

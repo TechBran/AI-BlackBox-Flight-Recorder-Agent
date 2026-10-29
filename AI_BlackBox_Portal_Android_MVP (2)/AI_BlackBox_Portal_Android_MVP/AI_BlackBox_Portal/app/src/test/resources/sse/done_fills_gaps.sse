@@ -1,0 +1,15 @@
+event: stream_start
+data: {"provider": "anthropic", "model": "claude-sonnet-5-5", "provenance": null}
+
+event: content
+data: "Hel"
+
+event: thinking
+data: "short"
+
+event: done
+data: {"content": "Hello, the full reply.", "reasoning": "a much longer chain of reasoning"}
+
+event: stream_end
+data: {"status": "complete"}
+

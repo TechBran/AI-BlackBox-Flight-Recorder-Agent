@@ -1,0 +1,89 @@
+{
+  "fixture": "openai_tool_image",
+  "provider": "openai",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: openai_tool_image",
+      "reasoning": null,
+      "model": "",
+      "provider": "openai",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "Here is your fox.",
+      "reasoning": null,
+      "model": "gpt-5.5",
+      "provider": "openai",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": {
+        "prompt": 20785,
+        "completion": 10
+      },
+      "provenance": null,
+      "mediaTasks": [],
+      "images": [
+        "{BOX}/ui/uploads/img-task-1.png"
+      ]
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "idle",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "",
+    "sessionId": null,
+    "deviceId": "blackbox",
+    "screenshotUrl": null
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: openai_tool_image",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "openai",
+    "model": null,
+    "session_id": null,
+    "device_id": null,
+    "camera": null
+  },
+  "save": {
+    "operator": "golden-op",
+    "user_message": "turn: openai_tool_image",
+    "assistant_response": "Here is your fox.",
+    "reasoning": null,
+    "model": "gpt-5.5",
+    "tokens": {
+      "prompt": 20785,
+      "completion": 10
+    },
+    "provenance": null
+  },
+  "taskStatusPolls": [
+    "/tasks/status/img-task-1"
+  ]
+}

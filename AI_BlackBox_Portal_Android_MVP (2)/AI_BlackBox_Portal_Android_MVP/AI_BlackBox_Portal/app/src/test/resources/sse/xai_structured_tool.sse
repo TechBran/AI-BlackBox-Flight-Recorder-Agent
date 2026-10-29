@@ -1,0 +1,21 @@
+event: stream_start
+data: {"provider": "xai", "model": "grok-4.3", "provenance": null}
+
+event: tool_start
+data: {"name": "web_search", "args": {"q": "weather"}}
+
+event: tool_executing
+data: {"name": "web_search"}
+
+event: tool_result
+data: {"name": "web_search", "ok": true}
+
+event: content
+data: "Sunny."
+
+event: done
+data: {"content": "Sunny."}
+
+event: stream_end
+data: {"status": "complete"}
+

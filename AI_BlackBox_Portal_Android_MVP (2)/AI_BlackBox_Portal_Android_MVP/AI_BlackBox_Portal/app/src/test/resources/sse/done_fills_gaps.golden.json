@@ -1,0 +1,79 @@
+{
+  "fixture": "done_fills_gaps",
+  "provider": "anthropic",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: done_fills_gaps",
+      "reasoning": null,
+      "model": "",
+      "provider": "anthropic",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "Hello, the full reply.",
+      "reasoning": "a much longer chain of reasoning",
+      "model": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "idle",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "",
+    "sessionId": null,
+    "deviceId": "blackbox",
+    "screenshotUrl": null
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: done_fills_gaps",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "anthropic",
+    "model": null,
+    "session_id": null,
+    "device_id": null,
+    "camera": null
+  },
+  "save": {
+    "operator": "golden-op",
+    "user_message": "turn: done_fills_gaps",
+    "assistant_response": "Hello, the full reply.",
+    "reasoning": "a much longer chain of reasoning",
+    "model": "claude-sonnet-5-5",
+    "tokens": null,
+    "provenance": null
+  },
+  "taskStatusPolls": []
+}

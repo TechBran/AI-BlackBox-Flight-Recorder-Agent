@@ -1,0 +1,36 @@
+event: stream_start
+data: {"provider": "computer-use", "model": "claude-opus-5-5", "provenance": null}
+
+event: cu_session
+data: {"session_id": "cu-sess-1", "device_id": "blackbox"}
+
+event: cu_step
+data: {"step": 1, "total": 5}
+
+event: cu_screenshot
+data: {"url": "/ui/uploads/cu_step1.png", "step": 1}
+
+event: tool_start
+data: "computer"
+
+event: cu_action
+data: {"action": "left_click (640, 360)", "step": 2}
+
+event: cu_bash_output
+data: {"command": "ls /tmp", "output": "a.txt\nb.txt"}
+
+event: cu_file_edit
+data: {"command": "create", "path": "/tmp/c.txt"}
+
+event: heartbeat
+data: {"step": 3}
+
+event: content
+data: "\nDone clicking."
+
+event: done
+data: {"content": "Done clicking."}
+
+event: stream_end
+data: {"status": "complete"}
+

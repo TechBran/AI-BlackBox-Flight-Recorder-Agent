@@ -1,0 +1,18 @@
+event: stream_start
+data: {"provider": "google", "model": "gemini-3.1-pro-preview", "provenance": null}
+
+event: video_task
+data: {"task_id": "vid-task-9", "prompt": "waves"}
+
+event: music_task
+data: "mus-task-3"
+
+event: content
+data: "Rendering a video and a track."
+
+event: done
+data: {"content": "Rendering a video and a track."}
+
+event: stream_end
+data: {"status": "complete"}
+

@@ -1,0 +1,45 @@
+event: stream_start
+data: {"provider": "robotics", "model": "gemini-robotics-er-1.5-preview", "provenance": null}
+
+event: er_session
+data: {"session_id": "er-1"}
+
+event: er_mission_start
+data: {"goal": "find the cup"}
+
+event: er_frame
+data: {"image": "data:image/jpeg;base64,AAAA", "camera": "front"}
+
+event: er_reasoning
+data: {"text": "The cup is on the left table."}
+
+event: er_action
+data: {"tool": "move", "args": {"x": 1.5, "y": 0}, "status": "ok"}
+
+event: er_nav_status
+data: {"goal_status": "ACTIVE"}
+
+event: er_queued
+data: {"position": 1}
+
+event: er_prompt_injected
+data: {"text": "faster"}
+
+event: er_status
+data: {"state": "searching"}
+
+event: er_error
+data: {"error": "bumper pressed"}
+
+event: er_stopped
+data: {}
+
+event: content
+data: "Mission ended."
+
+event: done
+data: {"content": "Mission ended."}
+
+event: stream_end
+data: {"status": "complete"}
+

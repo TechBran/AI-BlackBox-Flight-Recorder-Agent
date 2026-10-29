@@ -1,0 +1,57 @@
+{
+  "fixture": "cu_queued",
+  "provider": "computer-use",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: cu_queued",
+      "reasoning": null,
+      "model": "",
+      "provider": "computer-use",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "running",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "Prompt queued (#2)",
+    "sessionId": "cu-sess-1",
+    "deviceId": "blackbox",
+    "screenshotUrl": "{BOX}/ui/uploads/cu_step1.png?t={T}"
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: cu_queued",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "computer-use",
+    "model": null,
+    "session_id": "cu-sess-1",
+    "device_id": "blackbox",
+    "camera": null
+  },
+  "save": null,
+  "taskStatusPolls": []
+}

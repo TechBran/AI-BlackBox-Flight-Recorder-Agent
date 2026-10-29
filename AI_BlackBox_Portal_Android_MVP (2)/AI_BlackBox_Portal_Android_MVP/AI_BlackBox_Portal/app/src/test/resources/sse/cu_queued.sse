@@ -1,0 +1,9 @@
+event: stream_start
+data: {"provider": "computer-use", "model": "claude-opus-5-5", "provenance": null}
+
+event: cu_queued
+data: {"position": 2, "prompt": "then open the browser"}
+
+event: stream_end
+data: {"status": "complete"}
+

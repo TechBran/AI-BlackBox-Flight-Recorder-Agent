@@ -1,0 +1,79 @@
+{
+  "fixture": "error_then_content",
+  "provider": "openai",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: error_then_content",
+      "reasoning": null,
+      "model": "",
+      "provider": "openai",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "Partial answer and the rest.\n\nupstream hiccup, retrying",
+      "reasoning": null,
+      "model": "gpt-5.5",
+      "provider": "openai",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "idle",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "",
+    "sessionId": null,
+    "deviceId": "blackbox",
+    "screenshotUrl": null
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: error_then_content",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "openai",
+    "model": null,
+    "session_id": null,
+    "device_id": null,
+    "camera": null
+  },
+  "save": {
+    "operator": "golden-op",
+    "user_message": "turn: error_then_content",
+    "assistant_response": "Partial answer and the rest.",
+    "reasoning": null,
+    "model": "gpt-5.5",
+    "tokens": null,
+    "provenance": null
+  },
+  "taskStatusPolls": []
+}

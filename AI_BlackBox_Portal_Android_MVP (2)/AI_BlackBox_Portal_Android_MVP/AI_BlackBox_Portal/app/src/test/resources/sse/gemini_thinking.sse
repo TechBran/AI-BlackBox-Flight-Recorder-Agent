@@ -1,0 +1,30 @@
+event: stream_start
+data: {"provider": "google", "model": "gemini-3.1-pro-preview", "provenance": {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}}
+
+event: thinking_start
+data: ""
+
+event: thinking
+data: "Considering the question. "
+
+event: thinking
+data: "Checking memory."
+
+event: thinking_end
+data: ""
+
+event: usage
+data: {"prompt_tokens": 22339, "completion_tokens": 1}
+
+event: content
+data: "OK"
+
+event: usage
+data: {"prompt_tokens": 22339, "completion_tokens": 3}
+
+event: done
+data: {"thinking": "Considering the question. Checking memory.", "content": "OK"}
+
+event: stream_end
+data: {"status": "complete"}
+

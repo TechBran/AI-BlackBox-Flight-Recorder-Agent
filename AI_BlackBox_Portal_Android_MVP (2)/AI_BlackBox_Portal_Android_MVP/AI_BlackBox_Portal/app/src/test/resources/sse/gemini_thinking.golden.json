@@ -1,0 +1,95 @@
+{
+  "fixture": "gemini_thinking",
+  "provider": "gemini",
+  "messages": [
+    {
+      "role": "user",
+      "content": "turn: gemini_thinking",
+      "reasoning": null,
+      "model": "",
+      "provider": "gemini",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": null,
+      "provenance": null,
+      "mediaTasks": [],
+      "images": []
+    },
+    {
+      "role": "assistant",
+      "content": "OK",
+      "reasoning": "Considering the question. Checking memory.",
+      "model": "gemini-3.1-pro-preview",
+      "provider": "gemini",
+      "isStreaming": false,
+      "isThinking": false,
+      "sendFailed": false,
+      "tokens": {
+        "prompt": 22339,
+        "completion": 3
+      },
+      "provenance": {
+        "recent": [],
+        "keyword": [],
+        "semantic": [],
+        "checkpoint": []
+      },
+      "mediaTasks": [],
+      "images": []
+    }
+  ],
+  "chatState": "IDLE",
+  "signalLabel": null,
+  "cu": {
+    "status": "idle",
+    "step": 0,
+    "stepTotal": 0,
+    "actionLabel": "",
+    "sessionId": null,
+    "deviceId": "blackbox",
+    "screenshotUrl": null
+  },
+  "er": {
+    "status": "offline",
+    "missionActive": false,
+    "reasoning": "",
+    "camera": "yolo_oakd",
+    "cameraFrame": null
+  },
+  "streamRequest": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "turn: gemini_thinking",
+        "model": null,
+        "provider": null,
+        "reasoning": null
+      }
+    ],
+    "operator": "golden-op",
+    "provider": "gemini",
+    "model": null,
+    "session_id": null,
+    "device_id": null,
+    "camera": null
+  },
+  "save": {
+    "operator": "golden-op",
+    "user_message": "turn: gemini_thinking",
+    "assistant_response": "OK",
+    "reasoning": "Considering the question. Checking memory.",
+    "model": "gemini-3.1-pro-preview",
+    "tokens": {
+      "prompt": 22339,
+      "completion": 3
+    },
+    "provenance": {
+      "recent": [],
+      "keyword": [],
+      "semantic": [],
+      "checkpoint": []
+    }
+  },
+  "taskStatusPolls": []
+}
