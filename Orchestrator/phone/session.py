@@ -62,9 +62,6 @@ class PhoneSession:
         phone_sample_rate: Phone audio sample rate (8000 Hz)
         ai_sample_rate: AI audio sample rate (16000-24000 Hz)
 
-        freeswitch_uuid: FreeSwitch channel UUID
-        drachtio_dialog: Drachtio SIP dialog object
-
         conversation: Full conversation log for BlackBox snapshot
         operator: BlackBox operator name
 
@@ -101,12 +98,6 @@ class PhoneSession:
     audio_format: str = "ulaw"  # G.711 mu-law
     phone_sample_rate: int = 8000  # 8kHz (phone standard)
     ai_sample_rate: int = 24000  # 24kHz (AI standard)
-
-    # SIP/FreeSwitch state
-    freeswitch_uuid: str = ""  # FreeSwitch channel UUID
-    drachtio_dialog: Optional[Any] = None  # Drachtio SIP dialog
-    sip_from: str = ""  # SIP From header
-    sip_to: str = ""  # SIP To header
 
     # Asterisk state
     asterisk_channel_id: str = ""  # Asterisk channel ID
@@ -198,14 +189,6 @@ def get_session_by_call_id(call_id: str) -> Optional[PhoneSession]:
     """Get a phone session by SIP Call-ID."""
     for session in PHONE_SESSIONS.values():
         if session.call_id == call_id:
-            return session
-    return None
-
-
-def get_session_by_freeswitch_uuid(uuid: str) -> Optional[PhoneSession]:
-    """Get a phone session by FreeSwitch channel UUID."""
-    for session in PHONE_SESSIONS.values():
-        if session.freeswitch_uuid == uuid:
             return session
     return None
 

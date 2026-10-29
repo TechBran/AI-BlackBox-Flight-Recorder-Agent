@@ -432,15 +432,11 @@ voice never leaves your tailnet for outbound calls placed via SIM).
 
 ## SIM7600G-H cellular modem
 
-`Orchestrator/cellular/` drives a **SIM7600G-H USB modem** for two
-purposes:
-
-1. **Failover internet** — `internet_manager.py` enables the modem's
-   built-in PPP+RNDIS connection when the Wi-Fi/Ethernet link drops
-2. **Second voice channel** — `audio_stream.py` bridges 8 kHz PCM16
-   audio between the modem's serial-AT audio interface and Asterisk for
-   GSM calls that don't go through the TG200 (used when the TG200 is
-   offline, or for backup mission-critical voice during a LAN outage)
+`Orchestrator/cellular/` drives a **SIM7600G-H USB modem** for
+**failover internet**: `internet_manager.py` enables the modem's built-in
+PPP+RNDIS connection when the Wi-Fi/Ethernet link drops. Voice calls and
+SMS go through Asterisk and the TG200 (above); the modem's serial-audio
+call path was never wired in and has been removed.
 
 **Hot-plug detection** (`cellular/hotplug.py`) polls every 3 seconds for
 ttyUSB cluster appearance — the SIM7600 enumerates 5 ttyUSB ports but
