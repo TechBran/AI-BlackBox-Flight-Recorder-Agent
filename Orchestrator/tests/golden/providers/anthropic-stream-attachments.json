@@ -143,6 +143,14 @@
          }
         },
         {
+         "type": "image",
+         "source": {
+          "type": "base64",
+          "media_type": "image/jpeg",
+          "data": "QkFTRTY0"
+         }
+        },
+        {
          "type": "text",
          "text": "[Document content: notes.txt]\n\nGolden notes: the launch is on Tuesday.\n"
         },

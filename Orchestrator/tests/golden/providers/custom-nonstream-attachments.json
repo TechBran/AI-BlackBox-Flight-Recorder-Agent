@@ -162,7 +162,7 @@
         },
         {
          "type": "text",
-         "text": "[Note: Document report.pdf attached but content extraction not supported for this file type on custom servers]"
+         "text": "[Note: Document report.pdf attached but content extraction is not supported for this file type with this model]"
         },
         {
          "type": "text",

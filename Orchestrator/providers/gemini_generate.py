@@ -53,6 +53,54 @@ def _thinking_config(model: str) -> Dict:
     return {}
 
 
+# Inline-data MIME types by upload suffix (Gemini requires audio/aac for M4A).
+_MIME_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+    ".mp4": "video/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/aac",
+    ".ogg": "audio/ogg", ".flac": "audio/flac",
+    ".pdf": "application/pdf", ".txt": "text/plain",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+def _encode_parts(content: List[Dict], env: ProviderEnv, tag: str) -> List[Dict]:
+    """A message's parts as Gemini parts, the same on both paths (audit rank
+    74: the stream's copy dropped a base64 image and typed .webp as
+    application/octet-stream). Text stays text; a base64 image (the Android
+    app sends the Anthropic format) and every image, video, audio or document
+    upload become inline data; an upload refused for its size or type is the
+    refusal note."""
+    parts = []
+    for part in content:
+        if part.get("type") == "text":
+            parts.append({"text": part["text"]})
+        elif part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
+            source = part.get("source", {})
+            media_type = source.get("media_type", "image/png")
+            data = source.get("data", "")
+            if data:
+                print(f"{tag} Processing direct base64 image ({len(data)} chars, {media_type})")
+                parts.append({"inline_data": {"mime_type": media_type, "data": data}})
+        elif part.get("type") in ("image_url", "video_url", "audio_url", "document_url"):
+            media_key = part.get("type")
+            url = part[media_key]["url"]
+            try:
+                local_path, refused = env.load_attachment(url, MEDIA_EXTS, env.inline_max_bytes)
+                if refused:
+                    parts.append({"text": refused})
+                if local_path is not None:
+                    media_bytes = local_path.read_bytes()
+                    mime_type = _MIME_TYPES.get(local_path.suffix.lower(), "application/octet-stream")
+                    parts.append({
+                        "inline_data": {"mime_type": mime_type, "data": base64.b64encode(media_bytes).decode('utf-8')}
+                    })
+            except Exception as e:
+                print(f"{tag} Could not process media for Gemini: {e}")
+                parts.append({"text": _ATTACHMENT_ERROR_NOTE})
+    return parts
+
+
 def call(messages: List[Dict], model: str, operator: str, env: ProviderEnv):
     if not env.api_key: raise HTTPException(400, "GOOGLE_API_KEY not set")
 
@@ -69,72 +117,7 @@ def call(messages: List[Dict], model: str, operator: str, env: ProviderEnv):
             content = m.get("content", "")
 
             if isinstance(content, list): # Handle multimodal content
-                for part in content:
-                    if part.get("type") == "text":
-                        content_parts.append({"text": part["text"]})
-
-                    # Handle direct base64 images (from Android app - Anthropic format)
-                    elif part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
-                        source = part.get("source", {})
-                        media_type = source.get("media_type", "image/png")
-                        data = source.get("data", "")
-                        if data:
-                            print(f"[GEMINI] Processing direct base64 image ({len(data)} chars, {media_type})")
-                            content_parts.append({
-                                "inline_data": { "mime_type": media_type, "data": data }
-                            })
-
-                    # --- THIS IS THE NEW BLOCK ---
-                    # Check for all supported media types including documents
-                    elif part.get("type") in ("image_url", "video_url", "audio_url", "document_url"):
-                        media_key = part.get("type") # "image_url", "video_url", "audio_url", or "document_url"
-                        url = part[media_key]["url"]
-                        try:
-                            local_path, refused = env.load_attachment(url, MEDIA_EXTS, env.inline_max_bytes)
-                            if refused:
-                                content_parts.append({"text": refused})
-                            if local_path is not None:
-                                media_bytes = local_path.read_bytes()
-
-                                # --- NEW ROBUST MIME TYPE LOGIC ---
-                                suffix = local_path.suffix.lower()
-                                mime_type = "application/octet-stream" # Default
-
-                                if suffix in [".jpg", ".jpeg"]:
-                                    mime_type = "image/jpeg"
-                                elif suffix == ".png":
-                                    mime_type = "image/png"
-                                elif suffix == ".webp":
-                                    mime_type = "image/webp"
-                                elif suffix == ".mp4":
-                                    mime_type = "video/mp4"
-                                elif suffix == ".mp3":
-                                    mime_type = "audio/mpeg"
-                                elif suffix == ".wav":
-                                    mime_type = "audio/wav"
-                                elif suffix == ".m4a":
-                                    mime_type = "audio/aac"  # Gemini requires audio/aac for M4A files
-                                elif suffix == ".ogg":
-                                    mime_type = "audio/ogg"
-                                elif suffix == ".flac":
-                                    mime_type = "audio/flac"
-                                elif suffix == ".pdf":
-                                    mime_type = "application/pdf"
-                                elif suffix == ".txt":
-                                    mime_type = "text/plain"
-                                elif suffix == ".doc":
-                                    mime_type = "application/msword"
-                                elif suffix == ".docx":
-                                    mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                # --- END ROBUST MIME TYPE LOGIC ---
-
-                                content_parts.append({
-                                    "inline_data": { "mime_type": mime_type, "data": base64.b64encode(media_bytes).decode('utf-8') }
-                                })
-                        except Exception as e:
-                            print(f"Could not process local media for Gemini: {e}")
-                            content_parts.append({"text": _ATTACHMENT_ERROR_NOTE})
-                    # --- END NEW BLOCK ---
+                content_parts.extend(_encode_parts(content, env, "[GEMINI]"))
             else: # Text-only messages
                 content_parts.append({"text": str(content)})
 
@@ -284,36 +267,7 @@ async def stream(messages: List[Dict], model: str, operator: str, env: ProviderE
             content = m.get("content", "")
 
             if isinstance(content, list):
-                for part in content:
-                    if part.get("type") == "text":
-                        content_parts.append({"text": part["text"]})
-                    elif part.get("type") in ("image_url", "video_url", "audio_url", "document_url"):
-                        media_key = part.get("type")
-                        url = part[media_key]["url"]
-                        try:
-                            local_path, refused = env.load_attachment(url, MEDIA_EXTS, env.inline_max_bytes)
-                            if refused:
-                                content_parts.append({"text": refused})
-                            if local_path is not None:
-                                media_bytes = local_path.read_bytes()
-                                suffix = local_path.suffix.lower()
-                                # The documents typed as call_gemini types them (the
-                                # Portal streams .txt/.doc/.docx attachments too).
-                                mime_map = {
-                                    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-                                    ".mp4": "video/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav",
-                                    ".m4a": "audio/aac", ".ogg": "audio/ogg", ".flac": "audio/flac",
-                                    ".pdf": "application/pdf", ".txt": "text/plain",
-                                    ".doc": "application/msword",
-                                    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                }
-                                mime_type = mime_map.get(suffix, "application/octet-stream")
-                                content_parts.append({
-                                    "inline_data": {"mime_type": mime_type, "data": base64.b64encode(media_bytes).decode('utf-8')}
-                                })
-                        except Exception as e:
-                            print(f"Could not process media for Gemini streaming: {e}")
-                            content_parts.append({"text": _ATTACHMENT_ERROR_NOTE})
+                content_parts.extend(_encode_parts(content, env, "[GEMINI-STREAM]"))
             else:
                 content_parts.append({"text": str(content)})
 

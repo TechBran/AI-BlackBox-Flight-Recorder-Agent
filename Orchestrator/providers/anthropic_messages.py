@@ -37,7 +37,7 @@ from Orchestrator.providers.common import (
     _with_note,
 )
 from Orchestrator.providers.tool_dispatch import _record_media_task, dispatch_tool, dispatch_tool_blocking
-from Orchestrator.utils.paths import DOC_EXTS, IMAGE_EXTS
+from Orchestrator.utils.paths import IMAGE_EXTS
 
 
 def _as_block_list(content) -> List[Dict]:
@@ -166,6 +166,74 @@ def _anthropic_refusal(stop_details) -> Dict:
     return {"message": message, "category": category}
 
 
+# Image block media types by upload suffix (the four Claude reads).
+_IMAGE_MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                      ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _strip_media_blobs(text: str) -> str:
+    """``text`` without inline base64 data-URLs: junk in a text channel (media
+    rides in proper image blocks) that bloats the payload and the token
+    estimate. WI-10 (M7) removed the old 15,000-char per-message cut (history
+    is delivered whole, see _guard_anthropic_history); this is what remains."""
+    if not isinstance(text, str):
+        return text
+    cleaned = re.sub(
+        r'data:(image|audio|video)/[^;]+;base64,[A-Za-z0-9+/=\s]{1000,}',
+        '[MEDIA DATA REMOVED]',
+        text
+    )
+    if len(cleaned) != len(text):
+        print(f"[ANTHROPIC] Stripped inline base64 media: {len(text):,} -> {len(cleaned):,} chars")
+    return cleaned
+
+
+def _encode_parts(content: List[Dict], env: ProviderEnv, tag: str) -> List[Dict]:
+    """A message's parts as Claude content blocks, the same on both paths
+    (audit rank 74: the stream's copy dropped a base64 image, the non-stream
+    copy dropped a document it could not inline without a word, and both typed
+    a .webp image/png). A base64 image (the Android app sends this format)
+    passes; an image upload becomes an image block, one refused for its size or
+    type the refusal note; text loses inline media blobs and empty text parts
+    are dropped; audio, video and documents become what Claude can read (a PDF
+    as a document block, a plain-text file inlined) or a note."""
+    new_content = []
+    for part in content:
+        if part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
+            source = part.get("source", {})
+            media_type = source.get("media_type", "image/png")
+            data = source.get("data", "")
+            if data:
+                print(f"{tag} Processing direct base64 image ({len(data)} chars, {media_type})")
+                new_content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": data}
+                })
+        elif part.get("type") == "image_url":
+            url = part["image_url"]["url"]
+            try:
+                local_path, refused = env.load_attachment(url, IMAGE_EXTS)
+                if local_path is not None:
+                    media_type = _IMAGE_MEDIA_TYPES.get(local_path.suffix.lower(), "image/png")
+                    base64_image = base64.b64encode(local_path.read_bytes()).decode("utf-8")
+                    new_content.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": base64_image}
+                    })
+                elif refused:
+                    new_content.append({"type": "text", "text": refused})
+            except Exception as e:
+                print(f"{tag} Could not process image for Anthropic: {e}")
+                new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
+        elif part.get("type") == "text":
+            cleaned_text = _strip_media_blobs(part.get("text", ""))
+            if cleaned_text:  # Anthropic rejects an empty text block
+                new_content.append({**part, "text": cleaned_text})
+        else:
+            new_content.extend(env.unreadable_parts(part, pdf_block=True) or [])
+    return new_content
+
+
 def call(messages: List[Dict], model: str, operator: str, env: ProviderEnv):
     if not env.api_key: raise HTTPException(400, "ANTHROPIC_API_KEY not set")
     # Defense-in-depth: extract system text, then collapse any consecutive
@@ -178,75 +246,7 @@ def call(messages: List[Dict], model: str, operator: str, env: ProviderEnv):
         if m.get("role") in ("user", "assistant"):
             content = m.get("content")
             if isinstance(content, list): # Handle multimodal content
-                new_content = []
-                for part in content:
-                    # Handle direct base64 images (from Android app)
-                    if part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
-                        # Already in Anthropic format - pass through directly
-                        source = part.get("source", {})
-                        media_type = source.get("media_type", "image/png")
-                        data = source.get("data", "")
-                        if data:
-                            print(f"[ANTHROPIC] Processing direct base64 image ({len(data)} chars, {media_type})")
-                            new_content.append({
-                                "type": "image",
-                                "source": { "type": "base64", "media_type": media_type, "data": data }
-                            })
-                    elif part.get("type") == "image_url":
-                        url = part["image_url"]["url"]
-                        try:
-                            local_path, refused = env.load_attachment(url, IMAGE_EXTS)
-                            if local_path is not None:
-                                media_type = "image/jpeg" if local_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
-                                img_bytes = local_path.read_bytes()
-                                base64_image = base64.b64encode(img_bytes).decode("utf-8")
-                                new_content.append({
-                                    "type": "image",
-                                    "source": { "type": "base64", "media_type": media_type, "data": base64_image }
-                                })
-                            elif refused:
-                                new_content.append({"type": "text", "text": refused})
-                        except Exception as e:
-                            print(f"Could not process local image for Anthropic: {e}")
-                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
-                    elif part.get("type") == "video_url":
-                        # Handle videos - Anthropic doesn't support video directly, provide a note
-                        url = part["video_url"]["url"]
-                        new_content.append({
-                            "type": "text",
-                            "text": f"[Note: Video file attached: {url}. Anthropic Claude models don't support direct video analysis. Please use Google Gemini for video analysis.]"
-                        })
-                    elif part.get("type") == "audio_url":
-                        # A turn media_auto_route kept here (no Google key)
-                        new_content.extend(env.unreadable_parts(part))
-                    elif part.get("type") == "document_url":
-                        # Anthropic supports PDF documents
-                        url = part["document_url"]["url"]
-                        try:
-                            local_path, refused = env.load_attachment(url, DOC_EXTS)
-                            if refused:
-                                new_content.append({"type": "text", "text": refused})
-                            if local_path is not None:
-                                suffix = local_path.suffix.lower()
-                                if suffix == ".pdf":
-                                    doc_bytes = local_path.read_bytes()
-                                    base64_doc = base64.b64encode(doc_bytes).decode("utf-8")
-                                    new_content.append({
-                                        "type": "document",
-                                        "source": { "type": "base64", "media_type": "application/pdf", "data": base64_doc }
-                                    })
-                                elif suffix == ".txt":
-                                    # For text files, just read and add as text
-                                    text_content = local_path.read_text(encoding='utf-8')
-                                    new_content.append({
-                                        "type": "text",
-                                        "text": f"[Document content: {local_path.name}]\n\n{text_content}"
-                                    })
-                        except Exception as e:
-                            print(f"Could not process document for Anthropic: {e}")
-                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
-                    elif part.get("type") == "text":
-                        new_content.append(part)
+                new_content = _encode_parts(content, env, "[ANTHROPIC]")
                 amsgs.append({"role": m["role"], "content": new_content})
             else: # Original text-only logic
                 amsgs.append({"role": m["role"], "content": content})
@@ -439,62 +439,17 @@ async def stream(messages: List[Dict], model: str, operator: str, env: ProviderE
     # Extract system message
     system_text = "\n\n".join([m.get("content", "") for m in messages if m.get("role") == "system"])
 
-    # WI-10 (M7): the old truncate_large_content 15,000-char per-message cut
-    # is GONE — history messages are delivered WHOLE. Its window-safety role
-    # moved to _guard_anthropic_history below (drops OLDEST whole messages
-    # only if the verified 1M-window budget would be exceeded — never a
-    # mid-message truncation). What remains here is blob-stripping: inline
-    # base64 data-URLs are junk in a text channel (media rides in proper
-    # image blocks) and would bloat both the payload and the token estimate.
-    def strip_media_blobs(text: str) -> str:
-        if not isinstance(text, str):
-            return text
-        cleaned = re.sub(
-            r'data:(image|audio|video)/[^;]+;base64,[A-Za-z0-9+/=\s]{1000,}',
-            '[MEDIA DATA REMOVED]',
-            text
-        )
-        if len(cleaned) != len(text):
-            print(f"[ANTHROPIC] Stripped inline base64 media: {len(text):,} -> {len(cleaned):,} chars")
-        return cleaned
-
     # Build Anthropic-format messages — filter out empty content (Anthropic requires non-empty)
     amsgs = []
     for m in messages:
         if m.get("role") in ("user", "assistant"):
             content = m.get("content")
             if isinstance(content, list):
-                new_content = []
-                for part in content:
-                    if part.get("type") == "image_url":
-                        url = part["image_url"]["url"]
-                        try:
-                            local_path, refused = env.load_attachment(url, IMAGE_EXTS)
-                            if local_path is not None:
-                                media_type = "image/jpeg" if local_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
-                                img_bytes = local_path.read_bytes()
-                                base64_image = base64.b64encode(img_bytes).decode("utf-8")
-                                new_content.append({
-                                    "type": "image",
-                                    "source": {"type": "base64", "media_type": media_type, "data": base64_image}
-                                })
-                            elif refused:
-                                new_content.append({"type": "text", "text": refused})
-                        except Exception as e:
-                            print(f"Could not process image for Anthropic streaming: {e}")
-                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
-                    elif part.get("type") == "text":
-                        cleaned_text = strip_media_blobs(part.get("text", ""))
-                        if cleaned_text:  # Skip empty text parts
-                            new_content.append({"type": "text", "text": cleaned_text})
-                    else:
-                        # Audio, video and documents used to vanish here; Claude
-                        # reads a PDF itself and gets a note for the rest.
-                        new_content.extend(env.unreadable_parts(part, pdf_block=True) or [])
+                new_content = _encode_parts(content, env, "[ANTHROPIC-STREAM]")
                 if new_content:  # Skip messages with no content parts
                     amsgs.append({"role": m["role"], "content": new_content})
             else:
-                cleaned_content = strip_media_blobs(content) if isinstance(content, str) else content
+                cleaned_content = _strip_media_blobs(content) if isinstance(content, str) else content
                 # Skip empty/None content — Anthropic requires non-empty
                 if cleaned_content:
                     amsgs.append({"role": m["role"], "content": cleaned_content})

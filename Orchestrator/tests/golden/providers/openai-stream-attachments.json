@@ -132,22 +132,18 @@
         {
          "type": "image_url",
          "image_url": {
-          "url": "/ui/uploads/photo.png"
-         }
-        },
-        {
-         "type": "image",
-         "source": {
-          "type": "base64",
-          "media_type": "image/jpeg",
-          "data": "QkFTRTY0"
+          "url": "data:image/png;base64,iVBORyBnb2xkZW4gcGhvdG8gYnl0ZXM="
          }
         },
         {
          "type": "image_url",
          "image_url": {
-          "url": "/ui/uploads/missing.png"
+          "url": "data:image/jpeg;base64,QkFTRTY0"
          }
+        },
+        {
+         "type": "text",
+         "text": "[Image could not be loaded]"
         },
         {
          "type": "text",
@@ -188,7 +184,7 @@
   "get_tools": [
    {
     "provider": "openai",
-    "prompt": "Look at these attachments. [Document content: notes.txt]\n\nGolden notes: the launch is on Tuesday.\n [Note: Document report.pdf attached but content extraction is not supported for this file type with this model] [Note: Video file attached: /ui/uploads/clip.mp4. This model doesn't support direct video analysis.] [Note: Audio file attached: /ui/uploads/voice.mp3. This model doesn't support audio input.]",
+    "prompt": "Look at these attachments.",
     "group": "chat"
    }
   ]

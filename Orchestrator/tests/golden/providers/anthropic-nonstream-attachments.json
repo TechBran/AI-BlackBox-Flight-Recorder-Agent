@@ -163,7 +163,7 @@
         },
         {
          "type": "text",
-         "text": "[Note: Video file attached: /ui/uploads/clip.mp4. Anthropic Claude models don't support direct video analysis. Please use Google Gemini for video analysis.]"
+         "text": "[Note: Video file attached: /ui/uploads/clip.mp4. This model doesn't support direct video analysis.]"
         },
         {
          "type": "text",

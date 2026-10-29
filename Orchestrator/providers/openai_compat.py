@@ -5,7 +5,8 @@ stream_xai_with_reasoning and stream_custom_with_reasoning were three copies of
 one chat.completions stream loop, and call_openai / call_xai / call_custom
 three copies of its non-stream twin. Each pair is now one loop here, driven by
 a CompatProvider that names what really differs: the key or server the call
-goes to, how attachments are encoded, the per-family payload knobs, the one
+goes to, whether an image URL is the server's to fetch (attachments are
+otherwise encoded one way, on both paths), the per-family payload knobs, the one
 retry each family has (OpenAI's reasoning_effort 400, an old llama.cpp's
 stream_options 400), how an HTTP error is reported (billing classification for
 the clouds, the learned context window for a llama.cpp server) and the
@@ -42,7 +43,7 @@ from Orchestrator.providers.common import (
     _usage_into,
 )
 from Orchestrator.providers.tool_dispatch import _record_media_task, dispatch_tool, dispatch_tool_blocking
-from Orchestrator.utils.paths import DOC_EXTS, IMAGE_EXTS
+from Orchestrator.utils.paths import IMAGE_EXTS
 
 # Fields an OpenAI-compatible server may carry native reasoning in, in priority
 # order (llama.cpp always fills reasoning_content).
@@ -61,24 +62,20 @@ class CompatProvider:
     error_label: str = ""     # "<label> API error ..." (custom: alias-prefixed)
     executing_label: str = "Executing tools..."
     cap_note: bool = False    # tool cap ends with the note + done (else a plain done)
-    video_note: str = ""      # non-stream: the video-attachment note's model sentence
-    doc_where: str = ""       # non-stream: "...not supported for this file type <doc_where>"
+    fetches_image_urls: bool = False  # an image URL that is not an upload is the server's to fetch
 
 
 OPENAI = CompatProvider(
     name="openai", stream_tag="[OPENAI]", tool_tag="[OPENAI-STREAM]", call_tag="[OPENAI]",
     tools_provider="openai", key_name="OPENAI_API_KEY", billing="openai",
     error_label="OpenAI API error", executing_label="Executing web tools...", cap_note=True,
-    video_note="OpenAI GPT models don't support direct video analysis. Please use Google Gemini for video analysis.",
-    doc_where="in OpenAI")
+    fetches_image_urls=True)
 XAI = CompatProvider(
     name="xai", stream_tag="[XAI]", tool_tag="[XAI-STREAM]", call_tag="[XAI]",
-    tools_provider="grok", key_name="XAI_API_KEY", billing="xai", error_label="xAI API error",
-    video_note="Grok models don't support direct video analysis.", doc_where="in xAI")
+    tools_provider="grok", key_name="XAI_API_KEY", billing="xai", error_label="xAI API error")
 CUSTOM = CompatProvider(
     name="custom", stream_tag="[CUSTOM]", tool_tag="[CUSTOM-STREAM]", call_tag="[CUSTOM-CALL]",
-    tools_provider="custom",
-    video_note="This model doesn't support direct video analysis.", doc_where="on custom servers")
+    tools_provider="custom")
 
 
 # -----------------------------------------------------------------------------
@@ -232,220 +229,67 @@ def _base64_image_part(part: Dict, tag: str, verb: str) -> Optional[Dict]:
     return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}}
 
 
-def _stream_messages(provider: CompatProvider, messages: List[Dict], env: ProviderEnv) -> List[Dict]:
-    """xAI / custom stream: local images become data URLs; audio, video and
-    document parts become notes (forwarded raw they fail far-end)."""
-    tag = provider.tool_tag
-    processed_messages = []
-    for m in messages:
-        if m.get("role") in ("user", "assistant", "system"):
-            content = m.get("content")
-            if isinstance(content, list):
-                new_content = []
-                for part in content:
-                    # Handle direct base64 images (from Android app - Anthropic format)
-                    if part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
-                        converted = _base64_image_part(part, tag, "Converting Anthropic-format base64 image")
-                        if converted:
-                            new_content.append(converted)
-                    elif part.get("type") == "image_url":
-                        url = part.get("image_url", {}).get("url", "")
-                        print(f"{tag} Processing image_url: {url[:80]}...")
-
-                        # Already a data URL - pass through
-                        if url.startswith("data:"):
-                            print(f"{tag} Image already base64")
-                            new_content.append(part)
-                        else:
-                            # Try to load and convert to base64
-                            local_path = None
-                            try:
-                                # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
-                                local_path, refused = env.load_attachment(url, IMAGE_EXTS)
-
-                                if local_path is not None:
-                                    suffix = local_path.suffix.lower()
-                                    mime_type = _IMAGE_MIME.get(suffix, "image/jpeg")
-                                    img_bytes = local_path.read_bytes()
-                                    base64_image = base64.b64encode(img_bytes).decode("utf-8")
-                                    print(f"{tag} Converted to base64 ({len(base64_image)} chars, {mime_type})")
-                                    new_content.append({
-                                        "type": "image_url",
-                                        "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}
-                                    })
-                                else:
-                                    print(f"{tag} WARNING: File not found: {local_path}")
-                                    new_content.append({"type": "text", "text": refused or "[Image could not be loaded]"})
-                            except Exception as e:
-                                print(f"{tag} ERROR: {e}")
-                                new_content.append({"type": "text", "text": f"[Image error: {e}]"})
-                    else:
-                        # Audio, video and document parts become notes: forwarded
-                        # raw they fail the request far-end.
-                        stand_in = env.unreadable_parts(part)
-                        new_content.extend(stand_in if stand_in is not None else [part])
-                processed_messages.append({"role": m["role"], "content": new_content})
-            else:
-                processed_messages.append(m)
-        else:
-            processed_messages.append(m)
-    return processed_messages
-
-
-def _call_messages(provider: CompatProvider, messages: List[Dict], env: ProviderEnv) -> List[Dict]:
-    """The non-stream encoding: local images become data URLs, a .txt document
-    is inlined, everything else the model cannot read becomes a note."""
-    tag = provider.call_tag
-    processed_messages = []
-    for m in messages:
-        if m.get("role") in ("user", "assistant", "system"):
-            content = m.get("content")
-            if isinstance(content, list):
-                new_content = []
-                for part in content:
-                    # Handle direct base64 images (from Android app - Anthropic format)
-                    if part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
-                        converted = _base64_image_part(part, tag, "Processing direct base64 image")
-                        if converted:
-                            new_content.append(converted)
-                    elif part.get("type") == "image_url":
-                        if provider is OPENAI:
-                            _openai_call_image(part, new_content, env)
-                        else:
-                            _compat_call_image(part, new_content, env, tag)
-                    elif part.get("type") == "video_url":
-                        url = part["video_url"]["url"]
-                        new_content.append({
-                            "type": "text",
-                            "text": f"[Note: Video file attached: {url}. {provider.video_note}]"
-                        })
-                    elif part.get("type") == "audio_url":
-                        if provider is CUSTOM:
-                            # No audio path either — custom is the ONLY provider
-                            # whose call_* ever receives audio parts (tasks.py's
-                            # media auto-route exempts custom from the google
-                            # switch); forwarding the raw part 500s llama.cpp
-                            # far-end, the exact hard-fail that exemption exists
-                            # to prevent.
-                            url = part["audio_url"]["url"]
-                            new_content.append({
-                                "type": "text",
-                                "text": f"[Note: Audio file attached: {url}. This model doesn't support audio input.]"
-                            })
-                        else:
-                            # A turn media_auto_route kept here (no Google key)
-                            new_content.extend(env.unreadable_parts(part))
-                    elif part.get("type") == "document_url":
-                        # Extract text from documents and append as text
-                        url = part["document_url"]["url"]
-                        try:
-                            local_path, refused = env.load_attachment(url, DOC_EXTS)
-                            if refused:
-                                new_content.append({"type": "text", "text": refused})
-                            if local_path is not None:
-                                suffix = local_path.suffix.lower()
-                                if suffix == ".txt":
-                                    text_content = local_path.read_text(encoding='utf-8')
-                                    new_content.append({
-                                        "type": "text",
-                                        "text": f"[Document content: {local_path.name}]\n\n{text_content}"
-                                    })
-                                else:
-                                    new_content.append({
-                                        "type": "text",
-                                        "text": f"[Note: Document {local_path.name} attached but content extraction not supported for this file type {provider.doc_where}]"
-                                    })
-                        except Exception as e:
-                            print(f"{tag} Could not process document: {e}")
-                            new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
-                    else:
-                        new_content.append(part)
-                processed_messages.append({"role": m["role"], "content": new_content})
-            else:
-                processed_messages.append(m)
-        else:
-            processed_messages.append(m)
-    return processed_messages
-
-
-def _openai_call_image(part: Dict, new_content: List[Dict], env: ProviderEnv) -> None:
-    """call_openai's image: a missing upload keeps the original part."""
-    url = part["image_url"]["url"]
-    try:
-        local_path, refused = env.load_attachment(url, IMAGE_EXTS)
-        if local_path is not None:
-            mime_type = _IMAGE_MIME.get(local_path.suffix.lower(), "image/jpeg")
-            base64_image = base64.b64encode(local_path.read_bytes()).decode("utf-8")
-            new_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}
-            })
-        elif refused:
-            new_content.append({"type": "text", "text": refused})
-        else:
-            # If file doesn't exist, keep original URL
-            new_content.append(part)
-    except Exception as e:
-        print(f"Could not process image for OpenAI: {e}")
-        new_content.append({"type": "text", "text": _ATTACHMENT_ERROR_NOTE})
-        new_content.append(part)
-
-
-def _compat_call_image(part: Dict, new_content: List[Dict], env: ProviderEnv, tag: str) -> None:
-    """call_xai / call_custom's image: a data URL passes, a missing upload is a note."""
-    url = part.get("image_url", {}).get("url", "")
-    print(f"{tag} Processing image_url: {url[:100]}...")
-
-    # Already a data URL - pass through
+def _image_url_parts(provider: CompatProvider, part: Dict, env: ProviderEnv, tag: str) -> List[Dict]:
+    """An image_url part as the server can read it: a data URL passes, an
+    upload becomes a data URL, an upload refused for its size or type is the
+    refusal note; any other URL is OpenAI's to fetch, and a note for xAI and
+    the custom servers (as is a missing upload, a relative URL no server can
+    fetch)."""
+    ref = part.get("image_url")
+    url = ref.get("url") if isinstance(ref, dict) else None
+    url = url if isinstance(url, str) else ""
+    print(f"{tag} Processing image_url: {url[:80]}...")
     if url.startswith("data:"):
-        print(f"{tag} Image already base64 data URL")
-        new_content.append(part)
-        return
-
-    # Try to load and convert to base64
-    local_path = None
+        return [part]
     try:
         # /ui/uploads URLs or absolute paths INSIDE Portal/uploads only.
         local_path, refused = env.load_attachment(url, IMAGE_EXTS)
-
         if local_path is not None:
             mime_type = _IMAGE_MIME.get(local_path.suffix.lower(), "image/jpeg")
             base64_image = base64.b64encode(local_path.read_bytes()).decode("utf-8")
             print(f"{tag} Converted image to base64 ({len(base64_image)} chars, {mime_type})")
-            new_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}
-            })
-        else:
-            print(f"{tag} WARNING: Image file not found: {local_path}, skipping image")
-            new_content.append({
-                "type": "text",
-                "text": refused or "[Image could not be loaded]"
-            })
+            return [{"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}]
     except Exception as e:
         print(f"{tag} ERROR processing image: {e}")
-        new_content.append({
-            "type": "text",
-            "text": f"[Image processing error: {e}]"
-        })
+        return [{"type": "text", "text": _ATTACHMENT_ERROR_NOTE}]
+    if refused:
+        return [{"type": "text", "text": refused}]
+    if provider.fetches_image_urls and url.startswith(("http://", "https://")):
+        return [part]
+    print(f"{tag} WARNING: image not loaded: {url[:80]}")
+    return [{"type": "text", "text": "[Image could not be loaded]"}]
 
 
-def _unreadable_as_text(messages: List[Dict], env: ProviderEnv) -> List[Dict]:
-    """``messages`` with each audio, video and document part replaced by what
-    env.unreadable_parts gives for it; every other part and message passes
-    through as it is (the OpenAI stream's attachment handling)."""
-    out = []
+def _encode_messages(provider: CompatProvider, messages: List[Dict], env: ProviderEnv, tag: str) -> List[Dict]:
+    """The chat.completions encoding of ``messages``, the same on the stream
+    and the non-stream path of every family (audit rank 74: the two copies
+    disagreed, and the OpenAI stream sent uploads and base64 images raw).
+
+    Images become data URLs (_image_url_parts); audio, video and document
+    parts become what the model can read (a plain-text document inlined) or a
+    note, via env.unreadable_parts: forwarded raw they fail far-end."""
+    processed_messages = []
     for m in messages:
-        content = m.get("content") if isinstance(m, dict) else None
-        if not isinstance(content, list):
-            out.append(m)
+        content = m.get("content")
+        if m.get("role") not in ("user", "assistant", "system") or not isinstance(content, list):
+            processed_messages.append(m)
             continue
         new_content = []
         for part in content:
-            stand_in = env.unreadable_parts(part)
-            new_content.extend(stand_in if stand_in is not None else [part])
-        out.append({**m, "content": new_content})
-    return out
+            if not isinstance(part, dict):
+                new_content.append(part)
+            # Direct base64 images (the Android app sends the Anthropic format)
+            elif part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
+                converted = _base64_image_part(part, tag, "Converting Anthropic-format base64 image")
+                if converted:
+                    new_content.append(converted)
+            elif part.get("type") == "image_url":
+                new_content.extend(_image_url_parts(provider, part, env, tag))
+            else:
+                stand_in = env.unreadable_parts(part)
+                new_content.extend(stand_in if stand_in is not None else [part])
+        processed_messages.append({**m, "content": new_content})
+    return processed_messages
 
 
 # -----------------------------------------------------------------------------
@@ -539,13 +383,7 @@ async def stream(provider: CompatProvider, messages: List[Dict], model: str, ope
         yield {"type": "error", "data": error}
         return
 
-    if provider is OPENAI:
-        # Chat Completions rejects audio_url/video_url/document_url parts: a turn
-        # media_auto_route kept here (no Google key) gets a note per attachment.
-        messages = _unreadable_as_text(messages, env)
-        processed_messages = messages
-    else:
-        processed_messages = _stream_messages(provider, messages, env)
+    processed_messages = _encode_messages(provider, messages, env, provider.tool_tag)
 
     payload = {
         "model": target.model,
@@ -742,7 +580,7 @@ def call(provider: CompatProvider, messages: List[Dict], model: str, operator: s
     if target is None:
         raise HTTPException(400, error)
 
-    processed_messages = _call_messages(provider, messages, env)
+    processed_messages = _encode_messages(provider, messages, env, provider.call_tag)
     headers = _headers(provider, target, stream=False)
     payload = {
         "model": target.model,

@@ -150,10 +150,8 @@
          }
         },
         {
-         "type": "image_url",
-         "image_url": {
-          "url": "/ui/uploads/missing.png"
-         }
+         "type": "text",
+         "text": "[Image could not be loaded]"
         },
         {
          "type": "text",
@@ -161,11 +159,11 @@
         },
         {
          "type": "text",
-         "text": "[Note: Document report.pdf attached but content extraction not supported for this file type in OpenAI]"
+         "text": "[Note: Document report.pdf attached but content extraction is not supported for this file type with this model]"
         },
         {
          "type": "text",
-         "text": "[Note: Video file attached: /ui/uploads/clip.mp4. OpenAI GPT models don't support direct video analysis. Please use Google Gemini for video analysis.]"
+         "text": "[Note: Video file attached: /ui/uploads/clip.mp4. This model doesn't support direct video analysis.]"
         },
         {
          "type": "text",
