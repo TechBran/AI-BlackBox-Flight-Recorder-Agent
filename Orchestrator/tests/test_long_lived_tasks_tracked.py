@@ -74,7 +74,7 @@ def test_an_outbound_asterisk_call_is_tracked(monkeypatch):
     monkeypatch.setattr(ar, "PHONE_SESSIONS", {})
 
     async def scenario():
-        result = await ar.asterisk_outbound_call(ar.AsteriskCallRequest(to="5550100123"))
+        result = await ar.asterisk_outbound_call(ar.AsteriskCallRequest(to="5550100123", trunk="tg-test"))
         assert result["status"] == "initiated"
         await _settle_and_cancel("asterisk-outbound-call")
 

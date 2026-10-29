@@ -377,6 +377,57 @@ def get_gateway(gateway_id: str) -> Optional[dict]:
     return None
 
 
+def _enabled_ports(gw: dict) -> list:
+    return [p for p in gw.get("ports") or [] if isinstance(p, dict) and p.get("enabled", True)]
+
+
+def _caller_id(gw: Optional[dict]) -> str:
+    """The number of the gateway's first enabled port that has one."""
+    for port in _enabled_ports(gw or {}):
+        number = str(port.get("phone_number") or "").strip()
+        if number:
+            return number
+    return ""
+
+
+def resolve_outbound_route(gateway_id: str = "", trunk: str = "") -> dict:
+    """The trunk and caller id an outbound call goes out on.
+
+    The trunk: an explicit ``trunk`` (the wizard's test call pins its
+    gateway's), else the gateway ``gateway_id``, else TG200_TRUNK_NAME when it
+    is set, else the first enabled gateway with an enabled port. The caller
+    id: TG200_PHONE_NUMBER when set, else that gateway's first enabled port's
+    number. Gateways get trunk 'tg-<name>' from the wizard and discovery, so
+    the old env default 'tg200' matched no provisioned trunk (audit
+    O11-telephony-asterisk-cellular-07).
+
+    Returns {"gateway_id", "trunk", "caller_id"}; "trunk" is "" when nothing is
+    configured, or when ``gateway_id`` names no enabled gateway.
+    """
+    from Orchestrator.asterisk import config as asterisk_config
+    env_trunk = (asterisk_config.TG200_TRUNK_NAME or "").strip()
+    env_caller = (asterisk_config.TG200_PHONE_NUMBER or "").strip()
+    gateways = [gw for gw in load_gateways() if gw.get("enabled", True)]
+
+    gw = None
+    if trunk:
+        gw = next((g for g in gateways if g.get("trunk_name") == trunk), None)
+    elif gateway_id:
+        gw = next((g for g in gateways if g.get("id") == gateway_id), None)
+        trunk = (gw or {}).get("trunk_name", "")
+    elif env_trunk:
+        trunk = env_trunk
+        gw = next((g for g in gateways if g.get("trunk_name") == trunk), None)
+    else:
+        gw = next((g for g in gateways if _enabled_ports(g) and g.get("trunk_name")), None)
+        trunk = (gw or {}).get("trunk_name", "")
+    return {
+        "gateway_id": (gw or {}).get("id", ""),
+        "trunk": trunk,
+        "caller_id": env_caller or _caller_id(gw),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Gateway status
 # ---------------------------------------------------------------------------

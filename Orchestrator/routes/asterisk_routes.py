@@ -28,6 +28,7 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Optional, Dict, List
 
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from Orchestrator.checkpoint import app
@@ -60,7 +61,8 @@ class AsteriskCallRequest(BaseModel):
     greeting: str = ""
     role: str = ""
     claude_session_id: str = ""
-    trunk: str = ""  # Specific trunk name (empty = auto-select)
+    trunk: str = ""  # Specific trunk name (empty = from the gateway registry)
+    gateway_id: str = ""  # Specific gateway (empty = the first enabled one)
 
 
 class AsteriskSMSRequest(BaseModel):
@@ -141,6 +143,30 @@ def _audio_down_reason(ipc_client) -> str:
     return f"the audio subprocess is not running ({detail or 'see the [IPC] log lines'})"
 
 
+# The trunk name the static Asterisk configs used before the gateway wizard.
+# Dialled only when the registry is empty and Asterisk has this endpoint.
+LEGACY_TRUNK_NAME = "tg200"
+
+NO_GATEWAY_ERROR = (
+    "No telephony gateway is configured to place the call: add the TG200 in "
+    "the telephony setup wizard (Portal or Android), or set TG200_TRUNK_NAME"
+)
+
+
+async def _outbound_route(client, call_request: "AsteriskCallRequest") -> dict:
+    """resolve_outbound_route, plus a box set up by hand before the wizard:
+    an empty registry still dials [tg200] when Asterisk has that endpoint."""
+    from Orchestrator.asterisk.gateway_manager import resolve_outbound_route
+    route = resolve_outbound_route(gateway_id=call_request.gateway_id, trunk=call_request.trunk)
+    if not route["trunk"] and not call_request.gateway_id:
+        try:
+            if await client.get_endpoint_detail("PJSIP", LEGACY_TRUNK_NAME):
+                route["trunk"] = LEGACY_TRUNK_NAME
+        except Exception:
+            pass
+    return route
+
+
 # Active call tracking per session (for cleanup): AsteriskVoiceBridge objects
 _active_bridges: Dict[str, "AsteriskVoiceBridge"] = {}
 
@@ -153,8 +179,6 @@ _active_bridges: Dict[str, "AsteriskVoiceBridge"] = {}
 async def asterisk_outbound_call(call_request: AsteriskCallRequest):
     """Initiate an outbound voice call via Asterisk → TG200 → GSM."""
     from Orchestrator.asterisk.client import get_ari_client
-    from Orchestrator.asterisk.config import TG200_PHONE_NUMBER, TG200_TRUNK_NAME
-
     from Orchestrator.asterisk.audio_ipc import get_ipc_client
 
     client = get_ari_client()
@@ -164,15 +188,22 @@ async def asterisk_outbound_call(call_request: AsteriskCallRequest):
     if audio_down:
         return {"error": f"Cannot place the call: {audio_down}"}
 
+    route = await _outbound_route(client, call_request)
+    trunk = route["trunk"]
+    if not trunk:
+        error = (f"Gateway {call_request.gateway_id} is not configured or is disabled"
+                 if call_request.gateway_id else NO_GATEWAY_ERROR)
+        print(f"[ASTERISK-ROUTE] Outbound call refused: {error}")
+        return JSONResponse(status_code=409, content={"error": error})
+
     to_number = _normalize_phone(call_request.to)
     ai_backend = BACKEND_MAP.get(call_request.backend, AIBackend.OPENAI_REALTIME)
-    trunk = call_request.trunk or TG200_TRUNK_NAME
 
     # Create session
     session_id = f"ast-out-{uuid.uuid4().hex[:12]}"
     session = PhoneSession(
         session_id=session_id,
-        caller_id=TG200_PHONE_NUMBER,
+        caller_id=route["caller_id"],
         callee_id=to_number,
         direction=CallDirection.OUTBOUND,
         status=PhoneStatus.RINGING,
@@ -196,7 +227,8 @@ async def asterisk_outbound_call(call_request: AsteriskCallRequest):
         "status": "initiated",
         "session_id": session_id,
         "to": to_number,
-        "from": TG200_PHONE_NUMBER,
+        "from": route["caller_id"],
+        "trunk": trunk,
         "backend": ai_backend.value,
         "operator": session.operator,
     }
@@ -914,6 +946,7 @@ async def wizard_test_call_endpoint(gateway_id: str, req: WizardTestCallRequest)
         to=req.to,
         operator="system",
         trunk=gw["trunk_name"],
+        gateway_id=gateway_id,
     )
     return await asterisk_outbound_call(call_request)
 

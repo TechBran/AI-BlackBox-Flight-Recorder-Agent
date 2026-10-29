@@ -40,7 +40,9 @@ ASTERISK_FRAME_SIZE_MS = 20    # 20ms frames = 320 bytes per frame at 8kHz
 # ---------------------------------------------------------------------------
 # TG200 Gateway Defaults
 # ---------------------------------------------------------------------------
-TG200_TRUNK_NAME = os.getenv("TG200_TRUNK_NAME", "tg200")
+# Overrides only: outbound calls take their trunk and caller id from the
+# gateway registry (gateway_manager.resolve_outbound_route).
+TG200_TRUNK_NAME = os.getenv("TG200_TRUNK_NAME", "")
 TG200_PHONE_NUMBER = os.getenv("TG200_PHONE_NUMBER", "")
 TG200_DEFAULT_IP = os.getenv("TG200_DEFAULT_IP", "192.168.5.150")
 TG200_SIP_PORT = int(os.getenv("TG200_SIP_PORT", "5060"))
