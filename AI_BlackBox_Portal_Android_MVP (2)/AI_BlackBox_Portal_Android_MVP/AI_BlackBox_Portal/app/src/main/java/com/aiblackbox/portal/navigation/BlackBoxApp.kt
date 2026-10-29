@@ -1,0 +1,1163 @@
+package com.aiblackbox.portal.navigation
+
+import android.content.pm.PackageManager
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import com.aiblackbox.portal.data.model.TaskStatus
+import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.repository.transcribeUploadedRecording
+import com.aiblackbox.portal.data.repository.uploadFileName
+import com.aiblackbox.portal.data.location.LocationPermissionUx
+import com.aiblackbox.portal.data.location.LocationProvider
+import com.aiblackbox.portal.data.notifications.NotificationPermissionUx
+import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.voice.AudioRecorderManager
+import com.aiblackbox.portal.data.voice.MicSourcePolicy
+import com.aiblackbox.portal.data.voice.PcmAudioRecorder
+import com.aiblackbox.portal.data.voice.SttEvent
+import com.aiblackbox.portal.data.voice.SttFrames
+import com.aiblackbox.portal.data.voice.SttStreamClient
+import com.aiblackbox.portal.ui.components.AboveAnchorPositionProvider
+import com.aiblackbox.portal.ui.components.SttStatusChip
+import com.aiblackbox.portal.ui.components.SttSwitchProviderDialog
+import com.aiblackbox.portal.ui.components.fetchSttCatalog
+import com.aiblackbox.portal.ui.chat.AttachmentItem
+import com.aiblackbox.portal.ui.chat.ChatSpeech
+import com.aiblackbox.portal.ui.chat.ChatState
+import com.aiblackbox.portal.ui.chat.ChatViewModel
+import com.aiblackbox.portal.ui.chat.Composer
+import com.aiblackbox.portal.ui.chat.MAX_UPLOAD_SIZE
+import com.aiblackbox.portal.ui.chat.FALLBACK_COMPOSER_HEIGHT
+import com.aiblackbox.portal.ui.chat.LIVE_EDGE_GAP
+import com.aiblackbox.portal.ui.chat.SIGNAL_RESIDENCE_HEIGHT
+import com.aiblackbox.portal.ui.chat.calculateBottomFocalGeometry
+import com.aiblackbox.portal.ui.chat.rememberFilePicker
+import com.aiblackbox.portal.ui.chat.ReturnToLiveHost
+import com.aiblackbox.portal.ui.theme.BbxBlack
+import com.aiblackbox.portal.ui.theme.BbxWhite
+import com.aiblackbox.portal.ui.components.BlackBoxTopBar
+import com.aiblackbox.portal.ui.insets.LocalShowAppChrome
+import com.aiblackbox.portal.ui.settings.SettingsSheet
+import com.aiblackbox.portal.ui.updates.UpdatesViewModel
+import com.aiblackbox.portal.util.Constants
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
+import androidx.compose.ui.platform.LocalContext
+import com.aiblackbox.portal.BlackBoxNotificationManager
+
+/**
+ * The native app's whole composition, out of NativeMainActivity.setContent (audit
+ * A01-activities-root-10 / NEW-android-1, rank 76): the navigation graph and the chrome
+ * floating over it (top bar, close button, task panel, composer, return-to-live), the
+ * dictation and raw-audio recorders, the permission asks, the auto-TTS and vibration on a
+ * finished reply, and the Settings sheet. Moved verbatim; the provider and model wiring is
+ * [ProviderModelWiring], the speech is ChatSpeech.
+ *
+ * [withMicPermission] runs its action once RECORD_AUDIO is granted (asking first when it is
+ * not): the one thing this needs from its activity. Files, services and resolvers come from
+ * the application context, as they did inside the activity.
+ */
+@Composable
+internal fun BlackBoxApp(
+    origin: String,
+    withMicPermission: (action: () -> Unit) -> Unit,
+) {
+    val applicationContext = LocalContext.current.applicationContext
+    val navController = rememberNavController()
+    val store = remember { BlackBoxStore(applicationContext) }
+    val scope = rememberCoroutineScope()
+    // "" until the box resolves it (ChatViewModel.refreshOperators) — never a seed name.
+    val operator by store.operator.collectAsState(initial = "")
+    val provider by store.provider.collectAsState(initial = Constants.DEFAULT_PROVIDER)
+    val currentModel by store.model.collectAsState(initial = "")
+
+    val chatViewModel: ChatViewModel = viewModel()
+    // Provider + model wiring (rank 76): the composer pill, the CU + robotics
+    // screens' pickers, and the provider those screens set when they open.
+    val providerModels = remember(store, chatViewModel) {
+        ProviderModelWiring(store.providerModels()) {
+            ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)
+        }
+    }
+    // Spoken replies (rank 76): auto-TTS, the bubble speaker, plain speech.
+    val speech = remember(chatViewModel, store) {
+        ChatSpeech(
+            context = applicationContext,
+            scope = scope,
+            api = { chatViewModel.getApi() },
+            operatorOf = { operator },
+            voiceFor = { store.getOperatorVoice(it).first() },
+            bubbles = object : ChatSpeech.Bubbles {
+                override fun setGenerating(messageId: String, generating: Boolean, status: String?) =
+                    chatViewModel.setMessageTtsGenerating(messageId, generating, status)
+                override fun setAudioPath(messageId: String, path: String) =
+                    chatViewModel.setMessageTtsAudioUrl(messageId, path)
+            },
+        )
+    }
+    // B5: ONE activity-owned UpdatesViewModel. In a ComponentActivity's
+    // setContent, viewModel() resolves to the activity ViewModelStoreOwner,
+    // so this instance survives navigation and stays alive on the Chat home
+    // — letting the top-bar badge read update/embedding state without the
+    // Updates screen ever being opened. The SAME instance is threaded into
+    // the Updates screen via BlackBoxNavGraph(updatesVm = ...).
+    val updatesVm: UpdatesViewModel = viewModel()
+    val inputText by chatViewModel.inputText.collectAsState()
+    val chatState by chatViewModel.chatState.collectAsState()
+    val erMissionActive by chatViewModel.erMissionActive.collectAsState()
+    val snapshotCount by chatViewModel.snapshotCount.collectAsState()
+    val isHealthy by chatViewModel.isHealthy.collectAsState()
+    val checkpointTurns by chatViewModel.checkpointTurns.collectAsState()
+    val operators by chatViewModel.operators.collectAsState()
+    val operatorPrompt by chatViewModel.operatorPrompt.collectAsState()
+    var showSettings by remember { mutableStateOf(false) }
+    // T23 device QA fix (2026-05-26): CliAgentScreen-in-Terminal-state
+    // must hide BOTH the floating operator chrome (Layer 2) AND the
+    // floating X close button (Layer 2.5). Both live as siblings to
+    // BlackBoxNavGraph here, so the CompositionLocalProvider pattern
+    // T20 used inside CliAgentScreen never reached them — that
+    // provider only scopes to children of CliAgentScreen, not
+    // activity-level overlays. Lifting the flag to Activity scope
+    // and passing the setter down through NavGraph is the correct
+    // mechanism.
+    var cliAgentInTerminal by remember { mutableStateOf(false) }
+    val autoTtsEnabled by store.autoTtsEnabled.collectAsState(initial = false)
+    // Ember Backdrop mode (off / generating / always) — provided to the
+    // tree below via LocalEmberMode so EmberOverlay can honor it.
+    val emberMode by store.emberMode.collectAsState(initial = "always")
+    // Particle FIELD style (stars / embers / matrix) — provided to the
+    // tree below via LocalParticleMode so EmberOverlay picks the look.
+    val particleMode by store.particleMode.collectAsState(initial = "stars")
+    // How MUCH field: intensity slider (0.25–2.0, default 1.0) and the
+    // quality tier (low/high/ultra, default high). Both default to
+    // exactly today's counts; EmberOverlay combines them into one
+    // particle-count multiplier. See ParticleTuning.
+    val particleIntensity by store.particleIntensity.collectAsState(
+        initial = com.aiblackbox.portal.ui.components.ParticleTuning.INTENSITY_DEFAULT,
+    )
+    val particleQuality by store.particleQuality.collectAsState(
+        initial = com.aiblackbox.portal.ui.components.ParticleQuality.DEFAULT,
+    )
+    // Voice WAVEFORM style (aurora / classic / …) — provided to the tree
+    // below via LocalWaveformStyle so VoiceVisualizer picks the look, the
+    // exact twin of particleMode/LocalParticleMode above.
+    val waveformStyle by store.waveformStyle.collectAsState(
+        initial = com.aiblackbox.portal.ui.components.wave.WaveformStyles.AURORA,
+    )
+
+    // Legacy audio recorder — MediaRecorder/.m4a, and SHARED with Voice Lab's
+    // ElevenLabs cloning, which is why it is left exactly as it is. onWhisper and
+    // onRecordAudio no longer drive it.
+    val audioRecorder = remember { AudioRecorderManager(applicationContext) }
+    var isWhisperRecording by remember { mutableStateOf(false) }
+
+    // Live streaming STT client for onWhisper (multi-provider /ws/stt).
+    // Built once per origin, mirroring how VoiceScreen builds VoiceClient.
+    val sttClient = remember(origin) {
+        val wsUrl = origin.replace("https://", "wss://").replace("http://", "ws://")
+        SttStreamClient(
+            BlackBoxApi(origin).getClient(),
+            wsUrl,
+            MicSourcePolicy.supportsUnprocessed(applicationContext),
+        )
+    }
+    val isWhisperStreaming by sttClient.isStreaming.collectAsState()
+    // Collect the analyser's bands as Compose state so the waveform recomposes as
+    // they change. Reading sttClient.bands.value directly does NOT
+    // subscribe → the ribbon would freeze at one value (caught 2026-06-05).
+    val sttBands by sttClient.bands.collectAsState()
+    // The same tap's SECOND channel: the log-frequency spectrum six of the ten waveform
+    // styles draw from (the other four are band-driven). Collected, never read as
+    // .value, for exactly the subscription reason spelled out above.
+    val sttBins by sttClient.bins.collectAsState()
+    // Cumulative-delta applier holders: captured at stream start from the caret.
+    var sttBaseBefore by remember { mutableStateOf("") }
+    var sttBaseAfter by remember { mutableStateOf("") }
+
+    // Tap-toggle STT (Brandon 2026-07-05): tap 1 starts + live-appends into
+    // the input; tap 2 just STOPS — the transcript stays in the box for
+    // editing, no auto-send. The mic writes text; the user sends explicitly.
+    // Tapping send while the mic is live stops it and sends in one tap.
+    // stop() flushes a graceful close that can emit one trailing stt_final;
+    // on a mic-tap stop we want it (last words land), but right after a
+    // send-while-live it would repopulate the just-cleared box, so
+    // sttDiscardTrailingFinal drops exactly that one late final.
+    var sttDiscardTrailingFinal by remember { mutableStateOf(false) }
+
+    // Live-dictation status + provider switch (audit rank 52). The chip names
+    // the provider the mic really uses after a provider_override, or the on-box
+    // warm-up; a switchable stt_error offers another provider from /stt/catalog.
+    val sttApi = remember(origin) { BlackBoxApi(origin) }
+    val sttStatus by sttClient.status.collectAsState()
+    var sttProviderLabels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(sttStatus.overrideProvider) {
+        if (sttStatus.overrideProvider != null && sttProviderLabels.isEmpty()) {
+            sttProviderLabels = SttFrames.labels(fetchSttCatalog(sttApi))
+        }
+    }
+    val sttStatusText = SttFrames.statusText(sttStatus, sttProviderLabels)
+    var sttSwitchOffer by remember { mutableStateOf<SttEvent.Error?>(null) }
+
+    // Start dictation at the caret: the mic tap ("" = the box's choice), and a
+    // provider picked in the switch prompt, for that dictation only (kept, it
+    // silently overrode the wizard's STT setting for the activity's life).
+    fun startDictation(provider: String = "") {
+        withMicPermission {
+            // Fresh dictation: don't drop the first final.
+            sttDiscardTrailingFinal = false
+            // Capture the caret-anchored base for the
+            // cumulative-delta applier BEFORE starting.
+            val cur = chatViewModel.inputText.value
+            val insert = cur.selection.start.coerceIn(0, cur.text.length)
+            sttBaseBefore = cur.text.substring(0, insert)
+            sttBaseAfter = cur.text.substring(insert)
+            sttClient.start(provider = provider)
+        }
+    }
+
+    // Raw audio recorder for Gemini audio analysis — AudioRecord, so there is real PCM
+    // to both upload and ANALYSE. Its ribbon used to be a single MediaRecorder peak
+    // read once, which is why it sat frozen for the whole recording.
+    val rawAudioRecorder = remember {
+        PcmAudioRecorder(
+            applicationContext.externalCacheDir ?: applicationContext.cacheDir,
+            MicSourcePolicy.supportsUnprocessed(applicationContext),
+        )
+    }
+    var isRawAudioRecording by remember { mutableStateOf(false) }
+    // Collected as state, not read from .value: reading the flow directly does NOT
+    // subscribe, which is the other half of why this ribbon never moved.
+    val rawAudioBands by rawAudioRecorder.bands.collectAsState()
+    val rawAudioBins by rawAudioRecorder.bins.collectAsState()
+    DisposableEffect(rawAudioRecorder) {
+        onDispose { rawAudioRecorder.cancel() }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // M1 (2026-07-24) — location permission, asked ONCE, ever.
+    //
+    // The ask is deliberately decoupled from the send: tapping send fires
+    // the turn IMMEDIATELY and, in parallel, may surface this rationale.
+    // A prompt never waits on a permission dialog, and the turn that
+    // triggers the ask simply goes out without location (as does every
+    // turn, if the answer is no). LocationPermissionUx.shouldAsk holds the
+    // whole policy; the latch is written BEFORE the dialog appears, so
+    // dismissing it counts as the one ask we get — silent forever after.
+    // ─────────────────────────────────────────────────────────────
+    var showLocationRationale by remember { mutableStateOf(false) }
+    // (M4) True from the moment the NOTIFICATION rationale appears until its
+    // system dialog has been answered. The location ask reads this and DEFERS
+    // rather than stacking a second modal on top — see the ordering note below.
+    var notificationAskInFlight by remember { mutableStateOf(false) }
+    val locationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { /* Silent either way. Granted → next turn carries location. Denied → never asked again. */ }
+    val maybeAskForLocation: () -> Unit = {
+        scope.launch {
+            runCatching {
+                val attach = store.locationAttachEnabled.first()
+                val asked = store.locationPermissionAsked.first()
+                val granted = LocationProvider(applicationContext).hasPermission()
+                if (LocationPermissionUx.shouldAsk(attach, granted, asked, notificationAskInFlight)) {
+                    store.setLocationPermissionAsked(true)
+                    showLocationRationale = true
+                } else if (granted && !asked) {
+                    // Granted by some other route — burn the latch anyway.
+                    store.setLocationPermissionAsked(true)
+                }
+            }
+        }
+    }
+    if (showLocationRationale) {
+        AlertDialog(
+            onDismissRequest = { showLocationRationale = false },
+            title = { Text(LocationPermissionUx.RATIONALE_TITLE) },
+            text = { Text(LocationPermissionUx.RATIONALE_BODY) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLocationRationale = false
+                    runCatching {
+                        locationPermLauncher.launch(LocationPermissionUx.REQUESTED_PERMISSIONS)
+                    }
+                }) { Text(LocationPermissionUx.RATIONALE_CONFIRM) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLocationRationale = false }) {
+                    Text(LocationPermissionUx.RATIONALE_DISMISS)
+                }
+            },
+        )
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // M4 (2026-07-25) — POST_NOTIFICATIONS, asked ONCE, ever.
+    //
+    // The manifest has declared this permission for a long time and the native
+    // app never REQUESTED it, so on Android 13+ it was simply denied: on a fresh
+    // install the entire M3 delivery path (the 07:30 lock-screen navigation
+    // prompt, every task alert) posted into nothing. Confirmed on the Fold during
+    // M3 validation — granted=false — where it was only granted over adb.
+    // PortalActivity asks, but PairingActivity routes to THIS activity in native
+    // mode, so that ask was never reached.
+    //
+    // ORDERING against the M1 location ask — deliberate, not incidental:
+    //  1. NOTIFICATIONS ask first, once, at first composition. There is no
+    //     in-context moment for it: what it unlocks arrives while the app is
+    //     CLOSED, so foreground-at-startup is the only time we can ask at all.
+    //  2. LOCATION asks second, on the first send (M1, untouched).
+    // They cannot stack: the rationale is modal (the composer is unreachable
+    // behind it) AND `notificationAskInFlight` makes the location ask DEFER
+    // rather than race. A deferred location ask leaves its latch alone, so it
+    // simply asks on the next send — deferring never costs it its one chance.
+    // The LaunchedEffect keys on showLocationRationale so the reverse deferral
+    // (a location dialog somehow up first) re-evaluates when that closes,
+    // instead of the notification ask being lost forever.
+    //
+    // Denial is silent and permanent, exactly like location: no second prompt,
+    // no banner, nothing blocked. Settings states the true effective state and
+    // deep-links to system settings; the box reports PERMISSION_MISSING over the
+    // wire so a push is never falsely claimed as delivered.
+    // ─────────────────────────────────────────────────────────────
+    var showNotificationRationale by remember { mutableStateOf(false) }
+    val notificationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* Silent either way. Granted → pushes land. Denied → never asked again. */
+        notificationAskInFlight = false
+    }
+    LaunchedEffect(showLocationRationale) {
+        runCatching {
+            val asked = store.notificationPermissionAsked.first()
+            val granted = ContextCompat.checkSelfPermission(
+                applicationContext,
+                NotificationPermissionUx.PERMISSION,
+            ) == PackageManager.PERMISSION_GRANTED
+            val ask = NotificationPermissionUx.shouldAsk(
+                sdkInt = android.os.Build.VERSION.SDK_INT,
+                hasPermission = granted,
+                alreadyAsked = asked,
+                anotherPromptVisible = showLocationRationale,
+            )
+            if (ask) {
+                store.setNotificationPermissionAsked(true)
+                notificationAskInFlight = true
+                showNotificationRationale = true
+            } else if (granted && !asked) {
+                // Granted by some other route (PortalActivity, or an upgrade
+                // from a pre-13 install) — burn the latch anyway.
+                store.setNotificationPermissionAsked(true)
+            }
+        }
+    }
+    if (showNotificationRationale) {
+        AlertDialog(
+            onDismissRequest = {
+                showNotificationRationale = false
+                notificationAskInFlight = false
+            },
+            title = { Text(NotificationPermissionUx.RATIONALE_TITLE) },
+            text = { Text(NotificationPermissionUx.RATIONALE_BODY) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showNotificationRationale = false
+                    // Stays in-flight until the SYSTEM dialog is answered, so a
+                    // send underneath it still cannot trigger the location ask.
+                    val launched = runCatching {
+                        notificationPermLauncher.launch(NotificationPermissionUx.PERMISSION)
+                    }.isSuccess
+                    if (!launched) notificationAskInFlight = false
+                }) { Text(NotificationPermissionUx.RATIONALE_CONFIRM) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showNotificationRationale = false
+                    notificationAskInFlight = false
+                }) { Text(NotificationPermissionUx.RATIONALE_DISMISS) }
+            },
+        )
+    }
+
+    // File attachments state
+    val attachments = remember { mutableStateListOf<AttachmentItem>() }
+    // Pre-uploaded media URLs (from raw audio record — already on server)
+    val preUploadedUrls = remember { mutableStateListOf<String>() }
+    val jsonParser = remember { Json { ignoreUnknownKeys = true; isLenient = true } }
+
+    // File picker launcher
+    val launchFilePicker = rememberFilePicker { uri ->
+        val contentResolver = applicationContext.contentResolver
+        val cursor = contentResolver.query(uri, null, null, null, null)
+        var fileName = "file"
+        var fileSize = 0L
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val nameIdx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = it.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                if (nameIdx >= 0) fileName = it.getString(nameIdx) ?: "file"
+                if (sizeIdx >= 0) fileSize = it.getLong(sizeIdx)
+            }
+        }
+        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+
+        if (fileSize > MAX_UPLOAD_SIZE) {
+            Toast.makeText(applicationContext, "File too large (max 500MB)", Toast.LENGTH_SHORT).show()
+        } else {
+            attachments.add(
+                AttachmentItem(
+                    uri = uri,
+                    name = fileName,
+                    mimeType = mimeType,
+                    sizeBytes = fileSize
+                )
+            )
+            Toast.makeText(applicationContext, "File attached", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Sync auto-TTS flag from store to viewmodel
+    LaunchedEffect(autoTtsEnabled) {
+        chatViewModel.autoTtsEnabled = autoTtsEnabled
+    }
+
+    LaunchedEffect(origin) {
+        if (origin.isNotBlank()) {
+            chatViewModel.initialize(origin)
+        }
+    }
+
+    // A09: why a send waited (no operator resolved yet) or what the roster
+    // asks (pick one, or add the first) — one toast each.
+    LaunchedEffect(Unit) {
+        chatViewModel.operatorNotice.collect { notice ->
+            Toast.makeText(applicationContext, notice, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // B5: initialize the activity-scoped UpdatesViewModel once — this
+    // creates its api/repo AND does the first status+embeddings fetch, so
+    // the top-bar badge's `attention` flow is populated as soon as origin
+    // resolves (no need to open the Updates screen first).
+    LaunchedEffect(origin) {
+        if (origin.isNotBlank()) {
+            updatesVm.initialize(origin)
+        }
+    }
+
+    // M3: re-fetch update/embedding status whenever the app returns to the
+    // foreground (e.g. back from the onboarding wizard) so the top-bar
+    // badge stays fresh WITHOUT the user opening Updates. Low-frequency by
+    // design — one fetch per ON_RESUME, no tight loop.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, origin) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && origin.isNotBlank()) {
+                updatesVm.refreshStatus(forceFresh = false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Live STT — collect transcript events and apply the cumulative-delta
+    // applier to the prompt (TextFieldValue). Delta.text is the full
+    // interim so far; replace the interim region. Final.text commits.
+    LaunchedEffect(sttClient) {
+        sttClient.events.collect { event ->
+            when (event) {
+                is SttEvent.Delta -> {
+                    // Ignore any late interim after a send-while-live cleared
+                    // the box (the trailing final is dropped separately).
+                    if (sttDiscardTrailingFinal) return@collect
+                    val newText = sttBaseBefore + event.text + sttBaseAfter
+                    chatViewModel.onInputChange(
+                        TextFieldValue(
+                            newText,
+                            TextRange((sttBaseBefore + event.text).length)
+                        )
+                    )
+                }
+                is SttEvent.Final -> {
+                    // A send-while-live already consumed + cleared the box;
+                    // drop the one trailing final stop()'s grace emits so it
+                    // doesn't repopulate the now-empty input.
+                    if (sttDiscardTrailingFinal) {
+                        sttDiscardTrailingFinal = false
+                        return@collect
+                    }
+                    val committed = if (event.text.isNotEmpty() && !event.text.last().isWhitespace())
+                        "${event.text} " else event.text
+                    sttBaseBefore += committed
+                    val merged = sttBaseBefore + sttBaseAfter
+                    chatViewModel.onInputChange(
+                        TextFieldValue(merged, TextRange(sttBaseBefore.length))
+                    )
+                }
+                is SttEvent.Error -> {
+                    Toast.makeText(applicationContext, event.message, Toast.LENGTH_SHORT).show()
+                    sttClient.stop()
+                    if (event.switchable) sttSwitchOffer = event
+                }
+                // Drives sttClient.status, rendered as the chip above the composer.
+                is SttEvent.Status -> Unit
+                is SttEvent.SessionEnded -> {
+                    // Terminal marker from stop(): nothing further will
+                    // arrive for this session. If a send-while-live armed
+                    // the trailing-final discard but that final never came
+                    // (server produced nothing), disarm it here so it can't
+                    // eat the NEXT session's first final.
+                    sttDiscardTrailingFinal = false
+                }
+            }
+        }
+    }
+
+    // Stop the streaming mic + WS when the composable leaves the tree.
+    DisposableEffect(sttClient) {
+        onDispose { sttClient.stop() }
+    }
+
+    // Auto-TTS: observe events from ChatViewModel and speak
+    // Saves audio to file and sets URL on last assistant message for inline player
+    // Vibrate when chat response finishes generating
+    val vibrator = remember {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            val mgr = applicationContext.getSystemService(android.os.VibratorManager::class.java)
+            mgr?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            applicationContext.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+        }
+    }
+
+    LaunchedEffect(chatState) {
+        // Vibrate when streaming transitions to IDLE (response complete)
+        if (chatState == com.aiblackbox.portal.ui.chat.ChatState.IDLE) {
+            val lastMsg = chatViewModel.messages.value.lastOrNull()
+            if (lastMsg != null && lastMsg.role == "assistant" && lastMsg.content.isNotBlank()) {
+                vibrator?.let { v ->
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        v.vibrate(android.os.VibrationEffect.createOneShot(100, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        v.vibrate(100)
+                    }
+                }
+            }
+        }
+    }
+
+    // Auto-TTS: speak response when complete
+    // Mirrors the manual onSpeakWithId flow — shows spinner, generates, shows player
+    LaunchedEffect(Unit) {
+        chatViewModel.autoTtsEvent.collect { text ->
+            // Capture the target message BEFORE the async request
+            val targetMsg = chatViewModel.messages.value.lastOrNull { it.role == "assistant" }
+            val messageId = targetMsg?.id ?: return@collect
+            speech.autoSpeak(messageId, text)
+        }
+    }
+
+    // Full-screen overlay layout — no Scaffold, no black bars
+    // TopBar and Composer float over content with transparent backgrounds
+    // Ember backdrop mode provided once here from the persisted setting;
+    // read by EmberOverlay deep in the tree (call sites still pass "is generating").
+    val returnToLiveHost = remember { com.aiblackbox.portal.ui.chat.ReturnToLiveHostState() }
+    androidx.compose.runtime.CompositionLocalProvider(
+        com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode,
+        com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode,
+        com.aiblackbox.portal.ui.components.wave.LocalWaveformStyle provides waveformStyle,
+        com.aiblackbox.portal.ui.components.LocalParticleIntensity provides particleIntensity,
+        com.aiblackbox.portal.ui.components.LocalParticleQuality provides particleQuality,
+        com.aiblackbox.portal.ui.chat.LocalReturnToLiveHost provides returnToLiveHost,
+    ) {
+    val density = LocalDensity.current
+    var windowBottomPx by remember { mutableStateOf(Float.NaN) }
+    var composerTopPx by remember { mutableStateOf(Float.NaN) }
+    var composerBottomPx by remember { mutableStateOf(Float.NaN) }
+    val effectiveBottomInsetPx = WindowInsets.ime
+        .union(WindowInsets.navigationBars)
+        .getBottom(density)
+        .toFloat()
+    val bottomFocalGeometry = calculateBottomFocalGeometry(
+        windowBottomPx = windowBottomPx,
+        composerTopPx = composerTopPx,
+        composerBottomPx = composerBottomPx,
+        residenceHeightPx = with(density) { SIGNAL_RESIDENCE_HEIGHT.toPx() },
+        breathingGapPx = with(density) { LIVE_EDGE_GAP.toPx() },
+        fallbackComposerHeightPx = with(density) { FALLBACK_COMPOSER_HEIGHT.toPx() },
+        effectiveBottomInsetPx = effectiveBottomInsetPx,
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BbxBlack)
+            .onGloballyPositioned {
+                windowBottomPx = it.boundsInWindow().bottom
+            }
+    ) {
+        // Layer 1: Content (full screen, edge to edge)
+        BlackBoxNavGraph(
+            navController = navController,
+            origin = origin,
+            operator = operator,
+            operators = operators,
+            currentModel = currentModel,
+            chatViewModel = chatViewModel,
+            updatesVm = updatesVm,
+            // W22: the CU + robotics screens' model pickers (NavGraph) take the
+            // shared pick path too, so model_<provider> never goes stale for a
+            // switch back to restore.
+            onModelChange = { scope.launch { providerModels.selectModel(provider, it) } },
+            bottomFocalGeometry = bottomFocalGeometry,
+            onSpeak = { text -> speech.speak(text) },
+            onSpeakWithId = { messageId, text -> speech.speakForMessage(messageId, text) },
+            // T22: CLI Agents' SessionSwitcherTopBar hamburger
+            // routes through here to open the same SettingsSheet
+            // the global BlackBoxTopBar uses.
+            onOpenSettings = { showSettings = true },
+            // T23 device QA fix: lets CliAgentScreen tell the
+            // activity when its inner state is in Terminal mode,
+            // so the activity-level chrome layers (Layer 2
+            // BlackBoxTopBar + Layer 2.5 X close) can hide.
+            onCliAgentTerminalActiveChange = { active ->
+                cliAgentInTerminal = active
+            },
+            // M2 return-refresh: when the in-app wizard WebView
+            // (Routes.WIZARD) closes, force-refresh the SHARED
+            // activity-scoped UpdatesViewModel so a model/reranker
+            // change made inside the wizard reflects in the top-bar
+            // badge + Updates screen. This is the same `updatesVm`
+            // instance the Updates destination uses (a nav-scoped
+            // WIZARD destination can't reach that VM directly).
+            onWizardReturn = {
+                updatesVm.refreshStatus(forceFresh = true)
+            },
+        )
+
+        // Auto-set provider when on dedicated provider screens
+        LaunchedEffect(Unit) {
+            navController.currentBackStackEntryFlow.collect { entry ->
+                providerModels.onRouteEntered(entry.destination.route)
+            }
+        }
+
+        // Layer 2: TopBar floating on top (transparent bg, only bubbles visible)
+        // T20: respect LocalShowAppChrome so screens like CliAgentScreen
+        // (terminal-active branch) can hide the operator pill while
+        // SessionSwitcherTopBar owns the top region.
+        //
+        // [AppChromeLayer] scopes the LocalShowAppChrome.current read
+        // to a 1-line composable; without this extraction every
+        // sibling in this setContent body would invalidate on toggle.
+        // Brandon fit pass 2026-07-23: the CU live view hides the
+        // operator pill too — no operator switching happens on
+        // that screen (back out to switch) and the pill was the
+        // last overlay crowding the viewer's toolbar. The X close
+        // button (Layer 2.5) stays as the exit affordance.
+        val chromeRoute = navController
+            .currentBackStackEntryAsState().value?.destination?.route
+        val cuLiveViewActive =
+            chromeRoute?.startsWith(Routes.CU_LIVE_VIEW) == true
+        AppChromeLayer(forceHide = cliAgentInTerminal || cuLiveViewActive) {
+            BlackBoxTopBar(
+                operator = operator,
+                operators = operators,
+                operatorPrompt = operatorPrompt,
+                snapshotCount = snapshotCount,
+                checkpointTurns = checkpointTurns,
+                isHealthy = isHealthy,
+                onMenuClick = { showSettings = true },
+                // D1: badged Updates icon — lights when the shared
+                // UpdatesViewModel says there's something to surface,
+                // taps straight to the Updates screen.
+                showUpdatesBadge = updatesVm.attention.collectAsState().value,
+                onUpdatesClick = { navController.navigate(Routes.UPDATES) },
+                onOperatorChange = { scope.launch { store.setOperator(it) } },
+                onAddOperator = { name ->
+                    scope.launch {
+                        try {
+                            val api = chatViewModel.getApi() ?: return@launch
+                            val body = """{"name":"$name"}"""
+                            val response = api.post("/operator/add", body)
+                            val obj = jsonParser.parseToJsonElement(response).jsonObject
+                            val status = obj["status"]?.jsonPrimitive?.content
+                            if (status == "success" || status == "exists") {
+                                store.setOperator(name)
+                                chatViewModel.checkHealth() // Refreshes operator list
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("AddOperator", "Failed: ${e.message}", e)
+                        }
+                    }
+                }
+            )
+        }
+
+        // Layer 2.5: Floating X close button on sub-screens (not chat)
+        // Essential for XR goggles where back gesture is difficult
+        val currentBackStackEntry by navController.currentBackStackEntryAsState()
+        val currentRoute = currentBackStackEntry?.destination?.route
+        // T23 device QA fix: also hide when CliAgentScreen is in
+        // Terminal state — the SessionSwitcherTopBar's own
+        // hamburger occupies this region, and two affordances at
+        // the same screen position overlap visually on Z Fold 6.
+        if (currentRoute != null && currentRoute != Routes.CHAT && !cliAgentInTerminal) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(start = 12.dp, top = 8.dp)
+                    .size(36.dp)
+                    .clip(androidx.compose.foundation.shape.CircleShape)
+                    .background(androidx.compose.ui.graphics.Color(0xCC1C1C1E))
+                    .border(
+                        1.dp,
+                        androidx.compose.ui.graphics.Color(0x33FFFFFF),
+                        androidx.compose.foundation.shape.CircleShape
+                    )
+                    .clickFeedback {
+                        navController.popBackStack(Routes.CHAT, inclusive = false)
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "\u2715",
+                    color = BbxWhite,
+                    fontSize = 16.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                )
+            }
+        }
+
+        // Layer 3: TaskPanel floating above composer
+        val activeTasks by chatViewModel.activeTasks.collectAsState()
+        var showTaskPanel by remember { mutableStateOf(true) }
+        Box(modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 200.dp, end = 12.dp)) {
+            com.aiblackbox.portal.ui.components.TaskPanel(
+                tasks = activeTasks,
+                visible = showTaskPanel,
+                onDismiss = { showTaskPanel = false },
+                onStopTask = { taskId -> chatViewModel.cancelTask(taskId) },
+                // Pill "Live" (M2 multi-desktop, 2026-07-23): a local
+                // (blackbox) CU task now runs on its OWN virtual
+                // desktop, so route straight to that agent's Splashtop
+                // live view (cu_live_view/{session_id}) — the served
+                // page carries the status chip + STOP + narration
+                // bubble. A REMOTE device (device_id != blackbox) keeps
+                // the native ?liveDevice screenshot-stream path, whose
+                // VNC surface is still correct there.
+                onLiveView = { task ->
+                    val sid = task.effectiveSessionId()
+                    val dev = task.effectiveDeviceId()
+                    if (!sid.isNullOrBlank() && (dev == null || dev == "blackbox")) {
+                        navController.navigate(
+                            "${Routes.CU_LIVE_VIEW}/" + android.net.Uri.encode(sid)
+                        )
+                    } else {
+                        navController.navigate(
+                            Routes.COMPUTER_USE +
+                                "?liveDevice=" + android.net.Uri.encode(dev ?: "blackbox")
+                        )
+                    }
+                }
+            )
+        }
+        // Re-show panel when new tasks arrive
+        LaunchedEffect(activeTasks) {
+            if (activeTasks.isNotEmpty()) showTaskPanel = true
+        }
+
+        // Task completion notifications
+        val notificationMgr = remember { BlackBoxNotificationManager(applicationContext) }
+        LaunchedEffect(Unit) {
+            chatViewModel.taskCompletedEvent.collect { completedTask: com.aiblackbox.portal.data.model.TaskStatus ->
+                val isSuccess = completedTask.status.equals("completed", true)
+                val typeLabel = completedTask.taskType?.replace("_", " ")?.replaceFirstChar { it.uppercase() } ?: "Task"
+                notificationMgr.showTaskNotification(
+                    title = if (isSuccess) "$typeLabel Complete" else "$typeLabel Failed",
+                    body = if (isSuccess) "Your $typeLabel is ready" else (completedTask.error ?: "Generation failed"),
+                    operator = operator,
+                    taskType = completedTask.taskType,
+                    isSuccess = isSuccess
+                )
+            }
+        }
+
+        // Layer 4: Composer floating at bottom (transparent bg, only pills visible)
+        // Hide on screens that have their own compose UI (SMS, Contacts, CLI Agent,
+        // Voice — the provider/model composer is irrelevant in voice-agent mode).
+        val hideComposerRoutes = setOf(Routes.SMS_INBOX, Routes.CONTACTS, Routes.CLI_AGENT, Routes.VOICE)
+        // Only the chat surfaces render the bottom Signal residence
+        // (MainChatContent / AgentLiveMessageContent). Reserving the
+        // 40dp band on every other route floated the composer over a
+        // dead black strip (image gen, timeline, ...).
+        val signalResidenceRoutes = setOf(Routes.CHAT, Routes.AGENT, Routes.GEMINI_AGENT)
+        if (currentRoute !in hideComposerRoutes)
+        Box(modifier = Modifier
+            .align(Alignment.BottomCenter)
+            // CRITICAL: wrapContentHeight prevents this Box from expanding
+            // to fill the parent and intercepting touches on chat content above.
+            // Without this, the Box measured to fill available height, creating
+            // an invisible touch-consuming overlay above the visible Composer.
+            .wrapContentHeight(Alignment.Bottom)
+            .padding(
+                bottom = (if (currentRoute in signalResidenceRoutes) SIGNAL_RESIDENCE_HEIGHT else 0.dp) +
+                    with(density) { effectiveBottomInsetPx.toDp() },
+            )
+        ) {
+            Composer(
+                value = inputText,
+                onValueChange = { chatViewModel.onInputChange(it) },
+                applySystemBottomInsets = false,
+                onSend = {
+                    // Send while the mic is live → stop it and send in one
+                    // tap. Kill the stream, arm the trailing-final discard so
+                    // stop()'s grace final doesn't repopulate the box after
+                    // sendMessage() clears it, and drop the STT base anchors.
+                    if (sttClient.isStreaming.value) {
+                        sttDiscardTrailingFinal = true
+                        sttClient.stop()
+                        sttBaseBefore = ""
+                        sttBaseAfter = ""
+                    }
+                    // M1: first-use location ask. Fire-and-forget — it never
+                    // gates, delays, or blocks the send below.
+                    maybeAskForLocation()
+                    // Upload attachments first, then send message with URLs
+                    val hasAttachments = attachments.isNotEmpty()
+                    val hasPreUploaded = preUploadedUrls.isNotEmpty()
+                    if (hasAttachments || hasPreUploaded) {
+                        val toUpload = attachments.toList()
+                        val alreadyUploaded = preUploadedUrls.toList()
+                        attachments.clear()
+                        preUploadedUrls.clear()
+                        scope.launch {
+                            val api = chatViewModel.getApi()
+                            if (api == null) {
+                                chatViewModel.sendMessage()
+                                return@launch
+                            }
+                            // Start with pre-uploaded URLs (from raw audio record)
+                            val uploadedUrls = alreadyUploaded.toMutableList()
+                            for (item in toUpload) {
+                                try {
+                                    // Copy URI content to temp file. The name keeps (or gains,
+                                    // from the MIME type) an extension: /upload stores the file
+                                    // under it and the chat part is typed from it (W13).
+                                    val tempFile = withContext(Dispatchers.IO) {
+                                        val f = File(applicationContext.cacheDir, "upload_${System.currentTimeMillis()}_${uploadFileName(item.name, item.mimeType)}")
+                                        applicationContext.contentResolver.openInputStream(item.uri)?.use { input ->
+                                            f.outputStream().use { output -> input.copyTo(output) }
+                                        }
+                                        f
+                                    }
+                                    // Upload to /upload endpoint
+                                    val response = withContext(Dispatchers.IO) {
+                                        api.uploadFile("/upload", tempFile)
+                                    }
+                                    // Parse response for URL
+                                    val obj = jsonParser.parseToJsonElement(response).jsonObject
+                                    val url = obj["url"]?.jsonPrimitive?.content
+                                    if (url != null) {
+                                        // Convert relative URL to absolute
+                                        val fullUrl = if (url.startsWith("http")) url
+                                                      else "${api.getBaseUrl()}$url"
+                                        uploadedUrls.add(fullUrl)
+                                    }
+                                    // Clean up temp file
+                                    withContext(Dispatchers.IO) { tempFile.delete() }
+                                } catch (e: Exception) {
+                                    Log.e("FileUpload", "Upload failed for ${item.name}: ${e.message}", e)
+                                }
+                            }
+                            chatViewModel.sendMessage(imageUrls = uploadedUrls)
+                        }
+                    } else {
+                        chatViewModel.sendMessage()
+                    }
+                },
+                onAttach = {
+                    launchFilePicker()
+                },
+                onComputerUse = {
+                    // Composer shortcut (Brandon 2026-07-23): straight
+                    // into the CU live view. "auto" 302s server-side to
+                    // the best surface — a running agent's desktop
+                    // first, else the main desktop.
+                    navController.navigate("${Routes.CU_LIVE_VIEW}/auto")
+                },
+                onCliTerminal = {
+                    // Composer shortcut (Brandon 2026-07-24): the
+                    // terminal apex of the left-action triangle opens
+                    // the CLI Agents terminal (same route as the
+                    // Settings → CLI Agents entry).
+                    navController.navigate(Routes.CLI_AGENT)
+                },
+                onWhisper = {
+                    // Tap-toggle dictation via /ws/stt (Brandon 2026-07-05).
+                    // Tap 1 = start + live-append; tap 2 = just STOP. The
+                    // transcript stays in the box for editing — no auto-send.
+                    // (Tapping send while live stops + sends; see onSend.)
+                    if (sttClient.isStreaming.value) {
+                        sttClient.stop()
+                    } else {
+                        startDictation()
+                    }
+                },
+                onRecordAudio = {
+                    if (isRawAudioRecording) {
+                        // Stop recording — matches Portal gemini-recorder.js pipeline:
+                        // 1. Upload audio to /upload
+                        // 2. Transcribe via /stt by that upload's URL (the bytes go up
+                        //    once; a box without the url form gets the file) → insert
+                        //    text in prompt
+                        // 3. Add as attachment so it's sent as audio_url to Gemini
+                        isRawAudioRecording = false
+                        Toast.makeText(applicationContext, "Processing audio...", Toast.LENGTH_SHORT).show()
+                        scope.launch {
+                            val file = rawAudioRecorder.stop()
+                            if (file != null) {
+                                val api = chatViewModel.getApi()
+                                if (api != null) {
+                                    try {
+                                        // Step 1: Upload audio file
+                                        val response = withContext(Dispatchers.IO) {
+                                            api.uploadFile("/upload", file)
+                                        }
+                                        val obj = jsonParser.parseToJsonElement(response).jsonObject
+                                        val url = obj["url"]?.jsonPrimitive?.content
+
+                                        if (url != null) {
+                                            val fullUrl = if (url.startsWith("http")) url
+                                                          else "${api.getBaseUrl()}$url"
+                                            // Add to pre-uploaded URLs (already on server, no re-upload needed)
+                                            preUploadedUrls.add(fullUrl)
+                                        }
+
+                                        // Step 2: Transcribe the stored upload (no second upload)
+                                        try {
+                                            val sttResponse = withContext(Dispatchers.IO) {
+                                                transcribeUploadedRecording(api, url, file)
+                                            }
+                                            val sttObj = jsonParser.parseToJsonElement(sttResponse).jsonObject
+                                            val transcript = sttObj["text"]?.jsonPrimitive?.content?.trim()
+                                            if (!transcript.isNullOrBlank()) {
+                                                // Insert transcription into prompt (matching Portal behavior)
+                                                val currentText = chatViewModel.inputText.value.text
+                                                val prefix = if (currentText.isBlank()) "" else "$currentText "
+                                                chatViewModel.onInputChange(
+                                                    TextFieldValue("$prefix$transcript")
+                                                )
+                                                Toast.makeText(applicationContext, "Audio attached + transcribed", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(applicationContext, "Audio attached (no speech detected)", Toast.LENGTH_SHORT).show()
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.w("RawAudio", "STT failed (audio still attached): ${e.message}")
+                                            Toast.makeText(applicationContext, "Audio attached (transcription unavailable)", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("RawAudio", "Upload failed: ${e.message}", e)
+                                        Toast.makeText(applicationContext, "Upload failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    } finally {
+                                        withContext(Dispatchers.IO) { file.delete() }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        withMicPermission {
+                            if (rawAudioRecorder.start()) {
+                                isRawAudioRecording = true
+                                Toast.makeText(applicationContext, "Recording audio...", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(applicationContext, "Microphone unavailable", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                },
+                // Live voice-agent launcher (soundwave button in the input
+                // bubble) → the dedicated voice screen. Composer stays
+                // nav-agnostic; the host owns navigation. launchSingleTop
+                // mirrors the provider-select voice hand-off above.
+                onVoiceAgent = { navController.navigate(Routes.VOICE) { launchSingleTop = true } },
+                // Allow sends during robotics ER missions (prompt injection)
+                isStreaming = (chatState == ChatState.STREAMING || chatState == ChatState.THINKING)
+                    && !(provider == "robotics" && erMissionActive),
+                isRecording = isWhisperStreaming,
+                isRecordingAudio = isRawAudioRecording,
+                recordingBands = {
+                    // Both recorders now publish real analysed bands from their own
+                    // AudioAnalysisTap — the dictation mic at 24 kHz, the raw recorder
+                    // at 16 kHz. Same channel, same shape, whichever is live.
+                    if (isWhisperStreaming) sttBands else rawAudioBands
+                },
+                recordingBins = {
+                    // The SAME tap's spectrum, from the SAME recorder the bands above
+                    // came from — the two channels are two readings of one hop and must
+                    // never be crossed between producers.
+                    if (isWhisperStreaming) sttBins else rawAudioBins
+                },
+                provider = provider,
+                model = currentModel,
+                onProviderChange = { newProvider ->
+                    // Reset model to Auto when switching providers
+                    // so we don't send e.g. claude-opus-4-6 to Gemini,
+                    // then restore this provider's remembered pick only
+                    // if its live list still offers it. W22: the SAME
+                    // path as the Settings sheet's provider dropdown.
+                    scope.launch { providerModels.switchProvider(newProvider) }
+                    // Auto-navigate to dedicated screens for special providers
+                    val targetRoute = ProviderModelWiring.dedicatedRoute(newProvider)
+                    if (targetRoute != null) {
+                        navController.navigate(targetRoute) {
+                            launchSingleTop = true
+                        }
+                    }
+                },
+                // W22: remembered per provider too (model_<provider>), via the
+                // shared pick path the Settings sheet uses.
+                onModelChange = { scope.launch { providerModels.selectModel(provider, it) } },
+                autoTtsEnabled = autoTtsEnabled,
+                onAutoTtsToggle = { scope.launch { store.setAutoTtsEnabled(!autoTtsEnabled) } },
+                providerLabel = chatViewModel.getProviderLabel(),
+                // Task 1.6: offer the on-device LOCAL provider only when a
+                // verified model is installed; re-check (+ best-effort
+                // re-attest) each time the picker opens.
+                localAvailable = chatViewModel.localAvailable.collectAsState().value,
+                // Task W1: on-device engine readiness drives the pill's "loading…/ready"
+                // suffix so the model warm is visible before the first send.
+                localEngineState = chatViewModel.localEngineState.collectAsState().value,
+                onProviderMenuOpen = { chatViewModel.refreshLocalAvailability() },
+                liveModels = chatViewModel.liveModels.collectAsState().value,
+                // Task 7.1: custom-provider warm dots (id → load status
+                // from GET /models/custom; empty for other providers).
+                customModelStatus = chatViewModel.customModelStatus.collectAsState().value,
+                attachments = attachments,
+                onRemoveAttachment = { index ->
+                    if (index in attachments.indices) attachments.removeAt(index)
+                },
+                modifier = Modifier.onGloballyPositioned { coordinates ->
+                    coordinates.boundsInWindow().let { bounds ->
+                        composerTopPx = bounds.top
+                        composerBottomPx = bounds.bottom
+                    }
+                },
+            )
+            // Live-dictation status chip, floating above the composer while the
+            // mic is live (a Popup: no layout space taken).
+            if (isWhisperStreaming && sttStatusText != null) {
+                val chipGapPx = with(density) { 8.dp.roundToPx() }
+                Popup(
+                    popupPositionProvider = remember(chipGapPx) { AboveAnchorPositionProvider(chipGapPx) },
+                    properties = PopupProperties(focusable = false),
+                ) {
+                    SttStatusChip(sttStatusText)
+                }
+            }
+        }
+
+        // Layer 5: highest activity-owned chrome, permanently mounted.
+        ReturnToLiveHost(
+            state = returnToLiveHost,
+            composerTopPx = composerTopPx,
+        )
+
+    }
+    } // end CompositionLocalProvider(LocalEmberMode)
+
+    // A switchable stt_error (quota_exceeded first): offer another provider.
+    sttSwitchOffer?.let { offer ->
+        SttSwitchProviderDialog(
+            api = sttApi,
+            error = offer,
+            onPick = { choice ->
+                sttSwitchOffer = null
+                startDictation(provider = choice.id)
+            },
+            onDismiss = { sttSwitchOffer = null },
+        )
+    }
+
+    // Settings sheet
+    if (showSettings) {
+        SettingsSheet(
+            origin = origin,
+            operators = operators,
+            onDismiss = { showSettings = false },
+            onNavigate = { route ->
+                navController.navigate(route)
+            },
+            onClearHistory = { chatViewModel.clearHistory() }
+        )
+    }
+}
+
+/**
+ * T20 polish: scope the [LocalShowAppChrome] read to a tiny composable so
+ * the giant [BlackBoxApp] body doesn't
+ * subscribe (and therefore invalidate) every sibling on chrome toggle.
+ *
+ * Pass the chrome ([content]) as a slot lambda — it only executes when
+ * the local resolves to `true`. The CompositionLocal subscription stays
+ * inside this 1-line composable; the rest of the activity content stays
+ * insulated from chrome-visibility toggles.
+ */
+@Composable
+private fun AppChromeLayer(
+    forceHide: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    // forceHide is the activity-scope override (T23 fix); LocalShowAppChrome
+    // is the legacy CompositionLocal kept for any descendant-scoped consumers.
+    if (!forceHide && LocalShowAppChrome.current) content()
+}

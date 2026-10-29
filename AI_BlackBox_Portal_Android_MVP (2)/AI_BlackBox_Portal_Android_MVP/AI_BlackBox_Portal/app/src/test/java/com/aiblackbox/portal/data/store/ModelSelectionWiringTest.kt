@@ -8,7 +8,7 @@ import java.io.File
 
 /**
  * W22 / A11-settings-generation-06 — WIRING guard. SettingsViewModel (an
- * AndroidViewModel) and the composer pill in NativeMainActivity cannot be stood up on
+ * AndroidViewModel) and the composer pill in BlackBoxApp cannot be stood up on
  * the plain JVM, so their behaviour is tested through the shared path they delegate
  * to (ModelSelectionTest). This pins that they DO delegate — the surfaces drifted
  * once because each wrote the keys its own way:
@@ -67,8 +67,8 @@ class ModelSelectionWiringTest {
         return src.substring(start, end)
     }
 
-    /** The app's composition: the composer pill and the NavGraph call live here. */
-    private val app = "$root/NativeMainActivity.kt"
+    /** The app's composition (out of NativeMainActivity): the composer pill and the NavGraph call. */
+    private val app = "$root/navigation/BlackBoxApp.kt"
     private val wiringFile = "$root/navigation/ProviderModelWiring.kt"
 
     @Test fun `the composer pill switches provider through the shared path`() {
@@ -79,7 +79,7 @@ class ModelSelectionWiringTest {
         assertFalse(pill, "store.setProvider(" in pill)
         assertFalse(pill, "store.setModel(" in pill)
         // The wiring is fed the live catalog's ids...
-        val built = activity.substringAfter("ProviderModelWiring(store.providerModels())").substringBefore("\n                }")
+        val built = activity.substringAfter("ProviderModelWiring(store.providerModels())").substringBefore("\n    }")
         assertTrue(built, "ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)" in built)
         // ...and switches through the store's shared path with them.
         val wiring = moduleSource(wiringFile)
@@ -113,7 +113,7 @@ class ModelSelectionWiringTest {
         val navGraphCall = activity.substringAfter("BlackBoxNavGraph(").substringBefore("onSpeak = ")
         val screenModel = navGraphCall.substringAfter("onModelChange = ").substringBefore("\n")
         assertTrue(screenModel, "providerModels.selectModel(provider, it)" in screenModel)
-        // No model picker in the activity writes the bare global key any more.
+        // No model picker in the app writes the bare global key any more.
         assertFalse("onModelChange = { scope.launch { store.setModel(" in activity)
         assertFalse("onModelChange = { scope.launch { store.selectModel(" in activity)
 
