@@ -361,7 +361,12 @@ def test_reap_evicts_an_unsavable_operatorless_session():
 
 
 def test_reap_all_saves_through_the_route_and_retries_the_spool(box, monkeypatch):
-    from Orchestrator.models import REALTIME_SESSIONS
+    from Orchestrator.models import GEMINI_LIVE_SESSIONS, GROK_LIVE_SESSIONS, REALTIME_SESSIONS
+    # reap_all() sweeps the real registries. The root conftest empties them
+    # for every test, so the session below is the only one it can find: a
+    # session another test left behind would be swept and counted too.
+    assert not (GEMINI_LIVE_SESSIONS or GROK_LIVE_SESSIONS or REALTIME_SESSIONS), (
+        "another test's live voice session leaked into this one")
     fake = _ChatSave(monkeypatch, status=200)
     session = _stale(RealtimeSession, "reap-all-1")
     session.last_activity = (datetime.now(timezone.utc)
@@ -376,8 +381,12 @@ def test_reap_all_saves_through_the_route_and_retries_the_spool(box, monkeypatch
     monkeypatch.setattr(reaper, "retry_transcripts", fake_retry)
     try:
         counts = asyncio.run(reaper.reap_all())
+        evicted = "reap-all-1" not in REALTIME_SESSIONS
     finally:
         REALTIME_SESSIONS.pop("reap-all-1", None)
-    assert counts.get("realtime") == 1
+    assert counts == {"realtime": 1}
+    assert evicted, "the stale session must be evicted once its turns are saved"
     assert len(fake.bodies) == 1 and "hi" in fake.bodies[0]["assistant_response"]
+    assert fake.bodies[0]["model"] == "openai-realtime-voice"
+    assert session.conversation == [], "saved through the route, which takes the turns"
     assert retried == [False]

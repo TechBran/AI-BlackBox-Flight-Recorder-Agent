@@ -134,7 +134,13 @@ def grok_relay_stubs(monkeypatch):
 
     monkeypatch.setattr(gl, "grok_listener", _noop)
     monkeypatch.setattr(gl, "grok_keepalive_loop", _noop)
-    return connect_mock, configure_mock
+    from Orchestrator.models import GROK_LIVE_SESSIONS
+    before = set(GROK_LIVE_SESSIONS)
+    yield connect_mock, configure_mock
+    # The route keeps the disconnected session in GROK_LIVE_SESSIONS through
+    # the reconnect grace; a later test's reaper sweep must not find it.
+    for sid in set(GROK_LIVE_SESSIONS) - before:
+        GROK_LIVE_SESSIONS.pop(sid, None)
 
 
 def test_connected_event_reports_resolved_model(grok_relay_stubs):

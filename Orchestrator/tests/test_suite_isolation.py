@@ -428,3 +428,34 @@ def test_no_test_pins_an_absolute_working_directory():
                 if _ABSOLUTE_CWD.search(line):
                     offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
     assert offenders == []
+
+
+# ── no live voice session carries over (root conftest.py) ────────────────────
+
+def test_the_isolated_registries_are_the_ones_the_reaper_sweeps(request):
+    """A registry the reaper sweeps but the root conftest leaves alone would
+    let one test's disconnected voice session reach another test's
+    reap_all() (test_voice_transcript_spool counted five strangers on CI)."""
+    from Orchestrator import live_session_reaper, models
+    root = _root_conftest(request)
+    swept = {id(registry) for registry, _ in live_session_reaper._registries().values()}
+    isolated = {id(getattr(models, name)) for name in root._LIVE_SESSION_REGISTRIES}
+    assert isolated == swept
+    assert "_no_live_voice_session_carries_over" in request.fixturenames
+
+
+def test_a_live_session_a_test_leaves_behind_does_not_reach_the_next(request):
+    from Orchestrator.models import (
+        GROK_LIVE_SESSIONS, REALTIME_SESSIONS, GrokLiveSession, RealtimeSession)
+    root = _root_conftest(request)
+    outer = GrokLiveSession(session_id="iso-outer")
+    GROK_LIVE_SESSIONS["iso-outer"] = outer   # held before the "test" began
+    try:
+        with root._live_voice_sessions_isolated():
+            assert GROK_LIVE_SESSIONS == {} and REALTIME_SESSIONS == {}
+            REALTIME_SESSIONS["iso-left-behind"] = RealtimeSession(
+                session_id="iso-left-behind", status="disconnected")
+        assert "iso-left-behind" not in REALTIME_SESSIONS
+        assert GROK_LIVE_SESSIONS == {"iso-outer": outer}
+    finally:
+        GROK_LIVE_SESSIONS.pop("iso-outer", None)

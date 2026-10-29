@@ -1,6 +1,7 @@
 """Root conftest — puts repo root on sys.path so `from Orchestrator...` works,
 and keeps every test session away from this box's credentials, network, live
 services and stores (see "Isolation" and "Checkout write guard" below)."""
+import contextlib
 import errno
 import ipaddress
 import os
@@ -599,6 +600,48 @@ def _reset_local_stack_breakers():
     reset = getattr(local_stack, "reset_breakers", None)
     if reset is not None:
         reset()
+
+
+# The live voice-session registries of Orchestrator/models.py: the ones the
+# reaper sweeps (live_session_reaper._registries; test_suite_isolation pins
+# that the two lists agree).
+_LIVE_SESSION_REGISTRIES = ("GEMINI_LIVE_SESSIONS", "GROK_LIVE_SESSIONS", "REALTIME_SESSIONS")
+
+
+def _live_session_registries() -> list:
+    models = sys.modules.get("Orchestrator.models")
+    return [getattr(models, name) for name in _LIVE_SESSION_REGISTRIES
+            if isinstance(getattr(models, name, None), dict)]
+
+
+@contextlib.contextmanager
+def _live_voice_sessions_isolated():
+    """Run the body with the live voice-session registries empty, then drop
+    whatever it left in them and put back what they held before."""
+    saved = [(registry, dict(registry)) for registry in _live_session_registries()]
+    for registry, _ in saved:
+        registry.clear()
+    try:
+        yield
+    finally:
+        for registry in _live_session_registries():
+            registry.clear()
+        for registry, entries in saved:
+            registry.update(entries)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_voice_session_carries_over():
+    """GEMINI_LIVE_SESSIONS / GROK_LIVE_SESSIONS / REALTIME_SESSIONS are
+    process state. A voice route keeps a disconnected session in them through
+    the reconnect grace, so a test that drives a voice endpoint leaves its
+    session behind. Once DISCONNECTED_GRACE_SEC has passed (on a slow runner,
+    well before the suite ends) a later test's reaper sweep evicts and counts
+    it as well. Each test starts with the registries empty, and what it
+    leaves there is dropped. Only a module some test already imported is
+    touched (nothing is imported on its behalf)."""
+    with _live_voice_sessions_isolated():
+        yield
 
 
 @pytest.fixture(autouse=True)

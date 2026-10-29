@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import Orchestrator.routes.realtime_routes as rr
 from Orchestrator.checkpoint import app
+from Orchestrator.models import REALTIME_SESSIONS
 
 
 @pytest.fixture
@@ -28,7 +29,12 @@ def relay_stubs(monkeypatch):
 
     monkeypatch.setattr(rr, "openai_listener", _noop)
     monkeypatch.setattr(rr, "openai_keepalive_loop", _noop)
-    return connect_mock, configure_mock
+    before = set(REALTIME_SESSIONS)
+    yield connect_mock, configure_mock
+    # The route keeps the disconnected session in REALTIME_SESSIONS through
+    # the reconnect grace; a later test's reaper sweep must not find it.
+    for sid in set(REALTIME_SESSIONS) - before:
+        REALTIME_SESSIONS.pop(sid, None)
 
 
 def _drive_connect(path, connect_msg):
