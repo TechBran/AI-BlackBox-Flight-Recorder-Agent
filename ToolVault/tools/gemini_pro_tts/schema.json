@@ -8,6 +8,10 @@
     "mcp"
   ],
   "tier": 2,
+  "x-availability": {
+    "feature": "tts",
+    "provider": "gemini"
+  },
   "parameters": {
     "type": "object",
     "properties": {

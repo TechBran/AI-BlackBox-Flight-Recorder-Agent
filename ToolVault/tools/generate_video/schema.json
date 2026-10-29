@@ -12,6 +12,13 @@
     "mcp"
   ],
   "tier": 2,
+  "x-availability": {
+    "feature": "video",
+    "provider": "veo",
+    "requires_env": [
+      "GOOGLE_API_KEY"
+    ]
+  },
   "parameters": {
     "type": "object",
     "properties": {

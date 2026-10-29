@@ -12,6 +12,13 @@
     "mcp"
   ],
   "tier": 2,
+  "x-availability": {
+    "feature": "music",
+    "provider": "lyria",
+    "requires_env": [
+      "GOOGLE_APPLICATION_CREDENTIALS"
+    ]
+  },
   "parameters": {
     "type": "object",
     "properties": {

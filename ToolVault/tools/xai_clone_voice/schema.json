@@ -4,6 +4,13 @@
   "category": "audio",
   "groups": ["chat", "chat_cu", "mcp"],
   "tier": 2,
+  "x-availability": {
+    "feature": "tts",
+    "provider": "xai",
+    "requires_env": [
+      "XAI_API_KEY"
+    ]
+  },
   "parameters": {
     "type": "object",
     "properties": {

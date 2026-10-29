@@ -1,4 +1,4 @@
-"""Tool-availability gate for ToolVault (v1: web-search presence-gating).
+"""Tool-availability gate for ToolVault (presence-gating per provider key).
 
 Lean-venv-safe: reads .env / config.ini with STDLIB ONLY (never import
 Orchestrator.config -- the MCP server's lean venv lacks fastapi). See the
@@ -12,9 +12,12 @@ _ROOT = os.environ.get("BLACKBOX_ROOT") or os.path.dirname(
 
 # Feature registry: each feature carries its enable/default preference env vars,
 # a provider->env map, and a keyless-floor set (providers always enabled, no key).
-# Extensible to video/music later -- add a feature entry and tag tool schemas with
-# x-availability.feature. web_search is the DEFAULT feature (back-compat: shipped
-# web tools have no `feature` key and must resolve to web_search).
+# Add a feature entry and tag tool schemas with x-availability.feature; the
+# registry refuses a schema naming a feature that is not here (schema_spec).
+# web_search is the DEFAULT feature (back-compat: shipped web tools have no
+# `feature` key and must resolve to web_search). provider_tool names each
+# provider's representative tool (the default-provider hints read it; only
+# web_search and image render one).
 FEATURES = {
     "web_search": {
         "enabled_pref": "WEB_SEARCH_ENABLED",
@@ -46,6 +49,59 @@ FEATURES = {
         "hint_noun": "image generation",
         "hint_prefix": "IMAGE GENERATION GUIDANCE: ",
         "keyless_floor": set(),            # NO free image provider
+    },
+    # Media tools that only a configured provider can run (audit
+    # O18-toolvault-modules-13): without these gates a fresh box with no keys
+    # still discovered them, and the model called tools that could only fail.
+    "music": {   # music and sound-effect generation
+        "enabled_pref": "MUSIC_ENABLED",
+        "default_pref": "MUSIC_DEFAULT",
+        "provider_env": {
+            # Lyria runs on Vertex AI under a service account, not the API key.
+            "lyria": "GOOGLE_APPLICATION_CREDENTIALS",
+            "elevenlabs": "ELEVENLABS_API_KEY",
+        },
+        "provider_tool": {"lyria": "lyria_music", "elevenlabs": "elevenlabs_music"},
+        "hint_noun": "music generation",
+        "hint_prefix": "MUSIC GENERATION GUIDANCE: ",
+        "keyless_floor": set(),
+    },
+    "video": {
+        "enabled_pref": "VIDEO_ENABLED",
+        "default_pref": "VIDEO_DEFAULT",
+        "provider_env": {"veo": "GOOGLE_API_KEY"},
+        "provider_tool": {"veo": "generate_video"},
+        "hint_noun": "video generation",
+        "hint_prefix": "VIDEO GENERATION GUIDANCE: ",
+        "keyless_floor": set(),
+    },
+    # The provider-specific speech and voice tools. The catalog-driven
+    # text_to_speech / list_tts_voices / speech_to_text tools stay ungated:
+    # they also reach the on-box engines. A box whose Gemini TTS runs only on a
+    # service account enables it explicitly (TTS_ENABLED=gemini,...).
+    "tts": {
+        "enabled_pref": "TTS_ENABLED",
+        "default_pref": "TTS_DEFAULT",
+        "provider_env": {
+            "gemini": "GOOGLE_API_KEY", "elevenlabs": "ELEVENLABS_API_KEY",
+            "xai": "XAI_API_KEY",
+        },
+        "provider_tool": {
+            "gemini": "gemini_pro_tts", "elevenlabs": "elevenlabs_list_voices",
+            "xai": "xai_clone_voice",
+        },
+        "hint_noun": "speech generation",
+        "hint_prefix": "SPEECH GENERATION GUIDANCE: ",
+        "keyless_floor": set(),
+    },
+    "analysis": {   # analyze_image / analyze_audio / analyze_video (Gemini)
+        "enabled_pref": "ANALYSIS_ENABLED",
+        "default_pref": "ANALYSIS_DEFAULT",
+        "provider_env": {"gemini": "GOOGLE_API_KEY"},
+        "provider_tool": {"gemini": "analyze_image"},
+        "hint_noun": "media analysis",
+        "hint_prefix": "MEDIA ANALYSIS GUIDANCE: ",
+        "keyless_floor": set(),
     },
 }
 

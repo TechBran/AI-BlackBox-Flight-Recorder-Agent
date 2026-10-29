@@ -8,6 +8,13 @@
     "mcp"
   ],
   "tier": 2,
+  "x-availability": {
+    "feature": "analysis",
+    "provider": "gemini",
+    "requires_env": [
+      "GOOGLE_API_KEY"
+    ]
+  },
   "parameters": {
     "type": "object",
     "properties": {

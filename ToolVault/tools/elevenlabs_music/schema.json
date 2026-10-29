@@ -12,6 +12,13 @@
     "mcp"
   ],
   "tier": 2,
+  "x-availability": {
+    "feature": "music",
+    "provider": "elevenlabs",
+    "requires_env": [
+      "ELEVENLABS_API_KEY"
+    ]
+  },
   "parameters": {
     "type": "object",
     "properties": {
