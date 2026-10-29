@@ -1,0 +1,994 @@
+{
+ "client": [
+  {
+   "data": {
+    "arguments": {
+     "k": 2,
+     "query": "ann"
+    },
+    "name": "search_snapshots"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "search_snapshots",
+    "result_length": 168
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "query": ""
+    },
+    "name": "search_snapshots"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "search_snapshots",
+    "result_length": 32
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "max_chars": 500,
+     "url": "https://example.com/a"
+    },
+    "name": "web_fetch"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "web_fetch",
+    "result_length": 37
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "numberOfImages": 2,
+     "prompt": "a red barn at dusk",
+     "reference_images": [
+      "/ui/uploads/a.png"
+     ]
+    },
+    "name": "gemini_image"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "count": 2,
+    "prompt": "a red barn at dusk",
+    "task_id": "task-1"
+   },
+   "type": "image_task"
+  },
+  {
+   "data": {
+    "name": "gemini_image",
+    "result_length": 113
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "prompt": "a lighthouse",
+     "size": "1024x1024"
+    },
+    "name": "openai_image"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "count": 1,
+    "prompt": "a lighthouse",
+    "task_id": "task-2"
+   },
+   "type": "image_task"
+  },
+  {
+   "data": {
+    "name": "openai_image",
+    "result_length": 79
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "duration": 6,
+     "image_url": "/ui/uploads/b.png",
+     "negativePrompt": "blur",
+     "prompt": "waves"
+    },
+    "name": "generate_video"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "duration": 6,
+    "prompt": "waves",
+    "resolution": "720p",
+    "task_id": "task-3"
+   },
+   "type": "video_task"
+  },
+  {
+   "data": {
+    "name": "generate_video",
+    "result_length": 133
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "prompt": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "video_url": "/ui/uploads/c.mp4"
+    },
+    "name": "generate_video"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "duration": 8,
+    "prompt": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "resolution": "720p",
+    "task_id": "task-4"
+   },
+   "type": "video_task"
+  },
+  {
+   "data": {
+    "name": "generate_video",
+    "result_length": 232
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "negativePrompt": "drums",
+     "prompt": "calm piano",
+     "sampleCount": 2
+    },
+    "name": "lyria_music"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "prompt": "calm piano",
+    "sample_count": 2,
+    "task_id": "task-5"
+   },
+   "type": "music_task"
+  },
+  {
+   "data": {
+    "name": "lyria_music",
+    "result_length": 104
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "prompt": "short"
+    },
+    "name": "lyria_music"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "prompt": "short",
+    "sample_count": 1,
+    "task_id": "task-6"
+   },
+   "type": "music_task"
+  },
+  {
+   "data": {
+    "name": "lyria_music",
+    "result_length": 84
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "url": "/ui/uploads/a.png"
+    },
+    "name": "get_media"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "get_media",
+    "result_length": 70
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "media_type": "video"
+    },
+    "name": "list_media"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "list_media",
+    "result_length": 57
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "limit": 3,
+     "query": "sunset"
+    },
+    "name": "search_media"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "search_media",
+    "result_length": 74
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "extra": "dropped",
+     "message": "hi",
+     "phone_number": "+15550000002"
+    },
+    "name": "send_sms"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "send_sms",
+    "result_length": 36
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "greeting": "hello",
+     "phone_number": "+15550000003"
+    },
+    "name": "make_phone_call"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "make_phone_call",
+    "result_length": 18
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "message": "msg",
+     "phone_number": "+15550000004"
+    },
+    "name": "make_voice_call"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "make_voice_call",
+    "result_length": 18
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "count": 9
+    },
+    "name": "list_recent_snapshots"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "list_recent_snapshots",
+    "result_length": 173
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {},
+    "name": "get_recent_snapshots"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "get_recent_snapshots",
+    "result_length": 173
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "query": "ann"
+    },
+    "name": "search_contacts"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "search_contacts",
+    "result_length": 115
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "name": "Bo",
+     "phone": "+15550000005",
+     "tags": [
+      "x"
+     ]
+    },
+    "name": "save_contact"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "save_contact",
+    "result_length": 214
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "name": "daily",
+     "schedule": "0 9 * * *"
+    },
+    "name": "create_cron_job"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "create_cron_job",
+    "result_length": 37
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "job_id": "j1"
+    },
+    "name": "edit_cron_job"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "edit_cron_job",
+    "result_length": 16
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "query": "daily"
+    },
+    "name": "search_cron_jobs"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "search_cron_jobs",
+    "result_length": 19
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "task": "open the browser"
+    },
+    "name": "use_computer"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "use_computer",
+    "result_length": 28
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {},
+    "name": "list_devices"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "list_devices",
+    "result_length": 15
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "action": "home"
+    },
+    "name": "control_android_device"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "control_android_device",
+    "result_length": 25
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {},
+    "name": "get_current_time"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "get_current_time",
+    "result_length": 61
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {
+     "sides": 6
+    },
+    "name": "roll_dice"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "roll_dice",
+    "result_length": 12
+   },
+   "type": "tool_result"
+  },
+  {
+   "data": {
+    "arguments": {},
+    "name": "silent_tool"
+   },
+   "type": "tool_call"
+  },
+  {
+   "data": {
+    "name": "silent_tool",
+    "result_length": 53
+   },
+   "type": "tool_result"
+  }
+ ],
+ "client_closed": null,
+ "dials": [],
+ "executor_calls": [
+  {
+   "args": {
+    "message": "hi",
+    "phone_number": "+15550000002"
+   },
+   "operator": "golden-op",
+   "tool": "send_sms"
+  },
+  {
+   "args": {
+    "backend": "openai_realtime",
+    "greeting": "hello",
+    "phone_number": "+15550000003",
+    "role": ""
+   },
+   "operator": "golden-op",
+   "tool": "make_phone_call"
+  },
+  {
+   "args": {
+    "message": "msg",
+    "phone_number": "+15550000004",
+    "voice": "onyx"
+   },
+   "operator": "golden-op",
+   "tool": "make_voice_call"
+  },
+  {
+   "args": {
+    "name": "daily",
+    "schedule": "0 9 * * *"
+   },
+   "operator": "golden-op",
+   "tool": "create_cron_job"
+  },
+  {
+   "args": {
+    "job_id": "j1"
+   },
+   "operator": "golden-op",
+   "tool": "edit_cron_job"
+  },
+  {
+   "args": {
+    "query": "daily"
+   },
+   "operator": "golden-op",
+   "tool": "search_cron_jobs"
+  },
+  {
+   "args": {
+    "task": "open the browser"
+   },
+   "operator": "golden-op",
+   "tool": "use_computer"
+  },
+  {
+   "args": {},
+   "operator": "golden-op",
+   "tool": "list_devices"
+  },
+  {
+   "args": {
+    "action": "home"
+   },
+   "operator": "golden-op",
+   "tool": "control_android_device"
+  },
+  {
+   "args": {
+    "sides": 6
+   },
+   "operator": "golden-op",
+   "tool": "roll_dice"
+  },
+  {
+   "args": {},
+   "operator": "golden-op",
+   "tool": "silent_tool"
+  }
+ ],
+ "saves": [],
+ "tasks": [
+  {
+   "operator": "golden-op",
+   "prompt": "a red barn at dusk",
+   "result_data": {
+    "options": {
+     "aspectRatio": "16:9",
+     "numberOfImages": 2,
+     "provider": "gemini",
+     "reference_images": [
+      "/ui/uploads/a.png"
+     ],
+     "resolution": "1K"
+    }
+   },
+   "type": "image_generation"
+  },
+  {
+   "operator": "golden-op",
+   "prompt": "a lighthouse",
+   "result_data": {
+    "options": {
+     "aspectRatio": "16:9",
+     "numberOfImages": 1,
+     "provider": "openai",
+     "resolution": "1K",
+     "size": "1024x1024"
+    }
+   },
+   "type": "image_generation"
+  },
+  {
+   "operator": "golden-op",
+   "prompt": "waves",
+   "result_data": {
+    "options": {
+     "aspectRatio": "16:9",
+     "duration": 6,
+     "image_url": "/ui/uploads/b.png",
+     "negativePrompt": "blur",
+     "resolution": "720p"
+    }
+   },
+   "type": "video_generation"
+  },
+  {
+   "operator": "golden-op",
+   "prompt": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "result_data": {
+    "options": {
+     "aspectRatio": "16:9",
+     "duration": 8,
+     "resolution": "720p",
+     "video_url": "/ui/uploads/c.mp4"
+    }
+   },
+   "type": "video_generation"
+  },
+  {
+   "operator": "golden-op",
+   "prompt": "calm piano",
+   "result_data": {
+    "negative_prompt": "drums",
+    "operator": "golden-op",
+    "prompt": "calm piano",
+    "sample_count": 2
+   },
+   "type": "lyria_music"
+  },
+  {
+   "operator": "golden-op",
+   "prompt": "short",
+   "result_data": {
+    "operator": "golden-op",
+    "prompt": "short"
+   },
+   "type": "lyria_music"
+  }
+ ],
+ "tool_groups": [],
+ "upstream": [
+  [
+   {
+    "item": {
+     "call_id": "call-0",
+     "output": "Found 2 relevant snapshot(s) for: ann\n\n\n--- Result 1 ---\n<<[SNAP-20261002-0001] ann hit 1 (golden-op)>>\n\n--- Result 2 ---\n<<[SNAP-20261002-0002] ann hit 2 (golden-op)>>",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-1",
+     "output": "Error: No search query provided.",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-2",
+     "output": "FETCHED https://example.com/a max=500",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-3",
+     "output": "Image generation started (image-to-image) (using 1 reference image): a red barn at dusk. Creating 2 images at 1K.",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-4",
+     "output": "Image generation started (text-to-image): a lighthouse. Creating 1 image at 1K.",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-5",
+     "output": "Video generation started (image-to-video) (animating image: /ui/uploads/b.png): waves. Creating 6s video at 720p. Takes 5-20 minutes.",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-6",
+     "output": "Video generation started (video-extension) (extending video: /ui/uploads/c.mp4): xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.... Creating 8s video at 720p. Takes 5-20 minutes.",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-7",
+     "output": "Music generation started for: calm piano (2 variations). 30-second track will be ready in 20-60 seconds.",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-8",
+     "output": "Music generation started for: short. 30-second track will be ready in 20-60 seconds.",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-9",
+     "output": "{\n  \"url\": \"/ui/uploads/a.png\",\n  \"task_id\": null,\n  \"kind\": \"image\"\n}",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-10",
+     "output": "{\n  \"media_type\": \"video\",\n  \"limit\": 20,\n  \"items\": []\n}",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-11",
+     "output": "{\n  \"query\": \"sunset\",\n  \"media_type\": null,\n  \"limit\": 3,\n  \"items\": []\n}",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-12",
+     "output": "SMS sent\n[tool_data]: {\"sid\": \"SM1\"}",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-13",
+     "output": "make_phone_call ok",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-14",
+     "output": "make_voice_call ok",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-15",
+     "output": "Found 2 recent snapshot(s) (operator: golden-op):\n\n\n--- SNAP-20261003-0001 (operator: golden-op) ---\nthird-snap\n\n--- SNAP-20261001-0001 (operator: golden-op) ---\nfirst-snap ",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-16",
+     "output": "Found 2 recent snapshot(s) (operator: golden-op):\n\n\n--- SNAP-20261003-0001 (operator: golden-op) ---\nthird-snap\n\n--- SNAP-20261001-0001 (operator: golden-op) ---\nfirst-snap ",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-17",
+     "output": "[\n  {\n    \"name\": \"Ann Example\",\n    \"phone\": \"+15550000001\",\n    \"query\": \"ann\",\n    \"operator\": \"golden-op\"\n  }\n]",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-18",
+     "output": "Contact saved: {\n  \"saved\": true,\n  \"name\": \"Bo\",\n  \"notes\": \"\",\n  \"tags\": [\n    \"x\"\n  ],\n  \"operator\": \"golden-op\",\n  \"created_by\": \"grok-live\",\n  \"phone\": \"+15550000005\",\n  \"email\": null,\n  \"relationship\": null\n}",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-19",
+     "output": "job created\n[tool_data]: {\"id\": \"j1\"}",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-20",
+     "output": "edit_cron_job ok",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-21",
+     "output": "search_cron_jobs ok",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-22",
+     "output": "CU task started task_id=cu-1",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-23",
+     "output": "list_devices ok",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-24",
+     "output": "control_android_device ok",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-25",
+     "output": "Current date and time: Thursday, October 29, 2026 at 02:05 PM",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-26",
+     "output": "roll_dice ok",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   },
+   {
+    "item": {
+     "call_id": "call-27",
+     "output": "Tool 'silent_tool' executed successfully (no output).",
+     "type": "function_call_output"
+    },
+    "type": "conversation.item.create"
+   },
+   {
+    "type": "response.create"
+   }
+  ]
+ ]
+}
