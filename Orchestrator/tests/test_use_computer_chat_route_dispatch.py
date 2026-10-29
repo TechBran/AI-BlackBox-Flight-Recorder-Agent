@@ -1,7 +1,7 @@
 """M1-T3: the chat-route `use_computer` handlers route through the ToolVault executor.
 
-`use_computer` has SEVEN call sites across the provider tool-loops in
-Orchestrator/routes/chat_routes.py. Five already dispatch through
+`use_computer` used to have SEVEN call sites across the provider tool-loops in
+Orchestrator/routes/chat_routes.py. Five dispatched through
 ``BlackBoxToolExecutor.execute("use_computer", ...)`` (which runs the T2
 per-tool module executor → class resolution, device_id, url, AND the structured
 retryable failure). TWO legacy Anthropic branches (non-stream call_anthropic and
@@ -11,15 +11,19 @@ building ``result_data={"url": url} if url else {}`` — dropping ``device_id`` 
 inert on the primary chat path and downstream tasks got ``result_data["model"]
 is None``.
 
-T3 routes BOTH legacy branches through the executor, so all seven inherit
-resolution / threading / failure-shaping from ONE source and cannot drift.
+T3 routed BOTH legacy branches through the executor; audit rank 74 then moved
+every loop's tool table into the one dispatcher (providers/tool_dispatch.py),
+so all ten loops inherit resolution / threading / failure-shaping from ONE
+source and cannot drift.
 
 Covered here:
-  * STRUCTURAL (both branches, revert-proof): every ``use_computer`` branch in
-    chat_routes.py dispatches via ``.execute("use_computer", ...)`` and NONE
-    calls ``create_task`` directly. The matcher is name-agnostic and
-    membership-aware (a reworded branch cannot escape it — pinned by its own
-    test) and the branch count is pinned at 7 to guard the matcher's coverage.
+  * BEHAVIOR (every loop profile, revert-proof): dispatch_tool runs
+    use_computer through ``.execute("use_computer", ...)`` for all ten loops and
+    never calls ``create_task`` itself; the streams that emit browser_task do.
+  * STRUCTURAL: no inline ``use_computer`` branch is back in chat_routes.py or
+    the dispatcher (one would bypass the shared seam). The matcher is
+    name-agnostic and membership-aware (a reworded branch cannot escape it —
+    pinned by its own test).
   * BEHAVIOR — non-stream (call_anthropic, driven end-to-end): a fake Anthropic
     tool_use requesting use_computer results in a task whose result_data carries
     device_id + resolved concrete model id + url; ``model="gemini"`` stores
@@ -45,6 +49,7 @@ from Orchestrator.toolvault.context import ToolContext
 
 _REPO = Path(__file__).resolve().parents[2]
 _CHAT_ROUTES = _REPO / "Orchestrator" / "routes" / "chat_routes.py"
+_TOOL_DISPATCH = _REPO / "Orchestrator" / "providers" / "tool_dispatch.py"
 
 # The same live-shaped CU catalog T2 uses: anthropic opus + sonnet and one gemini
 # CU model — deliberately no gpt/openai member, so "available classes" is a
@@ -151,75 +156,100 @@ def test_matcher_detects_membership_form_and_is_name_agnostic():
     assert not _is_use_computer_test(unrelated.test), "matched an unrelated comparison"
 
 
-def test_use_computer_branch_count_pins_matcher_coverage():
-    """Pinned count = 7.
+def test_no_inline_use_computer_branch_bypasses_the_shared_dispatcher():
+    """Pinned count = 0 in both files.
 
-    The count-pin's real value is NOT the branch tally: it guards the MATCHER's
-    own coverage. If a future branch drops out of AST detection (reworded past
-    the matcher, or the matcher regresses), the count falls below 7 here AND the
-    branch vanishes from the property test unseen — the two tests cover each
-    other's blind spot. So do NOT reflexively bump 7 when this fails."""
-    branches = _use_computer_branches(_CHAT_ROUTES)
-    assert len(branches) == 7, (
-        f"expected 7 use_computer branches, found {len(branches)} at lines "
-        f"{[b.lineno for b in branches]}. This pin guards the AST matcher's "
-        f"coverage, not the branch count per se: if you LEGITIMATELY added a "
-        f"branch, first confirm test_every_use_computer_branch_routes_through_"
-        f"executor actually SEES it (broaden _is_use_computer_test if not), then "
-        f"bump this number — never bump it blind, or you disable both tests."
-    )
+    Every provider loop hands use_computer to dispatch_tool, which routes it by
+    table membership (no ``== "use_computer"`` branch at all). An inline branch
+    reappearing in chat_routes.py, or an if-branch in the dispatcher, would be a
+    second path that can drift from the executor (the T3 bug); if one is added
+    on purpose it must pass the property test below first."""
+    for path in (_CHAT_ROUTES, _TOOL_DISPATCH):
+        branches = _use_computer_branches(path)
+        assert branches == [], (
+            f"{path.name}: inline use_computer branch(es) at lines "
+            f"{[b.lineno for b in branches]} bypass the shared dispatch_tool table")
 
 
 def test_every_use_computer_branch_routes_through_executor():
-    """The whole T3 fix: EVERY use_computer branch dispatches via
-    ``.execute("use_computer", ...)`` and NONE calls create_task directly.
-
-    Reverting either legacy Anthropic branch to ``create_task(...)`` fails this.
-    """
+    """The whole T3 fix, kept as a guard: any use_computer branch (there are
+    none today) dispatches via ``.execute("use_computer", ...)`` and NONE calls
+    create_task directly."""
     offenders_no_execute = []
     offenders_create_task = []
-    for b in _use_computer_branches(_CHAT_ROUTES):
-        calls = _branch_body_calls(b)
-        if not any(_calls_execute_use_computer(c) for c in calls):
-            offenders_no_execute.append(b.lineno)
-        if any(_calls_create_task(c) for c in calls):
-            offenders_create_task.append(b.lineno)
+    for path in (_CHAT_ROUTES, _TOOL_DISPATCH):
+        for b in _use_computer_branches(path):
+            calls = _branch_body_calls(b)
+            if not any(_calls_execute_use_computer(c) for c in calls):
+                offenders_no_execute.append((path.name, b.lineno))
+            if any(_calls_create_task(c) for c in calls):
+                offenders_create_task.append((path.name, b.lineno))
     assert not offenders_no_execute, (
-        f"use_computer branch(es) at lines {offenders_no_execute} do NOT dispatch "
+        f"use_computer branch(es) at {offenders_no_execute} do NOT dispatch "
         f'via .execute("use_computer", ...) — class routing / device_id / model '
         f"are inert there"
     )
     assert not offenders_create_task, (
-        f"use_computer branch(es) at lines {offenders_create_task} call create_task "
+        f"use_computer branch(es) at {offenders_create_task} call create_task "
         f"DIRECTLY — bypassing the executor drops device_id + model (the T3 bug)"
     )
 
 
-def test_stream_branches_still_call_the_browser_task_helper():
-    """Pins the seam the _browser_task_event extraction created.
+def _dispatch_use_computer(monkeypatch, loop, data):
+    """dispatch_tool(use_computer) for ``loop``'s profile with a recording
+    executor; returns (outcome, executor_calls, create_task_calls)."""
+    from Orchestrator.providers import tool_dispatch as td
+    from Orchestrator.toolvault.context import ToolResult
+    import Orchestrator.tools as tools_pkg
 
-    The helper's own behavior is covered below, but a tested helper proves
-    nothing if the shipping branches stop calling it. M3 (2026-07-23) extended
-    the emit from the single Anthropic stream to EVERY provider's use_computer
-    branch (openai/gemini/xai + anthropic), so the in-chat agent pill appears
-    no matter which model launched the run. Guard that every use_computer
-    branch that yields to the client also calls the helper — a dropped call
-    site silently stops browser_task while the unit tests below keep passing.
-    """
-    callers = [
-        b.lineno for b in _use_computer_branches(_CHAT_ROUTES)
-        if any(
-            isinstance(c.func, ast.Name) and c.func.id == "_browser_task_event"
-            for c in _branch_body_calls(b)
-        )
-    ]
-    assert len(callers) >= 4, (
-        "expected the use_computer branches across the streaming providers "
-        "(anthropic/openai/gemini/xai) to call _browser_task_event, found "
-        f"{len(callers)} at {callers}. If a call site was removed, that "
-        "provider's stream silently stops emitting browser_task while the "
-        "helper's unit tests keep passing."
-    )
+    executed, created = [], []
+
+    class _Executor:
+        def __init__(self, operator="system", origin_device_id=None, **kw):
+            self.operator = operator
+
+        async def execute(self, name, args):
+            executed.append((name, dict(args), self.operator))
+            return ToolResult(success=True, result="Computer Use task started", data=data)
+
+    monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+    services = td.ToolServices(
+        create_task=lambda *a, **k: created.append((a, k)), generate_prompt_slug=str,
+        perform_web_fetch=None, hybrid_retrieve=None, execute_get_media=None,
+        execute_list_media=None, execute_search_media=None, resolve_attachment=None)
+    ctx = td.ToolContext(operator="op-1", origin_device_id=None,
+                         profile=td.PROFILES[loop], services=services)
+    outcome = asyncio.run(td.dispatch_tool("use_computer", {"prompt": "open the site"}, ctx))
+    return outcome, executed, created
+
+
+@pytest.mark.parametrize("loop", sorted(cr._TOOL_PROFILES))
+def test_every_loop_runs_use_computer_through_the_executor(monkeypatch, loop):
+    outcome, executed, created = _dispatch_use_computer(monkeypatch, loop, {"task_id": "t-1"})
+    assert executed == [("use_computer", {"prompt": "open the site"}, "op-1")]
+    assert created == [], "the dispatcher must never create the CU task itself"
+    assert outcome.result == "Computer Use task started"
+
+
+def test_stream_loops_still_emit_browser_task_through_the_helper(monkeypatch):
+    """M3 (2026-07-23) extended the browser_task emit from the single Anthropic
+    stream to EVERY provider's use_computer branch (openai/gemini/xai +
+    anthropic), so the in-chat agent pill appears no matter which model launched
+    the run; the custom stream never had it. A loop that silently stops emitting
+    it fails here, and a failure (no task_id) never emits one."""
+    emitting = []
+    for loop, profile in sorted(cr._TOOL_PROFILES.items()):
+        if not profile.stream:
+            continue
+        outcome, _, _ = _dispatch_use_computer(monkeypatch, loop, {"task_id": "t-1"})
+        browser = [e for e in outcome.events if e["type"] == "browser_task"]
+        if browser:
+            assert browser == [{"type": "browser_task",
+                                "data": {"task_id": "t-1", "prompt": "open the site"}}]
+            emitting.append(loop)
+        failed, _, _ = _dispatch_use_computer(monkeypatch, loop, {"retryable": True})
+        assert not [e for e in failed.events if e["type"] == "browser_task"]
+    assert set(emitting) >= {"stream_anthropic", "stream_openai", "stream_gemini", "stream_xai"}, emitting
 
 
 # --------------------------------------------------------------------------- #

@@ -347,8 +347,12 @@ def test_maps_missing_message_names_the_device(monkeypatch):
 
 # ── provider dispatch (the documented control_phone gotcha) ──────────────────────────
 # A directly-callable ToolVault tool is silently dead on any provider loop whose tool
-# if/elif chain has no name-agnostic catch-all. These pin every loop that can call this
-# tool, so "we forgot provider X" fails here instead of in front of a customer.
+# dispatch has no name-agnostic catch-all. These pin every loop that can call this
+# tool, so "we forgot provider X" fails here instead of in front of a customer. Every
+# loop hands its tool calls to the one shared dispatcher (providers/tool_dispatch.py,
+# audit rank 74), so the pins are: each loop dispatches through it, and the dispatcher
+# runs an unnamed tool through the executor with the turn's origin device for every
+# loop's profile.
 _PROVIDER_LOOPS = [
     "stream_openai_with_reasoning",      # OpenAI      (streaming)
     "stream_anthropic_with_thinking",    # Anthropic   (streaming)
@@ -364,24 +368,65 @@ _PROVIDER_LOOPS = [
 
 
 @pytest.mark.parametrize("fn_name", _PROVIDER_LOOPS)
-def test_every_provider_loop_has_a_name_agnostic_catch_all(fn_name):
+def test_every_provider_loop_dispatches_through_the_shared_seam(fn_name):
     import inspect
     from Orchestrator.routes import chat_routes
     src = inspect.getsource(getattr(chat_routes, fn_name))
-    assert "catch-all" in src.lower(), f"{fn_name} has no catch-all branch"
-    assert "BlackBoxToolExecutor" in src, f"{fn_name} never reaches the ToolVault executor"
+    assert "dispatch_tool" in src and "_tool_context(operator," in src, (
+        f"{fn_name} no longer hands its tool calls to the shared dispatcher")
     # navigate_device is never named anywhere: dispatch must be name-agnostic.
     assert "navigate_device" not in src
 
 
-@pytest.mark.parametrize("fn_name", _PROVIDER_LOOPS[:5])
-def test_streaming_catch_alls_thread_the_origin_device(fn_name):
+def _dispatch_unnamed(monkeypatch, loop):
+    import Orchestrator.tools as tools_pkg
+    from Orchestrator.providers import tool_dispatch as td
+    from Orchestrator.toolvault.context import ToolResult
+
+    seen = []
+
+    class _Executor:
+        def __init__(self, operator="system", origin_device_id=None, **kw):
+            self.operator, self.origin = operator, origin_device_id
+
+        async def execute(self, name, args):
+            seen.append((name, args, self.operator, self.origin))
+            return ToolResult(success=True, result="navigating")
+
+    monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+    ctx = td.ToolContext(operator="op-nav", origin_device_id="100.64.0.7",
+                         profile=td.PROFILES[loop], services=None)
+    outcome = _run(td.dispatch_tool("navigate_device", {"destination": "CN Tower"}, ctx))
+    return outcome, seen
+
+
+def test_the_shared_dispatcher_is_name_agnostic():
+    import inspect
+    from Orchestrator.providers import tool_dispatch
+    src = inspect.getsource(tool_dispatch)
+    assert "catch-all" in src.lower() and "BlackBoxToolExecutor" in src
+    assert "navigate_device" not in src
+
+
+@pytest.mark.parametrize("loop", ["stream_openai", "stream_anthropic", "stream_gemini",
+                                  "stream_xai", "stream_custom", "call_openai",
+                                  "call_anthropic", "call_gemini", "call_xai", "call_custom"])
+def test_every_loop_profile_reaches_the_executor_with_the_origin_device(monkeypatch, loop):
     """Origin-aware routing only works if the catch-all builds the executor with the turn's
     origin device — otherwise a phone-originated 'navigate me there' targets the primary."""
-    import inspect
+    outcome, seen = _dispatch_unnamed(monkeypatch, loop)
+    assert seen == [("navigate_device", {"destination": "CN Tower"}, "op-nav", "100.64.0.7")]
+    assert outcome.result == "navigating"
+
+
+def test_the_loops_tool_context_reads_the_turns_origin_device():
     from Orchestrator.routes import chat_routes
-    src = inspect.getsource(getattr(chat_routes, fn_name))
-    assert "origin_device_id=_ORIGIN_DEVICE_ID.get()" in src
+    token = chat_routes._ORIGIN_DEVICE_ID.set("100.64.0.8")
+    try:
+        ctx = chat_routes._tool_context("op-nav", "stream_openai")
+    finally:
+        chat_routes._ORIGIN_DEVICE_ID.reset(token)
+    assert ctx.origin_device_id == "100.64.0.8" and ctx.operator == "op-nav"
 
 
 def test_dispatch_reaches_this_executor_by_name():

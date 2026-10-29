@@ -241,6 +241,7 @@ _NO_VOLUME_TEXT = [
     "Orchestrator/context_builder.py",
     "Orchestrator/tasks.py",
     "Orchestrator/routes/chat_routes.py",
+    "Orchestrator/providers/tool_dispatch.py",
     "Orchestrator/routes/gemini_live_routes.py",
     "Orchestrator/routes/grok_live_routes.py",
     "Orchestrator/routes/realtime_routes.py",

@@ -1,22 +1,18 @@
 """Operator scoping for chat/CU tool-loop memory search (WI-8, Task 1.1).
 
-Eight `hybrid_retrieve` call sites live inside provider tool-loops and must pass
-the session operator (with `operator=""` the semantic channel is UNSCOPED —
-every operator's snapshots are visible — and the keyword channel is silently
-EMPTY because no index entry has operator ""):
+The `hybrid_retrieve` call sites inside provider tool-loops must pass the
+session operator (with `operator=""` the semantic channel is UNSCOPED — every
+operator's snapshots are visible — and the keyword channel is silently EMPTY
+because no index entry has operator ""):
 
-  Orchestrator/routes/chat_routes.py
-    1. call_anthropic                  (search_snapshots branch)
-    2. call_gemini                     (search_snapshots branch)
-    3. stream_openai_with_reasoning    (search_snapshots branch)
-    4. stream_anthropic_with_thinking  (search_snapshots branch)
-    5. stream_gemini_with_thinking     (search_snapshots branch)
-    6. stream_xai_with_reasoning       (search_snapshots branch)
-    7. stream_custom_with_reasoning    (search_snapshots branch)
+  Orchestrator/providers/tool_dispatch.py
+    1. _search_snapshots   (the search_snapshots branch every chat loop shares:
+                            call_anthropic, call_gemini and the five streams;
+                            until audit rank 74 each loop inlined its own copy)
   Orchestrator/browser/driver_anthropic.py
-    8. run_anthropic_cu_loop           (search_snapshots branch)
+    2. run_anthropic_cu_loop           (search_snapshots branch)
 
-Test seams (each loop INLINES the dispatch — there is no shared helper):
+Test seams:
 
   * The two NON-STREAM loops (call_anthropic, call_gemini) use sync
     ``requests.post``, so they are behavior-driven here: a fake provider
@@ -24,15 +20,14 @@ Test seams (each loop INLINES the dispatch — there is no shared helper):
     hybrid_retrieve records its kwargs, and we assert the session operator
     arrives (not the "" default).
 
-  * The five STREAMING loops consume provider-specific httpx SSE streams;
-    faking five SSE wire formats would exercise the fakes, not the plumbing.
-    Their dispatch blocks are byte-for-byte the same shape as the non-stream
-    ones, so they (and the CU loop, which additionally needs a live session
-    object) are covered by the AST structural test below: EVERY
-    hybrid_retrieve call site in the two files must pass ``operator=operator``
-    — the session operator variable each loop holds under exactly that name,
-    never a literal or some other variable (and the site count is pinned so a
-    new unscoped site cannot slip in unseen).
+  * The five STREAMING loops share the same dispatcher branch (the provider
+    goldens in tests/golden/providers replay each stream's search_snapshots
+    call with the session operator), and the CU loop needs a live session
+    object, so the AST structural test below covers the sites: EVERY
+    hybrid_retrieve call site must pass ``operator=operator`` — the session
+    operator variable each holds under exactly that name, never a literal or
+    some other variable (and the site counts are pinned so a new unscoped
+    site, or an inline copy back in chat_routes.py, cannot slip in unseen).
 
   * One live-store integration test (skip-guarded, never fake-pass — pattern
     from test_retrieval_golden.py) proves a real operator gets results, gets
@@ -45,6 +40,7 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _CHAT_ROUTES = _REPO / "Orchestrator" / "routes" / "chat_routes.py"
+_TOOL_DISPATCH = _REPO / "Orchestrator" / "providers" / "tool_dispatch.py"
 _CU_DRIVER = _REPO / "Orchestrator" / "browser" / "driver_anthropic.py"
 
 
@@ -185,7 +181,8 @@ def _hybrid_retrieve_call_sites(path: Path):
 
 
 @pytest.mark.parametrize("path,expected_count", [
-    (_CHAT_ROUTES, 7),   # the seven provider tool-loops (incl. custom)
+    (_CHAT_ROUTES, 0),   # the provider loops dispatch through tool_dispatch
+    (_TOOL_DISPATCH, 1),  # _search_snapshots, shared by every chat loop
     (_CU_DRIVER, 1),     # run_anthropic_cu_loop
 ])
 def test_every_hybrid_retrieval_site_passes_operator(path, expected_count):

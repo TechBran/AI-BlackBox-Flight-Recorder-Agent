@@ -33,6 +33,7 @@ from Orchestrator import media, models
 from Orchestrator.models import Task, TaskDatabase, TaskStatus, TaskType
 
 _ROUTES = Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py"
+_TOOL_DISPATCH = Path(__file__).resolve().parents[1] / "providers" / "tool_dispatch.py"
 _CU_DRIVER = Path(__file__).resolve().parents[1] / "browser" / "driver_anthropic.py"
 OP = "op-media-a"
 
@@ -191,12 +192,12 @@ def test_stream_anthropic_attributes_media_to_the_operator(cr, monkeypatch, tmp_
 # Structural: every create_task site in the tool loops                        #
 # --------------------------------------------------------------------------- #
 
-# The tool loops that create media tasks; each holds the session operator as
-# `operator`.
+# The code that creates media tasks; each holds the session operator as
+# `operator`. Every chat loop's native media branches are the dispatcher's
+# _image / _video / _music (audit rank 74); chat_routes.py itself has none.
 _TOOL_LOOPS = {
-    _ROUTES: ("call_anthropic", "call_gemini", "stream_openai_with_reasoning",
-              "stream_anthropic_with_thinking", "stream_gemini_with_thinking",
-              "stream_xai_with_reasoning", "stream_custom_with_reasoning"),
+    _ROUTES: (),
+    _TOOL_DISPATCH: ("_image", "_video", "_music"),
     _CU_DRIVER: ("run_anthropic_cu_loop",),
 }
 
@@ -215,10 +216,11 @@ def _create_task_sites(path):
     return sites
 
 
-@pytest.mark.parametrize("path, minimum", [(_ROUTES, 28), (_CU_DRIVER, 3)])
+@pytest.mark.parametrize("path, minimum", [(_TOOL_DISPATCH, 5), (_CU_DRIVER, 3)])
 def test_every_tool_loop_create_task_passes_the_session_operator(path, minimum):
-    # chat_routes: 28 media sites across the two non-stream and five stream
-    # loops; the CU driver: three. Each passes the loop's own `operator`.
+    # The dispatcher: five media sites (image, music, and video's extension,
+    # call_* and stream forms) shared by every chat loop; the CU driver: three.
+    # Each passes the session `operator`.
     sites = [s for s in _create_task_sites(path) if s[0] in _TOOL_LOOPS[path]]
     assert len(sites) >= minimum, f"{path.name}: create_task sites went missing"
     bad = [(fn, line, ast.unparse(arg) if arg is not None else None) for fn, line, arg in sites
@@ -226,14 +228,14 @@ def test_every_tool_loop_create_task_passes_the_session_operator(path, minimum):
     assert bad == [], f"{path.name}: create_task without operator=operator at {bad}"
 
 
-@pytest.mark.parametrize("path", [_ROUTES, _CU_DRIVER])
+@pytest.mark.parametrize("path", [_ROUTES, _TOOL_DISPATCH, _CU_DRIVER])
 def test_no_create_task_hardcodes_an_operator(path):
     bad = [(fn, line, arg.value) for fn, line, arg in _create_task_sites(path)
            if isinstance(arg, ast.Constant)]
     assert bad == [], f"{path.name}: literal operator at {bad}"
 
 
-@pytest.mark.parametrize("path", [_ROUTES, _CU_DRIVER])
+@pytest.mark.parametrize("path", [_ROUTES, _TOOL_DISPATCH, _CU_DRIVER])
 def test_no_media_options_carry_a_hardcoded_operator(path):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     bad = []
