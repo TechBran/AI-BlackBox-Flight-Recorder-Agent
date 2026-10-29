@@ -7,6 +7,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.aiblackbox.portal.data.remote.RemoteSessionTelemetry
 import com.aiblackbox.portal.data.remote.RemoteTaskRunner
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
+import com.aiblackbox.portal.data.repository.ModelCatalogs
 import com.aiblackbox.portal.data.voice.AudioPlaybackManager
 import com.aiblackbox.portal.overlay.AppForegroundState
 import com.aiblackbox.portal.ui.cli_agent.TerminalSessionManager
@@ -26,6 +27,10 @@ class PortalApplication : Application() {
         // survive an FGS restart / process kill (in-memory until this runs). Idempotent + never
         // throws — a DB-open failure keeps the in-memory fallback.
         RemoteSessionTelemetry.init(this)
+
+        // The shared model catalogs keep each box's last-served catalog on disk, so a cold
+        // start lists real models before the box answers (rank 76).
+        ModelCatalogs.init(this)
 
         // Wire the process-lived terminal-session manager to the Application context
         // so it can drive the TerminalForegroundService (Phase 3): start the FGS when

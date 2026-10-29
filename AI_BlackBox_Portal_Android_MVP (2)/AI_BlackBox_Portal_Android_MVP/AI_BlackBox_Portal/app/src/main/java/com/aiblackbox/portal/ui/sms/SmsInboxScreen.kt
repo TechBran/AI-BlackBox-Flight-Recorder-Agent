@@ -60,7 +60,6 @@ import com.aiblackbox.portal.ui.theme.Neutral100
 import com.aiblackbox.portal.ui.theme.Neutral200
 import com.aiblackbox.portal.ui.theme.Neutral500
 import com.aiblackbox.portal.ui.theme.SolidGreen
-import com.aiblackbox.portal.util.Constants
 
 @Composable
 fun SmsInboxScreen(
@@ -77,6 +76,7 @@ fun SmsInboxScreen(
     val selectedContactName by viewModel.selectedContactName.collectAsState()
     val smsProvider by viewModel.smsProvider.collectAsState()
     val smsModel by viewModel.smsModel.collectAsState()
+    val smsModelOptions by viewModel.smsModelOptions.collectAsState()
     val lines by viewModel.lines.collectAsState()
     val selectedFromNumber by viewModel.selectedFromNumber.collectAsState()
     val drafts by viewModel.draftTexts.collectAsState()
@@ -84,6 +84,8 @@ fun SmsInboxScreen(
     // The view model reads the operator from the store at every request and reloads on a
     // switch (A14-ui-misc-07), so only the origin is handed over here.
     LaunchedEffect(origin) { viewModel.initialize(origin) }
+    // The reply-model dropdown follows the provider's live catalog (rank 76).
+    LaunchedEffect(origin, smsProvider) { viewModel.loadSmsModels(smsProvider) }
     DisposableEffect(Unit) {
         viewModel.startPolling()
         onDispose { viewModel.stopPolling() }
@@ -121,6 +123,7 @@ fun SmsInboxScreen(
                 connected = connected,
                 smsProvider = smsProvider,
                 smsModel = smsModel,
+                smsModels = smsModelOptions,
                 onProviderModelChange = { provider, model -> viewModel.saveSmsPreferences(provider, model) },
                 onRefresh = { viewModel.loadThreads() },
                 onSelectThread = { thread -> viewModel.loadMessages(thread.phoneNumber) }
@@ -143,6 +146,7 @@ private fun SmsThreadListView(
     connected: Boolean,
     smsProvider: String,
     smsModel: String,
+    smsModels: List<Pair<String, String>>,
     onProviderModelChange: (String, String) -> Unit,
     onRefresh: () -> Unit,
     onSelectThread: (SmsThread) -> Unit
@@ -194,6 +198,7 @@ private fun SmsThreadListView(
             SmsModelSelector(
                 smsProvider = smsProvider,
                 smsModel = smsModel,
+                models = smsModels,
                 providers = smsProviders,
                 onProviderModelChange = onProviderModelChange
             )
@@ -564,6 +569,8 @@ private fun SmsFromNumberSelector(
 private fun SmsModelSelector(
     smsProvider: String,
     smsModel: String,
+    // The provider's live catalog rows (SmsViewModel.smsModelOptions, Auto first).
+    models: List<Pair<String, String>>,
     providers: List<Pair<String, String>>,
     onProviderModelChange: (String, String) -> Unit
 ) {
@@ -572,8 +579,7 @@ private fun SmsModelSelector(
     val feedback = rememberPressFeedback()
 
     val providerDisplay = providers.find { it.first == smsProvider }?.second ?: smsProvider
-    val models = Constants.MODEL_CONFIG[smsProvider] ?: emptyList()
-    // A stored id this static list cannot name is shown as itself, not as Auto.
+    // A stored id the list cannot name is shown as itself, not as Auto.
     val modelDisplay = models.find { it.first == smsModel }?.second ?: smsModel.ifBlank { "Auto" }
 
     Column(
@@ -630,10 +636,8 @@ private fun SmsModelSelector(
                             onClick = {
                                 feedback()
                                 showProviderMenu = false
-                                // When provider changes, pick the first model for that provider
-                                val newModels = Constants.MODEL_CONFIG[id] ?: emptyList()
-                                val firstModel = newModels.firstOrNull()?.first ?: ""
-                                onProviderModelChange(id, firstModel)
+                                // A new provider starts on Auto; its live list loads next.
+                                onProviderModelChange(id, "")
                             }
                         )
                     }

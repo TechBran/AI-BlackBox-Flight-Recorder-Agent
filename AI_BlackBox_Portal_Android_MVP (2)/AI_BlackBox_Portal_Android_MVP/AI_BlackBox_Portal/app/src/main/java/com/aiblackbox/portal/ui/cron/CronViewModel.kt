@@ -14,7 +14,9 @@ import com.aiblackbox.portal.data.model.CronContactsResponse
 import com.aiblackbox.portal.data.model.CronJobsResponse
 import com.aiblackbox.portal.data.model.CronPreviewRequest
 import com.aiblackbox.portal.data.model.CronPreviewResponse
-import com.aiblackbox.portal.data.repository.ChatRepository
+import com.aiblackbox.portal.data.repository.ModelCatalogRepository
+import com.aiblackbox.portal.data.repository.ModelCatalogs
+import com.aiblackbox.portal.data.store.ModelSelection
 import com.aiblackbox.portal.util.Constants
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -34,9 +36,9 @@ private const val TAG = "CronViewModel"
 
 class CronViewModel(application: Application) : AndroidViewModel(application) {
     private var api: BlackBoxApi? = null
-    // Reuses the chat composer's repository — getModels(key) hits the SAME
-    // GET /models/{key} endpoint the chat picker uses (no HTTP reimplemented).
-    private var repository: ChatRepository? = null
+    // The model catalogs the chat composer, Settings and SMS share (ModelCatalogs):
+    // the SAME GET /models/{key} copy, so cron never keeps its own cache.
+    private var catalogs: ModelCatalogRepository? = null
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
 
     // -- Raw state --
@@ -86,14 +88,10 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
 
     // -- Live model selector (M4.4) --
     // Models for the currently-selected provider, as (id, displayName) pairs with
-    // the Auto option ("" -> "Auto - …") first. Hydrated from /models/{key} via the
-    // shared chat repository; falls back to Constants.MODEL_CONFIG offline.
+    // the Auto option ("" -> "Auto - …") first. Hydrated from /models/{key} through the
+    // shared catalog (its TTL and last-good copy); Auto alone before any catalog is known.
     private val _modelsForProvider = MutableStateFlow<List<Pair<String, String>>>(emptyList())
     val modelsForProvider: StateFlow<List<Pair<String, String>>> = _modelsForProvider.asStateFlow()
-
-    // 5-min in-memory cache keyed by canonical provider key (mirrors chat).
-    private val modelsCache = mutableMapOf<String, Pair<Long, List<Pair<String, String>>>>()
-    private val modelsCacheTtlMs = 5 * 60 * 1_000L
 
     // -- Live operator list (Fix 4) --
     // Sourced from GET /operators -> {operators:[...], default:"..."} so the
@@ -161,7 +159,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
         if (origin.isBlank() || api != null) return
         val newApi = BlackBoxApi(origin)
         api = newApi
-        repository = ChatRepository(newApi)
+        catalogs = ModelCatalogs.forApi(newApi)
         loadJobs()
         loadOperators()
         startPolling()
@@ -425,7 +423,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // -------------------------------------------------------------------------
-    // Live model selector (M4.4) — mirrors ChatViewModel.fetchLiveModels
+    // Live model selector (M4.4) — the shared ModelCatalogRepository (rank 76)
     // -------------------------------------------------------------------------
 
     /** Canonical catalog provider keys (order = picker order), matching the
@@ -451,19 +449,6 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
         "computer-use" to "computer-use"
     )
 
-    // Constants.MODEL_CONFIG is keyed by Android's WORD provider keys, so the
-    // offline fallback needs the canonical key → MODEL_CONFIG word bridge.
-    // "custom" is deliberately ABSENT: it has no static offline catalog
-    // (models live only in the box's server registry), so offlineModels()'s
-    // null-fallback Auto-only seed is the correct offline behavior.
-    private val canonicalToConfigKey = mapOf(
-        "google" to "gemini",
-        "openai" to "openai",
-        "anthropic" to "anthropic",
-        "xai" to "xai",
-        "computer-use" to "computer-use"
-    )
-
     /** Normalize any provider string (canonical key OR a legacy word) to the
      *  canonical catalog key. Unknown values default to [defaultCronProvider]. */
     fun canonicalProviderKey(provider: String?): String {
@@ -474,18 +459,15 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Derive the canonical provider for a job lacking an explicit `provider`
-     *  (legacy rows): try the coarse word map, else scan the offline catalogs
-     *  for the specific id, else default. Mirrors Portal deriveProviderFromModel. */
+     *  (legacy rows): try the coarse word map, else the known catalogs
+     *  ([cronProviderForModelId]), else default. Mirrors Portal deriveProviderFromModel. */
     fun deriveProviderForJob(job: CronJob): String {
         job.provider?.takeIf { it.isNotBlank() }?.let { return canonicalProviderKey(it) }
         val model = job.model.trim()
         if (model.isEmpty()) return defaultCronProvider
         legacyModelToProvider[model.lowercase()]?.let { return it }
-        for (key in cronProviders) {
-            val cfgKey = canonicalToConfigKey[key] ?: continue
-            if (Constants.MODEL_CONFIG[cfgKey]?.any { it.first == model } == true) return key
-        }
-        return defaultCronProvider
+        return cronProviderForModelId(model, cronProviders.associateWith { catalogs?.cached(it)?.ids.orEmpty() })
+            ?: defaultCronProvider
     }
 
     /** Resolve a job's stored `model` to a SPECIFIC model id for the picker. A
@@ -514,78 +496,60 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     // list isn't reused for friendlyModelName of a different provider).
     private var providerForCurrentList: String = defaultCronProvider
 
-    private fun offlineModels(canonicalKey: String): List<Pair<String, String>> {
-        val cfgKey = canonicalToConfigKey[canonicalKey] ?: return listOf("" to "Auto - Latest")
-        val cfg = Constants.MODEL_CONFIG[cfgKey] ?: return listOf("" to "Auto - Latest")
-        // MODEL_CONFIG already prepends an Auto ("") entry for these providers.
-        return if (cfg.any { it.first == "" }) cfg else listOf("" to "Auto - Latest") + cfg
-    }
+    /** The shared catalog's known copy (memory, else the last-good disk copy), else Auto alone. */
+    private fun offlineModels(canonicalKey: String): List<Pair<String, String>> =
+        catalogs?.cached(canonicalKey)?.options()?.ifEmpty { null } ?: Constants.AUTO_ONLY
 
     /** Fetch the model list for [provider] (canonical key OR a legacy word) and
-     *  publish it to [modelsForProvider]. Reuses ChatRepository.getModels (the
-     *  same GET /models/{key} the chat composer uses); on failure falls back to
-     *  the offline Constants catalog so the dropdown is never empty. */
+     *  publish it to [modelsForProvider], from the catalog the chat composer shares
+     *  (ModelCatalogs: GET /models/{key}, 5-minute TTL, never cached for custom). The
+     *  known copy is published at once so the dropdown is never empty. */
     fun selectProvider(provider: String) {
         val key = canonicalProviderKey(provider)
         providerForCurrentList = key
-
-        // Cache hit — instant, no network. EXCEPTION: "custom" never touches
-        // the cache (bypass-all-caches rule): every switch hits the network so
-        // the roster is always fresh — new downloads appear immediately;
-        // mirrors the server-side never-cache design for /models/custom.
-        val skipCache = key == "custom"
-        val cached = modelsCache[key]
-        val now = System.currentTimeMillis()
-        if (!skipCache && cached != null && now - cached.first < modelsCacheTtlMs) {
-            _modelsForProvider.value = cached.second
-            return
-        }
-
-        // Seed with the offline catalog immediately so the dropdown is populated
-        // while the network fetch (if any) is in flight.
         _modelsForProvider.value = offlineModels(key)
 
-        val repo = repository ?: return
+        val catalogs = catalogs ?: return
         viewModelScope.launch {
-            try {
-                val response = repo.getModels(key)
-                val obj = json.parseToJsonElement(response).jsonObject
-                val modelsArr = obj["models"]?.jsonArray ?: return@launch
-                val models = modelsArr.mapNotNull { el ->
-                    try {
-                        val m = el.jsonObject
-                        val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                        val name = m["name"]?.jsonPrimitive?.content ?: id
-                        id to name
-                    } catch (_: Exception) { null }
-                }
-                if (models.isNotEmpty()) {
-                    // Auto ("") first — resolves server-side to the provider default.
-                    // For computer-use and custom, label Auto with the default model
-                    // name when known (mirrors chat + Portal — both catalogs carry
-                    // default_id); otherwise a plain "Auto - Latest".
-                    val autoLabel = if (key == "computer-use" || key == "custom") {
-                        val defaultId = obj["default_id"]?.jsonPrimitive?.content
-                        val defaultName = models.firstOrNull { it.first == defaultId }?.second
-                        if (defaultName != null) "Auto - $defaultName" else "Auto - Latest"
-                    } else {
-                        "Auto - Latest"
-                    }
-                    val withAuto = listOf("" to autoLabel) + models
-                    // Only publish if this is still the selected provider (guards a
-                    // fast provider switch from clobbering the newer list).
-                    if (providerForCurrentList == key) {
-                        _modelsForProvider.value = withAuto
-                    }
-                    // Custom is never cached — its roster must stay live.
-                    if (!skipCache) {
-                        modelsCache[key] = System.currentTimeMillis() to withAuto
-                    }
-                    Log.d(TAG, "Fetched ${models.size} models for $key")
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Model fetch failed for $key, using offline catalog: ${e.message}")
-                // Offline seed already published above.
+            val catalog = catalogs.refresh(key) ?: return@launch // the known copy stays
+            val withAuto = catalog.options()
+            // Only publish if this is still the selected provider (guards a
+            // fast provider switch from clobbering the newer list).
+            if (withAuto.isNotEmpty() && providerForCurrentList == key) {
+                _modelsForProvider.value = withAuto
+            }
+            Log.d(TAG, "Fetched ${catalog.models.size} models for $key")
+        }
+    }
+
+    /**
+     * The id the editor should hold for a job's stored [model] once [provider]'s fresh
+     * live catalog is known: a same-family successor or Auto when the catalog no longer
+     * lists it (ModelSelection.replacementFor), else [model] unchanged. Saving the job is
+     * what writes the replacement; nothing is changed on the box behind the operator.
+     */
+    fun reconciledModel(provider: String, model: String): String {
+        val catalog = catalogs?.cached(canonicalProviderKey(provider))
+            ?.takeIf { it.isAuthoritative } ?: return model
+        return ModelSelection.replacementFor(model, catalog.ids) ?: model
+    }
+
+    companion object {
+        /**
+         * The cron provider whose catalog in [idsByProvider] lists [model], else the one
+         * its id names (claude-, gemini-, gpt-/o<digit>, grok-, alias::model), else null.
+         * The fallback keeps a legacy job's provider when no catalog has loaded yet.
+         */
+        internal fun cronProviderForModelId(model: String, idsByProvider: Map<String, List<String>>): String? {
+            idsByProvider.entries.firstOrNull { model in it.value }?.let { return it.key }
+            val id = model.lowercase()
+            return when {
+                "::" in id -> "custom"
+                id.startsWith("claude-") -> "anthropic"
+                id.startsWith("gemini-") -> "google"
+                id.startsWith("grok-") -> "xai"
+                id.startsWith("gpt-") || Regex("o\\d.*").matches(id) -> "openai"
+                else -> null
             }
         }
     }

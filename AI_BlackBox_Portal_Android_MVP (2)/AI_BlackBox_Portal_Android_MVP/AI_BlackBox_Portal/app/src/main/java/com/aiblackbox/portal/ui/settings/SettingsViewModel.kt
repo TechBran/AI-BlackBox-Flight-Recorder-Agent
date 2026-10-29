@@ -6,12 +6,15 @@ import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.repository.ModelCatalogRepository
+import com.aiblackbox.portal.data.repository.ModelCatalogs
 import com.aiblackbox.portal.data.repository.UpdateRepository
 import com.aiblackbox.portal.ui.updates.RestartWait
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.OperatorResolver
 import com.aiblackbox.portal.ui.chat.ChatViewModel
 import com.aiblackbox.portal.ui.chat.ProviderPickerViewModel
+import com.aiblackbox.portal.util.Constants
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -77,6 +80,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     // picker shows it instead of a pinned id (VoicePicker.effectiveVoice).
     private val _defaultVoiceId = MutableStateFlow<String?>(null)
     val defaultVoiceId: StateFlow<String?> = _defaultVoiceId.asStateFlow()
+
+    // The Model dropdown's rows for the active provider, from the catalog the chat
+    // composer, cron and SMS share (ModelCatalogs, rank 76); see [loadModels].
+    private val _modelOptions = MutableStateFlow<List<Pair<String, String>>>(emptyList())
+    val modelOptions: StateFlow<List<Pair<String, String>>> = _modelOptions.asStateFlow()
+    private var modelOptionsProvider: String? = null
 
     fun loadVoiceCatalog() {
         val api = api ?: return
@@ -203,6 +212,32 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
      */
     fun refreshLocalAvailability() {
         providerPicker?.refresh()
+    }
+
+    /**
+     * Hydrate [modelOptions] for [provider]: the shared catalog's known copy at once, then
+     * the box's (GET /models/{provider}); Constants' entry for a provider the box has no
+     * catalog for, or before any catalog is known. A fresh live catalog also replaces the
+     * stored picks it no longer lists (BlackBoxStore.reconcileModelIds). The sheet used to
+     * read Constants.MODEL_CONFIG alone, a hand-kept list that went stale.
+     */
+    fun loadModels(provider: String) {
+        modelOptionsProvider = provider
+        val fallback = Constants.MODEL_CONFIG[provider].orEmpty()
+        val api = api
+        val apiProvider = ModelCatalogRepository.apiProviderFor(provider)
+        if (api == null || apiProvider == null) {
+            _modelOptions.value = fallback
+            return
+        }
+        val catalogs = ModelCatalogs.forApi(api)
+        _modelOptions.value = catalogs.cached(apiProvider)?.options()?.ifEmpty { null } ?: fallback
+        viewModelScope.launch {
+            val catalog = catalogs.refresh(apiProvider) ?: return@launch
+            if (modelOptionsProvider != provider) return@launch
+            catalog.options().takeIf { it.isNotEmpty() }?.let { _modelOptions.value = it }
+            if (catalog.isAuthoritative) store.reconcileModelIds(provider, catalog.ids)
+        }
     }
 
     // W22: the SAME switch the composer pill makes (BlackBoxStore.setProviderAndModel) —

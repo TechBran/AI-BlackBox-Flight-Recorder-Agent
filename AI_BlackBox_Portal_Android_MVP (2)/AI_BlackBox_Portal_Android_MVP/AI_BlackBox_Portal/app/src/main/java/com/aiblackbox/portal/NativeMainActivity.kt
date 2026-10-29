@@ -1012,13 +1012,12 @@ class NativeMainActivity : ComponentActivity() {
                             // (the pill hand-off), so compare on the path segment.
                             val route = entry.destination.route?.substringBefore('?')
                             if (route == Routes.COMPUTER_USE) {
-                                val currentProv = store.provider.first()
-                                if (currentProv != "computer-use") {
-                                    store.setProvider("computer-use")
-                                    val cuModels = Constants.MODEL_CONFIG["computer-use"] ?: emptyList()
-                                    val currentMdl = store.model.first()
-                                    if (cuModels.isNotEmpty() && cuModels.none { it.first == currentMdl }) {
-                                        store.setModel(cuModels.first().first)
+                                if (store.provider.first() != "computer-use") {
+                                    // The composer's switch path (W22): Auto at once, then
+                                    // the remembered CU pick only if the live CU catalog
+                                    // still lists it, never the previous provider's id.
+                                    store.setProviderAndModel("computer-use") {
+                                        ChatViewModel.fetchLiveModelIds(chatViewModel.getApi(), it)
                                     }
                                 }
                             }

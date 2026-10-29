@@ -182,6 +182,10 @@ class BlackBoxStore(private val context: Context) {
     suspend fun selectModel(provider: String, model: String) {
         ModelSelection.selectModel(context.dataStore, provider, model)
     }
+    // Replace the picks for [provider] that its fresh live catalog ([liveIds]) no longer
+    // lists: same-family successor, else Auto (ModelSelection.reconcileWithCatalog).
+    suspend fun reconcileModelIds(provider: String, liveIds: Collection<String>): Int =
+        ModelSelection.reconcileWithCatalog(context.dataStore, provider, liveIds)
 
     // Streaming
     val streamingEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_STREAMING] ?: true }

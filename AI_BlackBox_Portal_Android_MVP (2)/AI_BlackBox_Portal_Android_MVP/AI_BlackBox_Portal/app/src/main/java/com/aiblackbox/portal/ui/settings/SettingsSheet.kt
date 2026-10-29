@@ -182,15 +182,21 @@ fun SettingsSheet(
     // W22: show the GLOBAL model — the id ChatViewModel actually sends, not a per-provider
     // memory that can drift from it. A provider switch resets it to Auto (or
     // restores that provider's still-live pick); model_<provider> is only what a switch
-    // restores from. It can still hold an id this Constants-only list cannot name, shown
-    // as "Auto": a live-only pick, or a foreign id picked from the pill's previous-provider
-    // list in the moment before the new list arrives.
+    // restores from. An id the provider's live catalog no longer lists is replaced when
+    // that catalog arrives (rank 76); until then it is shown as itself.
     val selectedModel = currentModel
 
     LaunchedEffect(origin) {
         viewModel.initialize(origin)
         viewModel.loadVoiceCatalog()  // after init so api is ready → live catalog drives the picker
     }
+    // The Model dropdown follows the active provider's live catalog (shared with the
+    // composer, cron and SMS), re-read on every provider switch.
+    LaunchedEffect(origin, provider) {
+        viewModel.initialize(origin)
+        viewModel.loadModels(provider)
+    }
+    val models by viewModel.modelOptions.collectAsState()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -708,10 +714,10 @@ fun SettingsSheet(
             // ══════════════════════════════════════════════════════════════
             // Model — dropdown (dynamic per provider)
             // ══════════════════════════════════════════════════════════════
-            val models = Constants.MODEL_CONFIG[provider]
-            if (models != null && models.isNotEmpty()) {
+            if (models.isNotEmpty()) {
                 var showModelMenu by remember { mutableStateOf(false) }
-                val modelDisplay = models.find { it.first == selectedModel }?.second ?: "Auto"
+                val modelDisplay = models.find { it.first == selectedModel }?.second
+                    ?: selectedModel.ifBlank { "Auto" }
 
                 SectionHeader("Model", BbxDim)
 

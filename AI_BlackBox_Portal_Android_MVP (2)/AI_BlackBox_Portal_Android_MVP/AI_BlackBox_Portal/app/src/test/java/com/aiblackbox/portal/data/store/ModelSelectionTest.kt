@@ -149,13 +149,12 @@ class ModelSelectionTest {
                 if (id.startsWith("claude-")) assertTrue("$provider offers non-live $id", id in LIVE_ANTHROPIC_IDS)
             }
         }
-        // Auto first wherever a cloud chat picker offers it: an empty model is the server's default.
+        // The providers with a box catalog are seeded with Auto alone (rank 76): their
+        // pickers list the live catalog (ModelCatalogRepository), and no hand-kept id can
+        // go stale here. An empty model is the server's default.
         for (provider in listOf("gemini", "openai", "anthropic", "xai", "custom", "computer-use")) {
-            assertEquals(provider, "", config[provider]!!.first().first)
+            assertEquals(provider, listOf("" to "Auto - Latest"), config[provider])
         }
-        // The newest of each family is offered, so a migrated pick shows by name.
-        val anthropic = config["anthropic"]!!.map { it.first }
-        for (current in ModelSelection.FAMILY_SUCCESSORS.values) assertTrue(current, current in anthropic)
     }
 
     @Test fun `the retired pattern is the server's - every retired family, no live or picker id`() {
@@ -171,8 +170,7 @@ class ModelSelectionTest {
         // Never a current id: the live list, and every Claude id the static pickers offer.
         val pickerIds = com.aiblackbox.portal.util.Constants.MODEL_CONFIG.values.flatten()
             .map { it.first }.filter { it.startsWith("claude-") }
-        assertTrue(pickerIds.isNotEmpty())
-        for (id in LIVE_ANTHROPIC_IDS + pickerIds) {
+        for (id in LIVE_ANTHROPIC_IDS + pickerIds + ModelSelection.FAMILY_SUCCESSORS.values) {
             assertFalse(id, ModelSelection.RETIRED_CLAUDE_ID.matches(id))
         }
     }

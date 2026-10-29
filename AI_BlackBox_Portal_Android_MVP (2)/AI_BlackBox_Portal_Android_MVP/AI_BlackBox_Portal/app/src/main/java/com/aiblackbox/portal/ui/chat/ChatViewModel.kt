@@ -33,6 +33,9 @@ import com.aiblackbox.portal.data.local.TurnClient
 import com.aiblackbox.portal.data.local.VisionLlm
 import com.aiblackbox.portal.data.local.formatCloudToolMatches
 import com.aiblackbox.portal.data.local.toResultJsonString
+import com.aiblackbox.portal.data.model.ModelCatalog
+import com.aiblackbox.portal.data.repository.ModelCatalogRepository
+import com.aiblackbox.portal.data.repository.ModelCatalogs
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
@@ -3239,21 +3242,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // Dynamic model fetching — matches Portal fetchAvailableModels()
+    // Model catalog — the shared ModelCatalogRepository (rank 76)
     // =========================================================================
 
-    // In-memory cache for fetched model lists (5min TTL — same as web sessionStorage).
-    // Survives provider-switching within a session but NOT app restart (intentional —
-    // restart implies operator may have switched API keys).
-    private val modelsCache = mutableMapOf<String, Pair<Long, List<Pair<String, String>>>>()
-    private val MODELS_CACHE_TTL_MS = 5 * 60 * 1_000L
-
-    // CU backends map cached alongside modelsCache (same key + lifetime).
-    // Caching choice: a parallel map (vs widening modelsCache's value type)
-    // keeps the existing 4-provider cache code path byte-identical; the raw
-    // JSON isn't retained so the map can't be re-derived on a cache hit.
-    private val cuBackendsCache = mutableMapOf<String, Map<String, String>>()
-
+    /**
+     * Hydrate the composer's model list for [provider] from the shared catalog
+     * (ModelCatalogs: one copy for chat, Settings, cron, SMS and CU, a 5-minute TTL and a
+     * last-good copy on disk). The known copy is published at once, so a switch never
+     * shows the previous provider's models while the fetch runs (it used to); with none
+     * known the list is empty and the composer shows Constants' Auto seed. Custom is
+     * never cached: its list is empty until the box answers, and stays empty when the
+     * registry is (Portal parity, 4240459).
+     *
+     * A fresh live catalog also replaces the stored picks it no longer lists
+     * (BlackBoxStore.reconcileModelIds: same-family successor, else Auto).
+     */
     private fun fetchLiveModels(provider: String) {
         val currentApi = api ?: return
         val apiProvider = mapProviderForApi(provider)
@@ -3271,132 +3274,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _liveModels.value = emptyList()
             return
         }
-
-        // Custom never touches the 5-min cache — read OR write: servers are
-        // added/removed in the wizard and models load/unload between switches,
-        // so the roster+status must stay live (mirrors the Portal's skipCache
-        // and CronViewModel.selectProvider, bypass-all-caches rule).
-        val skipCache = apiProvider == "custom"
-
-        // Cache hit — instant population, no network
-        val cached = modelsCache[apiProvider]
-        val now = System.currentTimeMillis()
-        if (!skipCache && cached != null && now - cached.first < MODELS_CACHE_TTL_MS) {
-            _liveModels.value = cached.second
-            if (apiProvider == "computer-use") {
-                _cuModelBackends.value = cuBackendsCache[apiProvider] ?: emptyMap()
-            }
-            Log.d(TAG, "Models cache hit for $provider (age ${(now - cached.first) / 1000}s)")
-            return
-        }
-
-        if (skipCache) {
-            // Empty-catalog staleness fix (Portal parity, commit 4240459):
-            // _liveModels still holds the PREVIOUS provider's list here, and —
-            // unlike the other providers, where keeping it during the fetch is
-            // the intended fallback — those ids are meaningless as custom
-            // models. Clear eagerly so the pill falls back to Constants' Auto
-            // entry until the live roster arrives, and STAYS clear if the
-            // registry is empty or the box is unreachable (before this fix an
-            // empty/dead registry kept the previous provider's models
-            // selectable as "custom" models forever).
-            _liveModels.value = emptyList()
-            _customModelStatus.value = emptyMap()
-        }
+        val catalogs = ModelCatalogs.forApi(currentApi)
+        publishCatalog(apiProvider, catalogs.cached(apiProvider))
 
         viewModelScope.launch {
-            try {
-                val response = currentApi.get("/models/$apiProvider")
-                // Stale-response guard (CronViewModel's providerForCurrentList
-                // is the in-repo precedent): a late-arriving 200 from a previous
-                // provider's in-flight fetch must not clobber the list a newer
-                // switch owns — and with custom never cache-hitting, every
-                // visit-then-leave of custom opens that window. Both
-                // currentProvider writes (store.provider collector) and this
-                // coroutine run on Main, so the check is race-free.
-                if (provider != currentProvider) return@launch // stale response; a newer switch owns the UI
-                val obj = json.parseToJsonElement(response).jsonObject
-                val modelsArr = obj["models"]?.jsonArray ?: return@launch
-                val models = modelsArr.mapNotNull { el ->
-                    try {
-                        val m = el.jsonObject
-                        val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                        val name = m["name"]?.jsonPrimitive?.content ?: id
-                        id to name
-                    } catch (_: Exception) { null }
-                }
-                if (apiProvider == "custom") {
-                    // Custom hydrates UNCONDITIONALLY on a 200 (Portal parity,
-                    // 4240459): an EMPTY models list is real state (all servers
-                    // removed in the wizard) and must clear the roster. Zero
-                    // models → no Auto entry either (nothing for the backend to
-                    // resolve "" to); the Composer then shows Constants' seed.
-                    val statuses = modelsArr.mapNotNull { el ->
-                        try {
-                            val m = el.jsonObject
-                            val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                            // Tolerant: absent OR null status → not in the map
-                            // (contentOrNull turns JsonNull into null).
-                            val status = m["status"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                            id to status
-                        } catch (_: Exception) { null }
-                    }.toMap()
-                    val withAuto = if (models.isEmpty()) emptyList() else {
-                        // Auto ("") resolves server-side to the registry default —
-                        // label it with the default model's name when known
-                        // (mirrors CronViewModel.selectProvider + the CU branch).
-                        val defaultId = obj["default_id"]?.jsonPrimitive?.contentOrNull
-                        val defaultName = models.firstOrNull { it.first == defaultId }?.second
-                        listOf("" to (defaultName?.let { "Auto - $it" } ?: "Auto - Latest")) + models
-                    }
-                    // Adjacent writes, no suspension point between them — same
-                    // atomic-w.r.t.-composition rationale as the CU branch below.
-                    _liveModels.value = withAuto
-                    _customModelStatus.value = statuses
-                    // Never cached — roster/status must stay live (see skipCache).
-                    Log.d(TAG, "Fetched ${models.size} live custom models (${statuses.count { it.value == "loaded" }} loaded)")
-                } else if (models.isNotEmpty()) {
-                    if (apiProvider == "computer-use") {
-                        // CU: backend partition map + default-aware Auto label
-                        // (mirrors Portal buildHydratedModels, state-management.js)
-                        val backends = modelsArr.mapNotNull { el ->
-                            try {
-                                val m = el.jsonObject
-                                val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                                val backend = m["backend"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                                id to backend
-                            } catch (_: Exception) { null }
-                        }.toMap().toMutableMap()
-                        val defaultId = obj["default_id"]?.jsonPrimitive?.content
-                        val defaultName = models.firstOrNull { it.first == defaultId }?.second
-                        // Auto ("") resolves server-side to the default model →
-                        // it lives in the default model's backend group.
-                        backends[""] = defaultId?.let { backends[it] } ?: "anthropic"
-                        val autoLabel = if (defaultName != null) "Auto - $defaultName" else "Auto - Latest"
-                        val withAuto = listOf("" to autoLabel) + models
-                        // The two writes below have no suspension point between
-                        // them and run on the main thread, so composition never
-                        // observes the new list paired with a stale backends map
-                        // (the writes are atomic w.r.t. composition).
-                        _liveModels.value = withAuto
-                        _cuModelBackends.value = backends
-                        modelsCache[apiProvider] = System.currentTimeMillis() to withAuto
-                        cuBackendsCache[apiProvider] = backends
-                    } else {
-                        // Prepend "Auto" option
-                        val withAuto = listOf("" to "Auto - Latest") + models
-                        _liveModels.value = withAuto
-                        modelsCache[apiProvider] = System.currentTimeMillis() to withAuto
-                    }
-                    Log.d(TAG, "Fetched ${models.size} live models for $provider (source=${obj["source"]?.jsonPrimitive?.content ?: "?"})")
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Model fetch failed for $provider, using defaults: ${e.message}")
-                // Keep whatever's in liveModels (could be from Constants fallback).
-                // For custom that is the EMPTY list published eagerly above —
-                // never a stale roster; the Composer shows Constants' Auto seed.
-            }
+            val catalog = catalogs.refresh(apiProvider) ?: return@launch // keep what is shown
+            // Stale-response guard: a late answer for a provider the user already left
+            // must not overwrite the list a newer switch owns. Both this and the
+            // store.provider collector run on Main, so the check is race-free.
+            if (provider != currentProvider) return@launch
+            publishCatalog(apiProvider, catalog)
+            if (catalog.isAuthoritative) store.reconcileModelIds(provider, catalog.ids)
+            Log.d(TAG, "Models for $provider: ${catalog.models.size} (source=${catalog.source ?: "?"})")
         }
+    }
+
+    /**
+     * The composer's list, CU backends and custom load statuses from [catalog] (null =
+     * none known), in adjacent writes with no suspension point between them, so
+     * composition never sees the new list beside a stale backends map.
+     */
+    private fun publishCatalog(apiProvider: String, catalog: ModelCatalog?) {
+        _liveModels.value = catalog?.options().orEmpty()
+        if (apiProvider == ModelCatalog.COMPUTER_USE) _cuModelBackends.value = catalog?.backends().orEmpty()
+        if (apiProvider == ModelCatalog.CUSTOM) _customModelStatus.value = catalog?.statuses().orEmpty()
     }
 
     // =========================================================================
@@ -3676,49 +3577,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             else -> "stopped"
         }
 
-        /** Map provider IDs to the backend's expected provider key.
-         *  Note: Android uses "gemini" as provider key but backend uses "google".
-         *  T3 (2026-05-18) added xai mapping — previously a gap that left
-         *  the xai dropdown stuck on the malformed Constants.MODEL_CONFIG
-         *  fallback (which had IDs like "grok-4.1-fast" that don't exist
-         *  in the xAI API). Pure (companion) so the mapping is unit-testable
-         *  without the ViewModel — the same unknown→null trap would otherwise
-         *  silently no-op a new provider's hydration (it did for custom). */
+        /** The box's catalog key for an app provider id (gemini is "google" there); null for
+         *  providers with no /models endpoint. One mapping for every picker:
+         *  ModelCatalogRepository.apiProviderFor. Kept here for the chat's callers and tests. */
         @VisibleForTesting
-        internal fun mapProviderForApi(provider: String): String? = when (provider) {
-            "gemini" -> "google"
-            "anthropic" -> "anthropic"
-            "openai" -> "openai"
-            "xai" -> "xai"
-            // CU production pass 2026-06: the backend exposes GET /models/computer-use
-            // (merged live Anthropic/Google/OpenAI CU catalogs with `backend` field).
-            "computer-use" -> "computer-use"
-            // Task 7.1: user-registered OpenAI-compatible servers — the backend
-            // exposes GET /models/custom (registry roster + `status` field).
-            "custom" -> "custom"
-            else -> null // Voice/agent providers don't have model endpoints
-        }
+        internal fun mapProviderForApi(provider: String): String? =
+            ModelCatalogRepository.apiProviderFor(provider)
 
         /**
-         * W22: the ids on [provider]'s LIVE model list — the same GET /models/{apiProvider}
-         * the pill's dropdown hydrates from — for the provider-switch restore
-         * (BlackBoxStore.setProviderAndModel). The composer pill and the Settings sheet both
-         * pass this. Null when the list is not known (no api yet, no model endpoint for the
-         * provider, request or parse failure), so the switch stays on Auto.
+         * W22: the ids on [provider]'s LIVE model list — the same shared catalog the pill's
+         * dropdown hydrates from (ModelCatalogs, GET /models/{apiProvider}) — for the
+         * provider-switch restore (BlackBoxStore.setProviderAndModel). The composer pill and
+         * the Settings sheet both pass this. Null when the list is not known (no api yet, no
+         * model endpoint for the provider, request or parse failure), so the switch stays on
+         * Auto; never the disk copy, which may predate a model the box dropped.
          */
         internal suspend fun fetchLiveModelIds(api: BlackBoxApi?, provider: String): List<String>? {
             val apiProvider = mapProviderForApi(provider) ?: return null
             val currentApi = api ?: return null
-            return try {
-                val models = Json.parseToJsonElement(currentApi.get("/models/$apiProvider"))
-                    .jsonObject["models"]?.jsonArray ?: return null
-                models.mapNotNull { (it as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.d(TAG, "Live model ids unavailable for $provider: ${e.message}")
-                null
-            }
+            return ModelCatalogs.forApi(currentApi).liveIds(apiProvider)
         }
 
         /**

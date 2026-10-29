@@ -593,7 +593,7 @@ fun CuScreen(
     // liveModels is only trusted when cuModelBackends is non-empty — the
     // backends map is exclusively populated by a successful CU fetch, so a
     // stale chat-provider list can never leak into the CU dropdown. Empty
-    // (offline) → Constants.MODEL_CONFIG["computer-use"] + id heuristic.
+    // (no catalog known yet) → Constants.MODEL_CONFIG["computer-use"] (Auto) + id heuristic.
     liveModels: List<Pair<String, String>> = emptyList(),
     cuModelBackends: Map<String, String> = emptyMap(),
     onModelChange: (String) -> Unit = {},
@@ -1453,9 +1453,11 @@ private val CU_BACKENDS = listOf(
  * non-empty, partition [liveModels] by it. The map carries "" → the server
  * default's backend, so the Auto entry lands in that backend's group.
  *
- * Offline path: backends map empty → Constants.MODEL_CONFIG["computer-use"]
- * fallback partitioned by id-substring heuristic (Auto "" goes to anthropic,
- * matching the server's anthropic-default).
+ * Offline path: backends map empty (no CU catalog known yet: the shared catalog
+ * publishes its last-good copy at once, so only a phone that never reached its box)
+ * → Constants.MODEL_CONFIG["computer-use"], the Auto seed, partitioned by
+ * id-substring heuristic (Auto "" goes to anthropic, matching the server's
+ * anthropic-default).
  */
 private fun cuModelsForBackend(
     backend: String,
