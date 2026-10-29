@@ -30,6 +30,9 @@ for name in $(compgen -e); do
     esac
 done
 export BLACKBOX_ROOT="$repo"
+# The MCP control listener (POST /internal/reload) of every server a harness
+# starts binds a free port, never this box's 9094.
+export BLACKBOX_MCP_CONTROL_PORT=0
 
 stub_out="$(mktemp)"
 "$PY" "$here/_stub_backend.py" >"$stub_out" 2>&1 &

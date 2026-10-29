@@ -716,8 +716,8 @@ def test_stdio_get_task_status_is_unchanged():
 # ===========================================================================
 def test_bound_volume_info_hides_server_paths():
     with _bound(OP_A):
-        bound = json.loads(asyncio.run(srv.read_resource("blackbox://volume/info")).text)
-    stdio = json.loads(asyncio.run(srv.read_resource("blackbox://volume/info")).text)
+        bound = json.loads(asyncio.run(srv.read_resource("blackbox://volume/info"))[0].content)
+    stdio = json.loads(asyncio.run(srv.read_resource("blackbox://volume/info"))[0].content)
     assert "volume_path" not in bound and "index_path" not in bound, bound
     assert str(srv.BLACKBOX_ROOT) not in json.dumps(bound), bound
     assert "exists" in bound and "index_exists" in bound, bound

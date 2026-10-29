@@ -114,6 +114,7 @@ def _start_http_server(port: int, extra_env: dict) -> subprocess.Popen:
     # (the guard itself is covered by test_mcp_operator_scoping.py).
     env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
+    env["BLACKBOX_MCP_CONTROL_PORT"] = "0"     # a free port, never this box's 9094
     env.update(extra_env)
     return subprocess.Popen(
         [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],

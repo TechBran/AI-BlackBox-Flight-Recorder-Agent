@@ -129,3 +129,39 @@ def test_trigger_reload_is_best_effort_when_the_secret_cannot_be_written(monkeyp
     monkeypatch.setattr(mcp_routes.httpx, "post",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no secret, no call")))
     assert mcp_routes._trigger_reload() is False
+
+
+# ------------------------------------- the loopback control listener (O20-08)
+
+def test_trigger_reload_goes_to_the_loopback_control_listener(secret_file, monkeypatch):
+    """The reload (and its secret) goes to the MCP server's control listener,
+    never to the :9093 listener Tailscale Funnel forwards the internet to."""
+    from Orchestrator.routes import mcp_routes
+
+    monkeypatch.setenv("BLACKBOX_MCP_RELOAD_SECRET_FILE", str(secret_file))
+    monkeypatch.delenv("BLACKBOX_MCP_CONTROL_PORT", raising=False)
+    urls = []
+
+    class _R:
+        status_code = 200
+
+    def fake_post(url, headers=None, **kw):
+        urls.append(url)
+        return _R()
+
+    monkeypatch.setattr(mcp_routes.httpx, "post", fake_post)
+    assert mcp_routes._trigger_reload() is True
+    monkeypatch.setenv("BLACKBOX_MCP_CONTROL_PORT", "19094")
+    assert mcp_routes._trigger_reload() is True
+    assert urls == ["http://127.0.0.1:9094/internal/reload",
+                    "http://127.0.0.1:19094/internal/reload"]
+    assert not any(":9093" in u or u.startswith(mcp_routes.MCP_SERVER_URL) for u in urls)
+
+
+@pytest.mark.parametrize("raw,port", [("", 9094), ("9094", 9094), ("0", 0), ("19094", 19094),
+                                      ("70000", 9094), ("-1", 9094), ("nope", 9094),
+                                      (" 8123 ", 8123)])
+def test_control_port_parsing(monkeypatch, raw, port):
+    monkeypatch.setenv("BLACKBOX_MCP_CONTROL_PORT", raw)
+    assert isec.mcp_control_port() == port
+    assert isec.mcp_control_url() == f"http://127.0.0.1:{port}"

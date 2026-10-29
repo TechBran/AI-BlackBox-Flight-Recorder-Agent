@@ -109,7 +109,7 @@ def test_index_tools_run_off_the_loop(slow_index, tool, args, expect):
 ])
 def test_index_resources_run_off_the_loop(slow_index, uri, expect):
     result, gap = asyncio.run(_max_gap_during(srv.read_resource(uri)))
-    assert expect in result.text, result.text
+    assert expect in result[0].content, result
     assert gap < 0.2, f"{uri} blocked the MCP event loop for {gap:.2f}s"
 
 

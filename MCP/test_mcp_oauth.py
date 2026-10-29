@@ -124,6 +124,16 @@ def _start_http_server(port: int, clients_file: Path,
     # disable the startup roster guard (covered by test_mcp_operator_scoping.py).
     env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
+    # Hermetic: the refresh-token store and the OAuth rate ledger in a temp
+    # dir, the control listener on a free port (never this box's 9094), and
+    # rate limits out of the way of the flows below (test_mcp_hardening.py
+    # covers the limits).
+    _harness_dir = Path(tempfile.mkdtemp(prefix="bbmcp_harness_"))
+    env["BLACKBOX_MCP_OAUTH_REFRESH_FILE"] = str(_harness_dir / "mcp_oauth_refresh_tokens.json")
+    env["BLACKBOX_MCP_OAUTH_RATE_LEDGER_FILE"] = str(_harness_dir / "mcp_oauth_rate_ledger.json")
+    env["BLACKBOX_MCP_OAUTH_RATE_LIMITS"] = json.dumps(
+        {rule: [100000, 1] for rule in ("register", "register_all", "authorize", "token", "revoke")})
+    env["BLACKBOX_MCP_CONTROL_PORT"] = "0"
     return subprocess.Popen(
         [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],
         cwd=str(_HERE), env=env,
@@ -365,6 +375,16 @@ def _run_oauth_isolation(failures: list) -> None:
     env["BLACKBOX_MCP_PUBLIC_URL"] = origin   # redirect_uri match needs real origin
     env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"  # bob is a synthetic test operator
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
+    # Hermetic: the refresh-token store and the OAuth rate ledger in a temp
+    # dir, the control listener on a free port (never this box's 9094), and
+    # rate limits out of the way of the flows below (test_mcp_hardening.py
+    # covers the limits).
+    _harness_dir = Path(tempfile.mkdtemp(prefix="bbmcp_harness_"))
+    env["BLACKBOX_MCP_OAUTH_REFRESH_FILE"] = str(_harness_dir / "mcp_oauth_refresh_tokens.json")
+    env["BLACKBOX_MCP_OAUTH_RATE_LEDGER_FILE"] = str(_harness_dir / "mcp_oauth_rate_ledger.json")
+    env["BLACKBOX_MCP_OAUTH_RATE_LIMITS"] = json.dumps(
+        {rule: [100000, 1] for rule in ("register", "register_all", "authorize", "token", "revoke")})
+    env["BLACKBOX_MCP_CONTROL_PORT"] = "0"
     proc = subprocess.Popen(
         [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],
         cwd=str(_HERE), env=env,
@@ -485,7 +505,8 @@ def main() -> int:
                     "token_endpoint": m.get("token_endpoint") == TEST_PUBLIC_URL + "/token",
                     "registration_endpoint": m.get("registration_endpoint") == TEST_PUBLIC_URL + "/register",
                     "S256": m.get("code_challenge_methods_supported") == ["S256"],
-                    "grant_types": m.get("grant_types_supported") == ["authorization_code"],
+                    "grant_types": m.get("grant_types_supported") == ["authorization_code", "refresh_token"],
+                    "revocation_endpoint": m.get("revocation_endpoint") == TEST_PUBLIC_URL + "/revoke",
                     "response_types": m.get("response_types_supported") == ["code"],
                     "auth_methods_none": m.get("token_endpoint_auth_methods_supported") == ["none"],
                 }

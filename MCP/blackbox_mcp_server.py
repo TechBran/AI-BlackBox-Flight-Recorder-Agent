@@ -103,13 +103,15 @@ import httpx
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
+    from mcp.shared.exceptions import McpError
     from mcp.types import (
-        Tool,
-        TextContent,
+        INTERNAL_ERROR,
         CallToolResult,
+        ErrorData,
         Resource,
-        ResourceContents,
-        TextResourceContents,
+        TextContent,
+        Tool,
     )
 except ImportError:
     print("MCP SDK not installed. Run: pip install mcp", file=sys.stderr)
@@ -295,6 +297,28 @@ def _current_bound_operator() -> Optional[str]:
 _DENY_OPERATOR = "\x00__deny__\x00"
 
 
+def _request_audit_ids():
+    """(request id, token id) of the CURRENT request for the audit trail.
+
+    HTTP: both read from request.state, where the auth middleware put them for
+    this request -- never the session-frozen contextvars. A request whose state
+    lacks them still logs, as "unknown", so the line is never attributed to
+    another request. stdio: (None, None) -- no token, and the caller mints the
+    request id.
+    """
+    try:
+        req = server.request_context.request
+    except LookupError:
+        req = None
+    state = getattr(req, "state", None) if req is not None else None
+    if state is None:
+        if _is_http_request():
+            return None, "unknown"
+        return None, None
+    return (getattr(state, "request_id", None),
+            getattr(state, "token_id", None) or "unknown")
+
+
 async def resolve_operator(provided):
     """Server-side safety net: resolve the operator for a tool call.
 
@@ -465,21 +489,17 @@ from web_tools import perform_web_fetch
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 _WEB_FETCH_POOL = _ThreadPoolExecutor(max_workers=4, thread_name_prefix="web-fetch")
 
-# E21 (2026-05-17): load tool_registry.py as a STANDALONE module to bypass
-# Orchestrator/tools/__init__.py, which re-exports blackbox_tools -- and
-# blackbox_tools transitively pulls in aiohttp, Orchestrator.contacts, and
-# the rest of the FastAPI request/response stack. The MCP server only needs
-# get_mcp_tools (metadata generation, returns tool schemas); it never CALLS
-# them locally (execution always hops through HTTP back to the BlackBox API).
-# Loading the file directly via importlib lets MCP/venv stay lean -- no
-# aiohttp/fastapi/starlette needed, which sidesteps the mcp-vs-fastapi
-# starlette version conflict that would otherwise force a heavier venv.
-import importlib.util as _ilu
-_tr_path = BLACKBOX_ROOT / "Orchestrator" / "tools" / "tool_registry.py"
-_tr_spec = _ilu.spec_from_file_location("blackbox_tool_registry", str(_tr_path))
-_tr_module = _ilu.module_from_spec(_tr_spec)
-_tr_spec.loader.exec_module(_tr_module)
-get_mcp_tools = _tr_module.get_mcp_tools
+# The catalog: tool_registry's MCP converter over the ToolVault registry. The
+# MCP server only needs the schemas -- execution always hops through HTTP back
+# to the BlackBox API. Orchestrator/tools/__init__.py and
+# Orchestrator/toolvault/__init__.py resolve their re-exports lazily, so this
+# import loads the registry, the resolvers and the availability gate only, and
+# none of the tool executor / injector / embeddings stack the lean venv lacks.
+# (It replaced an importlib load of tool_registry.py under a second module
+# name, which kept a second copy of the registry snapshot and stopped keeping
+# anything out once toolvault/__init__ imported the injector: audit
+# O20-mcp-server-17. MCP/test_mcp_hardening.py holds the import closure.)
+from Orchestrator.tools.tool_registry import get_mcp_tools  # noqa: E402
 
 # Memoized valid-tool-name set (M1): the old catch-all rebuilt the entire tool
 # list (get_mcp_tools()) on EVERY unmatched call just to membership-test the name.
@@ -786,13 +806,13 @@ async def call_tool(name: str, arguments: dict[str, Any]):
     (isError=True) on any failure.
     """
     # Per-call request id for the audit trail (shared by every log line below).
-    # HTTP path: the auth middleware already set _REQUEST_ID (+ bound operator +
-    # token id) for THIS request -- reuse it so the middleware AUDIT line and the
-    # tool-call lines share one id. stdio path: no middleware ran, so mint a fresh
-    # id (the contextvar is still at its "-" default).
-    if _REQUEST_ID.get() == "-":
-        _REQUEST_ID.set(uuid.uuid4().hex[:12])
-    _tid = _TOKEN_ID.get()
+    # HTTP path: the auth middleware stashed THIS request's rid + token id on
+    # request.state -- reuse them so the middleware AUDIT line and the tool-call
+    # lines share one id. (The contextvars hold the values of the request that
+    # opened the session, copied into the session task: audit
+    # O20-mcp-server-14.) stdio path: no middleware ran, so mint a fresh id.
+    _rid, _tid = _request_audit_ids()
+    _REQUEST_ID.set(_rid or uuid.uuid4().hex[:12])
     if _tid is not None:
         # AUDIT (M3): every tool invocation on the HTTP/public surface logs the
         # token id (never the value) + the CURRENT request's operator (read per
@@ -1386,10 +1406,25 @@ async def list_resources() -> list[Resource]:
     ]
 
 
-@server.read_resource()
-async def read_resource(uri: str) -> ResourceContents:
-    """Read a BlackBox resource."""
+def _json_resource(payload) -> list:
+    return [ReadResourceContents(content=json.dumps(payload, indent=2),
+                                 mime_type="application/json")]
 
+
+# MCP's "resource not found" error code (spec: Resources > Error Handling).
+RESOURCE_NOT_FOUND = -32002
+
+
+@server.read_resource()
+async def read_resource(uri) -> list:
+    """Read a BlackBox resource.
+
+    The SDK hands over the URI as a pydantic AnyUrl, which never equals a str,
+    and expects Iterable[ReadResourceContents] back; comparing the AnyUrl and
+    returning a TextResourceContents made every read fail (audit
+    O20-mcp-server-04). An unknown URI is the spec's resource-not-found error.
+    """
+    uri = str(uri)
     try:
         # #2A: resources run in the SAME session task and are equally reachable
         # over HTTP -- apply the SAME bound-operator filter as the matching tools.
@@ -1414,14 +1449,12 @@ async def read_resource(uri: str) -> ResourceContents:
                     types[snap_type] += 1
                 total_bytes += entry.get("byte_end", 0) - entry.get("byte_start", 0)
 
-            stats = {
+            return _json_resource({
                 "total_snapshots": counted,
                 "operators": operators,
                 "types": types,
                 "total_size_mb": round(total_bytes / (1024 * 1024), 2)
-            }
-
-            return TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(stats, indent=2))
+            })
 
         elif uri == "blackbox://index/operators":
             index = await asyncio.to_thread(load_snapshot_index)
@@ -1432,11 +1465,7 @@ async def read_resource(uri: str) -> ResourceContents:
                     continue
                 operators[op] = operators.get(op, 0) + 1
 
-            return TextResourceContents(
-                uri=uri,
-                mimeType="application/json",
-                text=json.dumps({"operators": operators}, indent=2)
-            )
+            return _json_resource({"operators": operators})
 
         elif uri == "blackbox://index/recent":
             index = await asyncio.to_thread(load_snapshot_index)
@@ -1452,13 +1481,9 @@ async def read_resource(uri: str) -> ResourceContents:
                     "type": entry.get("type", "normal")
                 })
 
-            entries.sort(key=lambda x: x["timestamp"], reverse=True)
+            entries.sort(key=lambda x: x["timestamp"] or "", reverse=True)
 
-            return TextResourceContents(
-                uri=uri,
-                mimeType="application/json",
-                text=json.dumps({"recent_snapshots": entries[:20]}, indent=2)
-            )
+            return _json_resource({"recent_snapshots": entries[:20]})
 
         elif uri == "blackbox://volume/info":
             info = {
@@ -1474,18 +1499,43 @@ async def read_resource(uri: str) -> ResourceContents:
             if scope is not None:
                 info.pop("volume_path")
                 info.pop("index_path")
-            return TextResourceContents(uri=uri, mimeType="application/json", text=json.dumps(info, indent=2))
+            return _json_resource(info)
 
-        else:
-            return TextResourceContents(uri=uri, mimeType="text/plain", text=f"Unknown resource: {uri}")
-
-    except Exception as e:
-        return TextResourceContents(uri=uri, mimeType="text/plain", text=f"Error: {str(e)}")
+    except Exception:
+        logger.exception("rid=%s resource=%s | read failed", _REQUEST_ID.get(), uri)
+        raise McpError(ErrorData(code=INTERNAL_ERROR,
+                                 message=f"Failed to read resource {uri}")) from None
+    raise McpError(ErrorData(code=RESOURCE_NOT_FOUND, message=f"Resource not found: {uri}"))
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
+
+def _require_tool_catalog() -> int:
+    """Refuse to start without a tool catalog (audit O20-mcp-server-17).
+
+    A catalog that fails to build (an import the lean venv cannot satisfy, a
+    broken registry) or builds empty used to surface only as a JSON-RPC error
+    on tools/list, or as zero tools, in every client -- silently. Exit loudly
+    instead, so the stdio client reports a dead server and systemd a failed
+    unit. Returns the number of tools.
+    """
+    try:
+        count = len(get_mcp_tools())
+    except Exception:
+        logger.critical("Refusing to start: the MCP tool catalog failed to build "
+                        "(an import the MCP venv lacks, or a broken ToolVault "
+                        "registry). Clients would see no tools.", exc_info=True)
+        raise SystemExit(1) from None
+    if count == 0:
+        logger.critical("Refusing to start: the MCP tool catalog is EMPTY (no valid "
+                        "ToolVault module lists the 'mcp' group under %s). Clients "
+                        "would see no tools.", BLACKBOX_ROOT / "ToolVault" / "tools")
+        raise SystemExit(1)
+    logger.info("Tool catalog: %d tools", count)
+    return count
+
 
 def _log_startup_banner(transport: str) -> None:
     """Shared startup log lines (both transports)."""
@@ -1505,9 +1555,20 @@ async def main():
 
     Unchanged from M1: this is the Claude Code path. Selecting it requires no
     flags/env, so existing stdio clients are entirely unaffected by M2.
+
+    stdout is the JSON-RPC channel, and code this server calls (web_fetch, the
+    device registry, ToolVault) prints. The SDK gets the real stdout handle and
+    every other write to sys.stdout goes to stderr, so a stray print can never
+    split or corrupt a frame (audit O20-mcp-server-05).
     """
+    import anyio
+    from io import TextIOWrapper
+
+    protocol_out = anyio.wrap_file(TextIOWrapper(sys.stdout.buffer, encoding="utf-8"))
+    sys.stdout = sys.stderr
     _log_startup_banner("stdio")
-    async with stdio_server() as (read_stream, write_stream):
+    _require_tool_catalog()
+    async with stdio_server(stdout=protocol_out) as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
@@ -1607,8 +1668,9 @@ BLACKBOX_MCP_PUBLIC_URL = _load_runtime_public_url()
 # configured MCP path so a non-default path stays consistent across surfaces.
 BLACKBOX_MCP_RESOURCE_URL = BLACKBOX_MCP_PUBLIC_URL + BLACKBOX_MCP_HTTP_PATH
 
-# Module-level handle to the live auth middleware so the localhost /internal/reload
-# route can hot-swap the token map (mint/revoke) with no restart. Set in build_http_app.
+# Module-level handle to the live auth middleware so the control listener's
+# /internal/reload can hot-swap the token map (mint/revoke) with no restart, and
+# the OAuth endpoints read the same live map. Set in build_http_app.
 _AUTH_MIDDLEWARE = {"instance": None}
 
 
@@ -1622,12 +1684,13 @@ async def _internal_reload_handler(request):
     URL goes live with no restart. It only re-reads on-disk config -- it cannot
     set arbitrary values.
 
-    It shares the one HTTP listener, and Tailscale Funnel forwards the INTERNET
-    to that listener from 127.0.0.1 (REMOTE_SETUP.md exposes the whole origin),
-    so the loopback check below is defense-in-depth only. The gate is the
-    per-boot reload secret in credentials/ (0600, readable only by the service
-    user), sent by the Orchestrator and compared in constant time (audit M3 U20,
-    O20-mcp-server-08)."""
+    It is served ONLY by the control listener (_start_control_listener), a
+    second uvicorn server bound to 127.0.0.1:<BLACKBOX_MCP_CONTROL_PORT>, never
+    by the public listener that Tailscale Funnel forwards the internet to
+    (audit O20-mcp-server-08). The gate is the per-boot reload secret in
+    credentials/ (0600, readable only by the service user), sent by the
+    Orchestrator and compared in constant time (audit M3 U20); the loopback
+    check below is defense in depth."""
     from starlette.responses import JSONResponse
     client = getattr(request, "client", None)
     if client is not None and client.host not in ("127.0.0.1", "::1", "localhost"):
@@ -1783,13 +1846,19 @@ def _validate_token_operators(token_map: Dict[str, str]) -> Dict[str, str]:
     return kept if enforce else token_map
 
 
+def _token_bytes(token: str) -> bytes:
+    """A token as UTF-8 bytes, for hashing and comparison. surrogatepass keeps
+    the mapping one-to-one for any str a form or header can carry."""
+    return token.encode("utf-8", "surrogatepass")
+
+
 def _token_id(token: str) -> str:
     """A short, non-reversible IDENTIFIER for a token (audit logs only).
 
     sha256(token) -> first 12 hex chars. NEVER the token value -- so logs can be
     correlated to a credential without ever recording the secret.
     """
-    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+    return "sha256:" + hashlib.sha256(_token_bytes(token)).hexdigest()[:12]
 
 
 def _match_token(presented: str, token_map: Dict[str, str]):
@@ -1798,18 +1867,27 @@ def _match_token(presented: str, token_map: Dict[str, str]):
     hmac.compare_digest is used for EVERY known token (no early break on the
     first non-match) so total work does not depend on which token matched --
     no timing oracle on the secret. An empty/blank presented token never matches.
+    Both sides are compared as UTF-8 bytes: compare_digest raises TypeError
+    for a str with non-ASCII characters, which made a hostile Authorization
+    header or consent-form token a 500 (audit O20-mcp-server-11).
     """
-    if not presented:
+    if not presented or not isinstance(presented, str):
         return None, None
+    presented_b = _token_bytes(presented)
     matched_op = None
     matched_tok = None
     for known, operator in token_map.items():
-        if hmac.compare_digest(presented, known):
+        if hmac.compare_digest(presented_b, _token_bytes(known)):
             matched_op = operator
             matched_tok = known
     if matched_op is None:
         return None, None
     return matched_op, _token_id(matched_tok)
+
+
+# A bearer token is printable ASCII (RFC 6750's b64token is a subset); anything
+# else -- control bytes, latin-1 high bytes -- is malformed, never compared.
+_BEARER_TOKEN_RE = re.compile(r"[\x21-\x7e]{1,4096}")
 
 
 def _extract_bearer(scope) -> Optional[str]:
@@ -1827,7 +1905,7 @@ def _extract_bearer(scope) -> Optional[str]:
             parts = raw.split(" ", 1)
             if len(parts) == 2 and parts[0].lower() == "bearer":
                 tok = parts[1].strip()
-                return tok or None
+                return tok if _BEARER_TOKEN_RE.fullmatch(tok) else None
             return None
     return None
 
@@ -1846,7 +1924,7 @@ MAX_BOUND_SESSIONS = 10_000
 
 def _token_fingerprint(token: str) -> str:
     """Full sha256 of a token: the session-binding key (never the token value)."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_token_bytes(token)).hexdigest()
 
 
 def _request_header(scope, name: bytes) -> Optional[str]:
@@ -1889,6 +1967,11 @@ class BearerAuthMiddleware:
         self.token_map = token_map
         # mcp-session-id -> fingerprint of the token whose initialize opened it.
         self.session_owners: "OrderedDict[str, str]" = OrderedDict()
+
+    def live_consents(self) -> Dict[str, str]:
+        """fingerprint -> operator of every static token in the live map: an
+        OAuth token is valid only while the bearer that consented to it is."""
+        return {_token_fingerprint(t): op for t, op in self.token_map.items()}
 
     def _bind_session(self, session_id: str, fingerprint: str) -> None:
         self.session_owners[session_id] = fingerprint
@@ -1966,7 +2049,7 @@ class BearerAuthMiddleware:
         operator, token_id = _match_token(presented, self.token_map)
         auth_kind = "static"
         if operator is None:
-            operator, token_id = _match_oauth_access_token(presented)
+            operator, token_id = _match_oauth_access_token(presented, self.live_consents())
             auth_kind = "oauth"
         if operator is None:
             logger.warning("rid=%s AUTH reject: unknown token tid=%s (%s %s)",
@@ -2003,6 +2086,7 @@ class BearerAuthMiddleware:
         _req = _StarletteRequest(scope)
         _req.state.bound_operator = operator
         _req.state.token_id = token_id
+        _req.state.request_id = rid      # the tool-call audit line reads it back
         # _BOUND_OPERATOR/_TOKEN_ID remain set as the "this is HTTP" transport
         # signal + audit context. Their VALUE is NOT trusted for per-call operator
         # resolution (it can be session-stale); _current_bound_operator() is.
@@ -2040,8 +2124,261 @@ class BearerAuthMiddleware:
 # /authorize + /token are reserved here NOW (later chunks implement them) so the
 # exemption is already in place when they land. Everything else (notably /mcp)
 # still requires a bearer.
-OAUTH_PUBLIC_PATHS = {"/register", "/authorize", "/token"}
+OAUTH_PUBLIC_PATHS = {"/register", "/authorize", "/token", "/revoke"}
 OAUTH_PUBLIC_PREFIXES = ("/.well-known/",)
+
+
+# =============================================================================
+# THE PUBLIC OAUTH EDGE (audit O20-mcp-server-09)
+#
+# /register, /authorize, /token and /revoke take no credential, and Tailscale
+# Funnel puts them on the internet. Every request to them is rate-limited per
+# client address (a token bucket per rule, kept in memory and mirrored to a
+# small ledger so a restart does not hand out fresh buckets), and its body is
+# capped before a handler parses it. /mcp is never touched here: it streams,
+# and the bearer gate answers it.
+#
+# The client address is scope["client"]: uvicorn rewrites it from Funnel's
+# X-Forwarded-For only for a loopback peer (run_http pins forwarded_allow_ips),
+# taking the address the proxy appended. An IPv6 client is keyed by its /64.
+# =============================================================================
+OAUTH_MAX_BODY_BYTES = int(os.getenv("BLACKBOX_MCP_OAUTH_MAX_BODY", str(16 * 1024)))
+
+# rule -> (capacity, window_s): a bucket holds `capacity` requests and refills
+# them evenly over `window_s` seconds. "register_all" is ONE bucket for every
+# address: it bounds how fast the client store can grow at all. Override with
+# BLACKBOX_MCP_OAUTH_RATE_LIMITS='{"register": [10, 3600], ...}'.
+_DEFAULT_OAUTH_RATE_LIMITS = {
+    "register": (10, 3600),
+    "register_all": (60, 3600),
+    "authorize": (30, 600),
+    "token": (60, 600),
+    "revoke": (30, 600),
+}
+
+# path -> the buckets a request to it draws from ("*" = the shared bucket).
+_OAUTH_RATE_RULES = {
+    "/register": (("register", None), ("register_all", "*")),
+    "/authorize": (("authorize", None),),
+    "/token": (("token", None),),
+    "/revoke": (("revoke", None),),
+}
+
+BLACKBOX_MCP_OAUTH_RATE_LEDGER_FILE = os.getenv(
+    "BLACKBOX_MCP_OAUTH_RATE_LEDGER_FILE",
+    str(BLACKBOX_ROOT / "Manifest" / "mcp_oauth_rate_ledger.json"),
+)
+
+
+def _rate_limits_from_env(defaults: dict) -> dict:
+    out = dict(defaults)
+    raw = os.getenv("BLACKBOX_MCP_OAUTH_RATE_LIMITS", "").strip()
+    if not raw:
+        return out
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        logger.error("BLACKBOX_MCP_OAUTH_RATE_LIMITS is not JSON; using the defaults")
+        return out
+    for rule, spec in (data.items() if isinstance(data, dict) else ()):
+        if (rule in out and isinstance(spec, list) and len(spec) == 2
+                and all(isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
+                        for x in spec)):
+            out[rule] = (spec[0], spec[1])
+        else:
+            logger.error("BLACKBOX_MCP_OAUTH_RATE_LIMITS: ignoring %r=%r "
+                         "(want a known rule -> [capacity, window_seconds])", rule, spec)
+    return out
+
+
+OAUTH_RATE_LIMITS = _rate_limits_from_env(_DEFAULT_OAUTH_RATE_LIMITS)
+
+
+def _client_tag(host) -> str:
+    """The rate-limit / registration key for a client address: a hash, so the
+    ledger and the client store never hold a raw address. IPv6 is keyed by its
+    /64 (one subscriber's prefix), an IPv4-mapped address as the IPv4 one."""
+    import ipaddress
+    text = host if isinstance(host, str) else ""
+    try:
+        ip = ipaddress.ip_address(text)
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            text = str(ip.ipv4_mapped)
+        elif ip.version == 6:
+            text = str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    except ValueError:
+        text = text or "unknown"
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+class _RateLimiter:
+    """Token buckets keyed "rule|client", in memory, mirrored to a ledger.
+
+    At most `max_keys` buckets are kept (least recently used dropped first), so
+    a flood of addresses cannot grow memory or the ledger without bound. Only
+    buckets that are not full are written: a full one carries no state.
+    """
+
+    def __init__(self, rules: dict, ledger_path=None, max_keys: int = 4096,
+                 flush_interval: float = 5.0, clock=None):
+        self.rules = dict(rules)
+        self.ledger_path = ledger_path
+        self.max_keys = max_keys
+        self.flush_interval = flush_interval
+        self._clock = clock or _time.time
+        self._buckets: "OrderedDict[str, list]" = OrderedDict()   # key -> [tokens, stamp]
+        self._lock = _threading.Lock()
+        self._dirty = False
+        self._last_flush = 0.0
+
+    def _level(self, key: str, rule: str, now: float) -> float:
+        capacity, window = self.rules[rule]
+        tokens, stamp = self._buckets.get(key, (capacity, now))
+        return min(capacity, tokens + max(0.0, now - stamp) * capacity / window)
+
+    def take(self, draws, now: float = None) -> float:
+        """Take one token from each (rule, client) bucket, all or none.
+
+        Returns 0.0 when the request may proceed, else the seconds until every
+        bucket it needs holds a token again (the Retry-After)."""
+        now = self._clock() if now is None else now
+        with self._lock:
+            keyed = [(f"{rule}|{client}", rule) for rule, client in draws]
+            levels = {key: self._level(key, rule, now) for key, rule in keyed}
+            short = [(key, rule) for key, rule in keyed if levels[key] < 1]
+            if short:
+                wait = 0.0
+                for key, rule in short:
+                    capacity, window = self.rules[rule]
+                    wait = max(wait, (1 - levels[key]) * window / capacity)
+                return max(wait, 0.001)
+            for key, _rule in keyed:
+                self._buckets[key] = [levels[key] - 1, now]
+                self._buckets.move_to_end(key)
+            # Evict the least recently used per-client buckets; the shared
+            # ("rule|*") ones are never evicted, or a flood of addresses would
+            # refill them.
+            if len(self._buckets) > self.max_keys:
+                for key in list(self._buckets):
+                    if len(self._buckets) <= self.max_keys:
+                        break
+                    if not key.endswith("|*"):
+                        del self._buckets[key]
+            self._dirty = True
+            return 0.0
+
+    def load(self) -> None:
+        """Restore the ledger (a missing or corrupt one starts empty)."""
+        if not self.ledger_path:
+            return
+        data = atomic_json.read_json(self.ledger_path, {},
+                                     valid=lambda d: isinstance(d, dict))
+        now = self._clock()
+        with self._lock:
+            for key, value in list(data.items())[-self.max_keys:]:
+                rule = key.split("|", 1)[0] if isinstance(key, str) else None
+                if (rule in self.rules and isinstance(value, list) and len(value) == 2
+                        and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                                for x in value)):
+                    tokens, stamp = float(value[0]), min(float(value[1]), now)
+                    self._buckets[key] = [max(0.0, min(tokens, self.rules[rule][0])), stamp]
+
+    def flush(self, force: bool = False) -> None:
+        """Write the not-full buckets to the ledger (at most every
+        flush_interval seconds unless forced). Never raises."""
+        if not self.ledger_path:
+            return
+        now = self._clock()
+        with self._lock:
+            if not self._dirty or (not force and now - self._last_flush < self.flush_interval):
+                return
+            snapshot = {key: [round(value[0], 4), value[1]]
+                        for key, value in self._buckets.items()
+                        if self._level(key, key.split("|", 1)[0], now) < self.rules[key.split("|", 1)[0]][0]}
+            self._dirty = False
+            self._last_flush = now
+        try:
+            atomic_json.write_json(self.ledger_path, snapshot, indent=None)
+        except Exception as e:
+            logger.error("OAuth rate ledger %s not written: %s", self.ledger_path, e)
+
+
+async def _send_json(send, status: int, payload: dict, extra_headers=()) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    headers = [(b"content-type", b"application/json"), (b"cache-control", b"no-store"),
+               (b"content-length", str(len(body)).encode("ascii"))]
+    headers.extend(extra_headers)
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+class _OAuthEdgeMiddleware:
+    """Pure ASGI, in front of the router: per-client rate limits and a body cap
+    on the public OAuth endpoints. Everything else passes straight through."""
+
+    def __init__(self, app, limiter: "_RateLimiter", max_body: int = None):
+        self.app = app
+        self.limiter = limiter
+        self.max_body = OAUTH_MAX_BODY_BYTES if max_body is None else max_body
+
+    async def __call__(self, scope, receive, send):
+        draws = _OAUTH_RATE_RULES.get(scope.get("path")) if scope.get("type") == "http" else None
+        if draws is None:
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        tag = _client_tag(client[0] if client else None)
+        retry = self.limiter.take([(rule, "*" if who == "*" else tag) for rule, who in draws])
+        if retry:
+            logger.warning("OAuth edge: rate limit on %s %s from client=%s (retry in %.0fs)",
+                           scope.get("method"), scope.get("path"), tag, retry)
+            await _send_json(send, 429, {
+                "error": "temporarily_unavailable",
+                "error_description": "Too many requests; retry later."},
+                [(b"retry-after", str(max(1, int(retry + 0.999))).encode("ascii"))])
+            return
+
+        # Cap the body: a declared Content-Length over the cap is refused
+        # unread, and a chunked body is read only up to the cap.
+        length = None
+        for k, v in scope.get("headers", []):
+            if k == b"content-length":
+                try:
+                    length = int(v)
+                except ValueError:
+                    length = -1
+        too_large = {"error": "invalid_request",
+                     "error_description": f"Request body exceeds {self.max_body} bytes."}
+        if length is not None and (length < 0 or length > self.max_body):
+            await _send_json(send, 413, too_large)
+            return
+        chunks, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > self.max_body:
+                await _send_json(send, 413, too_large)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        try:
+            await self.app(scope, replay, send)
+        finally:
+            await asyncio.to_thread(self.limiter.flush)
 
 
 def _is_oauth_public_path(p: str) -> bool:
@@ -2062,6 +2399,61 @@ def _load_oauth_clients() -> Dict[str, dict]:
     return atomic_json.read_json(BLACKBOX_MCP_OAUTH_CLIENTS_FILE, {},
                                  valid=lambda d: isinstance(d, dict),
                                  cross_process=True)
+
+
+# Client store bounds (audit O20-mcp-server-09). A registration that never
+# completes a flow is "pending"; it expires after a day, and one address may
+# hold only a few at once. The store as a whole is capped; when full, the oldest
+# pending registration makes room. Registrations made before these bounds
+# (no "registered_from") are kept as they were.
+MAX_OAUTH_CLIENTS = int(os.getenv("BLACKBOX_MCP_OAUTH_MAX_CLIENTS", "500"))
+MAX_PENDING_CLIENTS_PER_ADDRESS = 10
+PENDING_CLIENT_TTL = 24 * 3600
+
+
+def _is_pending_client(record) -> bool:
+    return (isinstance(record, dict) and "registered_from" in record
+            and "last_token_at" not in record)
+
+
+def _register_oauth_client(client_id: str, record: dict, tag: str, now: float):
+    """Add one registration within the store bounds, under the store lock.
+
+    Returns None when stored, else (status, error, description) to refuse it.
+    """
+    stored = dict(record, registered_from=tag)
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_CLIENTS_FILE, {},
+                                 valid=lambda d: isinstance(d, dict),
+                                 cross_process=True) as clients:
+        for cid in [cid for cid, rec in clients.items()
+                    if _is_pending_client(rec)
+                    and now - (rec.get("client_id_issued_at") or 0) > PENDING_CLIENT_TTL]:
+            del clients[cid]
+        pending = [(rec.get("client_id_issued_at") or 0, cid) for cid, rec in clients.items()
+                   if _is_pending_client(rec)]
+        if sum(1 for _at, cid in pending
+               if clients[cid].get("registered_from") == tag) >= MAX_PENDING_CLIENTS_PER_ADDRESS:
+            return (429, "temporarily_unavailable",
+                    "Too many unfinished registrations from this address; complete or wait for them to expire.")
+        if len(clients) >= MAX_OAUTH_CLIENTS:
+            if not pending:
+                return (503, "temporarily_unavailable", "The client registry is full.")
+            _at, oldest = min(pending)
+            del clients[oldest]
+            logger.warning("OAuth DCR: client store full (%d); dropped the oldest unfinished "
+                           "registration %s", MAX_OAUTH_CLIENTS, oldest)
+        clients[client_id] = stored
+    return None
+
+
+def _touch_oauth_client(client_id: str, now: float) -> None:
+    """Record that a client completed a flow: it is no longer pending."""
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_CLIENTS_FILE, {},
+                                 valid=lambda d: isinstance(d, dict),
+                                 cross_process=True) as clients:
+        rec = clients.get(client_id)
+        if isinstance(rec, dict):
+            rec["last_token_at"] = int(now)
 
 
 def _persist_oauth_client(client_id: str, record: dict) -> None:
@@ -2095,10 +2487,12 @@ def _oauth_as_metadata() -> dict:
         "authorization_endpoint": issuer + "/authorize",
         "token_endpoint": issuer + "/token",
         "registration_endpoint": issuer + "/register",
+        "revocation_endpoint": issuer + "/revoke",
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "revocation_endpoint_auth_methods_supported": ["none"],
     }
 
 
@@ -2149,6 +2543,40 @@ async def _oauth_pr_metadata_handler(request):
     )
 
 
+# RFC 7591 string metadata kept for a client -> its length cap.
+_CLIENT_STRING_FIELDS = {
+    "client_name": 256, "client_uri": 2048, "logo_uri": 2048, "scope": 512,
+    "tos_uri": 2048, "policy_uri": 2048, "software_id": 256, "software_version": 64,
+}
+MAX_CLIENT_CONTACTS = 10
+MAX_REDIRECT_URIS = 10
+MAX_REDIRECT_URI_LENGTH = 2048
+# Never a redirect target: they run code or read local data in the browser.
+_FORBIDDEN_REDIRECT_SCHEMES = {"javascript", "data", "vbscript", "file", "blob", "about"}
+
+
+def _redirect_uris_error(uris: list) -> Optional[str]:
+    """Why a registration's redirect_uris are unacceptable, or None."""
+    from urllib.parse import urlsplit
+    if len(uris) > MAX_REDIRECT_URIS:
+        return f"at most {MAX_REDIRECT_URIS} redirect_uris"
+    for uri in uris:
+        if len(uri) > MAX_REDIRECT_URI_LENGTH:
+            return f"a redirect_uri is longer than {MAX_REDIRECT_URI_LENGTH} characters"
+        if "#" in uri or any(ord(ch) < 0x21 or ord(ch) == 0x7f for ch in uri):
+            return "a redirect_uri may not contain a fragment, spaces or control characters"
+        try:
+            parts = urlsplit(uri)
+        except ValueError:
+            return "a redirect_uri is not a valid URI"
+        scheme = parts.scheme.lower()
+        if not scheme or scheme in _FORBIDDEN_REDIRECT_SCHEMES:
+            return "a redirect_uri needs an absolute URI with an allowed scheme"
+        if scheme in ("http", "https") and not parts.netloc:
+            return "an http(s) redirect_uri needs a host"
+    return None
+
+
 async def _oauth_register_handler(request):
     """POST /register -- RFC 7591 Dynamic Client Registration (public PKCE).
 
@@ -2157,10 +2585,12 @@ async def _oauth_register_handler(request):
     mint a client_id, force token_endpoint_auth_method=none (public client, NO
     secret), persist the registration to the gitignored 0600 store, and return
     the RFC 7591 client information response (201).
+
+    Anyone on the internet can call this (the edge caps the body and the rate),
+    so every stored field is type- and length-checked and the store is bounded
+    (_register_oauth_client; audit O20-mcp-server-09).
     """
     from starlette.responses import JSONResponse
-    import secrets as _secrets
-    import time as _time
 
     try:
         body = await request.json()
@@ -2186,6 +2616,10 @@ async def _oauth_register_handler(request):
                                   "non-empty list of strings"},
             status_code=400,
         )
+    bad_uri = _redirect_uris_error(redirect_uris)
+    if bad_uri:
+        return JSONResponse({"error": "invalid_redirect_uri", "error_description": bad_uri},
+                            status_code=400)
 
     # Public PKCE client: NO secret. We accept (but normalize) the auth method.
     auth_method = body.get("token_endpoint_auth_method", "none")
@@ -2206,17 +2640,35 @@ async def _oauth_register_handler(request):
         "client_id_issued_at": issued_at,
         "redirect_uris": redirect_uris,
         "token_endpoint_auth_method": "none",
-        "grant_types": ["authorization_code"],
+        "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
     }
-    for field in ("client_name", "client_uri", "logo_uri", "scope",
-                  "contacts", "tos_uri", "policy_uri", "software_id",
-                  "software_version"):
-        if field in body and body[field] is not None:
-            record[field] = body[field]
+    for field, limit in _CLIENT_STRING_FIELDS.items():
+        value = body.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str) or len(value) > limit:
+            return JSONResponse(
+                {"error": "invalid_client_metadata",
+                 "error_description": f"{field} must be a string of at most {limit} characters"},
+                status_code=400)
+        record[field] = value
+    contacts = body.get("contacts")
+    if contacts is not None:
+        if (not isinstance(contacts, list) or len(contacts) > MAX_CLIENT_CONTACTS
+                or not all(isinstance(c, str) and len(c) <= 320 for c in contacts)):
+            return JSONResponse(
+                {"error": "invalid_client_metadata",
+                 "error_description": f"contacts must be a list of at most "
+                                      f"{MAX_CLIENT_CONTACTS} strings"},
+                status_code=400)
+        record["contacts"] = contacts
 
+    client = getattr(request, "client", None)
     try:
-        _persist_oauth_client(client_id, record)
+        refused = await asyncio.to_thread(
+            _register_oauth_client, client_id, record,
+            _client_tag(client.host if client else None), _time.time())
     except Exception as e:
         logger.error("Failed to persist OAuth client %s: %s", client_id, e)
         return JSONResponse(
@@ -2224,6 +2676,11 @@ async def _oauth_register_handler(request):
              "error_description": "Failed to persist client registration"},
             status_code=500,
         )
+    if refused:
+        status, error, description = refused
+        logger.warning("OAuth DCR: refused a registration (%s): %s", status, description)
+        return JSONResponse({"error": error, "error_description": description},
+                            status_code=status, headers={"Cache-Control": "no-store"})
 
     logger.info("OAuth DCR: registered client_id=%s (%d redirect_uri(s), name=%r)",
                 client_id, len(redirect_uris), record.get("client_name"))
@@ -2254,17 +2711,22 @@ async def _oauth_register_handler(request):
 #     replay finds nothing. Each code is bound to {client_id, redirect_uri,
 #     code_challenge, operator, scope}.
 #   * Access tokens are opaque, high-entropy (prefix bbmcp_oat_), EXPIRE
-#     (ACCESS_TOKEN_TTL), and are stored as token->{operator, expiry} so chunk
-#     6c can validate them on /mcp. The token VALUE is never logged (only the
-#     sha256[:12] id, matching the M3 _token_id pattern).
+#     (ACCESS_TOKEN_TTL), and are stored as token->{operator, expiry, client_id,
+#     family, consent} so chunk 6c can validate them on /mcp. The token VALUE is
+#     never logged (only the sha256[:12] id, matching the M3 _token_id pattern).
+#   * Refresh tokens (prefix bbmcp_ort_) come with every access token, rotate on
+#     every use, are stored by hash only, and a replayed one revokes its whole
+#     family (audit O20-mcp-server-13). Every token of a family dies with the
+#     bearer that consented to it.
 #   * Fail-closed: any validation gap -> reject. The operator is bound at
 #     /authorize from the AUTHENTICATED bearer token's operator (the consent gate)
 #     and carried through to the access token; the remote client never chooses it.
 #
 # Codes live IN-MEMORY only (short-lived, single process). Access tokens are
 # kept in a process-local dict AND mirrored to a gitignored 0600 file
-# (Manifest/mcp_oauth_tokens.json) so chunk 6c can read the binding. NO token
-# value is ever written to a COMMITTED file (the store is gitignored).
+# (Manifest/mcp_oauth_tokens.json) so chunk 6c can read the binding; refresh
+# tokens live in Manifest/mcp_oauth_refresh_tokens.json. NO token value is ever
+# written to a COMMITTED file (the stores are gitignored).
 # =============================================================================
 import base64 as _b64
 import secrets as _secrets
@@ -2298,11 +2760,191 @@ BLACKBOX_MCP_OAUTH_TOKENS_FILE = os.getenv(
 _AUTH_CODES: Dict[str, dict] = {}
 _AUTH_CODES_LOCK = _threading.Lock()
 
-# In-process access-token mirror: access_token -> {operator, expiry}. The
-# authoritative copy is also written to the gitignored file so chunk 6c can read
-# it without sharing this process's memory.
+# In-process access-token mirror: access_token -> {operator, expiry, client_id,
+# family, consent}. The authoritative copy is also written to the gitignored
+# file so chunk 6c can read it without sharing this process's memory.
 _ACCESS_TOKENS: Dict[str, dict] = {}
 _ACCESS_TOKENS_LOCK = _threading.Lock()
+
+# Token families revoked in this process (a refresh token reused, its consent
+# withdrawn, or /revoke): checked on every match, so an access token read back
+# from the file store in the instant of a revocation can never be warmed again.
+_REVOKED_FAMILIES: set = set()
+
+# Refresh tokens (audit O20-mcp-server-13): without them claude.ai / Claude
+# Desktop lost the connection every hour and the operator pasted the long-lived
+# bbmcp_ secret into the consent form again. A refresh token is single-use and
+# rotates: each refresh returns a new one in the same family, and presenting a
+# used one again (a replay of a stolen token) revokes the whole family. The
+# family also dies with the bearer that consented. Stored by sha256 only, in a
+# gitignored 0600 file, so the store never holds a usable refresh token.
+BLACKBOX_MCP_OAUTH_REFRESH_FILE = os.getenv(
+    "BLACKBOX_MCP_OAUTH_REFRESH_FILE",
+    str(BLACKBOX_ROOT / "Manifest" / "mcp_oauth_refresh_tokens.json"),
+)
+REFRESH_TOKEN_TTL = int(os.getenv("BLACKBOX_MCP_OAUTH_REFRESH_TTL", str(30 * 24 * 3600)))  # 30 d
+# How long a rotated token is remembered, to catch its reuse.
+REFRESH_REUSE_WINDOW = 24 * 3600
+
+# RFC 7636: a verifier is 43-128 unreserved characters; an S256 challenge is
+# the unpadded base64url of a SHA-256 digest. The tokens this server issues
+# are prefix + token_urlsafe.
+_PKCE_VERIFIER_RE = re.compile(r"[A-Za-z0-9._~-]{43,128}")
+_S256_CHALLENGE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+_OPAQUE_TOKEN_RE = re.compile(r"[A-Za-z0-9._~-]{1,512}")
+
+
+def _str_params(items) -> Dict[str, str]:
+    """Form / query / JSON fields that are plain strings (others dropped)."""
+    try:
+        pairs = items.items()
+    except AttributeError:
+        return {}
+    return {k: v for k, v in pairs if isinstance(k, str) and isinstance(v, str)}
+
+
+def _refresh_key(token: str) -> str:
+    return hashlib.sha256(_token_bytes(token)).hexdigest()
+
+
+def _valid_store(d) -> bool:
+    return isinstance(d, dict)
+
+
+def _live_consents() -> Dict[str, str]:
+    """fingerprint -> operator of every bearer the live gate accepts now."""
+    mw = _AUTH_MIDDLEWARE["instance"]
+    if mw is not None:
+        return mw.live_consents()
+    return {_token_fingerprint(t): op for t, op in _load_token_map().items()}
+
+
+def _consent_alive(binding: dict, consents: Dict[str, str]) -> bool:
+    consent = binding.get("consent")
+    if consent is None:
+        return True          # issued before consent binding: lives out its TTL
+    return consents.get(consent) == binding.get("operator")
+
+
+def _persist_refresh_token(token: str, record: dict, now: float) -> None:
+    """Store one refresh token (by hash), dropping the expired ones."""
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
+                                 valid=_valid_store, cross_process=True) as store:
+        for key in [k for k, r in store.items()
+                    if not (isinstance(r, dict) and r.get("expiry", 0) > now)]:
+            del store[key]
+        store[_refresh_key(token)] = record
+
+
+def _revoke_family(family: str, why: str) -> None:
+    """End every refresh and access token of one family (file and memory)."""
+    if not family:
+        return
+    _REVOKED_FAMILIES.add(family)
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
+                                 valid=_valid_store, cross_process=True) as store:
+        for key in [k for k, r in store.items()
+                    if isinstance(r, dict) and r.get("family") == family]:
+            del store[key]
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_TOKENS_FILE, {},
+                                 valid=_valid_store, cross_process=True) as store:
+        for tok in [t for t, b in store.items()
+                    if isinstance(b, dict) and b.get("family") == family]:
+            del store[tok]
+    with _ACCESS_TOKENS_LOCK:
+        for tok in [t for t, b in _ACCESS_TOKENS.items() if b.get("family") == family]:
+            _ACCESS_TOKENS.pop(tok, None)
+    logger.warning("OAuth: revoked token family %s (%s)", family[:12], why)
+
+
+def _redeem_refresh_token(presented: str, client_id: str, consents: Dict[str, str],
+                          now: float):
+    """Spend a refresh token. Returns (binding, None) for a live one -- marked
+    used, so it can never be spent again -- or (None, (error, description)).
+
+    A token that was already spent is a replay: the whole family is revoked.
+    A token whose consenting bearer is gone revokes its family too.
+    """
+    key = _refresh_key(presented)
+    revoke, why, binding = None, None, None
+    with atomic_json.update_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
+                                 valid=_valid_store, cross_process=True) as store:
+        for k in [k for k, r in store.items()
+                  if not (isinstance(r, dict) and r.get("expiry", 0) > now)]:
+            del store[k]
+        rec = store.get(key)
+        if not isinstance(rec, dict):
+            return None, ("invalid_grant", "refresh token is invalid or expired")
+        if rec.get("client_id") != client_id:
+            return None, ("invalid_grant", "refresh token was not issued to this client")
+        if rec.get("used_at") is not None:
+            revoke, why = rec.get("family"), "a spent refresh token was presented again"
+        elif not _consent_alive(rec, consents):
+            revoke, why = rec.get("family"), "the bearer that authorized it is no longer valid"
+        else:
+            rec["used_at"] = now
+            rec["expiry"] = min(rec.get("expiry", now), now + REFRESH_REUSE_WINDOW)
+            binding = {k: rec.get(k) for k in ("client_id", "operator", "scope", "consent", "family")}
+    if revoke is not None:
+        _revoke_family(revoke, why)
+        return None, ("invalid_grant", "refresh token is no longer valid; reconnect to authorize again")
+    return binding, None
+
+
+def _issue_token_pair(binding: dict, now: float):
+    """Mint an access token and a refresh token for one consented binding
+    ({client_id, operator, scope, consent, family?}). Returns
+    (access_token, refresh_token); raises if either cannot be stored."""
+    family = binding.get("family") or uuid.uuid4().hex
+    access_token = "bbmcp_oat_" + _secrets.token_urlsafe(40)
+    refresh_token = "bbmcp_ort_" + _secrets.token_urlsafe(40)
+    common = {"operator": binding["operator"], "client_id": binding["client_id"],
+              "family": family}
+    if binding.get("consent"):
+        common["consent"] = binding["consent"]
+    # The refresh token first: one stored but never handed out just expires.
+    _persist_refresh_token(refresh_token, dict(
+        common, scope=binding.get("scope") or "", issued_at=now,
+        expiry=now + REFRESH_TOKEN_TTL, used_at=None), now)
+    expiry = now + ACCESS_TOKEN_TTL
+    access_binding = dict(common, expiry=expiry)
+    with _ACCESS_TOKENS_LOCK:
+        # Prune expired in-process entries too, then add the new one.
+        for t in [t for t, b in _ACCESS_TOKENS.items() if b.get("expiry", 0) <= now]:
+            _ACCESS_TOKENS.pop(t, None)
+        _ACCESS_TOKENS[access_token] = access_binding
+    try:
+        _persist_access_token(access_token, binding["operator"], expiry,
+                              **{k: v for k, v in common.items() if k != "operator"})
+    except Exception:
+        # Fail CLOSED: an access token chunk 6c cannot validate is worse than none.
+        with _ACCESS_TOKENS_LOCK:
+            _ACCESS_TOKENS.pop(access_token, None)
+        raise
+    return access_token, refresh_token
+
+
+def _revoke_token(token: str, client_id: str) -> None:
+    """RFC 7009: revoke a refresh token (its whole family) or an access token
+    issued to `client_id`. A token of another client, or none, is a no-op."""
+    now = _time.time()
+    rec = atomic_json.read_json(BLACKBOX_MCP_OAUTH_REFRESH_FILE, {},
+                                valid=_valid_store, cross_process=True).get(_refresh_key(token))
+    if isinstance(rec, dict) and rec.get("expiry", 0) > now and rec.get("client_id") == client_id:
+        _revoke_family(rec.get("family"), "revoked by its client")
+        return
+    with _ACCESS_TOKENS_LOCK:
+        binding = _ACCESS_TOKENS.get(token)
+    if binding is None:
+        binding = atomic_json.read_json(BLACKBOX_MCP_OAUTH_TOKENS_FILE, {},
+                                        valid=_valid_store, cross_process=True).get(token)
+    if isinstance(binding, dict) and binding.get("client_id") == client_id:
+        with atomic_json.update_json(BLACKBOX_MCP_OAUTH_TOKENS_FILE, {},
+                                     valid=_valid_store, cross_process=True) as store:
+            store.pop(token, None)
+        with _ACCESS_TOKENS_LOCK:
+            _ACCESS_TOKENS.pop(token, None)
+        logger.info("OAuth: access token id=%s revoked by its client", _token_id(token))
 
 
 def _s256_challenge(verifier: str) -> str:
@@ -2323,8 +2965,9 @@ def _prune_expired_auth_codes(now: float) -> None:
         _AUTH_CODES.pop(c, None)
 
 
-def _persist_access_token(token: str, operator: str, expiry: float) -> None:
-    """Mirror one access token -> {operator, expiry} to the gitignored 0600 file.
+def _persist_access_token(token: str, operator: str, expiry: float, **binding) -> None:
+    """Mirror one access token -> {operator, expiry, + its family binding} to
+    the gitignored 0600 file.
 
     Read-modify-write the whole map (token issuance is low-volume). Expired
     tokens are pruned on every write so the file does not grow unbounded. The
@@ -2341,12 +2984,17 @@ def _persist_access_token(token: str, operator: str, expiry: float) -> None:
         for t in [t for t, b in existing.items()
                   if not (isinstance(b, dict) and b.get("expiry", 0) > now)]:
             del existing[t]
-        existing[token] = {"operator": operator, "expiry": expiry}
+        existing[token] = dict(binding, operator=operator, expiry=expiry)
 
 
-def _match_oauth_access_token(presented: str):
+def _match_oauth_access_token(presented: str, consents: Optional[Dict[str, str]] = None):
     """Validate an OAuth access token (chunk 6c). Returns (operator, token_id)
     for a PRESENT + UNEXPIRED token, else (None, None).
+
+    `consents` (fingerprint -> operator of the live bearers): a token whose
+    consenting bearer has left the map, or whose family was revoked, is
+    invalid. Tokens minted before consent binding carry none and live out
+    their TTL.
 
     Mirrors the M3 static-bearer contract (_match_token): a hit yields the
     bound operator + the SAME sha256[:12] `_token_id`, so the OAuth branch
@@ -2386,10 +3034,7 @@ def _match_oauth_access_token(presented: str):
                         binding = fb
                         # Warm the in-process mirror for subsequent requests.
                         with _ACCESS_TOKENS_LOCK:
-                            _ACCESS_TOKENS[presented] = {
-                                "operator": fb.get("operator"),
-                                "expiry": fb.get("expiry"),
-                            }
+                            _ACCESS_TOKENS[presented] = dict(fb)
         except Exception as e:
             logger.error("OAuth token validation: failed to read token store %s: %s",
                          BLACKBOX_MCP_OAUTH_TOKENS_FILE, e)
@@ -2397,6 +3042,10 @@ def _match_oauth_access_token(presented: str):
         return None, None
     operator = binding.get("operator")
     if not operator:
+        return None, None
+    if binding.get("family") in _REVOKED_FAMILIES:
+        return None, None
+    if consents is not None and not _consent_alive(binding, consents):
         return None, None
     return operator, _token_id(presented)
 
@@ -2444,7 +3093,8 @@ async def _oauth_authorize_handler(request):
     from urllib.parse import urlencode
 
     is_post = request.method == "POST"
-    params = (await request.form()) if is_post else request.query_params
+    # Only plain string fields count: a multipart file part is never a param.
+    params = _str_params((await request.form()) if is_post else request.query_params)
     response_type = params.get("response_type")
     client_id = params.get("client_id")
     redirect_uri = params.get("redirect_uri")
@@ -2514,6 +3164,10 @@ async def _oauth_authorize_handler(request):
         return _redirect_error(
             "invalid_request",
             "code_challenge_method must be 'S256' (PKCE S256 is mandatory)")
+    if not _S256_CHALLENGE_RE.fullmatch(code_challenge):
+        return _redirect_error(
+            "invalid_request",
+            "code_challenge must be a base64url SHA-256 digest (43 characters)")
 
     # ---- consent + AUTHENTICATION (closes the public auto-approve bypass) ----
     client_name = client.get("client_name") or client_id
@@ -2527,11 +3181,15 @@ async def _oauth_authorize_handler(request):
                             headers={"Cache-Control": "no-store"})
     # POST -> the operator must prove their BlackBox bearer token; the issued code
     # binds to the AUTHENTICATED token's operator (not a fixed env operator).
-    # Authenticate against the SAME roster-validated map the /mcp gate uses, so a
-    # ghost-operator token (dropped at /mcp) cannot mint an OAuth token here either.
-    operator, _tid = _match_token(
-        (params.get("blackbox_token") or "").strip(),
-        await asyncio.to_thread(_load_validated_token_map))
+    # Authenticate against the SAME roster-validated map the /mcp gate uses (the
+    # live one, hot-reloaded in place), so a ghost-operator token (dropped at
+    # /mcp) cannot mint an OAuth token here either, and the tokens minted from
+    # this consent stay valid exactly as long as that bearer does.
+    consent_token = (params.get("blackbox_token") or "").strip()
+    mw = _AUTH_MIDDLEWARE["instance"]
+    live_tokens = (mw.token_map if mw is not None
+                   else await asyncio.to_thread(_load_validated_token_map))
+    operator, _tid = _match_token(consent_token, live_tokens)
     if not operator:
         logger.warning("OAuth authorize: rejected consent (invalid token) client=%s",
                        client_id)
@@ -2548,6 +3206,9 @@ async def _oauth_authorize_handler(request):
         "redirect_uri": redirect_uri,
         "code_challenge": code_challenge,
         "operator": operator,
+        # The bearer that consented: the OAuth tokens from this code live only
+        # as long as it stays in the token map (revoking it ends them).
+        "consent": _token_fingerprint(consent_token),
         "scope": scope,
         "expires_at": now + AUTH_CODE_TTL,
     }
@@ -2571,7 +3232,8 @@ async def _oauth_authorize_handler(request):
 
 async def _oauth_token_handler(request):
     """POST /token -- exchange an authorization code (grant_type=authorization_code)
-    for an opaque access token, verifying PKCE S256.
+    for an opaque access token + a rotating refresh token, verifying PKCE S256;
+    or spend a refresh token (grant_type=refresh_token) for a new pair.
 
     Validates: grant_type, code exists + unexpired + SINGLE-USE (consumed up
     front), client_id matches the code, redirect_uri matches the code, and the
@@ -2589,24 +3251,24 @@ async def _oauth_token_handler(request):
             headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
         )
 
-    # Accept form-encoded (RFC 6749) and tolerate JSON bodies.
+    # Accept form-encoded (RFC 6749) and tolerate JSON bodies. Only string
+    # fields count (a JSON number or a file part is never a token or a code).
     try:
-        form = await request.form()
-        body = {k: v for k, v in form.items()}
+        body = _str_params(await request.form())
     except Exception:
         body = {}
     if not body:
         try:
-            j = await request.json()
-            if isinstance(j, dict):
-                body = j
+            body = _str_params(await request.json())
         except Exception:
             body = {}
 
     grant_type = body.get("grant_type")
+    if grant_type == "refresh_token":
+        return await _oauth_refresh_grant(body, _err)
     if grant_type != "authorization_code":
         return _err("unsupported_grant_type",
-                    "Only grant_type=authorization_code is supported")
+                    "grant_type must be authorization_code or refresh_token")
 
     code = body.get("code")
     client_id = body.get("client_id")
@@ -2620,6 +3282,9 @@ async def _oauth_token_handler(request):
     if not code_verifier:
         return _err("invalid_request",
                     "code_verifier is required (PKCE is mandatory)")
+    if not _PKCE_VERIFIER_RE.fullmatch(code_verifier):
+        return _err("invalid_grant",
+                    "code_verifier must be 43-128 unreserved characters (RFC 7636)")
 
     # SINGLE-USE: consume (pop) the code up front under the lock. A second
     # exchange with the same code finds nothing -> invalid_grant. Expired codes
@@ -2649,52 +3314,162 @@ async def _oauth_token_handler(request):
     # PKCE VERIFY: S256(verifier) must equal the bound challenge -- CONSTANT-TIME.
     expected = binding.get("code_challenge") or ""
     derived = _s256_challenge(code_verifier)
-    if not hmac.compare_digest(derived, expected):
+    if not hmac.compare_digest(derived.encode("ascii"), _token_bytes(expected)):
         return _err("invalid_grant", "PKCE code_verifier does not match")
 
-    # ---- success: mint + store an opaque, expiring access token ----
+    # ---- success: mint + store an access token and a refresh token ----
     operator = binding.get("operator")
     if not operator:
         # The consent gate always binds the authenticated operator; a missing one
         # is a server bug, not an excuse to fall back to someone's name.
         return _err("server_error", "no operator bound to authorization code")
-    access_token = "bbmcp_oat_" + _secrets.token_urlsafe(40)
-    expiry = now + ACCESS_TOKEN_TTL
-    with _ACCESS_TOKENS_LOCK:
-        # Prune expired in-process entries too, then add the new one.
-        for t in [t for t, b in _ACCESS_TOKENS.items() if b.get("expiry", 0) <= now]:
-            _ACCESS_TOKENS.pop(t, None)
-        _ACCESS_TOKENS[access_token] = {"operator": operator, "expiry": expiry}
+    return await _token_response(
+        {"client_id": client_id, "operator": operator, "scope": binding.get("scope") or "",
+         "consent": binding.get("consent")},
+        now, _err, f"code id={_token_id(code)} consumed")
+
+
+async def _token_response(binding: dict, now: float, _err, how: str):
+    """Issue a token pair for `binding` and answer with RFC 6749 5.1."""
+    from starlette.responses import JSONResponse
     try:
-        _persist_access_token(access_token, operator, expiry)
+        access_token, refresh_token = await asyncio.to_thread(_issue_token_pair, binding, now)
     except Exception as e:
-        # If we cannot persist the binding, fail CLOSED -- an access token chunk
-        # 6c cannot validate is worse than no token.
-        with _ACCESS_TOKENS_LOCK:
-            _ACCESS_TOKENS.pop(access_token, None)
-        logger.error("OAuth token: failed to persist access token id=%s: %s",
-                     _token_id(access_token), e)
+        logger.error("OAuth token: failed to persist issued tokens (client=%s): %s",
+                     binding.get("client_id"), e)
         return _err("server_error", "failed to persist issued token", status=500)
-
+    try:
+        # The client completed a flow: it is no longer an unfinished registration.
+        await asyncio.to_thread(_touch_oauth_client, binding["client_id"], now)
+    except Exception as e:
+        logger.error("OAuth token: could not mark client %s as used: %s",
+                     binding.get("client_id"), e)
     logger.info("OAuth token: issued access token id=%s client=%s operator=%s "
-                "expires_in=%ds (code id=%s consumed)",
-                _token_id(access_token), client_id, operator,
-                ACCESS_TOKEN_TTL, _token_id(code))
-
-    # RFC 6749 5.1 success token response (no refresh token -- the public PKCE
-    # MCP clients re-run the short auth_code flow; a refresh token would be one
-    # more long-lived secret to store with no current consumer).
+                "expires_in=%ds (%s)", _token_id(access_token), binding["client_id"],
+                binding["operator"], ACCESS_TOKEN_TTL, how)
     return JSONResponse(
         {
             "access_token": access_token,
             "token_type": "Bearer",
             "expires_in": ACCESS_TOKEN_TTL,
+            "refresh_token": refresh_token,
             "scope": binding.get("scope") or "",
         },
         status_code=200,
         headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
     )
 
+
+async def _oauth_refresh_grant(body: dict, _err):
+    """grant_type=refresh_token: spend the presented refresh token (rotation)
+    and issue a new pair in the same family, for the same client and operator."""
+    refresh_token = body.get("refresh_token")
+    client_id = body.get("client_id")
+    if not refresh_token:
+        return _err("invalid_request", "refresh_token is required")
+    if not client_id:
+        return _err("invalid_request", "client_id is required")
+    if not _OPAQUE_TOKEN_RE.fullmatch(refresh_token):
+        return _err("invalid_grant", "refresh token is invalid or expired")
+    now = _time.time()
+    binding, error = await asyncio.to_thread(
+        _redeem_refresh_token, refresh_token, client_id, _live_consents(), now)
+    if error is not None:
+        logger.warning("OAuth token: refresh refused client=%s: %s", client_id, error[1])
+        return _err(*error)
+    return await _token_response(binding, now, _err, "refresh token rotated")
+
+
+async def _oauth_revoke_handler(request):
+    """POST /revoke -- RFC 7009 token revocation for public clients.
+
+    Revokes a refresh token (and with it every token of its family) or one
+    access token, if it was issued to `client_id`. Answers 200 whether or not
+    anything matched, so it confirms nothing about a token it did not issue.
+    """
+    from starlette.responses import JSONResponse, Response
+    try:
+        body = _str_params(await request.form())
+    except Exception:
+        body = {}
+    token = body.get("token")
+    client_id = body.get("client_id")
+    if not token or not client_id:
+        return JSONResponse({"error": "invalid_request",
+                             "error_description": "token and client_id are required"},
+                            status_code=400, headers={"Cache-Control": "no-store"})
+    if _OPAQUE_TOKEN_RE.fullmatch(token):
+        await asyncio.to_thread(_revoke_token, token, client_id)
+    return Response(status_code=200, headers={"Cache-Control": "no-store"})
+
+
+# =============================================================================
+# THE CONTROL LISTENER (audit O20-mcp-server-08)
+#
+# POST /internal/reload is served on its own loopback-only listener,
+# 127.0.0.1:<BLACKBOX_MCP_CONTROL_PORT> (default 9094, the address
+# Orchestrator/utils/internal_secret.mcp_control_url() names), never on the
+# public listener Tailscale Funnel forwards the internet to. It is a second
+# uvicorn server on the same event loop, started and stopped by the public
+# app's lifespan; the public server keeps the signal handlers.
+# =============================================================================
+class _ControlListener:
+    def __init__(self, server, task, address):
+        self._server = server
+        self._task = task
+        self.address = address
+
+    async def stop(self) -> None:
+        self._server.should_exit = True
+        try:
+            await asyncio.wait_for(self._task, 10)
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning("internal/reload control listener did not stop cleanly: %s", e)
+
+
+async def _start_control_listener(port: int = None):
+    """Serve /internal/reload on 127.0.0.1 only. Returns the listener, or None
+    (logged) when the port cannot be bound: token and public-URL changes then
+    take effect on the next restart."""
+    import contextlib
+    import socket
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    if port is None:
+        port = internal_secret.mcp_control_port()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))   # loopback, whatever BLACKBOX_MCP_HTTP_HOST says
+    except OSError as e:
+        sock.close()
+        logger.error("internal/reload control listener NOT started: cannot bind "
+                     "127.0.0.1:%d (%s). Token and public-URL changes take effect on "
+                     "the next restart.", port, e)
+        return None
+
+    class _QuietServer(uvicorn.Server):
+        @contextlib.contextmanager
+        def capture_signals(self):
+            yield      # the public server owns SIGINT/SIGTERM
+
+    app = Starlette(routes=[Route("/internal/reload", endpoint=_internal_reload_handler,
+                                  methods=["POST"])])
+    config = uvicorn.Config(app, lifespan="off", log_level=LOG_LEVEL.lower(),
+                            access_log=False, proxy_headers=False)
+    control = _QuietServer(config)
+    task = asyncio.create_task(control.serve(sockets=[sock]))
+    while not control.started and not task.done():
+        await asyncio.sleep(0.01)
+    if task.done():
+        logger.error("internal/reload control listener failed to start: %r",
+                     task.exception() if not task.cancelled() else "cancelled")
+        return None
+    address = sock.getsockname()
+    logger.info("internal/reload control listener on http://%s:%d (loopback only)", *address)
+    return _ControlListener(control, task, address)
 
 
 def build_http_app(path: str = None):
@@ -2739,11 +3514,21 @@ def build_http_app(path: str = None):
         async def __call__(self, scope, receive, send):
             await self._sm.handle_request(scope, receive, send)
 
+    # The public OAuth edge's rate limiter, restored from its ledger.
+    limiter = _RateLimiter(OAUTH_RATE_LIMITS, ledger_path=BLACKBOX_MCP_OAUTH_RATE_LEDGER_FILE)
+    limiter.load()
+
     @contextlib.asynccontextmanager
     async def lifespan(app):
         async with session_manager.run():
             logger.info("Streamable HTTP session manager running at path %s", path)
-            yield
+            control = await _start_control_listener()
+            try:
+                yield
+            finally:
+                if control is not None:
+                    await control.stop()
+                await asyncio.to_thread(limiter.flush, True)
 
     # M3: load the token->operator map ONCE and wrap the MCP endpoint in the
     # bearer-auth gate. A loaded map of size 0 means the transport FAILS CLOSED
@@ -2766,7 +3551,7 @@ def build_http_app(path: str = None):
                        "origin to enable OAuth.")
 
     guarded_endpoint = BearerAuthMiddleware(_MCPASGIApp(session_manager), token_map)
-    _AUTH_MIDDLEWARE["instance"] = guarded_endpoint   # for localhost /internal/reload
+    _AUTH_MIDDLEWARE["instance"] = guarded_endpoint   # for the control listener's /internal/reload
 
     # Whichever side starts first writes this boot's reload secret (the
     # Orchestrator also creates it on demand), so it exists before a reload.
@@ -2795,13 +3580,13 @@ def build_http_app(path: str = None):
               endpoint=_oauth_authorize_handler, methods=["GET", "POST"]),
         Route("/token",
               endpoint=_oauth_token_handler, methods=["POST"]),
-        # Hot-reload: onboarding calls this after writing a token or the runtime
-        # public URL, so changes go live with no restart. Funnel reaches this
-        # listener too, so it requires the per-boot reload secret (see handler).
-        Route("/internal/reload",
-              endpoint=_internal_reload_handler, methods=["POST"]),
+        Route("/revoke",
+              endpoint=_oauth_revoke_handler, methods=["POST"]),
+        # /internal/reload is NOT here: Funnel forwards the internet to this
+        # listener. It lives on the loopback control listener (lifespan above).
     ]
 
+    from starlette.middleware import Middleware
     app = Starlette(
         debug=False,
         routes=[
@@ -2809,8 +3594,10 @@ def build_http_app(path: str = None):
                   methods=["GET", "POST", "DELETE"]),
             *oauth_routes,
         ],
+        middleware=[Middleware(_OAuthEdgeMiddleware, limiter=limiter)],
         lifespan=lifespan,
     )
+    app.state.oauth_limiter = limiter
     return app, session_manager
 
 
@@ -2823,6 +3610,7 @@ def run_http(host: str = None, port: int = None, path: str = None):
     path = path or BLACKBOX_MCP_HTTP_PATH
 
     _log_startup_banner("streamable-http")
+    _require_tool_catalog()
     logger.info("Streamable HTTP transport binding http://%s:%d%s (M3: bearer auth + "
                 "token-bound operator + audit)", host, port, path)
     if host not in ("127.0.0.1", "localhost", "::1"):
@@ -2831,7 +3619,11 @@ def run_http(host: str = None, port: int = None, path: str = None):
                        "premature (auth is M3, public exposure is M4).", host)
 
     app, _sm = build_http_app(path)
-    config = uvicorn.Config(app, host=host, port=port, log_level=LOG_LEVEL.lower())
+    # The client address the OAuth edge keys its rate limits on comes from
+    # X-Forwarded-For only when the peer is loopback (the local Funnel/serve
+    # proxy), whatever FORWARDED_ALLOW_IPS the environment carries.
+    config = uvicorn.Config(app, host=host, port=port, log_level=LOG_LEVEL.lower(),
+                            proxy_headers=True, forwarded_allow_ips="127.0.0.1,::1")
     uvicorn.Server(config).run()
 
 

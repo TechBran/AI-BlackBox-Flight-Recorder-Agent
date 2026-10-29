@@ -5,8 +5,10 @@ Audit 2026-10-09 M3 U20 item 3 (O20-mcp-server-08).
 "The caller is 127.0.0.1" proves nothing on a BlackBox: `tailscale serve`
 hands every tailnet request to the Orchestrator from loopback, and Tailscale
 Funnel hands INTERNET requests to the MCP server's 127.0.0.1:9093 listener.
-A control endpoint that must stay internal (MCP POST /internal/reload) checks
-a secret only processes running as the service user can read instead:
+So the MCP control endpoint (POST /internal/reload) is served on its own
+loopback-only listener, 127.0.0.1:<BLACKBOX_MCP_CONTROL_PORT> (default 9094),
+which no Funnel or serve mapping names (audit O20-mcp-server-08), and it
+checks a secret only processes running as the service user can read:
 
 * one file, credentials/mcp_reload.secret (BLACKBOX_MCP_RELOAD_SECRET_FILE
   overrides), mode 0600, JSON {"boot_id": ..., "secret": ...};
@@ -32,6 +34,8 @@ from typing import Optional
 from Orchestrator.utils.paths import blackbox_root
 
 SECRET_HEADER = "X-BlackBox-Internal-Secret"
+MCP_CONTROL_PORT_ENV = "BLACKBOX_MCP_CONTROL_PORT"
+MCP_CONTROL_PORT_DEFAULT = 9094
 _BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id"
 _MAX_FILE_BYTES = 4096
 
@@ -44,6 +48,24 @@ def mcp_reload_secret_path(root=None) -> Path:
         return Path(env)
     base = Path(root) if root is not None else blackbox_root()
     return base / "credentials" / "mcp_reload.secret"
+
+
+def mcp_control_port() -> int:
+    """The MCP server's loopback control port: BLACKBOX_MCP_CONTROL_PORT when it
+    is a valid port number (0 = any free port, for tests), else 9094. Read by
+    both sides, so they agree without any other configuration."""
+    raw = os.getenv(MCP_CONTROL_PORT_ENV, "").strip()
+    try:
+        port = int(raw)
+    except ValueError:
+        return MCP_CONTROL_PORT_DEFAULT
+    return port if 0 <= port <= 65535 else MCP_CONTROL_PORT_DEFAULT
+
+
+def mcp_control_url() -> str:
+    """Where the Orchestrator reaches the MCP control listener: always the
+    loopback address (the reload secret is never sent anywhere else)."""
+    return f"http://127.0.0.1:{mcp_control_port()}"
 
 
 def _boot_id() -> str:

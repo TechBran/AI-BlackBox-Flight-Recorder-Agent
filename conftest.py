@@ -83,6 +83,7 @@ def _under(path: str, root: str) -> bool:
 _LIVE_SERVICE_PORTS = {
     9091,   # the Orchestrator
     9093,   # the MCP server
+    9094,   # the MCP server's control listener (/internal/reload)
     9097,   # zellij web
     9098,   # llama-swap, the on-box models
     11434,  # Ollama

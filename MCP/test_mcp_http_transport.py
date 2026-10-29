@@ -144,6 +144,7 @@ def main() -> int:
     env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"
     # Quiet the server logs a touch; stderr is still captured for failures.
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
+    env["BLACKBOX_MCP_CONTROL_PORT"] = "0"     # a free port, never this box's 9094
 
     server_py = str(_HERE / "blackbox_mcp_server.py")
     print(f"[smoke] starting HTTP server: {sys.executable} {server_py} --transport http  (port {port})")
