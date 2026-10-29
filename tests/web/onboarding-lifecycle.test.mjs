@@ -90,6 +90,45 @@ test("confirmInline arms on the first tap and confirms on the second", async () 
     assert.equal(confirmInline(btn, { timeoutMs: 20 }), false, "a lapsed arm needs two taps again");
 });
 
+test("askInline asks in the page next to the button and answers once", async () => {
+    const { askInline } = await import("../../Portal/onboarding/inline-confirm.js");
+    const actions = document.createElement("div");
+    const btn = document.createElement("button");
+    btn.className = "btn btn-primary";
+    actions.appendChild(btn);
+    document.body.appendChild(actions);
+    const rows = () => document.querySelectorAll(".inline-confirm-row");
+
+    const yes = askInline(btn, "Install 1 update(s)?\n\n<b>app.py</b> is stashed", { okLabel: "Install" });
+    assert.equal(rows().length, 1);
+    const row = rows()[0];
+    assert.equal(actions.nextElementSibling, row, "the question sits right after the button's row");
+    const text = row.querySelector(".inline-confirm-text");
+    assert.equal(text.textContent, "Install 1 update(s)?\n\n<b>app.py</b> is stashed");
+    assert.equal(text.querySelector("b"), null, "the text is never parsed as markup");
+    assert.equal(row.querySelector(".inline-confirm-ok").textContent, "Install");
+    assert.equal(row.querySelector(".inline-confirm-ok").className, "btn inline-confirm-ok");
+    row.querySelector(".inline-confirm-ok").click();
+    assert.equal(await yes, true);
+    assert.equal(rows().length, 0, "the row goes once answered");
+
+    const no = askInline(btn, "Roll back?");
+    rows()[0].querySelector(".inline-confirm-cancel").click();
+    assert.equal(await no, false);
+
+    const first = askInline(btn, "first");
+    const second = askInline(btn, "second");
+    assert.equal(await first, false, "asking again replaces the older question");
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0].querySelector(".inline-confirm-text").textContent, "second");
+    rows()[0].querySelector(".inline-confirm-ok").click();
+    assert.equal(await second, true);
+    actions.remove();
+
+    assert.equal(await askInline(document.createElement("button"), "detached"), false,
+                 "a button outside the page cannot ask");
+});
+
 test("no wizard flow depends on confirm() or alert() (dead in the Android WebView)", () => {
     const offenders = [];
     const walk = (dir) => {

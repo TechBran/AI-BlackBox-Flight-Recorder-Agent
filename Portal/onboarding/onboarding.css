@@ -2665,6 +2665,18 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     margin: 0.5rem 0 0;
     color: #ff6b6b;
 }
+/* Inline confirm row (inline-confirm.js askInline) */
+.inline-confirm-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.5rem 0 0;
+}
+.inline-confirm-text {
+    flex-basis: 100%;
+    margin: 0;
+}
 /* Armed two-tap confirm (inline-confirm.js) */
 .ob-confirm-armed {
     color: var(--ob-accent);

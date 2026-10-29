@@ -1,7 +1,8 @@
 // The Updates panel's destructive actions (audit rank 43: O16-01, A13-ui-ops-01).
 //
-//  * Install and Rollback ask first; declining sends nothing. Restart Service
-//    arms on the first tap and never opens a browser dialog.
+//  * Install and Rollback ask first; declining sends nothing. They ask in the
+//    page (an inline confirm row), and Restart Service arms on the first tap:
+//    no window.confirm, which the Android WebView answers false unseen.
 //  * Local changes to tracked files are named in the confirm, and agreeing
 //    sends discard_local_changes (the backend stashes them); a 409 that lists
 //    dirty_files asks again and retries with consent.
@@ -15,6 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { installDom, PORTAL } from "./helpers/portal-dom.mjs";
+import { stripComments } from "./helpers/sink-scan.mjs";
 
 installDom();
 
@@ -24,11 +26,23 @@ const reply = (status, body) => Promise.resolve({
     json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)),
 });
 
-// ── fakes: confirm/alert, EventSource, fetch ─────────────────────────────
+// ── fakes: the inline confirm, alert, EventSource, fetch ─────────────────
 
+// Every question is an inline confirm row (inline-confirm.js askInline):
+// `asked` records its text and `answers` taps Continue (true) or Cancel
+// (false, also when none is queued). window.confirm must never be reached.
 let answers = [];
 const asked = [];
-window.confirm = (text) => { asked.push(text); return answers.length ? answers.shift() : false; };
+const browserConfirms = [];
+window.confirm = (text) => { browserConfirms.push(text); throw new Error("window.confirm called"); };
+new window.MutationObserver(() => {
+    for (const row of document.querySelectorAll(".inline-confirm-row:not([data-answered])")) {
+        row.dataset.answered = "1";
+        asked.push(row.querySelector(".inline-confirm-text").textContent);
+        const yes = answers.length ? answers.shift() : false;
+        row.querySelector(yes ? ".inline-confirm-ok" : ".inline-confirm-cancel").click();
+    }
+}).observe(document.body, { childList: true, subtree: true });
 const alerts = [];
 window.alert = (text) => { alerts.push(text); };
 
@@ -77,9 +91,11 @@ globalThis.fetch = window.fetch = (url, opts = {}) => {
 
 document.body.insertAdjacentHTML("beforeend", `
     <div id="updatesStatusRow"></div><div id="updatesCommitsList"></div>
-    <button id="btnCheckUpdates"></button><button id="btnInstallUpdate"></button>
-    <button id="btnViewUpdateLog"></button><button id="btnRollbackUpdate"></button>
-    <button id="btnRestart">Restart Service</button>`);
+    <div class="menu-grid">
+        <button id="btnCheckUpdates"></button><button id="btnInstallUpdate" class="btn btn-primary"></button>
+        <button id="btnViewUpdateLog"></button><button id="btnRollbackUpdate" class="btn btn-warn"></button>
+    </div>
+    <div class="menu-grid"><button id="btnRestart" class="btn">Restart Service</button></div>`);
 
 const { initUpdatesPanel, RESTART_ARM_MS } = await import("../../Portal/modules/updates-manager.js");
 {
@@ -388,4 +404,11 @@ test("the onboarding hub's Install Now uses the panel's confirm and stash-and-re
     const [, body] = posts.find(([u]) => u === "/update/start");
     assert.deepEqual(body, { confirm_sha: "b".repeat(40), discard_local_changes: true });
     assert.match(streams[0].url, /task_id=update-7/);
+});
+
+test("no update action reached window.confirm", () => {
+    assert.deepEqual(browserConfirms, []);
+    const src = stripComments(readFileSync(resolve(PORTAL, "modules", "updates-manager.js"), "utf8"));
+    assert.doesNotMatch(src, /(?:^|[^.\w])(?:window\.)?confirm\s*\(/m,
+                        "confirm() returns false unseen in the Android WebView");
 });

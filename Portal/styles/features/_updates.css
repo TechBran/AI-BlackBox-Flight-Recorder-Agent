@@ -190,6 +190,25 @@
     gap: 0.5rem;
 }
 
+/* ── Inline confirm row (onboarding/inline-confirm.js askInline) ────── */
+
+.inline-confirm-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.6rem 0;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid rgba(255, 196, 0, 0.35);
+    border-radius: 6px;
+    background: rgba(255, 196, 0, 0.06);
+}
+.inline-confirm-text {
+    flex-basis: 100%;
+    margin: 0;
+    line-height: 1.4;
+}
+
 /* ── SSE log modal ──────────────────────────────────────────────────── */
 
 .updates-log-modal {

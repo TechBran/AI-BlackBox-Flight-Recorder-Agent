@@ -360,10 +360,11 @@ export async function mountUpdatesBadge(hostEl, {
             }
             line.textContent = msg;   // textContent: server text never becomes markup
         };
-        hostEl.querySelector("[data-ob-update-install]").addEventListener("click", async () => {
+        const installBtn = hostEl.querySelector("[data-ob-update-install]");
+        installBtn.addEventListener("click", async () => {
             try {
                 const mod = await loadUpdates();
-                await mod.startInstall(status);
+                await mod.startInstall(status, { anchor: installBtn });
             } catch (e) {
                 showUpdateError("Network error: " + e.message);
             }

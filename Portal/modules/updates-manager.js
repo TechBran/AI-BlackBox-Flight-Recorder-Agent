@@ -40,10 +40,12 @@
 // onboarding wizard now; the updates panel no longer renders that card.)
 //
 // Destructive actions (audit rank 43): Install, Rollback and Restart Service
-// ask first (Restart Service as a two-tap button, inline-confirm.js: no
-// browser dialog). Local changes to tracked files (status.dirty_files) are named in
-// the Install/Rollback confirm, and confirming sends discard_local_changes so
-// the backend stashes them; a 409 that lists dirty_files asks again. After any
+// ask first, in the page (inline-confirm.js: an inline confirm row, and a
+// two-tap button for Restart Service), never with window.confirm, which the
+// Android WebView answers false without showing anything. Local changes to
+// tracked files (status.dirty_files) are named in the Install/Rollback
+// confirm, and confirming sends discard_local_changes so the backend
+// stashes them; a 409 that lists dirty_files asks again. After any
 // action that restarts the service the modal waits for /health's boot_id to
 // CHANGE (A13-ui-ops-01) instead of trusting the first 200, which the old
 // process answers for the ~2 s before the restart fires. When the log stream
@@ -51,7 +53,7 @@
 // finished with a restart coming, or ended without one (A13-ui-ops-06).
 
 import { createPoller, escapeHtml, toastError } from "./core-utils.js";
-import { confirmInline } from "../onboarding/inline-confirm.js";
+import { askInline, confirmInline } from "../onboarding/inline-confirm.js";
 
 let _state = "loading";
 let _lastStatus = null;  // last /update/status response
@@ -261,7 +263,7 @@ function _renderDirtyNote(status) {
         + `Install and Rollback stash them first (<code>git stash list</code> shows them later).</p>`;
 }
 
-// ── Confirm wording (plain text for window.confirm) ────────────────────
+// ── Confirm wording (plain text for the inline confirm) ───────────────
 
 function _dirtyLine(dirty, action) {
     const shown = dirty.slice(0, 5).join(", ") + (dirty.length > 5 ? ` and ${dirty.length - 5} more` : "");
@@ -425,9 +427,9 @@ function _wireButtons() {
     const btnLog = document.getElementById("btnViewUpdateLog");
     const btnRollback = document.getElementById("btnRollbackUpdate");
     if (btnCheck) btnCheck.addEventListener("click", () => refreshPanel(true));
-    if (btnInstall) btnInstall.addEventListener("click", _onInstallClick);
+    if (btnInstall) btnInstall.addEventListener("click", () => startInstall(_lastStatus, { anchor: btnInstall }));
     if (btnLog) btnLog.addEventListener("click", _onViewLogClick);
-    if (btnRollback) btnRollback.addEventListener("click", _onRollbackClick);
+    if (btnRollback) btnRollback.addEventListener("click", () => _onRollbackClick(btnRollback));
     // System Controls' Restart Service sits in the same menu and needs the
     // same restart detection, so it is wired here, and only here (ui-setup.js
     // used to bind a second handler: one click ran both).
@@ -441,9 +443,10 @@ function _wireButtons() {
  * when the operator declined or the request failed (already reported).
  * `freshOnConflict`: refresh the panel from a new fetch (preflight) after any
  * other 409. A rollback passes false: preflight deletes a failed state, and
- * with it the tag the rollback needs.
+ * with it the tag the rollback needs. `anchor`: the button the stash question
+ * is asked next to.
  */
-async function _postUpdateAction(url, body, action, { freshOnConflict = true } = {}) {
+async function _postUpdateAction(url, body, action, { freshOnConflict = true, anchor = null } = {}) {
     const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -453,9 +456,10 @@ async function _postUpdateAction(url, body, action, { freshOnConflict = true } =
         const detail = await r.json().catch(() => ({}));
         const dirty = Array.isArray(detail.dirty_files) ? detail.dirty_files : [];
         if (dirty.length && !body.discard_local_changes) {
-            if (!window.confirm(_stashRetryText(dirty, action))) return null;
+            if (!await askInline(anchor, _stashRetryText(dirty, action),
+                                 { okLabel: "Stash and continue" })) return null;
             return _postUpdateAction(url, { ...body, discard_local_changes: true }, action,
-                                     { freshOnConflict });
+                                     { freshOnConflict, anchor });
         }
         window.alert(`${action} conflict: ${detail.detail || "another update may be in progress."}`);
         await refreshPanel(freshOnConflict);
@@ -477,21 +481,18 @@ async function _onInitClick() {
     await refreshPanel(true);
 }
 
-function _onInstallClick() {
-    return startInstall(_lastStatus);
-}
-
 /**
  * The Install flow, shared with the onboarding hub's Install Now badge
  * (Portal/onboarding/hub-controls.js): confirm (naming CLI sessions and local
  * changes), POST /update/start with consent for the files the confirm named,
  * ask again on a dirty-tree 409, then stream the task and wait for the
- * restart. `status` is a /update/status reply. Resolves true when an update
- * was started.
+ * restart. `status` is a /update/status reply; `anchor` is the Install
+ * button, which the questions are asked next to. Resolves true when an
+ * update was started.
  */
-export async function startInstall(status) {
+export async function startInstall(status, { anchor } = {}) {
     if (!status || !status.commits_behind) return false;
-    if (!window.confirm(installConfirmText(status))) return false;
+    if (!await askInline(anchor, installConfirmText(status), { okLabel: "Install" })) return false;
     try {
         // Read before the action: the old process's id is what must change.
         const priorBootId = await readBootId();
@@ -499,7 +500,7 @@ export async function startInstall(status) {
             confirm_sha: status.latest_sha,
             // The confirm just named these files; agreeing to it is consent.
             discard_local_changes: (status.dirty_files || []).length > 0,
-        }, "Update");
+        }, "Update", { anchor });
         if (!body) return false;
         openUpdateLogModal(body.task_id, { priorBootId });
         return true;
@@ -516,13 +517,13 @@ function _onViewLogClick() {
     window.open("/onboarding/logs/stream?lines=200", "_blank");
 }
 
-async function _onRollbackClick() {
-    if (!window.confirm(rollbackConfirmText(_lastStatus))) return;
+async function _onRollbackClick(button) {
+    if (!await askInline(button, rollbackConfirmText(_lastStatus), { okLabel: "Roll back" })) return;
     try {
         const priorBootId = await readBootId();
         const body = await _postUpdateAction("/update/rollback", {
             discard_local_changes: ((_lastStatus && _lastStatus.dirty_files) || []).length > 0,
-        }, "Rollback", { freshOnConflict: false });
+        }, "Rollback", { freshOnConflict: false, anchor: button });
         if (!body) return;
         const tag = body.reverted_to || "(unknown)";
         if (body.task_id) {
