@@ -22,6 +22,8 @@ server's own contracts (audit 2026-10-09 rank 80: O20-mcp-server-04/-05/-08/
   (9) one tool_registry, imported normally, and a lean import closure.
  (10) /internal/reload is not on the public listener; the control listener
       binds loopback only.
+ (11) the deploy docs and example config carry no host paths, and the Funnel
+      recipe names exactly the public paths.
 
 HERMETIC: no backend at :9091, no network beyond loopback test listeners, every
 store in a temp dir. The HTTP transport runs in-process through
@@ -960,6 +962,26 @@ def test_a_taken_control_port_is_logged_not_fatal():
         assert asyncio.run(srv._start_control_listener(port=holder.getsockname()[1])) is None
     finally:
         holder.close()
+
+
+# ===========================================================================
+# (11) Deploy docs: no host paths; the Funnel recipe names the public paths
+# ===========================================================================
+def test_no_hand_maintained_unit_or_host_paths_ship():
+    assert not list((_HERE / "deploy").glob("*.service")), "install.sh renders the unit"
+    example = (_HERE / "claude_mcp_config.example.json").read_text()
+    assert "/home/" not in example
+    json.loads(example)
+
+
+def test_the_funnel_recipe_exposes_exactly_the_public_paths():
+    import re
+    doc = (_HERE / "deploy" / "REMOTE_SETUP.md").read_text()
+    paths = set(re.findall(r"--set-path=(\S+) http://127\.0\.0\.1:9093(\S+)", doc))
+    mounts = {mount for mount, target in paths if mount == target}
+    expected = {srv.BLACKBOX_MCP_HTTP_PATH, "/.well-known"} | srv.OAUTH_PUBLIC_PATHS
+    assert mounts == expected, (mounts, expected)
+    assert "--set-path=/internal" not in doc and "9094" not in "".join(t for _m, t in paths)
 
 
 @pytest.fixture(scope="session", autouse=True)

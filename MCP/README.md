@@ -1,7 +1,7 @@
 # BlackBox MCP Server
 
 Exposes the BlackBox Flight Recorder — snapshot memory, multimodal generation/analysis,
-Workspace, telephony, and ~74 ToolVault tools — to AI agents over the Model Context Protocol.
+Workspace, telephony, and the ToolVault `mcp` group — to AI agents over the Model Context Protocol.
 
 The advertised tool list is **registry-derived** from the ToolVault `mcp` group
 (`Orchestrator/toolvault`), so it tracks the live catalog automatically. Most tools execute
@@ -15,9 +15,15 @@ byte-offset reads run in-process.
 | **stdio** (default) | Local Claude Code on this box (subprocess) | none (local) |
 | **Streamable HTTP** (`--transport http`) | Remote apps over the network | bearer token / OAuth 2.1 |
 
-- Local: launched per `claude_mcp_config.example.json` (command + args).
-- Remote: a persistent service on `127.0.0.1:9093`, exposed publicly via Tailscale Funnel.
+- Local: launched per `claude_mcp_config.example.json` (command + args; replace
+  `<REPO_ROOT>` with this checkout's absolute path).
+- Remote: a persistent service on `127.0.0.1:9093` (`blackbox-mcp.service`, rendered and
+  enabled by `Scripts/install.sh`), exposed publicly via Tailscale Funnel, path by path.
   See [`deploy/REMOTE_SETUP.md`](deploy/REMOTE_SETUP.md).
+
+On either transport the server refuses to start, loudly, when its tool catalog is empty
+or fails to build (for example an import the lean venv lacks), instead of serving zero
+tools. On stdio only the SDK writes to stdout; any other print goes to stderr.
 
 ## Auth & isolation (HTTP transport)
 
@@ -28,9 +34,17 @@ byte-offset reads run in-process.
   (no cross-operator access). Validated per-request.
 - **Audit logging** — each call logs `sha256(token)[:12]` + operator + tool (never the token).
 - **OAuth 2.1** (DCR + PKCE/S256) — for Claude Desktop / claude.ai web; discovery at
-  `/.well-known/oauth-authorization-server`. (In progress.)
-- OAuth bootstrap endpoints (`/.well-known/*`, `/register`, `/authorize`, `/token`) are
-  public; only `/mcp` requires a credential.
+  `/.well-known/oauth-authorization-server`. The operator authorizes a connection once by
+  entering a bearer token at the consent form; the client then gets a 1-hour access token
+  and a rotating 30-day refresh token. A refresh token presented twice revokes the whole
+  connection, `POST /revoke` (RFC 7009) revokes on request, and revoking the bearer that
+  consented ends every connection made with it. Refresh tokens are stored as hashes.
+- OAuth bootstrap endpoints (`/.well-known/*`, `/register`, `/authorize`, `/token`,
+  `/revoke`) are public; only `/mcp` requires a credential. They are rate-limited per client
+  address, their bodies are capped, and the client registry is bounded.
+- `/internal/reload` (onboarding's hot reload of tokens and the public URL) is not on this
+  listener: it is served on `127.0.0.1:9094` only (`BLACKBOX_MCP_CONTROL_PORT`) and needs the
+  per-boot secret in `credentials/mcp_reload.secret`.
 
 ## Connecting external apps
 
@@ -65,6 +79,9 @@ bearer_token_env_var = "BLACKBOX_MCP_TOKEN"
 - `blackbox://index/stats` — snapshot index stats
 - `blackbox://index/operators` — operator roster
 - `blackbox://index/recent` — recent snapshots
+- `blackbox://volume/info` — snapshot volume file info
+
+A remote (token-bound) caller sees only its own operator's data in each.
 
 ## Notes
 

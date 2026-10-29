@@ -1,13 +1,13 @@
 {
   "mcpServers": {
     "blackbox": {
-      "command": "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/MCP/venv/bin/python",
+      "command": "<REPO_ROOT>/MCP/venv/bin/python",
       "args": [
-        "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/MCP/blackbox_mcp_server.py"
+        "<REPO_ROOT>/MCP/blackbox_mcp_server.py"
       ],
       "env": {
         "BLACKBOX_URL": "http://localhost:9091",
-        "BLACKBOX_ROOT": "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc"
+        "BLACKBOX_ROOT": "<REPO_ROOT>"
       }
     }
   }
