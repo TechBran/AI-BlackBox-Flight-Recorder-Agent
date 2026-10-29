@@ -70,7 +70,7 @@ This is the canonical, provider-agnostic tool definition. Format converters gene
 
 ## Step 2 — `executor.py` (required if the tool *does* something)
 
-Contract — exactly this signature:
+Contract — this signature, as an `async def` (awaited on the event loop; it may only await) or a plain `def` (blocking work, run on the ToolVault worker-thread pool):
 
 ```python
 """Executor for roll_dice."""
