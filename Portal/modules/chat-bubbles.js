@@ -523,43 +523,6 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
     }
 }
 
-/**
- * Render all history items to the DOM
- */
-export function renderHistory() {
-    const hist = $("history");
-    if (!hist) return;
-
-    // Clear existing bubbles
-    hist.innerHTML = '';
-
-    const historyData = getHistoryData();
-    historyData.forEach(item => {
-        const bubble = appendBubble(item.role, item.content);
-        // Restore the retry affordance on user turns whose send failed
-        if (item.role === 'user' && item.failed && bubble) {
-            if (item.sendKey) bubble.dataset.sendKey = item.sendKey;
-            if (item.failedAt) bubble.dataset.failedAt = String(item.failedAt);
-            attachRetryChip(bubble, item.content);
-        }
-    });
-
-    // Scroll to bottom after restoring history
-    scrollToBottomIfNeeded();
-}
-
-/**
- * Clear all chat history
- */
-export function clearHistory() {
-    setHistoryData([]);
-    saveHistory();
-
-    const hist = $("history");
-    if (hist) {
-        hist.innerHTML = '';
-        updateHintsVisibility();
-    }
-
-    toast("Chat cleared");
-}
+// The history renderer is chat-send.js renderHistory (it restores pending
+// turns and the reasoning and Computer Use panels, which this module's copy
+// did not; audit P01-chat-core-web-20). Clearing is ui-setup's Clear handler.

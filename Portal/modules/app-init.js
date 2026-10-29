@@ -15,9 +15,6 @@
 import { $, toast, sleep, createPoller } from './core-utils.js';
 import {
     loadHistory,
-    saveHistory,
-    getHistoryData,
-    setHistoryData,
     getOperator,
     setOperator,
     initOperatorSelector,
@@ -42,10 +39,9 @@ import {
     setupTaskMonitor,
     adjustClaudeBannerPosition,
     refreshHealth,
-    initModalHandlers,
-    scrollToBottomIfNeeded
+    initModalHandlers
 } from './ui-setup.js';
-import { initHelpHints, updateHintsVisibility } from './help-hints.js';
+import { initHelpHints } from './help-hints.js';
 import { initGeminiAudioRecorder } from './gemini-recorder.js';
 
 // Phase 3: Features
@@ -67,13 +63,7 @@ import {
 import { taskManager } from './task-manager.js';
 
 // Phase 4: Chat Components
-import {
-    appendBubble,
-    addBubble,
-    attachRetryChip,
-    createAnimatedThinkingBubble,
-    renderHistory
-} from './chat-bubbles.js';
+import { addBubble } from './chat-bubbles.js';
 import {
     initGenerationModals,
     setupAudioAnalysisModal
@@ -100,7 +90,7 @@ import {
 } from './gemini-agent-handler.js';
 
 // Phase 5: Chat Send
-import { initChatSend, send, createBubbleWithThinking, checkCUBackgroundStatus } from './chat-send.js';
+import { initChatSend, send, checkCUBackgroundStatus, renderHistory } from './chat-send.js';
 import { initCUDrawer } from './cu-drawer.js';
 
 // Generation ember backdrop (fades embers in while the AI is generating)
@@ -289,60 +279,12 @@ function initSlashCommands() {
 // =============================================================================
 
 /**
- * Initialize and render chat history
+ * Load and render chat history (chat-send.js renderHistory, the one renderer)
  */
 function initHistory() {
     loadHistory();
     loadAudioCache();
-
-    const hist = $("history");
-    if (!hist) return;
-
-    hist.innerHTML = "";
-    const historyData = getHistoryData();
-
-    for (let i = 0; i < historyData.length; i++) {
-        const b = historyData[i];
-
-        // Handle pending messages
-        if (b.pending && b.role === 'assistant') {
-            const now = Date.now();
-            const pendingAge = now - (b.pendingTimestamp || 0);
-            const fiveMinutes = 5 * 60 * 1000;
-
-            if (b.pendingTimestamp && pendingAge < fiveMinutes) {
-                const thinkingBubble = createAnimatedThinkingBubble();
-                hist.appendChild(thinkingBubble);
-                console.log('[History] Restored recent pending message as thinking bubble');
-                continue;
-            } else {
-                console.log('[History] Found stale pending message, removing');
-                historyData.splice(i, 1);
-                setHistoryData(historyData);
-                saveHistory();
-                i--;
-                continue;
-            }
-        }
-
-        // Check if this assistant message has thinking/reasoning or CU content
-        if (b.role === 'assistant' && (b.thinking || b.cuLog)) {
-            console.log('[History] Restoring message with thinking/CU content');
-            const bubbleWithThinking = createBubbleWithThinking(b.content, b.thinking, b.cuLog);
-            hist.appendChild(bubbleWithThinking);
-        } else {
-            const bubble = appendBubble(b.role, b.content);
-            // Restore the retry affordance on user turns whose send failed
-            if (b.role === 'user' && b.failed && bubble) {
-                if (b.sendKey) bubble.dataset.sendKey = b.sendKey;
-                if (b.failedAt) bubble.dataset.failedAt = String(b.failedAt);
-                attachRetryChip(bubble, b.content);
-            }
-        }
-    }
-
-    scrollToBottomIfNeeded();
-    updateHintsVisibility();
+    renderHistory();
 }
 
 // =============================================================================

@@ -7,7 +7,7 @@
  */
 
 import { $, toast, toastError, createPoller } from './core-utils.js';
-import { getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
+import { getOperator, OPERATOR_REQUIRED_MESSAGE, clearHistory } from './state-management.js';
 import { openSnapshotById } from './timeline-browser.js';
 import { taskTypeMeta, isAgentTaskType, canShowLiveView, truncateText } from './task-ui.js';
 
@@ -1224,8 +1224,7 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
     safeSetOnClick("btnCancelClear", () => confirmClearModal && confirmClearModal.classList.add("hide"));
     safeSetOnClick("btnConfirmClear", () => {
         console.log('[HINTS] Clear history clicked');
-        setHistoryData([]);
-        saveHistory();
+        clearHistory();   // the one history clear (state-management.js)
         clearAudioCache();
         const hist = $("history");
         if (hist) {

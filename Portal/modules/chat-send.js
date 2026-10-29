@@ -9,10 +9,11 @@
 
 import { $, toast, escapeAttr, createPoller } from './core-utils.js';
 import { parseSseStream } from './sse.js';
-import { getHistoryData, setHistoryData, saveHistory, loadHistory, getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
+import { getHistoryData, setHistoryData, saveHistory, getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
-import { addBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
+import { addBubble, appendBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
+import { updateHintsVisibility } from './help-hints.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { handleFileUpload, handleSessionFileUpload, getAttachedFiles, clearAttachedFiles, renderPreviews } from './file-upload.js';
 import { openVideoExtensionModal } from './generation-modals.js';
@@ -1887,6 +1888,318 @@ function addExtendButtonToVideo(videoElement) {
 }
 
 // =============================================================================
+// History Rendering
+// =============================================================================
+
+/**
+ * Render the stored history into #history: the ONE renderer (page load,
+ * a Computer Use task finished in the background). A recent pending reply
+ * comes back as a thinking bubble and a stale one is dropped; a reply keeps
+ * its reasoning and Computer Use panels; a failed user turn keeps its retry
+ * chip. chat-bubbles had a second renderer without the pending, reasoning
+ * and CU handling (audit P01-chat-core-web-20).
+ */
+export function renderHistory() {
+    const hist = $("history");
+    if (!hist) return;
+
+    hist.innerHTML = "";
+    const historyData = getHistoryData();
+
+    for (let i = 0; i < historyData.length; i++) {
+        const b = historyData[i];
+
+        // Handle pending messages
+        if (b.pending && b.role === 'assistant') {
+            const now = Date.now();
+            const pendingAge = now - (b.pendingTimestamp || 0);
+            const fiveMinutes = 5 * 60 * 1000;
+
+            if (b.pendingTimestamp && pendingAge < fiveMinutes) {
+                const thinkingBubble = createAnimatedThinkingBubble();
+                hist.appendChild(thinkingBubble);
+                console.log('[History] Restored recent pending message as thinking bubble');
+                continue;
+            } else {
+                console.log('[History] Found stale pending message, removing');
+                historyData.splice(i, 1);
+                setHistoryData(historyData);
+                saveHistory();
+                i--;
+                continue;
+            }
+        }
+
+        // Check if this assistant message has thinking/reasoning or CU content
+        if (b.role === 'assistant' && (b.thinking || b.cuLog)) {
+            console.log('[History] Restoring message with thinking/CU content');
+            const bubbleWithThinking = createBubbleWithThinking(b.content, b.thinking, b.cuLog);
+            hist.appendChild(bubbleWithThinking);
+        } else {
+            const bubble = appendBubble(b.role, b.content);
+            // Restore the retry affordance on user turns whose send failed
+            if (b.role === 'user' && b.failed && bubble) {
+                if (b.sendKey) bubble.dataset.sendKey = b.sendKey;
+                if (b.failedAt) bubble.dataset.failedAt = String(b.failedAt);
+                attachRetryChip(bubble, b.content);
+            }
+        }
+    }
+
+    scrollToBottomIfNeeded();
+    updateHintsVisibility();
+}
+
+// =============================================================================
+// CLI Agents (Claude Code, Gemini CLI)
+// =============================================================================
+
+/**
+ * The CLI agents the composer sends to over their WebSocket, by provider:
+ * their handler slot, names and session-folder prefix. send() had one ~180-line
+ * branch per agent, differing only in these (audit P01-chat-core-web-20).
+ */
+const CLI_AGENTS = {
+    'agents': {
+        label: 'Claude Code',
+        logPrefix: '[Agent]',
+        connecting: 'Connecting to Claude Code CLI...',
+        errorToast: 'Agent error',
+        folderPrefix: 'session-',
+        getHandler: getAgentHandler,
+        createHandler() {
+            const handler = new AgentChatHandler();
+            setAgentHandler(handler);
+            return handler;
+        },
+    },
+    'gemini-agents': {
+        label: 'Gemini CLI',
+        logPrefix: '[GeminiAgent]',
+        connecting: 'Connecting to Gemini CLI...',
+        errorToast: 'Gemini agent error',
+        folderPrefix: 'gemini-session-',
+        getHandler: getGeminiAgentHandler,
+        createHandler() {
+            const handler = new GeminiAgentHandler();
+            setGeminiAgentHandler(handler);
+            return handler;
+        },
+    },
+};
+
+/**
+ * The block appended to an agent prompt naming the files uploaded for it
+ * (the agent reads them with its tools).
+ * @param {Array<{filename: string, path: string}>} uploaded - The uploaded files
+ * @returns {string}
+ */
+function attachedFilesBlock(uploaded) {
+    let block = '\n\n--- ATTACHED FILES ---\n';
+    block += `Session folder: ${uploaded[0].path.replace(/\/[^/]+$/, '')}\n\n`;
+    block += 'Files uploaded to your session folder:\n';
+    for (const f of uploaded) {
+        block += `- ${f.filename}: ${f.path}\n`;
+    }
+    block += '\nYou can read, analyze, or manipulate these files using your tools (Read, analyze_image, analyze_audio, analyze_video, etc.).\n';
+    block += '---\n';
+    return block;
+}
+
+/**
+ * Upload the composer's attachments into an agent's session folder, the
+ * composer showing the progress (amber while uploading, green once done).
+ * @param {string} txt - The typed prompt
+ * @param {File[]} files - The attachments
+ * @param {string} folderId - The session folder
+ * @param {Object} agent - A CLI_AGENTS entry
+ * @param {boolean} startsSession - Whether the prompt starts a session (wording)
+ * @returns {Promise<{prompt: string, uploaded: Array}>} The prompt with the
+ *   ATTACHED FILES block (when any file made it) and the uploaded files
+ */
+async function uploadToAgentSession(txt, files, folderId, agent, startsSession) {
+    const promptEl = $("prompt");
+    const uploaded = [];
+    console.log(`${agent.logPrefix} Uploading ${files.length} file(s) to session folder: ${folderId}`);
+    toast(`Uploading ${files.length} file(s) to session folder...`);
+
+    if (promptEl) {
+        promptEl.style.backgroundColor = 'rgba(255, 159, 64, 0.2)';
+        promptEl.style.borderColor = '#ff9f40';
+        promptEl.disabled = true;
+    }
+
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+            if (promptEl) {
+                promptEl.value = txt + `\n\n⏳ Uploading ${file.name} (${i+1}/${files.length})...`;
+            }
+            const uploadResult = await handleSessionFileUpload(file, folderId);
+            if (uploadResult && uploadResult.path) {
+                uploaded.push({
+                    filename: uploadResult.filename,
+                    path: uploadResult.path,
+                    url: uploadResult.url
+                });
+                console.log(`${agent.logPrefix} File uploaded to session: ${uploadResult.path}`);
+            }
+        } catch (err) {
+            console.error(`${agent.logPrefix} Error uploading ${file.name}:`, err);
+            toast(`Error uploading ${file.name}: ${err.message}`);
+        }
+    }
+
+    let prompt = txt;
+    if (uploaded.length > 0) {
+        prompt = txt + attachedFilesBlock(uploaded);
+        if (promptEl) {
+            promptEl.style.backgroundColor = 'rgba(39, 217, 128, 0.2)';
+            promptEl.style.borderColor = '#27d980';
+            promptEl.value = prompt;
+        }
+        toast(`${uploaded.length} file(s) uploaded! ${startsSession ? 'Starting' : 'Sending to'} ${agent.label}...`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+    } else {
+        console.warn(`${agent.logPrefix} No files uploaded successfully`);
+        toast('Warning: Could not upload attachments');
+    }
+
+    if (promptEl) {
+        promptEl.style.backgroundColor = '';
+        promptEl.style.borderColor = '';
+        promptEl.disabled = false;
+    }
+    return { prompt, uploaded };
+}
+
+/**
+ * Send a turn to a CLI agent: input to its open session when it has one for
+ * this operator (files into that session's folder), else a new session (files
+ * into a fresh folder).
+ * @param {Object} agent - A CLI_AGENTS entry
+ * @param {string} txt - The typed prompt
+ * @param {File[]} attachedFiles - The composer's attachments
+ */
+async function sendToCliAgent(agent, txt, attachedFiles) {
+    let handler = agent.getHandler();
+    const promptEl = $("prompt");
+
+    if (handler && handler.isActive() && handler.belongsTo(getOperator())) {
+        console.log(`${agent.logPrefix} Active session detected, sending input to existing session`);
+        let inputPrompt = txt;
+        let uploaded = [];
+        if (attachedFiles.length > 0 && handler.sessionId) {
+            ({ prompt: inputPrompt, uploaded } = await uploadToAgentSession(
+                txt, attachedFiles, handler.sessionId, agent, false));
+            clearAttachedFiles();
+            renderPreviews();
+        }
+
+        let bubbleText = txt;
+        if (uploaded.length > 0) {
+            bubbleText += `\n[Attached ${uploaded.length} file(s) to session folder]`;
+        }
+        addBubble("user", bubbleText);
+        if (promptEl) promptEl.value = "";
+        handler.sendInput(inputPrompt);
+        return;
+    }
+
+    console.log(`${agent.logPrefix} No active session, starting a new one...`);
+    let enhancedPrompt = txt;
+    if (attachedFiles.length > 0) {
+        const sessionFolderId = agent.folderPrefix + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        ({ prompt: enhancedPrompt } = await uploadToAgentSession(
+            txt, attachedFiles, sessionFolderId, agent, true));
+    }
+
+    toast(agent.connecting);
+    addBubble("user", enhancedPrompt);
+    if (promptEl) promptEl.value = "";
+    clearAttachedFiles();
+    renderPreviews();
+
+    if (!handler) {
+        handler = agent.createHandler();
+    }
+    try {
+        await handler.startSession(enhancedPrompt, getOperator());
+    } catch (err) {
+        console.error(`${agent.logPrefix} startSession error:`, err);
+        toast(`${agent.errorToast}: ${err.message}`);
+    }
+}
+
+// =============================================================================
+// User Content
+// =============================================================================
+
+/**
+ * The user turn's content parts and bubble text: the text, then each
+ * attachment uploaded ONCE per logical send (both modes build on it, so a
+ * streaming->standard fallback never uploads the files a second time, audit
+ * P01-chat-core-web-18), then the uploaded image URLs for the image tools. A
+ * retry re-sends the failed attempt's own parts, its uploads included.
+ * @param {string} txt - The typed text
+ * @param {File[]} attachedFiles - The composer's attachments
+ * @param {?{content: Array, bubble: ?string}} resend - The turn a retry re-sends
+ * @returns {Promise<?{userContent: Array, bubbleContent: string}>} null when an
+ *   upload failed (nothing is sent; the draft and the attachments stay put)
+ */
+export async function buildUserContent(txt, attachedFiles, resend = null) {
+    let userContent = [];
+    let bubbleContent = txt;
+    if (resend) {
+        // The parts the failed attempt sent, its uploads included.
+        userContent = resend.content.map((part) => ({ ...part }));
+        if (resend.bubble) bubbleContent = resend.bubble;
+    } else if (txt) {
+        userContent.push({ type: "text", text: txt });
+    }
+
+    if (attachedFiles.length > 0) {
+        let imageUrls = [];  // Track image URLs for tool usage
+        for (const file of attachedFiles) {
+            const type = classifyAttachment(file);
+            if (!type) {
+                // Never dropped silently: the operator would think the model saw it.
+                toast(`Not sent to the model (unsupported type): ${file.name}`);
+                continue;
+            }
+            let uploadResult;
+            try {
+                uploadResult = await handleFileUpload(file);
+            } catch (err) {
+                // Nothing is sent: the draft and the attachments stay put for another try.
+                console.error('[CHAT] Upload failed:', file.name, err);
+                toast(`Upload failed: ${file.name} — ${err?.message || err}`);
+                return null;
+            }
+            if (!uploadResult || !uploadResult.url) continue;
+            userContent.push({ type, [type]: { url: uploadResult.url } });
+            bubbleContent += `\n[Attached: ${file.name}]`;
+
+            // Track image URLs so model can use them for tools
+            if (type === "image_url") {
+                imageUrls.push({ filename: file.name, url: uploadResult.url });
+            }
+        }
+
+        // Add image URL info as text so model can use for generate_video(image_url) or generate_image(reference_images)
+        if (imageUrls.length > 0) {
+            let urlInfo = '\n\n[Uploaded Image URLs for tool use:';
+            for (const img of imageUrls) {
+                urlInfo += `\n- ${img.filename}: ${img.url}`;
+            }
+            urlInfo += '\nUse these URLs with generate_video(image_url=...) for image-to-video, or generate_image(reference_images=[...]) for image-to-image.]';
+            userContent.push({ type: "text", text: urlInfo });
+        }
+    }
+    return { userContent, bubbleContent };
+}
+
+// =============================================================================
 // Main Send Function
 // =============================================================================
 
@@ -1915,426 +2228,17 @@ export async function send() {
         return;
     }
 
-    // Handle agents provider (Claude Code CLI) via WebSocket
-    if (window.__provider === 'agents') {
-        console.log('[Agent] send() called, provider is agents, txt:', txt);
-        let agentHandler = getAgentHandler();
-        console.log('[Agent] agentHandler exists:', !!agentHandler);
-        console.log('[Agent] attachedFiles at entry:', attachedFiles.length);
-
-        toast(`[DEBUG v103] Agent mode: ${attachedFiles.length} file(s) attached`);
-
-        if (agentHandler && agentHandler.isActive() && agentHandler.belongsTo(getOperator())) {
-            console.log('[Agent] Active session detected, sending input to existing session');
-
-            let inputPrompt = txt;
-            let uploadedFiles = [];
-            const promptEl = $("prompt");
-            const sessionId = agentHandler.sessionId;
-
-            if (attachedFiles.length > 0 && sessionId) {
-                console.log(`[Agent v104] Uploading ${attachedFiles.length} files to session folder: ${sessionId}`);
-                toast(`Uploading ${attachedFiles.length} file(s) to session folder...`);
-
-                if (promptEl) {
-                    promptEl.style.backgroundColor = 'rgba(255, 159, 64, 0.2)';
-                    promptEl.style.borderColor = '#ff9f40';
-                    promptEl.disabled = true;
-                    promptEl.value = txt + '\n\n\u23F3 Uploading files...';
-                }
-
-                for (let i = 0; i < attachedFiles.length; i++) {
-                    const file = attachedFiles[i];
-                    try {
-                        if (promptEl) {
-                            promptEl.value = txt + `\n\n\u23F3 Uploading ${file.name} (${i+1}/${attachedFiles.length})...`;
-                        }
-
-                        const uploadResult = await handleSessionFileUpload(file, sessionId);
-                        if (uploadResult && uploadResult.path) {
-                            uploadedFiles.push({
-                                filename: uploadResult.filename,
-                                path: uploadResult.path,
-                                url: uploadResult.url
-                            });
-                            console.log(`[Agent] File uploaded to session: ${uploadResult.path}`);
-                        }
-                    } catch (err) {
-                        console.error(`[Agent] Error uploading ${file.name}:`, err);
-                        toast(`Upload failed: ${file.name}`);
-                    }
-                }
-
-                if (uploadedFiles.length > 0) {
-                    let fileContext = '\n\n--- ATTACHED FILES ---\n';
-                    fileContext += `Session folder: ${uploadedFiles[0].path.replace(/\/[^/]+$/, '')}\n\n`;
-                    fileContext += 'Files uploaded to your session folder:\n';
-                    for (const f of uploadedFiles) {
-                        fileContext += `- ${f.filename}: ${f.path}\n`;
-                    }
-                    fileContext += '\nYou can read, analyze, or manipulate these files using your tools.\n';
-                    fileContext += '---\n';
-
-                    inputPrompt = txt + fileContext;
-
-                    if (promptEl) {
-                        promptEl.style.backgroundColor = 'rgba(39, 217, 128, 0.2)';
-                        promptEl.style.borderColor = '#27d980';
-                        promptEl.value = inputPrompt;
-                    }
-
-                    toast(`${uploadedFiles.length} file(s) uploaded! Sending to Claude Code...`);
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
-
-                if (promptEl) {
-                    promptEl.style.backgroundColor = '';
-                    promptEl.style.borderColor = '';
-                    promptEl.disabled = false;
-                }
-
-                clearAttachedFiles();
-                renderPreviews();
-            }
-
-            let bubbleText = txt;
-            if (uploadedFiles.length > 0) {
-                bubbleText += `\n[Attached ${uploadedFiles.length} file(s) to session folder]`;
-            }
-            addBubble("user", bubbleText);
-            if (promptEl) promptEl.value = "";
-            agentHandler.sendInput(inputPrompt);
-            return;
-        }
-
-        // Start new session
-        console.log('[Agent] No active session, starting new agent session...');
-        let enhancedPrompt = txt;
-        let uploadedFiles = [];
-        const promptEl = $("prompt");
-
-        if (attachedFiles.length > 0) {
-            console.log(`[Agent] Processing ${attachedFiles.length} attached files for session folder upload`);
-            const sessionFolderId = 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-            console.log(`[Agent] Using session folder ID: ${sessionFolderId}`);
-
-            if (promptEl) {
-                promptEl.style.backgroundColor = 'rgba(255, 159, 64, 0.2)';
-                promptEl.style.borderColor = '#ff9f40';
-                promptEl.disabled = true;
-            }
-            toast(`Uploading ${attachedFiles.length} file(s) to session folder...`);
-
-            for (let i = 0; i < attachedFiles.length; i++) {
-                const file = attachedFiles[i];
-                try {
-                    if (promptEl) {
-                        promptEl.value = txt + `\n\n\u23F3 Uploading ${file.name} (${i+1}/${attachedFiles.length})...`;
-                    }
-
-                    console.log(`[Agent] Uploading file to session folder: ${file.name}`);
-                    const uploadResult = await handleSessionFileUpload(file, sessionFolderId);
-
-                    if (uploadResult) {
-                        console.log(`[Agent] File uploaded to session: ${uploadResult.path}`);
-                        uploadedFiles.push({
-                            filename: uploadResult.filename,
-                            path: uploadResult.path,
-                            url: uploadResult.url
-                        });
-                    }
-                } catch (err) {
-                    console.error(`[Agent] Error uploading file ${file.name}:`, err);
-                    toast(`Error uploading ${file.name}: ${err.message}`);
-                }
-            }
-
-            if (uploadedFiles.length > 0) {
-                let fileContext = '\n\n--- ATTACHED FILES ---\n';
-                fileContext += `Session folder: ${uploadedFiles[0].path.replace(/\/[^/]+$/, '')}\n\n`;
-                fileContext += 'Files uploaded to your session folder:\n';
-                for (const f of uploadedFiles) {
-                    fileContext += `- ${f.filename}: ${f.path}\n`;
-                }
-                fileContext += '\nYou can read, analyze, or manipulate these files using your tools (Read, analyze_image, analyze_audio, analyze_video, etc.).\n';
-                enhancedPrompt = txt + fileContext;
-
-                if (promptEl) {
-                    promptEl.style.backgroundColor = 'rgba(39, 217, 128, 0.2)';
-                    promptEl.style.borderColor = '#27d980';
-                    promptEl.value = enhancedPrompt;
-                }
-
-                console.log('[Agent] Enhanced prompt with file paths:', enhancedPrompt.substring(0, 500) + '...');
-                toast(`${uploadedFiles.length} file(s) uploaded! Starting Claude Code...`);
-                await new Promise(resolve => setTimeout(resolve, 500));
-            } else {
-                console.warn('[Agent] No files uploaded successfully');
-                toast('Warning: Could not upload attachments');
-            }
-
-            if (promptEl) {
-                promptEl.style.backgroundColor = '';
-                promptEl.style.borderColor = '';
-                promptEl.disabled = false;
-            }
-        }
-
-        toast('Connecting to Claude Code CLI...');
-        addBubble("user", enhancedPrompt);
-        if (promptEl) promptEl.value = "";
-        clearAttachedFiles();
-        renderPreviews();
-
-        if (!agentHandler) {
-            console.log('[Agent] Creating new AgentChatHandler');
-            agentHandler = new AgentChatHandler();
-            setAgentHandler(agentHandler);
-        }
-        try {
-            await agentHandler.startSession(enhancedPrompt, getOperator());
-        } catch (err) {
-            console.error('[Agent] startSession error:', err);
-            toast('Agent error: ' + err.message);
-        }
+    // The CLI agents (Claude Code, Gemini CLI) take the turn over their WebSocket.
+    const cliAgent = CLI_AGENTS[window.__provider];
+    if (cliAgent) {
+        await sendToCliAgent(cliAgent, txt, attachedFiles);
         return;
     }
 
-    // Handle gemini-agents provider (Gemini CLI) via WebSocket
-    if (window.__provider === 'gemini-agents') {
-        console.log('[GeminiAgent] send() called, provider is gemini-agents, txt:', txt);
-        let geminiHandler = getGeminiAgentHandler();
-        console.log('[GeminiAgent] geminiHandler exists:', !!geminiHandler);
-
-        if (geminiHandler && geminiHandler.isActive() && geminiHandler.belongsTo(getOperator())) {
-            console.log('[GeminiAgent] Active session detected, sending input to existing session');
-
-            let inputPrompt = txt;
-            let uploadedFiles = [];
-            const promptEl = $("prompt");
-            const sessionId = geminiHandler.sessionId;
-
-            if (attachedFiles.length > 0 && sessionId) {
-                console.log(`[GeminiAgent] Uploading ${attachedFiles.length} files to session folder: ${sessionId}`);
-                toast(`Uploading ${attachedFiles.length} file(s) to session folder...`);
-
-                if (promptEl) {
-                    promptEl.style.backgroundColor = 'rgba(255, 159, 64, 0.2)';
-                    promptEl.style.borderColor = '#ff9f40';
-                    promptEl.disabled = true;
-                    promptEl.value = txt + '\n\n\u23F3 Uploading files...';
-                }
-
-                for (let i = 0; i < attachedFiles.length; i++) {
-                    const file = attachedFiles[i];
-                    try {
-                        if (promptEl) {
-                            promptEl.value = txt + `\n\n\u23F3 Uploading ${file.name} (${i+1}/${attachedFiles.length})...`;
-                        }
-
-                        const uploadResult = await handleSessionFileUpload(file, sessionId);
-                        if (uploadResult && uploadResult.path) {
-                            uploadedFiles.push({
-                                filename: uploadResult.filename,
-                                path: uploadResult.path,
-                                url: uploadResult.url
-                            });
-                            console.log(`[GeminiAgent] File uploaded to session: ${uploadResult.path}`);
-                        }
-                    } catch (err) {
-                        console.error(`[GeminiAgent] Error uploading ${file.name}:`, err);
-                        toast(`Upload failed: ${file.name}`);
-                    }
-                }
-
-                if (uploadedFiles.length > 0) {
-                    let fileContext = '\n\n--- ATTACHED FILES ---\n';
-                    fileContext += `Session folder: ${uploadedFiles[0].path.replace(/\/[^/]+$/, '')}\n\n`;
-                    fileContext += 'Files uploaded to your session folder:\n';
-                    for (const f of uploadedFiles) {
-                        fileContext += `- ${f.filename}: ${f.path}\n`;
-                    }
-                    fileContext += '\nYou can read, analyze, or manipulate these files using your tools.\n';
-                    fileContext += '---\n';
-
-                    inputPrompt = txt + fileContext;
-
-                    if (promptEl) {
-                        promptEl.style.backgroundColor = 'rgba(39, 217, 128, 0.2)';
-                        promptEl.style.borderColor = '#27d980';
-                        promptEl.value = inputPrompt;
-                    }
-
-                    toast(`${uploadedFiles.length} file(s) uploaded! Sending to Gemini CLI...`);
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
-
-                if (promptEl) {
-                    promptEl.style.backgroundColor = '';
-                    promptEl.style.borderColor = '';
-                    promptEl.disabled = false;
-                }
-
-                clearAttachedFiles();
-                renderPreviews();
-            }
-
-            let bubbleText = txt;
-            if (uploadedFiles.length > 0) {
-                bubbleText += `\n[Attached ${uploadedFiles.length} file(s) to session folder]`;
-            }
-            addBubble("user", bubbleText);
-            if (promptEl) promptEl.value = "";
-            geminiHandler.sendInput(inputPrompt);
-            return;
-        }
-
-        // Start new Gemini CLI session
-        console.log('[GeminiAgent] No active session, starting new Gemini agent session...');
-        let enhancedPrompt = txt;
-        let uploadedFiles = [];
-        const promptEl = $("prompt");
-
-        if (attachedFiles.length > 0) {
-            console.log(`[GeminiAgent] Processing ${attachedFiles.length} attached files for session folder upload`);
-            const sessionFolderId = 'gemini-session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-            console.log(`[GeminiAgent] Using session folder ID: ${sessionFolderId}`);
-
-            if (promptEl) {
-                promptEl.style.backgroundColor = 'rgba(255, 159, 64, 0.2)';
-                promptEl.style.borderColor = '#ff9f40';
-                promptEl.disabled = true;
-            }
-            toast(`Uploading ${attachedFiles.length} file(s) to session folder...`);
-
-            for (let i = 0; i < attachedFiles.length; i++) {
-                const file = attachedFiles[i];
-                try {
-                    if (promptEl) {
-                        promptEl.value = txt + `\n\n\u23F3 Uploading ${file.name} (${i+1}/${attachedFiles.length})...`;
-                    }
-
-                    console.log(`[GeminiAgent] Uploading file to session folder: ${file.name}`);
-                    const uploadResult = await handleSessionFileUpload(file, sessionFolderId);
-
-                    if (uploadResult) {
-                        console.log(`[GeminiAgent] File uploaded to session: ${uploadResult.path}`);
-                        uploadedFiles.push({
-                            filename: uploadResult.filename,
-                            path: uploadResult.path,
-                            url: uploadResult.url
-                        });
-                    }
-                } catch (err) {
-                    console.error(`[GeminiAgent] Error uploading file ${file.name}:`, err);
-                    toast(`Error uploading ${file.name}: ${err.message}`);
-                }
-            }
-
-            if (uploadedFiles.length > 0) {
-                let fileContext = '\n\n--- ATTACHED FILES ---\n';
-                fileContext += `Session folder: ${uploadedFiles[0].path.replace(/\/[^/]+$/, '')}\n\n`;
-                fileContext += 'Files uploaded to your session folder:\n';
-                for (const f of uploadedFiles) {
-                    fileContext += `- ${f.filename}: ${f.path}\n`;
-                }
-                fileContext += '\nYou can read, analyze, or manipulate these files using your tools (Read, analyze_image, analyze_audio, analyze_video, etc.).\n';
-                enhancedPrompt = txt + fileContext;
-
-                if (promptEl) {
-                    promptEl.style.backgroundColor = 'rgba(39, 217, 128, 0.2)';
-                    promptEl.style.borderColor = '#27d980';
-                    promptEl.value = enhancedPrompt;
-                }
-
-                console.log('[GeminiAgent] Enhanced prompt with file paths:', enhancedPrompt.substring(0, 500) + '...');
-                toast(`${uploadedFiles.length} file(s) uploaded! Starting Gemini CLI...`);
-                await new Promise(resolve => setTimeout(resolve, 500));
-            } else {
-                console.warn('[GeminiAgent] No files uploaded successfully');
-                toast('Warning: Could not upload attachments');
-            }
-
-            if (promptEl) {
-                promptEl.style.backgroundColor = '';
-                promptEl.style.borderColor = '';
-                promptEl.disabled = false;
-            }
-        }
-
-        toast('Connecting to Gemini CLI...');
-        addBubble("user", enhancedPrompt);
-        if (promptEl) promptEl.value = "";
-        clearAttachedFiles();
-        renderPreviews();
-
-        if (!geminiHandler) {
-            console.log('[GeminiAgent] Creating new GeminiAgentHandler');
-            geminiHandler = new GeminiAgentHandler();
-            setGeminiAgentHandler(geminiHandler);
-        }
-        try {
-            await geminiHandler.startSession(enhancedPrompt, getOperator());
-        } catch (err) {
-            console.error('[GeminiAgent] startSession error:', err);
-            toast('Gemini agent error: ' + err.message);
-        }
-        return;
-    }
-
-    // =========================================================================
-    // ATTACHMENTS: uploaded ONCE per logical send. Both modes below build on
-    // the same userContent, so a streaming->standard fallback never uploads
-    // the files a second time (audit P01-chat-core-web-18).
-    // =========================================================================
-    let userContent = [];
-    let bubbleContent = txt;
-    if (resend) {
-        // The parts the failed attempt sent, its uploads included.
-        userContent = resend.content.map((part) => ({ ...part }));
-        if (resend.bubble) bubbleContent = resend.bubble;
-    } else if (txt) {
-        userContent.push({ type: "text", text: txt });
-    }
-
-    if (attachedFiles.length > 0) {
-        let imageUrls = [];  // Track image URLs for tool usage
-        for (const file of attachedFiles) {
-            const type = classifyAttachment(file);
-            if (!type) {
-                // Never dropped silently: the operator would think the model saw it.
-                toast(`Not sent to the model (unsupported type): ${file.name}`);
-                continue;
-            }
-            let uploadResult;
-            try {
-                uploadResult = await handleFileUpload(file);
-            } catch (err) {
-                // Nothing is sent: the draft and the attachments stay put for another try.
-                console.error('[CHAT] Upload failed:', file.name, err);
-                toast(`Upload failed: ${file.name} — ${err?.message || err}`);
-                return;
-            }
-            if (!uploadResult || !uploadResult.url) continue;
-            userContent.push({ type, [type]: { url: uploadResult.url } });
-            bubbleContent += `\n[Attached: ${file.name}]`;
-
-            // Track image URLs so model can use them for tools
-            if (type === "image_url") {
-                imageUrls.push({ filename: file.name, url: uploadResult.url });
-            }
-        }
-
-        // Add image URL info as text so model can use for generate_video(image_url) or generate_image(reference_images)
-        if (imageUrls.length > 0) {
-            let urlInfo = '\n\n[Uploaded Image URLs for tool use:';
-            for (const img of imageUrls) {
-                urlInfo += `\n- ${img.filename}: ${img.url}`;
-            }
-            urlInfo += '\nUse these URLs with generate_video(image_url=...) for image-to-video, or generate_image(reference_images=[...]) for image-to-image.]';
-            userContent.push({ type: "text", text: urlInfo });
-        }
-    }
+    // ATTACHMENTS: uploaded ONCE per logical send (buildUserContent).
+    const built = await buildUserContent(txt, attachedFiles, resend);
+    if (!built) return;  // an upload failed: the draft and the attachments stay put
+    const { userContent, bubbleContent } = built;
 
     // The user turn's bubble for this logical send, appended exactly ONCE
     // (the standard-mode fallback reuses it), and the anchor for the retry
@@ -3133,15 +3037,8 @@ export async function checkCUBackgroundStatus() {
                 });
                 setHistoryData(hist);
                 saveHistory();
-                // Re-render history to show the new result
-                loadHistory();
-                const { renderHistory } = await import('./chat-bubbles.js');
-                const histEl = $("history");
-                if (histEl) {
-                    histEl.innerHTML = "";
-                    renderHistory(histEl, getHistoryData());
-                    scrollToBottomIfNeeded();
-                }
+                // Re-render history to show the new result, its CU panel included
+                renderHistory();
                 toast('Computer Use task completed in background');
             }
             _removeCUBackgroundBanner();
