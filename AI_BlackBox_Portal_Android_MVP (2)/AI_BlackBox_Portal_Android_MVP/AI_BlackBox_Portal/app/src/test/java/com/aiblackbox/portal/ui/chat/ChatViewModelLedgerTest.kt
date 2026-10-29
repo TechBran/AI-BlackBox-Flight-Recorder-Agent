@@ -147,7 +147,9 @@ class ChatViewModelLedgerTest {
         for (field in listOf("currentOperator", "currentProvider", "currentModel")) {
             assertFalse("sendViaSSE reads $field after capturing the turn", Regex("\\b$field\\b").containsMatchIn(afterCapture))
         }
-        assertFalse("processSSEEvent must use the turn's provider", Regex("\\bcurrentProvider\\b").containsMatchIn(functionBody(vm, "processSSEEvent")))
+        // The event handler (the pure SseTurnReducer since rank 76) gets the turn's provider.
+        assertTrue("events are folded with the turn's provider", "applySseEvent(acc, event, turn.provider)" in body)
+        assertFalse("applySseEvent must use the turn's provider", Regex("\\bcurrentProvider\\b").containsMatchIn(functionBody(vm, "applySseEvent")))
         assertFalse("saveConversation must use the turn's operator", Regex("\\bcurrentOperator\\b").containsMatchIn(functionBody(vm, "saveConversation")))
         assertTrue("the finalize goes through ledgerResponseFor", "ledgerResponseFor(" in body)
     }

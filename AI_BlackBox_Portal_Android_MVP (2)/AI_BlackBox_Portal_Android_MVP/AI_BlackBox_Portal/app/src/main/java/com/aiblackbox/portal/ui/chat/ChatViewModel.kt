@@ -197,15 +197,7 @@ private class SseTurn(
     val model: String,
     val userMessageId: String,
     val assistantMessageId: String,
-) {
-    // cu_queued: the box queued this prompt behind a running computer-use task, whose
-    // stream carries the reply (cu_queue_next), so this turn has no reply of its own.
-    var queued = false
-
-    // cu_queue_next: this stream now also carries the next queued prompt's reply,
-    // appended after a separator, so "done" must not replace the accumulated content.
-    var queueAppend = false
-}
+)
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -376,11 +368,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _streamCancelled = MutableStateFlow(false)
     val streamCancelled: StateFlow<Boolean> = _streamCancelled.asStateFlow()
 
-    // Per-turn Signal tracking (reset in [sendViaSSE], read across the many
-    // processSSEEvent calls of one turn). Never persisted.
-    private var signalLastTool: String = ""       // last tool_start name, for the "· ok" echo
-    private var signalGenerating: Boolean = false // one-shot latch for the "generating ·" line
-    private var signalModelLabel: String = "model" // real model id (from stream_start)
+    // The Signal's per-turn tracking (last tool, the "generating ·" latch, the real model
+    // id) lives in the turn's SseTurnState (SseTurnReducer). Never persisted.
     // Computer-use turns keep The Signal DARK (match web, which destroys the line for
     // provider === 'computer-use'): the CU tool indicator / todo panel / Live View
     // carry the activity narrative. Set per turn; all non-null pushes go through
@@ -2004,10 +1993,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // from content_start → "generating · <model>" (non-retrieval turns). A brief
         // blank before the first backend frame is exactly how web already behaves.
         _signalLabel.value = null
-        signalLastTool = ""
-        signalGenerating = false
-        signalModelLabel = turn.model.ifBlank { turn.provider }.ifBlank { "model" }
-        // Computer-use turns keep The Signal dark for the whole turn (match web).
+        // Computer-use turns keep The Signal dark for the whole turn (match web); the
+        // turn's own Signal state (last tool, the generating latch, the model label)
+        // lives in its SseTurnState (SseTurnReducer.start).
         signalSuppressed = signalSuppressedForProvider(turn.provider)
 
         val history = buildApiHistory()
@@ -2022,15 +2010,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         streamJob = viewModelScope.launch {
-            val content = StringBuilder()
-            val reasoning = StringBuilder()
-            // SSE "error" events accumulate here, NOT in content — see the "error"
-            // case in processSSEEvent and the failure branch in the finalize below.
-            val errors = StringBuilder()
-            var tokenCount: TokenCount? = null
-            var streamModel: String? = null
-            var provenance: Provenance? = null
-            val mediaTasks = mutableListOf<String>()
+            // Everything the stream accumulates (content, reasoning, the SSE "error" text
+            // kept apart from content, media tasks, model, tokens, provenance, the CU
+            // queue flags, the Signal's turn state), folded event by event through the
+            // pure SseTurnReducer (applySseEvent). See the failure branch below.
+            var acc = SseTurnReducer.start(turn.provider, turn.model)
 
             // CU params (only when provider is computer-use)
             val cuSessionId = if (isCuProvider) _cuSessionId.value else null
@@ -2072,25 +2056,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 flow.collect { event ->
-                    processSSEEvent(
-                        event, turn, content, reasoning, mediaTasks, errors
-                    ) { model, tokens, prov ->
-                        if (model != null) streamModel = model
-                        if (tokens != null) tokenCount = tokens
-                        if (prov != null) provenance = prov
-                    }
+                    acc = applySseEvent(acc, event, turn.provider)
 
                     // Update the streaming assistant message — the user still sees
                     // error-event text as it arrives (rendered after real content).
                     // Addressed by id: a late event can never rewrite another message.
                     updateLastMessage(
                         messageId = turn.assistantMessageId,
-                        content = combineContentAndErrors(content.toString(), errors.toString()),
-                        reasoning = reasoning.toString().ifBlank { null },
+                        content = combineContentAndErrors(acc.content, acc.errors),
+                        reasoning = acc.reasoning.ifBlank { null },
                         isStreaming = true,
                         isThinking = _chatState.value == ChatState.THINKING,
-                        model = streamModel,
-                        mediaTasks = mediaTasks.toList()
+                        model = acc.model,
+                        mediaTasks = acc.mediaTasks
                     )
                 }
 
@@ -2100,12 +2078,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // must NOT be minted into the ledger via saveConversation, and the
                 // user turn gets the retry affordance. Real-content-also-arrived
                 // keeps the previous behavior (protects mid-stream transient errors).
-                val realContent = content.toString()
-                val errorText = errors.toString()
+                val realContent = acc.content
+                val errorText = acc.errors
                 val display = combineContentAndErrors(realContent, errorText)
                 val failedOutcome = streamOutcomeIsFailure(realContent, errorText)
 
-                if (turn.queued) {
+                if (acc.queued) {
                     // cu_queued (A04-chat-viewmodel-15): the reply streams into the
                     // running task's turn, so drop this empty bubble and save nothing.
                     // The task is still running; its CU status is left as it is.
@@ -2129,13 +2107,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 updateLastMessage(
                     messageId = turn.assistantMessageId,
                     content = display,
-                    reasoning = reasoning.toString().ifBlank { null },
+                    reasoning = acc.reasoning.ifBlank { null },
                     isStreaming = false,
                     isThinking = false,
-                    model = streamModel,
-                    tokens = tokenCount,
-                    provenance = provenance,
-                    mediaTasks = mediaTasks.toList()
+                    model = acc.model,
+                    tokens = acc.tokens,
+                    provenance = acc.provenance,
+                    mediaTasks = acc.mediaTasks
                 )
 
                 // Resolve media tasks — uses the robust resolver that handles
@@ -2161,7 +2139,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // nothing for an empty completion (A04-chat-viewmodel-15).
                     // provenance is forwarded so backend auto-mint records context lineage.
                     ledgerResponseFor(turn.provider, realContent)?.let { response ->
-                        saveConversation(turn, text, response, reasoning.toString(), streamModel, tokenCount, provenance)
+                        saveConversation(turn, text, response, acc.reasoning, acc.model, acc.tokens, acc.provenance)
                     }
 
                     // Persist to local storage
@@ -2169,8 +2147,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     // Auto-TTS: speak the response if enabled
                     // Matches Portal window.triggerAutoTTS() called after full response
-                    if (autoTtsEnabled && content.isNotBlank()) {
-                        _autoTtsEvent.tryEmit(content.toString())
+                    if (autoTtsEnabled && realContent.isNotBlank()) {
+                        _autoTtsEvent.tryEmit(realContent)
                     }
                 }
 
@@ -2182,7 +2160,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 stopBackgroundService()
                 updateLastMessage(
                     messageId = turn.assistantMessageId,
-                    content = combineContentAndErrors(content.toString(), errors.toString())
+                    content = combineContentAndErrors(acc.content, acc.errors)
                         .ifBlank { "Error: ${e.message}" },
                     isStreaming = false,
                     isThinking = false
@@ -2196,7 +2174,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _messages.value = markSendFailedOnUserTurn(
                         _messages.value,
                         userMsgId,
-                        usableContentArrived = content.isNotBlank(),
+                        usableContentArrived = acc.content.isNotBlank(),
                     )
                     // Persist so the error bubble + retry affordance survive a reload.
                     persistTurnHistory(turn)
@@ -2206,405 +2184,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // Process SSE Event — aligned with Portal's 30+ event type handler
+    // Apply one SSE event — the pure SseTurnReducer decides, this writes the flows
     // =========================================================================
-    private fun processSSEEvent(
-        event: SSEEvent,
-        turn: SseTurn,
-        content: StringBuilder,
-        reasoning: StringBuilder,
-        mediaTasks: MutableList<String>,
-        errors: StringBuilder,
-        onMeta: (model: String?, tokens: TokenCount?, provenance: Provenance?) -> Unit
-    ) {
-        when (event.event) {
-            // ── Stream lifecycle ──
-            "stream_start" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val model = obj["model"]?.jsonPrimitive?.content
-                    // The Signal: remember the REAL model id for the "generating ·" line
-                    // (presentation-only; never touches content/reasoning or the save payload).
-                    if (!model.isNullOrBlank()) signalModelLabel = model
-                    // Provenance is embedded in stream_start.data.provenance — backend
-                    // does NOT send a standalone "provenance" SSE event for /chat/stream
-                    // (the dead branch below is a defensive fallback for WS-bridged paths).
-                    val parsedProv = extractProvenanceFromStreamStart(event.data)
-                    onMeta(model, null, parsedProv)
-                    if (parsedProv != null) {
-                        Log.d(TAG, "stream_start provenance: " +
-                              "recent=${parsedProv.recent.size} " +
-                              "keyword=${parsedProv.keyword.size} " +
-                              "semantic=${parsedProv.semantic.size} " +
-                              "checkpoint=${parsedProv.checkpoint.size}")
-                    }
-                } catch (_: Exception) {}
-            }
-            "content_start" -> {
-                // Transition from thinking to content (Portal uses this as marker)
-                if (_chatState.value == ChatState.THINKING) {
-                    _chatState.value = ChatState.STREAMING
-                }
-                signalOnGenerating()
-            }
-            "content" -> {
-                signalOnGenerating() // first answer bytes → narrate generation (once)
-                content.append(event.data)
-                if (_chatState.value == ChatState.THINKING) {
-                    _chatState.value = ChatState.STREAMING
-                }
-            }
-            "stream_end" -> {
-                _chatState.value = ChatState.IDLE
-                _signalLabel.value = null // dissolve The Signal (ephemeral)
-            }
-            "done" -> {
-                // "done" carries the full accumulated response as fallback.
-                // Gemini: {"thinking": "...", "content": "..."}
-                // Anthropic/OpenAI: {"reasoning": "...", "content": "..."}
-                // If streaming missed content, this ensures we have the full response.
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val doneContent = obj["content"]?.jsonPrimitive?.content
-                    val doneThinking = obj["thinking"]?.jsonPrimitive?.content
-                        ?: obj["reasoning"]?.jsonPrimitive?.content
-                    // Use done content if our streaming buffer is empty or shorter —
-                    // except after cu_queue_next, when the buffer holds two replies.
-                    if (!turn.queueAppend && !doneContent.isNullOrBlank() && doneContent.length > content.length) {
-                        content.clear()
-                        content.append(doneContent)
-                    }
-                    if (!doneThinking.isNullOrBlank() && doneThinking.length > reasoning.length) {
-                        reasoning.clear()
-                        reasoning.append(doneThinking)
-                    }
-                } catch (_: Exception) {
-                    // done data might be a plain string — ignore parse failure
-                }
-                _chatState.value = ChatState.IDLE
-                _signalLabel.value = null // dissolve The Signal (ephemeral)
-                // Clear ER mission state when stream completes
-                if (turn.provider == "robotics") {
-                    _erMissionActive.value = false
-                }
-            }
-
-            // ── Thinking/reasoning ──
-            "thinking_start" -> {
-                _chatState.value = ChatState.THINKING
-            }
-            "thinking" -> {
-                reasoning.append(event.data)
-                if (_chatState.value != ChatState.THINKING) {
-                    _chatState.value = ChatState.THINKING
-                }
-            }
-            "thinking_end" -> {
-                // Thinking phase complete — content will follow
-                // State transitions to STREAMING on next content event
-            }
-
-            // ── Usage & metadata ──
-            "usage" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val prompt = obj["prompt_tokens"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                    val completion = obj["completion_tokens"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                    onMeta(null, TokenCount(prompt, completion), null)
-                } catch (_: Exception) {}
-            }
-            "provenance" -> {
-                val parsed = parseProvenance(event.data)
-                if (parsed != null) {
-                    onMeta(null, null, parsed)
-                    Log.d(TAG, "provenance: recent=${parsed.recent.size} " +
-                          "keyword=${parsed.keyword.size} semantic=${parsed.semantic.size} " +
-                          "checkpoint=${parsed.checkpoint.size}")
-                } else {
-                    Log.w(TAG, "provenance event unparseable: ${event.data.take(200)}")
-                }
-            }
-
-            // ── Media generation tasks ──
-            "image_task", "video_task", "music_task" -> {
-                // Backend returns task_id for async generation
-                // Prefix with type so placeholder knows which animation to show
-                val typePrefix = when (event.event) {
-                    "image_task" -> "image:"
-                    "video_task" -> "video:"
-                    "music_task" -> "music:"
-                    else -> ""
-                }
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val taskId = obj["task_id"]?.jsonPrimitive?.content
-                    if (taskId != null) {
-                        mediaTasks.add("$typePrefix$taskId")
-                        Log.d(TAG, "${event.event}: $taskId")
-                    }
-                } catch (_: Exception) {
-                    // task_id might be sent as plain string
-                    if (event.data.isNotBlank()) {
-                        mediaTasks.add("$typePrefix${event.data.trim()}")
-                    }
-                }
-            }
-
-            // ── Computer Use events — matches Portal chat-send.js ──
-            "cu_screenshot" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val url = obj["url"]?.jsonPrimitive?.content
-                    if (url != null) {
-                        val baseUrl = api?.getBaseUrl() ?: ""
-                        val fullUrl = if (url.startsWith("http")) url else "$baseUrl$url"
-                        _cuScreenshotUrl.value = "$fullUrl?t=${System.currentTimeMillis()}"
-                    }
-                    val step = obj["step"]?.jsonPrimitive?.content?.toIntOrNull()
-                    if (step != null) _cuStep.value = step
-                } catch (_: Exception) {}
-                _cuStatus.value = "running"
-                Log.d(TAG, "CU screenshot update")
-            }
-            "cu_action" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val action = obj["action"]?.jsonPrimitive?.content ?: ""
-                    val step = obj["step"]?.jsonPrimitive?.content?.toIntOrNull()
-                    _cuActionLabel.value = action
-                    if (step != null) _cuStep.value = step
-                    // Append action summary to content for chat history
-                    content.append("\n`[$action]` ")
-                } catch (_: Exception) {}
-                _cuStatus.value = "running"
-            }
-            "cu_bash_output" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val cmd = obj["command"]?.jsonPrimitive?.content ?: ""
-                    val output = obj["output"]?.jsonPrimitive?.content ?: ""
-                    content.append("\n```\n$ $cmd\n$output\n```\n")
-                } catch (_: Exception) {}
-            }
-            "cu_file_edit" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val cmd = obj["command"]?.jsonPrimitive?.content ?: "edit"
-                    val path = obj["path"]?.jsonPrimitive?.content ?: ""
-                    content.append("\n`[$cmd $path]` ")
-                } catch (_: Exception) {}
-            }
-            "cu_step" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    _cuStep.value = obj["step"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                    _cuStepTotal.value = obj["total"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                } catch (_: Exception) {}
-                _cuStatus.value = "running"
-            }
-            "cu_session" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val sessionId = obj["session_id"]?.jsonPrimitive?.content
-                    if (sessionId != null) _cuSessionId.value = sessionId
-                    val deviceId = obj["device_id"]?.jsonPrimitive?.content
-                    if (deviceId != null) _cuDeviceId.value = deviceId
-                } catch (_: Exception) {}
-            }
-            "cu_stopped", "cu_task_stopped" -> {
-                _cuStatus.value = "stopped"
-            }
-            // ── CU prompt queue — matches Portal chat-send.js ──
-            "cu_queued" -> {
-                // The box queued this prompt behind the running task; that task's
-                // stream carries the reply (cu_queue_next), so this turn ends empty
-                // and the finalize drops its placeholder instead of saving it.
-                turn.queued = true
-                val position = runCatching {
-                    json.parseToJsonElement(event.data).jsonObject["position"]?.jsonPrimitive?.content
-                }.getOrNull()
-                _cuActionLabel.value = if (position.isNullOrBlank()) "Prompt queued" else "Prompt queued (#$position)"
-            }
-            "cu_queue_next" -> {
-                // The running task picked up the next queued prompt: its reply
-                // streams into THIS bubble after a separator.
-                turn.queueAppend = true
-                val prompt = runCatching {
-                    json.parseToJsonElement(event.data).jsonObject["prompt"]?.jsonPrimitive?.content
-                }.getOrNull().orEmpty()
-                content.append(cuQueueSeparator(prompt))
-                _chatState.value = ChatState.STREAMING
-                _cuStatus.value = "running"
-            }
-
-            // ── Robotics ER events — matches Portal chat-send.js ──
-            "er_frame" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val image = obj["image"]?.jsonPrimitive?.content
-                    val camera = obj["camera"]?.jsonPrimitive?.content
-                    if (image != null) _erCameraFrame.value = image
-                    if (camera != null) _erCamera.value = camera
-                } catch (_: Exception) {}
-                _erStatus.value = "connected"
-                Log.d(TAG, "ER camera frame received")
-            }
-            "er_reasoning" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val text = obj["text"]?.jsonPrimitive?.content ?: ""
-                    _erReasoning.value = text
-                    Log.d(TAG, "ER reasoning: ${text.take(80)}...")
-                } catch (_: Exception) {}
-                _erStatus.value = "connected"
-            }
-            "er_action" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val tool = obj["tool"]?.jsonPrimitive?.content ?: ""
-                    val args = obj["args"]?.toString() ?: ""
-                    val status = obj["status"]?.jsonPrimitive?.content ?: "executing"
-                    content.append("\n`[$tool]` $args → $status ")
-                } catch (_: Exception) {}
-                _erStatus.value = "connected"
-            }
-            "er_status" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val state = obj["state"]?.jsonPrimitive?.content ?: "idle"
-                    _erStatus.value = state
-                } catch (_: Exception) {}
-            }
-            "er_error" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val error = obj["error"]?.jsonPrimitive?.content ?: "Unknown robot error"
-                    content.append("\n\n**Robot Error:** $error")
-                    _erStatus.value = "offline"
-                } catch (_: Exception) {}
-            }
-            "er_mission_start" -> {
-                _erMissionActive.value = true
-                _erStatus.value = "mission_active"
-                Log.d(TAG, "ER mission started")
-            }
-            "er_stopped" -> {
-                _erMissionActive.value = false
-                _erStatus.value = "stopped"
-                Log.d(TAG, "ER mission stopped")
-            }
-            "er_timeout" -> {
-                _erMissionActive.value = false
-                _erStatus.value = "timeout"
-                Log.d(TAG, "ER mission timed out")
-            }
-            "er_queued" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val pos = obj["position"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1
-                    Log.d(TAG, "ER prompt queued at position $pos")
-                } catch (_: Exception) {}
-            }
-            "er_prompt_injected" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val injText = obj["text"]?.jsonPrimitive?.content ?: ""
-                    Log.d(TAG, "ER prompt injected: ${injText.take(80)}")
-                } catch (_: Exception) {}
-            }
-            "er_nav_status" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val goalStatus = obj["goal_status"]?.jsonPrimitive?.content ?: ""
-                    Log.d(TAG, "ER nav: $goalStatus")
-                    _erStatus.value = "navigating"
-                } catch (_: Exception) {}
-            }
-            "er_session" -> {
-                try {
-                    val obj = json.parseToJsonElement(event.data).jsonObject
-                    val sessionId = obj["session_id"]?.jsonPrimitive?.content
-                    Log.d(TAG, "ER session: $sessionId")
-                } catch (_: Exception) {}
-            }
-
-            // ── Keep-alive ──
-            "heartbeat" -> {
-                // Ignore — just prevents connection timeout
-            }
-
-            // ── Error ──
-            "error" -> {
-                // Accumulated SEPARATELY from real content: the bubble still renders
-                // content+errors (combineContentAndErrors), but an error-only stream
-                // must finalize as a FAILURE — never stomped to IDLE, never minted
-                // into the ledger via saveConversation, and it must not defeat the
-                // usableContentArrived check that drives the retry affordance.
-                if (errors.isNotEmpty()) errors.append("\n\n")
-                errors.append(event.data)
-                _chatState.value = ChatState.ERROR
-            }
-
-            // ── "The Signal" — presentation-only telemetry HUD (Phase 2) ──
-            // These three branches drive the morphing red line ONLY. HARD RULE:
-            // they must NEVER append to content/reasoning, feed the /chat/save
-            // payload, or reach the ledger — this telemetry is display-only and
-            // is held solely in the transient _signalLabel flow.
-            "system_activity" -> {
-                // data = { stage, label, detail, seq } (JSON OBJECT — see
-                // Orchestrator/telemetry_events.py). SSEClient.decodeJsonData returns
-                // objects verbatim; we parse and render ONLY the label. pushSignal
-                // no-ops on computer-use turns (kept dark, matching web).
-                parseSignalLabel(event.data)?.let { pushSignal(it) }
-            }
-            "tool_start" -> {
-                // data = the tool name (a JSON-encoded string → decodeJsonData already
-                // stripped the outer quotes). Remember it for the "· ok" echo.
-                // Web-parity tolerance: if the payload ever becomes an OBJECT
-                // ({name}/{tool} — the planned structured tool events), read the
-                // name field instead of splashing raw JSON onto the HUD.
-                val raw = event.data.trim()
-                val toolName = if (raw.startsWith("{")) {
-                    try {
-                        val obj = org.json.JSONObject(raw)
-                        obj.optString("name").ifBlank { obj.optString("tool") }
-                    } catch (_: Exception) { "" }
-                } else raw
-                if (toolName.isNotBlank()) {
-                    signalLastTool = toolName
-                    pushSignal("tool · $toolName")
-                }
-            }
-            "tool_result" -> {
-                // Echo the last tool name as done; else fall back to a trimmed blurb.
-                if (signalLastTool.isNotBlank()) {
-                    pushSignal("tool · $signalLastTool · ok")
-                } else {
-                    val d = event.data.trim()
-                    if (d.isNotBlank()) {
-                        pushSignal("tool · " + (if (d.length > 40) d.substring(0, 40) else d))
-                    }
-                }
-            }
-
-            // ── Unknown events — log but don't crash ──
-            else -> {
-                Log.d(TAG, "Unhandled SSE event: ${event.event}")
-            }
-        }
-    }
-
     /**
-     * Push the "generating · <model>" line onto The Signal exactly once per turn
-     * (on content_start or the first content byte). Presentation-only: the model
-     * label is the real id captured from stream_start; this never touches content,
-     * reasoning, or any persisted/saved payload.
+     * Fold [event] into [turnState] through [SseTurnReducer] (the Portal-aligned handler
+     * for the 30+ event types, pure since rank 76) and write the UI state it returns.
      */
-    private fun signalOnGenerating() {
-        if (!signalGenerating) {
-            signalGenerating = true
-            pushSignal("generating · $signalModelLabel")
+    private fun applySseEvent(turnState: SseTurnState, event: SSEEvent, provider: String): SseTurnState {
+        val step = SseTurnReducer.reduce(
+            turnState, event, _chatState.value, provider, api?.getBaseUrl() ?: "", System.currentTimeMillis(),
+        )
+        step.chatState?.let { _chatState.value = it }
+        when (val s = step.signal) {
+            SignalUpdate.Unchanged -> Unit
+            is SignalUpdate.Show -> _signalLabel.value = s.label
+            SignalUpdate.Clear -> _signalLabel.value = null
         }
+        step.cu.let { cu ->
+            cu.screenshotUrl?.let { _cuScreenshotUrl.value = it }
+            cu.step?.let { _cuStep.value = it }
+            cu.stepTotal?.let { _cuStepTotal.value = it }
+            cu.status?.let { _cuStatus.value = it }
+            cu.actionLabel?.let { _cuActionLabel.value = it }
+            cu.sessionId?.let { _cuSessionId.value = it }
+            cu.deviceId?.let { _cuDeviceId.value = it }
+        }
+        step.er.let { er ->
+            er.cameraFrame?.let { _erCameraFrame.value = it }
+            er.camera?.let { _erCamera.value = it }
+            er.reasoning?.let { _erReasoning.value = it }
+            er.status?.let { _erStatus.value = it }
+            er.missionActive?.let { _erMissionActive.value = it }
+        }
+        return step.turn
     }
 
     /**
@@ -3410,7 +3022,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * ViewModel and without org.json (which is unmocked in local JVM tests).
          * Returns null on a blank/missing label or unparseable data.
          */
-        @VisibleForTesting
         internal fun parseSignalLabel(data: String): String? = try {
             signalJson.parseToJsonElement(data).jsonObject["label"]
                 ?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
@@ -3435,7 +3046,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * indicator / todo panel / Live View) — mirroring web, which destroys the
          * Signal line for provider === 'computer-use'. Pure for unit tests.
          */
-        @VisibleForTesting
         internal fun signalSuppressedForProvider(provider: String): Boolean =
             provider == "computer-use"
 

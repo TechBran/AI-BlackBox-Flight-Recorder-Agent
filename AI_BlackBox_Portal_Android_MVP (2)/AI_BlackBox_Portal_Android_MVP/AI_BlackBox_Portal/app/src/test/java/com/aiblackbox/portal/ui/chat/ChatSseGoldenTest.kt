@@ -152,7 +152,8 @@ class ChatSseGoldenTest {
             put("provenance", JsonNull)
         }
         put("mediaTasks", buildJsonArray { m.mediaTasks.forEach { add(JsonPrimitive(it)) } })
-        put("images", buildJsonArray { m.images.forEach { add(JsonPrimitive(it.replace(base, "{BOX}"))) } })
+        // Sorted: two media tasks resolve in parallel, in whichever order the box answers.
+        put("images", buildJsonArray { m.images.map { it.replace(base, "{BOX}") }.sorted().forEach { add(JsonPrimitive(it)) } })
     }
 
     /** The JSON body, or the raw text, with the box's address made stable. */
@@ -207,9 +208,10 @@ class ChatSseGoldenTest {
                 s != ChatState.STREAMING && s != ChatState.THINKING &&
                     vm.messages.value.drop(before).none { it.isStreaming }
             }
-            settle()
+            val goldenText = javaClass.classLoader!!.getResource("sse/$name.golden.json")?.readText()
+            val golden = goldenText?.let { Json.parseToJsonElement(it) }
 
-            val observed = buildJsonObject {
+            fun observe(): JsonObject = buildJsonObject {
                 put("fixture", name)
                 put("provider", provider)
                 put("messages", buildJsonArray { vm.messages.value.drop(before).forEach { add(msgJson(it, base)) } })
@@ -241,14 +243,26 @@ class ChatSseGoldenTest {
                 })
             }
 
-            val goldenText = javaClass.classLoader!!.getResource("sse/$name.golden.json")?.readText()
-            if (goldenText == null) {
+            // What follows a turn (the /chat/save, a media resolve) lands a few ms later:
+            // give it up to 5 s to match the golden, or 600 ms to record one.
+            var observed = observe()
+            if (golden != null) {
+                val deadline = System.currentTimeMillis() + 5_000
+                while (observed != golden && System.currentTimeMillis() < deadline) {
+                    settle(50)
+                    observed = observe()
+                }
+            } else {
+                settle(600)
+                observed = observe()
+            }
+
+            if (golden == null) {
                 val out = File("build/sse-golden").apply { mkdirs() }
                 File(out, "$name.golden.json").writeText(json.encodeToString(JsonElement.serializer(), observed) + "\n")
                 mismatches += "$name: no golden yet (written to ${File(out, "$name.golden.json").absolutePath})"
                 continue
             }
-            val golden = Json.parseToJsonElement(goldenText)
             if (golden != observed) {
                 val out = File("build/sse-golden").apply { mkdirs() }
                 File(out, "$name.observed.json").writeText(json.encodeToString(JsonElement.serializer(), observed) + "\n")
