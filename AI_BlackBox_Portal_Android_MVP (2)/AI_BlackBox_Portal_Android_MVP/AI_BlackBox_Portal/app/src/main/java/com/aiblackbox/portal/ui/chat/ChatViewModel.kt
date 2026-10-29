@@ -51,6 +51,7 @@ import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.ToolSchema
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.repository.ChatRepository
+import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.ChatHistoryStore
@@ -242,6 +243,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var api: BlackBoxApi? = null
     private var repository: ChatRepository? = null
     private var taskRepository: TaskRepository? = null
+    private var taskPoller: TaskPoller? = null
     private var historyLoaded = false
 
     // ── On-device (local) provider gating (Task 1.6) ──
@@ -411,9 +413,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _operatorNotice = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val operatorNotice: SharedFlow<String> = _operatorNotice.asSharedFlow()
 
+    // The box tasks: the TaskPanel's discovery, the pill polls and the media-placeholder
+    // resolver, all through the one TaskPoller (rank 76). Finished media lands in the
+    // messages through resolveMediaTaskInMessage / removeMediaTaskFromMessage.
+    private val tasks = TaskDiscovery(
+        scope = viewModelScope,
+        listTasks = { taskRepository?.listTasks() },
+        poller = { taskPoller },
+        onMediaResolved = { id, type, url -> resolveMediaTaskInMessage(id, type, url) },
+        onMediaDropped = { id -> removeMediaTaskFromMessage(id) },
+    )
+
     // Media task IDs for polling (image/video/music generation)
-    private val _pendingMediaTasks = MutableStateFlow<List<String>>(emptyList())
-    val pendingMediaTasks: StateFlow<List<String>> = _pendingMediaTasks.asStateFlow()
+    val pendingMediaTasks: StateFlow<List<String>> = tasks.pendingMediaTasks
 
     // Auto-TTS: emits text to speak when response completes and auto-TTS is on
     private val _autoTtsEvent = MutableSharedFlow<String>(extraBufferCapacity = 1)
@@ -421,12 +433,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     var autoTtsEnabled: Boolean = false
 
     // Active tasks being polled (for TaskPanel display)
-    private val _activeTasks = MutableStateFlow<List<TaskStatus>>(emptyList())
-    val activeTasks: StateFlow<List<TaskStatus>> = _activeTasks.asStateFlow()
+    val activeTasks: StateFlow<List<TaskStatus>> = tasks.activeTasks
 
     // Task completion events (for notifications)
-    private val _taskCompletedEvent = MutableSharedFlow<TaskStatus>(extraBufferCapacity = 5)
-    val taskCompletedEvent: SharedFlow<TaskStatus> = _taskCompletedEvent.asSharedFlow()
+    val taskCompletedEvent: SharedFlow<TaskStatus> = tasks.taskCompletedEvent
 
     // ── Agent prompt forwarding ──
     // When provider is an agent type, prompts are forwarded here instead of SSE
@@ -640,98 +650,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Track which tasks are being actively polled by the resolver (prevent duplicates) */
-    private val _resolverPolling = mutableSetOf<String>()
-
     /**
-     * Scan all messages for unresolved mediaTasks and resolve them.
-     * Handles both prior session placeholders and current session tasks.
-     *
-     * For completed tasks: resolves immediately (replaces placeholder with media).
-     * For pending tasks: starts its OWN polling loop (3s interval, self-contained).
-     * For failed/missing tasks: removes the stale placeholder.
-     *
-     * This is the single source of truth for media task resolution — it does NOT
-     * delegate to startTaskPolling() which has a separate, unreliable code path.
+     * Resolve the media placeholders on screen (prior sessions' and this turn's): the
+     * single source of truth for media task resolution, in [TaskDiscovery].
      */
-    private fun resolveUnresolvedMediaTasks() {
-        val repo = taskRepository ?: return
-        val messages = _messages.value
-        val unresolvedTasks = mutableListOf<Pair<String, String?>>() // (rawId, taskType)
-
-        for (msg in messages) {
-            for (entry in msg.mediaTasks) {
-                val colonIdx = entry.indexOf(':')
-                val taskType = if (colonIdx > 0) entry.substring(0, colonIdx) else null
-                val rawId = if (colonIdx > 0) entry.substring(colonIdx + 1) else entry
-                // Skip if already being polled by this resolver
-                if (rawId !in _resolverPolling) {
-                    unresolvedTasks.add(rawId to taskType)
-                }
-            }
-        }
-
-        if (unresolvedTasks.isEmpty()) return
-        Log.d(TAG, "Found ${unresolvedTasks.size} unresolved media tasks — resolving")
-
-        for ((taskId, taskType) in unresolvedTasks) {
-            _resolverPolling.add(taskId)
-
-            viewModelScope.launch {
-                try {
-                    // Poll until completed, failed, or not found (max ~25 min for videos)
-                    var attempts = 0
-                    val maxAttempts = 500  // 500 * 3s = 25 minutes max
-                    while (attempts < maxAttempts) {
-                        try {
-                            val status = repo.getTaskStatus(taskId)
-
-                            when {
-                                status.status.equals("completed", true) && status.resultUrl != null -> {
-                                    resolveMediaTaskInMessage(taskId, taskType, status.resultUrl!!)
-                                    Log.d(TAG, "Resolved media task $taskId → ${status.resultUrl}")
-                                    _resolverPolling.remove(taskId)
-                                    return@launch
-                                }
-                                status.status.equals("failed", true)
-                                    || status.status.equals("cancelled", true) -> {
-                                    // 'cancelled' is terminal like failed (G2-T8):
-                                    // stop polling and drop the placeholder, or a
-                                    // cancelled media task polls for the full 25 min.
-                                    removeMediaTaskFromMessage(taskId)
-                                    Log.w(TAG, "Media task $taskId ${status.status} — removed placeholder")
-                                    _resolverPolling.remove(taskId)
-                                    return@launch
-                                }
-                                else -> {
-                                    // Still pending/processing — wait and retry
-                                    if (attempts % 10 == 0) {
-                                        Log.d(TAG, "Media task $taskId: ${status.status} (attempt $attempts)")
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            // Task not found on server — remove stale placeholder
-                            removeMediaTaskFromMessage(taskId)
-                            Log.w(TAG, "Media task $taskId not found — removed: ${e.message}")
-                            _resolverPolling.remove(taskId)
-                            return@launch
-                        }
-
-                        attempts++
-                        delay(3000)  // Poll every 3 seconds
-                    }
-
-                    // Timed out after max attempts
-                    Log.w(TAG, "Media task $taskId timed out after $maxAttempts attempts")
-                    _resolverPolling.remove(taskId)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Resolver failed for $taskId: ${e.message}")
-                    _resolverPolling.remove(taskId)
-                }
-            }
-        }
-    }
+    private fun resolveUnresolvedMediaTasks() = tasks.resolveUnresolvedMediaTasks(_messages.value)
 
     /**
      * Save the conversation on screen under [operator]. Both are read NOW, not when the
@@ -782,6 +705,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             api = BlackBoxApi(origin)
             repository = ChatRepository(api!!)
             taskRepository = TaskRepository(api!!)
+            taskPoller = TaskPoller(api!!)
             Log.d(TAG, "Initialized for $origin")
             startHealthLoop()
             startTaskDiscoveryLoop()
@@ -865,87 +789,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Poll /tasks/list every 2s to discover and update tasks — matches Portal TaskManager. */
-    private fun startTaskDiscoveryLoop() {
-        viewModelScope.launch {
-            while (true) {
-                try {
-                    val response = api?.get("/tasks/list") ?: run { delay(2_000); continue }
-                    val obj = json.parseToJsonElement(response).jsonObject
-                    val tasksArr = obj["tasks"]?.jsonArray ?: run { delay(2_000); continue }
-                    val serverTasks = tasksArr.mapNotNull { el ->
-                        try {
-                            val t = el.jsonObject
-                            val status = t["status"]?.jsonPrimitive?.content ?: ""
-                            TaskStatus(
-                                taskId = t["task_id"]?.jsonPrimitive?.content ?: return@mapNotNull null,
-                                taskType = t["task_type"]?.jsonPrimitive?.content,
-                                status = status,
-                                progress = t["progress"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
-                                operator = t["operator"]?.jsonPrimitive?.content,
-                                resultUrl = t["result_url"]?.jsonPrimitive?.content,
-                                // G3-T13 (M3.3): this MANUAL /tasks/list builder is the SOLE
-                                // feed for panel tasks. startTaskPolling (called at :755) EARLY-
-                                // RETURNS for them — the task was just added to _activeTasks at
-                                // :754, so its guard is already true — so the /tasks/status
-                                // auto-parse poll never runs for a panel task and never sets
-                                // these fields. Thread them HERE or they never surface.
-                                // /tasks/list carries progress_text AND device_id top-level.
-                                progressText = t["progress_text"]?.jsonPrimitive?.contentOrNull,
-                                // CU reasoning narration (accumulating, multi-line). Same
-                                // rationale as progressText: /tasks/list is the SOLE panel
-                                // feed, so thread it HERE or the reasoning window stays empty.
-                                reasoningText = t["reasoning_text"]?.jsonPrimitive?.contentOrNull,
-                                deviceId = t["device_id"]?.jsonPrimitive?.contentOrNull,
-                                // M2 multi-desktop: the CU session this task drives — routes
-                                // the pill's Live button to the agent's OWN desktop. Same
-                                // sole-feed rationale as the fields above: thread it HERE.
-                                sessionId = t["session_id"]?.jsonPrimitive?.contentOrNull
-                            )
-                        } catch (_: Exception) { null }
-                    }
-
-                    val existingIds = _activeTasks.value.map { it.taskId }.toSet()
-
-                    // Update progress on existing active tasks
-                    val activeServerTasks = serverTasks.filter { it.status in listOf("pending", "processing") }
-                    if (_activeTasks.value.isNotEmpty()) {
-                        _activeTasks.value = _activeTasks.value.map { existing ->
-                            activeServerTasks.find { it.taskId == existing.taskId } ?: existing
-                        }
-                    }
-
-                    // Add newly discovered tasks
-                    val newTasks = activeServerTasks.filter { it.taskId !in existingIds }
-                    if (newTasks.isNotEmpty()) {
-                        _activeTasks.value = _activeTasks.value + newTasks
-                        // startTaskPolling early-returns here BY DESIGN — the task was just
-                        // added to _activeTasks on the line above, so its guard
-                        // (`if (_activeTasks.value.any { it.taskId == taskId }) return`) is
-                        // already true; the /tasks/status poll never runs and this discovery
-                        // loop is the SOLE panel feed. Do NOT reorder this after the add, or
-                        // drop that guard, without accepting a per-2s label flicker
-                        // (e.g. "CLI Agent" <-> "Claude Code") from the poll object then ALSO
-                        // writing _activeTasks with a differently-resolved TaskStatus. (G3-T13)
-                        newTasks.forEach { startTaskPolling(it.taskId, it.taskType) }
-                        Log.d(TAG, "Discovered ${newTasks.size} new active tasks")
-                    }
-
-                    // Remove completed/failed tasks that server no longer reports as active
-                    val serverActiveIds = activeServerTasks.map { it.taskId }.toSet()
-                    _activeTasks.value = _activeTasks.value.filter { task ->
-                        task.taskId in serverActiveIds ||
-                        task.status.equals("completed", true) ||
-                        task.status.equals("failed", true) ||
-                        task.status.equals("cancelled", true)   // terminal — show briefly (G2-T8)
-                    }
-                } catch (_: Exception) {
-                    // Silent — task discovery is best-effort
-                }
-                delay(2_000)
-            }
-        }
-    }
+    /** The 2 s /tasks/list discovery that feeds the TaskPanel ([TaskDiscovery]). */
+    private fun startTaskDiscoveryLoop() = tasks.startDiscoveryLoop()
 
     fun onInputChange(value: TextFieldValue) {
         _inputText.value = value
@@ -3023,10 +2868,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Remove a completed media task from pending list */
-    fun completeMediaTask(taskId: String) {
-        _pendingMediaTasks.value = _pendingMediaTasks.value - taskId
-        _activeTasks.value = _activeTasks.value.filter { it.taskId != taskId }
-    }
+    fun completeMediaTask(taskId: String) = tasks.completeMediaTask(taskId)
 
     /**
      * G3-T13 (M3.3): STOP a single active task from the TaskPanel. Fires the REAL
@@ -3047,133 +2889,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Replace a media task placeholder with actual media content in the message.
-     * Finds the message containing this taskId, adds the result URL to images/content,
-     * and removes the task from mediaTasks so the placeholder disappears.
+     * Replace a media task placeholder with its media at [url] (absolute: the poller
+     * resolves it against the box) — [TaskDiscovery.resolveMediaEntry] — and save.
      */
-    private fun resolveMediaTaskInMessage(taskId: String, taskType: String?, resultUrl: String) {
-        val current = _messages.value.toMutableList()
-        // The task entry in mediaTasks is prefixed with type: "image:taskId"
-        val prefixedEntries = listOf("image:$taskId", "video:$taskId", "music:$taskId", taskId)
-
-        for (i in current.indices) {
-            val msg = current[i]
-            val matchingEntry = msg.mediaTasks.firstOrNull { entry ->
-                prefixedEntries.any { prefix -> entry == prefix || entry.endsWith(taskId) }
-            }
-            if (matchingEntry != null) {
-                // Determine media type from the prefix or taskType
-                val isImage = matchingEntry.startsWith("image:") ||
-                    taskType?.contains("image", true) == true ||
-                    resultUrl.matches(Regex(".*\\.(png|jpg|jpeg|webp|gif)$", RegexOption.IGNORE_CASE))
-                val isAudio = matchingEntry.startsWith("music:") ||
-                    taskType?.contains("music", true) == true ||
-                    resultUrl.matches(Regex(".*\\.(wav|mp3|m4a|ogg|flac)$", RegexOption.IGNORE_CASE))
-
-                // Build full URL if relative
-                val fullUrl = if (resultUrl.startsWith("http")) resultUrl
-                    else "${api?.getBaseUrl() ?: ""}$resultUrl"
-
-                val updatedMsg = if (isImage) {
-                    // Add to images list — ChatBubble renders these with AsyncImage
-                    msg.copy(
-                        images = msg.images + fullUrl,
-                        mediaTasks = msg.mediaTasks.filter { it != matchingEntry }
-                    )
-                } else {
-                    // Video/audio — append URL to content so inline media extractor renders it
-                    val urlLine = "\n$fullUrl\n"
-                    msg.copy(
-                        content = msg.content + urlLine,
-                        mediaTasks = msg.mediaTasks.filter { it != matchingEntry }
-                    )
-                }
-                current[i] = updatedMsg
-                _messages.value = current
-                persistHistory()
-                Log.d(TAG, "Resolved media task $taskId → $fullUrl (${if (isImage) "image" else "media"})")
-                return
-            }
+    private fun resolveMediaTaskInMessage(taskId: String, taskType: String?, url: String) {
+        val updated = TaskDiscovery.resolveMediaEntry(_messages.value, taskId, taskType, url)
+        if (updated == null) {
+            Log.w(TAG, "No message found for task $taskId — result URL: $url")
+            return
         }
-        Log.w(TAG, "No message found for task $taskId — result URL: $resultUrl")
+        _messages.value = updated
+        persistHistory()
+        Log.d(TAG, "Resolved media task $taskId → $url")
     }
 
     /** Remove a failed task's placeholder from the message. */
     private fun removeMediaTaskFromMessage(taskId: String) {
-        val current = _messages.value.toMutableList()
-        for (i in current.indices) {
-            val msg = current[i]
-            val matchingEntry = msg.mediaTasks.firstOrNull { it.endsWith(taskId) || it == taskId }
-            if (matchingEntry != null) {
-                current[i] = msg.copy(
-                    mediaTasks = msg.mediaTasks.filter { it != matchingEntry }
-                )
-                _messages.value = current
-                return
-            }
-        }
+        TaskDiscovery.dropMediaEntry(_messages.value, taskId)?.let { _messages.value = it }
     }
 
     /**
      * Start polling a task. Called when media tasks arrive from SSE or generation screens.
      * Matches Portal's TaskManager 3-second polling loop.
      */
-    fun startTaskPolling(taskId: String, taskType: String? = null) {
-        val repo = taskRepository ?: return
-        // Skip if already tracking this task
-        if (_activeTasks.value.any { it.taskId == taskId }) return
-        // Add to pending
-        if (taskId !in _pendingMediaTasks.value) {
-            _pendingMediaTasks.value = _pendingMediaTasks.value + taskId
-        }
-        // Add initial status to active tasks
-        val initial = TaskStatus(
-            taskId = taskId,
-            taskType = taskType,
-            status = "pending"
-        )
-        _activeTasks.value = _activeTasks.value + initial
-
-        // Start polling flow
-        viewModelScope.launch {
-            try {
-                repo.pollTask(taskId, intervalMs = 1500).collect { status ->
-                    // Update active tasks list
-                    _activeTasks.value = _activeTasks.value.map {
-                        if (it.taskId == taskId) status else it
-                    }
-
-                    val isDone = status.status.equals("completed", true)
-                    val isFailed = status.status.equals("failed", true)
-                    // 'cancelled' is terminal (G2-T8): must end the poll and clean
-                    // up the placeholder, or the flow collects forever.
-                    val isCancelled = status.status.equals("cancelled", true)
-                    if (isDone || isFailed || isCancelled) {
-                        // Emit completion event for notifications — but NOT for a
-                        // cancel: it is operator-initiated, so a push notification
-                        // about the thing they just stopped is noise (and the
-                        // consumer would render any non-completed status as
-                        // "Failed"). Matches the backend suppress. G2-T8.
-                        if (!isCancelled) _taskCompletedEvent.tryEmit(status)
-
-                        // Replace placeholder with actual media in the message
-                        if (isDone && status.resultUrl != null) {
-                            resolveMediaTaskInMessage(taskId, taskType, status.resultUrl!!)
-                        } else {
-                            // Failed or cancelled — just remove the placeholder
-                            removeMediaTaskFromMessage(taskId)
-                        }
-
-                        delay(2000)
-                        completeMediaTask(taskId)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Task polling failed for $taskId: ${e.message}")
-                completeMediaTask(taskId)
-            }
-        }
-    }
+    fun startTaskPolling(taskId: String, taskType: String? = null) = tasks.startTaskPolling(taskId, taskType)
 
     /** Set the TTS audio URL on a specific message by ID, triggering the inline player */
     fun setMessageTtsAudioUrl(messageId: String, audioUrl: String) {

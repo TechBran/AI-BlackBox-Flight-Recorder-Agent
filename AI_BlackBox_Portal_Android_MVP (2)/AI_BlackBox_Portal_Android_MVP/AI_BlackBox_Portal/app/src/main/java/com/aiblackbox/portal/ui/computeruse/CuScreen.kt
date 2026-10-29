@@ -121,7 +121,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.aiblackbox.portal.data.model.Device
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -150,7 +153,46 @@ data class CuDevice(
     val name: String,
     val protocol: String,
     val status: String,
-)
+) {
+    companion object {
+        private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+        /** The box itself, always offered: the local desktop every CU backend can drive. */
+        val BLACKBOX = CuDevice("blackbox", "BlackBox (Local)", "local", "online")
+
+        /**
+         * The device picker's rows from a GET /devices/ body, each row decoded as the
+         * typed [Device] the Device Manager uses (this screen hand-parsed the same
+         * payload); a row that does not decode is skipped, not the list. Anthropic and
+         * OpenAI drive LOCAL and VNC devices only; Gemini drives every one (ADB included).
+         * The box is always offered, first unless the box lists itself; a body that is not
+         * a device list leaves only the box.
+         */
+        internal fun fromDevicesJson(raw: String, providerIsGemini: Boolean): List<CuDevice> {
+            val rows = try {
+                (json.parseToJsonElement(raw) as? JsonObject)?.get("devices") as? JsonArray
+            } catch (_: Exception) {
+                null
+            } ?: return listOf(BLACKBOX)
+            val devices = rows.mapNotNull { row ->
+                try {
+                    json.decodeFromJsonElement(Device.serializer(), row)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            val list = devices.mapNotNull { d ->
+                if (d.id.isBlank()) return@mapNotNull null
+                val protocol = d.protocol.ifBlank { "local" }
+                // Anthropic: LOCAL + VNC only (openai deliberately takes
+                // the same anthropic path). Gemini: ALL (including ADB)
+                if (!providerIsGemini && protocol != "local" && protocol != "vnc") return@mapNotNull null
+                CuDevice(d.id, d.name.ifBlank { d.id }, protocol, d.status.ifBlank { "unknown" })
+            }
+            return if (list.any { it.id == BLACKBOX.id }) list else listOf(BLACKBOX) + list
+        }
+    }
+}
 
 // =============================================================================
 // Preflight data model — GET /cu/preflight (mirrors Portal cu-drawer.js)
@@ -333,29 +375,12 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
         val api = api ?: return
         val providerIsGemini = _selectedProvider.value == "google"
         viewModelScope.launch {
-            try {
-                val raw = api.get("/devices/")
-                val json = Json { ignoreUnknownKeys = true }
-                val root = json.parseToJsonElement(raw).jsonObject
-                val arr = root["devices"]?.jsonArray ?: return@launch
-                val list = arr.mapNotNull { el ->
-                    val obj = el.jsonObject
-                    val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                    val name = obj["name"]?.jsonPrimitive?.content ?: id
-                    val protocol = obj["protocol"]?.jsonPrimitive?.content ?: "local"
-                    val status = obj["status"]?.jsonPrimitive?.content ?: "unknown"
-                    // Anthropic: LOCAL + VNC only (openai deliberately takes
-                    // the same anthropic path). Gemini: ALL (including ADB)
-                    if (!providerIsGemini && protocol != "local" && protocol != "vnc") return@mapNotNull null
-                    CuDevice(id, name, protocol, status)
-                }
-                val hasBlackbox = list.any { it.id == "blackbox" }
-                _devices.value = if (hasBlackbox) list
-                else listOf(CuDevice("blackbox", "BlackBox (Local)", "local", "online")) + list
+            _devices.value = try {
+                CuDevice.fromDevicesJson(api.get("/devices/"), providerIsGemini)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (_: Exception) {
-                _devices.value = listOf(
-                    CuDevice("blackbox", "BlackBox (Local)", "local", "online")
-                )
+                listOf(CuDevice.BLACKBOX)
             }
         }
     }

@@ -4,6 +4,7 @@ import android.util.Log
 import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -259,29 +260,20 @@ class TtsRepository(private val api: BlackBoxApi) {
     }
 
     // =========================================================================
-    // Gemini task poll — wait for a completed task's audio url.
-    // Parsing is based on GeminiProTtsScreen's task-status handling
-    // (status / result_url / error_message); bounded with a timeout.
+    // Gemini task poll — wait for a completed task's audio url through the shared
+    // TaskPoller: a network blip is retried, 'cancelled' ends the wait (this loop
+    // used to poll a cancelled task to its ceiling), and the url comes back absolute.
     // ~90s ceiling: Gemini Pro TTS can exceed 60s under load.
     // =========================================================================
-    suspend fun pollGeminiTaskForUrl(taskId: String, attempts: Int = 90, intervalMs: Long = 1000): String {
-        repeat(attempts) {
-            val raw = api.get("/tasks/status/$taskId")
-            val o = json.parseToJsonElement(raw).jsonObject
-            val status = o["status"]?.jsonPrimitive?.content ?: "pending"
-            when {
-                status.equals("completed", ignoreCase = true) -> {
-                    val url = o["result_url"]?.jsonPrimitive?.content
-                    if (!url.isNullOrBlank()) return url
-                }
-                status.equals("failed", ignoreCase = true) -> {
-                    val err = o["error_message"]?.jsonPrimitive?.content ?: "Generation failed"
-                    throw Exception(err)
-                }
-            }
-            kotlinx.coroutines.delay(intervalMs)
+    suspend fun pollGeminiTaskForUrl(taskId: String, timeoutMs: Long = 90_000, intervalMs: Long = 1000): String {
+        val outcome = withTimeoutOrNull(timeoutMs) { TaskPoller(api).await(taskId, intervalMs) }
+            ?: throw Exception("Gemini TTS preview timed out")
+        return when (outcome) {
+            is TaskPollOutcome.Completed -> outcome.resultUrl ?: throw Exception("No audio url returned")
+            is TaskPollOutcome.Failed -> throw Exception(outcome.message)
+            TaskPollOutcome.Cancelled -> throw Exception("Cancelled")
+            TaskPollOutcome.LostConnection -> throw Exception(LOST_CONNECTION_MESSAGE)
         }
-        throw Exception("Gemini TTS preview timed out")
     }
 
     // =========================================================================

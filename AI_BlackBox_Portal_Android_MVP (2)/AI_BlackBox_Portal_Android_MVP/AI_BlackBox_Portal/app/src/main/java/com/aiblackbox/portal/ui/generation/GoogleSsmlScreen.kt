@@ -56,7 +56,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.repository.LOST_CONNECTION_MESSAGE
 import com.aiblackbox.portal.data.repository.TaskPollOutcome
-import com.aiblackbox.portal.data.repository.TaskRepository
+import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.repository.isTerminalTaskStatus
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.OperatorUnresolvedException
@@ -243,16 +243,17 @@ class GoogleSsmlViewModel(application: Application) : AndroidViewModel(applicati
     /**
      * Poll through the shared poller (A11-settings-generation-01/-02): a network blip
      * is retried instead of ending the wait, and 'cancelled' is terminal — before, it
-     * fell into the else branch and polled every second forever.
+     * fell into the else branch and polled every second forever. The audio URL comes
+     * back absolute: the box stores `/ui/uploads/...`, which the player cannot open alone.
      */
     private suspend fun pollTask(taskId: String) {
         val api = api ?: return
-        val outcome = TaskRepository(api).awaitTask(taskId, intervalMs = 1000) { s ->
+        val outcome = TaskPoller(api).await(taskId, intervalMs = 1000) { s ->
             if (!isTerminalTaskStatus(s.status)) _status.value = "Generating... (${s.status})"
         }
         _status.value = when (outcome) {
             is TaskPollOutcome.Completed -> {
-                _audioUrl.value = outcome.status.resultUrl
+                _audioUrl.value = outcome.resultUrl
                 "Audio ready"
             }
             is TaskPollOutcome.Failed -> "Error: ${outcome.message}"

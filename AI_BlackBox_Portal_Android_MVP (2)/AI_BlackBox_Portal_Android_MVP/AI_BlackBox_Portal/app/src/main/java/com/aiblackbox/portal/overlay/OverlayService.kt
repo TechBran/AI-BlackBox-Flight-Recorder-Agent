@@ -58,7 +58,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.PairingActivity
 import com.aiblackbox.portal.R
+import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.HttpClients
+import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.remote.RemoteSessionBus
 import com.aiblackbox.portal.data.store.OperatorPrompt
 import com.aiblackbox.portal.data.store.OperatorResolver
@@ -2858,64 +2860,24 @@ class OverlayService : Service() {
 
         Log.d(TAG, "Chat task created: $taskId")
 
-        // Step 2: Poll for task completion
+        // Step 2: Poll for task completion through the shared TaskPoller (rank 76): a
+        // blip is retried, 'cancelled' ends the wait, the box's error_message is shown.
         withContext(Dispatchers.Main) {
             updateStatus("Processing...")
         }
-
-        val maxPolls = 120  // 2 minutes max
-        val pollInterval = 1000L  // 1 second
-
-        for (i in 0 until maxPolls) {
-            delay(pollInterval)
-
-            val statusRequest = Request.Builder()
-                .url("$serverUrl/tasks/$taskId")
-                .get()
-                .build()
-
-            try {
-                val statusResponse = client.newCall(statusRequest).execute()
-                if (statusResponse.isSuccessful) {
-                    val statusBody = statusResponse.body?.string()
-                    val statusJson = JSONObject(statusBody ?: "{}")
-                    val status = statusJson.optString("status", "")
-
-                    Log.d(TAG, "Task $taskId status: $status")
-
-                    when (status) {
-                        "completed" -> {
-                            // Get response from result_data - try multiple field names
-                            val resultData = statusJson.optJSONObject("result_data")
-                            val response = resultData?.optString("ui_reply", null)
-                                ?: resultData?.optString("reply", null)
-                                ?: resultData?.optString("text", null)
-                                ?: resultData?.optString("response", null)
-                                ?: statusJson.optString("result_url", null)
-                            Log.d(TAG, "Task completed, response length: ${response?.length ?: 0}")
-                            return response ?: "Task completed but no response"
-                        }
-                        "error", "failed" -> {
-                            val error = statusJson.optString("error", "Unknown error")
-                            Log.e(TAG, "Task failed: $error")
-                            return "Error: $error"
-                        }
-                        "processing", "pending" -> {
-                            // Continue polling
-                            val progress = statusJson.optInt("progress", 0)
-                            withContext(Dispatchers.Main) {
-                                updateStatus("Processing... ${progress}%")
-                            }
-                        }
-                    }
+        val outcome = withTimeoutOrNull(OverlayChatReply.CEILING_MS) {
+            TaskPoller(BlackBoxApi(serverUrl)).await(taskId, intervalMs = 1000) { s ->
+                Log.d(TAG, "Task $taskId status: ${s.status}")
+                if (s.status == "processing" || s.status == "pending") {
+                    handler.post { updateStatus("Processing... ${s.progress}%") }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error polling task status", e)
             }
         }
-
-        Log.e(TAG, "Task polling timeout")
-        return "Request timed out"
+        if (outcome == null) {
+            Log.e(TAG, "Task polling timeout")
+            return "Request timed out"
+        }
+        return OverlayChatReply.textFor(outcome)
     }
 
     private fun encodeFileToBase64(file: File): String {
