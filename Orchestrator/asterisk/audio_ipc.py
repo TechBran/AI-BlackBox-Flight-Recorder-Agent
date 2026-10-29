@@ -204,7 +204,7 @@ class AudioIPCClient:
         """The child's command line. -I keeps this directory off its sys.path
         (and ignores PYTHON* variables), so no module here can shadow the
         stdlib for numpy and scipy; -u sends its log lines as they happen.
-        The script path stays in argv: the unit's ExecStartPre matches it."""
+        The script path stays in argv, so `pgrep -f audio_subprocess.py` finds it."""
         return [self._python(), "-I", "-u", SUBPROCESS_SCRIPT,
                 str(child_fd), self.host, str(self.port)]
 

@@ -76,6 +76,11 @@ MAX="$(pct MemoryMax)"
 grep -qx 'OOMPolicy=continue' "$UNIT" \
     || fail "OOMPolicy=continue missing: an OOM-killed CLI agent child would stop the whole orchestrator"
 grep -qx 'Restart=always' "$UNIT" || fail "Restart=always missing: an OOM kill of uvicorn would leave the service down"
+# That kill leaves the Asterisk audio child running (KillMode=process); it exits
+# by itself and frees its port (Orchestrator/asterisk/tests/test_audio_orphan.py),
+# so nothing pkills it before the restart any more.
+grep -qE '^ExecStartPre=.*pkill' "$UNIT" \
+    && fail "blackbox.service pkills before each start again; the audio child exits on its own: $(grep -E '^ExecStartPre=' "$UNIT")"
 
 # The override scaffold documents how to change the cap.
 grep -qx '# MemoryMax=[0-9]*%' "$OVERRIDE" || fail "the override drop-in does not show how to change MemoryMax"
