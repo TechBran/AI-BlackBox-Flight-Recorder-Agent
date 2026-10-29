@@ -6,11 +6,20 @@ Provides:
 1. HTTP methods for channel control (answer, hangup, originate, DTMF, playback)
 2. WebSocket connection for ARI events (StasisStart, DTMF, Hangup)
 
+Events are routed per call. The TG200 carries one call per GSM port, so two
+calls at once is the designed case: each call registers its DTMF handler and
+its hangup watch by channel id, and an outbound call waits for its answer by
+the uuid it put in appArgs. They used to swap shared callback slots and
+restore them in `finally`, which orphaned the second of two concurrent calls
+(audit O11-telephony-asterisk-cellular-04); hangup events reached a slot
+nothing set (-11).
+
 Uses aiohttp (already in venv) for both HTTP and WebSocket.
 Singleton pattern: get_ari_client() / init_ari_client().
 """
 
 import asyncio
+import collections
 import json
 import time
 import traceback
@@ -92,19 +101,79 @@ class AsteriskARIClient:
         self._running = False
         self._reconnect_delay = 1.0
 
-        # Event callbacks (set by asterisk_routes.py or startup.py)
+        # The default StasisStart handler: inbound calls (set by startup.py).
+        # Outbound answers never reach it (expect_outbound_answer).
         self.on_stasis_start: Optional[Callable[..., Awaitable[None]]] = None
-        self.on_stasis_end: Optional[Callable[..., Awaitable[None]]] = None
-        self.on_dtmf: Optional[Callable[[str, str], Awaitable[None]]] = None
-        self.on_hangup: Optional[Callable[[str], Awaitable[None]]] = None
-        self.on_playback_finished: Optional[Callable[[str], Awaitable[None]]] = None
+
+        # Per-call routing (see the module docstring)
+        self._dtmf_handlers: Dict[str, Callable[[str, str], Awaitable[None]]] = {}
+        self._outbound_waiters: Dict[str, asyncio.Future] = {}
+        self._hangup_watches: Dict[str, asyncio.Event] = {}
+        # Channels that hung up with nobody watching yet (bounded), so a watch
+        # started a moment late still sees it.
+        self._recently_gone: "collections.OrderedDict[str, None]" = collections.OrderedDict()
 
         # Playback completion tracking — maps playback_id to asyncio.Event
         self._playback_events: Dict[str, asyncio.Event] = {}
+        # Playbacks that finished before anyone waited for them (bounded)
+        self._recently_finished: "collections.OrderedDict[str, None]" = collections.OrderedDict()
 
     @property
     def is_connected(self) -> bool:
         return self._running and self._session is not None and not self._session.closed
+
+    # ------------------------------------------------------------------
+    # Per-call routing
+    # ------------------------------------------------------------------
+
+    _RECENT_MAX = 256
+
+    def register_dtmf_handler(self, channel_id: str,
+                              handler: Callable[[str, str], Awaitable[None]]) -> None:
+        """Deliver this channel's DTMF digits to ``handler(channel_id, digit)``."""
+        self._dtmf_handlers[channel_id] = handler
+
+    def unregister_dtmf_handler(self, channel_id: str) -> None:
+        self._dtmf_handlers.pop(channel_id, None)
+
+    def expect_outbound_answer(self, call_uuid: str) -> asyncio.Future:
+        """A future resolved with the channel id when the call originated with
+        appArgs "outbound,<call_uuid>" is answered (enters Stasis)."""
+        future = asyncio.get_running_loop().create_future()
+        self._outbound_waiters[call_uuid] = future
+        return future
+
+    def cancel_outbound_answer(self, call_uuid: str) -> None:
+        future = self._outbound_waiters.pop(call_uuid, None)
+        if future and not future.done():
+            future.cancel()
+
+    def watch_hangup(self, channel_id: str) -> asyncio.Event:
+        """An Event set once the channel hangs up (ChannelHangupRequest or
+        ChannelDestroyed); already set when it is gone."""
+        event = self._hangup_watches.get(channel_id)
+        if event is None:
+            event = asyncio.Event()
+            if channel_id in self._recently_gone:
+                event.set()
+            self._hangup_watches[channel_id] = event
+        return event
+
+    def unwatch_hangup(self, channel_id: str) -> None:
+        self._hangup_watches.pop(channel_id, None)
+
+    def _remember(self, recent: "collections.OrderedDict", key: str) -> None:
+        recent[key] = None
+        recent.move_to_end(key)
+        while len(recent) > self._RECENT_MAX:
+            recent.popitem(last=False)
+
+    def _channel_gone(self, channel_id: str) -> None:
+        event = self._hangup_watches.get(channel_id)
+        if event is not None:
+            event.set()
+        else:
+            self._remember(self._recently_gone, channel_id)
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -197,34 +266,40 @@ class AsteriskARIClient:
             callee = channel.get("dialplan", {}).get("exten", "unknown")
             args = event.get("args", [])
             print(f"[ARI] StasisStart: channel={channel_id} caller={caller} callee={callee} args={args}")
-            if self.on_stasis_start:
+            if args and args[0] == "outbound":
+                # An answered outbound call: hand it to the call that dialled it.
+                waiter = self._outbound_waiters.pop(args[1] if len(args) > 1 else "", None)
+                if waiter and not waiter.done():
+                    waiter.set_result(channel_id)
+                else:
+                    # Its call gave up (no-answer timeout). Never run the
+                    # inbound IVR on the person being called.
+                    print(f"[ARI] Outbound answer nobody is waiting for, hanging up: channel={channel_id}")
+                    self._spawn(self.hangup_channel(channel_id), "ari-stray-outbound")
+            elif self.on_stasis_start:
                 self._spawn(self.on_stasis_start(channel_id, caller, callee, args), "ari-stasis-start")
 
         elif event_type == "StasisEnd":
+            # Also sent when a channel is continued into the dialplan, so it
+            # is not a hangup.
             channel_id = event.get("channel", {}).get("id", "")
             print(f"[ARI] StasisEnd: channel={channel_id}")
-            if self.on_stasis_end:
-                self._spawn(self.on_stasis_end(channel_id), "ari-stasis-end")
 
         elif event_type == "ChannelDtmfReceived":
             channel_id = event.get("channel", {}).get("id", "")
             digit = event.get("digit", "")
             # Never log the digit: IVR PIN entry arrives through here.
             print(f"[ARI] DTMF received: channel={channel_id}")
-            if self.on_dtmf:
-                self._spawn(self.on_dtmf(channel_id, digit), "ari-dtmf")
+            handler = self._dtmf_handlers.get(channel_id)
+            if handler:
+                self._spawn(handler(channel_id, digit), "ari-dtmf")
 
-        elif event_type == "ChannelHangupRequest":
+        elif event_type in ("ChannelHangupRequest", "ChannelDestroyed"):
             channel_id = event.get("channel", {}).get("id", "")
-            print(f"[ARI] HangupRequest: channel={channel_id}")
-            if self.on_hangup:
-                self._spawn(self.on_hangup(channel_id), "ari-hangup")
-
-        elif event_type == "ChannelDestroyed":
-            channel_id = event.get("channel", {}).get("id", "")
-            print(f"[ARI] ChannelDestroyed: channel={channel_id}")
-            if self.on_hangup:
-                self._spawn(self.on_hangup(channel_id), "ari-hangup")
+            label = "HangupRequest" if event_type == "ChannelHangupRequest" else "ChannelDestroyed"
+            print(f"[ARI] {label}: channel={channel_id}")
+            if channel_id:
+                self._channel_gone(channel_id)
 
         elif event_type == "PlaybackFinished":
             playback_id = event.get("playback", {}).get("id", "")
@@ -233,8 +308,8 @@ class AsteriskARIClient:
                 evt = self._playback_events.pop(playback_id, None)
                 if evt:
                     evt.set()
-                if self.on_playback_finished:
-                    self._spawn(self.on_playback_finished(playback_id), "ari-playback-finished")
+                else:
+                    self._remember(self._recently_finished, playback_id)
 
     @staticmethod
     def _spawn(coro, name: str) -> None:
@@ -415,6 +490,9 @@ class AsteriskARIClient:
 
         Returns True if playback finished, False on timeout.
         """
+        if playback_id in self._recently_finished:
+            del self._recently_finished[playback_id]
+            return True  # it finished before this wait began
         evt = asyncio.Event()
         self._playback_events[playback_id] = evt
         try:

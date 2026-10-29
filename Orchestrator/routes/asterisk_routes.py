@@ -26,7 +26,7 @@ Gateway Management:
 
 import asyncio
 import uuid
-from typing import Optional, Dict, List
+from typing import TYPE_CHECKING, Optional, Dict, List
 
 from pydantic import BaseModel
 
@@ -41,8 +41,10 @@ from Orchestrator.phone.session import (
     PHONE_SESSIONS,
     get_session,
 )
-from Orchestrator.phone.bridge import PhoneAIBridge
 from Orchestrator.asterisk.ivr import AsteriskIVR
+
+if TYPE_CHECKING:
+    from Orchestrator.asterisk.voice_bridge import AsteriskVoiceBridge
 
 
 
@@ -139,8 +141,8 @@ def _audio_down_reason(ipc_client) -> str:
     return f"the audio subprocess is not running ({detail or 'see the [IPC] log lines'})"
 
 
-# Active call tracking per session (for cleanup)
-_active_bridges: Dict[str, PhoneAIBridge] = {}
+# Active call tracking per session (for cleanup): AsteriskVoiceBridge objects
+_active_bridges: Dict[str, "AsteriskVoiceBridge"] = {}
 
 
 # =============================================================================
@@ -216,23 +218,11 @@ async def _handle_outbound_call(session: PhoneSession, to_number: str, trunk: st
 
     voice_bridge = None
     channel_id = None
+    hung_up = None
     call_uuid = str(uuid.uuid4())
-    stasis_event = asyncio.Event()
-    stasis_channel_id_holder = [None]
-
-    # Intercept StasisStart for our outbound call
-    original_on_stasis = client.on_stasis_start
-
-    async def on_outbound_stasis(ch_id, caller, callee, args):
-        if args and len(args) >= 2 and args[0] == "outbound" and args[1] == call_uuid:
-            stasis_channel_id_holder[0] = ch_id
-            stasis_event.set()
-        elif original_on_stasis:
-            await original_on_stasis(ch_id, caller, callee, args)
-
-    client.on_stasis_start = on_outbound_stasis
-
-    call_ended = asyncio.Event()
+    # The answer is a StasisStart carrying appArgs "outbound,<call_uuid>"; the
+    # ARI client hands it to this call only (another call may be dialling too).
+    answer = client.expect_outbound_answer(call_uuid)
 
     try:
         endpoint = f"PJSIP/{to_number}@{trunk}"
@@ -251,18 +241,24 @@ async def _handle_outbound_call(session: PhoneSession, to_number: str, trunk: st
             return
 
         session.asterisk_channel_id = channel_id
+        hung_up = client.watch_hangup(channel_id)
 
-        # Wait for callee to answer (StasisStart fires on answer)
+        # Wait for the callee to answer (StasisStart), or for the call to end
+        # unanswered (rejected, busy, unreachable), whichever comes first.
         print(f"[ASTERISK-ROUTE] Waiting for answer: {channel_id}")
+        ended = asyncio.ensure_future(hung_up.wait())
         try:
-            await asyncio.wait_for(stasis_event.wait(), timeout=50.0)
-        except asyncio.TimeoutError:
-            print("[ASTERISK-ROUTE] No answer timeout")
-            await client.hangup_channel(channel_id)
+            await asyncio.wait({answer, ended}, timeout=50.0,
+                               return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            ended.cancel()
+        if not answer.done():
+            print("[ASTERISK-ROUTE] " + ("Call ended before it was answered"
+                                         if hung_up.is_set() else "No answer timeout"))
             session.status = PhoneStatus.FAILED
             return
 
-        answered_channel = stasis_channel_id_holder[0] or channel_id
+        answered_channel = answer.result() or channel_id
         print(f"[ASTERISK-ROUTE] Callee answered: {answered_channel}")
 
         # Set UUID and continue to AudioSocket context
@@ -307,8 +303,9 @@ async def _handle_outbound_call(session: PhoneSession, to_number: str, trunk: st
 
         print(f"[ASTERISK-ROUTE] Outbound bridged: {to_number} <-> {session.ai_backend.value} (via AsteriskVoiceBridge)")
 
-        # Wait until bridge stops (phone hangup or AI disconnect)
-        while voice_bridge.is_running:
+        # Wait until the bridge stops (AudioSocket hangup or AI disconnect)
+        # or ARI reports the channel gone.
+        while voice_bridge.is_running and not hung_up.is_set():
             await asyncio.sleep(0.5)
 
     except Exception as e:
@@ -316,7 +313,9 @@ async def _handle_outbound_call(session: PhoneSession, to_number: str, trunk: st
         import traceback
         traceback.print_exc()
     finally:
-        client.on_stasis_start = original_on_stasis
+        client.cancel_outbound_answer(call_uuid)
+        if channel_id:
+            client.unwatch_hangup(channel_id)
         if voice_bridge:
             await voice_bridge.stop()
         _active_bridges.pop(session.session_id, None)
@@ -357,9 +356,11 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
             pass
         return
 
-    bridge = None
+    voice_bridge = None
     session_id = f"ast-in-{uuid.uuid4().hex[:12]}"
     call_uuid = str(uuid.uuid4())
+    # Set when the caller hangs up; the IVR watches it too and ends at once.
+    hung_up = client.watch_hangup(channel_id)
 
     session = PhoneSession(
         session_id=session_id,
@@ -372,8 +373,6 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
     )
     session.asterisk_channel_id = channel_id
     PHONE_SESSIONS[session_id] = session
-
-    call_ended = asyncio.Event()
 
     try:
         print(f"[ASTERISK-ROUTE] Inbound: {caller_id} → {callee_id} (channel={channel_id})")
@@ -453,6 +452,7 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
             asterisk_rate=actual_rate,
         )
 
+        _active_bridges[session_id] = voice_bridge
         success = await voice_bridge.start()
         if not success:
             print("[ASTERISK-ROUTE] Voice bridge failed to start")
@@ -465,8 +465,9 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
 
         print(f"[ASTERISK-ROUTE] Inbound bridged via IVR pipeline: {caller_id} <-> {ivr_backend} (operator={ivr_operator})")
 
-        # Wait until bridge stops (phone hangup or AI disconnect)
-        while voice_bridge.is_running:
+        # Wait until the bridge stops (AudioSocket hangup or AI disconnect)
+        # or ARI reports the channel gone.
+        while voice_bridge.is_running and not hung_up.is_set():
             await asyncio.sleep(0.5)
 
     except Exception as e:
@@ -474,8 +475,10 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
         import traceback
         traceback.print_exc()
     finally:
-        if 'voice_bridge' in dir() and voice_bridge:
+        client.unwatch_hangup(channel_id)
+        if voice_bridge:
             await voice_bridge.stop()
+        _active_bridges.pop(session_id, None)
         if client and client.is_connected:
             try:
                 await client.hangup_channel(channel_id)

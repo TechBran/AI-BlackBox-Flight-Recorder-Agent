@@ -40,17 +40,18 @@ def test_ari_event_callbacks_are_tracked():
     client = AsteriskARIClient("http://127.0.0.1:8088", "ws://127.0.0.1:8088/ari/events",
                                "user", "pass", "blackbox")
     client.on_stasis_start = _forever
-    client.on_hangup = _forever
 
     async def scenario():
+        client.register_dtmf_handler("ch-1", _forever)
         await client._handle_event({"type": "StasisStart",
                                     "channel": {"id": "ch-1", "caller": {"number": "100"},
                                                 "dialplan": {"exten": "200"}},
                                     "args": []})
-        await client._handle_event({"type": "ChannelHangupRequest", "channel": {"id": "ch-1"}})
+        await client._handle_event({"type": "ChannelDtmfReceived", "channel": {"id": "ch-1"},
+                                    "digit": "5"})
         await asyncio.sleep(0)
         names = _names()
-        assert "ari-stasis-start" in names and "ari-hangup" in names
+        assert "ari-stasis-start" in names and "ari-dtmf" in names
         await _settle_and_cancel("ari-stasis-start")
 
     asyncio.run(scenario())

@@ -59,6 +59,19 @@ class FakeARI:
     async def wait_for_playback(self, playback_id, timeout=15.0):
         return True
 
+    # The ARI client's per-channel routing (Orchestrator/asterisk/client.py)
+    def register_dtmf_handler(self, channel_id, handler):
+        self.on_dtmf = handler
+
+    def unregister_dtmf_handler(self, channel_id):
+        self.on_dtmf = None
+
+    def watch_hangup(self, channel_id):
+        return asyncio.Event()  # the caller never hangs up here
+
+    def unwatch_hangup(self, channel_id):
+        pass
+
 
 @pytest.fixture(autouse=True)
 def pin_env(tmp_path, monkeypatch):
@@ -165,7 +178,7 @@ def test_ari_client_does_not_log_dtmf_digits(capsys):
     async def on_dtmf(channel_id, digit):
         seen.append(digit)
 
-    client.on_dtmf = on_dtmf
+    client.register_dtmf_handler(CHANNEL, on_dtmf)
 
     async def drive():
         for d in PIN:

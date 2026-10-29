@@ -8,6 +8,9 @@ pre-generated WAV file playback.
 
 After IVR completes, the caller returns a dict with operator/backend/voice
 and the handler continues the channel to AudioSocket for AI conversation.
+
+Each IVR registers its own channel's DTMF handler and hangup watch with the
+ARI client (two calls can run at once), and a hangup ends it at once.
 """
 
 import asyncio
@@ -56,20 +59,37 @@ class AsteriskIVR:
         self._current_playback_id: Optional[str] = None
         self._barge_in = False
 
-        # Save/restore original DTMF handler
-        self._original_on_dtmf = None
-
     async def run(self) -> Optional[Dict[str, str]]:
         """
         Run the full IVR flow.
-        Returns {"operator": str, "backend": str, "voice": str} or None on failure.
+        Returns {"operator": str, "backend": str, "voice": str}, or None on
+        failure or when the caller hangs up (which ends it at once).
         """
         print(f"[ASTERISK-IVR] Starting IVR for {self._caller_id} on channel {self._channel_id}")
 
-        # Register our DTMF handler (save original to restore later)
-        self._original_on_dtmf = self._client.on_dtmf
-        self._client.on_dtmf = self._on_dtmf
+        self._client.register_dtmf_handler(self._channel_id, self._on_dtmf)
+        hung_up = self._client.watch_hangup(self._channel_id)
+        flow = asyncio.ensure_future(self._run_stages())
+        gone = asyncio.ensure_future(hung_up.wait())
+        try:
+            await asyncio.wait({flow, gone}, return_when=asyncio.FIRST_COMPLETED)
+            if flow.done():
+                return flow.result()
+            print(f"[ASTERISK-IVR] Caller hung up during the IVR on channel {self._channel_id}")
+            flow.cancel()
+            try:
+                await flow
+            except asyncio.CancelledError:
+                pass
+            return None
+        finally:
+            for task in (flow, gone):
+                if not task.done():
+                    task.cancel()
+            self._client.unregister_dtmf_handler(self._channel_id)
 
+    async def _run_stages(self) -> Optional[Dict[str, str]]:
+        """PIN, operator and backend selection, then the confirmation."""
         try:
             # Stage 1: PIN verification (plays its own refusal on failure)
             pin_ok = await self._run_pin()
@@ -116,18 +136,12 @@ class AsteriskIVR:
             print(f"[ASTERISK-IVR] Error: {e}")
             traceback.print_exc()
             return None
-        finally:
-            # Restore original DTMF handler
-            self._client.on_dtmf = self._original_on_dtmf
 
     # ----- DTMF handling -----
 
     async def _on_dtmf(self, channel_id: str, digit: str):
-        """Handle DTMF from ARI — only for our channel."""
+        """Handle DTMF from ARI (registered for our channel only)."""
         if channel_id != self._channel_id:
-            # Not our channel — forward to original handler
-            if self._original_on_dtmf:
-                await self._original_on_dtmf(channel_id, digit)
             return
 
         # Never log the digit: during the PIN stage it is part of the PIN.
@@ -205,8 +219,11 @@ class AsteriskIVR:
                         break
                     await asyncio.sleep(0.05)  # 50ms check interval for barge-in
             except asyncio.CancelledError:
+                # The IVR is being stopped (the caller hung up): stop with it.
                 wait_task.cancel()
-            self._current_playback_id = None
+                raise
+            finally:
+                self._current_playback_id = None
 
     async def _play_and_wait(self, media_uri: str, num_digits: int = 1,
                               timeout_s: float = 10.0) -> Optional[str]:
