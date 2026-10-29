@@ -1,5 +1,18 @@
 # OpenAI Responses-API Migration (chat) + Voice Currency Bump Implementation Plan
 
+> **Status (2026-10-29, M6 unit U38, audit item W17): DEFERRED, not executed.** The chat
+> transport stays `/v1/chat/completions` for every OpenAI-compatible family. Why: xAI and the
+> custom llama.cpp / llama-swap servers speak only chat.completions, so one adapter serves all
+> three; the one OpenAI case that wants Responses (gpt-5.6 reasoning together with tools) runs
+> today with `reasoning_effort="none"`; and the client-facing SSE contract is now pinned by the
+> recorded provider goldens (`Orchestrator/tests/golden/providers/`), which a wire-format switch
+> must be measured against rather than folded into a refactor. The decision is recorded in the
+> docstring of `Orchestrator/providers/openai_compat.py`. The line numbers below predate the
+> split of `chat_routes.py` into `Orchestrator/routes/chat/` and the adapters in
+> `Orchestrator/providers/`: executing this later means re-probing the OpenAI model set, then
+> adding a Responses transport behind `openai_compat`'s OpenAI `CompatProvider` on its own branch,
+> with the goldens as the gate. The voice items (M4 a/b/c/e) already landed through the voice pass.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (or subagent-driven-development) to implement this plan task-by-task.
 
 **Goal:** Move the OpenAI CHAT provider from `/v1/chat/completions` to `/v1/responses` so gpt-5.6-family models get **function tools + reasoning together** and every OpenAI reasoning model lights up the thinking channel; bump the (already-GA) realtime voice stack to `gpt-realtime-2.1`; retire the legacy `whisper-1` telephony stragglers. The frontend SSE contract does not change by one byte.
