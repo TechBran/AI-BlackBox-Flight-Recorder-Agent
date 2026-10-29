@@ -237,6 +237,7 @@ PRODUCTION_STARTUP = [
     "Orchestrator.startup.startup_live_session_reaper",
     "Orchestrator.startup.startup_assert_sudoers_current",
     "Orchestrator.startup.startup_assert_helpers_current",
+    "Orchestrator.startup.startup_assert_tree_permissions",
     "Orchestrator.startup.startup_assert_url_handlers",
     "Orchestrator.startup.startup_toolvault_embedding_sync",
     "Orchestrator.startup.startup_scheduler",

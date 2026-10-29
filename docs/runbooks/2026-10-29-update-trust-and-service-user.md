@@ -131,3 +131,24 @@ only later remove the old line (in a commit signed by the new key).
 **Lost key:** boxes that enforce refuse everything signed otherwise. Recovery is
 an operator step per box: check out the new release by hand (verify it some
 other way), then `sudo bash Scripts/install.sh` to pin the new key.
+
+## 4. Nobody else writes into the checkout
+
+The service starts uvicorn with the checkout as its working directory, so
+Python imports from it first, and the Portal, the MCP server and the CLI agents'
+slash commands come from it too. The dev box had the root, `Orchestrator/`,
+`Portal/`, `Manifest/` and `.claude/commands/` at 0777 and nothing normalized
+them (X04-security-clients-infra-13).
+
+* `install.sh` Step 0e (`harden_tree_permissions`) runs **as the checkout's
+  owner** on every install: directories lose group and other write, files lose
+  other write, and `Manifest/` and `credentials/` become 0700 (created if
+  missing). It never adds a permission and never runs `chmod` as root.
+* At every start the service logs `[PERMS]` warnings for what is still wrong:
+  a directory other accounts can write (group write counts only for a group
+  someone else can hold, not the owner's private group), a world-writable
+  parent directory, or `Manifest/` / `credentials/` not 0700. Warn only.
+
+```bash
+journalctl -u blackbox.service -b | grep '\[PERMS\]'    # nothing = clean
+```

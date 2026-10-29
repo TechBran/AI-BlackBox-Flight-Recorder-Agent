@@ -520,6 +520,39 @@ if [[ -f /etc/logrotate.d/blackbox ]] && grep -q '/var/log/blackbox/' /etc/logro
     echo "[install] Removed dead /etc/logrotate.d/blackbox (/var/log/blackbox is never written)"
 fi
 
+# ── Step 0e: nobody else writes into the checkout (2026-10 audit ─────────────
+#             X04-security-clients-infra-13) ───────────────────────────────────
+# The service starts uvicorn with the checkout as its working directory, so
+# Python imports from it first, and the Portal, the MCP server and the CLI
+# agents' slash commands come from it too: any local account that can write a
+# directory in it can plant code the service runs. The dev box had the root,
+# Orchestrator/, Portal/, Portal/uploads/, Manifest/ and .claude/commands/ at
+# 0777, and nothing ever normalized them. Directories lose group and other
+# write, files lose other write (a world-writable module is the same hole).
+# Manifest/ (MCP tokens, OAuth stores, update state) and credentials/ become
+# 0700: their files are 0600, but in a directory others can write anyone can
+# replace them. Runs AS THE CHECKOUT'S OWNER, never root (root's chmod would
+# follow a symlink swapped in mid-walk), touches only that owner's entries and
+# only ever removes bits. The service warns at every start about what is still
+# wrong (Orchestrator/utils/tree_perms.py). BLACKBOX_ROOT is the only input,
+# so scripts/tests/test_install_tree_permissions.sh runs it on a sandbox tree.
+harden_tree_permissions() {
+    local owner dirs files d
+    local -a as_owner=()
+    owner="$(stat -c %U "$BLACKBOX_ROOT")"
+    [[ "$owner" == "$(id -un)" ]] || as_owner=(sudo -u "$owner")
+    dirs="$( { ${as_owner[@]+"${as_owner[@]}"} find "$BLACKBOX_ROOT" -xdev -type d -user "$owner" \
+                   -perm /022 -print -exec chmod go-w {} + || true; } | wc -l)"
+    files="$( { ${as_owner[@]+"${as_owner[@]}"} find "$BLACKBOX_ROOT" -xdev -type f -user "$owner" \
+                    -perm -002 -print -exec chmod o-w {} + || true; } | wc -l)"
+    for d in Manifest credentials; do
+        ${as_owner[@]+"${as_owner[@]}"} mkdir -p "$BLACKBOX_ROOT/$d"
+        ${as_owner[@]+"${as_owner[@]}"} chmod 0700 "$BLACKBOX_ROOT/$d"
+    done
+    echo "[install] Checkout permissions: removed group/other write from $dirs directories and other write from $files files; Manifest/ and credentials/ are 0700"
+}
+harden_tree_permissions
+
 # ── Step 1: apt deps (audit C1 — corrected pipeline) ──
 # E16 fix: install MUST_HAVE + SHOULD_HAVE buckets. SHOULD_HAVE packages
 # (scrot, xdotool, openbox, x11vnc, mpg123, alsa-utils, chromium-browser)

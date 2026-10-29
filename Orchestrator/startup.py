@@ -682,6 +682,27 @@ def startup_assert_helpers_current():
 
 
 @boot_hook(app, "startup")
+async def startup_assert_tree_permissions():
+    """Warn in the journal when other local accounts can write into the
+    checkout this service imports and serves from, or Manifest/ / credentials/
+    are not 0700 (audit X04-security-clients-infra-13; Orchestrator/utils/
+    tree_perms.py). install.sh fixes both; this only reports, once per start,
+    in a worker thread so the walk never holds up startup. Never raises."""
+    import asyncio
+    from Orchestrator.utils.paths import blackbox_root
+    from Orchestrator.utils.tree_perms import audit_checkout
+
+    async def _once():
+        try:
+            for warning in await asyncio.to_thread(audit_checkout, blackbox_root()):
+                logger.warning("[PERMS] %s", warning)
+        except Exception as e:  # noqa: BLE001 — a report, never boot criteria.
+            logger.error("[PERMS] permission check failed (non-fatal): %s", e)
+
+    _track(asyncio.create_task(_once(), name="tree-permissions"), "tree-permissions")
+
+
+@boot_hook(app, "startup")
 def startup_assert_url_handlers():
     """Re-assert chromium-browser as the default URL handler for HTTP(S)
     and text/html every time the service starts. Brandon's MSO2 hit a
