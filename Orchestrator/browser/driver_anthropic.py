@@ -1,9 +1,11 @@
 """Anthropic Computer Use driver.
 
 `run_anthropic_cu_loop` is the Anthropic CU background agent loop,
-extracted verbatim from Orchestrator/routes/chat_routes.py
-(formerly `_cu_agent_loop`).  It pushes events to session.event_queue
-instead of yielding, so the loop survives client disconnection.
+extracted from Orchestrator/routes/chat_routes.py (formerly
+`_cu_agent_loop`).  It pushes events to session.event_queue instead of
+yielding, so the loop survives client disconnection. It runs the computer,
+bash and editor tools itself; every BlackBox tool goes through the
+dispatch_tool() every chat loop shares (providers/tool_dispatch.py).
 """
 import asyncio
 import json
