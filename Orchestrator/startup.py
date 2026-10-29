@@ -160,8 +160,10 @@ def startup_check_index():
                         logger.info("Index is current with %d snapshots (volume has %d trailing bytes)", index_count, new_bytes)
                     else:
                         # Volume has new data — incrementally index only the new tail
+                        # (sliced from the ledger's map, not a whole-file read)
                         logger.info("Volume grew by %d bytes since last index, running incremental update...", new_bytes)
-                        vol_bytes = read_volume_bytes(VOL_PATH)
+                        from Orchestrator import ledger
+                        vol_bytes = ledger.view(VOL_PATH).buffer()
                         _incremental_index_update(index, vol_bytes, max_byte_end)
                 else:
                     # Volume shrunk or something weird — full rebuild
@@ -197,9 +199,9 @@ def startup_check_index():
     # the storage maintenance timer applies, startup_storage_maintenance)
     logger.info("Running archive cleanup...")
     try:
-        from Orchestrator.maintenance import ARCHIVE_RETENTION
+        from Orchestrator.maintenance import archive_retention
         from Orchestrator.volume import archive_min_free_gb
-        cleanup_stats = cleanup_old_archives(**ARCHIVE_RETENTION, min_free_gb=archive_min_free_gb())
+        cleanup_stats = cleanup_old_archives(**archive_retention(), min_free_gb=archive_min_free_gb())
         if cleanup_stats["deleted_files"] > 0:
             logger.info("Cleaned up %d archives (%.1f MB freed)",
                         cleanup_stats["deleted_files"], cleanup_stats["deleted_size_mb"])

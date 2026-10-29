@@ -1685,9 +1685,11 @@ def _last_response_for(operator: str):
         byte_start = latest_meta["byte_start"]
         byte_end = latest_meta["byte_end"]
 
-        with open(VOL_PATH, 'r', encoding='utf-8') as f:
-            f.seek(byte_start)
-            snapshot_text = f.read(byte_end - byte_start)
+        # Exactly the snapshot's bytes, from the ledger's map. A text-mode
+        # read of byte_end - byte_start CHARACTERS ran past the snapshot on
+        # any multi-byte text (audit rank 77).
+        from Orchestrator import ledger
+        snapshot_text = ledger.view(VOL_PATH).text(byte_start, byte_end)
 
         # Parse the Raw Session Log section to extract conversation turns
         # Format: - [N] YYYY-MM-DDTHH:MM:SS.sssZ operator=Name role: message

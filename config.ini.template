@@ -28,6 +28,13 @@ min_snapshots_required = 5
 # copy that would cross it is skipped, and the hourly cleanup removes the
 # oldest copies (never the newest) until it is met.
 min_free_gb = 2
+# Mints record the ledger's prefix hash (Manifest/ledger_hashes.jsonl) instead
+# of copying it; the hourly maintenance pass makes a full copy once the newest
+# one is this many hours old and the ledger has grown since, and checks the
+# ledger (scripts/ledger_fsck.py) as often.
+copy_interval_hours = 24
+# Full copies the retention keeps (never fewer than one).
+keep_copies = 30
 
 [budget]
 context_tokens_max = 120000

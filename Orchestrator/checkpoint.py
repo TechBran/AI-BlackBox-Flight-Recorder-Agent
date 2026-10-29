@@ -30,7 +30,7 @@ from Orchestrator.fossils import append_snapshot_vectors, get_recent_fossils_for
 from Orchestrator.monitoring import drift_state_for, render_snapshot_body_v71
 from Orchestrator.state import get_state, save_operator_state, mint_lock
 from Orchestrator.utils.operators import validate_operator
-from Orchestrator.volume import LedgerError, append_snapshot_text, archive_volume, next_snap_id_from_tail, now_utc_iso, parse_tail, verify_gm_or_halt, read_text_safe
+from Orchestrator.volume import LedgerError, append_snapshot_text, next_snap_id_from_tail, now_utc_iso, parse_tail, publish_latest, read_tail_text, record_append, verify_gm_or_halt
 
 
 def _embed_for_index(snap_id: str, body: str) -> Dict[str, Any]:
@@ -83,6 +83,29 @@ def _index_entry(warnings: List[str], snap_id: str, *args, **kwargs) -> None:
     if not _best_effort(warnings, "snapshot index", snap_id, update_snapshot_index, snap_id, *args, **kwargs):
         if not any(w.startswith("snapshot index") for w in warnings):
             warnings.append("snapshot index: the entry was not written (see the journal)")
+
+
+def _ledger_record(warnings: List[str], snap_id: str, byte_start: int, byte_end: int,
+                   utc: str) -> Optional[Dict[str, Any]]:
+    """The append's prefix-hash record (volume.record_append: the sha256 of
+    the ledger as this append left it, one line of Manifest/ledger_hashes.jsonl),
+    under mint_lock so the records follow the appends in order. It replaces
+    the full ledger copy every mint wrote into Archive/ (audit
+    O05-ledger-persistence-02); full copies are scheduled now. Best-effort:
+    the snapshot is already committed."""
+    return _best_effort(warnings, "ledger hash record", snap_id, record_append,
+                        snap_id, byte_start, byte_end, utc, ledger_path=VOL_PATH)
+
+
+def _mint_result(snap_id: str, record: Optional[Dict[str, Any]], byte_end: int) -> Dict[str, Any]:
+    """The fields every mint result carries about the ledger: assert_sha256
+    is the sha256 of the ledger as this mint committed it (what the per-mint
+    archive copy's digest was), archived is None (mints make no copy any
+    more; the maintenance pass makes one a day), ledger_bytes its size."""
+    return {"snap_id": snap_id,
+            "assert_sha256": record["sha256"] if record else None,
+            "archived": None,
+            "ledger_bytes": byte_end}
 
 
 def _embed_and_store(warnings: List[str], snap_id: str, body: str) -> Optional[int]:
@@ -204,10 +227,11 @@ def create_checkpoint_async(operator: str, manual: bool = False) -> Dict[str, An
 
 def _create_checkpoint(operator: str, manual: bool) -> Dict[str, Any]:
     s = get_state(operator)
-    vol_txt = read_text_safe(VOL_PATH)
 
-    # Get recent snapshots for this operator (configured in [checkpoint] section)
-    recent_snapshots = get_recent_fossils_for_operator(vol_txt, operator, count=CHECKPOINT_TURNS_TO_COMPRESS, cap_chars_each=10000)
+    # Get recent snapshots for this operator (configured in [checkpoint] section),
+    # their byte ranges only: the helper reads the volume itself when there is
+    # no index, and never used the whole decoded volume this used to pass it.
+    recent_snapshots = get_recent_fossils_for_operator("", operator, count=CHECKPOINT_TURNS_TO_COMPRESS, cap_chars_each=10000)
 
     if len(recent_snapshots) < CHECKPOINT_MIN_SNAPSHOTS:
         print(f"[CHECKPOINT] Not enough snapshots for {operator} to create checkpoint ({len(recent_snapshots)}/{CHECKPOINT_TURNS_TO_COMPRESS})")
@@ -247,8 +271,7 @@ Provide a comprehensive, structured summary:
     # the embed runs after it is released (see _embed_and_store).
     with mint_lock:
         utc = now_utc_iso()
-        vol1 = read_text_safe(VOL_PATH)
-        info1 = parse_tail(vol1)
+        info1 = parse_tail(read_tail_text(VOL_PATH))
         snap_id = next_snap_id_from_tail(info1["tail_id"])
 
         # Determine source range
@@ -307,11 +330,14 @@ Provide a comprehensive, structured summary:
 
         _index_entry(warnings, snap_id, byte_start=byte_start, byte_end=byte_end,
                      operator=operator, timestamp=utc, snap_type="checkpoint")
+        record = _ledger_record(warnings, snap_id, byte_start, byte_end, utc)
 
     print(f"[CHECKPOINT] Created {snap_id} for {operator} at turn {s.total_turns} ({len(compressed_summary)} chars)")
 
     # Save operator state after checkpoint creation
     _best_effort(warnings, "operator state", snap_id, save_operator_state)
+    # The manifest's latest_* follow checkpoints too (audit O05-ledger-persistence-03).
+    _best_effort(warnings, "ledger manifest", snap_id, publish_latest, record)
     _embed_and_store(warnings, snap_id, body)
 
     result = {"status": "created", "snap_id": snap_id, "model": model_used}
@@ -361,11 +387,13 @@ def should_create_checkpoint(operator: str) -> bool:
 # Mint
 # -----------------------------------------------------------------------------
 # The ledger append is the commit point. Under mint_lock a mint only reads the
-# tail, renders, appends, advances the operator's mint cursor and writes the
-# index entry; the embed (bounded by the search layer's ceiling), the vector
-# append, the archive copy and the state save run after the lock is released,
-# best-effort, each failure reported in the result's "warnings" (audit
-# O05-ledger-persistence-04/-05).
+# tail, renders, appends, advances the operator's mint cursor, writes the
+# index entry and records the ledger's prefix hash; the embed (bounded by the
+# search layer's ceiling), the vector append, the manifest update and the
+# state save run after the lock is released, best-effort, each failure
+# reported in the result's "warnings" (audit O05-ledger-persistence-04/-05).
+# A mint makes no archive copy: the maintenance pass makes one a day (audit
+# rank 77).
 def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
     # The ledger choke point: the operator is rendered verbatim into the body
     # ("OPERATOR: <name>", "operator=<name>"), so a name carrying a newline
@@ -377,8 +405,9 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
     warnings: List[str] = []
 
     with mint_lock:
-        vol1 = read_text_safe(VOL_PATH)
-        info1 = parse_tail(vol1)
+        # The ledger's tail only (read_tail_text): every mint read and decoded
+        # the whole ledger twice here (audit O05-ledger-persistence-18).
+        info1 = parse_tail(read_tail_text(VOL_PATH))
         utc = now_utc_iso()
         snap_id = next_snap_id_from_tail(info1["tail_id"])
 
@@ -429,8 +458,7 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
             provenance={"gm": gm_flag, "recent": recent_ids, "relevant": relevant_ids},
         )
 
-        vol2 = read_text_safe(VOL_PATH)
-        info2 = parse_tail(vol2)
+        info2 = parse_tail(read_tail_text(VOL_PATH))
         if info2["tail_id"] != info1["tail_id"]:
             info1 = info2
             snap_id = next_snap_id_from_tail(info1["tail_id"])
@@ -472,17 +500,16 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         # The snapshot's index entry (and media artifacts); vectors come after the lock.
         _index_entry(warnings, snap_id, byte_start, byte_end, operator, utc, snap_type="normal",
                      media_artifacts=media_artifacts if media_artifacts else None)
+        record = _ledger_record(warnings, snap_id, byte_start, byte_end, utc)
 
     # Save operator state after mint
     _best_effort(warnings, "operator state", snap_id, save_operator_state)
     embed_dims = _embed_and_store(warnings, snap_id, body)
-    # The copy is the ledger as this mint committed it (byte_end, measured
+    # The record is the ledger as this mint committed it (byte_end, hashed
     # under mint_lock), never a later mint's half-written append.
-    archived = _best_effort(warnings, "archive copy", snap_id, archive_volume, upto=byte_end)
+    _best_effort(warnings, "ledger manifest", snap_id, publish_latest, record)
 
-    result = {"snap_id": snap_id,
-              "assert_sha256": archived[1] if archived else None,
-              "archived": Path(archived[0]).name if archived else None}
+    result = _mint_result(snap_id, record, byte_end)
     # Vector-less mints (fresh box / soft failure) leave dims None and the
     # key is omitted from the result.
     if embed_dims is not None:
@@ -514,8 +541,7 @@ def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_
     warnings: List[str] = []
 
     with mint_lock:
-        vol1 = read_text_safe(VOL_PATH)
-        info1 = parse_tail(vol1)
+        info1 = parse_tail(read_tail_text(VOL_PATH))
         utc = now_utc_iso()
         snap_id = next_snap_id_from_tail(info1["tail_id"])
 
@@ -533,8 +559,7 @@ def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_
         )
 
         # Handle race condition
-        vol2 = read_text_safe(VOL_PATH)
-        info2 = parse_tail(vol2)
+        info2 = parse_tail(read_tail_text(VOL_PATH))
         if info2["tail_id"] != info1["tail_id"]:
             info1 = info2
             snap_id = next_snap_id_from_tail(info1["tail_id"])
@@ -554,14 +579,13 @@ def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_
 
         # Update the snapshot index (vectors come after the lock)
         _index_entry(warnings, snap_id, byte_start, byte_end, operator, utc, snap_type=snap_type)
+        record = _ledger_record(warnings, snap_id, byte_start, byte_end, utc)
 
     _embed_and_store(warnings, snap_id, body)
-    archived = _best_effort(warnings, "archive copy", snap_id, archive_volume, upto=byte_end)
+    _best_effort(warnings, "ledger manifest", snap_id, publish_latest, record)
 
-    result = {"snap_id": snap_id,
-              "assert_sha256": archived[1] if archived else None,
-              "archived": Path(archived[0]).name if archived else None,
-              "byte_range": [byte_start, byte_end]}
+    result = _mint_result(snap_id, record, byte_end)
+    result["byte_range"] = [byte_start, byte_end]
     if warnings:
         result["warnings"] = warnings
     return result

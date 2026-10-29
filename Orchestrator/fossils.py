@@ -23,6 +23,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import traceback
 
 # Local imports
+from Orchestrator import ledger
 from Orchestrator.config import SNAPSHOT_INDEX, CFG, VOL_PATH, START_RX, END_RX, SNAP_RE, SNAP_ID_RX
 from Orchestrator.volume import read_volume_bytes, read_text_safe
 
@@ -679,32 +680,36 @@ class VolumeRanges:
     what ``read_volume_bytes(VOL_PATH)[start:end]`` returned at that moment,
     so the bounds checks callers already make against the length still hold.
     A missing volume reads as empty, as read_volume_bytes does.
+
+    The reads come from the shared ledger map (Orchestrator/ledger.py, audit
+    rank 77): no open or read() per context, and ``slice`` hands out the
+    bytes without copying them. A mint during the context appends past
+    ``size``, so it never changes what the context reads.
     """
 
     def __init__(self, path: Optional[Path] = None):
         self._path = path if path is not None else VOL_PATH
-        self._file = None
+        self._view: Optional[ledger.LedgerView] = None
         self.size = 0
 
     def __enter__(self) -> "VolumeRanges":
-        try:
-            self._file = open(self._path, "rb")
-            self.size = os.fstat(self._file.fileno()).st_size
-        except OSError:
-            self._file, self.size = None, 0
+        self._view = ledger.view(self._path)
+        self.size = self._view.size
         return self
 
     def __exit__(self, *exc) -> None:
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        self._view = None
 
     def read(self, start: int, end: int) -> bytes:
-        start, end = max(0, start), min(end, self.size)
-        if self._file is None or start >= end:
+        if self._view is None:
             return b""
-        self._file.seek(start)
-        return self._file.read(end - start)
+        return self._view.read(start, end)
+
+    def slice(self, start: int, end: int):
+        """read() without the copy: a memoryview of the ledger map."""
+        if self._view is None:
+            return b""
+        return self._view.slice(start, end)
 
 
 def _fallback_volume_text(vol_txt: str) -> str:
@@ -820,8 +825,9 @@ def rebuild_snapshot_index() -> Dict[str, Dict[str, Any]]:
     if not VOL_PATH.exists():
         return index
 
-    # Read as BYTES — regex directly on bytes gives true byte offsets (O(n))
-    vol_bytes = read_volume_bytes(VOL_PATH)
+    # Regex directly on the ledger's bytes gives true byte offsets (O(n)); the
+    # map serves them without a 58 MB copy (audit rank 77).
+    vol_bytes = ledger.view(VOL_PATH).buffer()
 
     # Byte-level regexes for START and END markers
     # START captures snap_id and UTC timestamp (always present and consistent)
@@ -1474,11 +1480,14 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
         if not terms and not bigrams and not trigrams:
             return []
 
-        # Read only the snapshots being scored - this operator's, or every one
-        # for "system" - by their index byte ranges, once each and in file
-        # order. This used to read the whole volume on every chat turn and
-        # every search, whoever asked (audit X05-architecture-14). A range the
-        # index puts past the end of the file scores as empty, as before.
+        # Read only the snapshots being scored - this operator's, or every
+        # one for "system" - by their index byte ranges, in file order. This
+        # used to read the whole volume on every chat turn and every search,
+        # whoever asked (audit X05-architecture-14), and then still held a
+        # copy of the operator's whole share while scoring; each range is now
+        # a zero-copy view of the ledger map, decoded as it is scored (audit
+        # rank 77). A range the index puts past the end of the file scores as
+        # empty, as before.
         raw = [b""] * len(recent)
         with VolumeRanges() as vol:
             vol_len = vol.size
@@ -1486,7 +1495,7 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
                 start = recent[i][1]["byte_start"]
                 end = recent[i][1]["byte_end"]
                 if start < vol_len and end <= vol_len:
-                    raw[i] = vol.read(start, end)
+                    raw[i] = vol.slice(start, end)
 
         # PHASE 2b PEAK FIX: do NOT materialize the full decoded `texts` list.
         # Holding the raw bytes (~37 MB of volume then) alongside a decoded copy of the WHOLE
@@ -1502,7 +1511,7 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
         num_texts = len(recent)
 
         def _decode_lc(i):
-            return raw[i].decode('utf-8', errors='replace').lower()
+            return str(raw[i], 'utf-8', 'replace').lower()
 
         # Shared streaming base TF-IDF (df pass + per-doc tf*idf); boosts added below.
         base = _streaming_tfidf_scores(_decode_lc, num_texts, terms)
@@ -1544,7 +1553,7 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
         # Decode text for the top-k only.
         base = []
         for _, i in scored[:k]:
-            base.append((sids[i], raw[i].decode('utf-8', errors='replace')))
+            base.append((sids[i], str(raw[i], 'utf-8', 'replace')))
     else:
         # Fallback to old method if index not available
         base_texts = keyword_retrieve(_fallback_volume_text(vol_txt), query, k=999999) if query else []  # Get all results (no limit)

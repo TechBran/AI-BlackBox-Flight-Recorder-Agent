@@ -1,10 +1,13 @@
-"""The mint and checkpoint path (audit O05-ledger-persistence-04/-05/-15/-16).
+"""The mint and checkpoint path (audit O05-ledger-persistence-04/-05/-15/-16,
+rank 77).
 
-The ledger append is the commit point: under mint_lock a mint only renders,
-appends and writes the index entry; the embed (bounded by a ceiling), the
-vector append, the archive copy and the state save run after the lock is
-released, best-effort. A checkpoint is attempted at most once per interval
-per operator, never twice at once, through the configured provider.
+The ledger append is the commit point: under mint_lock a mint only reads the
+ledger's tail, renders, appends, writes the index entry and records the
+ledger's prefix hash; the embed (bounded by a ceiling), the vector append,
+the manifest update and the state save run after the lock is released,
+best-effort. Mints make no archive copy (the maintenance pass does, daily).
+A checkpoint is attempted at most once per interval per operator, never twice
+at once, through the configured provider.
 
 Every test runs on a real ledger, GoldMaster, manifest, index and vector
 store under tmp_path, with fake embedding providers and fake chat calls.
@@ -123,16 +126,16 @@ def test_embed_failure_after_append_leaves_the_ledger_consistent_and_reembeddabl
     assert store.missing([snap_id]) == []
 
 
-def test_archive_failure_after_append_never_remints_the_same_turns(box, monkeypatch):
+def test_a_failed_hash_record_after_append_never_remints_the_same_turns(box, monkeypatch):
     box.provider(FakeProvider())
 
     def disk_full(*_a, **_k):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(ckpt, "archive_volume", disk_full)
+    monkeypatch.setattr(ckpt, "record_append", disk_full)
     _turn(OP, 1)
-    first = ckpt.perform_mint(OP, "TEST")                  # used to raise here
-    assert first["archived"] is None and first["warnings"]
+    first = ckpt.perform_mint(OP, "TEST")                  # an archive failure used to raise here
+    assert first["assert_sha256"] is None and first["warnings"]
     _turn(OP, 2)
     second = ckpt.perform_mint(OP, "TEST")
     assert _snapshots(box.vol) == [first["snap_id"], second["snap_id"]]
@@ -141,12 +144,12 @@ def test_archive_failure_after_append_never_remints_the_same_turns(box, monkeypa
     assert "question 2" in _body(box.vol, second["snap_id"])
 
 
-def test_mint_with_content_reports_a_failed_archive_instead_of_raising(box, monkeypatch):
+def test_mint_with_content_reports_a_failed_hash_record_instead_of_raising(box, monkeypatch):
     box.provider(FakeProvider())
-    monkeypatch.setattr(ckpt, "archive_volume", lambda *a, **k: (_ for _ in ()).throw(OSError(28, "full")))
+    monkeypatch.setattr(ckpt, "record_append", lambda *a, **k: (_ for _ in ()).throw(OSError(28, "full")))
     result = ckpt.mint_with_content(OP, "direct content", reason="TEST")
     assert _snapshots(box.vol) == [result["snap_id"]]
-    assert result["archived"] is None and result["warnings"]
+    assert result["assert_sha256"] is None and result["warnings"]
     assert result["snap_id"] in fossils.load_snapshot_index()
 
 
@@ -159,13 +162,31 @@ def test_the_embed_runs_after_mint_lock_is_released(box):
     assert held == [False, False]
 
 
-def test_a_successful_mint_still_embeds_and_archives(box):
+def _records(box):
+    path = volume.ledger_hashes_path()
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_a_successful_mint_embeds_and_records_its_prefix_hash_without_a_copy(box):
+    """A mint no longer copies the whole ledger into Archive/ (audit
+    O05-ledger-persistence-02): it records the ledger's sha256 at its own end,
+    which is the digest the copy used to carry."""
     box.provider(FakeProvider())
     _turn(OP, 1)
     result = ckpt.perform_mint(OP, "TEST")
-    assert result["dims"] == DIMS and result["archived"] and "warnings" not in result
+    ledger = box.vol.read_bytes()
+    assert result["dims"] == DIMS and "warnings" not in result
+    assert result["assert_sha256"] == hashlib.sha256(ledger).hexdigest()
+    assert result["archived"] is None and result["ledger_bytes"] == len(ledger)
     assert get_store(SLUG, base_dir=box.stores).missing([result["snap_id"]]) == []
-    assert len(list(box.arc.glob("Volume_*.txt"))) == 1
+    assert list(box.arc.glob("Volume_*.txt")) == []
+    [rec] = _records(box)
+    assert rec == {"snap_id": result["snap_id"], "byte_start": 0, "byte_end": len(ledger),
+                   "sha256": result["assert_sha256"], "utc": rec["utc"]}
+    man = json.loads(volume.MANIFEST.read_text())
+    assert man["latest_sha256"] == result["assert_sha256"] and man["latest_bytes"] == len(ledger)
+    assert man["latest_snap_id"] == result["snap_id"] and man["archive"] == []
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", man["latest_utc"])
 
 
 def test_concurrent_mints_each_land_once_in_ledger_and_index(box):
@@ -180,18 +201,27 @@ def test_concurrent_mints_each_land_once_in_ledger_and_index(box):
     ids = [r["snap_id"] for r in results]
     assert sorted(_snapshots(box.vol)) == sorted(ids) and len(set(ids)) == 6
     assert set(ids) <= set(fossils.load_snapshot_index())
+    # One record per append, in append order, each the hash of its prefix,
+    # each starting where the one before it ended: the chain.
+    ledger = box.vol.read_bytes()
+    records = _records(box)
+    assert sorted(r["snap_id"] for r in records) == sorted(ids)
+    assert [r["byte_start"] for r in records] == [0] + [r["byte_end"] for r in records[:-1]]
+    for rec in records:
+        assert rec["sha256"] == hashlib.sha256(ledger[:rec["byte_end"]]).hexdigest()
+    man = json.loads(volume.MANIFEST.read_text())
+    assert man["latest_sha256"] == hashlib.sha256(ledger).hexdigest()
 
 
-
-def test_an_archive_copy_never_captures_a_concurrent_append(box, monkeypatch):
-    """Mint A archives after releasing mint_lock while mint B is half way
-    through its append: A's copy is the ledger A committed, never a torn one
-    (a START with no END), and the manifest ends on the newest ledger."""
+def test_a_hash_record_never_captures_a_concurrent_append(box, monkeypatch):
+    """Mint A updates the manifest after releasing mint_lock while mint B is
+    half way through its append: the manifest describes the ledger A
+    committed (never B's torn half), and ends on the newest ledger."""
     box.provider(FakeProvider())
     real_append = ckpt.append_snapshot_text
-    real_archive = volume.archive_volume
-    b_half_written, a_archived, a_unlocked = threading.Event(), threading.Event(), threading.Event()
-    copies = {}
+    real_publish = ckpt.publish_latest
+    b_half_written, a_published, a_unlocked = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
 
     def slow_append(text):
         if "OPERATOR: Bob" not in text:
@@ -199,18 +229,18 @@ def test_an_archive_copy_never_captures_a_concurrent_append(box, monkeypatch):
         half = len(text) // 2
         real_append(text[:half])
         b_half_written.set()
-        a_archived.wait(5)
+        a_published.wait(5)
         with open(volume.VOL_PATH, "ab") as f:
             f.write(text[half:].encode())
 
-    def archive(*args, **kwargs):
-        if "A" not in copies:
+    def publish(record):
+        if record and record["snap_id"] not in seen and "A" not in seen:
             assert b_half_written.wait(5)
-            out = real_archive(*args, **kwargs)
-            copies["A"] = Path(out[0]).read_text()
-            a_archived.set()
+            out = real_publish(record)
+            seen["A"] = json.loads(volume.MANIFEST.read_text())
+            a_published.set()
             return out
-        return real_archive(*args, **kwargs)
+        return real_publish(record)
 
     real_embed_store = ckpt._embed_and_store
 
@@ -220,7 +250,7 @@ def test_an_archive_copy_never_captures_a_concurrent_append(box, monkeypatch):
         return real_embed_store(warnings, snap_id, body)
 
     monkeypatch.setattr(ckpt, "append_snapshot_text", slow_append)
-    monkeypatch.setattr(ckpt, "archive_volume", archive)
+    monkeypatch.setattr(ckpt, "publish_latest", publish)
     monkeypatch.setattr(ckpt, "_embed_and_store", embed_store)
     _turn("Ann", 1)
     _turn("Bob", 1)
@@ -232,14 +262,41 @@ def test_an_archive_copy_never_captures_a_concurrent_append(box, monkeypatch):
     tb.start()
     ta.join(10)
     tb.join(10)
-    copy = copies["A"]
-    assert copy.count("=== START SNAPSHOT") == copy.count("=== END SNAPSHOT") == 1
-    assert "OPERATOR: Bob" not in copy
-    volume.parse_tail(copy)
     ledger = box.vol.read_bytes()
+    a_end = results["A"]["ledger_bytes"]
+    committed_a = ledger[:a_end].decode()
+    assert committed_a.count("=== START SNAPSHOT") == committed_a.count("=== END SNAPSHOT") == 1
+    assert seen["A"]["latest_bytes"] == a_end
+    assert seen["A"]["latest_sha256"] == hashlib.sha256(ledger[:a_end]).hexdigest()
+    volume.parse_tail(committed_a)                         # a whole ledger, not torn
     man = json.loads(volume.MANIFEST.read_text())
     assert man["latest_sha256"] == hashlib.sha256(ledger).hexdigest()
     assert results["B"]["assert_sha256"] == man["latest_sha256"]
+
+
+def test_every_writer_reads_only_the_ledger_tail(box, monkeypatch):
+    """A mint used to read and decode the whole ledger twice under mint_lock
+    just to find its tail (audit O05-ledger-persistence-18). On a large
+    ledger, a mint now reads a few KB of it."""
+    from Orchestrator.tests.test_ledger_reads_per_turn import count_volume_reads
+    filler = []
+    for n in range(1, 401):
+        sid = f"SNAP-20260101-{n:03d}"
+        filler.append(f"=== START SNAPSHOT — UTC 2026-01-01T00:00:00Z — {sid} (7.1.0) ===\n"
+                      f"OPERATOR: Old\n{'history ' * 600}\n"
+                      f"=== END SNAPSHOT — {sid} — UTC 2026-01-01T00:00:00Z ===\n")
+    box.vol.write_text("".join(filler))
+    size = box.vol.stat().st_size
+    box.provider(FakeProvider())
+    _turn(OP, 1)
+    ckpt.perform_mint(OP, "TEST")          # the first mint after boot hashes the ledger once
+    # Bytes read through open() or served from the ledger map, counted as
+    # the per-turn harness counts them.
+    served = count_volume_reads(monkeypatch)
+    _turn(OP, 2)
+    result = ckpt.perform_mint(OP, "TEST")
+    assert result["snap_id"] == "SNAP-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-402"
+    assert served["bytes"] < size // 10, f"a mint read {served['bytes']:,} of {size:,} bytes"
 
 
 # ── the embed ceiling ───────────────────────────────────────────────────────
@@ -329,6 +386,49 @@ def test_compression_uses_the_configured_provider(checkpoint_env, monkeypatch):
     assert config.resolve_default_model("anthropic") in body
     assert fossils.load_snapshot_index()[result["snap_id"]]["type"] == "checkpoint"
     assert state.get_state(OP).last_checkpoint_id == result["snap_id"]
+
+
+def test_a_checkpoint_records_its_prefix_hash_and_refreshes_the_manifest(checkpoint_env, monkeypatch):
+    """Checkpoints appended to the ledger without touching latest_sha256, so
+    the manifest went stale after every one (audit O05-ledger-persistence-03)."""
+    cr = checkpoint_env
+    monkeypatch.setattr(config, "DEFAULT_PROVIDER", "anthropic")
+    monkeypatch.setattr(cr, "call_anthropic",
+                        lambda messages, model, operator: ("compressed summary", {}, "", []))
+    _turn(OP, 1)
+    minted = ckpt.perform_mint(OP, "TEST")
+    result = ckpt.create_checkpoint_async(OP)
+    assert result["status"] == "created" and "warnings" not in result
+    ledger = volume.VOL_PATH.read_bytes()
+    records = _records(box=None)
+    assert [r["snap_id"] for r in records] == [minted["snap_id"], result["snap_id"]]
+    assert records[1]["byte_start"] == records[0]["byte_end"]
+    assert records[1]["sha256"] == hashlib.sha256(ledger).hexdigest()
+    man = json.loads(volume.MANIFEST.read_text())
+    assert man["latest_sha256"] == hashlib.sha256(ledger).hexdigest()
+    assert man["latest_snap_id"] == result["snap_id"]
+
+
+def test_a_flight_report_records_its_prefix_hash_and_refreshes_the_manifest(box, monkeypatch, tmp_path):
+    from Orchestrator import oversight
+    box.provider(FakeProvider())
+    _turn(OP, 1)
+    minted = ckpt.perform_mint(OP, "TEST")
+    monkeypatch.setattr(oversight, "VOL_PATH", box.vol)
+    monkeypatch.setattr(oversight, "STATE_PATH", tmp_path / "fr_state.json")
+    oversight.load_flight_recorder_state()
+    monkeypatch.setattr(fossils, "get_recent_fossils_for_operator", lambda *a, **k: ["a snapshot"])
+    monkeypatch.setattr(oversight, "collect_oversight_signals", lambda: {})
+    monkeypatch.setattr(oversight, "format_signals_digest", lambda signals: "no signals")
+    monkeypatch.setattr(oversight, "_synthesize", lambda prompt: "all quiet")
+    monkeypatch.setattr(oversight, "_maybe_notify", lambda *a: None)
+    snap_id = oversight.create_flight_report_async(manual=True)
+    assert snap_id and snap_id != minted["snap_id"]
+    ledger = box.vol.read_bytes()
+    assert [r["snap_id"] for r in _records(box)] == [minted["snap_id"], snap_id]
+    man = json.loads(volume.MANIFEST.read_text())
+    assert man["latest_sha256"] == hashlib.sha256(ledger).hexdigest()
+    assert man["latest_snap_id"] == snap_id
 
 
 def test_a_failed_checkpoint_is_reported_as_failed(checkpoint_env, monkeypatch):

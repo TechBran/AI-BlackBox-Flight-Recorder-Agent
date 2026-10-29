@@ -269,11 +269,14 @@ def test_scorer_returns_text_for_topk(monkeypatch, tmp_path):
 
 
 # OLD peak (commit f9dd2c8, pre-2b) measured 127.3 MB over a ~37 MB volume (~3.4x).
-# NEW peak is floored by the volume bytes alone: 38.0 MB at ~37 MB (2026-06-21) and
-# 58.5 MB at 55.6 MB (2026-10-11), i.e. ~1.05x. The volume grows with every mint, so
-# the ceiling is RELATIVE to it (an absolute 55 MB pin went red once the ledger
-# passed 55 MiB). 1.3x + 8 MiB still catches the ~3.4x texts-materialisation regression.
-PEAK_CEILING_FACTOR = 1.3
+# The 2b peak was floored by the volume bytes alone: 38.0 MB at ~37 MB (2026-06-21)
+# and 58.5 MB at 55.6 MB (2026-10-11), i.e. ~1.05x. Since the scan slices the
+# shared ledger map instead of copying the bytes it scores (audit rank 77) the peak
+# is the per-snapshot bookkeeping and one decoded snapshot at a time: 5.8 MB at
+# 55.9 MiB (2026-10-29, 54.5 MB before). The volume grows with every mint, so the
+# ceiling is RELATIVE to it. 0.25x + 8 MiB catches a reintroduced copy of the
+# scored bytes (~1x) as well as the ~3.4x texts materialisation.
+PEAK_CEILING_FACTOR = 0.25
 PEAK_CEILING_SLACK_BYTES = 8 * 1024 * 1024
 MIN_MEANINGFUL_VOLUME_BYTES = 1024 * 1024
 
@@ -283,11 +286,13 @@ def _peak_ceiling_bytes(volume_bytes: int) -> int:
 
 
 def test_peak_ceiling_still_catches_the_pre_2b_regression():
-    """The relative ceiling must stay below the pre-2b peak it exists to catch
-    (127.3 MB over a ~37 MB volume, ~3.4x), at any volume size."""
+    """The relative ceiling must stay below the peaks it exists to catch: the
+    pre-2b texts materialisation (127.3 MB over a ~37 MB volume, ~3.4x) and a
+    copy of the scored bytes (~1x), at any volume size."""
     for vol_mb in (37, 55, 120, 400):
         vol_bytes = vol_mb * 1024 * 1024
         assert _peak_ceiling_bytes(vol_bytes) < 3.4 * vol_bytes
+        assert _peak_ceiling_bytes(vol_bytes) < vol_bytes
 
 
 @pytest.mark.live_store
@@ -295,8 +300,9 @@ def test_keyword_scorer_peak_ceiling():
     """Per-call tracemalloc PEAK of the operator scorer must sit below the ceiling.
 
     OLD (pre-2b): 127.3 MB because vol_bytes (~37 MB) + a fully-materialized `texts`
-    list (~89 MB) coexisted for the whole scan. NEW: ~1.05x the volume (streamed;
-    floored by vol_bytes alone). Both versions cannot run in one process, so the
+    list (~89 MB) coexisted for the whole scan. 2b: ~1.05x the volume (streamed;
+    floored by vol_bytes alone). NOW: ~0.1x (the scan slices the ledger map
+    instead of copying what it scores). Both versions cannot run in one process, so the
     ceiling is a fixed multiple of the CURRENT volume size (see _peak_ceiling_bytes).
 
     This test reads the LIVE volume on purpose: the per-call high-water mark is a
@@ -324,7 +330,7 @@ def test_keyword_scorer_peak_ceiling():
     assert peak <= ceiling, (
         f"keyword scorer per-call peak {peak / mb:.1f}MB exceeds ceiling "
         f"{ceiling / mb:.1f}MB ({PEAK_CEILING_FACTOR}x the {vol_bytes / mb:.1f}MB volume "
-        f"+ {PEAK_CEILING_SLACK_BYTES // mb}MB; OLD pre-2b was ~3.4x)"
+        f"+ {PEAK_CEILING_SLACK_BYTES // mb}MB; OLD pre-2b was ~3.4x, a copy of the scored bytes ~1x)"
     )
 
 

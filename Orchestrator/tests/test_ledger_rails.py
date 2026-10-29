@@ -83,7 +83,7 @@ def test_health_reports_gm_fail_instead_of_500(ledger, app_client, monkeypatch):
 
 def test_ledger_error_from_a_route_is_a_500_with_its_detail(ledger, app_client, monkeypatch):
     from Orchestrator.routes import admin_routes
-    monkeypatch.setattr(admin_routes, "read_text_safe", lambda _p: "=== END SNAPSHOT — SNAP-20260101-001 — UTC 2026-01-01T00:00:00Z ===\n")
+    monkeypatch.setattr(admin_routes, "read_tail_text", lambda _p: "=== END SNAPSHOT — SNAP-20260101-001 — UTC 2026-01-01T00:00:00Z ===\n")
     monkeypatch.setattr(admin_routes, "parse_tail", volume.parse_tail)
     r = app_client.get("/tail")
     assert r.status_code == 500

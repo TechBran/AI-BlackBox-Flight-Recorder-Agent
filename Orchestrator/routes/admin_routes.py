@@ -42,7 +42,7 @@ import Orchestrator.models as models_module  # Import module for dynamic access 
 from Orchestrator.models import task_queue
 from Orchestrator.monitoring import drift_state_global, get_disk_usage
 from Orchestrator.state import get_state, state_by_op
-from Orchestrator.volume import LedgerError, cleanup_old_archives, parse_tail, read_text_safe, sha256_bytes, verify_gm_or_halt
+from Orchestrator.volume import LedgerError, cleanup_old_archives, ledger_counts, parse_tail, read_tail_text, read_text_safe, sha256_bytes, verify_gm_or_halt
 from Orchestrator.maintenance import cleanup_old_session_files
 
 
@@ -349,6 +349,11 @@ def _manifest_summary() -> dict:
         "latest_utc": man.get("latest_utc", ""),
         "archive_count": len(archive) if isinstance(archive, list) else 0,
     }
+    # The committed prefix latest_sha256 hashes (every append records it,
+    # audit rank 77); absent from a manifest no mint has updated since.
+    for key in ("latest_bytes", "latest_snap_id"):
+        if key in man:
+            summary[key] = man[key]
     _manifest_summary_cache = (key, summary)
     return dict(summary)
 
@@ -367,9 +372,16 @@ def health(full: bool = False):
     # Count snapshots from the mtime-cached index every retrieval shares,
     # instead of parsing the 17 MB index file on every poll.
     try:
-        snapshot_count = len(load_snapshot_index())
+        index = load_snapshot_index()
+        snapshot_count = len(index)
     except Exception:
-        snapshot_count = 0
+        index, snapshot_count = None, 0
+    # The ledger's own counts (audit rank 77): how much of it the index
+    # covers, the prefix-hash records, the archive copies, the last check.
+    try:
+        ledger_block = ledger_counts(index)
+    except Exception as e:
+        ledger_block = {"error": str(e)}
     if full:
         try:
             latest_manifest = json.loads(MANIFEST.read_text())
@@ -411,7 +423,7 @@ def health(full: bool = False):
         "status": status, "detail": detail, "gm_sha256": gm_digest,"worker_running": models_module.worker_running,"queue_size": len(task_queue),
         "gm_bytes": gm_bytes, "volume_bytes": vol_bytes, "snapshot_count": snapshot_count, "drift": drift_state_global(),
         "ctx_used": max((s.context_used for s in state_by_op.values()), default=0),
-        "ctx_max": CTX_MAX, "latest_manifest": latest_manifest,
+        "ctx_max": CTX_MAX, "latest_manifest": latest_manifest, "ledger": ledger_block,
         "audio_engine": AUDIO_ENGINE, "tts_model": TTS_MODEL, "stt_model": STT_MODEL,
         "users": {"list": USERS_LIST, "default": current_default()}, "pairing": pairing,
         "operator_turns": operator_turns,  # Per-operator turn counts, checkpoint countdown, and cumulative tokens
@@ -1026,11 +1038,12 @@ def get_available_models(provider: str, operator: Optional[str] = None):
 
 @app.get("/tail")
 def tail():
-    return parse_tail(read_text_safe(VOL_PATH))
+    # The ledger's last snapshot, not the whole file decoded (read_tail_text).
+    return parse_tail(read_tail_text(VOL_PATH))
 
 @app.get("/recall")
 def recall():
-    vol = read_text_safe(VOL_PATH)
+    vol = read_tail_text(VOL_PATH)
     ends = list(END_RX.finditer(vol))
     if not ends: return {"prior": ""}
     end_m = ends[-1]
@@ -1108,14 +1121,23 @@ def force_rebuild_index():
 @app.get("/artifact")
 def artifact(which: str = "latest", utc: Optional[str] = None):
     if which == "latest":
-        man = json.loads(MANIFEST.read_text())
-        if not man["archive"]: raise HTTPException(404, "No archive yet")
-        return FileResponse(Path(man["archive"][-1]["path"]))
+        try:
+            man = json.loads(MANIFEST.read_text())
+        except (OSError, ValueError):
+            man = {}
+        # The newest copy the manifest lists that is still on disk.
+        for entry in reversed((man.get("archive") if isinstance(man, dict) else None) or []):
+            p = Path(entry.get("path", "")) if isinstance(entry, dict) else None
+            if p is not None and p.is_file():
+                return FileResponse(p)
+        raise HTTPException(404, "No archive yet")
     elif utc:
         # utc is a query parameter joined into a filename: no path syntax.
         if any(c in utc for c in ("/", "\\", "\x00")) or ".." in utc:
             raise HTTPException(400, "Invalid utc")
-        p = ARC_DIR / f"Volume_{utc}.txt"
+        # The manifest records the ISO time (2026-10-08T11:05:55Z); the file
+        # name carries it with dashes for colons. Either form finds the copy.
+        p = ARC_DIR / f"Volume_{utc.replace(':', '-')}.txt"
         if not p.exists(): raise HTTPException(404, "Not found")
         return FileResponse(p)
     raise HTTPException(400, "Specify which=latest or utc=...")

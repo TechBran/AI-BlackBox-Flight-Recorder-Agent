@@ -157,14 +157,13 @@ def test_perform_mint_attaches_only_the_new_media(env, tmp_path, monkeypatch):
     tasks, db, index_path = env
     snap_ids = iter(["SNAP-20261001-0001", "SNAP-20261001-0002"])
     monkeypatch.setattr(ckpt, "verify_gm_or_halt", lambda: None)
-    monkeypatch.setattr(ckpt, "read_text_safe", lambda _p: "")
+    monkeypatch.setattr(ckpt, "read_tail_text", lambda _p: "")
     monkeypatch.setattr(ckpt, "parse_tail",
                         lambda _t: {"tail_id": "SNAP-20261001-0000", "utc": "2026-10-01T00:00:00Z"})
     monkeypatch.setattr(ckpt, "next_snap_id_from_tail", lambda _t: next(snap_ids))
     monkeypatch.setattr(ckpt, "append_snapshot_text", lambda body: None)
     monkeypatch.setattr(ckpt, "VOL_PATH", tmp_path / "no-such-volume.txt")
     monkeypatch.setattr(ckpt, "_embed_for_index", lambda *a, **k: {})
-    monkeypatch.setattr(ckpt, "archive_volume", lambda: ("/tmp/arc.txt", "deadbeef", "utc"))
     monkeypatch.setattr(ckpt, "save_operator_state", lambda *a, **k: None)
 
     first = _media(db, 1)

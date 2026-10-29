@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from Orchestrator import ledger
 from Orchestrator.config import CFG, VOL_PATH
 from Orchestrator.embeddings import search as _emb
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
@@ -211,19 +212,19 @@ def _note_rerank_fallthrough(reason: str) -> None:
 
 def _decode_snapshot_text(meta) -> "str | None":
     """Byte-offset decode of ONE snapshot from the volume (rerank passage
-    source). Targeted seek-read — a few KB per candidate, NOT the ~35MB
-    whole-volume read the no-index keyword fallback pays. None on any
-    failure (missing offsets, short file, IO error) — never raises."""
+    source). A few KB per candidate from the shared ledger map
+    (Orchestrator/ledger.py), NOT the ~35MB whole-volume read the no-index
+    keyword fallback pays, and no open per passage (a reranked search used to
+    open the file 40 times). None on any failure (missing offsets, short
+    file, IO error) — never raises."""
     try:
         start, end = int(meta["byte_start"]), int(meta["byte_end"])
         if end <= start:
             return None
-        with open(VOL_PATH, "rb") as f:
-            f.seek(start)
-            raw = f.read(end - start)
-        if len(raw) < end - start:
+        view = ledger.view(VOL_PATH)
+        if end > view.size:
             return None  # offsets beyond EOF (index/volume drift)
-        return raw.decode("utf-8", errors="replace")
+        return view.text(start, end)
     except Exception:  # noqa: BLE001 - rerank is best-effort, never raises
         return None
 

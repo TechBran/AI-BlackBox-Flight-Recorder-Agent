@@ -80,7 +80,7 @@ from Orchestrator.embeddings.store import (
     set_active_slug,
     store_exists,
 )
-from Orchestrator.volume import read_volume_bytes
+from Orchestrator import ledger
 
 STATE_FILE = "migration_state.json"
 BATCH_SIZE = 8          # texts per provider.embed call (model-switch engine)
@@ -402,8 +402,9 @@ def resume_if_interrupted() -> "asyncio.Task | None":
 
 # ── shared volume-slice helper (engine + Task 9 watcher gap-heal) ────────────
 
-def slice_snapshot_text(snap_id: str, index: dict, vol_bytes: bytes) -> "str | None":
+def slice_snapshot_text(snap_id: str, index: dict, vol_bytes) -> "str | None":
     """Snapshot body text sliced from the volume by index byte offsets.
+    `vol_bytes` is the volume's bytes or a ledger view of them (ledger.view).
 
     None when the recorded range is invalid for this volume (stale index
     entry, truncated volume) — callers quarantine/skip those ids.
@@ -601,10 +602,10 @@ async def _run_engine(target_slug: str) -> dict:
                 break
             _set_total_from_missing(len(missing))
 
-            # Volume bytes are read ONCE per pass (~35MB) and sliced per
-            # snapshot — off the loop, a 35MB disk read blocks every request.
+            # One view of the volume per pass, sliced per snapshot from the
+            # ledger's map (no whole-file read; audit rank 77) — off the loop.
             vol_bytes = await asyncio.to_thread(
-                read_volume_bytes, Path(config.VOL_PATH)
+                ledger.view, Path(config.VOL_PATH)
             )
 
             for i in range(0, len(missing), BATCH_SIZE):
@@ -845,7 +846,7 @@ async def _catch_up_fill(target_slug: str) -> int:
     missing = store.missing(sorted(index.keys()))
     if not missing:
         return 0
-    vol_bytes = await asyncio.to_thread(read_volume_bytes, Path(config.VOL_PATH))
+    vol_bytes = await asyncio.to_thread(ledger.view, Path(config.VOL_PATH))
     ids_texts = []
     for sid in missing:
         text = slice_snapshot_text(sid, index, vol_bytes)
@@ -989,9 +990,9 @@ async def _run_rebuild_engine(target_slug: str, content_mode: str = "full",
                 break
             _set_total_from_missing(len(missing))
 
-            # One volume read per pass, sliced per snapshot (engine pattern).
+            # One view of the volume per pass, sliced per snapshot (engine pattern).
             vol_bytes = await asyncio.to_thread(
-                read_volume_bytes, Path(config.VOL_PATH)
+                ledger.view, Path(config.VOL_PATH)
             )
             ids_texts, bad_ids = [], []
             for sid in missing:

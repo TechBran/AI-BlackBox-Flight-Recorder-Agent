@@ -176,7 +176,7 @@ def save_env(monkeypatch, artifacts_dir, tmp_path):
     monkeypatch.setattr(ckpt, "save_operator_state", lambda *a, **k: None)
     monkeypatch.setattr(tasks, "collect_pending_media_artifacts", lambda *a, **k: [])
     monkeypatch.setattr(ckpt, "verify_gm_or_halt", lambda: None)
-    monkeypatch.setattr(ckpt, "read_text_safe", lambda _p: "")
+    monkeypatch.setattr(ckpt, "read_tail_text", lambda _p: "")
     monkeypatch.setattr(ckpt, "parse_tail",
                         lambda _t: {"tail_id": "SNAP-20261017-0000", "utc": "2026-10-17T00:00:00Z"})
     monkeypatch.setattr(ckpt, "next_snap_id_from_tail", lambda _t: "SNAP-20261017-0001")
@@ -184,7 +184,6 @@ def save_env(monkeypatch, artifacts_dir, tmp_path):
     monkeypatch.setattr(ckpt, "VOL_PATH", tmp_path / "no-such-volume.txt")
     monkeypatch.setattr(ckpt, "_embed_for_index", lambda *a, **k: {})
     monkeypatch.setattr(ckpt, "update_snapshot_index", lambda *a, **k: None)
-    monkeypatch.setattr(ckpt, "archive_volume", lambda *_a, **_k: ("/tmp/arc.txt", "deadbeef", "utc"))
     return cr, ledger
 
 

@@ -420,7 +420,7 @@ def mint_site(env, monkeypatch, tmp_path):
     from Orchestrator import checkpoint
 
     monkeypatch.setattr(checkpoint, "verify_gm_or_halt", lambda: None)
-    monkeypatch.setattr(checkpoint, "read_text_safe", lambda _p: "")
+    monkeypatch.setattr(checkpoint, "read_tail_text", lambda _p: "")
     monkeypatch.setattr(
         checkpoint, "parse_tail", lambda _txt: {"tail_id": "SNAP-20260702-0100"}
     )
@@ -429,9 +429,6 @@ def mint_site(env, monkeypatch, tmp_path):
     )
     monkeypatch.setattr(checkpoint, "append_snapshot_text", lambda _b: None)
     monkeypatch.setattr(checkpoint, "VOL_PATH", tmp_path / "nonexistent-vol.txt")
-    monkeypatch.setattr(
-        checkpoint, "archive_volume", lambda *_a, **_k: ("/tmp/arc.txt", "deadbeef", TS)
-    )
     return checkpoint
 
 

@@ -57,15 +57,25 @@ def ledger(isolated_stores):
 
 @pytest.fixture
 def volume_reads(monkeypatch):
-    """Bytes read from the volume file while the test runs (open() and io.open
-    are both wrapped, so a pathlib read counts too)."""
+    return count_volume_reads(monkeypatch)
+
+
+def count_volume_reads(monkeypatch) -> dict:
+    """Bytes read from the volume file from now on: through open() (open()
+    and io.open are both wrapped, so a pathlib read counts too) or served
+    from the shared ledger map (Orchestrator/ledger.py views: read, slice,
+    and a whole-view buffer, which counts as the whole file)."""
+    try:
+        from Orchestrator import ledger as ledger_mod
+    except ImportError:  # a tree from before the shared reader
+        ledger_mod = None
     counter = {"bytes": 0}
     real_open = builtins.open
 
     def counting_open(file, mode="r", *a, **k):
         f = real_open(file, mode, *a, **k)
         name = str(file) if not isinstance(file, int) else ""
-        if name.endswith("SNAPSHOT_VOLUME.txt") and "r" in mode:
+        if name.endswith("SNAPSHOT_VOLUME.txt") and "r" in mode and "+" not in mode:
             real_read = f.read
 
             def read(n=-1):
@@ -75,8 +85,20 @@ def volume_reads(monkeypatch):
             f.read = read
         return f
 
+    def counted(name):
+        real = getattr(ledger_mod.LedgerView, name)
+
+        def method(self, *args):
+            out = real(self, *args)
+            if self.path.endswith("SNAPSHOT_VOLUME.txt"):
+                counter["bytes"] += len(out)
+            return out
+        return method
+
     monkeypatch.setattr(builtins, "open", counting_open)
     monkeypatch.setattr(io, "open", counting_open)
+    for name in ("read", "slice", "buffer") if ledger_mod else ():
+        monkeypatch.setattr(ledger_mod.LedgerView, name, counted(name))
     return counter
 
 

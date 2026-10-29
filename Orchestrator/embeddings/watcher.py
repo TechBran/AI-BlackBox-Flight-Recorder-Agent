@@ -92,7 +92,7 @@ from Orchestrator.embeddings.store import (
     list_stores,
 )
 from Orchestrator.notifications.bus import notify
-from Orchestrator.volume import read_volume_bytes
+from Orchestrator import ledger
 
 HEALTH_FILE = "health.json"        # same name embeddings_routes reads
 PROBE_TIMEOUT_S = 30.0             # 1-string probe cap (provider retries inside)
@@ -395,9 +395,9 @@ async def _gap_heal(active: str) -> int:
         missing = store.missing(list(index.keys()))[:HEAL_CAP]
         if not missing:
             return 0
-        # One volume read, sliced per snapshot — same pattern as the migration
-        # engine (and the same shared slice helper).
-        vol_bytes = await asyncio.to_thread(read_volume_bytes, Path(config.VOL_PATH))
+        # One view of the volume, sliced per snapshot — same pattern as the
+        # migration engine (and the same shared slice helper).
+        vol_bytes = await asyncio.to_thread(ledger.view, Path(config.VOL_PATH))
         good_ids, texts = [], []
         for sid in missing:
             text = slice_snapshot_text(sid, index, vol_bytes)

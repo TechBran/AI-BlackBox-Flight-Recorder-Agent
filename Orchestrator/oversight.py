@@ -461,7 +461,7 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
     )
     from Orchestrator.volume import (
         append_snapshot_text, next_snap_id_from_tail, now_utc_iso,
-        parse_tail, read_text_safe,
+        parse_tail, publish_latest, read_tail_text, record_append,
     )
     from Orchestrator.monitoring import render_snapshot_body_v71
     from Orchestrator.state import mint_lock
@@ -510,8 +510,7 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
 
         with mint_lock:
             utc = now_utc_iso()
-            vol1 = read_text_safe(VOL_PATH)
-            info1 = parse_tail(vol1)
+            info1 = parse_tail(read_tail_text(VOL_PATH))
             snap_id = next_snap_id_from_tail(info1["tail_id"])
             source_range = (f"{covered_ids[0]}..{covered_ids[-1]}"
                             if covered_ids else "none")
@@ -547,7 +546,21 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
                 snap_id=snap_id, byte_start=byte_start, byte_end=byte_end,
                 operator=FLIGHT_RECORDER_OPERATOR, timestamp=utc,
                 snap_type="flight_report")
+            # The append's prefix-hash record, as on every mint path
+            # (checkpoint._ledger_record). Best-effort: the report is in.
+            try:
+                record = record_append(snap_id, byte_start, byte_end, utc,
+                                       ledger_path=VOL_PATH)
+            except Exception as e:  # noqa: BLE001 - the report is committed
+                record = None
+                print(f"[FLIGHT-RECORDER] ledger hash record failed for {snap_id}: {e}")
 
+        # The manifest's latest_* follow flight reports too (audit
+        # O05-ledger-persistence-03: they never refreshed latest_sha256).
+        try:
+            publish_latest(record)
+        except Exception as e:  # noqa: BLE001
+            print(f"[FLIGHT-RECORDER] manifest latest update failed for {snap_id}: {e}")
         # The embed runs after mint_lock is released, as on every mint path
         # (checkpoint._embed_and_store): a slow provider must not hold every
         # other mint (audit O05-ledger-persistence-05).

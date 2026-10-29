@@ -81,7 +81,7 @@ def test_hybrid_retrieve_surfaces_recent_work():
     assert_has_recent(extract_snap_ids(results))
 
 
-HYBRID_PEAK_FACTOR = 1.5
+HYBRID_PEAK_FACTOR = 0.25
 HYBRID_PEAK_SLACK_BYTES = 16 * 1024 * 1024
 MIN_MEANINGFUL_VOLUME_BYTES = 1024 * 1024
 
@@ -92,10 +92,12 @@ def _hybrid_peak_ceiling_bytes(volume_bytes: int) -> int:
 
 def test_hybrid_peak_ceiling_still_catches_a_full_volume_decode():
     """The relative ceiling must stay well below a reintroduced full-volume
-    read_text_safe decode (~7x the volume), at any volume size."""
+    read_text_safe decode (~7x the volume) and a copy of the bytes the
+    keyword scan scores (~1x), at any volume size."""
     for vol_mb in (35, 56, 120, 400):
         vol_bytes = vol_mb * 1024 * 1024
         assert _hybrid_peak_ceiling_bytes(vol_bytes) < 7 * vol_bytes
+        assert _hybrid_peak_ceiling_bytes(vol_bytes) < vol_bytes
 
 
 @pytest.mark.live_store
@@ -115,10 +117,12 @@ def test_hybrid_retrieve_peak_is_bounded():
     ~250MB — even though the index-backed keyword path IGNORES that decoded str (it
     decodes per-snapshot from read_volume_bytes on demand; verified: passing "" yields
     the SAME keyword ids when an index exists). retrieve() now skips read_text_safe
-    whenever the index is non-empty, dropping the steady-state peak to ~39MB. This
-    test pins an honest post-fix ceiling (<80MB, ~2x headroom over the ~39MB floor) so
-    that a reintroduced full-volume decode (~250MB) or an unbounded/O(n^2) blowup is
-    caught.
+    whenever the index is non-empty, dropping the steady-state peak to ~39MB, and
+    the keyword scan now slices the shared ledger map instead of copying the bytes
+    it scores (audit rank 77), dropping it to ~0.1x the volume. This test pins an
+    honest post-fix ceiling relative to the volume (see _hybrid_peak_ceiling_bytes)
+    so that a reintroduced copy of the scored bytes (~1x), a full-volume decode
+    (~250MB) or an unbounded/O(n^2) blowup is caught.
     """
     vol_bytes = len(read_volume_bytes(VOL_PATH)) if VOL_PATH.exists() else 0
     if vol_bytes < MIN_MEANINGFUL_VOLUME_BYTES:
@@ -138,12 +142,13 @@ def test_hybrid_retrieve_peak_is_bounded():
     mb = 1024 * 1024
     hybrid_mb = peak_hybrid / mb
     ceiling = _hybrid_peak_ceiling_bytes(vol_bytes)
-    # Honest post-fix ceiling: the steady-state peak is ~1.07x the volume (the
-    # streaming keyword scan over read_volume_bytes, floored by the volume itself:
-    # ~39MB at ~35MB, 59.3MB at 55.6MB on 2026-10-11). The ceiling is RELATIVE to the
-    # volume because the ledger grows with every mint (an absolute 80MB pin would go
-    # red near a 75MB volume). 1.5x + 16MB still catches a reintroduced full-volume
-    # read_text_safe decode (~7x) or an unbounded / O(n^2) blowup.
+    # Honest post-fix ceiling: the steady-state peak was ~1.07x the volume (the
+    # streaming keyword scan held a copy of the bytes it scored: ~39MB at ~35MB,
+    # 59.3MB at 55.6MB on 2026-10-11) and is ~0.1x since the scan slices the
+    # shared ledger map (6.5MB at 55.9MiB on 2026-10-29, audit rank 77). The
+    # ceiling is RELATIVE to the volume because the ledger grows with every mint.
+    # 0.25x + 16MB catches that copy coming back (~1x), a reintroduced
+    # full-volume read_text_safe decode (~7x) or an unbounded / O(n^2) blowup.
     assert peak_hybrid <= ceiling, (
         f"hybrid_retrieve peak {hybrid_mb:.1f}MB exceeded the {ceiling / mb:.1f}MB ceiling "
         f"({HYBRID_PEAK_FACTOR}x the {vol_bytes / mb:.1f}MB volume + "
