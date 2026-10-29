@@ -90,3 +90,51 @@ def test_stringified_image_args_start_the_right_images(provider):
 def test_garbage_k_falls_back_to_the_default(provider):
     out, _ = _call(provider, "search_snapshots", {"query": "ann", "k": "lots"})
     assert out.startswith("Found 3 relevant snapshot(s) for: ann"), out
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.parametrize("value", [2, "2"])
+def test_the_declared_limit_sets_the_search_size(provider, value):
+    # ToolVault declares search_snapshots {query, operator, limit}; the voice
+    # ladder read only `k`, so a model following the schema always got 3.
+    out, _ = _call(provider, "search_snapshots", {"query": "ann", "limit": value})
+    assert out.startswith("Found 2 relevant snapshot(s) for: ann"), out
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_the_search_size_stays_capped_at_five(provider):
+    out, _ = _call(provider, "search_snapshots", {"query": "ann", "limit": "50"})
+    assert out.startswith("Found 5 relevant snapshot(s) for: ann"), out
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.parametrize("args", [{"k": "-1"}, {"limit": "0"}, {"limit": -3}])
+def test_a_non_positive_search_size_still_searches(provider, args):
+    out, _ = _call(provider, "search_snapshots", {"query": "ann", **args})
+    assert out.startswith("Found 1 relevant snapshot(s) for: ann"), out
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.parametrize("count", ["-2", "0", -1])
+def test_a_non_positive_count_lists_one_not_all_but_some(provider, count):
+    # matching[:-1] is every snapshot but one: for the system operator, the
+    # whole index read off the volume into one tool result.
+    out, _ = _call(provider, "list_recent_snapshots", {"count": count})
+    assert out.startswith("Found 1 recent snapshot(s)"), out
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_a_garbage_sample_count_falls_back_to_one(provider):
+    out, cap = _call(provider, "lyria_music", {"prompt": "calm piano", "sampleCount": "two"})
+    assert out.startswith("Music generation started"), out
+    assert "variations" not in out
+    assert "sample_count" not in cap.tasks[0]["result_data"]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.parametrize("value", ["2.5", "many", 0, "-4"])
+def test_a_garbage_image_count_falls_back_to_one(provider, value):
+    out, cap = _call(provider, "gemini_image", {"prompt": "a red barn", "numberOfImages": value})
+    assert out.startswith("Image generation started"), out
+    assert "Creating 1 image at" in out
+    assert cap.tasks[0]["result_data"]["options"]["numberOfImages"] == 1

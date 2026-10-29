@@ -20,7 +20,8 @@ its search failed.
 """
 
 import json
-from typing import Any, Callable, Dict
+import math
+from typing import Any, Callable, Dict, Optional
 
 from Orchestrator.config import VOL_PATH
 from Orchestrator.fossils import format_snapshot_for_delivery, hybrid_retrieve
@@ -98,6 +99,8 @@ def _int_arg(args: Dict, key: str, default: int) -> int:
     value = args.get(key, default)
     if isinstance(value, bool):
         return default
+    if isinstance(value, float) and not math.isfinite(value):
+        return default  # json.loads takes NaN and Infinity
     if isinstance(value, (int, float)):
         return int(value)
     if isinstance(value, str):
@@ -107,6 +110,19 @@ def _int_arg(args: Dict, key: str, default: int) -> int:
     return default
 
 
+def _count_arg(args: Dict, default: int, *keys: str, cap: Optional[int] = None) -> int:
+    """A how-many argument (results, variations, images): the first of `keys`
+    the call sets, read through _int_arg, then at least 1 and at most `cap`.
+    Without the floor, count=-1 made matching[:-1] every snapshot but one."""
+    value = default
+    for key in keys:
+        if key in args:
+            value = _int_arg(args, key, default)
+            break
+    value = max(1, value)
+    return min(value, cap) if cap is not None else value
+
+
 # =============================================================================
 # Memory tools
 # =============================================================================
@@ -114,7 +130,8 @@ def _int_arg(args: Dict, key: str, default: int) -> int:
 async def execute_search_snapshots(session, arguments: Dict, *, log_prefix: str) -> str:
     """search_snapshots: hybrid retrieval, at most five snapshots, delivered whole."""
     query = arguments.get("query", "")
-    k = min(_int_arg(arguments, "k", 3), 5)  # Cap at 5 results
+    # `limit` is the declared ToolVault parameter; `k` stays for older prompts.
+    k = _count_arg(arguments, 3, "limit", "k", cap=5)  # Cap at 5 results
 
     if not query:
         return "Error: No search query provided."
@@ -146,7 +163,7 @@ async def _recent_snapshots(session, args: Dict, log_prefix: str) -> str:
     # spelling (get_recent_snapshots -> list_recent_snapshots) stays a dispatch
     # alias, so this specialized handler (system-sees-all scoping for
     # outbound-call context handoff) serves both instead of the catch-all.
-    count = min(_int_arg(args, "count", 3), 5)
+    count = _count_arg(args, 3, "count", cap=5)
     operator = session.operator or "system"
 
     # System operator sees ALL snapshots (for outbound calls/context handoff)
@@ -222,7 +239,7 @@ async def _generate_image(session, name: str, args: Dict, log_prefix: str) -> st
     prompt = args.get("prompt", "")
     aspect_ratio = args.get("aspectRatio", "16:9")
     resolution = args.get("resolution", "1K")
-    num_images = args.get("numberOfImages", 1)
+    num_images = _count_arg(args, 1, "numberOfImages")
     reference_images = args.get("reference_images", [])  # For image-to-image
 
     mode = "image-to-image" if reference_images else "text-to-image"
@@ -308,7 +325,7 @@ async def _generate_video(session, args: Dict, log_prefix: str) -> str:
 async def _generate_music(session, args: Dict, log_prefix: str) -> str:
     prompt = args.get("prompt", "")
     negative_prompt = args.get("negativePrompt", "")
-    sample_count = args.get("sampleCount", 1)
+    sample_count = _count_arg(args, 1, "sampleCount")
     print(f"{log_prefix} Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
 
     music_options = {
@@ -317,7 +334,7 @@ async def _generate_music(session, args: Dict, log_prefix: str) -> str:
     }
     if negative_prompt:
         music_options["negative_prompt"] = negative_prompt
-    if sample_count and sample_count > 1:
+    if sample_count > 1:
         music_options["sample_count"] = sample_count
 
     task = create_task(
@@ -391,7 +408,7 @@ async def execute_voice_tool(session, name: str, args: Dict, *, log_prefix: str,
     if name == "list_media":
         from Orchestrator.routes.chat_routes import execute_list_media
         media_type = args.get("media_type")
-        limit = args.get("limit", 20)
+        limit = _count_arg(args, 20, "limit")
         print(f"{log_prefix} Executing list_media: type={media_type}, limit={limit}")
         list_result = await run_blocking(execute_list_media, media_type=media_type, limit=limit)
         return json.dumps(list_result, indent=2)
@@ -399,7 +416,7 @@ async def execute_voice_tool(session, name: str, args: Dict, *, log_prefix: str,
         from Orchestrator.routes.chat_routes import execute_search_media
         query = args.get("query", "")
         media_type = args.get("media_type")
-        limit = args.get("limit", 10)
+        limit = _count_arg(args, 10, "limit")
         print(f"{log_prefix} Executing search_media: query='{query}', type={media_type}")
         search_result = await run_blocking(execute_search_media, query=query, media_type=media_type, limit=limit)
         return json.dumps(search_result, indent=2)
