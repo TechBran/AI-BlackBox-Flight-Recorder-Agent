@@ -7,7 +7,9 @@ _cu_save_to_blackbox, the on-device turn's persist_local_turn_and_mint, and the
 each, exactly what lands in the operator state (the conversation-log items, the
 counters, the snapshot metadata perform_mint reads), which mint and checkpoint
 calls are made, and what the caller returns. They are the contract the shared
-persist_turn_and_maybe_mint() is held to.
+persist_turn_and_maybe_mint() is held to; since it decided one metadata policy
+(test_turn_persistence_fixes.py) every path records the semantic ids as
+relevant and sets its own location gauge.
 
 Hermetic: perform_mint, the checkpoint task, save_operator_state and the drift
 gauge are recorders; every test uses its own operator name.
@@ -99,7 +101,7 @@ def test_chat_save_records_and_mints(gate):
         "meta": {"model": "test-model", "location": "43.65,-79.38 · Toronto, ON",
                  "usage_last": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
                  "gm_excerpt": True, "recent_ids": ["SNAP-1"],
-                 "relevant_ids": ["SNAP-2", "SNAP-4"]},
+                 "relevant_ids": ["SNAP-2", "SNAP-4", "SNAP-3"]},
     }
     assert gate["mint"] == [(op, "TURNS")]
     assert gate["checkpoint_task"] == [("CHECKPOINT", op, {"result_data": {"manual": False}})]
@@ -118,10 +120,10 @@ def test_cu_save_records_and_mints(gate):
             {"role": "assistant", "text": "Opened them.", "snap_text": "Opened them."},
         ],
         "counters": [1, 15, 1, 15, 0],
-        "meta": {"model": "computer-use", "location": None,
+        "meta": {"model": "computer-use", "location": "",
                  "usage_last": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
                  "gm_excerpt": True, "recent_ids": ["SNAP-1"],
-                 "relevant_ids": ["SNAP-2", "SNAP-4"]},
+                 "relevant_ids": ["SNAP-2", "SNAP-4", "SNAP-3"]},
     }
     assert gate["mint"] == [(op, "TURNS")]
     assert gate["checkpoint_task"] == [("CHECKPOINT", op, {"result_data": {"manual": False}})]
@@ -149,7 +151,7 @@ def test_local_turn_records_and_mints(gate):
             {"role": "assistant", "text": composed, "snap_text": composed},
         ],
         "counters": [1, 0, 1, 0, 0],
-        "meta": {"model": "local", "location": None,
+        "meta": {"model": "local", "location": "",
                  "usage_last": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                  "gm_excerpt": True, "recent_ids": ["SNAP-1"],
                  "relevant_ids": ["SNAP-2", "SNAP-4", "SNAP-3"]},
@@ -164,6 +166,7 @@ def test_worker_turn_records_and_mints(gate, monkeypatch):
     from Orchestrator.volume import now_utc_iso
 
     op = "persist-contract-worker"
+    monkeypatch.setattr(tasks, "TOOLVAULT_ENABLED", False)  # no tool-injection embedding
     monkeypatch.setattr(tasks, "build_fossil_context", lambda *a, **k: ("", dict(PROVENANCE)))
     monkeypatch.setattr(cr, "call_anthropic", lambda msgs, model, operator: (
         "Briefing done.", {"prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26},
@@ -184,9 +187,10 @@ def test_worker_turn_records_and_mints(gate, monkeypatch):
     assert view["log"][1]["snap_text"].endswith("\n\n[REASONING]\nThought about it.")
     assert view["counters"] == [1, 26, 1, 26, 26]
     assert view["meta"] == {
-        "model": "claude-opus-5-5", "location": None,
+        "model": "claude-opus-5-5", "location": "",
         "usage_last": {"prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26},
-        "gm_excerpt": True, "recent_ids": ["SNAP-1"], "relevant_ids": ["SNAP-2"]}
+        "gm_excerpt": True, "recent_ids": ["SNAP-1"],
+        "relevant_ids": ["SNAP-2", "SNAP-4", "SNAP-3"]}
     assert gate["mint"] == [(op, "TURNS")]
     assert gate["checkpoint_task"] == [("CHECKPOINT", op, {"result_data": {"manual": False}})]
     assert gate["saved"] == 1

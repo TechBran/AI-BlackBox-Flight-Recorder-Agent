@@ -2398,13 +2398,10 @@ def process_chat_task(task: Task):
         else: raise Exception(f"unknown provider: {provider}")
 
         with state_lock:
+            # The turn's provenance and usage are recorded with the turn
+            # (persist_turn_and_maybe_mint below).
             s.last_context_meta.update({
-                # Provenance reflects what is DELIVERED (build_fossil_context's
-                # window guard may have dropped whole snapshots).
-                "recent_ids": provenance["recent"],
-                "relevant_ids": provenance["keyword"], "gm_excerpt": True,
                 "provider": provider, "model": selected_model, "operator": active_operator,
-                "usage_last": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             })
 
         update_task(task.task_id, progress=40)
@@ -2603,10 +2600,6 @@ def process_chat_task(task: Task):
             reply_alias = ui_reply
 
         total_tok = usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
-        with state_lock:
-            s.last_context_meta["usage_last"] = {"prompt_tokens": usage.get("prompt_tokens", 0),
-                                               "completion_tokens": usage.get("completion_tokens", 0),
-                                               "total_tokens": total_tok}
 
         user_message_content = next((m.get("content") for m in inp.messages if m.get("role") == "user"), None)
         log_text = (user_text if user_text else "[media content]") if user_message_content else ""
@@ -2637,15 +2630,15 @@ def process_chat_task(task: Task):
 
         update_task(task.task_id, progress=90)
 
-        # The persist + auto-mint tail every chat path shares (audit rank 74).
-        # The snapshot metadata (provenance, model, usage) was set above, so the
-        # helper only records the turn, counts it (context_used included) and
-        # mints inline: this is a worker thread, not the event loop.
+        # The persist + auto-mint tail every chat path shares (audit rank 74):
+        # the turn, its usage and its DELIVERED provenance (build_fossil_context's
+        # window guard may have dropped whole snapshots), counted with
+        # context_used, minted inline (this is a worker thread, not the loop).
         checkpoint_triggered = asyncio.run(persist_turn_and_maybe_mint(
             s, active_operator, log_text, ui_reply, gate=_mint_gate(), snap_text=snap_text,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0), total_tokens=total_tok,
-            record_usage=False, count_context=True, offload=False, tag="[CHECKPOINT]",
+            provenance=provenance, count_context=True, offload=False, tag="[CHECKPOINT]",
         )).checkpoint_triggered
 
         result_data = {

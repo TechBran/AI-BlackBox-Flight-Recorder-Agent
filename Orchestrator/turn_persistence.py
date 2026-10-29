@@ -10,6 +10,14 @@ into the snapshot metadata, the drift / tokens / turns mint gate with its
 debounce, the checkpoint cadence, save the state — and the copies drifted. The
 sequence now lives here once.
 
+One policy for the snapshot metadata, decided here once (O03-chat-routes-B-11):
+"relevant" provenance is every retrieval channel that informed the turn
+(keyword, checkpoint and semantic; three copies dropped semantic, the worker
+kept keyword only), every turn sets its own LOCATION gauge ("" when it carried
+none, so a CU, on-device or worker turn never inherits a phone turn's fix),
+and every turn records its own token usage (the on-device turn showed the
+previous turn's).
+
 What stays with each caller: the turn's text and snapshot body (the worker's
 keyword digest, /chat/save's [REASONING] block, the on-device [TOOLS USED]
 block), and the knobs it is configured with. Those arrive as a MintGate built
@@ -21,7 +29,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
 from Orchestrator.models import TaskType
 from Orchestrator.utils.async_helpers import run_blocking
@@ -42,6 +50,10 @@ class MintGate:
     create_task: Callable
     save_operator_state: Callable
     drift_state_for: Callable
+
+
+# The retrieval channels a snapshot lists as "relevant" (recent is its own list).
+RELEVANT_CHANNELS = ("keyword", "checkpoint", "semantic")
 
 
 @dataclass
@@ -66,10 +78,10 @@ def mint_reason(state, gate: MintGate) -> Optional[str]:
     return None
 
 
-def relevant_ids(provenance: dict, keys: Iterable[str]) -> list:
-    """The snapshot's "relevant" provenance: the retrieval channels in ``keys``."""
+def relevant_ids(provenance: dict) -> list:
+    """The snapshot's "relevant" provenance: every RELEVANT_CHANNELS id."""
     out = []
-    for key in keys:
+    for key in RELEVANT_CHANNELS:
         out += provenance.get(key, [])
     return out
 
@@ -82,10 +94,8 @@ async def persist_turn_and_maybe_mint(
     completion_tokens: int = 0,
     total_tokens: Optional[int] = None,
     model: Optional[str] = None,
-    record_usage: bool = True,
-    location_gauge: Optional[str] = None,
+    location_gauge: str = "",
     provenance: Optional[dict] = None,
-    relevant_keys: Iterable[str] = ("keyword", "checkpoint"),
     count_context: bool = False,
     offload: bool = True,
     tag: str = "[TURN]",
@@ -94,12 +104,11 @@ async def persist_turn_and_maybe_mint(
 
     ``user_text`` "" records no user turn. ``total_tokens`` defaults to
     prompt + completion (a provider total that counts thinking tokens is
-    passed as is). ``model`` None, ``record_usage``
-    False, ``location_gauge`` None and ``provenance`` empty leave that piece of
-    the snapshot metadata as it is (the worker sets them before the provider
-    call). ``count_context`` also adds the tokens to context_used (the worker's
-    gauge). ``offload`` runs the mint off the event loop; a caller on a worker
-    thread mints inline.
+    passed as is). ``model`` None leaves the recorded model as it is (the worker
+    sets it before the provider call); ``location_gauge`` "" is a turn without
+    a location. ``count_context`` also adds the tokens to context_used (the
+    worker's gauge). ``offload`` runs the mint off the event loop; a caller on a
+    worker thread mints inline.
     """
     utc_now = now_utc_iso()
     if user_text:
@@ -121,18 +130,16 @@ async def persist_turn_and_maybe_mint(
     meta = state.last_context_meta
     if model is not None:
         meta["model"] = model
-    if location_gauge is not None:
-        # The snapshot's LOCATION gauge (perform_mint reads it into `gauges`).
-        meta["location"] = location_gauge
-    if record_usage:
-        meta["usage_last"] = {"prompt_tokens": prompt_tokens,
-                              "completion_tokens": completion_tokens,
-                              "total_tokens": total_tokens}
+    # The snapshot's LOCATION gauge (perform_mint reads it into `gauges`).
+    meta["location"] = location_gauge
+    meta["usage_last"] = {"prompt_tokens": prompt_tokens,
+                          "completion_tokens": completion_tokens,
+                          "total_tokens": total_tokens}
     if provenance:
         # perform_mint reads recent_ids and relevant_ids from last_context_meta.
         meta["gm_excerpt"] = True  # the turn's context always carried the system prompt
         meta["recent_ids"] = provenance.get("recent", [])
-        meta["relevant_ids"] = relevant_ids(provenance, relevant_keys)
+        meta["relevant_ids"] = relevant_ids(provenance)
         print(f"{tag} Provenance - Recent: {meta['recent_ids']}, Relevant: {meta['relevant_ids']}")
 
     result = TurnResult()

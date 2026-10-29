@@ -965,8 +965,7 @@ async def persist_local_turn_and_mint(
         # Token counts are 0 for an on-device turn; the model is the on-device provider.
         turn = await persist_turn_and_maybe_mint(
             get_state(operator), operator, prompt, assistant_response, gate=_mint_gate(),
-            model="local", record_usage=False, provenance=provenance,
-            relevant_keys=("keyword", "checkpoint", "semantic"), tag="[LOCAL-SAVE]",
+            model="local", provenance=provenance, tag="[LOCAL-SAVE]",
         )
         print(f"[LOCAL-SAVE] Saved on-device turn for {operator} (minted={turn.minted})")
         return {"snap_id": turn.snap_id, "minted": turn.minted,
