@@ -7,16 +7,16 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, escapeHtml as sharedEscapeHtml } from './core-utils.js';
-import { getHistoryData, setHistoryData, saveHistory, getOperator, getOperatorSession, saveOperatorSession, clearOperatorSession, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
+import { $, toast, escapeHtml } from './core-utils.js';
+import { getOperator, saveOperatorSession, getOperatorSession } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
 import { markdownToSafeHtml, markdownCodeSpan } from './markdown-renderer.js';
-import { sanitizeAssistantHtml } from './sanitize.js';
-import { speakToBubble, setLastAssistantText } from './tts-stt.js';
-import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
-import { scrollToBottomIfNeeded, setStreamingState } from './ui-setup.js';
+import { scrollToBottomIfNeeded } from './ui-setup.js';
 import { todoTracker } from './todo-tracker.js';
 import { statusLine } from './status-line.js';
+import {
+    BaseAgentHandler, bindBannerToggle, probeOncePerOperator, restoreForOperatorSwitch,
+} from './base-agent-handler.js';
 import {
     PERMISSION_MODE_INFO,
     nextPermissionMode,
@@ -38,10 +38,36 @@ function permissionStorage() {
 // AgentChatHandler Class
 // =============================================================================
 
-/**
- * Handler for Claude Code agent WebSocket communication
- * Manages streaming output, tool execution display, and session persistence
- */
+/** What sets the Claude Code agent apart (base-agent-handler.js) */
+const CLAUDE_AGENT = {
+    logPrefix: '[Agent]',
+    name: 'Claude Code',
+    connectFailed: 'Failed to connect to Claude Code CLI',
+    wsPath: '/ws/agent/',
+    sessionSuffix: '',
+    historyFlag: 'isAgent',
+    skipBlankDeltas: false,
+    toasts: {
+        sessionCleared: 'Session cleared. Ready for new prompt.',
+        sessionEnded: 'Session ended. Start a new conversation.',
+        endedByServer: 'Session ended',
+        error: 'Agent error',
+        connectionError: 'Agent connection error - check console',
+        continueFailed: 'Failed to continue session',
+    },
+    ids: {
+        endSession: 'endAgentSession',
+        newSession: 'newAgentSession',
+        snapshot: 'devSnapshotBtn',
+        confirmModal: 'confirmNewSessionModal',
+        banner: 'claudeCodeBanner',
+        bannerCollapsed: 'claudeBannerCollapsed',
+        bannerCollapseBtn: 'bannerCollapseBtn',
+        status: 'claudeAgentStatus',
+        statusCompact: 'claudeStatusCompact',
+    },
+};
+
 // Reasoning/Thinking cycling phrases
 const REASONING_PHRASES = [
     "Reasoning",
@@ -66,21 +92,20 @@ const REASONING_PHRASES = [
     "Deep analysis"
 ];
 
-export class AgentChatHandler {
+/**
+ * Handler for Claude Code agent WebSocket communication: the shared turn and
+ * rendering machinery (BaseAgentHandler) plus reconnection, the permission
+ * mode, the thinking budget and reasoning panel, todos and the status line,
+ * file/edit results, permission prompts, quick actions and detected apps.
+ */
+export class AgentChatHandler extends BaseAgentHandler {
+    /** The Claude Code agent's description (BaseAgentHandler) */
+    get agent() {
+        return CLAUDE_AGENT;
+    }
+
     constructor() {
-        this.ws = null;
-        this.sessionId = null;
-        this.currentBubble = null;
-        this.outputBuffer = '';
-        this.thinkingBuffer = '';
-        this.speakableBuffer = '';  // Text content only (no tool use) for TTS
-        this.isStreaming = false;
-        this.hasActiveSession = false;  // Track if we have an ongoing conversation
-        this.messageCount = 0;
-        this.currentOperator = null;
-        this.lastTool = null;
-        this.hasReceivedStreamingContent = false;
-        this._saveStateTimer = null;
+        super();
         this.permissionKeyboardHandler = null;
         this.activePermissionDialog = null;
         // Thinking budget tracking
@@ -94,84 +119,10 @@ export class AgentChatHandler {
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 15;
         this.reconnectTimer = null;
-        // Every listener this instance adds to shared DOM goes through this
-        // signal, so dispose() removes them all. A second instance used to
-        // stack its own copies: Shift+Tab and the mode indicator then cycled
-        // the permission mode twice (audit P03-live-agents-web-04).
-        this._listeners = new AbortController();
+        // Through the base's signal, so dispose() removes them: a second
+        // instance's copies cycled the permission mode twice per Shift+Tab
+        // (audit P03-live-agents-web-04).
         const signal = this._listeners.signal;
-
-        // Setup End Session button handler
-        const endBtn = $('endAgentSession');
-        if (endBtn) {
-            endBtn.onclick = () => this.endSession();
-        }
-
-        // Setup New Session button handler
-        const newSessionBtn = $('newAgentSession');
-        if (newSessionBtn) {
-            newSessionBtn.onclick = () => this.startNewSession();
-        }
-
-        // Setup Dev Snapshot button handler
-        const snapshotBtn = $('devSnapshotBtn');
-        if (snapshotBtn) {
-            snapshotBtn.onclick = () => this.createDevSnapshot();
-        }
-
-        // Setup Banner Collapse/Expand Toggle
-        const bannerCollapsed = $('claudeBannerCollapsed');
-        const bannerCollapseBtn = $('bannerCollapseBtn');
-
-        // Define toggle functions that get banner fresh each time
-        window.expandAgentBanner = function(e) {
-            if (e) e.preventDefault();
-            const banner = $('claudeCodeBanner');
-            if (banner) {
-                banner.classList.remove('collapsed');
-                if (window.updateHistoryPaddingForBanner) {
-                    window.updateHistoryPaddingForBanner();
-                }
-            }
-        };
-
-        window.collapseAgentBanner = function(e) {
-            if (e) {
-                e.preventDefault();
-                e.stopPropagation();
-            }
-            const banner = $('claudeCodeBanner');
-            if (banner) {
-                banner.classList.add('collapsed');
-                if (window.updateHistoryPaddingForBanner) {
-                    window.updateHistoryPaddingForBanner();
-                }
-            }
-        };
-
-        if (bannerCollapsed) {
-            bannerCollapsed.addEventListener('click', window.expandAgentBanner, { passive: false, capture: true, signal });
-            bannerCollapsed.setAttribute('role', 'button');
-            bannerCollapsed.setAttribute('tabindex', '0');
-            bannerCollapsed.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    window.expandAgentBanner(e);
-                }
-            }, { signal });
-        }
-
-        if (bannerCollapseBtn) {
-            bannerCollapseBtn.addEventListener('click', window.collapseAgentBanner, { passive: false, capture: true, signal });
-            bannerCollapseBtn.setAttribute('role', 'button');
-            bannerCollapseBtn.setAttribute('tabindex', '0');
-            bannerCollapseBtn.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    window.collapseAgentBanner(e);
-                }
-            }, { signal });
-        }
 
         // Setup Permission Mode click handler
         const permissionIndicator = $('permissionModeIndicator');
@@ -193,180 +144,89 @@ export class AgentChatHandler {
 
         // Initialize permission mode indicator
         this.updatePermissionModeIndicator();
-
-        // Save state when page is about to unload
-        window.addEventListener('beforeunload', () => {
-            if (this.isStreaming && this.currentBubble) {
-                this._saveToHistory();
-            }
-        }, { signal });
     }
 
     /**
-     * Retire this instance: its DOM listeners go and its socket is let go
-     * quietly (the session itself is not ended server-side).
+     * Retire this instance (BaseAgentHandler.dispose) and its reasoning animation.
      */
     dispose() {
-        this._listeners.abort();
-        this._releaseSession();
+        super.dispose();
         this.stopReasoningCycle();
     }
 
     /**
-     * Leave the streaming state after a failure: a backend 'error', or a
-     * socket that closed or errored without reconnecting. The 'completed'
-     * message used to be the ONLY way out, so after a failure isStreaming
-     * stayed true, the bubble kept its "Starting Claude Code session..."
-     * loader and ui-setup's page-fill scrolling stayed on for the rest of the
-     * page (audit P03-live-agents-web-12).
+     * A failed turn also stops the reasoning animation, the thinking-budget
+     * indicator and the status line's session (BaseAgentHandler._finalizeFailure).
      * @param {string} [message] - Shown where the loader was, if no reply came
      */
     _finalizeFailure(message) {
-        this.isStreaming = false;
-        setStreamingState(false);
         this.stopReasoningCycle();
         $('thinkingIndicator')?.classList.add('hide'); // don't leave embers pinned on
         statusLine.endSession();
-        const bubble = this.currentBubble;
-        if (!bubble) return;
-        bubble.classList.remove('agent-streaming');
-        const loading = bubble.querySelector('.agent-loading');
-        if (loading) {
-            const note = document.createElement('div');
-            note.className = 'agent-error';
-            note.textContent = message || 'Claude Code stopped before replying.';
-            loading.replaceWith(note);
-        }
+        super._finalizeFailure(message);
     }
 
     // =========================================================================
-    // Session Management
+    // Turn hooks (BaseAgentHandler)
     // =========================================================================
 
-    /**
-     * Start a new clean session (clears current and lets user send new prompt)
-     */
-    startNewSession() {
-        const modal = $('confirmNewSessionModal');
-        if (modal) {
-            modal.classList.remove('hide');
-        }
+    /** The model picked in the banner */
+    _selectedModel() {
+        const claudeModelSelect = $('claudeModelSelect');
+        return claudeModelSelect ? claudeModelSelect.value : (window.__claudeModel || 'sonnet');
+    }
+
+    /** A new session clears the todo tracker and the status line */
+    _onNewSession() {
+        todoTracker.clear();
+        statusLine.reset();
+    }
+
+    /** The todo tracker and status line follow the session (and cache their DOM) */
+    _attachSessionUi() {
+        todoTracker.init('todoPanel', this.sessionId);
+        statusLine.init('agentStatusLine');
+    }
+
+    /** An open socket resets the reconnect backoff and starts the status line */
+    _onTurnOpen() {
+        this.reconnectAttempts = 0;
+        statusLine.startSession(this.sessionId, this._selectedModel());
+    }
+
+    /** An abnormal close of a live session reconnects with backoff */
+    _reconnectsAfter(e) {
+        return e.code !== 1000 && !!this.sessionId;
+    }
+
+    _promptMessage(prompt) {
+        return {
+            ...super._promptMessage(prompt),
+            model: this._selectedModel(),
+            // The banner's mode switch: plan = read-only, yolo = every tool approved.
+            ...permissionPayload(this.permissionMode)
+        };
+    }
+
+    _followUpMessage(text) {
+        return { ...super._followUpMessage(text), model: this._selectedModel(), ...permissionPayload(this.permissionMode) };
+    }
+
+    _inputMessage(text) {
+        // A mode switched since the last message applies to this one.
+        return { ...super._inputMessage(text), ...permissionPayload(this.permissionMode) };
     }
 
     /**
-     * Actually perform the session clear (called when user confirms)
+     * Let go of the session (BaseAgentHandler._releaseSession), and of a
+     * pending reconnect, which would otherwise attach the old session again.
      */
-    confirmNewSession() {
-        console.log('[Agent] Starting new session');
-        const operator = this.currentOperator || getOperator();
-        if (operator) clearOperatorSession(operator);
-        todoTracker.clear();  // Clear todo tracker for new session
-        statusLine.reset();   // Reset status line for new session
-        this.endSession();
-        toast('Session cleared. Ready for new prompt.');
-
-        const modal = $('confirmNewSessionModal');
-        if (modal) {
-            modal.classList.add('hide');
+    _releaseSession() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
         }
-    }
-
-    /**
-     * Cancel new session (user clicked Cancel)
-     */
-    cancelNewSession() {
-        toast('Session kept. Continuing with current context.');
-        const modal = $('confirmNewSessionModal');
-        if (modal) {
-            modal.classList.add('hide');
-        }
-    }
-
-    /**
-     * Create a dev snapshot by triggering the /snapshot-dev slash command
-     */
-    createDevSnapshot() {
-        console.log('[Agent] Triggering /snapshot-dev command');
-
-        if (!this.hasActiveSession || !this.sessionId) {
-            toast('No active session. Start a conversation first.');
-            return;
-        }
-
-        const promptEl = $('prompt');
-        if (promptEl) {
-            promptEl.value = '/snapshot-dev';
-            $('btnSend')?.click();
-            toast('Snapshot command sent to Claude Code...');
-        }
-    }
-
-    /**
-     * Update banner status display
-     * @param {string} status - Status text
-     * @param {boolean} isStreaming - Whether currently streaming
-     */
-    updateBannerStatus(status, isStreaming = false) {
-        const statusEl = $('claudeAgentStatus');
-        const statusCompactEl = $('claudeStatusCompact');
-        const bannerEl = $('claudeCodeBanner');
-
-        const isReady = status.toLowerCase().includes('ready') ||
-                        status.toLowerCase().includes('active') ||
-                        status.toLowerCase().includes('msgs)');
-
-        if (statusEl) {
-            statusEl.textContent = status;
-            if (isStreaming) {
-                statusEl.classList.add('streaming');
-                statusEl.classList.remove('ready');
-            } else {
-                statusEl.classList.remove('streaming');
-                if (isReady) {
-                    statusEl.classList.add('ready');
-                } else {
-                    statusEl.classList.remove('ready');
-                }
-            }
-        }
-
-        if (statusCompactEl) {
-            statusCompactEl.textContent = status;
-            if (isStreaming) {
-                statusCompactEl.classList.add('streaming');
-                statusCompactEl.classList.remove('ready');
-            } else {
-                statusCompactEl.classList.remove('streaming');
-                if (isReady) {
-                    statusCompactEl.classList.add('ready');
-                } else {
-                    statusCompactEl.classList.remove('ready');
-                }
-            }
-        }
-
-        if (bannerEl) {
-            if (isStreaming) {
-                bannerEl.classList.add('working');
-                bannerEl.classList.remove('session-ready');
-            } else {
-                bannerEl.classList.remove('working');
-                if (isReady) {
-                    bannerEl.classList.add('session-ready');
-                } else {
-                    bannerEl.classList.remove('session-ready');
-                }
-            }
-        }
-
-        const endBtn = $('endAgentSession');
-        if (endBtn) {
-            if (this.hasActiveSession && !isStreaming) {
-                endBtn.classList.remove('hide');
-            } else {
-                endBtn.classList.add('hide');
-            }
-        }
+        super._releaseSession();
     }
 
     /**
@@ -388,11 +248,8 @@ export class AgentChatHandler {
         this.reconnectTimer = setTimeout(() => {
             if (!this.sessionId) return;
 
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/ws/agent/${this.sessionId}`;
-
             try {
-                this.ws = new WebSocket(wsUrl);
+                this.ws = new WebSocket(this._wsUrl());
 
                 this.ws.onopen = () => {
                     console.log('[Agent] Reconnected successfully');
@@ -431,237 +288,57 @@ export class AgentChatHandler {
         }, delay);
     }
 
-    /**
-     * Start a new agent session
-     * @param {string} prompt - User prompt
-     * @param {string} operator - Operator name
-     */
-    async startSession(prompt, operator) {
-        const op = operator || getOperator();
-        if (!op) {
-            toast(OPERATOR_REQUIRED_MESSAGE);
-            return;
-        }
-        // An operator switch never continues the previous operator's session: let go of
-        // it so this operator's own persisted session (or a fresh one) is used below.
-        if (this.currentOperator && this.currentOperator !== op) this._releaseSession();
-        this.currentOperator = op;
-
-        const persistedSessionId = getOperatorSession(this.currentOperator);
-        const isNewSession = !this.hasActiveSession || !this.sessionId;
-
-        if (isNewSession) {
-            if (persistedSessionId && !this.sessionId) {
-                this.sessionId = persistedSessionId;
-                console.log('[Agent] Restoring persisted session:', this.sessionId);
-            } else {
-                this.sessionId = crypto.randomUUID();
-                saveOperatorSession(this.currentOperator, this.sessionId);
-            }
-            this.messageCount = 0;
-        }
-
-        // Always initialize todo tracker and status line (ensures DOM elements are cached)
-        todoTracker.init('todoPanel', this.sessionId);
-        statusLine.init('agentStatusLine');
-
-        this.outputBuffer = '';
-        this.thinkingBuffer = '';
-        this.speakableBuffer = '';
-        this.isStreaming = true;
-        setStreamingState(true); // Enable smooth scrolling
-        this.hasReceivedStreamingContent = false;
-        this.messageCount++;
-
-        console.log('[Agent] Session:', this.sessionId, 'Message #:', this.messageCount, 'New:', isNewSession);
-        console.log('[Agent] Prompt:', prompt);
-        console.log('[Agent] Operator:', this.currentOperator);
-
-        this.updateBannerStatus(isNewSession ? 'Starting...' : 'Continuing...', true);
-
-        this.currentBubble = addBubble('assistant', '');
-        this.currentBubble.classList.add('agent-streaming');
-
-        const bubbleText = this.currentBubble.querySelector('.bubble-text');
-        if (bubbleText) {
-            const loadingMsg = isNewSession ? 'Starting Claude Code session...' : 'Continuing conversation...';
-            bubbleText.innerHTML = `<div class="agent-loading">${loadingMsg}</div>`;
-        }
-
-        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProtocol}//${window.location.host}/ws/agent/${this.sessionId}`;
-
-        console.log('[Agent] WebSocket URL:', wsUrl);
-
-        try {
-            this.ws = new WebSocket(wsUrl);
-        } catch (err) {
-            console.error('[Agent] WebSocket creation error:', err);
-            this.updateBannerStatus('Connection Failed');
-            if (bubbleText) {
-                bubbleText.innerHTML = '<div class="agent-error">Failed to connect to Claude Code CLI</div>';
-            }
-            return;
-        }
-
-        this.ws.onopen = () => {
-            this.reconnectAttempts = 0;
-            console.log('[Agent] WebSocket connected, sending prompt...');
-            this.updateBannerStatus('Connected', true);
-
-            const claudeModelSelect = $('claudeModelSelect');
-            const selectedModel = claudeModelSelect ? claudeModelSelect.value : (window.__claudeModel || 'sonnet');
-            console.log(`[Agent] Model selector value: ${claudeModelSelect?.value}, window.__claudeModel: ${window.__claudeModel}, using: ${selectedModel}`);
-
-            // Start status line session
-            statusLine.startSession(this.sessionId, selectedModel);
-
-            const message = {
-                type: 'prompt',
-                text: prompt,
-                operator: this.currentOperator,
-                working_dir: null,
-                model: selectedModel,
-                // The banner's mode switch: plan = read-only, yolo = every tool approved.
-                ...permissionPayload(this.permissionMode)
-            };
-            console.log('[Agent] Sending:', message);
-            this.ws.send(JSON.stringify(message));
-        };
-
-        this.ws.onmessage = (e) => {
-            try {
-                const msg = JSON.parse(e.data);
-                this.handleMessage(msg);
-            } catch (err) {
-                console.error('[Agent] Parse error:', err);
-            }
-        };
-
-        this.ws.onclose = (e) => {
-            console.log('[Agent] WebSocket closed:', e.code, e.reason);
-            if (e.code !== 1000 && this.sessionId) {
-                this.attemptReconnect();
-            } else {
-                this._finalizeFailure();
-                this.updateBannerStatus('Disconnected');
-            }
-        };
-
-        this.ws.onerror = (err) => {
-            console.error('[Agent] WebSocket error:', err);
-            this.updateBannerStatus('Error');
-            toast('Agent connection error - check console');
-            this._finalizeFailure('Could not reach Claude Code.');
-        };
-    }
-
     // =========================================================================
     // Message Handling
     // =========================================================================
 
     /**
-     * Handle incoming WebSocket message
+     * The messages only Claude Code sends (the rest: BaseAgentHandler.handleMessage)
      * @param {Object} msg - Message object with type and data
+     * @returns {boolean} Whether it was handled
      */
-    handleMessage(msg) {
-        console.log('[Agent] Received message:', msg.type);
+    _handleAgentMessage(msg) {
         switch(msg.type) {
-            case 'content':
-                this.updateBannerStatus('Responding...', true);
-                this.hasReceivedStreamingContent = true;
-                this.appendContent(msg.data);
-                break;
             case 'assistant_message':
+                // The complete message: after streamed deltas it is their duplicate.
                 if (!this.hasReceivedStreamingContent) {
                     this.updateBannerStatus('Responding...', true);
                     this.appendContent(msg.data);
                 }
-                break;
-            case 'thinking':
-                this.updateBannerStatus('Thinking...', true);
-                this.appendThinking(msg.data);
-                break;
-            case 'tool_use':
-                this.updateBannerStatus('Using tools...', true);
-                this.appendToolUse(msg.data);
-                break;
-            case 'tool_result':
-                this.updateBannerStatus('Processing...', true);
-                this.appendToolResult(msg.data);
-                break;
+                return true;
             case 'file_result':
                 this.updateBannerStatus('File operation...', true);
                 this.appendFileResult(msg.data);
-                break;
+                return true;
             case 'edit_diff':
                 this.updateBannerStatus('Edit complete', true);
                 this.appendEditDiff(msg.data);
-                break;
-            case 'raw':
-                this.updateBannerStatus('Active', true);
-                this.appendRawOutput(msg.data);
-                break;
-            case 'output':
-                this.updateBannerStatus('Streaming...', true);
-                this.appendRawOutput(msg.data);
-                break;
+                return true;
             case 'waiting':
                 this.updateBannerStatus('Waiting for input', true);
                 console.log('[Agent] Claude waiting for input');
-                break;
-            case 'completed':
-                this.hasActiveSession = true;
-                this.updateBannerStatus(`Session Active (${this.messageCount} msgs)`);
-                this.isStreaming = false;
-                setStreamingState(false); // Disable smooth scrolling
-                this.currentBubble?.classList.remove('agent-streaming');
-                this.finalizeOutput();
-                break;
-            case 'session_ended':
-                this.hasActiveSession = false;
-                this.sessionId = null;
-                this.messageCount = 0;
-                this.updateBannerStatus('Ready');
-                toast(msg.data || 'Session ended');
-                break;
+                return true;
             case 'permission_request':
                 this.updateBannerStatus('Permission Required', true);
                 this.showPermissionButtons(msg.data);
                 if (navigator.vibrate) {
                     navigator.vibrate([200, 100, 200]);
                 }
-                break;
-            case 'info':
-                console.log('[Agent] Info:', msg.data);
-                toast(msg.data);
-                break;
-            case 'error':
-                this.updateBannerStatus('Error');
-                console.error('[Agent] Error:', msg.data);
-                toast(`Agent error: ${msg.data}`);
-                // The backend no longer has this session (e.g. after a service
-                // restart): forget it, or every next prompt goes to sendInput
-                // and fails the same way until "New Session".
-                if (/no (active )?session/i.test(String(msg.data || ''))) this._forgetSession();
-                this._finalizeFailure(String(msg.data || ''));
-                break;
+                return true;
             case 'app_detected':
                 console.log('[Agent] App detected:', msg.data);
                 this.addAppToPanel(msg.data);
                 toast(`App detected on port ${msg.data.port}`, 3000);
-                break;
-            case 'pong':
-                break;
+                return true;
             case 'todo_write':
                 // Handle TodoWrite tool - update task tracker
                 this.updateBannerStatus('Working...', true);
                 todoTracker.updateTodos(msg.data);
-                break;
+                return true;
             case 'status_update':
                 // Handle status updates (context/cost/model)
                 statusLine.updateFromMessage(msg.data);
-                break;
+                return true;
             case 'image_task': {
                 console.log('[Agent] Image generation task:', msg.data);
                 const imgData = msg.data;
@@ -669,7 +346,7 @@ export class AgentChatHandler {
                     taskManager.addTask(imgData.task_id, 'image_generation', imgData.prompt, null, imgData.count);
                     console.log(`[Agent] Tracking image generation: ${imgData.task_id}`);
                 });
-                break;
+                return true;
             }
             case 'video_task': {
                 console.log('[Agent] Video generation task:', msg.data);
@@ -678,7 +355,7 @@ export class AgentChatHandler {
                     taskManager.addTask(vidData.task_id, 'video_generation', vidData.prompt, { duration: vidData.duration, resolution: vidData.resolution });
                     console.log(`[Agent] Tracking video generation: ${vidData.task_id}`);
                 });
-                break;
+                return true;
             }
             case 'music_task': {
                 console.log('[Agent] Music generation task:', msg.data);
@@ -687,63 +364,27 @@ export class AgentChatHandler {
                     taskManager.addTask(musData.task_id, 'lyria_music', musData.prompt, null, musData.sample_count || 1);
                     console.log(`[Agent] Tracking music generation: ${musData.task_id}`);
                 });
-                break;
+                return true;
             }
             default:
-                console.warn('[Agent] Unhandled message type:', msg.type, 'data:', msg.data);
-                if (typeof msg.data === 'string' && msg.data.length < 10000) {
-                    this.appendContent(msg.data);
-                }
-                break;
+                return false;
         }
     }
 
     // =========================================================================
-    // Content Appending
+    // Thinking
     // =========================================================================
 
     /**
-     * Append content to output buffer
-     * @param {string} text - Content to append
-     */
-    appendContent(text) {
-        text = this.enhanceContent(text);
-        this.outputBuffer += text;
-        this.speakableBuffer += text;
-        this.renderOutput();
-    }
-
-    /**
-     * Enhance content with file path highlighting.
-     *
-     * No diff decoration here: this runs on every streamed DELTA, so the old
-     * ^-/^+ passes wrapped every markdown bullet, every '---' rule and any
-     * delta that merely began with '-' in red/green diff spans. Real diffs
-     * arrive fenced (```diff), and highlightDiff colors those at render time
-     * (audit P03-live-agents-web-01).
-     * @param {string} text - Text to enhance
-     * @returns {string} Enhanced text
-     */
-    enhanceContent(text) {
-        // Detect file path references
-        return text.replace(/([\/\w\-\.]+\.(js|py|html|css|json|ts|tsx|jsx|md|txt|yaml|yml|xml|sh)):(\d+)/g,
-            '<code class="file-ref">$1:<span class="line-num">$3</span></code>');
-    }
-
-    /**
-     * Append thinking content
+     * Thinking counts toward the spoken text and the thinking budget
      * @param {string} text - Thinking text
      */
-    appendThinking(text) {
-        if (!this.thinkingBuffer) this.thinkingBuffer = '';
-        this.thinkingBuffer += text;
+    _onThinking(text) {
         this.speakableBuffer += text;
 
         // Estimate tokens (rough: ~4 chars per token for English)
         this.thinkingTokens = Math.round(this.thinkingBuffer.length / 4);
         this.updateThinkingIndicator();
-
-        this.renderOutput();
     }
 
     /**
@@ -780,15 +421,32 @@ export class AgentChatHandler {
     }
 
     /**
-     * Reset thinking for new message
+     * The thinking section: a reasoning panel with cycling words
+     * @returns {string} HTML
      */
-    resetThinking() {
-        this.thinkingBuffer = '';
-        this.thinkingTokens = 0;
-        this.stopReasoningCycle();
-        const indicator = $('thinkingIndicator');
-        if (indicator) {
-            indicator.classList.add('hide');
+    _thinkingHtml() {
+        const wordCount = this.thinkingBuffer.split(/\s+/).filter(w => w.length > 0).length;
+        const isActive = this.isStreaming;
+        const activeClass = isActive ? 'reasoning-active' : 'reasoning-complete';
+
+        return `<details class="reasoning-panel ${activeClass}">
+                <summary class="reasoning-header">
+                    <span class="reasoning-icon">${isActive ? '🧠' : '✓'}</span>
+                    <span class="reasoning-label">${isActive ? 'Reasoning' : 'Reasoning Complete'}</span>
+                    <span class="reasoning-stats">${wordCount} words</span>
+                    <span class="reasoning-toggle">▶</span>
+                </summary>
+                <div class="reasoning-content"><pre>${this.escapeHtml(this.thinkingBuffer)}</pre></div>
+            </details>`;
+    }
+
+    /**
+     * Start the cycling animation while reasoning is active
+     * @param {HTMLElement} bubbleText - The re-rendered bubble text
+     */
+    _onRendered(bubbleText) {
+        if (this.thinkingBuffer && this.isStreaming) {
+            this.startReasoningCycle(bubbleText);
         }
     }
 
@@ -832,6 +490,10 @@ export class AgentChatHandler {
         }
     }
 
+    // =========================================================================
+    // Permission Mode
+    // =========================================================================
+
     /**
      * Toggle the permission mode (YOLO ⇄ Plan). It applies from the next message sent.
      */
@@ -862,22 +524,9 @@ export class AgentChatHandler {
         indicator.className = `permission-mode ${mode.className}`;
     }
 
-    /**
-     * Append tool use indicator
-     * @param {Object} data - Tool use data
-     */
-    appendToolUse(data) {
-        const toolName = data.name || 'Unknown';
-        const toolInput = data.input || {};
-
-        this.lastTool = {
-            name: toolName,
-            input: toolInput,
-            timestamp: Date.now()
-        };
-
-        this.updateToolIndicator();
-    }
+    // =========================================================================
+    // Tool, File and Edit Results
+    // =========================================================================
 
     /**
      * Append tool result
@@ -967,354 +616,54 @@ export class AgentChatHandler {
         this.renderOutput();
     }
 
-    /**
-     * Append raw output
-     * @param {string} html - Raw HTML to append
-     */
-    appendRawOutput(html) {
-        this.outputBuffer += html;
-
-        let terminal = this.currentBubble?.querySelector('.agent-terminal');
-        if (!terminal) {
-            const bubbleText = this.currentBubble?.querySelector('.bubble-text');
-            if (bubbleText) {
-                bubbleText.innerHTML = '<div class="agent-terminal"></div>';
-                terminal = bubbleText.querySelector('.agent-terminal');
-            }
-        }
-
-        if (terminal) {
-            // Agent stdout is untrusted (ansi_to_html wraps it in spans but does
-            // not escape it): sanitize, keeping the ansi-* class spans.
-            terminal.innerHTML = sanitizeAssistantHtml(this.outputBuffer);
-            this.detectAndShowQuickActions();
-
-            scrollToBottomIfNeeded();
-        }
-    }
-
     // =========================================================================
-    // Tool Indicator
+    // Finalizing
     // =========================================================================
 
     /**
-     * Update the tool indicator display (sticky at bottom of bubble)
+     * Stop the reasoning animation and hide the thinking-budget indicator on
+     * turn completion. updateThinkingIndicator only re-shows it while actively
+     * thinking, but nothing re-hid it — so it (and the generation ember
+     * backdrop, which keys off #thinkingIndicator:not(.hide)) would otherwise
+     * linger for the rest of the session.
      */
-    updateToolIndicator() {
-        if (!this.currentBubble || !this.lastTool) return;
-
-        const tool = this.lastTool;
-        const icon = this.getToolIcon(tool.name);
-
-        let content = `<span class="tool-icon">${icon}</span> <strong>${this.escapeHtml(tool.name)}</strong>`;
-
-        if (tool.input.command) {
-            content += ` <span class="tool-detail">${this.escapeHtml(tool.input.command.substring(0, 50))}${tool.input.command.length > 50 ? '...' : ''}</span>`;
-        } else if (tool.input.file_path) {
-            const fileName = tool.input.file_path.split('/').pop();
-            content += ` <span class="tool-detail">${this.escapeHtml(fileName)}</span>`;
-        } else if (tool.input.pattern) {
-            content += ` <span class="tool-detail">${this.escapeHtml(tool.input.pattern.substring(0, 35))}${tool.input.pattern.length > 35 ? '...' : ''}</span>`;
-        }
-
-        // Update sticky tool indicator in bubble
-        let indicator = this.currentBubble.querySelector('.tool-indicator');
-        if (!indicator) {
-            indicator = document.createElement('div');
-            indicator.className = 'tool-indicator';
-            // Append to end of bubble so it's sticky at bottom
-            this.currentBubble.appendChild(indicator);
-        }
-        indicator.innerHTML = content;
-        indicator.classList.remove('hidden');
-    }
-
-    /**
-     * Hide the tool indicator when done
-     */
-    hideToolIndicator() {
-        if (this.currentBubble) {
-            const indicator = this.currentBubble.querySelector('.tool-indicator');
-            if (indicator) {
-                indicator.classList.add('hidden');
-            }
-        }
-    }
-
-    /**
-     * Get icon for tool type
-     * @param {string} toolName - Tool name
-     * @returns {string} Icon emoji
-     */
-    getToolIcon(toolName) {
-        const icons = {
-            'Bash': '\u26A1',
-            'Read': '\uD83D\uDCC4',
-            'Edit': '\u270F\uFE0F',
-            'Write': '\uD83D\uDCBE',
-            'Grep': '\uD83D\uDD0D',
-            'Glob': '\uD83D\uDDC2\uFE0F',
-            'Task': '\uD83E\uDD16',
-            'WebSearch': '\uD83C\uDF10',
-            'WebFetch': '\uD83C\uDF0D'
-        };
-        return icons[toolName] || '\uD83D\uDD27';
-    }
-
-    // =========================================================================
-    // Rendering
-    // =========================================================================
-
-    /**
-     * Highlight diff content
-     * @param {HTMLElement} codeBlock - Code block element
-     */
-    highlightDiff(codeBlock) {
-        const text = codeBlock.textContent;
-        const lines = text.split('\n');
-
-        const highlightedLines = lines.map(line => {
-            if (line.startsWith('+++')) {
-                return `<span style="color: #bd93f9; font-weight: bold;">${this.escapeHtml(line)}</span>`;
-            } else if (line.startsWith('---')) {
-                return `<span style="color: #ff79c6; font-weight: bold;">${this.escapeHtml(line)}</span>`;
-            } else if (line.startsWith('+')) {
-                return `<span style="color: #50fa7b; background: rgba(80, 250, 123, 0.1); display: inline-block; width: 100%;">${this.escapeHtml(line)}</span>`;
-            } else if (line.startsWith('-')) {
-                return `<span style="color: #ff5555; background: rgba(255, 85, 85, 0.1); display: inline-block; width: 100%;">${this.escapeHtml(line)}</span>`;
-            } else if (line.startsWith('@@')) {
-                return `<span style="color: #8be9fd; font-weight: bold;">${this.escapeHtml(line)}</span>`;
-            } else {
-                return this.escapeHtml(line);
-            }
-        });
-
-        codeBlock.innerHTML = highlightedLines.join('\n');
-    }
-
-    /**
-     * Render output buffer to bubble
-     */
-    renderOutput() {
-        const bubbleText = this.currentBubble?.querySelector('.bubble-text');
-        if (!bubbleText) return;
-
-        let html = '';
-
-        // Show thinking in enhanced collapsible section with cycling words
-        if (this.thinkingBuffer) {
-            const wordCount = this.thinkingBuffer.split(/\s+/).filter(w => w.length > 0).length;
-            const isActive = this.isStreaming;
-            const activeClass = isActive ? 'reasoning-active' : 'reasoning-complete';
-
-            html += `<details class="reasoning-panel ${activeClass}">
-                <summary class="reasoning-header">
-                    <span class="reasoning-icon">${isActive ? '🧠' : '✓'}</span>
-                    <span class="reasoning-label">${isActive ? 'Reasoning' : 'Reasoning Complete'}</span>
-                    <span class="reasoning-stats">${wordCount} words</span>
-                    <span class="reasoning-toggle">▶</span>
-                </summary>
-                <div class="reasoning-content"><pre>${this.escapeHtml(this.thinkingBuffer)}</pre></div>
-            </details>`;
-        }
-
-        // Render main content as markdown (sanitized; fails closed to escaped
-        // text). Code is highlighted while parsing only when NOT streaming
-        // (prevents jitter, and the per-token re-render never runs highlight.js).
-        if (this.outputBuffer) {
-            html += markdownToSafeHtml(this.outputBuffer, { streaming: this.isStreaming });
-        }
-
-        bubbleText.innerHTML = html;
-
-        // Start cycling animation if reasoning is active
-        if (this.thinkingBuffer && this.isStreaming) {
-            this.startReasoningCycle(bubbleText);
-        }
-
-        if (!this.isStreaming) {
-            // Diff blocks get the add/remove line colouring
-            bubbleText.querySelectorAll('pre code.language-diff').forEach((block) => this.highlightDiff(block));
-
-            // Apply custom text highlighting
-            if (typeof applySyntaxHighlighting === 'function') {
-                applySyntaxHighlighting(bubbleText);
-            }
-
-            // Make snapshot IDs clickable
-            if (typeof makeSnapshotsClickable === 'function') {
-                makeSnapshotsClickable(bubbleText);
-            }
-        }
-
-        // Scroll to bottom only if user is near bottom
-        scrollToBottomIfNeeded();
-
-        // Save current state
-        this.saveStreamingState();
-    }
-
-    /**
-     * Debounced save of streaming state to history
-     */
-    saveStreamingState() {
-        if (this._saveStateTimer) {
-            clearTimeout(this._saveStateTimer);
-        }
-
-        this._saveStateTimer = setTimeout(() => {
-            this._saveToHistory();
-        }, 500);
-    }
-
-    /**
-     * Immediately save current state to history
-     */
-    _saveToHistory() {
-        if (!this.currentBubble) return;
-
-        const bubbleText = this.currentBubble.querySelector('.bubble-text');
-        if (!bubbleText) return;
-
-        const historyData = getHistoryData();
-        for (let i = historyData.length - 1; i >= 0; i--) {
-            if (historyData[i].role === 'assistant') {
-                const content = historyData[i].content || '';
-                if (!content || content.includes('agent-loading') || historyData[i].isAgent || historyData[i].isStreaming) {
-                    historyData[i].content = bubbleText.innerHTML;
-                    historyData[i].isAgent = true;
-                    historyData[i].isStreaming = this.isStreaming;
-                    historyData[i].speakableText = this.speakableBuffer || '';
-                    setHistoryData(historyData);
-                    saveHistory();
-                    break;
-                }
-            }
-        }
-    }
-
-    /**
-     * Finalize output after completion
-     */
-    finalizeOutput() {
-        // Stop reasoning animation
+    _onFinalizing() {
         this.stopReasoningCycle();
-
-        // Hide the thinking-budget indicator on turn completion. updateThinkingIndicator
-        // only re-shows it while actively thinking, but nothing re-hid it — so it (and
-        // the generation ember backdrop, which keys off #thinkingIndicator:not(.hide))
-        // would otherwise linger for the rest of the session.
         $('thinkingIndicator')?.classList.add('hide');
+    }
 
-        // Hide tool indicator
-        this.hideToolIndicator();
-
-        this.renderOutput();
-
-        // Update reasoning panel to complete state
-        if (this.currentBubble) {
-            const reasoningPanel = this.currentBubble.querySelector('.reasoning-panel');
-            if (reasoningPanel) {
-                reasoningPanel.classList.remove('reasoning-active');
-                reasoningPanel.classList.add('reasoning-complete');
-                const icon = reasoningPanel.querySelector('.reasoning-icon');
-                const label = reasoningPanel.querySelector('.reasoning-label');
-                if (icon) icon.textContent = '✓';
-                if (label) label.textContent = 'Reasoning Complete';
-            }
+    /**
+     * The reasoning panel shows complete and the file/edit/tool result sections
+     * collapse
+     */
+    _onFinalRendered() {
+        if (!this.currentBubble) return;
+        const reasoningPanel = this.currentBubble.querySelector('.reasoning-panel');
+        if (reasoningPanel) {
+            reasoningPanel.classList.remove('reasoning-active');
+            reasoningPanel.classList.add('reasoning-complete');
+            const icon = reasoningPanel.querySelector('.reasoning-icon');
+            const label = reasoningPanel.querySelector('.reasoning-label');
+            if (icon) icon.textContent = '✓';
+            if (label) label.textContent = 'Reasoning Complete';
         }
 
-        // Auto-collapse all file/edit/tool result sections
-        if (this.currentBubble) {
-            const collapsibles = this.currentBubble.querySelectorAll(
-                'details.file-result-collapsible, details.edit-diff-collapsible, details.tool-result-collapsible'
-            );
-            collapsibles.forEach(details => {
-                details.removeAttribute('open');
-            });
-        }
-
-        if (this.currentBubble && this.speakableBuffer) {
-            const existingControls = this.currentBubble.querySelector('.bubble-controls');
-            if (existingControls) existingControls.remove();
-
-            const controlsBar = document.createElement('div');
-            controlsBar.className = 'bubble-controls';
-
-            const speakableText = this.speakableBuffer;
-            const bubble = this.currentBubble;
-
-            // TTS play button
-            const playBtn = document.createElement('button');
-            playBtn.className = 'bubble-btn speak-btn';
-            playBtn.title = 'Listen';
-            playBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-            </svg>`;
-            playBtn.onclick = () => speakToBubble(speakableText, bubble, playBtn);
-            controlsBar.appendChild(playBtn);
-
-            // Copy button
-            const copyBtn = document.createElement('button');
-            copyBtn.className = 'bubble-btn copy-btn';
-            copyBtn.title = 'Copy text';
-            copyBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>`;
-            copyBtn.onclick = () => {
-                navigator.clipboard.writeText(speakableText).then(() => {
-                    toast('Copied to clipboard');
-                    copyBtn.classList.add('copied');
-                    setTimeout(() => copyBtn.classList.remove('copied'), 2000);
-                });
-            };
-            controlsBar.appendChild(copyBtn);
-
-            this.currentBubble.appendChild(controlsBar);
-
-            // Update lastAssistantText for main speaker button
-            setLastAssistantText(speakableText);
-
-            // Trigger Auto-TTS if enabled
-            if (window.triggerAutoTTS && speakableText) {
-                window.triggerAutoTTS(speakableText, this.currentBubble);
-            }
-
-            // Save to history
-            const bubbleText = this.currentBubble.querySelector('.bubble-text');
-            if (bubbleText) {
-                const historyData = getHistoryData();
-                for (let i = historyData.length - 1; i >= 0; i--) {
-                    if (historyData[i].role === 'assistant') {
-                        const content = historyData[i].content || '';
-                        if (!content || content.includes('agent-loading') || historyData[i].isAgent || historyData[i].isStreaming) {
-                            historyData[i].content = bubbleText.innerHTML;
-                            historyData[i].isAgent = true;
-                            historyData[i].isStreaming = false;
-                            historyData[i].speakableText = speakableText;
-                            break;
-                        }
-                    }
-                }
-                setHistoryData(historyData);
-                saveHistory();
-            }
-        }
-
-        if (this._saveStateTimer) {
-            clearTimeout(this._saveStateTimer);
-            this._saveStateTimer = null;
-        }
-
-        this.thinkingBuffer = '';
+        const collapsibles = this.currentBubble.querySelectorAll(
+            'details.file-result-collapsible, details.edit-diff-collapsible, details.tool-result-collapsible'
+        );
+        collapsibles.forEach(details => {
+            details.removeAttribute('open');
+        });
     }
 
     // =========================================================================
     // Quick Actions
     // =========================================================================
+
+    /** The terminal output may be asking a question: offer its answers */
+    _onRawOutput() {
+        this.detectAndShowQuickActions();
+    }
 
     /**
      * Detect and show quick action buttons
@@ -1378,10 +727,6 @@ export class AgentChatHandler {
 
         scrollToBottomIfNeeded();
     }
-
-    // =========================================================================
-    // Permission Handling
-    // =========================================================================
 
     /**
      * Show permission request buttons
@@ -1523,205 +868,6 @@ export class AgentChatHandler {
     }
 
     // =========================================================================
-    // Input Sending
-    // =========================================================================
-
-    /**
-     * Send follow-up input to continue the conversation
-     * @param {string} text - Input text
-     */
-    async sendInput(text) {
-        console.log(`[Agent] sendInput called with: "${text}"`);
-        console.log(`[Agent] WebSocket state: ${this.ws ? this.ws.readyState : 'null'}, hasActiveSession=${this.hasActiveSession}`);
-
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-            if (this.hasActiveSession) {
-                // Initialize todo tracker and status line (same as startSession)
-                todoTracker.init('todoPanel', this.sessionId);
-                statusLine.init('agentStatusLine');
-
-                this.outputBuffer = '';
-                this.thinkingBuffer = '';
-                this.speakableBuffer = '';
-                this.isStreaming = true;
-                this.messageCount++;
-
-                this.currentBubble = addBubble('assistant', '');
-                this.currentBubble.classList.add('agent-streaming');
-                const bubbleText = this.currentBubble.querySelector('.bubble-text');
-                if (bubbleText) {
-                    bubbleText.innerHTML = '<div class="agent-loading">Continuing conversation...</div>';
-                }
-
-                this.updateBannerStatus('Continuing...', true);
-
-                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${wsProtocol}//${window.location.host}/ws/agent/${this.sessionId}`;
-
-                try {
-                    const ws = new WebSocket(wsUrl);
-                    this.ws = ws;
-                    this.ws.onopen = () => {
-                        this.reconnectAttempts = 0;
-                        console.log('[Agent] Reconnected, sending follow-up prompt');
-                        const claudeModelSelect = $('claudeModelSelect');
-                        const selectedModel = claudeModelSelect ? claudeModelSelect.value : (window.__claudeModel || 'sonnet');
-
-                        // Start status line session on reconnect
-                        statusLine.startSession(this.sessionId, selectedModel);
-
-                        this.ws.send(JSON.stringify({
-                            type: 'prompt',
-                            text: text,
-                            operator: this.currentOperator || getOperator(),
-                            model: selectedModel,
-                            ...permissionPayload(this.permissionMode)
-                        }));
-                    };
-                    this.ws.onmessage = (e) => {
-                        try {
-                            this.handleMessage(JSON.parse(e.data));
-                        } catch (err) {
-                            console.error('[Agent] Parse error:', err);
-                        }
-                    };
-                    this.ws.onclose = (e) => {
-                        console.log('[Agent] WebSocket closed after follow-up:', e.code);
-                        if (this.ws !== ws) return; // replaced by a later turn's socket: not this turn's end
-                        if (e.code !== 1000 && this.sessionId) {
-                            this.attemptReconnect();
-                        } else {
-                            this._finalizeFailure();
-                        }
-                    };
-                    this.ws.onerror = (err) => {
-                        console.error('[Agent] WebSocket error:', err);
-                        if (this.ws !== ws) return;
-                        this._finalizeFailure('Could not reach Claude Code.');
-                    };
-                } catch (err) {
-                    console.error('[Agent] Reconnect failed:', err);
-                    toast('Failed to continue session');
-                    this._finalizeFailure('Could not reach Claude Code.');
-                }
-                return;
-            } else {
-                console.error('[Agent] No active session to continue');
-                toast('No active session - start a new conversation');
-                return;
-            }
-        }
-
-        this.outputBuffer = '';
-        this.thinkingBuffer = '';
-        this.speakableBuffer = '';
-        this.isStreaming = true;
-        this.messageCount++;
-
-        this.currentBubble = addBubble('assistant', '');
-        this.currentBubble.classList.add('agent-streaming');
-        const bubbleText = this.currentBubble.querySelector('.bubble-text');
-        if (bubbleText) {
-            bubbleText.innerHTML = '<div class="agent-loading">Continuing conversation...</div>';
-        }
-
-        const message = {
-            type: 'input',
-            text: text,
-            // A mode switched since the last message applies to this one.
-            ...permissionPayload(this.permissionMode)
-        };
-        console.log('[Agent] Sending input message:', message);
-        this.ws.send(JSON.stringify(message));
-        this.updateBannerStatus('Continuing...', true);
-    }
-
-    // =========================================================================
-    // Session State
-    // =========================================================================
-
-    /**
-     * Check if agent session is active
-     * @returns {boolean} Whether session is active
-     */
-    isActive() {
-        const wsOpen = this.ws && this.ws.readyState === WebSocket.OPEN;
-        const active = wsOpen || this.hasActiveSession;
-        console.log(`[Agent] isActive() = ${active}, hasActiveSession=${this.hasActiveSession}, wsOpen=${wsOpen}`);
-        return active;
-    }
-
-    /**
-     * Whether this session may take [operator]'s next prompt: it has no owner yet or is
-     * theirs. Another operator's prompt starts (or restores) their own session instead.
-     * @param {string} operator - Operator about to send
-     * @returns {boolean}
-     */
-    belongsTo(operator) {
-        return !this.currentOperator || this.currentOperator === operator;
-    }
-
-    /**
-     * Let go of the current session WITHOUT ending it server-side (it stays the previous
-     * operator's to resume): the socket is closed quietly so its close handler cannot
-     * start a reconnect loop for the session that replaces it.
-     */
-    _releaseSession() {
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
-        }
-        if (this.ws) {
-            this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null;
-            try { this.ws.close(1000); } catch (_) { /* already closed */ }
-            this.ws = null;
-        }
-        this.sessionId = null;
-        this.hasActiveSession = false;
-        this.isStreaming = false;
-        this.messageCount = 0;
-    }
-
-    /**
-     * Forget a session the backend reports it no longer has: let go of the
-     * socket and drop the persisted id, so the next prompt starts a fresh one.
-     */
-    _forgetSession() {
-        const operator = this.currentOperator || getOperator();
-        this._releaseSession();
-        if (operator) clearOperatorSession(operator);
-        this.updateBannerStatus('Ready');
-    }
-
-    /**
-     * End the current session
-     */
-    endSession() {
-        console.log('[Agent] Ending session:', this.sessionId);
-
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ type: 'end_session' }));
-        }
-
-        this.hasActiveSession = false;
-        this.sessionId = null;
-        this.messageCount = 0;
-        this.updateBannerStatus('Ready');
-        toast('Session ended. Start a new conversation.');
-    }
-
-    /**
-     * Disconnect WebSocket
-     */
-    disconnect() {
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
-        }
-        this.isStreaming = false;
-    }
-
-    // =========================================================================
     // App Panel
     // =========================================================================
 
@@ -1748,59 +894,7 @@ export class AgentChatHandler {
      * @param {string} name - App name
      */
     openAppPreview(port, name) {
-        const modal = $('appPreviewModal');
-        const frame = $('appPreviewFrame');
-        const title = $('appPreviewTitle');
-
-        if (!modal || !frame) return;
-
-        title.textContent = `\uD83D\uDE80 ${name || 'App Preview'}`;
-        frame.src = `/app-proxy/${port}/`;
-        modal.classList.remove('hide');
-    }
-
-    /**
-     * Handle completed message
-     */
-    handleCompleted() {
-        this.isStreaming = false;
-        if (this.currentBubble) {
-            this.currentBubble.classList.remove('agent-streaming');
-            const controls = this.currentBubble.querySelector('.bubble-controls');
-            if (!controls) {
-                const newControls = document.createElement('div');
-                newControls.className = 'bubble-controls';
-
-                const playBtn = document.createElement('button');
-                playBtn.className = 'bubble-btn speak-btn';
-                playBtn.title = 'Listen';
-                playBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-                </svg>`;
-                playBtn.onclick = () => speakToBubble(this.outputBuffer, this.currentBubble, playBtn);
-                newControls.appendChild(playBtn);
-
-                const copyBtn = document.createElement('button');
-                copyBtn.className = 'bubble-btn copy-btn';
-                copyBtn.title = 'Copy text';
-                copyBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                </svg>`;
-                copyBtn.onclick = () => {
-                    navigator.clipboard.writeText(this.outputBuffer).then(() => {
-                        toast('Copied to clipboard');
-                        copyBtn.classList.add('copied');
-                        setTimeout(() => copyBtn.classList.remove('copied'), 2000);
-                    });
-                };
-                newControls.appendChild(copyBtn);
-
-                this.currentBubble.appendChild(newControls);
-            }
-        }
+        openAppPreviewModal(port, name);
     }
 
     /**
@@ -1854,18 +948,13 @@ export class AgentChatHandler {
 
             console.log('[Agent] Session still running, reconnecting WebSocket...');
 
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${location.host}/ws/agent/${this.sessionId}`;
-
-            this.ws = new WebSocket(wsUrl);
+            this.ws = new WebSocket(this._wsUrl());
 
             this.ws.onopen = () => {
                 this.reconnectAttempts = 0;
                 console.log('[Agent] Reconnected to running session');
                 // Start status line on reconnect
-                const claudeModelSelect = $('claudeModelSelect');
-                const selectedModel = claudeModelSelect ? claudeModelSelect.value : (window.__claudeModel || 'sonnet');
-                statusLine.startSession(this.sessionId, selectedModel);
+                statusLine.startSession(this.sessionId, this._selectedModel());
 
                 this.ws.send(JSON.stringify({
                     type: 'reconnect',
@@ -1897,23 +986,6 @@ export class AgentChatHandler {
 
         console.log('[Agent] Restored session:', this.sessionId, 'status:', sessionData.status);
     }
-
-    /**
-     * Legacy method for backwards compatibility
-     * @param {string} text - Output text
-     */
-    appendOutput(text) {
-        this.appendRawOutput(text);
-    }
-
-    /**
-     * Escape HTML characters (shared core-utils helper; also escapes quotes)
-     * @param {string} text - Text to escape
-     * @returns {string} Escaped text
-     */
-    escapeHtml(text) {
-        return sharedEscapeHtml(text);
-    }
 }
 
 // =============================================================================
@@ -1942,12 +1014,6 @@ export function setAgentHandler(handler) {
 }
 
 /**
- * The restore in flight, shared by concurrent callers for the SAME operator
- * (boot + a re-select): {operator, promise}.
- */
-let _agentSessionCheck = null;
-
-/**
  * The handler a restore goes into: the existing instance, never a second
  * one (each constructor registers document-level listeners; two instances
  * doubled Shift+Tab, the toasts and, on reconnect, every delta).
@@ -1973,20 +1039,7 @@ function handlerForRestore(operator) {
  * operator is resolved (app-init awaits initOperatorSelector); with no operator
  * there is nobody's session to look for, so it neither probes nor restores.
  */
-export function checkExistingAgentSession() {
-    const operator = getOperator();
-    const inFlight = _agentSessionCheck;
-    if (inFlight && inFlight.operator === operator) return inFlight.promise;
-    // Another operator's probe (an operator switch mid-probe) is never shared:
-    // this one runs after it, so the last operator picked is the one restored.
-    const prior = inFlight ? inFlight.promise.catch(() => {}) : Promise.resolve();
-    const entry = { operator, promise: null };
-    entry.promise = prior
-        .then(() => _checkExistingAgentSession(operator))
-        .finally(() => { if (_agentSessionCheck === entry) _agentSessionCheck = null; });
-    _agentSessionCheck = entry;
-    return entry.promise;
-}
+export const checkExistingAgentSession = probeOncePerOperator(_checkExistingAgentSession);
 
 /** Whether a restore for `operator` is still wanted (no switch since it began). */
 const stillOperator = (operator) => getOperator() === operator;
@@ -2096,7 +1149,7 @@ function addAppToMenuPanel(app) {
 
     if (menuAppsList.querySelector(`[data-port="${app.port}"]`)) return;
 
-    menuAppsList.appendChild(buildAppMenuItem(app, () => openAppPreviewSimple(app.port, app.name)));
+    menuAppsList.appendChild(buildAppMenuItem(app, () => openAppPreviewModal(app.port, app.name)));
 }
 
 /**
@@ -2135,8 +1188,8 @@ function buildAppMenuItem(app, onOpen) {
     item.className = 'menu-app-item';
     item.dataset.port = app.port;
     item.innerHTML = `
-        <span class="app-name">${escapeHtmlSimple(app.name)}</span>
-        <span class="app-port">:${escapeHtmlSimple(app.port)}</span>
+        <span class="app-name">${escapeHtml(app.name)}</span>
+        <span class="app-port">:${escapeHtml(app.port)}</span>
         <span class="app-status">checking…</span>
         <button class="btn btn-open-app">Open</button>
     `;
@@ -2152,20 +1205,11 @@ function buildAppMenuItem(app, onOpen) {
 }
 
 /**
- * Simple HTML escape
- * @param {string} text - Text to escape
- * @returns {string} Escaped text
- */
-function escapeHtmlSimple(text) {
-    return sharedEscapeHtml(text);
-}
-
-/**
- * Simple app preview opener
+ * Open the app preview modal on an app (through the sandboxed app proxy)
  * @param {number} port - App port
  * @param {string} name - App name
  */
-function openAppPreviewSimple(port, name) {
+function openAppPreviewModal(port, name) {
     const modal = $('appPreviewModal');
     const frame = $('appPreviewFrame');
     const title = $('appPreviewTitle');
@@ -2183,6 +1227,7 @@ function openAppPreviewSimple(port, name) {
  * earlier run probed before the operator was known and raced the first).
  */
 export function initAgentHandler() {
+    bindBannerToggle(CLAUDE_AGENT);
     initAppPreviewModal();
     loadRegisteredApps();
     window.addEventListener('bbx:operator-changed', restoreAgentSessionForOperatorSwitch);
@@ -2194,11 +1239,5 @@ export function initAgentHandler() {
  * that is still streaming keeps its operator; the next send switches instead.
  */
 export async function restoreAgentSessionForOperatorSwitch() {
-    const handler = agentHandler;
-    if (handler && handler.isStreaming) return;
-    if (handler && handler.currentOperator && !handler.belongsTo(getOperator())) {
-        handler._releaseSession();
-        handler.updateBannerStatus('Ready');
-    }
-    await checkExistingAgentSession();
+    await restoreForOperatorSwitch(agentHandler, checkExistingAgentSession);
 }

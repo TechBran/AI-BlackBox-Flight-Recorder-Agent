@@ -11,7 +11,7 @@ loadMarked();
 
 const MODULES = [
     "core-utils", "sanitize", "markdown-renderer", "chat-bubbles", "chat-send",
-    "agent-handler", "gemini-agent-handler", "timeline-browser", "todo-tracker",
+    "agent-handler", "gemini-agent-handler", "base-agent-handler", "timeline-browser", "todo-tracker",
     "contacts-manager", "slash-commands", "grok-live", "cellular-manager",
     "media-manager", "task-manager", "tts-stt", "file-upload", "generation-modals",
     "sms-inbox", "telephony-manager", "telephony-wizard", "device-manager", "cron-manager",
