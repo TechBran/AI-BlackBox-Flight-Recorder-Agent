@@ -1,6 +1,7 @@
 // The Updates panel's destructive actions (audit rank 43: O16-01, A13-ui-ops-01).
 //
-//  * Install, Rollback and Restart Service ask first; declining sends nothing.
+//  * Install and Rollback ask first; declining sends nothing. Restart Service
+//    arms on the first tap and never opens a browser dialog.
 //  * Local changes to tracked files are named in the confirm, and agreeing
 //    sends discard_local_changes (the backend stashes them); a 409 that lists
 //    dirty_files asks again and retries with consent.
@@ -11,7 +12,9 @@
 // Run: cd tests/web && npm ci && node --test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { installDom } from "./helpers/portal-dom.mjs";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { installDom, PORTAL } from "./helpers/portal-dom.mjs";
 
 installDom();
 
@@ -76,9 +79,20 @@ document.body.insertAdjacentHTML("beforeend", `
     <div id="updatesStatusRow"></div><div id="updatesCommitsList"></div>
     <button id="btnCheckUpdates"></button><button id="btnInstallUpdate"></button>
     <button id="btnViewUpdateLog"></button><button id="btnRollbackUpdate"></button>
-    <button id="btnRestart"></button>`);
+    <button id="btnRestart">Restart Service</button>`);
 
-const { initUpdatesPanel } = await import("../../Portal/modules/updates-manager.js");
+const { initUpdatesPanel, RESTART_ARM_MS } = await import("../../Portal/modules/updates-manager.js");
+{
+    // The Portal's own button wiring too, so a competing restart handler there
+    // shows up as a second POST or a dialog. It warns about every control this
+    // page lacks.
+    const ui = await import("../../Portal/modules/ui-setup.js");
+    const warn = console.warn;
+    console.warn = () => {};
+    ui.initModalHandlers();
+    await settle(100);
+    console.warn = warn;
+}
 
 async function panel(withStatus) {
     status = { ...STATUS, ...withStatus };
@@ -198,35 +212,115 @@ test("Rollback asks first, then streams its task", async () => {
 });
 
 // ── Restart Service ──────────────────────────────────────────────────────
+//
+// ONE handler (updates-manager.js): a two-tap arm on the button itself, then
+// one POST /restart and the boot_id wait. Never window.confirm: the Android
+// WebView has no dialog host, so confirm() returns false there without showing
+// anything. ui-setup.js used to bind a second, competing handler, so one click
+// ran both paths.
 
-test("Restart Service asks first and then waits for the boot_id to change", async () => {
+/** Record (and refuse) any browser dialog until the returned restore runs. */
+function forbidDialogs() {
+    const saved = [window.confirm, window.alert, window.prompt];
+    const opened = [];
+    const refuse = (kind) => (text) => { opened.push(`${kind}: ${text}`); throw new Error(`window.${kind} called`); };
+    window.confirm = refuse("confirm");
+    window.alert = refuse("alert");
+    window.prompt = refuse("prompt");
+    return { opened, restore: () => { [window.confirm, window.alert, window.prompt] = saved; } };
+}
+
+const restartPosts = () => posts.filter(([u]) => u === "/restart");
+const btnRestart = () => document.getElementById("btnRestart");
+
+test("Restart Service: the first tap arms the button and sends nothing", async () => {
     reset();
     await panel({});
-    answers = [false];
-    document.getElementById("btnRestart").click();
-    await settle();
-    assert.match(asked[0], /Restart the BlackBox service/);
-    assert.deepEqual(posts.filter(([u]) => u === "/restart"), []);
-
-    answers = [true];
-    postReplies["/restart"] = [() => Promise.reject(new TypeError("connection reset"))];
-    document.getElementById("btnRestart").click();
-    await settle(100);
-    assert.equal(posts.filter(([u]) => u === "/restart").length, 1);
-    assert.doesNotMatch(logText(), /back online/, "the old process answering is not a restart");
-    bootId = "boot-C";
-    await settle(2100);
-    assert.match(logText(), /back online/);
+    const dialogs = forbidDialogs();
+    try {
+        btnRestart().click();
+        await settle();
+        assert.deepEqual(restartPosts(), []);
+        assert.equal(btnRestart().textContent, "Tap again to restart");
+        assert.deepEqual(dialogs.opened, []);
+    } finally {
+        dialogs.restore();
+    }
+    await settle(RESTART_ARM_MS + 100);      // let the arm lapse for the next test
 });
 
-test("Restart Service reports a refused restart instead of waiting", async () => {
+test("Restart Service: the second tap POSTs /restart once and waits for a new boot_id", async () => {
     reset();
     await panel({});
-    answers = [true];
-    postReplies["/restart"] = [() => reply(200, { status: "error", message: "Restart failed: sudo: a password is required" })];
-    document.getElementById("btnRestart").click();
-    await settle();
-    assert.match(alerts[0] || "", /password is required/);
+    const dialogs = forbidDialogs();
+    try {
+        postReplies["/restart"] = [() => Promise.reject(new TypeError("connection reset"))];
+        btnRestart().click();
+        await settle();
+        btnRestart().click();
+        await settle(100);
+        assert.equal(restartPosts().length, 1, "exactly one restart, from exactly one handler");
+        assert.equal(btnRestart().textContent, "Restart Service", "confirming restores the label");
+        // The prior boot_id was read before the POST: that is what must change.
+        assert.ok(gets.includes("/health"), gets.join(" "));
+        assert.match(logText(), /Restart requested/);
+        assert.doesNotMatch(logText(), /back online/, "the old process answering is not a restart");
+        bootId = "boot-C";
+        await settle(2100);
+        assert.match(logText(), /back online/);
+        assert.deepEqual(dialogs.opened, []);
+    } finally {
+        dialogs.restore();
+    }
+});
+
+test("Restart Service: an arm that lapses restores the label and needs two taps again", async () => {
+    reset();
+    await panel({});
+    const dialogs = forbidDialogs();
+    try {
+        btnRestart().click();
+        await settle();
+        assert.equal(btnRestart().textContent, "Tap again to restart");
+        await settle(RESTART_ARM_MS + 100);
+        assert.equal(btnRestart().textContent, "Restart Service");
+        btnRestart().click();                // a lapsed arm: this tap only arms again
+        await settle();
+        assert.deepEqual(restartPosts(), []);
+        assert.equal(btnRestart().textContent, "Tap again to restart");
+        assert.deepEqual(dialogs.opened, []);
+    } finally {
+        dialogs.restore();
+    }
+    await settle(RESTART_ARM_MS + 100);
+});
+
+test("Restart Service reports a refused restart in the page instead of waiting", async () => {
+    reset();
+    await panel({});
+    const dialogs = forbidDialogs();
+    try {
+        postReplies["/restart"] = [() => reply(200, { status: "error", message: "Restart failed: sudo: a password is required" })];
+        btnRestart().click();
+        await settle();
+        btnRestart().click();
+        await settle();
+        assert.equal(restartPosts().length, 1);
+        assert.match(document.getElementById("toast").textContent, /password is required/);
+        assert.ok(document.getElementById("updatesLogModal").classList.contains("hide"),
+                  "a refused restart opens no wait");
+        assert.equal(btnRestart().disabled, false);
+        assert.deepEqual(dialogs.opened, []);
+    } finally {
+        dialogs.restore();
+    }
+});
+
+test("index.html gives btnRestart no inline handler", () => {
+    const html = readFileSync(resolve(PORTAL, "index.html"), "utf8");
+    const tag = html.match(/<button[^>]*\bid="btnRestart"[^>]*>/);
+    assert.ok(tag, "btnRestart is in index.html");
+    assert.doesNotMatch(tag[0], /\son[a-z]+\s*=/i);
 });
 
 // ── review follow-ups ────────────────────────────────────────────────────

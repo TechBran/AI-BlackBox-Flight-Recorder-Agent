@@ -3,7 +3,8 @@
 // dialog host, where confirm() returns false without showing anything, so
 // "Remove operator" and "Remove credential file" silently did nothing on the
 // phone (audit P08-onboarding-installer-06). api_keys.js already uses an
-// inline "Remove? ✓/✕"; this is the same idea for a single button.
+// inline "Remove? ✓/✕"; this is the same idea for a single button. The
+// Portal's Restart Service (modules/updates-manager.js) uses it too.
 //
 //   if (!confirmInline(btn, { prompt: "Remove?" })) return;   // first tap arms
 //   ...destructive action...                                   // second tap runs

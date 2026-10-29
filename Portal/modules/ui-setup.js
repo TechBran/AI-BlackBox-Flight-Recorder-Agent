@@ -1148,37 +1148,8 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
         }
     });
 
-    // Restart Service: an inline two-step confirm on the button itself (no
-    // confirm() dialog: the Android WebView has no dialog host for it).
-    const btnRestart = $("btnRestart");
-    if (btnRestart) {
-        const restartLabel = btnRestart.textContent;
-        let armedUntil = 0;
-        let disarmTimer = null;
-        btnRestart.onclick = async () => {
-            if (Date.now() > armedUntil) {
-                armedUntil = Date.now() + 4000;
-                btnRestart.textContent = "Tap again to restart";
-                clearTimeout(disarmTimer);
-                disarmTimer = setTimeout(() => { btnRestart.textContent = restartLabel; armedUntil = 0; }, 4000);
-                return;
-            }
-            clearTimeout(disarmTimer);
-            armedUntil = 0;
-            btnRestart.textContent = restartLabel;
-            btnRestart.disabled = true;
-            try {
-                const r = await fetch("/restart", { method: "POST" });
-                const j = await r.json().catch(() => ({}));
-                if (!r.ok || j.status !== "success") throw new Error(j.message || j.error || `restart returned ${r.status}`);
-                toast("Restarting — the box is back in about a minute");
-            } catch (e) {
-                toastError("Restart failed: " + e.message);
-            } finally {
-                btnRestart.disabled = false;
-            }
-        };
-    }
+    // Restart Service (btnRestart) is wired by updates-manager.js, which owns
+    // the restart POST and the wait for a new boot_id. No second handler here.
 
     // Pairing modal. The QR names the operator the phone starts as, so the token is
     // minted for the operator who opened this dialog (POST /pair/start {operator}),

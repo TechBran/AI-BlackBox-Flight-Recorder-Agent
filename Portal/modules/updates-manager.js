@@ -40,7 +40,8 @@
 // onboarding wizard now; the updates panel no longer renders that card.)
 //
 // Destructive actions (audit rank 43): Install, Rollback and Restart Service
-// ask first. Local changes to tracked files (status.dirty_files) are named in
+// ask first (Restart Service as a two-tap button, inline-confirm.js: no
+// browser dialog). Local changes to tracked files (status.dirty_files) are named in
 // the Install/Rollback confirm, and confirming sends discard_local_changes so
 // the backend stashes them; a 409 that lists dirty_files asks again. After any
 // action that restarts the service the modal waits for /health's boot_id to
@@ -50,6 +51,7 @@
 // finished with a restart coming, or ended without one (A13-ui-ops-06).
 
 import { createPoller, escapeHtml, toastError } from "./core-utils.js";
+import { confirmInline } from "../onboarding/inline-confirm.js";
 
 let _state = "loading";
 let _lastStatus = null;  // last /update/status response
@@ -290,6 +292,9 @@ export function rollbackConfirmText(status) {
 export const RESTART_CONFIRM_TEXT = "Restart the BlackBox service now?\n\n"
     + "Every connected client is cut off for 60–90 seconds while it comes back.";
 
+// How long an armed Restart Service button waits for its second tap.
+export const RESTART_ARM_MS = 4000;
+
 function _stashRetryText(dirty, action) {
     return `${action} was refused: ${_dirtyLine(dirty, action)}\n\nStash them and continue?`;
 }
@@ -424,9 +429,10 @@ function _wireButtons() {
     if (btnLog) btnLog.addEventListener("click", _onViewLogClick);
     if (btnRollback) btnRollback.addEventListener("click", _onRollbackClick);
     // System Controls' Restart Service sits in the same menu and needs the
-    // same restart detection, so it is wired here.
+    // same restart detection, so it is wired here, and only here (ui-setup.js
+    // used to bind a second handler: one click ran both).
     const btnRestart = document.getElementById("btnRestart");
-    if (btnRestart) btnRestart.addEventListener("click", _onRestartClick);
+    if (btnRestart) btnRestart.addEventListener("click", () => _onRestartClick(btnRestart));
 }
 
 /**
@@ -531,23 +537,35 @@ async function _onRollbackClick() {
     }
 }
 
-async function _onRestartClick() {
-    if (!window.confirm(RESTART_CONFIRM_TEXT)) return;
-    const priorBootId = await readBootId();
+/**
+ * Restart Service: a two-tap confirm on the button itself, never
+ * window.confirm (the Android WebView has no dialog host, so confirm()
+ * returns false there without showing anything). The second tap reads the
+ * running boot_id, POSTs /restart once and waits for a new boot_id.
+ */
+async function _onRestartClick(button) {
+    if (!confirmInline(button, { prompt: "Tap again to restart", detail: RESTART_CONFIRM_TEXT,
+                                 timeoutMs: RESTART_ARM_MS })) return;
+    button.disabled = true;
     try {
-        const r = await fetch("/restart", { method: "POST" });
-        const body = await r.json().catch(() => ({}));
-        // /restart answers 200 with status "error" when sudo refuses. Any
-        // other answer (a proxy's 502 included) may be the restart itself:
-        // the wait below tells the two apart by boot_id.
-        if (body.status === "error") {
-            window.alert(`Restart failed: ${body.message || body.error || "unknown error"}`);
-            return;
+        const priorBootId = await readBootId();
+        try {
+            const r = await fetch("/restart", { method: "POST" });
+            const body = await r.json().catch(() => ({}));
+            // /restart answers 200 with status "error" when sudo refuses. Any
+            // other answer (a proxy's 502 included) may be the restart itself:
+            // the wait below tells the two apart by boot_id.
+            if (body.status === "error") {
+                toastError(body.message || `Restart failed: ${body.error || "unknown error"}`);
+                return;
+            }
+        } catch (_) {
+            // Expected: the restart can cut this very request off.
         }
-    } catch (_) {
-        // Expected: the restart can cut this very request off.
+        openHealthPollModal("Restart requested. Waiting for the service…", { priorBootId });
+    } finally {
+        button.disabled = false;
     }
-    openHealthPollModal("Restart requested. Waiting for the service…", { priorBootId });
 }
 
 // ── Embeddings notification card (pluggable embeddings, Task 14) ───────
