@@ -1839,6 +1839,9 @@ def _mint_cu_failure_snapshot(task: Task, operator: str, error_text: str,
                 "user_message": f"Computer Use task FAILED: {(task.prompt or '')[:300]}",
                 "assistant_response": body,
                 "model": "computer-use",
+                # A background snapshot: leave the operator's carried phone
+                # location for the turn it belongs to.
+                "carry_location": False,
             },
             timeout=30,
         )
@@ -1943,6 +1946,7 @@ def process_browser_use(task: Task):
                         "user_message": f"Computer Use task: {(task.prompt or '')[:300]}",
                         "assistant_response": summary,
                         "model": "computer-use",
+                        "carry_location": False,  # a background snapshot
                     },
                     timeout=30
                 )
@@ -2135,6 +2139,7 @@ def process_cli_agent(task: Task):
                 "user_message": f"CLI agent ({provider}) task: {prompt[:300]}",
                 "assistant_response": summary,
                 "model": f"cli-agent-{provider}",
+                "carry_location": False,  # a background snapshot
             },
             timeout=30,
         )

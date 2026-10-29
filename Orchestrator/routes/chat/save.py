@@ -127,7 +127,10 @@ async def chat_save(request: Request):
         assistant_response: string,
         reasoning: string (optional) - AI thinking/reasoning process,
         model: string (optional),
-        tokens: { prompt: int, completion: int } (optional)
+        tokens: { prompt: int, completion: int } (optional),
+        carry_location: bool (optional, default true) - false for a background
+            snapshot (the worker's CU / CLI results), which must not take the
+            location a phone's /chat/stream carried for its own save
     }
     """
     try:
@@ -194,7 +197,12 @@ async def chat_save(request: Request):
         # text and an empty gauge, byte-identical to today.
         turn_location = None
         try:
-            carried = _take_turn_location(operator)  # always pop, never let one linger
+            # A background snapshot (carry_location false: a Computer Use or
+            # CLI-agent result the worker records) is not the turn the slot was
+            # carried for; popping it there took the phone's fix from the
+            # phone's own save, landing a moment later.
+            background = body.get("carry_location", True) is False
+            carried = None if background else _take_turn_location(operator)  # always pop, never let one linger
             turn_location = user_location.normalize(body.get("location")) or carried
             if turn_location and user_message:
                 user_message = user_location.append_location_to_text(user_message, turn_location)
