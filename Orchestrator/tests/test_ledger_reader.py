@@ -81,6 +81,52 @@ def test_an_unchanged_ledger_is_mapped_once(tmp_path, monkeypatch):
     assert ledger.view(p).read(0, 200) == _snap(9).encode()[:200] and len(opens) == 1
 
 
+def test_a_prefix_view_never_reaches_past_its_cut(tmp_path):
+    """ledger_fsck cuts its view at the size it measured under mint_lock, so
+    a mint appending meanwhile stays out of the check. buffer() (a regex
+    scan's input) and a stepped slice handed out the whole map instead."""
+    import re
+    p = tmp_path / "SNAPSHOT_VOLUME.txt"
+    p.write_bytes(b"abcdefghij")
+    whole = ledger.view(p)
+    cut = whole.prefix(4)
+    assert len(cut) == 4 and cut[:] == b"abcd" and cut[2:99] == b"cd" and cut[-1:] == b"d"
+    assert len(cut.buffer()) == 4 and bytes(cut.buffer()) == b"abcd"
+    assert re.findall(rb"[a-z]", cut.buffer()) == [b"a", b"b", b"c", b"d"]
+    assert cut[::2] == b"ac" and cut[::-1] == b"dcba" and cut[1:9:2] == b"bd"
+    assert whole[::3] == b"adgj" and whole[::-4] == b"jfb" and bytes(whole.buffer()) == b"abcdefghij"
+    assert ledger.view(tmp_path / "missing.txt")[::2] == b""
+
+
+def test_read_volume_bytes_hands_out_the_map(tmp_path, monkeypatch):
+    """read_volume_bytes read the whole ledger into memory on every call, for
+    the live-voice recent-snapshot tools to slice three snapshots out of it
+    (audit O05-ledger-persistence-18). It returns the shared map's view now:
+    the same len(), slices, bytes() and decode() as the bytes it returned,
+    with no open() of a mapped ledger, and an append after the call is not
+    in it."""
+    import builtins
+    p = tmp_path / "SNAPSHOT_VOLUME.txt"
+    data = "".join(_snap(n) for n in range(1, 9)).encode()
+    p.write_bytes(data)
+    ledger.view(p)                                  # mapped once
+    opened = []
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open", lambda f, *a, **k: (
+        opened.append(f) if str(f).endswith("SNAPSHOT_VOLUME.txt") else None) or real_open(f, *a, **k))
+    got = volume.read_volume_bytes(p)
+    assert opened == []
+    assert len(got) == len(data) and bytes(got) == data and got[:] == data
+    assert got[10:300] == data[10:300] and got[-7:] == data[-7:] and got[5] == data[5]
+    assert got.decode() == got.decode("utf-8", errors="replace") == data.decode()
+    with real_open(p, "ab") as f:                   # a mint appends
+        f.write(_snap(9).encode())
+    assert len(got) == len(data) and got[len(data) - 5:len(data) + 99] == data[-5:]
+    assert len(volume.read_volume_bytes(p)) == len(data) + len(_snap(9).encode())
+    missing = volume.read_volume_bytes(tmp_path / "nope.txt")
+    assert len(missing) == 0 and bytes(missing) == b"" and missing[0:9] == b""
+
+
 def _write(p: Path, text: str) -> Path:
     p.write_text(text, encoding="utf-8")
     return p

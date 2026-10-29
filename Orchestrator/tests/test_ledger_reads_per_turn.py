@@ -245,6 +245,40 @@ def test_list_recent_snapshots_tool_reads_only_what_it_returns(ledger, volume_re
     assert volume_reads["bytes"] == _size(ledger, newest_ben)
 
 
+_VOICE_EXECUTORS = [
+    ("Orchestrator.routes.grok_live_routes", "_execute_grok_tool"),
+    ("Orchestrator.routes.realtime_routes", "_execute_openai_tool"),
+    ("Orchestrator.routes.gemini_live_routes", "_execute_gemini_tool"),
+]
+
+
+@pytest.mark.parametrize("operator", ["Ana", "system"])
+@pytest.mark.parametrize("module,executor", _VOICE_EXECUTORS)
+def test_voice_recent_snapshots_read_only_what_they_return(ledger, volume_reads, module, executor,
+                                                           operator):
+    """The live-voice prompts open every session with list_recent_snapshots.
+    Its Grok, OpenAI and Gemini handlers slice their snapshots out of
+    read_volume_bytes, which read the whole ledger to return three of them
+    (audit O05-ledger-persistence-18); it serves the shared map now. "system"
+    sees every operator's snapshots."""
+    import importlib
+    from types import SimpleNamespace
+    raw = VOL_PATH.read_bytes()
+    newest = sorted((s for s, m in ledger.items() if operator == "system" or m["operator"] == operator),
+                    key=lambda s: int(s.rsplit("-", 1)[1]))[-3:]
+    volume_reads["bytes"] = 0  # the test's own read above
+
+    run = getattr(importlib.import_module(module), executor)
+    out = asyncio.run(run(SimpleNamespace(operator=operator), "list_recent_snapshots", {"count": 3}))
+
+    for sid in newest:
+        lo, hi = ledger[sid]["byte_start"], ledger[sid]["byte_end"]
+        assert f"--- {sid} (operator: {ledger[sid]['operator']}) ---\n" + raw[lo:hi].decode() in out
+    assert volume_reads["bytes"] == _size(ledger, newest), (
+        f"read {volume_reads['bytes']:,} bytes of a {len(raw):,}-byte ledger "
+        f"for 3 snapshots ({_size(ledger, newest):,} bytes)")
+
+
 def test_hybrid_retrieve_defaults_vol_txt_and_reads_only_its_results(
         ledger, volume_reads, monkeypatch):
     from Orchestrator import retrieval

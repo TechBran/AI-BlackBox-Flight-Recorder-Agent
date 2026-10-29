@@ -42,7 +42,7 @@ import Orchestrator.models as models_module  # Import module for dynamic access 
 from Orchestrator.models import task_queue
 from Orchestrator.monitoring import drift_state_global, get_disk_usage
 from Orchestrator.state import get_state, state_by_op
-from Orchestrator.volume import LedgerError, cleanup_old_archives, ledger_counts, parse_tail, read_tail_text, read_text_safe, sha256_bytes, verify_gm_or_halt
+from Orchestrator.volume import LedgerError, archive_min_free_gb, cleanup_old_archives, ledger_counts, parse_tail, read_tail_text, read_text_safe, sha256_bytes, verify_gm_or_halt
 from Orchestrator.maintenance import archive_retention, cleanup_old_session_files
 
 
@@ -351,9 +351,9 @@ def _manifest_summary() -> dict:
     }
     # The committed prefix latest_sha256 hashes (every append records it,
     # audit rank 77); absent from a manifest no mint has updated since.
-    for key in ("latest_bytes", "latest_snap_id"):
-        if key in man:
-            summary[key] = man[key]
+    for field in ("latest_bytes", "latest_snap_id"):
+        if field in man:
+            summary[field] = man[field]
     _manifest_summary_cache = (key, summary)
     return dict(summary)
 
@@ -573,18 +573,29 @@ def dashboard():
 
 @app.post("/cleanup/archives")
 def cleanup_archives_manual(
-    days_to_keep: int = 30,
-    max_size_gb: float = 5.0,
-    max_files: int = 200,
+    days_to_keep: Optional[int] = None,
+    max_size_gb: Optional[float] = None,
+    max_files: Optional[int] = None,
+    min_free_gb: Optional[float] = None,
     dry_run: bool = False
 ):
-    """Manually trigger archive cleanup with custom parameters."""
+    """Manually trigger archive cleanup with custom parameters. A parameter
+    left out takes the value the maintenance pass applies (archive_retention()
+    and [archive] min_free_gb), so a dry run with none lists exactly what the
+    next pass will delete."""
+    retention = archive_retention()
+    args = {
+        "days_to_keep": retention["days_to_keep"] if days_to_keep is None else days_to_keep,
+        "max_size_gb": retention["max_size_gb"] if max_size_gb is None else max_size_gb,
+        "max_files": retention["max_files"] if max_files is None else max_files,
+        "min_free_gb": archive_min_free_gb() if min_free_gb is None else min_free_gb,
+    }
     if dry_run:
         # Only report what would be deleted: nothing is removed.
-        stats = cleanup_old_archives(days_to_keep, max_size_gb, max_files, dry_run=True)
+        stats = cleanup_old_archives(**args, dry_run=True)
         return {"dry_run": True, "would_delete": stats}
 
-    stats = cleanup_old_archives(days_to_keep, max_size_gb, max_files)
+    stats = cleanup_old_archives(**args, dry_run=False)
     return {
         "dry_run": False,
         "cleanup_stats": stats,

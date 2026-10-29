@@ -87,6 +87,31 @@ def test_health_follows_a_rewritten_manifest(box, app_client):
     assert summary["archive_count"] == 3 and summary["latest_sha256"] == "ef" * 32
 
 
+def test_health_parses_an_unchanged_manifest_once(box, app_client, monkeypatch):
+    """The summary is kept per manifest (mtime, size). A loop over the
+    latest_bytes/latest_snap_id fields reused the cache key's name, so the
+    cache never hit and every poll parsed the manifest again."""
+    from pathlib import Path
+    from Orchestrator.routes import admin_routes
+    man = json.loads(config.MANIFEST.read_text())
+    man.update(latest_bytes=1234, latest_snap_id="SNAP-20261001-37")
+    config.MANIFEST.write_text(json.dumps(man))
+    monkeypatch.setattr(admin_routes, "_manifest_summary_cache", (None, None))
+    reads = []
+    real_read_text = Path.read_text
+
+    def read_text(self, *a, **k):
+        if self.name == "manifest.json":
+            reads.append(self)
+        return real_read_text(self, *a, **k)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    for _ in range(4):
+        summary = app_client.get("/health").json()["latest_manifest"]
+    assert summary["latest_bytes"] == 1234 and summary["latest_snap_id"] == "SNAP-20261001-37"
+    assert summary["archive_count"] == ARCHIVES
+    assert len(reads) == 1, f"an unchanged manifest was parsed {len(reads)} times for 4 polls"
+
+
 def test_health_on_a_box_without_a_manifest_or_index(isolated_stores, app_client):
     _write_goldmaster()
     config.MANIFEST.unlink(missing_ok=True)

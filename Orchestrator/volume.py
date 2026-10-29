@@ -101,29 +101,21 @@ def read_text_safe(p: Path) -> str:
         traceback.print_exc()
         return ""
 
-def read_volume_bytes(p: Path) -> bytes:
-    """Read volume file as bytes for byte-offset indexing.
+def read_volume_bytes(p: Path) -> "ledger.LedgerView":
+    """The volume's bytes for byte-offset slicing (the index's offsets are
+    byte offsets, never str ones), as the shared ledger map's view.
 
-    Returns raw bytes to allow proper byte-offset slicing.
-    Byte offsets in the index must be used with bytes, not strings.
+    It used to read the whole file into memory on every call, for callers
+    that slice a few snapshots out of it: the live-voice recent-snapshot
+    tools on every session start (audit O05-ledger-persistence-18). A view
+    has the bytes' len(), [a:b] slices, bytes() and decode(), and holds the
+    file as it was at the call: a mint appending afterwards is not in it.
+    A missing volume reads as empty.
     """
-    if not p.exists():
-        return b""
-
     try:
-        with open(p, 'rb') as f:
-            raw_bytes = f.read()
-
-        # Debug: verify we read the complete file
-        expected_size = p.stat().st_size
-        actual_size = len(raw_bytes)
-        if actual_size != expected_size:
-            print(f"[ERROR] Incomplete read! Expected {expected_size} bytes, got {actual_size} bytes")
-
-        return raw_bytes
+        return ledger.view(p)
     except Exception as e:
         print(f"[ERROR] Failed to read {p}: {e}")
-        import traceback
         traceback.print_exc()
         return b""
 
@@ -314,14 +306,21 @@ def _iso_utc(stamp: str) -> str:
     return f"{y}-{mo}-{d}T{h}:{mi}:{s}Z"
 
 
-def _read_manifest() -> Dict[str, Any]:
-    """The manifest, or a fresh one when it is missing or does not parse."""
-    try:
-        man = json.loads(MANIFEST.read_text())
-    except (OSError, ValueError):
-        man = {}
-    if not isinstance(man, dict):
-        man = {}
+def _manifest_shape(man) -> bool:
+    return isinstance(man, dict) and isinstance(man.get("archive", []), list)
+
+
+def _read_manifest(quarantine: bool = True) -> Dict[str, Any]:
+    """The manifest, or a fresh one when it is missing. One that does not
+    parse (or has the wrong shape) is moved to manifest.json.corrupt-<utc>
+    first, as atomic_json does for every store, never written over: it holds
+    each copy's recorded sha256. When it cannot be moved aside, or read at
+    all, this raises and the caller writes nothing. quarantine=False (a dry
+    run) reads such a manifest as empty and leaves it where it is."""
+    if quarantine:
+        man = atomic_json.load_json(MANIFEST, default={}, valid=_manifest_shape)
+    else:
+        man = atomic_json.read_json(MANIFEST, default={}, valid=_manifest_shape, quarantine=False)
     if not isinstance(man.get("archive"), list):
         man["archive"] = []
     return man
@@ -564,7 +563,7 @@ def _prune_manifest_archive(gone: List[Path], dry_run: bool) -> int:
     _archive_lock."""
     if not MANIFEST.exists():
         return 0
-    man = _read_manifest()
+    man = _read_manifest(quarantine=not dry_run)
     gone_names = {p.name for p in gone}
     keep, dropped = [], 0
     for entry in man["archive"]:

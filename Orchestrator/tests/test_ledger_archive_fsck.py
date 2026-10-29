@@ -214,6 +214,58 @@ def test_an_empty_archive_still_prunes_the_manifest(box):
     assert _manifest(box)["archive"] == []
 
 
+def test_a_corrupt_manifest_is_set_aside_not_overwritten(box):
+    """publish_latest runs after every mint and rewrote a manifest that did
+    not parse as a fresh one, losing archive[] and every copy's recorded
+    sha256 (the old per-mint copy raised and left it alone). It is moved to
+    manifest.json.corrupt-<utc> first, as every atomic_json store is."""
+    _mint(box, 1)
+    volume.scheduled_archive_copy()
+    good = box.man.read_text()
+    torn = good[: len(good) // 2]
+    box.man.write_text(torn)
+    volume.cleanup_old_archives(days_to_keep=3650, max_size_gb=50, max_files=9, dry_run=True)
+    assert box.man.read_text() == torn and not list(box.man.parent.glob("manifest.json.corrupt-*"))
+    _mint(box, 2)
+    [aside] = box.man.parent.glob("manifest.json.corrupt-*")
+    assert aside.read_text() == torn
+    man = _manifest(box)
+    assert man["latest_bytes"] == box.vol.stat().st_size and man["archive"] == []
+
+
+def test_a_corrupt_manifest_that_cannot_be_moved_is_never_written_over(box, monkeypatch):
+    from Orchestrator.utils import atomic_json
+    _mint(box, 1)
+    box.man.write_text('{"archive": [{"utc": "x"')
+    monkeypatch.setattr(atomic_json, "quarantine", lambda path: None)
+    start = box.vol.stat().st_size
+    volume.append_snapshot_text(_snap(2))
+    rec = volume.record_append("SNAP-20261001-2", start, box.vol.stat().st_size)
+    with pytest.raises(atomic_json.CorruptStoreError):
+        volume.publish_latest(rec)
+    with pytest.raises(atomic_json.CorruptStoreError):
+        volume.cleanup_old_archives()
+    assert box.man.read_text() == '{"archive": [{"utc": "x"'
+
+
+def test_the_cleanup_route_previews_what_the_pass_deletes(app_client, monkeypatch):
+    """POST /cleanup/archives kept its own defaults (200 copies, no free-space
+    floor), so its dry run listed fewer deletions than the hourly pass makes.
+    A parameter left out now takes the pass's value."""
+    from Orchestrator.routes import admin_routes
+    calls = []
+    monkeypatch.setattr(admin_routes, "cleanup_old_archives",
+                        lambda *a, **k: calls.append((a, k)) or {"deleted_files": 0})
+    monkeypatch.setattr(volume, "archive_keep_copies", lambda: 7)
+    monkeypatch.setattr(admin_routes, "archive_min_free_gb", lambda: 3.5)
+    assert app_client.post("/cleanup/archives", params={"dry_run": "true"}).json()["dry_run"] is True
+    assert calls[-1] == ((), {"days_to_keep": 30, "max_size_gb": 5.0, "max_files": 7,
+                              "min_free_gb": 3.5, "dry_run": True})
+    app_client.post("/cleanup/archives", params={"max_files": 2, "min_free_gb": 0, "days_to_keep": 9})
+    assert calls[-1] == ((), {"days_to_keep": 9, "max_size_gb": 5.0, "max_files": 2,
+                              "min_free_gb": 0.0, "dry_run": False})
+
+
 # -- /artifact and /health --------------------------------------------------------------
 
 def test_artifact_finds_a_copy_by_its_recorded_iso_time(box, app_client, monkeypatch):

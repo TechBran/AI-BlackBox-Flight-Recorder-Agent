@@ -44,9 +44,11 @@ class LedgerView:
     """The ledger's bytes [0, size) as they were when the view was taken.
 
     read() and view[a:b] return bytes; slice() returns a zero-copy memoryview
-    (bytes when the file could not be mapped). A missing or empty ledger is a
-    view of size 0. Usable as a context manager for symmetry with the readers
-    it replaces; there is nothing to close.
+    (bytes when the file could not be mapped). len(), slicing, bytes() and
+    decode() behave as on the bytes of the file, so a view stands in for
+    volume.read_volume_bytes' old whole-file read. A missing or empty ledger
+    is a view of size 0. Usable as a context manager for symmetry with the
+    readers it replaces; there is nothing to close.
     """
 
     __slots__ = ("path", "size", "dev", "ino", "mtime_ns", "_buf", "_fd_file")
@@ -90,13 +92,23 @@ class LedgerView:
 
     def buffer(self):
         """The whole view as one bytes-like object for a regex scan (re
-        accepts a map). Never close it: other views share it."""
+        accepts a map). Never close it: other views share it. A prefix()
+        view gets a memoryview cut at its size, never the bytes past it."""
         if self._buf is not None:
+            if self.size < len(self._buf):
+                return memoryview(self._buf)[:self.size]
             return self._buf
         return self.read(0, self.size)
 
     def text(self, start: int, end: int) -> str:
         return self.read(start, end).decode("utf-8", errors="replace")
+
+    def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
+        """The whole view decoded, as bytes.decode() does it."""
+        return self.read(0, self.size).decode(encoding, errors)
+
+    def __bytes__(self) -> bytes:
+        return self.read(0, self.size)
 
     def prefix(self, size: int) -> "LedgerView":
         """The same ledger cut at `size` bytes (a committed size measured
@@ -111,7 +123,8 @@ class LedgerView:
     def __getitem__(self, key):
         if isinstance(key, slice):
             if key.step not in (None, 1):
-                return self.buffer()[key]
+                # A stepped slice: bytes, cut at the view's size.
+                return bytes(memoryview(self.buffer())[key])
             start = 0 if key.start is None else key.start
             end = self.size if key.stop is None else key.stop
             if start < 0:

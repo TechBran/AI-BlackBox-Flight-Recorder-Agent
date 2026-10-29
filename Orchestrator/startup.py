@@ -318,11 +318,14 @@ async def _cu_display_reaper():
 @boot_hook(app, "startup")
 async def startup_storage_maintenance():
     """Bound Archive/ and the agent upload folders between restarts (audit
-    X06-ops-deploy-04): every mint copies the whole ledger into Archive/, and
-    the boot-time cleanup was the only thing that ever pruned it, so a box up
-    for weeks grew past its own 5 GB cap; nothing ever ran the upload session
-    sweep at all. Runs run_storage_maintenance() every MAINTENANCE_INTERVAL_S
-    in a worker thread (it stats and deletes files). Never raises."""
+    X06-ops-deploy-04): the boot-time cleanup was the only thing that ever
+    pruned Archive/, so a box up for weeks grew past its own 5 GB cap, and
+    nothing ever ran the upload session sweep at all. Runs
+    run_storage_maintenance() every MAINTENANCE_INTERVAL_S in a worker thread
+    (it copies, stats and deletes files): the scheduled full ledger copy
+    (mints only record a prefix hash, audit rank 77), the archive retention
+    under the free-space floor, the upload and artifact sweeps, and the daily
+    ledger check. Never raises."""
     import asyncio
     from Orchestrator.maintenance import MAINTENANCE_INTERVAL_S, run_storage_maintenance
 
