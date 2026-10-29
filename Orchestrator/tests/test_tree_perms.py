@@ -139,3 +139,26 @@ def test_the_private_group_rule_against_this_process(tmp_path):
     expected = g.gr_name != me.pw_name or any(m != me.pw_name for m in g.gr_mem)
     assert tree_perms._real_group_is_shared(os.getgid(), os.getuid()) is expected
     assert tree_perms._real_group_is_shared(os.getgid(), os.getuid() + 12345) is True
+
+
+# ── the account the service runs as (X04-security-clients-infra-12) ─────────
+
+@pytest.mark.parametrize("groups, warned", [
+    (["bbx", "sudo", "input"], True),
+    (["bbx", "wheel"], True),
+    (["bbx", "admin"], True),
+    (["blackbox", "systemd-journal", "input"], False),
+])
+def test_a_service_running_as_a_sudo_capable_account_is_told_to_move(monkeypatch, groups, warned):
+    monkeypatch.setattr(tree_perms, "_account_groups", lambda: ("bbx", groups))
+    warnings = tree_perms.service_account_warnings()
+    assert bool(warnings) is warned
+    if warned:
+        assert "--service-user" in warnings[0] and "bbx" in warnings[0]
+
+
+def test_the_account_check_never_raises(monkeypatch):
+    def boom():
+        raise KeyError("no such uid")
+    monkeypatch.setattr(tree_perms, "_account_groups", boom)
+    assert tree_perms.service_account_warnings() == []

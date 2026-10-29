@@ -152,3 +152,109 @@ them (X04-security-clients-infra-13).
 ```bash
 journalctl -u blackbox.service -b | grep '\[PERMS\]'    # nothing = clean
 ```
+
+## 5. Optional: run the BlackBox as a dedicated service account
+
+By default the service runs as the desktop/admin account that ran `install.sh`:
+a member of `sudo`, whose whole `$HOME` the service can write (the CLI-agent
+drop-in sets `ProtectHome=no`). A compromised service can then rewrite that
+account's shell rc files or autostart entries and wait for its next
+interactive `sudo` (X04-security-clients-infra-12). The service logs a
+`[PERMS] This service runs as …, a member of sudo` warning at every start while
+that is the case.
+
+`install.sh --service-user NAME` moves the BlackBox to a dedicated, non-login
+system account outside the sudo group. It is **opt-in, off by default, and
+was not run on the dev box**: the code path is proven in a sandbox
+(`scripts/tests/test_install_service_user.sh`), not yet on hardware. Do it on a
+test box first.
+
+### Before you start
+
+* End the CLI-agent terminal sessions: they belong to the old account and do
+  not carry over.
+* If the opt-in vLLM reranker (`vllm-reranker.service`) is enabled, the move
+  refuses: `sudo systemctl disable --now vllm-reranker.service` first (re-provision
+  it afterwards with `RERANK_PROVIDER=vllm` if you still want it).
+* Check `.env` and `config.ini` for paths into the admin's home (for example a
+  `GOOGLE_APPLICATION_CREDENTIALS` file): the service account cannot read
+  them. Move those files into the checkout's `credentials/` first.
+
+### Preview, then move
+
+```bash
+sudo bash Scripts/install.sh --service-user blackbox --dry-run   # prints every change, makes none
+sudo bash Scripts/install.sh --service-user blackbox             # the move, then the full install
+```
+
+The dry run lists every privileged step: the `useradd`, each traverse ACL,
+each unit it stops, one `chown -hR` per top-level entry of the checkout (with
+the number of entries each changes), each move of per-user state, the display
+access entry and the recorded choice. The move then does, in order:
+
+| Step | What |
+| --- | --- |
+| Account | `useradd --system --user-group --create-home --home-dir /var/lib/blackbox --shell /usr/sbin/nologin` (an existing account must not be root, must not be in sudo/admin/wheel, and must have its own primary group). Home 0700. |
+| Reach the checkout | Traverse-only ACLs (`setfacl -m u:<uid>:x`) on the directories above the checkout the account could not pass (the checkout usually sits in the admin's 0750 home). No read and no write anywhere in that home. |
+| Stop | The BlackBox units that are running (they start again at the end). |
+| Checkout | `chown -hR blackbox:blackbox` of every top-level entry: the runtime data (`Volumes/`, `Manifest/`, `data/`, `credentials/`, `Portal/uploads/`), the venvs (`Orchestrator/venv`, `MCP/venv`), the code and `.git`. The whole checkout, because the in-app updater resets it, the wizard writes `.env` and `config.ini`, and the CLI agents edit it. |
+| Per-user state | Moved from the admin's home into `/var/lib/blackbox`: `.blackbox` (the local model stack; left as a root-owned symlink at its old path, because its venv scripts carry absolute shebangs), `.local/share/zellij`, `.local/share/blackbox`, `.claude-bbox`, `agent-workspaces`. The admin's own `.claude`, `.gemini`, `.codex`, `.nvm` are **not** touched. |
+| Display | `~/.config/autostart/blackbox-service-display.desktop` in the desktop session runs `xhost +SI:localuser:blackbox` at login (Computer Use on the real display). |
+| Record | `/etc/blackbox/service-user` (root-owned): `SERVICE_USER=blackbox`, `PREVIOUS_USER=<admin>`. |
+
+The rest of that `install.sh` run then renders every unit with
+`User=blackbox` (blackbox, blackbox-mcp, zellij-web, blackbox-models; ydotoold's
+socket for its uid), the sudoers grants (`/etc/sudoers.d/blackbox-system`, and
+`blackbox-asterisk` when Asterisk is installed) and the template store for
+`blackbox` only, makes the account's whole home writable in the CLI-agent
+drop-in, adds it to `systemd-journal` and `input`, and installs nvm, the CLI
+agents and the MCP registration into its home. Every later `install.sh` run
+(including the one `Scripts/update.sh` makes) reads the recorded choice and
+keeps it; a half-finished move finishes there.
+
+### After the move
+
+```bash
+systemctl show -p User blackbox.service blackbox-mcp.service zellij-web.service   # User=blackbox
+sudo -l -U blackbox | grep NOPASSWD | head -3                                      # the bounded grants, for blackbox
+sudo -l -U <admin> | grep -c blackbox-write-systemd                                # 0: the admin's grants are gone
+journalctl -u blackbox.service -b | grep '\[PERMS\]'                                # no "member of sudo" line
+```
+
+* **Sign the CLI agents in again**, as the service account, from a CLI-agent
+  terminal in the Portal (`claude`, `gemini`, `codex` each ask on first use).
+* **Log out and back in** on the desktop (or run
+  `xhost +SI:localuser:blackbox` in the desktop session) so Computer Use can
+  reach the display.
+* **Working in the checkout as the admin** now goes through the owner:
+  `sudo -u blackbox git -C <checkout> status`. `Scripts/update.sh` does this by
+  itself (it runs its git and pip steps as the checkout's owner).
+* Known gaps of a separate account, by design of the desktop session: the
+  service cannot use the admin's session D-Bus (GNOME settings, `xdg-open`
+  into the admin's browser, so a CLI agent's browser sign-in shows a URL to
+  open by hand) or the admin's audio session.
+
+### Rolling back
+
+```bash
+sudo bash Scripts/install.sh --revert-service-user --dry-run
+sudo bash Scripts/install.sh --revert-service-user
+```
+
+Run it as the account the checkout came from (`PREVIOUS_USER`). It stops the
+units, gives the checkout back, moves the per-user state back (removing the
+`.blackbox` symlink), removes the traverse ACLs, the display entry and
+`/etc/blackbox/service-user`, and the rest of the run renders everything for
+the admin again. The account and its home are kept (they hold its CLI-agent
+sign-ins); remove them with `sudo userdel blackbox && sudo rm -rf /var/lib/blackbox`
+once nothing in them is needed.
+
+### What still holds after the move
+
+`sudo bash Scripts/install.sh` runs as root from a checkout the service can
+write. With the move, a compromised service can no longer reach the admin's
+account, but it can still change the code that a later `install.sh` runs as
+root. Run `install.sh` from a checkout you trust. `Scripts/update.sh` checks the
+commit it installs (section 1) and runs `install.sh` right after the reset,
+which narrows that window but does not close it; closing it needs the
+installer to run from root-owned code, a later change.

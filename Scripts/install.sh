@@ -2,7 +2,7 @@
 # AI BlackBox installer — Ubuntu 24.04
 set -euo pipefail
 
-# ── Options (2026-10 audit rank 79, X04-security-clients-infra-11) ──
+# ── Options (2026-10 audit rank 79, X04-security-clients-infra-11/-12) ──
 # With no option this is the full, idempotent install, which is also what
 # Scripts/update.sh re-runs. Options:
 #   --publish-store-only   republish only the root-owned trust anchors from this
@@ -10,11 +10,35 @@ set -euo pipefail
 #                          /etc/blackbox apt allowlist, template store and
 #                          update pins), then stop. Scripts/update.sh runs it
 #                          from the old code after rolling back a failed update.
+#   --service-user NAME    OPT-IN: run the BlackBox as the dedicated non-login
+#                          system account NAME (created when missing, never in
+#                          the sudo group) instead of the account running this
+#                          script, and move the checkout and the BlackBox's own
+#                          state to it (Step 0s). Remembered in
+#                          /etc/blackbox/service-user, so later runs keep it.
+#   --revert-service-user  undo --service-user: give everything back to the
+#                          account running this script (the one it came from).
+#   --dry-run              with either of the two above: print every change
+#                          (each chown, move, ACL, unit stop) and make none.
 # docs/runbooks/2026-10-29-update-trust-and-service-user.md
 PUBLISH_STORE_ONLY=0
+REQUESTED_SERVICE_USER=""
+REVERT_SERVICE_USER=0
+DRY_RUN=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --publish-store-only) PUBLISH_STORE_ONLY=1 ;;
+        --service-user)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                echo "[install] ERROR: --service-user needs an account name (e.g. --service-user blackbox)" >&2
+                exit 2
+            fi
+            REQUESTED_SERVICE_USER="$2"
+            shift
+            ;;
+        --service-user=*) REQUESTED_SERVICE_USER="${1#*=}" ;;
+        --revert-service-user) REVERT_SERVICE_USER=1 ;;
+        --dry-run) DRY_RUN=1 ;;
         -h|--help)
             sed -n '/^# ── Options/,/^# docs\/runbooks/p' "$0"
             exit 0
@@ -26,6 +50,18 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+if [[ -n "$REQUESTED_SERVICE_USER" && "$REVERT_SERVICE_USER" -eq 1 ]]; then
+    echo "[install] ERROR: --service-user and --revert-service-user contradict each other" >&2
+    exit 2
+fi
+if [[ "$DRY_RUN" -eq 1 && -z "$REQUESTED_SERVICE_USER" && "$REVERT_SERVICE_USER" -ne 1 ]]; then
+    echo "[install] ERROR: --dry-run previews --service-user NAME or --revert-service-user" >&2
+    exit 2
+fi
+if [[ "$PUBLISH_STORE_ONLY" -eq 1 && ( -n "$REQUESTED_SERVICE_USER" || "$REVERT_SERVICE_USER" -eq 1 ) ]]; then
+    echo "[install] ERROR: --publish-store-only changes nothing but the trust anchors; run the service-account change on its own" >&2
+    exit 2
+fi
 
 # ── Step 0: detect sudo, resolve real user/home (audit M6) ──
 if [[ $EUID -eq 0 ]]; then
@@ -102,6 +138,404 @@ fi
 BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT//\\/\\\\}"
 BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT_SED_ESC//&/\\&}"
 BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT_SED_ESC//|/\\|}"
+
+# ── Step 0s: the account the BlackBox runs as (2026-10 audit rank 79, ─────────
+#             X04-security-clients-infra-12) ───────────────────────────────────
+# By default the service runs as the account that runs this script: the
+# desktop/admin user, a sudo-group member whose whole $HOME the service can
+# write (the CLI-agent drop-in sets ProtectHome=no). A compromised service could
+# then persist into that account's next interactive sudo session (shell rc
+# files, ~/.config/autostart), and every operator step this design relies on
+# (sudo bash install.sh, Scripts/update.sh) is run by it. `--service-user NAME`
+# moves the service to a dedicated, non-login system account outside the sudo
+# group, with its own home for the CLI agents. OPT-IN and default OFF: with no
+# choice recorded, nothing below changes a byte of what this script writes.
+#
+# The migration, in order (each step printed; --dry-run prints them and stops):
+#   1. create NAME (useradd --system, nologin, own group, home /var/lib/NAME,
+#      0700) unless it exists; an existing one must not be root or in
+#      sudo/admin/wheel and must have its own primary group;
+#   2. give NAME traverse-only (x) ACLs on the directories above the checkout
+#      it could not otherwise pass (the checkout usually sits in the admin's
+#      0750 home): no read, no write, nothing else of that home;
+#   3. stop the BlackBox units that are running (Step 2c, Step 4 and Step 7
+#      start them again);
+#   4. chown the whole checkout to NAME, one top-level entry at a time. That is
+#      the runtime data (Volumes/, Manifest/, data/, credentials/,
+#      Portal/uploads/), the venvs (Orchestrator/venv, MCP/venv) and the code
+#      and .git: the in-app updater resets it, the wizard writes .env and
+#      config.ini, the CLI agents edit it;
+#   5. move the BlackBox's own state out of the old home (SERVICE_STATE below);
+#      .blackbox (the local model stack, whose venv scripts carry absolute
+#      shebangs) is left a root-owned symlink at its old path so those keep
+#      working. The CLI agents' sign-ins (.claude, .gemini, .codex, .nvm) are the
+#      admin's own and stay: NAME signs in afresh (runbook);
+#   6. let NAME use the desktop's X display (Computer Use): an autostart entry
+#      in the desktop user's session runs `xhost +SI:localuser:NAME`;
+#   7. record SERVICE_USER=NAME and PREVIOUS_USER in /etc/blackbox/service-user.
+# Every later run reads that file and repeats 1-7 idempotently (nothing to do =
+# nothing printed), so a half-finished migration finishes on the next run.
+# `--revert-service-user` walks it back (checkout, state, ACLs, autostart, the
+# file), keeping the account and its home (the runbook says how to remove them).
+#
+# From here on REAL_USER/REAL_HOME name the account the SERVICE runs as and
+# that owns the checkout (every unit's User=, the sudoers grants, the venvs, the
+# CLI agents' homes), and DESKTOP_USER/DESKTOP_HOME the human desktop session
+# (its autostart entries, GNOME settings, default browser). Without a service
+# account they are the same account. The functions take their paths as
+# arguments, so scripts/tests/test_install_service_user.sh runs them in a
+# sandbox; the production paths are the constants at the call site below.
+DESKTOP_USER="$REAL_USER"
+DESKTOP_HOME="$REAL_HOME"
+
+# <path under the account's home>:<move|link>. `link` leaves a root-owned
+# symlink at the old path (absolute paths inside the entry must keep working).
+SERVICE_STATE=(
+    ".blackbox:link"
+    ".local/share/zellij:move"
+    ".local/share/blackbox:move"
+    ".claude-bbox:move"
+    "agent-workspaces:move"
+)
+# The units that run as the BlackBox account (stopped while files change hands).
+SERVICE_UNITS=(blackbox.service blackbox-mcp.service zellij-web.service blackbox-models.service)
+SVC_STOPPED_UNITS=()
+
+_svc_run() {  # <command...>: run it, or under --dry-run only print it
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '[install]   would run:'
+    else
+        printf '[install]   +'
+    fi
+    printf ' %q' "$@"
+    printf '\n'
+    [[ "$DRY_RUN" -eq 1 ]] || "$@"
+}
+
+_svc_refuse() {
+    echo "[install] ERROR: $*" >&2
+    echo "[install] Nothing was changed by the service-account step." >&2
+    exit 1
+}
+
+# Reads <file> into CHOSEN_SERVICE_USER / CHOSEN_PREVIOUS_USER ("" when absent).
+read_service_choice() {  # <file>
+    CHOSEN_SERVICE_USER=""
+    CHOSEN_PREVIOUS_USER=""
+    [[ -f "$1" ]] || return 0
+    CHOSEN_SERVICE_USER="$(sed -n 's/^SERVICE_USER=\([a-z_][a-z0-9_-]*\)$/\1/p' "$1" | head -n 1)"
+    CHOSEN_PREVIOUS_USER="$(sed -n 's/^PREVIOUS_USER=\([a-z_][a-z0-9_-]*\)$/\1/p' "$1" | head -n 1)"
+    [[ -n "$CHOSEN_SERVICE_USER" && -n "$CHOSEN_PREVIOUS_USER" ]] \
+        || _svc_refuse "$1 is unreadable or malformed (want SERVICE_USER= and PREVIOUS_USER= lines); fix or remove it as root"
+}
+
+# Refuses unless <name> may be the service account (it need not exist yet).
+check_service_account() {  # <name>
+    local name="$1" g
+    [[ "$name" =~ ^[a-z_][a-z0-9_-]*$ ]] || _svc_refuse "service account '$name' is not a POSIX user name"
+    [[ "$name" != root ]] || _svc_refuse "the service account cannot be root"
+    [[ "$name" != "$DESKTOP_USER" ]] \
+        || _svc_refuse "the service account must not be $DESKTOP_USER, the account running this script (to go back to it: --revert-service-user)"
+    getent passwd "$name" > /dev/null || return 0
+    [[ "$(id -u "$name")" != 0 ]] || _svc_refuse "$name has uid 0"
+    for g in sudo admin wheel; do
+        [[ " $(id -nG "$name") " != *" $g "* ]] \
+            || _svc_refuse "$name is in the $g group: the point of the service account is that it cannot sudo"
+    done
+    [[ "$(id -gn "$name")" == "$name" ]] \
+        || _svc_refuse "$name's primary group is $(id -gn "$name"), not its own; units and files are written as $name:$name"
+    [[ "$(service_account_home "$name")" =~ $_root_ok_re ]] \
+        || _svc_refuse "$name's home '$(service_account_home "$name")' does not match ${_root_ok_re} (it is templated into the units)"
+}
+
+# Where a NEW service account's home goes (an existing one keeps its own).
+SERVICE_HOME_BASE=/var/lib
+
+service_account_home() {  # <name>: its home, or the one it will be created with
+    local home
+    home="$(getent passwd "$1" | cut -d: -f6)"
+    printf '%s\n' "${home:-$SERVICE_HOME_BASE/$1}"
+}
+
+# Numeric uid of <name>, or nothing while it does not exist (a dry run). The
+# checks below compare uids, never names, so they also hold for an account made
+# a moment ago and for files that show a bare number.
+_svc_uid() { id -u "$1" 2>/dev/null || true; }
+
+# The directories above each <path> that <name> could not otherwise traverse:
+# no x for others, <name> neither the owner nor in the group, no ACL for it yet.
+service_traverse_dirs() {  # <name> <path>...
+    local name="$1" uid p d
+    uid="$(_svc_uid "$name")"
+    shift
+    for p in "$@"; do
+        d="$(dirname "$p")"
+        while [[ "$d" != / ]]; do
+            printf '%s\n' "$d"
+            d="$(dirname "$d")"
+        done
+    done | sort -u | while read -r d; do
+        (( 8#$(stat -c %a "$d") & 1 )) && continue
+        if [[ -n "$uid" ]]; then
+            [[ "$(stat -c %u "$d")" == "$uid" ]] && continue
+            [[ " $(id -G "$name") " == *" $(stat -c %g "$d") "* ]] && continue
+            getfacl -cpn "$d" 2>/dev/null | grep -qE "^user:$uid:..x" && continue
+        fi
+        printf '%s\n' "$d"
+    done
+}
+
+# Gives the checkout to <user> (its own group), one top-level entry at a time,
+# skipping what <user> owns already. `chown -h`: a symlink in the tree is
+# re-owned itself, its target never.
+service_chown_checkout() {  # <user> <root>
+    local to="$1" root="$2" uid entry n
+    local -a entries=() others=()
+    uid="$(_svc_uid "$to")"
+    # Not created yet (a dry run): every entry changes hands.
+    if [[ -n "$uid" ]]; then others=(! -uid "$uid"); fi
+    if [[ "$(stat -c %u "$root")" != "$uid" ]]; then
+        _svc_run sudo chown -h "$to:$to" "$root"
+    fi
+    shopt -s dotglob nullglob
+    entries=("$root"/*)
+    shopt -u dotglob nullglob
+    for entry in ${entries[@]+"${entries[@]}"}; do
+        [[ -n "$(find "$entry" -xdev ${others[@]+"${others[@]}"} -print -quit 2>/dev/null)" ]] || continue
+        n="$(find "$entry" -xdev ${others[@]+"${others[@]}"} 2>/dev/null | wc -l)"
+        echo "[install]   ${entry#"$root"/}: $n entries to $to"
+        _svc_run sudo chown -hR "$to:$to" "$entry"
+    done
+}
+
+# Moves each SERVICE_STATE entry from <from home> to <to home> for <to user>.
+# A `link` entry leaves a root-owned symlink at the old path when moving out
+# (<direction> = out) and has it removed when moving back (<direction> = back).
+service_move_state() {  # <out|back> <from home> <to home> <to user>
+    local direction="$1" from="$2" to="$3" user="$4" item rel mode src dst probe unlinked
+    for item in "${SERVICE_STATE[@]}"; do
+        rel="${item%:*}"; mode="${item#*:}"
+        src="$from/$rel"; dst="$to/$rel"; unlinked=0
+        # Moving back, the symlink a `link` move left at the old path goes first.
+        if [[ "$direction" == back && -L "$dst" && "$(readlink "$dst")" == "$src" ]]; then
+            _svc_run sudo rm -f "$dst"
+            unlinked=1
+        fi
+        if [[ -L "$src" ]]; then
+            # The symlink this step left last time (nothing to do), or one of the
+            # account's own: its target is never moved or re-owned.
+            [[ "$(readlink "$src")" == "$dst" ]] \
+                || echo "[install]   WARN: $src is a symlink (to $(readlink "$src")); not moved: link it from $to yourself" >&2
+            continue
+        fi
+        [[ -e "$src" ]] || continue
+        if [[ "$unlinked" -eq 0 && ( -e "$dst" || -L "$dst" ) ]]; then
+            echo "[install]   WARN: $dst exists already; leaving $src where it is" >&2
+            continue
+        fi
+        probe="$to"
+        while [[ ! -e "$probe" ]]; do probe="$(dirname "$probe")"; done
+        if [[ "$(stat -c %d "$from")" == "$(stat -c %d "$probe")" ]]; then
+            echo "[install]   $src -> $dst (same filesystem: a rename)"
+        else
+            echo "[install]   $src -> $dst (another filesystem: $(du -sh "$src" 2>/dev/null | cut -f1) to copy)"
+        fi
+        _svc_run sudo -u "$user" mkdir -p "$(dirname "$dst")"
+        _svc_run sudo mv "$src" "$dst"
+        _svc_run sudo chown -hR "$user:$user" "$dst"
+        if [[ "$direction" == out && "$mode" == link ]]; then
+            _svc_run sudo ln -s "$dst" "$src"
+        fi
+    done
+}
+
+# The desktop session's autostart entry that lets <name> use its X display.
+service_display_entry() {  # <name> <desktop user> <desktop home> <add|remove>
+    local name="$1" user="$2" entry="$3/.config/autostart/blackbox-service-display.desktop" tmp
+    if [[ "$4" == remove ]]; then
+        if [[ -e "$entry" ]]; then _svc_run sudo rm -f "$entry"; fi
+        return 0
+    fi
+    tmp="$(mktemp)"
+    cat > "$tmp" <<DESKTOP_EOF
+[Desktop Entry]
+Type=Application
+Name=BlackBox display access
+Comment=Lets the BlackBox service account ($name) use this X display (Computer Use). Written by install.sh --service-user.
+Exec=xhost +SI:localuser:$name
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+DESKTOP_EOF
+    if [[ -f "$entry" ]] && cmp -s "$tmp" "$entry"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    _svc_run sudo -u "$user" mkdir -p "$(dirname "$entry")"
+    _svc_run sudo install -m 0644 -o "$user" -g "$user" "$tmp" "$entry"
+    rm -f "$tmp"
+}
+
+service_stop_units() {
+    local u
+    for u in "${SERVICE_UNITS[@]}"; do
+        if systemctl is-active --quiet "$u" 2>/dev/null; then
+            _svc_run sudo systemctl stop "$u"
+            SVC_STOPPED_UNITS+=("$u")
+        fi
+    done
+}
+
+# True when moving the checkout and state to <user> has anything left to do: a
+# checkout entry <user> does not own, or a state entry still at <from home>
+# that is not yet at <to home> (where only the old `link` symlink may stand).
+service_move_pending() {  # <user> <root> <from home> <to home>
+    local item rel src dst uid
+    uid="$(_svc_uid "$1")"
+    [[ -n "$uid" ]] || return 0
+    [[ -n "$(find "$2" -xdev ! -uid "$uid" -print -quit 2>/dev/null)" ]] && return 0
+    for item in "${SERVICE_STATE[@]}"; do
+        rel="${item%:*}"; src="$3/$rel"; dst="$4/$rel"
+        [[ -e "$src" && ! -L "$src" ]] || continue
+        if [[ ! -e "$dst" && ! -L "$dst" ]] || [[ -L "$dst" && "$(readlink "$dst")" == "$src" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Moves the BlackBox to <name> (steps 1-7 above); idempotent.
+migrate_to_service_account() {  # <name> <previous user> <choice file> <root>
+    local name="$1" previous="$2" choice="$3" root="$4" home prev_home d tmp who
+    local -a acl_dirs=() reach=("$root")
+    check_service_account "$name"
+    home="$(service_account_home "$name")"
+    prev_home="$(service_account_home "$previous")"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "[install] Moving the BlackBox to the service account $name (dry run: nothing is changed):"
+    fi
+    if systemctl is-enabled --quiet vllm-reranker.service 2>/dev/null; then
+        _svc_refuse "the opt-in vLLM reranker (vllm-reranker.service) runs as $previous from $(service_account_home "$previous") and is only re-provisioned on request: disable it first (sudo systemctl disable --now vllm-reranker.service), then re-run with RERANK_PROVIDER=vllm after the move if you still want it"
+    fi
+    # The old .blackbox path stays in use through its symlink (venv shebangs).
+    if [[ -e "$prev_home/.blackbox" || -L "$prev_home/.blackbox" ]]; then
+        reach+=("$prev_home/.blackbox")
+    fi
+    # Refused before anything changes: the ACLs are set once the account exists.
+    if [[ -n "$(service_traverse_dirs "$name" "${reach[@]}")" ]] && ! command -v setfacl > /dev/null; then
+        _svc_refuse "$name needs traverse-only ACLs above $root and setfacl is missing (sudo apt install acl)"
+    fi
+    if ! getent passwd "$name" > /dev/null; then
+        echo "[install]   account $name does not exist: creating it (system account, no login shell, not in sudo, home $home)"
+        _svc_run sudo useradd --system --user-group --create-home --home-dir "$home" \
+            --shell /usr/sbin/nologin --comment "AI BlackBox service" "$name"
+        _svc_run sudo chmod 0700 "$home"
+    elif [[ ! -d "$home" ]]; then
+        _svc_run sudo install -d -m 0700 -o "$name" -g "$name" "$home"
+    elif [[ "$(stat -c %a "$home")" != 700 ]]; then
+        _svc_run sudo chmod 0700 "$home"
+    fi
+    # By uid (the name only in a dry run, before the account exists).
+    mapfile -t acl_dirs < <(service_traverse_dirs "$name" "${reach[@]}")
+    who="$(_svc_uid "$name")"
+    for d in ${acl_dirs[@]+"${acl_dirs[@]}"}; do
+        _svc_run sudo setfacl -m "u:${who:-$name}:x" "$d"
+    done
+    if service_move_pending "$name" "$root" "$prev_home" "$home" || [[ "$DRY_RUN" -eq 1 ]]; then
+        service_stop_units
+        service_chown_checkout "$name" "$root"
+        service_move_state out "$prev_home" "$home" "$name"
+    fi
+    service_display_entry "$name" "$DESKTOP_USER" "$DESKTOP_HOME" add
+    tmp="$(mktemp)"
+    printf '# Written by Scripts/install.sh --service-user; --revert-service-user undoes it.\nSERVICE_USER=%s\nPREVIOUS_USER=%s\n' \
+        "$name" "$previous" > "$tmp"
+    if ! cmp -s "$tmp" "$choice" 2>/dev/null; then
+        _svc_run sudo mkdir -p "$(dirname "$choice")"
+        _svc_run sudo install -m 0644 -o root -g root "$tmp" "$choice"
+    fi
+    rm -f "$tmp"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "[install]   ...then the rest of install.sh renders every unit with User=$name, the sudoers grants for $name and"
+        echo "[install]   the store for $name, installs nvm, the CLI agents and the MCP registration into $home, and"
+        echo "[install]   restarts the units. The desktop user $DESKTOP_USER keeps its own CLI-agent sign-ins; $name"
+        echo "[install]   signs in afresh. Undo with: sudo bash $root/Scripts/install.sh --revert-service-user"
+    fi
+}
+
+# Gives the BlackBox back to <previous user>; keeps the account and its home.
+revert_service_account() {  # <name> <previous user> <choice file> <root>
+    local name="$1" previous="$2" choice="$3" root="$4" home prev_home d uid
+    uid="$(_svc_uid "$name")"
+    home="$(service_account_home "$name")"
+    prev_home="$(service_account_home "$previous")"
+    [[ "$DESKTOP_USER" == "$previous" ]] \
+        || _svc_refuse "the checkout came from $previous; run --revert-service-user as $previous"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "[install] Giving the BlackBox back to $previous from $name (dry run: nothing is changed):"
+    fi
+    if service_move_pending "$previous" "$root" "$home" "$prev_home" || [[ "$DRY_RUN" -eq 1 ]]; then
+        service_stop_units
+        service_chown_checkout "$previous" "$root"
+        service_move_state back "$home" "$prev_home" "$previous"
+    fi
+    # The traverse ACLs the move added (any entry for $name's uid above the
+    # checkout or the old home).
+    if [[ -z "$uid" ]]; then
+        echo "[install]   WARN: $name no longer exists, so its ACL entries (if any) above $root cannot be found by uid; check with getfacl" >&2
+    fi
+    while read -r d; do
+        if [[ -n "$d" ]]; then _svc_run sudo setfacl -x "u:$uid" "$d"; fi
+    done < <(if [[ -n "$uid" ]]; then
+                 for d in "$(dirname "$root")" "$prev_home"; do
+                     while [[ "$d" != / ]]; do
+                         if getfacl -cpn "$d" 2>/dev/null | grep -qE "^user:$uid:"; then printf '%s\n' "$d"; fi
+                         d="$(dirname "$d")"
+                     done
+                 done | sort -u
+             fi)
+    service_display_entry "$name" "$DESKTOP_USER" "$DESKTOP_HOME" remove
+    if [[ -e "$choice" ]]; then
+        _svc_run sudo rm -f "$choice"
+    fi
+    echo "[install]   The account $name and its home $home were kept (they hold its CLI-agent sign-ins)."
+    echo "[install]   Remove them when nothing in them is needed: sudo userdel $name && sudo rm -rf $home"
+}
+
+# Decides who the BlackBox runs as and sets REAL_USER/REAL_HOME accordingly.
+# <heal> = 0 only reads the recorded choice (--publish-store-only changes nothing).
+resolve_service_account() {  # <choice file> <root> <heal 0|1>
+    local choice="$1" root="$2" heal="$3"
+    read_service_choice "$choice"
+    if [[ "$REVERT_SERVICE_USER" -eq 1 ]]; then
+        if [[ -z "$CHOSEN_SERVICE_USER" ]]; then
+            echo "[install] --revert-service-user: the BlackBox already runs as $DESKTOP_USER; nothing to revert"
+        else
+            revert_service_account "$CHOSEN_SERVICE_USER" "$CHOSEN_PREVIOUS_USER" "$choice" "$root"
+        fi
+        return 0
+    fi
+    if [[ -n "$REQUESTED_SERVICE_USER" && -n "$CHOSEN_SERVICE_USER" \
+            && "$REQUESTED_SERVICE_USER" != "$CHOSEN_SERVICE_USER" ]]; then
+        _svc_refuse "this box already runs the BlackBox as $CHOSEN_SERVICE_USER ($choice); --revert-service-user first"
+    fi
+    local name="${REQUESTED_SERVICE_USER:-$CHOSEN_SERVICE_USER}"
+    [[ -n "$name" ]] || return 0
+    if [[ "$heal" -eq 1 ]]; then
+        migrate_to_service_account "$name" "${CHOSEN_PREVIOUS_USER:-$DESKTOP_USER}" "$choice" "$root"
+    else
+        check_service_account "$name"
+    fi
+    [[ "$DRY_RUN" -eq 1 ]] && return 0
+    REAL_USER="$name"
+    REAL_HOME="$(service_account_home "$name")"
+    echo "[install] The BlackBox runs as the service account $REAL_USER (home $REAL_HOME; recorded in $choice)"
+}
+
+resolve_service_account /etc/blackbox/service-user "$BLACKBOX_ROOT" "$(( PUBLISH_STORE_ONLY ? 0 : 1 ))"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[install] Dry run complete: nothing was changed."
+    exit 0
+fi
 
 # ── Step 0a: git-clone bootstrap (audit E23 / T3) ──
 # Update pipeline requires $BLACKBOX_ROOT to be a git checkout so the wizard's
@@ -1305,6 +1739,12 @@ sudo -u "$REAL_USER" mkdir -p \
     "$REAL_HOME/.local/share/zellij" \
     "$REAL_HOME/.local/share/blackbox"
 render_cli_agent_dropin() {
+    # A dedicated service account (Step 0s) has a home of its own under
+    # /var/lib, which ProtectSystem=strict makes read-only: all of it is the
+    # account's state, so all of it is writable. (Without one, ProtectHome=no
+    # below already leaves the home writable, and the line stays as it was.)
+    local own_home=""
+    [[ "${DESKTOP_USER:-$REAL_USER}" == "$REAL_USER" ]] || own_home=" $REAL_HOME"
     cat <<EOF
 # CLI Agent compatibility drop-in (E22). DO NOT EDIT — install.sh manages
 # this file. To customize service behavior, edit override.conf instead.
@@ -1329,7 +1769,7 @@ render_cli_agent_dropin() {
 #
 # Never add /etc/blackbox here either — see the perimeter invariant at the main
 # unit heredoc above (it holds the apt-helper root pointer).
-ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.claude.json $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij $REAL_HOME/.local/share/blackbox /tmp
+ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.claude.json $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij $REAL_HOME/.local/share/blackbox /tmp$own_home
 # Disable PrivateTmp so tmux's socket lives in real /tmp and survives
 # service restarts (combined with KillMode=process below).
 PrivateTmp=false
@@ -1618,10 +2058,11 @@ fi
 # Autostart .desktop file runs xrandr at every login (X11 session required —
 # see Step 4h). Iterates connected outputs (HDMI-1, DP-1, etc.) and applies
 # the mode to the first one that accepts it. Sleeps 5s to let the session
-# fully initialize before changing resolution.
-sudo -u "$REAL_USER" mkdir -p "$REAL_HOME/.config/autostart"
-sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/installer/templates/set-cu-resolution.desktop" \
-    "$REAL_HOME/.config/autostart/blackbox-cu-resolution.desktop"
+# fully initialize before changing resolution. The desktop session's, so
+# DESKTOP_USER's (Step 0s), whoever the service runs as.
+sudo -u "$DESKTOP_USER" mkdir -p "$DESKTOP_HOME/.config/autostart"
+sudo -u "$DESKTOP_USER" cp "$BLACKBOX_ROOT/installer/templates/set-cu-resolution.desktop" \
+    "$DESKTOP_HOME/.config/autostart/blackbox-cu-resolution.desktop"
 echo "[install] Installed autostart entry: set display to 1280x720 on next login (Anthropic CU sweet spot)"
 
 # ── Step 4f: ydotool 1.x for Wayland input injection (E18) ──
@@ -1705,8 +2146,9 @@ echo "[install] ydotoold.service enabled and running"
 # is the global animation toggle. Trade-off: customer loses all GNOME UI
 # transitions (window minimize/maximize/workspace switch animations), but this
 # is desirable on a CU kiosk anyway — animations confuse the model and waste
-# CPU. Set via dbus-launch wrapper so dconf finds the right session.
-sudo -u "$REAL_USER" bash -c '
+# CPU. Set via dbus-launch wrapper so dconf finds the right session (the
+# desktop user's, Step 0s).
+sudo -u "$DESKTOP_USER" bash -c '
     if [[ -e "/run/user/$(id -u)/bus" ]]; then
         export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
         gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null \
@@ -1731,8 +2173,10 @@ sudo -u "$REAL_USER" bash -c '
 # Fix: register the first available browser as default for all relevant MIME
 # types. Prefer chromium-browser.desktop (apt-installed, deterministic launch);
 # fall back to firefox_firefox.desktop (snap-managed) if chromium absent.
-# Idempotent: re-running with the default already set is a no-op.
-sudo -u "$REAL_USER" bash -c '
+# Idempotent: re-running with the default already set is a no-op. For the
+# desktop user's session (Step 0s); a dedicated service account gets its own
+# defaults from startup_assert_url_handlers.
+sudo -u "$DESKTOP_USER" bash -c '
     DESKTOP_DIRS="/usr/share/applications /var/lib/snapd/desktop/applications"
     chosen=""
     # Priority order: chromium-browser (apt) → firefox_firefox (snap) → google-chrome
@@ -1914,15 +2358,16 @@ install_setup_app() {
 install_setup_app
 
 # ── Step 6a: autostart .desktop — first-boot wizard launch (audit M6) ──
-sudo -u "$REAL_USER" mkdir -p "$REAL_HOME/.config/autostart"
-sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/installer/dist/blackbox-setup-autostart.desktop" \
-    "$REAL_HOME/.config/autostart/blackbox-setup.desktop"
+# Steps 6a/6b are the desktop user's (Step 0s), whoever the service runs as.
+sudo -u "$DESKTOP_USER" mkdir -p "$DESKTOP_HOME/.config/autostart"
+sudo -u "$DESKTOP_USER" cp "$BLACKBOX_ROOT/installer/dist/blackbox-setup-autostart.desktop" \
+    "$DESKTOP_HOME/.config/autostart/blackbox-setup.desktop"
 
 # ── Step 6b: persistent .desktop — manage-mode launcher (audit M6) ──
-sudo -u "$REAL_USER" mkdir -p "$REAL_HOME/.local/share/applications"
-sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/installer/dist/blackbox-setup.desktop" \
-    "$REAL_HOME/.local/share/applications/blackbox-setup.desktop"
-sudo -u "$REAL_USER" update-desktop-database "$REAL_HOME/.local/share/applications" 2>/dev/null || true
+sudo -u "$DESKTOP_USER" mkdir -p "$DESKTOP_HOME/.local/share/applications"
+sudo -u "$DESKTOP_USER" cp "$BLACKBOX_ROOT/installer/dist/blackbox-setup.desktop" \
+    "$DESKTOP_HOME/.local/share/applications/blackbox-setup.desktop"
+sudo -u "$DESKTOP_USER" update-desktop-database "$DESKTOP_HOME/.local/share/applications" 2>/dev/null || true
 
 # ── Step 7: enable + restart (audit M5 — restart works whether running or stopped) ──
 sudo systemctl daemon-reload
@@ -1946,6 +2391,14 @@ if [[ -e "$UPDATE_LOCK" ]] && ! flock -n "$UPDATE_LOCK" true 2>/dev/null; then
 else
     sudo systemctl restart blackbox.service
 fi
+
+# Units Step 0s stopped while the checkout changed hands and nothing above has
+# started again (blackbox-models.service is restarted only by its installer).
+for _unit in ${SVC_STOPPED_UNITS[@]+"${SVC_STOPPED_UNITS[@]}"}; do
+    if ! systemctl is-active --quiet "$_unit"; then
+        sudo systemctl start "$_unit" || echo "[install] WARN: $_unit did not start again; check: journalctl -u $_unit -n 50" >&2
+    fi
+done
 
 # ── Step 8: Final user message (audit C3 — /usr/bin not /usr/local/bin) ──
 echo

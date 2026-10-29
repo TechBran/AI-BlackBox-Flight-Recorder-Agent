@@ -10,7 +10,9 @@ imports (the dev box had the root, Orchestrator/, Portal/, Manifest/ and
 and credentials/ hold 0600 files, but in a directory others can open or write
 those can be listed, unlinked and replaced, so both must be 0700.
 
-install.sh fixes all of it as the checkout's owner (harden_tree_permissions).
+install.sh fixes all of it as the checkout's owner (harden_tree_permissions),
+and moves the service off a sudo-capable account on request (--service-user;
+service_account_warnings, X04-security-clients-infra-12, says when it has not).
 This module only REPORTS what is still wrong, for the startup hook in
 Orchestrator/startup.py to put in the journal: it never changes a mode and
 never raises. Group write counts only when the group is one other accounts can
@@ -95,6 +97,37 @@ def audit_checkout(root: Path, *, max_dirs: int = MAX_DIRS) -> list[str]:
                 f"credentials other local accounts must not list or replace; {_REMEDY} "
                 f"(or: chmod 0700 {root / name}).")
     return warnings
+
+
+# Groups whose members can become root with their own password.
+ADMIN_GROUPS = frozenset({"sudo", "admin", "wheel"})
+
+
+def service_account_warnings() -> list[str]:
+    """One warning when this process runs as a sudo-capable account (audit
+    X04-security-clients-infra-12): a compromised service can then rewrite that
+    account's shell rc files and autostart entries and reach its next
+    interactive sudo. `install.sh --service-user` moves the service to a
+    dedicated non-login account; until then this is the documented boundary.
+    Never raises."""
+    try:
+        name, groups = _account_groups()
+    except (KeyError, OSError):
+        return []
+    admin = sorted(ADMIN_GROUPS.intersection(groups))
+    if not admin:
+        return []
+    return [f"This service runs as {name}, a member of {', '.join(admin)}: anything that "
+            f"compromises the service can write {name}'s home and wait for its next "
+            f"sudo. Move it to a dedicated non-login account: sudo bash "
+            f"Scripts/install.sh --service-user blackbox --dry-run, then without "
+            f"--dry-run (docs/runbooks/2026-10-29-update-trust-and-service-user.md)."]
+
+
+def _account_groups() -> tuple[str, list[str]]:
+    """This process's user name and the names of all its groups."""
+    name = pwd.getpwuid(os.getuid()).pw_name
+    return name, [grp.getgrgid(g).gr_name for g in os.getgroups()]
 
 
 def _writable_by_others(st: os.stat_result) -> bool:
