@@ -166,3 +166,36 @@ def test_every_stream_emits_browser_task_for_use_computer(rec, loop):
     out = _dispatch(rec, loop, "use_computer", {"prompt": "open the docs"})
     assert {"type": "browser_task",
             "data": {"task_id": "exec-use_computer", "prompt": "open the docs"}} in out.events
+
+
+# --------------------------------------------------------------------------- #
+# The non-stream entry point                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_the_blocking_dispatch_also_works_inside_a_running_loop(rec, monkeypatch):
+    """call_* used to asyncio.run each executor tool, which raises inside a
+    running loop; dispatch_tool_blocking runs it on a helper thread instead,
+    keeping the caller's context (the origin device, the tool-outcome log)."""
+    import contextvars
+
+    marker = contextvars.ContextVar("marker", default="unset")
+    seen = []
+
+    class _Executor:
+        def __init__(self, *a, **k):
+            pass
+
+        async def execute(self, name, args):
+            seen.append(marker.get())
+            return ToolResult(success=True, result="ran")
+
+    monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+    ctx = td.ToolContext(operator="op-fix", origin_device_id=None,
+                         profile=td.PROFILES["call_anthropic"], services=rec["services"])
+
+    async def caller():
+        marker.set("from-the-caller")
+        return td.dispatch_tool_blocking("roll_dice", {"sides": 6}, ctx)
+
+    assert asyncio.run(caller()).result == "ran"
+    assert seen == ["from-the-caller"]
