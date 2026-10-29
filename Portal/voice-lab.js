@@ -37,6 +37,7 @@
 
 import { escapeHtml, toastSuccess, toastError } from './modules/core-utils.js';
 import { populateVoiceCatalog, trackDetachedPlayer } from './modules/tts-stt.js';
+import { MIC_CONSTRAINTS } from './modules/mic-capture.js';
 
 const MODAL_ID = 'voiceLabModal';
 
@@ -357,16 +358,9 @@ async function toggleRecording() {
         return;
     }
     try {
-        // Same constraints the STT path uses (mono + echo/noise/gain) — ElevenLabs
-        // cloning wants clean speech.
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-            },
-        });
+        // The STT path's mic profile (mono + echo/noise/gain, mic-capture.js) —
+        // ElevenLabs cloning wants clean speech.
+        mediaStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
     } catch (e) {
         console.error('getUserMedia failed', e);
         toastError(`Mic error: ${e.message || e.name}`);

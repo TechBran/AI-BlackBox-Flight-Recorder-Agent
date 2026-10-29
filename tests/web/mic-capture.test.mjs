@@ -5,7 +5,9 @@
 // Run: cd tests/web && npm ci && node --test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { installDom } from "./helpers/portal-dom.mjs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+import { installDom, PORTAL } from "./helpers/portal-dom.mjs";
 
 installDom();
 
@@ -199,4 +201,24 @@ test("the processor idles without input and ends on 'stop'", () => {
     assert.equal(p.process([[]]), true);
     p.port.onmessage({ data: "stop" });
     assert.equal(p.process([[new Float32Array(128)]]), false);
+});
+
+test("every other microphone in the Portal opens with the one mic profile", () => {
+    // Dictation's and the Gemini recorder's MediaRecorder paths and the Voice
+    // Lab kept their own copies of these constraints (audit P02-voice-web-12).
+    const offenders = [];
+    (function walk(dir) {
+        for (const name of readdirSync(dir)) {
+            if (["vendor", "uploads", "artifacts", "node_modules"].includes(name)) continue;
+            const p = join(dir, name);
+            if (statSync(p).isDirectory()) walk(p);
+            else if (name.endsWith(".js") && !p.endsWith(join("modules", "mic-capture.js"))) {
+                const code = readFileSync(p, "utf8");
+                for (const m of code.matchAll(/getUserMedia\(\s*([^)]*?)\s*\)/g)) {
+                    if (m[1] !== "MIC_CONSTRAINTS") offenders.push(`${relative(PORTAL, p)}: getUserMedia(${m[1].slice(0, 40)})`);
+                }
+            }
+        }
+    })(PORTAL);
+    assert.deepEqual(offenders, []);
 });

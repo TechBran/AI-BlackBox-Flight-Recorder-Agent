@@ -10,6 +10,7 @@ import { $, toast, toastError } from './core-utils.js';
 import { getAttachedFiles, addAttachedFile } from './file-upload.js';
 import { claimMic, releaseMic } from './mic-arbiter.js';
 import { hasMic, isNativeAndroid } from './native-bridge.js';
+import { MIC_CONSTRAINTS } from './mic-capture.js';
 
 /** This module's mic-arbiter owner id. */
 const MIC_OWNER = 'gemini-recorder';
@@ -557,17 +558,9 @@ export function initGeminiAudioRecorder(options = {}) {
 
             try {
                 console.log('[GeminiAudio] Calling getUserMedia with optimized constraints...');
-                // Audio constraints - require echo cancellation
-                const audioConstraints = {
-                    audio: {
-                        sampleRate: { ideal: 48000 },
-                        channelCount: 1,              // FORCE MONO - Critical for audio interfaces
-                        echoCancellation: true,       // Required - not just ideal
-                        noiseSuppression: true,       // Required - not just ideal
-                        autoGainControl: true         // Required - not just ideal
-                    }
-                };
-                mediaStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+                // The one mic profile (mono, echo cancellation, noise
+                // suppression, AGC): mic-capture.js.
+                mediaStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
                 console.log('[GeminiAudio] Got media stream in MONO with processing enabled');
 
                 try {

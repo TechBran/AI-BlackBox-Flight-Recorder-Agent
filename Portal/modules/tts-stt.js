@@ -7,12 +7,14 @@
  * Refactored: 2025-12-20
  */
 
-import { $, toast, simpleHash, escapeAttr } from './core-utils.js';
+import { $, toast, simpleHash } from './core-utils.js';
 import { getOperator, getAudioCache, saveAudioCache } from './state-management.js';
 import { sttStream } from './stt-stream.js';
 import { htmlToText } from './sanitize.js';
 import { claimMic, releaseMic } from './mic-arbiter.js';
 import { hasMic, hasNativeDownload, isNativeAndroid, nativeDownloadFile } from './native-bridge.js';
+import { createBubbleAudioPlayer } from './bubble-audio-player.js';
+import { MIC_CONSTRAINTS } from './mic-capture.js';
 
 /** Dictation's mic-arbiter owner id. */
 const DICTATION_MIC_OWNER = 'dictation';
@@ -1451,111 +1453,28 @@ export function attachAudioPlayer(bubbleElement, audioDataURL, autoplay = false,
 
     const ttsBtn = speakerBtn || bubbleElement.querySelector('.bubble-btn[title="Listen"]');
 
-    const audioContainer = document.createElement('div');
-    audioContainer.className = 'bubble-audio-player';
-    audioContainer.innerHTML = `
-        <audio src="${escapeAttr(audioDataURL)}" preload="metadata"></audio>
-        <button class="audio-play-btn" title="Play/Pause">
-            <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <polygon points="5 3 19 12 5 21 5 3"/>
-            </svg>
-            <svg class="pause-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display:none">
-                <rect x="6" y="4" width="4" height="16"/>
-                <rect x="14" y="4" width="4" height="16"/>
-            </svg>
-        </button>
-        <div class="audio-progress-container">
-            <div class="audio-progress-bar">
-                <div class="audio-progress-fill"></div>
-            </div>
-        </div>
-        <span class="audio-time">0:00</span>
-        <button class="audio-download-btn" title="Download Audio">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-        </button>
-    `;
-
-    const audio = audioContainer.querySelector('audio');
-    const playBtn = audioContainer.querySelector('.audio-play-btn');
-    const playIcon = audioContainer.querySelector('.play-icon');
-    const pauseIcon = audioContainer.querySelector('.pause-icon');
-    const progressBar = audioContainer.querySelector('.audio-progress-bar');
-    const progressFill = audioContainer.querySelector('.audio-progress-fill');
-    const timeDisplay = audioContainer.querySelector('.audio-time');
-
-    const formatTime = (seconds) => {
-        if (isNaN(seconds)) return '0:00';
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    };
-
-    playBtn.onclick = () => {
-        if (audio.paused) audio.play();
-        else audio.pause();
-    };
-
-    audio.onplay = () => {
-        playIcon.style.display = 'none';
-        pauseIcon.style.display = 'block';
-        playBtn.classList.add('playing');
-        if (ttsBtn) {
-            ttsBtn.classList.add('bubble-btn-playing');
-            ttsBtn.classList.remove('bubble-btn-loading');
-        }
-    };
-
-    audio.onpause = () => {
-        playIcon.style.display = 'block';
-        pauseIcon.style.display = 'none';
-        playBtn.classList.remove('playing');
+    const player = createBubbleAudioPlayer({
+        src: audioDataURL,
+        onDownload: () => downloadTTSAudio(audioDataURL, 'tts-response'),
+        onPlay: () => {
+            if (ttsBtn) {
+                ttsBtn.classList.add('bubble-btn-playing');
+                ttsBtn.classList.remove('bubble-btn-loading');
+            }
+        },
         // Paused by the user or by another player starting: not playing now.
-        if (ttsBtn) ttsBtn.classList.remove('bubble-btn-playing');
-    };
-
-    audio.onended = () => {
-        playIcon.style.display = 'block';
-        pauseIcon.style.display = 'none';
-        playBtn.classList.remove('playing');
-        progressFill.style.width = '0%';
-        if (ttsBtn) ttsBtn.classList.remove('bubble-btn-playing');
-    };
-
-    audio.ontimeupdate = () => {
-        if (audio.duration) {
-            const percent = (audio.currentTime / audio.duration) * 100;
-            progressFill.style.width = `${percent}%`;
-            timeDisplay.textContent = formatTime(audio.currentTime);
-        }
-    };
-
-    audio.onloadedmetadata = () => {
-        timeDisplay.textContent = formatTime(audio.duration);
-    };
-
-    progressBar.onclick = (e) => {
-        const rect = progressBar.getBoundingClientRect();
-        const percent = (e.clientX - rect.left) / rect.width;
-        audio.currentTime = percent * audio.duration;
-    };
-
-    const downloadBtn = audioContainer.querySelector('.audio-download-btn');
-    downloadBtn.onclick = () => downloadTTSAudio(audioDataURL, 'tts-response');
+        onPause: () => { if (ttsBtn) ttsBtn.classList.remove('bubble-btn-playing'); },
+        onEnded: () => { if (ttsBtn) ttsBtn.classList.remove('bubble-btn-playing'); },
+    });
 
     const controlsBar = bubbleElement.querySelector('.bubble-controls');
     if (controlsBar) {
-        controlsBar.insertAdjacentElement('afterend', audioContainer);
+        controlsBar.insertAdjacentElement('afterend', player.container);
     } else {
-        bubbleElement.appendChild(audioContainer);
+        bubbleElement.appendChild(player.container);
     }
 
-    if (autoplay) {
-        audio.play().catch(e => console.log("Autoplay prevented by browser:", e));
-    }
+    if (autoplay) player.play();
 }
 
 /**
@@ -1565,99 +1484,17 @@ export function attachAudioPlayer(bubbleElement, audioDataURL, autoplay = false,
  * @param {string} filenamePrefix - Filename prefix
  */
 export function attachGeneratedAudioPlayer(bubbleElement, audioURL, filenamePrefix = 'generated-audio') {
-    const audioContainer = document.createElement('div');
-    audioContainer.className = 'bubble-audio-player generated-audio-player';
-    audioContainer.innerHTML = `
-        <audio src="${escapeAttr(audioURL)}" preload="metadata"></audio>
-        <button class="audio-play-btn" title="Play/Pause">
-            <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <polygon points="5 3 19 12 5 21 5 3"/>
-            </svg>
-            <svg class="pause-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display:none">
-                <rect x="6" y="4" width="4" height="16"/>
-                <rect x="14" y="4" width="4" height="16"/>
-            </svg>
-        </button>
-        <div class="audio-progress-container">
-            <div class="audio-progress-bar">
-                <div class="audio-progress-fill"></div>
-            </div>
-        </div>
-        <span class="audio-time">0:00</span>
-        <button class="audio-download-btn" title="Download Audio">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-        </button>
-    `;
-
-    const audio = audioContainer.querySelector('audio');
-    const playBtn = audioContainer.querySelector('.audio-play-btn');
-    const playIcon = audioContainer.querySelector('.play-icon');
-    const pauseIcon = audioContainer.querySelector('.pause-icon');
-    const progressBar = audioContainer.querySelector('.audio-progress-bar');
-    const progressFill = audioContainer.querySelector('.audio-progress-fill');
-    const timeDisplay = audioContainer.querySelector('.audio-time');
-
-    const formatTime = (seconds) => {
-        if (isNaN(seconds)) return '0:00';
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    };
-
-    playBtn.onclick = () => {
-        if (audio.paused) audio.play();
-        else audio.pause();
-    };
-
-    audio.onplay = () => {
-        playIcon.style.display = 'none';
-        pauseIcon.style.display = 'block';
-        playBtn.classList.add('playing');
-    };
-
-    audio.onpause = () => {
-        playIcon.style.display = 'block';
-        pauseIcon.style.display = 'none';
-        playBtn.classList.remove('playing');
-    };
-
-    audio.onended = () => {
-        playIcon.style.display = 'block';
-        pauseIcon.style.display = 'none';
-        playBtn.classList.remove('playing');
-        progressFill.style.width = '0%';
-    };
-
-    audio.ontimeupdate = () => {
-        if (audio.duration) {
-            const percent = (audio.currentTime / audio.duration) * 100;
-            progressFill.style.width = `${percent}%`;
-            timeDisplay.textContent = formatTime(audio.currentTime);
-        }
-    };
-
-    audio.onloadedmetadata = () => {
-        timeDisplay.textContent = formatTime(audio.duration);
-    };
-
-    progressBar.onclick = (e) => {
-        const rect = progressBar.getBoundingClientRect();
-        const percent = (e.clientX - rect.left) / rect.width;
-        audio.currentTime = percent * audio.duration;
-    };
-
-    const downloadBtn = audioContainer.querySelector('.audio-download-btn');
-    downloadBtn.onclick = () => downloadGeneratedAudio(audioURL, filenamePrefix);
+    const { container } = createBubbleAudioPlayer({
+        src: audioURL,
+        className: 'generated-audio-player',
+        onDownload: () => downloadGeneratedAudio(audioURL, filenamePrefix),
+    });
 
     const audioResult = bubbleElement.querySelector('.audio-result');
     if (audioResult) {
-        audioResult.appendChild(audioContainer);
+        audioResult.appendChild(container);
     } else {
-        bubbleElement.appendChild(audioContainer);
+        bubbleElement.appendChild(container);
     }
 }
 
@@ -1761,103 +1598,21 @@ export function attachThinkingAudioPlayer(panel, audioDataURL, btn, autoplay = f
     const existingPlayer = panel.parentElement.querySelector('.thinking-audio-player');
     if (existingPlayer) existingPlayer.remove();
 
-    const audioContainer = document.createElement('div');
-    audioContainer.className = 'bubble-audio-player thinking-audio-player';
-    audioContainer.innerHTML = `
-        <audio src="${escapeAttr(audioDataURL)}" preload="metadata"></audio>
-        <span class="audio-label-icon">🧠</span>
-        <button class="audio-play-btn" title="Play/Pause">
-            <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <polygon points="5 3 19 12 5 21 5 3"/>
-            </svg>
-            <svg class="pause-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display:none">
-                <rect x="6" y="4" width="4" height="16"/>
-                <rect x="14" y="4" width="4" height="16"/>
-            </svg>
-        </button>
-        <div class="audio-progress-container">
-            <div class="audio-progress-bar">
-                <div class="audio-progress-fill"></div>
-            </div>
-        </div>
-        <span class="audio-time">0:00</span>
-        <button class="audio-download-btn" title="Download Audio">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-        </button>
-    `;
+    const player = createBubbleAudioPlayer({
+        src: audioDataURL,
+        className: 'thinking-audio-player',
+        labelIcon: '🧠',
+        onDownload: () => downloadTTSAudio(audioDataURL, 'tts-reasoning'),
+        onPlay: () => {
+            btn.classList.add('thinking-btn-playing');
+            btn.classList.remove('thinking-btn-loading');
+        },
+        onEnded: () => btn.classList.remove('thinking-btn-playing'),
+    });
 
-    const audio = audioContainer.querySelector('audio');
-    const playBtn = audioContainer.querySelector('.audio-play-btn');
-    const playIcon = audioContainer.querySelector('.play-icon');
-    const pauseIcon = audioContainer.querySelector('.pause-icon');
-    const progressBar = audioContainer.querySelector('.audio-progress-bar');
-    const progressFill = audioContainer.querySelector('.audio-progress-fill');
-    const timeDisplay = audioContainer.querySelector('.audio-time');
+    panel.insertAdjacentElement('afterend', player.container);
 
-    const formatTime = (seconds) => {
-        if (isNaN(seconds)) return '0:00';
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    };
-
-    playBtn.onclick = () => {
-        if (audio.paused) audio.play();
-        else audio.pause();
-    };
-
-    audio.onplay = () => {
-        playIcon.style.display = 'none';
-        pauseIcon.style.display = 'block';
-        playBtn.classList.add('playing');
-        btn.classList.add('thinking-btn-playing');
-        btn.classList.remove('thinking-btn-loading');
-    };
-
-    audio.onpause = () => {
-        playIcon.style.display = 'block';
-        pauseIcon.style.display = 'none';
-        playBtn.classList.remove('playing');
-    };
-
-    audio.onended = () => {
-        playIcon.style.display = 'block';
-        pauseIcon.style.display = 'none';
-        playBtn.classList.remove('playing');
-        progressFill.style.width = '0%';
-        btn.classList.remove('thinking-btn-playing');
-    };
-
-    audio.ontimeupdate = () => {
-        if (audio.duration) {
-            const percent = (audio.currentTime / audio.duration) * 100;
-            progressFill.style.width = `${percent}%`;
-            timeDisplay.textContent = formatTime(audio.currentTime);
-        }
-    };
-
-    audio.onloadedmetadata = () => {
-        timeDisplay.textContent = formatTime(audio.duration);
-    };
-
-    progressBar.onclick = (e) => {
-        const rect = progressBar.getBoundingClientRect();
-        const percent = (e.clientX - rect.left) / rect.width;
-        audio.currentTime = percent * audio.duration;
-    };
-
-    const downloadBtn = audioContainer.querySelector('.audio-download-btn');
-    downloadBtn.onclick = () => downloadTTSAudio(audioDataURL, 'tts-reasoning');
-
-    panel.insertAdjacentElement('afterend', audioContainer);
-
-    if (autoplay) {
-        audio.play().catch(e => console.log("Autoplay prevented by browser:", e));
-    }
+    if (autoplay) player.play();
 }
 
 // =============================================================================
@@ -2370,17 +2125,9 @@ async function legacyStartSTT() {
     } else {
         try {
             audioChunks = [];
-            // Audio constraints - require echo cancellation
-            const audioConstraints = {
-                audio: {
-                    sampleRate: { ideal: 48000 },
-                    channelCount: 1,              // FORCE MONO - Critical for audio interfaces
-                    echoCancellation: true,       // Required - not just ideal
-                    noiseSuppression: true,       // Required - not just ideal
-                    autoGainControl: true         // Required - not just ideal
-                }
-            };
-            mediaStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+            // The one mic profile (mono, echo cancellation, noise suppression,
+            // AGC): mic-capture.js.
+            mediaStream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
             mediaRec = new MediaRecorder(mediaStream);
             mediaRec.ondataavailable = (e) => {
                 if (e.data.size > 0) audioChunks.push(e.data);

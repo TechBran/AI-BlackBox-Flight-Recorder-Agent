@@ -18,6 +18,7 @@ const MODULES = [
     // The live voice agents and the modules they share (audit rank 75).
     "gemini-live", "gpt-realtime", "stt-stream", "gemini-recorder", "audio-dsp",
     "native-bridge", "mic-capture", "pcm-capture-worklet", "live-session",
+    "bubble-audio-player",
 ];
 
 for (const name of MODULES) {
