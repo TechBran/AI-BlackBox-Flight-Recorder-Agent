@@ -57,6 +57,11 @@ STORE_PATHS = [
     ("Orchestrator.media_index", "MEDIA_INDEX_FILE", "Manifest/media_index.json"),
     # Failed voice-transcript saves spool here (under the ledger root, cwd-relative).
     ("Orchestrator.voice_transcript_spool", "SPOOL_DIR", "Volumes/pending_transcripts"),
+    # The telephony gateway registry: /asterisk/call resolves its trunk from it
+    # and load_gateways() re-saves a record it migrates. gateway_manager holds
+    # its own copy of the name; contacts reads the config module's at call time.
+    ("Orchestrator.asterisk.config", "GATEWAYS_FILE", "asterisk/gateways.json"),
+    ("Orchestrator.asterisk.gateway_manager", "GATEWAYS_FILE", "asterisk/gateways.json"),
 ]
 
 # Singletons that captured a store path (or a store's contents) at

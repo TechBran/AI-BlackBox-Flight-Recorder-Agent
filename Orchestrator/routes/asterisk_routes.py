@@ -28,7 +28,6 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Optional, Dict, List
 
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from Orchestrator.checkpoint import app
@@ -148,17 +147,21 @@ def _audio_down_reason(ipc_client) -> str:
 LEGACY_TRUNK_NAME = "tg200"
 
 NO_GATEWAY_ERROR = (
-    "No telephony gateway is configured to place the call: add the TG200 in "
-    "the telephony setup wizard (Portal or Android), or set TG200_TRUNK_NAME"
+    "No enabled telephony gateway can place the call: add the TG200 (or switch "
+    "it and a SIM port on) in the telephony setup wizard (Portal or Android), "
+    "or set TG200_TRUNK_NAME"
 )
 
 
 async def _outbound_route(client, call_request: "AsteriskCallRequest") -> dict:
     """resolve_outbound_route, plus a box set up by hand before the wizard:
-    an empty registry still dials [tg200] when Asterisk has that endpoint."""
-    from Orchestrator.asterisk.gateway_manager import resolve_outbound_route
+    an empty registry still dials [tg200] when Asterisk has that endpoint.
+    A registry whose gateways (or their ports) are all switched off refuses:
+    the dev box's legacy record is itself named 'tg200', and turning it off in
+    the wizard must stop the calls."""
+    from Orchestrator.asterisk.gateway_manager import load_gateways, resolve_outbound_route
     route = resolve_outbound_route(gateway_id=call_request.gateway_id, trunk=call_request.trunk)
-    if not route["trunk"] and not call_request.gateway_id:
+    if not route["trunk"] and not call_request.gateway_id and not load_gateways():
         try:
             if await client.get_endpoint_detail("PJSIP", LEGACY_TRUNK_NAME):
                 route["trunk"] = LEGACY_TRUNK_NAME
@@ -194,7 +197,9 @@ async def asterisk_outbound_call(call_request: AsteriskCallRequest):
         error = (f"Gateway {call_request.gateway_id} is not configured or is disabled"
                  if call_request.gateway_id else NO_GATEWAY_ERROR)
         print(f"[ASTERISK-ROUTE] Outbound call refused: {error}")
-        return JSONResponse(status_code=409, content={"error": error})
+        # 200 {error}, like every other refusal here: callers read the body of
+        # a 200 (telephony.call_result_ok), and the phone bridge drops a 4xx's.
+        return {"error": error}
 
     to_number = _normalize_phone(call_request.to)
     ai_backend = BACKEND_MAP.get(call_request.backend, AIBackend.OPENAI_REALTIME)

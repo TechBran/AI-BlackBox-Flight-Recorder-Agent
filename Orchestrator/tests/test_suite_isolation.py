@@ -379,11 +379,13 @@ def test_writes_outside_the_checkout_and_bytecode_caches_are_allowed(checkout_gu
 
 def test_box_stores_point_off_the_checkout_without_app_client():
     """Not only app_client tests: for the whole session the task DB, cron DB,
-    contacts, .env, onboarding, operator and local-model download state and
-    the media index live in a sandbox, so a worker or route call in any test
-    cannot reach the box's."""
+    contacts, .env, onboarding, operator and local-model download state, the
+    media index and the telephony gateway registry live in a sandbox, so a
+    worker or route call in any test cannot reach the box's."""
     from Orchestrator import contacts, local_stack, media_index, models
     from Orchestrator import state as operator_state
+    from Orchestrator.asterisk import config as asterisk_config
+    from Orchestrator.asterisk import gateway_manager
     from Orchestrator.onboarding import secrets_writer, state
     from Orchestrator.scheduler import manager
 
@@ -397,6 +399,10 @@ def test_box_stores_point_off_the_checkout_without_app_client():
         "downloads": local_stack.DOWNLOAD_STATE_PATH,
         "operator_state": operator_state.OPERATOR_STATE_FILE,
         "media_index": media_index.MEDIA_INDEX_FILE,
+        # /asterisk/call resolves its trunk here, and load_gateways re-saves a
+        # record it migrates (audit O11-telephony-asterisk-cellular-07 fix).
+        "gateways": gateway_manager.GATEWAYS_FILE,
+        "gateways (contacts' reader)": asterisk_config.GATEWAYS_FILE,
     }
     in_checkout = {name: str(p) for name, p in stores.items()
                    if Path(p).resolve().is_relative_to(REPO_ROOT)}

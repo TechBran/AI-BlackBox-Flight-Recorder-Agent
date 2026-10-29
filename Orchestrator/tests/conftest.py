@@ -59,8 +59,8 @@ def isolated_stores(tmp_path, monkeypatch):
     and the open task_db singleton), contacts, the device registry and pairing
     stores, the local-provider registry, cron, SMS, notification
     subscriptions, voice-agent presets, custom model servers, the phone PIN
-    lockout, the wizard's .env, onboarding state and local-model download
-    state. The ledger paths (Volumes/, Manifest/, Portal/uploads, config.ini)
+    lockout, the wizard's .env, onboarding state, local-model download state
+    and the telephony gateway registry. The ledger paths (Volumes/, Manifest/, Portal/uploads, config.ini)
     are cwd-relative in config.py, so the test runs from the tmp root, which
     starts with a copy of this checkout's config.ini.
     """

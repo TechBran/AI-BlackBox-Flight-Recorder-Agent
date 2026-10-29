@@ -11,8 +11,11 @@ gateways.json record is hand-named 'tg200'.
 
 The route now takes the trunk and caller id from the gateway registry (an
 explicit trunk or gateway_id first), keeps the two env values as overrides,
-and refuses with a clear 409 when nothing can place the call. The ARI client,
-the audio subprocess and the call itself are fakes; nothing is dialled.
+and refuses with a clear {error} when nothing can place the call (HTTP 200,
+like the route's other refusals: telephony.call_result_ok). The legacy
+'tg200' endpoint is dialled only when the registry is EMPTY: a registry whose
+gateways or ports are all switched off refuses. The ARI client, the audio
+subprocess and the call itself are fakes; nothing is dialled.
 """
 import asyncio
 
@@ -59,9 +62,11 @@ def box(tmp_path, monkeypatch):
     return {"ari": ari, "placed": placed}
 
 
-def _gateway(name, numbers=(), enabled=True, ports_enabled=True):
+def _gateway(name, numbers=(), enabled=True, ports_enabled=True, trunk=None):
     gw = gm._new_gateway(name=name, ip="192.0.2.10", phone_numbers=list(numbers))
     gw["enabled"] = enabled
+    if trunk is not None:
+        gw["trunk_name"] = trunk
     for port in gw["ports"]:
         port["enabled"] = ports_enabled
     gm.add_gateway(gw)
@@ -129,9 +134,13 @@ def test_an_explicit_trunk_is_dialled_as_given(box):
 
 
 def test_no_gateway_is_a_clear_refusal_not_a_failed_session(box):
+    from Orchestrator.telephony import call_error, call_result_ok
     status, body = _body(_call())
-    assert status == 409
+    # 200 {error}, like the route's other refusals (ARI down, audio down):
+    # the phone bridge reads the body of a 200 only, so a 4xx lost the reason.
+    assert status == 200 and not call_result_ok(body)
     assert "gateway" in body["error"].lower() and "wizard" in body["error"].lower()
+    assert "wizard" in call_error(body, status).lower()
     assert box["placed"] == [] and ar.PHONE_SESSIONS == {}
 
 
@@ -141,6 +150,33 @@ def test_a_hand_configured_legacy_trunk_still_works(box):
     box["ari"].endpoints.add("tg200")
     status, body = _body(_call())
     assert status == 200 and box["placed"][-1]["trunk"] == "tg200"
+
+
+@pytest.mark.parametrize("switched_off", [
+    {"enabled": False},
+    {"ports_enabled": False},
+], ids=["gateway-disabled", "all-ports-disabled"])
+def test_switching_the_legacy_gateway_off_stops_its_calls(box, switched_off):
+    """The dev box's only registry record is the hand-named 'tg200' gateway,
+    and Asterisk has the [tg200] endpoint. Turning that gateway (or every one
+    of its SIM ports) off in the wizard must stop make_phone_call dialling it:
+    the legacy fallback is for an EMPTY registry, not for one whose gateways
+    are all off."""
+    _gateway("TG200", numbers=["+15555550166"], trunk="tg200", **switched_off)
+    box["ari"].endpoints.add("tg200")
+    status, body = _body(_call())
+    assert status == 200 and body.get("status") != "initiated"
+    assert "gateway" in body["error"].lower()
+    assert box["placed"] == [] and ar.PHONE_SESSIONS == {}
+
+
+def test_a_switched_on_legacy_gateway_is_dialled_from_the_registry(box):
+    """The same record switched on resolves through the registry (with its
+    port's caller id), not through the endpoint probe."""
+    _gateway("TG200", numbers=["+15555550166"], trunk="tg200")
+    status, body = _body(_call())
+    assert status == 200 and box["placed"][-1] == {
+        "to": "+15550100123", "trunk": "tg200", "caller_id": "+15555550166"}
 
 
 def test_the_make_phone_call_tool_reports_the_refusal(box, monkeypatch):
