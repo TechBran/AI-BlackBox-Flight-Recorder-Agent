@@ -192,15 +192,37 @@ UPDATE_SH="$REPO_ROOT/Scripts/update.sh"
 bash -n "$UPDATE_SH" || fail "update.sh does not parse"
 line_of() { grep -nE "$1" "$UPDATE_SH" | head -n1 | cut -d: -f1; }
 ORIGIN_AT="$(line_of '^check_pinned_origin$')"
-FETCH_AT="$(line_of '^if ! git fetch origin main')"
+LATEST_AT="$(line_of '^if ! LATEST_SHA="\$\(remote_main_sha "\$ORIGIN_URL"\)"; then$')"
+FETCH_AT="$(line_of '^if ! git fetch origin "\+refs/heads/main:refs/remotes/origin/main"')"
 SIGN_AT="$(line_of '^verify_release_commit "\$LATEST_SHA"$')"
+OBJECTS_AT="$(line_of '^if ! OBJECT_PROBLEMS="\$\(run_tree_check objects "\$LATEST_SHA"\)"; then$')"
 TAG_AT="$(line_of '^git tag "\$PRE_TAG"$')"
 SWAP_AT="$(line_of '^if ! keep_local_work "auto-stash-\$\{PRE_TAG\}" "\$LATEST_SHA"')"
+RESET_AT="$(line_of '^git reset --hard "\$LATEST_SHA"$')"
+TREE_AT="$(line_of '^if ! TREE_PROBLEMS="\$\(run_tree_check worktree "\$LATEST_SHA"\)"; then$')"
+INSTALL_AT="$(line_of '^if ! sudo "\$BLACKBOX_ROOT/Scripts/install.sh"; then$')"
 [[ -n "$ORIGIN_AT" && -n "$FETCH_AT" && "$ORIGIN_AT" -lt "$FETCH_AT" ]] \
     || fail "update.sh must check the pinned origin (line ${ORIGIN_AT:-none}) before it fetches (line ${FETCH_AT:-none})"
+# The commit installed is main as the origin reports it (git ls-remote), asked
+# after the origin check and before the fetch, never read back from the
+# checkout's refs (a tag named origin/main shadows refs/remotes/origin/main).
+[[ -n "$LATEST_AT" && "$ORIGIN_AT" -lt "$LATEST_AT" && "$LATEST_AT" -lt "$FETCH_AT" ]] \
+    || fail "update.sh must take LATEST_SHA from remote_main_sha between the origin check and the fetch (line ${LATEST_AT:-none})"
+grep -qE '(rev-parse|LATEST_SHA=).*origin/main' "$UPDATE_SH" \
+    && fail "update.sh reads the commit to install from the checkout's origin/main ref again"
 [[ -n "$SIGN_AT" && -n "$TAG_AT" && "$SIGN_AT" -lt "$TAG_AT" ]] \
     || fail "update.sh must verify the release signature (line ${SIGN_AT:-none}) before it tags, freezes or stashes (line ${TAG_AT:-none})"
+[[ -n "$OBJECTS_AT" && "$SIGN_AT" -lt "$OBJECTS_AT" && "$OBJECTS_AT" -lt "$TAG_AT" ]] \
+    || fail "update.sh must hash-check the commit's objects (line ${OBJECTS_AT:-none}) before it tags"
 [[ -n "$SWAP_AT" ]] || fail "update.sh no longer resets to the verified \$LATEST_SHA"
+# Root runs install.sh from the tree only once it is the commit, byte for byte.
+[[ -n "$RESET_AT" && -n "$TREE_AT" && -n "$INSTALL_AT" && "$RESET_AT" -lt "$TREE_AT" && "$TREE_AT" -lt "$INSTALL_AT" ]] \
+    || fail "update.sh must check the tree on disk (line ${TREE_AT:-none}) between the reset (line ${RESET_AT:-none}) and sudo install.sh (line ${INSTALL_AT:-none})"
+# Every git call on the checkout goes without replace refs, hooks or fsmonitor.
+grep -qxF 'GIT_SAFE=(--no-replace-objects --no-pager -c core.hooksPath=/dev/null -c core.fsmonitor=false)' "$UPDATE_SH" \
+    || fail "update.sh lost its GIT_SAFE options"
+grep -qxF 'git() { command "${GIT_CMD[@]}" "${GIT_SAFE[@]}" "$@"; }' "$UPDATE_SH" \
+    || fail "update.sh's git() wrapper no longer adds GIT_SAFE"
 grep -qE '^[[:space:]]*git reset --hard origin/main' "$UPDATE_SH" \
     && fail "update.sh resets to origin/main again — it must reset to the verified \$LATEST_SHA"
 grep -qE '^git reset --hard "\$LATEST_SHA"$' "$UPDATE_SH" \
@@ -213,13 +235,29 @@ grep -qE '\$\{UPDATE_TRUST_(DIR|UID):?[-=]' "$UPDATE_SH" \
 # ── 10. the in-app runner checks the same pins, in the same places ─────────────
 RUNNER="$REPO_ROOT/Orchestrator/update/runner.py"
 R_ORIGIN="$(grep -n 'verify.check_origin' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_LATEST="$(grep -n 'git_ops.latest_origin_sha' "$RUNNER" | head -n1 | cut -d: -f1)"
 R_FETCH="$(grep -n 'git_ops.fetch_origin_main' "$RUNNER" | head -n1 | cut -d: -f1)"
 R_SIGN="$(grep -n 'verify.check_commit' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_OBJECTS="$(grep -n 'verify.check_objects' "$RUNNER" | head -n1 | cut -d: -f1)"
 R_TAG="$(grep -n 'git_ops.tag, self.pre_update_tag' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_RESET="$(grep -n 'self._write_state(PHASE_RESET_HARD)' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_TREE="$(grep -n 'verify.check_worktree' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_APT="$(grep -n 'self._write_state(PHASE_APT_INSTALL)' "$RUNNER" | head -n1 | cut -d: -f1)"
 [[ -n "$R_ORIGIN" && -n "$R_FETCH" && "$R_ORIGIN" -lt "$R_FETCH" ]] \
     || fail "runner.py must check the pinned origin before its fetch"
+[[ -n "$R_LATEST" && "$R_ORIGIN" -lt "$R_LATEST" && "$R_LATEST" -lt "$R_FETCH" ]] \
+    || fail "runner.py must ask the origin for main (latest_origin_sha) between the origin check and the fetch"
 [[ -n "$R_SIGN" && -n "$R_TAG" && "$R_SIGN" -lt "$R_TAG" ]] \
     || fail "runner.py must verify the release signature before it tags"
+[[ -n "$R_OBJECTS" && "$R_OBJECTS" -lt "$R_TAG" ]] \
+    || fail "runner.py must hash-check the commit's objects before it tags"
+[[ -n "$R_RESET" && -n "$R_TREE" && -n "$R_APT" && "$R_RESET" -lt "$R_TREE" && "$R_TREE" -lt "$R_APT" ]] \
+    || fail "runner.py must check the tree on disk after the reset and before anything is installed"
+GIT_OPS="$REPO_ROOT/Orchestrator/update/git_ops.py"
+grep -qF '["git", *GIT_SAFE_OPTIONS, *args]' "$GIT_OPS" \
+    || fail "git_ops._git no longer passes GIT_SAFE_OPTIONS to every git call"
+grep -qE 'rev-parse", "origin/main"' "$GIT_OPS" \
+    && fail "git_ops reads the commit to install from the checkout's origin/main ref again"
 grep -qE '^TRUST_DIR = "/etc/blackbox"$' "$REPO_ROOT/Orchestrator/update/verify.py" \
     || fail "verify.py's trust pins no longer come from the fixed /etc/blackbox"
 grep -q 'os.environ' "$REPO_ROOT/Orchestrator/update/verify.py" \

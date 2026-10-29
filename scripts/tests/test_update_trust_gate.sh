@@ -11,7 +11,12 @@
 #   2. verify_release_commit: no key pinned passes with a warning; with a key,
 #      an unsigned commit, a commit signed by another key, and a commit whose
 #      .git/config plants an attacker's signers file or an always-good
-#      verifier all refuse with exit 4; the pinned key's commit passes.
+#      verifier all refuse with exit 4; the pinned key's commit passes;
+#   3. remote_main_sha: the commit to install is the remote's own main, whatever
+#      the checkout's refs (a tag named origin/main, a frozen remote ref), its
+#      config or a GIT_DIR in the caller's environment say;
+#   4. run_tree_check: a rewritten tracked file after the "reset" and a
+#      rewritten object before it are refused; hooks never run through git().
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -129,6 +134,65 @@ q "$WORK/box" config --unset gpg.ssh.program
 q "$WORK/box" config --unset gpg.ssh.allowedSignersFile
 printf '# only comments\n\n' > "$TRUST/update-allowed-signers"
 expect 0 "a key file with only comments" "holds no key" verify_release_commit "$UNSIGNED"
+
+# ── 3. which commit: the remote's own main ───────────────────────────────────
+q "$WORK/box" push -q origin "$SIGNED:refs/heads/main"
+q "$WORK/box" fetch -q origin
+q "$WORK/box" update-ref refs/tags/origin/main "$FOREIGN"            # shadows origin/main
+q "$WORK/box" update-ref refs/remotes/origin/main "$UNSIGNED"        # a frozen remote ref
+q "$WORK/box" config --replace-all remote.origin.fetch "+refs/heads/main:refs/remotes/origin/upstream"
+[[ "$("$G" -C "$WORK/box" rev-parse origin/main 2>/dev/null)" == "$FOREIGN" ]] \
+    || fail "precondition: the tag should shadow origin/main"
+got="$(run_gate remote_main_sha "$WORK/origin.git")" || fail "remote_main_sha failed: $got"
+[[ "$got" == "$SIGNED" ]] || fail "remote_main_sha answered $got, not the remote's main $SIGNED"
+# A GIT_DIR or GIT_CONFIG_PARAMETERS in the caller's environment would bring
+# an insteadOf that sends the question to another remote, whose main is FOREIGN.
+"$G" init -q --bare "$WORK/elsewhere.git"
+q "$WORK/box" push -q "$WORK/elsewhere.git" "$FOREIGN:refs/heads/main"
+"$G" init -q --bare "$WORK/cfg.git"
+"$G" --git-dir="$WORK/cfg.git" config "url.$WORK/elsewhere.git.insteadOf" "$WORK/origin.git"
+[[ "$("$G" --git-dir="$WORK/cfg.git" ls-remote "$WORK/origin.git" refs/heads/main | cut -f1)" == "$FOREIGN" ]] \
+    || fail "precondition: the planted insteadOf should redirect a plain ls-remote"
+got="$(GIT_DIR="$WORK/cfg.git" run_gate remote_main_sha "$WORK/origin.git")" || fail "remote_main_sha failed under GIT_DIR: $got"
+[[ "$got" == "$SIGNED" ]] || fail "a GIT_DIR in the environment chose the answer: $got"
+got="$(GIT_CONFIG_PARAMETERS="'url.$WORK/elsewhere.git.insteadof'='$WORK/origin.git'" \
+       run_gate remote_main_sha "$WORK/origin.git")" || fail "remote_main_sha failed under GIT_CONFIG_PARAMETERS: $got"
+[[ "$got" == "$SIGNED" ]] || fail "GIT_CONFIG_PARAMETERS in the environment chose the answer: $got"
+run_gate remote_main_sha "$WORK/no-such-remote.git" > /dev/null 2>&1 \
+    && fail "remote_main_sha answered for a remote that does not exist"
+
+# ── 4. the commit's real content ─────────────────────────────────────────────
+TC="$REPO_ROOT/Orchestrator/update/tree_check.py"
+# shellcheck disable=SC2034  # the variables are read by the sourced run_tree_check
+check() {  # <objects|worktree> <sha>
+    ( cd "$WORK/box" || exit 99
+      BLACKBOX_ROOT="$WORK/box"; TREE_OWNER="$(id -un)"; GIT_CMD=(git)
+      GIT_SAFE=(--no-replace-objects --no-pager -c core.hooksPath=/dev/null -c core.fsmonitor=false)
+      PYTHON3=python3; TREE_CHECK="$TC"
+      # shellcheck source=/dev/null
+      source "$GATE"
+      run_tree_check "$@" )
+}
+q "$WORK/box" reset -q --hard "$SIGNED"
+check worktree "$SIGNED" > /dev/null || fail "a clean checkout of the signed commit did not pass"
+echo planted > "$WORK/box/f"
+out="$(check worktree "$SIGNED")" && fail "a rewritten tracked file passed"
+[[ "$out" == "f: differs from the release" ]] || fail "the rewritten file was not named: $out"
+q "$WORK/box" checkout -- f
+check objects "$SIGNED" > /dev/null || fail "the signed commit's objects did not pass"
+check objects "$(printf '%040d' 0)" > /dev/null && fail "a commit .git does not have passed"
+# git() in update.sh never runs hooks (core.hooksPath=/dev/null).
+printf '#!/bin/sh\ntouch "%s/hook-ran"\n' "$WORK" > "$WORK/box/.git/hooks/post-checkout"
+chmod +x "$WORK/box/.git/hooks/post-checkout"
+awk '/^GIT_SAFE=\(/' "$UPDATE_SH" > "$WORK/safe.sh"
+grep -q . "$WORK/safe.sh" || fail "GIT_SAFE is not in update.sh"
+# shellcheck disable=SC2034  # GIT_CMD is read by the eval'd git()
+( cd "$WORK/box" && GIT_CMD=(git)
+  # shellcheck source=/dev/null
+  source "$WORK/safe.sh"
+  eval "$(grep -E '^git\(\) \{' "$UPDATE_SH")"
+  git checkout -q "$UNSIGNED" && git checkout -q "$SIGNED" ) || fail "git() could not check out"
+[[ ! -e "$WORK/hook-ran" ]] || fail "a hook ran through update.sh's git()"
 
 echo "ALL TESTS PASSED"
 exit 0

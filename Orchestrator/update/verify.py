@@ -1,42 +1,55 @@
 """Pinned update origin + release-signature gate (2026-10 audit rank 79,
 X04-security-clients-infra-11).
 
-Both updaters apply the same two checks before they change anything on the
-box: this module for the in-app runner (runner.py), and Scripts/update.sh for
-the SSH path (its check_pinned_origin / verify_release_commit, which follow the
-rules below line for line).
+Both updaters apply the same checks before they change anything on the box:
+this module for the in-app runner (runner.py), and Scripts/update.sh for the
+SSH path (its check_pinned_origin / verify_release_commit / run_tree_check,
+which follow the rules below line for line).
 
   1. ORIGIN. /etc/blackbox/update-origin lists the URLs updates may come from,
      one per line (# comments and blank lines ignored). The effective
      `git remote get-url origin` (url.*.insteadOf applied) must be one of them,
      compared after trimming one trailing "/" and one trailing ".git" and
      ignoring case (GitHub owner and repository names are case-insensitive).
-     Checked BEFORE the fetch, so the box never fetches from anywhere else.
-  2. SIGNATURE. /etc/blackbox/update-allowed-signers is an ssh-keygen ALLOWED
-     SIGNERS file. When it holds at least one key, the commit about to be
-     installed must carry an SSH signature (a `gpgsig -----BEGIN SSH
-     SIGNATURE-----` header) that `git verify-commit` accepts against that
-     file. The verification pins gpg.ssh.allowedSignersFile and gpg.ssh.program
-     on the command line, which beats anything .git/config says, and points the
-     PGP and X.509 programs at `false`, so neither a planted config nor a
-     signature from a key the box was never given can pass.
+     Checked BEFORE anything is fetched. The retired blackbox-poc slug is
+     re-pointed first, as update.sh does (check_origin).
+  2. WHICH COMMIT. The SHA installed is main as that origin itself reports it
+     (git_ops.latest_origin_sha: `git ls-remote` run outside the checkout),
+     never the checkout's own origin/main, which a tag named origin/main or a
+     remote.origin.fetch refspec can shadow or freeze.
+  3. SIGNATURE. /etc/blackbox/update-allowed-signers is an ssh-keygen ALLOWED
+     SIGNERS file. When it holds at least one key, that commit must carry an
+     SSH signature (a `gpgsig -----BEGIN SSH SIGNATURE-----` header) that
+     `git verify-commit` accepts against that file. The verification pins
+     gpg.ssh.allowedSignersFile and gpg.ssh.program on the command line, which
+     beats anything .git/config says, and points the PGP and X.509 programs at
+     `false`, so neither a planted config nor a signature from a key the box
+     was never given can pass.
+  4. CONTENT. The commit, its trees and its blobs must hash to their ids
+     (check_objects, before the reset), and after the reset every tracked file
+     on disk must be the blob the commit holds (check_worktree): tree_check.py
+     hashes them itself, so a planted pack, a refs/replace/ entry, a hook or a
+     filter cannot put other bytes on disk under the verified SHA. Every git
+     call also runs with tree_check.GIT_SAFE_OPTIONS.
 
-Both files are written ONLY by `sudo bash install.sh` (publish_update_pins, from
-the tracked installer/update-origin and installer/allowed_signers), root-owned
-like the template store, and /etc/blackbox is never in the service's
+Both pin files are written ONLY by `sudo bash install.sh` (publish_update_pins,
+from the tracked installer/update-origin and installer/allowed_signers),
+root-owned like the template store, and /etc/blackbox is never in the service's
 ReadWritePaths. A file that is not root-owned, is a symlink, or is writable by
 group or others is not a pin, and the update is refused. A MISSING file means
 "not pinned yet" (a box that has not run that install.sh, or a repo that ships
 no release key yet): the update goes ahead with a warning in its log, the way
-the template store is adopted. See
-docs/runbooks/2026-10-29-update-trust-and-service-user.md (how releases get
-signed, and how a box adopts the pins).
+the template store is adopted. Until installer/allowed_signers ships a key, no
+box checks signatures. See docs/runbooks/2026-10-29-update-trust-and-service-
+user.md (how releases get signed, how a box adopts the pins).
 
 What this does NOT cover: code already on disk. The runner is itself service
-code, so a compromised service could skip these checks; the gate protects the
-box from what arrives over the network (a hijacked or renamed repository, a
-tampered origin URL, a man in the middle), which is where the commits it
-installs come from.
+code, so a compromised service could skip these checks, and on the SSH path
+update.sh and install.sh are files in the service-writable checkout that root
+then runs (the runbook's "What is still open"). The gate protects the box from
+what arrives over the network (a hijacked or renamed repository, a tampered
+origin URL, a man in the middle, once a release key is pinned) and from
+tampering that only reaches .git (refs, config, objects, hooks).
 """
 from __future__ import annotations
 
@@ -48,6 +61,7 @@ from pathlib import Path
 from typing import Optional
 
 from Orchestrator.update import git_ops
+from Orchestrator.update import tree_check
 
 # Root-owned trust anchors. Module constants (never environment variables: the
 # service's environment comes partly from the service-writable .env), so only a
@@ -59,6 +73,11 @@ TRUSTED_UID = 0
 
 # The tracked files install.sh publishes as those pins.
 PIN_SOURCES = ("installer/update-origin", "installer/allowed_signers")
+
+# The repository's pre-rename slug (renamed 2026-07-23). GitHub still
+# redirects it, so a box that never ran update.sh's self-heal still updates
+# from it; the pin lists only the new URL, so it is re-pointed before the check.
+RETIRED_ORIGIN_SLUG = "TechBran/blackbox-poc"
 
 # The raw commit header line of an SSH signature (git writes the armour's first
 # line into the gpgsig header).
@@ -75,13 +94,17 @@ class UpdateRefused(Exception):
 def check_origin(root: Path) -> list[str]:
     """Refuse (UpdateRefused) unless the checkout's origin is a pinned one.
 
-    Returns the log notes for the update: one warning when no origin is
-    pinned on this box yet, else nothing."""
+    The retired blackbox-poc slug is re-pointed to git_ops.DEFAULT_REMOTE_URL
+    first (Scripts/update.sh's origin self-heal, same match). Returns the log
+    notes for the update: that re-point, and a warning when no origin is
+    pinned on this box yet."""
+    notes = _heal_retired_origin(root)
     pins = _read_pin(ORIGIN_PIN)
     if pins is None:
-        return [f"WARNING: no update origin is pinned on this box ({_pin_path(ORIGIN_PIN)} "
-                f"is missing), so the origin was not checked. `sudo bash "
-                f"{root}/Scripts/install.sh` pins it."]
+        return notes + [
+            f"WARNING: no update origin is pinned on this box ({_pin_path(ORIGIN_PIN)} "
+            f"is missing), so the origin was not checked. `sudo bash "
+            f"{root}/Scripts/install.sh` pins it."]
     if not pins:
         raise UpdateRefused(f"{_pin_path(ORIGIN_PIN)} lists no update origin, so no "
                             f"origin is accepted. Re-run `sudo bash {root}/Scripts/install.sh` "
@@ -96,7 +119,7 @@ def check_origin(root: Path) -> list[str]:
             f"origin ({_pin_path(ORIGIN_PIN)} lists {', '.join(pins)}). Nothing was "
             f"fetched or changed. If the origin was changed by mistake, put it back with "
             f"`git -C {root} remote set-url origin {pins[0]}`.")
-    return []
+    return notes
 
 
 def check_commit(root: Path, sha: str) -> list[str]:
@@ -140,6 +163,37 @@ def check_commit(root: Path, sha: str) -> list[str]:
     return []
 
 
+def check_objects(root: Path, sha: str) -> None:
+    """Refuse (UpdateRefused) unless the commit `sha`, its trees and its blobs
+    in the object store hash to their ids (tree_check.verify_objects). Run
+    before anything is reset."""
+    problems = _tree_problems(tree_check.verify_objects, root, sha)
+    if problems:
+        raise UpdateRefused(
+            f"The objects for commit {sha[:7]} in this checkout's .git are not the ones "
+            f"its id names, so it was not installed: {'; '.join(tree_check.summarize(problems))}. "
+            f"Nothing was changed. If a fetch was interrupted, check for updates again.")
+
+
+def check_worktree(root: Path, sha: str) -> None:
+    """Refuse (UpdateRefused) unless every tracked file on disk is, byte for
+    byte, the one commit `sha` holds (tree_check.verify_worktree). Run right
+    after the reset, before anything runs from the new code."""
+    problems = _tree_problems(tree_check.verify_worktree, root, sha)
+    if problems:
+        raise UpdateRefused(
+            f"After the reset to {sha[:7]}, these tracked files are not the ones the "
+            f"verified commit holds (something rewrote them during the reset): "
+            f"{'; '.join(tree_check.summarize(problems))}.")
+
+
+def _tree_problems(check, root: Path, sha: str) -> list[str]:
+    try:
+        return check(str(root), sha)
+    except tree_check.TreeCheckError as e:
+        return [f"the check could not run ({e})"]
+
+
 def normalize_origin(url: str) -> str:
     """The comparable form of an origin URL: trimmed, lower-cased, then one
     trailing "/" and one trailing ".git" removed (Scripts/update.sh's
@@ -150,6 +204,22 @@ def normalize_origin(url: str) -> str:
     if url.endswith(".git"):
         url = url[:-4]
     return url
+
+
+def _heal_retired_origin(root: Path) -> list[str]:
+    """Re-point an origin still on the retired slug (idempotent; never adds the
+    old slug to any pin). Returns the note for the log, or nothing."""
+    try:
+        url = git_ops.origin_url(root)
+    except _GIT_ERRORS:
+        return []  # check_origin reports an unreadable origin itself
+    if RETIRED_ORIGIN_SLUG not in url:
+        return []
+    try:
+        git_ops.set_origin_url(root, git_ops.DEFAULT_REMOTE_URL)
+    except _GIT_ERRORS as e:
+        return [f"WARNING: could not re-point the origin from the retired {url}: {_git_error(e)}"]
+    return [f"Re-pointed the origin from the retired {url} to {git_ops.DEFAULT_REMOTE_URL}."]
 
 
 def _pin_path(name: str) -> str:

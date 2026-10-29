@@ -22,6 +22,12 @@ DESIGN NOTES:
     sync handlers already run in FastAPI's threadpool.
   - /update/status caches the git_ops.fetch result for 60s to avoid
     GitHub rate-limiting (audit M7) when multiple Portal tabs auto-poll.
+  - The pinned update origin (2026-10 audit X04-security-clients-infra-11,
+    verify.check_origin) is checked before status, preflight or the
+    confirm_sha race check fetch anything: an origin the pin does not list is
+    reported as fetch_error (refused: "unverified_update") and never fetched
+    from, so no panel lists its commits as an update. latest_sha is main as
+    the origin itself reports it, the commit Install would install.
   - /update/log/stream uses the same SSE pattern as /onboarding/logs/stream
     (newline-delimited "data: <json>\\n\\n" frames).
 """
@@ -41,6 +47,7 @@ from pydantic import BaseModel
 
 from Orchestrator.update import changes as changes_mod
 from Orchestrator.update import git_ops
+from Orchestrator.update import verify
 from Orchestrator.update.active_sessions import (
     count_active_cli_sessions, list_active_cli_sessions,
 )
@@ -146,6 +153,19 @@ def _compute_status_uncached(root: Path) -> dict:
     """Do the actual git-fetch + categorize work. Updates the cache."""
     global _STATUS_CACHE, _STATUS_CACHE_TS
     try:
+        verify.check_origin(root)
+    except verify.UpdateRefused as e:
+        # Never fetched from: Install would be refused for the same reason.
+        return {
+            "git_initialized": True,
+            "fetch_error": str(e),
+            "refused": "unverified_update",
+            "in_progress": _MGR.is_locked(),
+            "last_state": _MGR.read_state(),
+        }
+    try:
+        # Main as the origin reports it, asked before the fetch brings it.
+        latest = git_ops.latest_origin_sha(root)
         git_ops.fetch_origin_main(root)
     except subprocess.CalledProcessError as e:
         return {
@@ -162,12 +182,19 @@ def _compute_status_uncached(root: Path) -> dict:
             "last_state": _MGR.read_state(),
         }
 
+    if not git_ops.has_commit(root, latest):
+        return {
+            "git_initialized": True,
+            "fetch_error": f"the fetch did not bring {latest[:7]} (origin/main moved "
+                           f"while checking); check again",
+            "in_progress": _MGR.is_locked(),
+            "last_state": _MGR.read_state(),
+        }
     current = git_ops.current_sha(root)
     current_short = git_ops.current_short(root)
-    latest = git_ops.latest_origin_sha(root)
     latest_short = latest[:7]
-    behind = git_ops.commits_behind(root)
-    ahead = git_ops.commits_ahead(root)
+    behind = git_ops.commits_behind(root, target=latest)
+    ahead = git_ops.commits_ahead(root, target=latest)
 
     commits = []
     changed_files: list[str] = []
@@ -263,14 +290,18 @@ async def update_start(req: StartRequest):
         return _dirty_refusal(dirty, "Installing the update")
 
     # confirm_sha race-check: if origin moved since UI fetched status,
-    # refuse so user re-reads the (now different) changelog.
+    # refuse so user re-reads the (now different) changelog. Asked of the
+    # pinned origin itself (an unpinned one is never contacted: the runner
+    # refuses it with the reason).
+    latest = ""
     if req.confirm_sha:
         try:
-            await asyncio.to_thread(git_ops.fetch_origin_main, _ROOT)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            await asyncio.to_thread(verify.check_origin, _ROOT)
+            latest = await asyncio.to_thread(git_ops.latest_origin_sha, _ROOT)
+        except (verify.UpdateRefused, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired, OSError):
             pass  # fall through — runner will fail with clearer error
-        latest = await asyncio.to_thread(git_ops.latest_origin_sha, _ROOT)
-        if latest != req.confirm_sha:
+        if latest and latest != req.confirm_sha:
             raise HTTPException(
                 409,
                 f"origin/main moved since you confirmed. "

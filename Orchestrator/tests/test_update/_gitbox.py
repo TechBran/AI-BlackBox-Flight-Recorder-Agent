@@ -4,7 +4,9 @@ test_updater_safety.py (the in-app runner and routes) and test_update_sh.py
 (the Scripts/update.sh twin)."""
 from __future__ import annotations
 
+import os
 import subprocess
+import zlib
 from types import SimpleNamespace
 
 
@@ -132,3 +134,61 @@ def write_pins(trust_dir, *, origins=None, signers=None):
         p = trust_dir / "update-allowed-signers"
         p.write_text("# release keys\n" + "".join(f"{s}\n" for s in signers))
         p.chmod(0o644)
+
+
+# ── what someone who can write the box's .git plants (X04-...-11) ───────
+
+def plant_commit(box, workdir, files, message="looks like a normal release"):
+    """A commit on top of the box's HEAD with `files` ({relpath: body})
+    changed, made elsewhere and fetched into the box's object store with no
+    ref left pointing at it, the working tree untouched. Returns its SHA."""
+    att = workdir / "attacker-clone"
+    git(workdir, "clone", "-q", str(box.root), str(att))
+    _identity(att)
+    for rel, body in files.items():
+        p = att / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+        if rel.endswith(".sh"):
+            p.chmod(0o755)
+    git(att, "add", "-A")
+    git(att, "commit", "-q", "-m", message)
+    sha = git(att, "rev-parse", "HEAD")
+    git(box.root, "fetch", "-q", str(att), f"{sha}:refs/planted/tmp")
+    git(box.root, "update-ref", "-d", "refs/planted/tmp")
+    return sha
+
+
+def tree_with(root, commit, rel, body, index_file):
+    """The id of `commit`'s tree with `rel` replaced by `body` (written into
+    the box's object store, as a replace ref or a rewritten object needs)."""
+    env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=str(root), input=body,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "read-tree", commit], cwd=str(root), env=env, check=True)
+    subprocess.run(["git", "update-index", "--cacheinfo", f"100755,{blob},{rel}"],
+                   cwd=str(root), env=env, check=True)
+    return subprocess.run(["git", "write-tree"], cwd=str(root), env=env, capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def overwrite_loose_object(root, oid, kind, raw):
+    """Rewrite loose object `oid` in place to hold `raw` (a `kind` object), as
+    a writer of .git/objects could. The fetch must have left it loose
+    (fetch.unpackLimit)."""
+    path = root / ".git" / "objects" / oid[:2] / oid[2:]
+    assert path.exists(), f"{oid} is not a loose object"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(zlib.compress(b"%s %d\0" % (kind.encode(), len(raw)) + raw))
+    os.replace(tmp, path)
+
+
+def smudge_filter(root, workdir, pattern, body):
+    """Make every checkout of the files matching `pattern` write `body`
+    instead: a filter driver in .git/config and .git/info/attributes, the two
+    files the service can write."""
+    evil = workdir / "smudged-content"
+    evil.write_text(body)
+    (root / ".git" / "info").mkdir(exist_ok=True)
+    (root / ".git" / "info" / "attributes").write_text(f"{pattern} filter=planted\n")
+    git(root, "config", "filter.planted.smudge", f"cat {evil}")

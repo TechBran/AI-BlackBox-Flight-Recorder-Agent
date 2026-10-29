@@ -39,8 +39,9 @@ from pathlib import Path
 
 import pytest
 
-from ._gitbox import (git, head, make_box, make_signing_key, make_zip_box, push_signed,
-                      push_upstream, stash_entries, tags, write_pins)
+from ._gitbox import (git, head, make_box, make_signing_key, make_zip_box,
+                      overwrite_loose_object, plant_commit, push_signed, push_upstream,
+                      smudge_filter, stash_entries, tags, tree_with, write_pins)
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -70,6 +71,10 @@ FAKE_SUDO = textwrap.dedent("""\
     case "$1" in systemctl) exit 0 ;; esac
     exec "$@"
 """)
+
+TREE_CHECK_REL = "Orchestrator/update/tree_check.py"
+# The global options every update.sh git call carries (tree_check.GIT_SAFE_OPTIONS).
+SAFE = "--no-replace-objects --no-pager -c core.hooksPath=/dev/null -c core.fsmonitor=false"
 
 # The constants update.sh reads its trust pins and the checkout's owner from.
 TRUST_DIR_LINE = "UPDATE_TRUST_DIR=/etc/blackbox\n"
@@ -113,6 +118,8 @@ def sh(tmp_path, trust):
         box = make_box(tmp_path, {
             "Scripts/update.sh": sandboxed_update_sh(trust, tree_owner),
             "Scripts/install.sh": install_stub,
+            # The checker update.sh copies before the reset (the real one).
+            TREE_CHECK_REL: (REPO / TREE_CHECK_REL).read_text(),
             "requirements.txt": "aiohttp==3.13.2\n",
         })
         box.v2 = push_upstream(box, requirements=requirements)
@@ -575,6 +582,133 @@ def test_the_reset_installs_the_checked_commit_even_if_origin_main_moves(sh):
     assert head(box.root) == box.v2
 
 
+# ── what .git says cannot choose or change what root runs (review of rank 79) ──
+#
+# Each attacker can write the box's .git and nothing else. Before the fix every
+# one of them got its own Scripts/install.sh run through `sudo install.sh`.
+
+EVIL_INSTALL = textwrap.dedent("""\
+    #!/bin/sh
+    echo "[evil] the planted install.sh ran"
+    touch "$PWD/PWNED"
+    exit 0
+""")
+
+
+def evil_ran(box, r) -> bool:
+    return (box.root / "PWNED").exists() or "[evil]" in r.stdout
+
+
+def test_update_sh_and_the_runner_pass_git_the_same_safe_options():
+    import re
+    from Orchestrator.update import tree_check
+    script = (REPO / "Scripts" / "update.sh").read_text()
+    line = re.search(r"^GIT_SAFE=\((.*)\)$", script, re.M).group(1)
+    assert line.split() == list(tree_check.GIT_SAFE_OPTIONS)
+    assert SAFE.split() == list(tree_check.GIT_SAFE_OPTIONS)
+    # Every git call goes through the wrapper that adds them, or names them.
+    assert re.findall(r"^git\(\) \{ command \"\$\{GIT_CMD\[@\]\}\" \"\$\{GIT_SAFE\[@\]\}\" \"\$@\"; \}$",
+                      script, re.M)
+    assert "rev-parse origin/main" not in script and "LATEST_SHA=$(git" not in script
+
+
+def test_a_tag_named_origin_main_does_not_choose_what_is_installed(sh, trust, tmp_path):
+    box = sh()
+    write_pins(trust, origins=[str(box.origin)])
+    evil = plant_commit(box, tmp_path, {"Scripts/install.sh": EVIL_INSTALL})
+    git(box.root, "update-ref", "refs/tags/origin/main", evil)   # data only
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == box.v2
+    assert not evil_ran(box, r)
+
+
+def test_a_remote_fetch_refspec_does_not_choose_what_is_installed(sh, trust, tmp_path):
+    box = sh()
+    write_pins(trust, origins=[str(box.origin)])
+    evil = plant_commit(box, tmp_path, {"Scripts/install.sh": EVIL_INSTALL})
+    git(box.root, "update-ref", "refs/remotes/origin/main", evil)
+    git(box.root, "config", "--replace-all", "remote.origin.fetch",
+        "+refs/heads/main:refs/remotes/origin/upstream")
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == box.v2
+    assert not evil_ran(box, r)
+
+
+def test_a_replace_ref_cannot_swap_install_sh_under_a_signed_commit(sh, trust, tmp_path):
+    box = sh()
+    key = make_signing_key(tmp_path / "keys")
+    signed = push_signed(box, key)                  # changes app.py only
+    write_pins(trust, origins=[str(box.origin)], signers=[key.line])
+    git(box.root, "fetch", "-q", "origin", "main")
+    evil_tree = tree_with(box.root, signed, "Scripts/install.sh", EVIL_INSTALL, tmp_path / "idx")
+    git(box.root, "replace", git(box.root, "rev-parse", f"{signed}^{{tree}}"), evil_tree)
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == signed
+    assert (box.root / "Scripts" / "install.sh").read_text() == INSTALL_STUB
+    assert not evil_ran(box, r)
+
+
+def test_a_rewritten_object_is_refused_before_anything_changes(sh, trust, tmp_path):
+    box = sh()
+    key = make_signing_key(tmp_path / "keys")
+    signed = push_signed(box, key)
+    write_pins(trust, origins=[str(box.origin)], signers=[key.line])
+    git(box.root, "-c", "fetch.unpackLimit=100000", "fetch", "-q", "origin", "main")
+    tree = git(box.root, "rev-parse", f"{signed}^{{tree}}")
+    evil_tree = tree_with(box.root, signed, "Scripts/install.sh", EVIL_INSTALL, tmp_path / "idx")
+    raw = subprocess.run(["git", "cat-file", "tree", evil_tree], cwd=str(box.root),
+                         capture_output=True, check=True).stdout
+    overwrite_loose_object(box.root, tree, "tree", raw)
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "does not hash to its id" in r.stderr
+    assert head(box.root) == box.v1 and tags(box.root) == [] and sudo_calls(box) == []
+    assert not evil_ran(box, r)
+
+
+def test_a_hook_cannot_rewrite_install_sh_after_the_verified_reset(sh, trust, tmp_path):
+    box = sh()
+    key = make_signing_key(tmp_path / "keys")
+    signed = push_signed(box, key)
+    write_pins(trust, origins=[str(box.origin)], signers=[key.line])
+    planted = tmp_path / "planted-install.sh"
+    planted.write_text(EVIL_INSTALL)
+    for name in ("reference-transaction", "post-checkout"):
+        hook = box.root / ".git" / "hooks" / name
+        hook.write_text(f"#!/bin/sh\ncp {planted} Scripts/install.sh\n")
+        hook.chmod(0o755)
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == signed
+    assert (box.root / "Scripts" / "install.sh").read_text() == INSTALL_STUB
+    assert not evil_ran(box, r)
+
+
+def test_a_filter_that_rewrites_files_during_the_reset_stops_install_sh(sh, trust, tmp_path):
+    """Hooks are off, but a smudge filter (.git/config + .git/info/attributes)
+    still runs during the reset. What it wrote is found before root runs
+    anything from the tree, and the code goes back."""
+    box = sh()
+    write_pins(trust, origins=[str(box.origin)])
+    smudge_filter(box.root, tmp_path, "app.py", "EVIL = True\n")
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "app.py: differs from the release" in r.stderr
+    assert "install.sh was not run" in r.stderr
+    assert head(box.root) == box.v1
+    assert not [c for c in sudo_calls(box) if "install.sh" in c], "root ran nothing from that tree"
+    assert "systemctl restart blackbox.service" not in sudo_calls(box)
+
+
 # ── a failed install.sh: the stash and the trusted store go back too ──────
 
 def test_a_failed_install_puts_the_stashed_edit_back(sh):
@@ -626,8 +760,10 @@ def test_git_and_pip_run_as_the_checkouts_owner(sh):
     assert r.returncode == 0, r.stdout + r.stderr
     assert head(box.root) == box.v2
     calls = sudo_calls(box)
-    assert "-u svc-owner -- git fetch origin main" in calls
-    assert f"-u svc-owner -- git reset --hard {box.v2}" in calls
+    assert f"-u svc-owner -- git {SAFE} fetch origin +refs/heads/main:refs/remotes/origin/main" in calls
+    assert f"-u svc-owner -- git {SAFE} reset --hard {box.v2}" in calls
+    # The checker's git runs as the owner too; it hashes what git hands it.
+    assert f"-u svc-owner -- git {SAFE} cat-file --batch" in calls
     assert any(c.startswith("-u svc-owner -- ") and c.endswith("/pip freeze") for c in calls)
     assert "-u svc-owner -- tee Manifest/pre_update_pip_freeze.txt" in calls
     # Only install.sh and the restart run as root.
@@ -647,6 +783,6 @@ def test_a_failed_install_rolls_back_as_the_checkouts_owner(sh):
     assert (box.root / "app.py").read_text() == "VERSION = 1  # hand fix\n"
     calls = sudo_calls(box)
     assert any(c.startswith("-u svc-owner -- ") and "/pip install -r " in c for c in calls)
-    assert any(c.startswith("-u svc-owner -- git stash apply") for c in calls)
+    assert any(c.startswith(f"-u svc-owner -- git {SAFE} stash apply") for c in calls)
     assert [c for c in calls if not c.startswith("-u svc-owner -- ")] == [
         f"{box.root}/Scripts/install.sh", f"{box.root}/Scripts/install.sh --publish-store-only"]

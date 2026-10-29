@@ -17,6 +17,12 @@ WHY each call sets cwd= explicitly:
     (CLI agent PTY bridge does this). Trusting the global cwd is brittle.
   - Each invocation is self-contained → safe to call from threads / async
     tasks without cwd lock contention.
+
+WHY every call carries tree_check.GIT_SAFE_OPTIONS (2026-10 audit rank 79,
+X04-security-clients-infra-11): .git is writable by the service, so a
+refs/replace/ entry could swap the tree checked out under a verified commit and
+a hook or an fsmonitor program could run during the reset. The options turn
+both off whatever .git/config says. Scripts/update.sh passes the same ones.
 """
 from __future__ import annotations
 
@@ -25,6 +31,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+from Orchestrator.update.tree_check import GIT_SAFE_OPTIONS
 
 
 # Canonical public repo (renamed 2026-07-23; GitHub 301-redirects the old
@@ -43,7 +51,7 @@ def _git(root: Path, *args: str, check: bool = True,
     environment (tracked_changes passes GIT_INDEX_FILE this way).
     """
     return subprocess.run(
-        ["git", *args],
+        ["git", *GIT_SAFE_OPTIONS, *args],
         cwd=str(root),
         capture_output=True, text=True, timeout=timeout, check=check, env=env,
     )
@@ -87,16 +95,55 @@ def current_short(root: Path) -> str:
     return _git(root, "rev-parse", "--short", "HEAD").stdout.strip()
 
 
+# The ref every update installs, and where the fetch keeps a copy of it.
+MAIN_REF = "refs/heads/main"
+TRACKING_REF = "refs/remotes/origin/main"
+
+
 def fetch_origin_main(root: Path) -> None:
-    """git fetch origin main. Updates refs/remotes/origin/main to the
-    latest GitHub state. Does NOT touch the working tree."""
-    _git(root, "fetch", "origin", "main", timeout=120.0)
+    """Bring origin's main into the object store and refs/remotes/origin/main.
+    Does NOT touch the working tree. The refspec is given in full on the
+    command line, so a remote.origin.fetch in .git/config cannot send main
+    elsewhere. What gets installed is never read back from that ref (see
+    latest_origin_sha): this only brings the objects."""
+    _git(root, "fetch", "origin", f"+{MAIN_REF}:{TRACKING_REF}", timeout=120.0)
 
 
 def latest_origin_sha(root: Path) -> str:
-    """Return the full SHA of origin/main (last-fetched value).
-    Caller is responsible for fetch_origin_main first if a fresh read is needed."""
-    return _git(root, "rev-parse", "origin/main").stdout.strip()
+    """Full SHA of main on the checkout's origin, as the origin itself reports
+    it now (git ls-remote), for the commit an update installs (2026-10 audit
+    X04-security-clients-infra-11). Never the local origin/main: a tag named
+    origin/main wins git's ref lookup over refs/remotes/origin/main, and the
+    service can write both. Call it BEFORE fetch_origin_main, so the fetch
+    brings this commit (or a newer one that contains it)."""
+    return remote_main_sha(origin_url(root))
+
+
+def remote_main_sha(url: str) -> str:
+    """Full SHA of refs/heads/main at `url`, from `git ls-remote` run outside
+    any checkout (cwd /) with the GIT_* variables that redirect git removed,
+    so no checkout's .git/config (http.*, url.*.insteadOf) and none of its
+    refs can change the answer. Raises CalledProcessError when the remote
+    does not answer or has no main."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("GIT_") or k == "GIT_TERMINAL_PROMPT"}
+    out = subprocess.run(["git", "ls-remote", "--", url, MAIN_REF], cwd="/", env=env,
+                         capture_output=True, text=True, timeout=60.0, check=True).stdout
+    for line in out.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref == MAIN_REF and _is_full_sha(sha):
+            return sha
+    raise subprocess.CalledProcessError(2, ["git", "ls-remote", url, MAIN_REF], out,
+                                        f"{url} has no {MAIN_REF}")
+
+
+def has_commit(root: Path, sha: str) -> bool:
+    """True when commit `sha` is in the object store (after a fetch)."""
+    return _git(root, "cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode == 0
+
+
+def _is_full_sha(s: str) -> bool:
+    return len(s) in (40, 64) and all(c in "0123456789abcdef" for c in s)
 
 
 def origin_url(root: Path) -> str:
@@ -104,6 +151,12 @@ def origin_url(root: Path) -> str:
     url.*.insteadOf rewrite applied (verify.check_origin compares it with the
     pinned update origin)."""
     return _git(root, "remote", "get-url", "origin").stdout.strip()
+
+
+def set_origin_url(root: Path, url: str) -> None:
+    """`git remote set-url origin <url>` (verify.check_origin's re-point of the
+    retired slug)."""
+    _git(root, "remote", "set-url", "origin", url)
 
 
 def raw_commit(root: Path, sha: str) -> str:
@@ -127,14 +180,14 @@ def verify_commit(root: Path, sha: str, *, allowed_signers: str, ssh_keygen: str
 
 
 def commits_behind(root: Path, base: str = "HEAD",
-                    target: str = "origin/main") -> int:
+                    target: str = TRACKING_REF) -> int:
     """How many commits target is ahead of base (i.e. updates available)."""
     out = _git(root, "rev-list", "--count", f"{base}..{target}").stdout.strip()
     return int(out) if out else 0
 
 
 def commits_ahead(root: Path, base: str = "HEAD",
-                   target: str = "origin/main") -> int:
+                   target: str = TRACKING_REF) -> int:
     """How many commits base is ahead of target (i.e. local unpushed work)."""
     out = _git(root, "rev-list", "--count", f"{target}..{base}").stdout.strip()
     return int(out) if out else 0

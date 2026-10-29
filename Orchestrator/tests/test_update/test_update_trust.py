@@ -22,8 +22,9 @@ from Orchestrator.update import verify
 from Orchestrator.update.manager import UpdateManager
 from Orchestrator.update.runner import UpdateRunner
 
-from ._gitbox import (git, head, make_box, make_signing_key, push_signed, push_upstream,
-                      stash_entries, tags, write_pins)
+from ._gitbox import (git, head, make_box, make_signing_key, overwrite_loose_object,
+                      plant_commit, push_signed, push_upstream, smudge_filter, stash_entries,
+                      tags, tree_with, write_pins)
 
 
 @pytest.fixture(autouse=True)
@@ -308,6 +309,161 @@ def test_an_update_that_changes_the_pin_sources_says_they_need_install_sh(box):
     events = collect(FakeRunner(box.root).run())
     assert events[-1]["succeeded"] is True
     assert any("installer/allowed_signers" in t and "install.sh" in t for t in logs(events))
+
+
+# ── what .git says cannot choose or change the commit installed ─────────
+#
+# 2026-10 review of rank 79: the origin pin checked the URL, but the commit
+# installed was read back from the checkout's own refs, and the reset wrote
+# whatever the object store, a replace ref, a hook or a filter made of it.
+# Each attacker below can write .git and nothing else.
+
+def test_a_tag_named_origin_main_does_not_choose_the_commit(box, trust, tmp_path):
+    v2 = push_upstream(box)
+    write_pins(trust, origins=[str(box.origin)])
+    evil = plant_commit(box, tmp_path, {"app.py": "EVIL = True\n"})
+    # Data only: a tag wins git's lookup of "origin/main" over the remote ref.
+    git(box.root, "update-ref", "refs/tags/origin/main", evil)
+    assert git(box.root, "rev-parse", "origin/main") == evil, "precondition: the tag shadows"
+
+    done = collect(FakeRunner(box.root).run())[-1]
+    assert done["succeeded"] is True, done
+    assert head(box.root) == v2
+    assert (box.root / "app.py").read_text() == "VERSION = 2\n"
+
+
+def test_a_remote_fetch_refspec_does_not_choose_the_commit(box, trust, tmp_path):
+    v2 = push_upstream(box)
+    write_pins(trust, origins=[str(box.origin)])
+    evil = plant_commit(box, tmp_path, {"app.py": "EVIL = True\n"})
+    git(box.root, "update-ref", "refs/remotes/origin/main", evil)
+    # One config line: a plain `git fetch origin main` no longer moves origin/main.
+    git(box.root, "config", "--replace-all", "remote.origin.fetch",
+        "+refs/heads/main:refs/remotes/origin/upstream")
+
+    done = collect(FakeRunner(box.root).run())[-1]
+    assert done["succeeded"] is True, done
+    assert head(box.root) == v2
+
+
+def test_the_origins_main_is_asked_without_the_callers_git_variables(box, tmp_path, monkeypatch):
+    """The service's environment comes partly from the service-writable .env:
+    a GIT_DIR or GIT_CONFIG_PARAMETERS there would bring an insteadOf that
+    sends the question to another remote."""
+    from Orchestrator.update import git_ops
+    v2 = push_upstream(box)
+    elsewhere = tmp_path / "elsewhere.git"
+    git(tmp_path, "init", "-q", "--bare", str(elsewhere))
+    evil = plant_commit(box, tmp_path, {"app.py": "EVIL = True\n"})
+    git(box.root, "push", "-q", str(elsewhere), f"{evil}:refs/heads/main")
+    cfg = tmp_path / "cfg.git"
+    git(tmp_path, "init", "-q", "--bare", str(cfg))
+    git(cfg, "config", f"url.{elsewhere}.insteadOf", str(box.origin))
+    monkeypatch.setenv("GIT_DIR", str(cfg))
+    assert git_ops.remote_main_sha(str(box.origin)) == v2
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'url.{elsewhere}.insteadof'='{box.origin}'")
+    assert git_ops.remote_main_sha(str(box.origin)) == v2
+    with pytest.raises(subprocess.CalledProcessError):
+        git_ops.remote_main_sha(str(tmp_path / "no-such-remote.git"))
+
+
+def test_a_replace_ref_cannot_swap_the_tree_under_a_signed_commit(box, trust, key, tmp_path):
+    signed = push_signed(box, key)
+    write_pins(trust, origins=[str(box.origin)], signers=[key.line])
+    git(box.root, "fetch", "-q", "origin", "main")
+    evil_tree = tree_with(box.root, signed, "app.py", "EVIL = True\n", tmp_path / "idx")
+    git(box.root, "replace", git(box.root, "rev-parse", f"{signed}^{{tree}}"), evil_tree)
+
+    done = collect(FakeRunner(box.root).run())[-1]
+    assert done["succeeded"] is True, done
+    assert head(box.root) == signed
+    assert (box.root / "app.py").read_text() == "VERSION = 3\n", "the replace ref was honoured"
+
+
+def test_a_rewritten_object_is_refused_before_anything_changes(box, trust, key, tmp_path):
+    signed = push_signed(box, key)
+    write_pins(trust, origins=[str(box.origin)], signers=[key.line])
+    git(box.root, "-c", "fetch.unpackLimit=100000", "fetch", "-q", "origin", "main")
+    tree = git(box.root, "rev-parse", f"{signed}^{{tree}}")
+    evil_tree = tree_with(box.root, signed, "app.py", "EVIL = True\n", tmp_path / "idx")
+    raw = subprocess.run(["git", "cat-file", "tree", evil_tree], cwd=str(box.root),
+                         capture_output=True, check=True).stdout
+    overwrite_loose_object(box.root, tree, "tree", raw)
+
+    done = nothing_changed(box, collect(FakeRunner(box.root).run()))
+    assert "does not hash to its id" in done["error"]
+
+
+def test_a_filter_that_rewrites_files_during_the_reset_is_rolled_back(box, trust, tmp_path):
+    push_upstream(box)
+    write_pins(trust, origins=[str(box.origin)])
+    smudge_filter(box.root, tmp_path, "app.py", "EVIL = True\n")
+
+    r = FakeRunner(box.root)
+    done = collect(r.run())[-1]
+    assert done["succeeded"] is False and done["failed_phase"] == "reset_hard", done
+    assert "app.py: differs from the release" in done["error"]
+    assert "rolled back" in done["error"]
+    assert head(box.root) == box.v1
+    assert not [c for c in r.calls if "pip" in " ".join(c) and "install" in c], \
+        "nothing may be installed from a tree that is not the commit"
+
+
+def test_no_hook_runs_during_the_update(box, trust, tmp_path):
+    v2 = push_upstream(box)
+    write_pins(trust, origins=[str(box.origin)])
+    marker = tmp_path / "hook-ran"
+    for name in ("reference-transaction", "post-checkout", "post-merge", "pre-auto-gc"):
+        hook = box.root / ".git" / "hooks" / name
+        hook.write_text(f"#!/bin/sh\necho {name} >> {marker}\n")
+        hook.chmod(0o755)
+
+    done = collect(FakeRunner(box.root).run())[-1]
+    assert done["succeeded"] is True and head(box.root) == v2
+    assert not marker.exists(), marker.read_text()
+
+
+def test_the_retired_slug_is_repointed_before_the_pin_check(box, trust):
+    """GitHub still redirects the pre-rename slug, so a box only ever updated
+    from the Portal can still have it; the pin lists only the new URL."""
+    from Orchestrator.update import git_ops
+    git(box.root, "remote", "set-url", "origin", "https://github.com/TechBran/blackbox-poc.git")
+    write_pins(trust, origins=[git_ops.DEFAULT_REMOTE_URL])
+
+    notes = verify.check_origin(box.root)
+    assert git(box.root, "remote", "get-url", "origin") == git_ops.DEFAULT_REMOTE_URL
+    assert any("retired" in n for n in notes)
+    assert verify.check_origin(box.root) == [], "a second check has nothing to re-point"
+
+
+# ── the update panels never fetch from, or offer, an unpinned origin ────
+
+@pytest.fixture
+def panel(box, monkeypatch, app_client):
+    from .test_updater_safety import wire_routes
+    return wire_routes(box, monkeypatch, app_client)
+
+
+def test_status_and_preflight_refuse_an_unpinned_origin_without_fetching(panel, box, trust):
+    push_upstream(box)
+    write_pins(trust, origins=["https://github.com/example/the-real-repo.git"])
+    for status in (panel.client.get("/update/status").json(),
+                   panel.client.post("/update/preflight").json()):
+        assert status["refused"] == "unverified_update"
+        assert "the-real-repo" in status["fetch_error"]
+        assert "commits" not in status and "latest_sha" not in status
+    assert git(box.root, "rev-parse", "refs/remotes/origin/main") == box.v1, "nothing fetched"
+
+
+def test_status_offers_main_as_the_origin_reports_it(panel, box, trust, tmp_path):
+    v2 = push_upstream(box)
+    write_pins(trust, origins=[str(box.origin)])
+    evil = plant_commit(box, tmp_path, {"app.py": "EVIL = True\n"})
+    git(box.root, "update-ref", "refs/tags/origin/main", evil)
+    status = panel.client.post("/update/preflight").json()
+    assert status["latest_sha"] == v2 and status["commits_behind"] == 1
+    assert [c["sha"] for c in status["commits"]] == [v2]
 
 
 # ── a failed update gives back the local changes it stashed ─────────────

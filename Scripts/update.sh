@@ -28,9 +28,14 @@
 # question, are stashed rather than reset over.
 #
 # Updates come only from the origin the root-owned /etc/blackbox/update-origin
-# pins (checked before the fetch) and, once /etc/blackbox/update-allowed-signers
-# holds a release key, only as commits SSH-signed by it; the reset installs the
-# exact commit that was checked (2026-10 audit X04-security-clients-infra-11;
+# pins (checked before the fetch). The commit installed is main as that origin
+# itself reports it (git ls-remote, outside the checkout), never the checkout's
+# own origin/main. Once /etc/blackbox/update-allowed-signers holds a release
+# key, only commits SSH-signed by it are installed. Its objects must hash to
+# their ids before the reset, and every tracked file on disk must be its blob
+# after the reset, before root runs install.sh from the tree. Every git call
+# runs without replace refs, hooks, fsmonitor or pager (2026-10 audit
+# X04-security-clients-infra-11;
 # docs/runbooks/2026-10-29-update-trust-and-service-user.md). A failed
 # install.sh puts back the venvs, the code, the stash taken for the update and
 # the old code's root-owned template store.
@@ -41,8 +46,11 @@
 #   2 — user declined the update or the stash, or --yes met local edits
 #       without --stash
 #   3 — preflight failure (not a git repo, network unreachable, etc.)
-#   4 — refused by the trust pins: the origin is not a pinned one, or the
-#       commit is not signed by a pinned release key; nothing was changed
+#   4 — refused by the trust checks: the origin is not a pinned one, the
+#       commit is not signed by a pinned release key, or .git does not hold
+#       the commit's real content (nothing was changed); or the files on disk
+#       after the reset are not the commit's (the code was put back, and
+#       install.sh never ran)
 
 set -euo pipefail
 
@@ -82,15 +90,25 @@ fi
 # running this script is another, sudo-capable one. Every git, pip and file
 # step on the checkout then runs as its owner, so nothing in it ends up owned
 # by the operator or by root; only install.sh and the restart run as root. On
-# every other box the owner is the caller and both helpers change nothing.
+# every other box the owner is the caller and as_owner changes nothing.
+#
+# Every git call on the checkout carries GIT_SAFE (2026-10 audit
+# X04-security-clients-infra-11; the in-app updater's tree_check.GIT_SAFE_OPTIONS,
+# kept identical by a test): .git belongs to the service, so a refs/replace/
+# entry could swap the tree checked out under a verified commit, a hook or an
+# fsmonitor program could run during the reset, and a pager during `git log`.
+# Command-line options beat anything .git/config says.
+GIT_SAFE=(--no-replace-objects --no-pager -c core.hooksPath=/dev/null -c core.fsmonitor=false)
 TREE_OWNER="$(stat -c %U "$BLACKBOX_ROOT")"
 if [[ "$TREE_OWNER" != "$(id -un)" ]]; then
     as_owner() { sudo -u "$TREE_OWNER" -- "$@"; }
-    git() { sudo -u "$TREE_OWNER" -- git "$@"; }
+    GIT_CMD=(sudo -u "$TREE_OWNER" -- git)
     echo "[update] $BLACKBOX_ROOT belongs to $TREE_OWNER: its git and pip steps run as $TREE_OWNER."
 else
     as_owner() { "$@"; }
+    GIT_CMD=(git)
 fi
+git() { command "${GIT_CMD[@]}" "${GIT_SAFE[@]}" "$@"; }
 
 if ! git remote get-url origin > /dev/null 2>&1; then
     echo "[update] ERROR: no 'origin' remote configured. Run install.sh's Step 0a manually." >&2
@@ -163,13 +181,14 @@ normalize_origin() {  # <url>: trimmed, lower case, one "/" and one ".git" off t
 
 check_pinned_origin() {
     local url want pin
+    ORIGIN_URL="$(git remote get-url origin)"  # where remote_main_sha asks
     if ! load_pin update-origin; then
         echo "[update] WARNING: no update origin is pinned on this box ($UPDATE_TRUST_DIR/update-origin is missing), so the origin was not checked. sudo bash $BLACKBOX_ROOT/Scripts/install.sh pins it." >&2
         return 0
     fi
     [[ ${#PIN_LINES[@]} -gt 0 ]] \
         || refuse_update "$UPDATE_TRUST_DIR/update-origin lists no update origin, so no origin is accepted. Re-run sudo bash $BLACKBOX_ROOT/Scripts/install.sh to restore it."
-    url="$(git remote get-url origin)"
+    url="$ORIGIN_URL"
     want="$(normalize_origin "$url")"
     for pin in "${PIN_LINES[@]}"; do
         [[ "$(normalize_origin "$pin")" == "$want" ]] && return 0
@@ -203,19 +222,75 @@ verify_release_commit() {  # <sha>
     echo "[update] Commit ${sha:0:7} is signed by a pinned release key."
 }
 
+# The SHA of refs/heads/main at <url>, as that remote itself answers it now:
+# the commit this update installs. git ls-remote runs outside the checkout (in
+# /, as the caller, without the GIT_* variables that redirect git), so neither
+# the checkout's refs (a tag named origin/main wins git's lookup over
+# refs/remotes/origin/main; a remote.origin.fetch refspec stops the fetch from
+# moving it) nor its config (http.*, insteadOf) can change the answer.
+remote_main_sha() {  # <url>
+    local out sha ref found=""
+    out="$( cd / || exit 1
+            for v in "${!GIT_@}"; do [[ "$v" == GIT_TERMINAL_PROMPT ]] || unset "$v"; done
+            command git ls-remote -- "$1" refs/heads/main )" || return 1
+    while IFS=$'\t' read -r sha ref; do
+        if [[ "$ref" == refs/heads/main && "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            found="$sha"
+        fi
+    done <<< "$out"
+    [[ -n "$found" ]] || return 1
+    printf '%s\n' "$found"
+}
+
+# ── The commit's real content (X04-...-11; Orchestrator/update/tree_check.py) ──
+# `objects`: the commit, its trees and its blobs in .git hash to their ids.
+# `worktree`: every tracked file on disk is, byte for byte, the commit's blob.
+# Hashed by the checker in this process (git, as the checkout's owner, only
+# hands it the objects), so a planted pack, a replace ref, a hook or a filter
+# cannot pass. $TREE_CHECK is set below, after the origin check.
+run_tree_check() {  # <objects|worktree> <sha>: prints the problems, returns non-zero on any
+    "$PYTHON3" -I "$TREE_CHECK" "$1" "$BLACKBOX_ROOT" "$2" "${GIT_CMD[@]}"
+}
+
 check_pinned_origin
 
+# The checker run_tree_check uses: the copy this script came with, taken before
+# the reset replaces the file.
+TREE_CHECK="$(mktemp)"
+trap 'rm -f "$TREE_CHECK"' EXIT
+if [[ ! -f "$BLACKBOX_ROOT/Orchestrator/update/tree_check.py" ]] \
+        || ! cat "$BLACKBOX_ROOT/Orchestrator/update/tree_check.py" > "$TREE_CHECK"; then
+    echo "[update] ERROR: $BLACKBOX_ROOT/Orchestrator/update/tree_check.py is missing; restore it with: git checkout -- Orchestrator/update/tree_check.py" >&2
+    exit 3
+fi
+PYTHON3=/usr/bin/python3
+[[ -x "$PYTHON3" ]] || PYTHON3="$(command -v python3 || true)"
+if [[ -z "$PYTHON3" ]]; then
+    echo "[update] ERROR: python3 is missing, so the update cannot be checked (sudo apt install python3)." >&2
+    exit 3
+fi
+
 # ── Fetch latest ──
-echo "[update] Fetching latest from $(git remote get-url origin)..."
-if ! git fetch origin main 2>&1; then
+# Main as the origin reports it is asked first; the fetch then brings that
+# commit (or a newer one containing it). The refspec is spelled out, so a
+# remote.origin.fetch in .git/config cannot send main elsewhere.
+echo "[update] Fetching latest from $ORIGIN_URL..."
+if ! LATEST_SHA="$(remote_main_sha "$ORIGIN_URL")"; then
+    echo "[update] ERROR: $ORIGIN_URL did not say where its main is. Network down or github.com unreachable?" >&2
+    exit 3
+fi
+if ! git fetch origin "+refs/heads/main:refs/remotes/origin/main" 2>&1; then
     echo "[update] ERROR: git fetch failed. Network down or github.com unreachable?" >&2
+    exit 3
+fi
+if ! git cat-file -e "${LATEST_SHA}^{commit}" 2> /dev/null; then
+    echo "[update] ERROR: the fetch did not bring ${LATEST_SHA:0:7} (origin/main moved while fetching?). Run the update again." >&2
     exit 3
 fi
 
 CURRENT_SHA=$(git rev-parse HEAD)
 CURRENT_SHORT=$(git rev-parse --short HEAD)
-LATEST_SHA=$(git rev-parse origin/main)
-LATEST_SHORT=$(git rev-parse --short origin/main)
+LATEST_SHORT="${LATEST_SHA:0:7}"
 
 # Distinguish "same SHA" / "local ahead" / "local behind" — only the last
 # is an actual update opportunity. `rev-list --count A..B` counts commits
@@ -227,7 +302,7 @@ if [[ "$COMMITS_BEHIND" -eq 0 ]]; then
     if [[ "$COMMITS_AHEAD" -eq 0 ]]; then
         echo "[update] Already up to date ($CURRENT_SHORT)."
     else
-        echo "[update] Local is AHEAD of origin/main by $COMMITS_AHEAD commit(s)."
+        echo "[update] Local is AHEAD of origin/main ($LATEST_SHORT) by $COMMITS_AHEAD commit(s)."
         echo "[update] (Unpushed work — nothing to pull. Push first if you want them on origin.)"
     fi
     exit 0
@@ -241,6 +316,9 @@ echo "[update] ─────────────────────�
 # The commit the reset below installs: LATEST_SHA itself, never whatever
 # origin/main names by then.
 verify_release_commit "$LATEST_SHA"
+if ! OBJECT_PROBLEMS="$(run_tree_check objects "$LATEST_SHA")"; then
+    refuse_update "the objects for commit $LATEST_SHORT in this checkout's .git are not the ones its id names, so it was not installed (if a fetch was interrupted, run the update again):"$'\n'"${OBJECT_PROBLEMS:-the check could not run}"
+fi
 
 # ── Local edits to tracked files (audit M2, O16-01) ──
 # The reset below destroys them; the pre-update tag protects committed work
@@ -256,8 +334,8 @@ tracked_edits() {
     if [[ -z "$(git ls-files -z | head -c 1)" && -n "$(git ls-tree --name-only HEAD 2>/dev/null | head -c 1)" ]]; then
         tmp="$(as_owner mktemp -d "$(git rev-parse --absolute-git-dir)/blackbox-status-XXXXXX")"
         # `env` so the variable reaches git through as_owner's sudo too.
-        as_owner env GIT_INDEX_FILE="$tmp/index" git read-tree HEAD \
-            && as_owner env GIT_INDEX_FILE="$tmp/index" git --no-optional-locks status --porcelain --untracked-files=no
+        as_owner env GIT_INDEX_FILE="$tmp/index" git "${GIT_SAFE[@]}" read-tree HEAD \
+            && as_owner env GIT_INDEX_FILE="$tmp/index" git "${GIT_SAFE[@]}" --no-optional-locks status --porcelain --untracked-files=no
         rc=$?
         as_owner rm -rf "$tmp"
         return "$rc"
@@ -429,8 +507,12 @@ rollback_to_pre_tag() {
     if grep -qx 'MCP/requirements.txt' <<< "$CHANGED_FILES"; then
         restore_venv MCP/venv/bin/pip Manifest/pre_update_mcp_freeze.txt
     fi
-    # A reset like any other: keep what the failed run left first, and never
-    # reset when that fails.
+    reset_code_to_pre_tag
+}
+
+# The code back to PRE_TAG. A reset like any other: keep what the failed run
+# left first (it stays in the stash list), and never reset when that fails.
+reset_code_to_pre_tag() {
     if ! STASH_MODE=1 keep_local_work "auto-stash-rollback-${PRE_TAG}" "$PRE_TAG" "rollback-${PRE_TAG}"; then
         echo "[update] The code was NOT rolled back to $PRE_TAG: the new code is still on disk." >&2
         echo "[update] Commit or stash the changed files, then run: git reset --hard $PRE_TAG" >&2
@@ -487,6 +569,22 @@ fi
 UPDATE_STASH="$KEPT_STASH"
 echo "[update] Resetting to $LATEST_SHORT (origin/main as checked above)..."
 git reset --hard "$LATEST_SHA"
+
+# ── What root is about to run from: the verified commit, byte for byte ──
+# Checked after the reset and before install.sh. Nothing has run from the new
+# code yet: the venvs are untouched and the template store still holds the old
+# code's, so a mismatch puts back the code and the stash only.
+if ! TREE_PROBLEMS="$(run_tree_check worktree "$LATEST_SHA")"; then
+    echo "[update] REFUSED: after the reset these tracked files are not the ones commit $LATEST_SHORT holds, so install.sh was not run:" >&2
+    printf '%s\n' "${TREE_PROBLEMS:-the check could not run}" >&2
+    if reset_code_to_pre_tag; then
+        put_back_update_stash
+        echo "[update] The code is back at $PRE_TAG (the files found are kept in the stash list). Investigate what rewrote them before updating again." >&2
+    else
+        echo "[update] Do not run install.sh or restart the service until the code is back at $PRE_TAG." >&2
+    fi
+    exit 4
+fi
 
 # ── Re-run idempotent install.sh steps + restart ──
 # install.sh's existing if-not-exists guards prevent overwriting per-customer

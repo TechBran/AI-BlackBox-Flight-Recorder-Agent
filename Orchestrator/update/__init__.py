@@ -15,4 +15,8 @@ Module map:
   - active_sessions.py — detect in-flight tmux CLI sessions before restart
   - manager.py        — flock-based mutex + persistent state machine
   - runner.py         — full update flow with SSE-friendly event emission
+  - verify.py         — the pinned update origin + release-signature gate
+  - tree_check.py     — byte-for-byte check of the objects and the checkout
+                        against the commit verified (stdlib only: update.sh
+                        runs it too)
 """

@@ -93,6 +93,10 @@ def resets(monkeypatch, root):
     monkeypatch.setattr(runner_mod.git_ops, "paths_in_the_way", lambda p, ref: [])
     monkeypatch.setattr(runner_mod.git_ops, "reset_hard",
                         lambda p, ref: recorded.append(ref))
+    # No git checkout here: the byte-for-byte checks of the verified commit
+    # have their own tests (test_update_trust.py).
+    monkeypatch.setattr(runner_mod.verify, "check_objects", lambda p, sha: None)
+    monkeypatch.setattr(runner_mod.verify, "check_worktree", lambda p, sha: None)
     return recorded
 
 

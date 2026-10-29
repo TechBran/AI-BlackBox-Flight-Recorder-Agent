@@ -56,13 +56,17 @@ DESIGN NOTES (audit-driven):
 
 TRUSTED ORIGIN + SIGNED RELEASES (2026-10 audit rank 79,
 X04-security-clients-infra-11): before the fetch the checkout's origin must be
-one /etc/blackbox/update-origin pins, and once /etc/blackbox/update-allowed-
-signers holds a key the commit installed must be SSH-signed by it (verify.py
-has the rules; Scripts/update.sh applies the same ones). A refusal changes
-nothing and is not persisted, like a dirty-tree refusal. The reset installs the
-SHA that was verified, never whatever origin/main names by then. A failed
-update that is rolled back puts the local changes it stashed back once the
-code is at the pre-update tag (_restore_stashes).
+one /etc/blackbox/update-origin pins; the commit installed is main as that
+origin reports it (ls-remote, never the checkout's own origin/main ref); once
+/etc/blackbox/update-allowed-signers holds a key it must be SSH-signed by it;
+its objects must hash to their ids before the reset and the tracked files on
+disk must be its blobs after it (verify.py has the rules; Scripts/update.sh
+applies the same ones). A refusal before the reset changes nothing and is not
+persisted, like a dirty-tree refusal; a checkout that is not the commit after
+the reset is rolled back. The reset installs the SHA that was verified, never
+whatever origin/main names by then. A failed update that is rolled back puts
+the local changes it stashed back once the code is at the pre-update tag
+(_restore_stashes).
 
 SELF-UPDATE CEILING: update_routes.py imports UpdateRunner at module load and
 iterates one instance for the whole update — there is no reload and no re-exec,
@@ -294,9 +298,12 @@ class UpdateRunner:
         except verify.UpdateRefused as e:
             yield update_refusal(str(e))
             return
+        # The commit to install: main as the pinned origin itself reports it,
+        # asked before the fetch (which then brings it, or a newer commit that
+        # contains it). Never read back from the checkout's origin/main.
         try:
-            await self._git(git_ops.fetch_origin_main)
             self.target_sha = await self._git(git_ops.latest_origin_sha)
+            await self._git(git_ops.fetch_origin_main)
         except _GIT_ERRORS as e:
             yield self._fail("staging", f"git fetch failed: {_git_error(e)}")
             return
@@ -308,10 +315,12 @@ class UpdateRunner:
                    "message": "Already up to date"}
             return
 
-        # The release signature of the exact commit the reset below installs.
+        # The release signature of the exact commit the reset below installs,
+        # and its objects, each hashed (a planted pack or loose object).
         try:
             trust_notes += await asyncio.to_thread(verify.check_commit, self.root,
                                                    self.target_sha)
+            await asyncio.to_thread(verify.check_objects, self.root, self.target_sha)
         except verify.UpdateRefused as e:
             yield update_refusal(str(e))
             return
@@ -406,6 +415,15 @@ class UpdateRunner:
             return
         for note in kept:
             yield self._log(PHASE_RESET_HARD, note)
+        # What is on disk now is what the next phases install from and what
+        # the restart runs: it must be the verified commit, byte for byte (a
+        # filter or anything else writing during the reset is not).
+        try:
+            await asyncio.to_thread(verify.check_worktree, self.root, self.target_sha)
+        except verify.UpdateRefused as e:
+            async for ev in self._fail_rolled_back(PHASE_RESET_HARD, str(e)):
+                yield ev
+            return
         try:
             short = await self._git(git_ops.current_short)
         except _GIT_ERRORS:
